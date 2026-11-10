@@ -19,6 +19,7 @@ from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.approval_gate import resolve_approval_gate
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
+from daimon.core.features.surface import OVERRIDES_OFF
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.outsiders import OutsiderVisibility
 from daimon.core.permissions import (
@@ -673,18 +674,15 @@ async def load_here_card(
     gate = resolve_approval_gate(
         policy, platform=platform, channel_id=channel_id, thread_id=thread_id
     )
-    effective = "on" if gate.value == "inherit" else gate.value
-    source = "Daimon default" if gate.value == "inherit" else gate.scope
-    note = (
-        f"Third-party write approvals: {effective} ({source})."
-        if gate_overrides_active
-        else (
-            f"Stored write approvals: {gate.value} ({gate.scope}); "
-            "approval overrides are not enabled."
-        )
-    )
+    shown = {"on": "Ask", "off": "Allow writes"}
     if is_dm:
-        note = "Direct-message write approvals are unchanged; scope overrides do not apply."
+        note = "Approvals: unchanged in direct messages."
+    elif gate.value == "inherit":
+        note = "Approvals: Ask (default)."
+    else:
+        note = f"Approvals: {shown[gate.value]} (set by the {gate.scope})."
+        if not gate_overrides_active:
+            note += f" {OVERRIDES_OFF}"
     card = card.model_copy(
         update={
             "approval_gate_note": note,

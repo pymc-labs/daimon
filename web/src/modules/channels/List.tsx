@@ -1,6 +1,6 @@
 import { MessageSquare, X } from "lucide-react"
 import { useMemo } from "react"
-import { Navigate, Route, Routes } from "react-router"
+import { Navigate, Route, Routes, useLocation } from "react-router"
 
 import { AgentAvatar, Ago, Money } from "@/components/common"
 import { Drawer } from "@/components/Drawer"
@@ -147,8 +147,9 @@ function ChannelsTab() {
 export function Channels() {
   const can = useCan()
   const manage = can("channels.manage")
+  const inThread = /^\/channels\/[^/]+\/threads\//.test(useLocation().pathname)
   return (
-    <Page crumbs={[{ label: "Channels" }]} tabs={manage ? [{ label: "Channels", to: "/channels", end: true }, { label: "Defaults", to: "/channels/defaults" }] : undefined} flush>
+    <Page crumbs={[{ label: "Channels" }]} tabs={manage ? [{ label: "Channels", to: "/channels", end: true, active: inThread || undefined }, { label: "Defaults", to: "/channels/defaults" }] : undefined} flush>
       <Routes>
         <Route index element={<ChannelsTab />} />
         <Route path="defaults" element={manage ? <DefaultsTab /> : <Navigate to="/channels" replace />} />

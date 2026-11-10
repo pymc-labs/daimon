@@ -10,10 +10,7 @@ const Row = ({ label, overridden, bare, children }: { label: string; overridden:
   bare ? <>{children}</> : <SettingRow label={label} overridden={overridden}>{children}</SettingRow>
 
 const DEFAULT = "__default"
-const defaultText = (i: { label: string; from: string }) => {
-  const head = i.from === "Default" ? "Default" : `${i.from} default`
-  return i.label && i.label.toLowerCase() !== "default" ? `${head} (${i.label})` : head
-}
+const defaultText = (i: { label: string; from: string }) => (i.label && i.label.toLowerCase() !== "default" ? `${i.from} default (${i.label})` : `${i.from} default`)
 
 /**
  * One control for a setting that may be inherited. The first item is the default and sets null;

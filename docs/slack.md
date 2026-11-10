@@ -191,7 +191,8 @@ channel.
 `/agent-setup` opens the agents roster, and `/here` shows only the caller a
 card with the agent that answers in the channel. `/settings` shows and changes
 every feature at the channel or workspace level (see [features](features.md));
-for a thread's own setting, ask Daimon in that thread. Members see only agents whose
+for a thread's own setting, ask Daimon in that thread or use the thread's Settings page in
+the web app. Members see only agents whose
 rules allow them to answer at that location, while admins see all. Knowing an
 agent's name does not grant edit rights.
 

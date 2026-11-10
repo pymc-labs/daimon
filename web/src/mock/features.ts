@@ -12,21 +12,30 @@ const schema = (key: string, name: string, tiers: Tier[] = ALL): FeatureSchema =
 })
 const SCHEMA = [
   schema("progress_plans", "Progress plans"), schema("participation", "Thread participation"),
-  schema("guidance", "Setup guidance", ["deployment", "workspace", "agent"]), schema("tool.bash", "Built-in tool: bash"),
+  schema("guidance", "Setup guidance", ["deployment", "workspace", "agent"]), schema("tool.bash", "Built-in tool: bash"), schema("cost_footer", "Cost footer"),
 ]
+/** Locked at the workspace, so every level below reads it as locked; `value` is what the lock holds. */
+const locks = new Map<string, string>([["cost_footer", "off"]])
+/** The one channel where the bash tool is unavailable (it has no sandbox), with a value of its own so the row shows. */
+const NO_SANDBOX = "c_general"
+const REASON = "Needs a sandbox. Ask an admin."
 /** `place|tier|key` to the value set there. */
-const own = new Map<string, string>()
+const own = new Map<string, string>([[`/${NO_SANDBOX}/|channel|tool.bash`, "off"], [`/${NO_SANDBOX}/t_launch|thread|tool.bash`, "off"]])
 const place = (url: URL) => ["agent", "channel", "thread"].map((k) => url.searchParams.get(k) ?? "").join("/")
 const tiersOf = (url: URL): Tier[] => ["workspace", ...(url.searchParams.get("agent") ? ["agent"] : []), ...(url.searchParams.get("channel") ? ["channel"] : []), ...(url.searchParams.get("thread") ? ["thread"] : [])] as Tier[]
 
 function viewOf(url: URL, s: FeatureSchema): FeatureView {
+  const lock = locks.get(s.key)
   const tiers = tiersOf(url).filter((t) => s.tiers.includes(t)).map((tier) => {
-    const value = own.get(`${place(url)}|${tier}|${s.key}`) ?? "default"
-    return { tier, value, locked: false, text: value }
+    if (tier === "workspace" && lock) return { tier, value: lock, locked: true, text: `${lock}:locked` }
+    const text = own.get(`${place(url)}|${tier}|${s.key}`) ?? "default"
+    return { tier, value: text.split(":")[0]!, locked: text.endsWith(":locked"), text }
   })
-  const set = [...tiers].reverse().find((t) => t.value !== "default")
+  const locked = tiers.find((t) => t.locked)
+  const set = locked ?? [...tiers].reverse().find((t) => t.value !== "default")
   const value = set?.value ?? s.default
-  return { key: s.key, tiers, value, source: set?.tier ?? "default", locked: false, unavailable: null, summary: ON_OFF.find((o) => o.value === value)?.label ?? value }
+  const unavailable = s.key === "tool.bash" && url.searchParams.get("channel") === NO_SANDBOX ? REASON : null
+  return { key: s.key, tiers, value, source: set?.tier ?? "default", locked: !!locked, unavailable, summary: ON_OFF.find((o) => o.value === value)?.label ?? value }
 }
 
 export const featuresHandlers: HttpHandler[] = [
@@ -39,10 +48,14 @@ export const featuresHandlers: HttpHandler[] = [
   http.put("/api/features", async ({ request }) => {
     await wait()
     const url = new URL(request.url)
-    const b = (await request.json()) as { key: string; tier: Tier; value: string }
+    const b = (await request.json()) as { key: string; tier: Tier; value: string; locked?: boolean }
     const s = SCHEMA.find((x) => x.key === b.key)
     if (!s) return HttpResponse.json({ detail: "No such feature." }, { status: 404 })
-    own.set(`${place(url)}|${b.tier}|${b.key}`, b.value)
+    if (b.tier === "workspace" && (b.locked || locks.has(b.key))) {
+      if (b.locked) locks.set(b.key, b.value)
+      else locks.delete(b.key)
+    }
+    own.set(`${place(url)}|${b.tier}|${b.key}`, b.locked ? `${b.value}:locked` : b.value)
     return HttpResponse.json(viewOf(url, s))
   }),
 ]

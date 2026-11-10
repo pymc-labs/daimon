@@ -132,7 +132,7 @@ bots:
           - title: here
             description: Who answers here and what it can use
           - title: settings
-            description: Approvals, threads, plans and the cost line here
+            description: Turn features on or off here
           - title: memory
             description: What the agent remembers
           - title: routines

@@ -3,8 +3,9 @@
 One reader and one writer for every key the registry holds, so a new key needs no route.
 `GET /api/features/schema` describes each key for the controls the page draws; `GET` reads
 a place; `PUT` changes one tier of it with the value the caller last read. Who may change a
-tier is the core's rule; this only answers `admin_for` from the caller's role and
-capabilities and builds the agent tier of `tool.*` from the agent's own tool config.
+tier is the core's rule; this only answers `admin_for` from the caller's role,
+capabilities and, for a server-admin-only feature, the account's own role. It also
+builds the agent tier of `tool.*` from the agent's own tool config.
 """
 
 from __future__ import annotations
@@ -17,10 +18,10 @@ from daimon.adapters.web.access import is_admin
 from daimon.adapters.web.agent_access import actor_of as agent_actor_of
 from daimon.adapters.web.agent_access import change_deps, edit_refusal
 from daimon.adapters.web.audit import audit
-from daimon.adapters.web.caller import WebCaller, current_caller
+from daimon.adapters.web.caller import NOT_ALLOWED, WebCaller, current_caller
 from daimon.adapters.web.channels import channel_refusals, one_row
 from daimon.adapters.web.runtime import WebRuntime
-from daimon.core.admin_actions import DelegatedAction
+from daimon.core.admin_actions import DelegatedAction, admin_for_action
 from daimon.core.agent_editing import (
     AgentEditError,
     builtin_reader,
@@ -38,6 +39,7 @@ from daimon.core.stores.domain import CHAT_PLATFORMS
 from daimon.core.stores.platform_names import get_channel_names
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import thread_in_channel
+from daimon.core.web_roles_rules import server_admin
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -97,7 +99,7 @@ def features_router(runtime: WebRuntime) -> APIRouter:
     def readable(caller: WebCaller, place: FeaturePlace) -> None:
         needed = "agents.view" if place.channel_id is None and place.agent_id else "channels.view"
         if needed not in caller.capabilities:
-            raise HTTPException(403, "You can't see this.")
+            raise HTTPException(403, f"You can't see this. {NOT_ALLOWED}")
 
     async def names(caller: WebCaller, place: FeaturePlace) -> str:
         """What an audit row calls the place."""
@@ -176,7 +178,7 @@ def features_router(runtime: WebRuntime) -> APIRouter:
             # In chat anyone present may set a thread; on the web only a channel admin may, and
             # only for a thread this workspace has a session in, run for this channel.
             if needed not in caller.capabilities:
-                raise HTTPException(403, "You can't change this.")
+                raise HTTPException(403, f"You can't change this. {NOT_ALLOWED}")
             thread_key, channel_id = place.thread_key, place.channel_id
             async with runtime.sessionmaker() as db:
                 if (
@@ -193,8 +195,15 @@ def features_router(runtime: WebRuntime) -> APIRouter:
                     raise HTTPException(404, "No such thread in this channel.")
         account = caller.person.account_id
 
-        async def admin_for(_: DelegatedAction | None) -> bool:
-            return needed in caller.capabilities and is_admin(caller.role)
+        async def admin_for(action: DelegatedAction | None) -> bool:
+            """A workspace owner or admin may do a delegated action; with no action only a
+            server admin (a platform admin or the chat workspace's own admin) may."""
+            workspace_admin = needed in caller.capabilities and is_admin(caller.role)
+            if not workspace_admin:
+                return False
+            async with runtime.sessionmaker() as db:
+                platform_admin = await server_admin(db, caller.person)
+            return admin_for_action(platform_admin=platform_admin, daimon_admin=True, action=action)
 
         async def owns(agent_id: str) -> bool:
             async with runtime.sessionmaker() as db:

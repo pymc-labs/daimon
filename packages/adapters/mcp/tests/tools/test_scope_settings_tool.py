@@ -126,7 +126,7 @@ BYPASSES: list[tuple[str, Any, tuple[str, Tier, str], dict[str, Any], str, bool]
     ("non_admin", lambda: make_auth(admin=False), ("approvals", "channel", "off"), {"admin": [MEMBER]}, "Only a server admin can change approvals", False),
     ("admin_lost_after_press", make_auth, ("approvals", "channel", "off"), {"admin": [ADMIN, MEMBER]}, "Only a server admin", True),
     ("daimon_admin_vs_approvals", _granted, ("approvals", "channel", "off"), {"admin": [MEMBER]}, "Only a server admin can change approvals", False),
-    ("approvals_at_agent", make_auth, ("approvals", "agent", "off"), {}, "can't be set for this agent here", False),
+    ("approvals_at_agent", make_auth, ("approvals", "agent", "off"), {}, "can't be set for the agent", False),
     ("guardrail_by_agent_key", lambda: make_auth(agent_id=uuid.uuid4()), ("unattended_capabilities", "workspace", "off"), {}, "Nothing changed", False),
     ("guardrail_unattended", make_auth, ("require_routine_destination", "workspace", "on"), {"origin": SimpleNamespace(attended=False, platform="discord", parent_channel_id="C1", thread_id="T1")}, "Nothing changed", False),
     ("guardrail_no_card", make_auth, ("reach_budget", "channel", "on"), {"card": AsyncMock(side_effect=ToolError("Confirm this in chat. Nothing changed."))}, "Nothing changed", True),

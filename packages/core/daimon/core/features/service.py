@@ -50,7 +50,7 @@ from daimon.core.features.snapshot import (
     tier_values,
     unavailable_reason,
 )
-from daimon.core.platform_words import NEUTRAL_ADMIN, words_for
+from daimon.core.platform_words import NEUTRAL_ADMIN, space_for, words_for
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_changes import WORKSPACE_ID, WriteHook, record_change
 from daimon.core.stores.domain import CHAT_PLATFORMS, ChangeSurface, ChannelSetting, FeatureTarget
@@ -222,6 +222,39 @@ def _refused(
     return ChannelChangeRefused(message, kind=kind, reason=reason)
 
 
+def tier_word(tier: Tier | str, platform: str | None) -> str:
+    """The tier as the platform's people say it: the workspace is the server on Discord."""
+    return space_for(platform) if tier == "workspace" else str(tier)
+
+
+def where(tier: Tier | str, platform: str | None) -> str:
+    """``this channel``, ``the server``: the tier as a phrase."""
+    word = tier_word(tier, platform)
+    if tier == "deployment":
+        return word
+    return f"the {word}" if tier in ("workspace", "agent") else f"this {word}"
+
+
+def _where_set(tier: Tier | str, platform: str | None) -> str:
+    """Where a value was set, for a sentence: everywhere, or the place's own name."""
+    if tier in ("deployment", "default"):
+        return "everywhere"
+    return f"for {where(tier, platform)}"
+
+
+def _settings_pointer(platform: str | None) -> str:
+    """Where a person sees every setting."""
+    if platform in CHAT_PLATFORMS:
+        return words_for(platform).phrase("settings", place="channel") or "Settings"
+    return "Settings"
+
+
+def _joined(labels: Collection[str]) -> str:
+    """``A, B or C``."""
+    *head, last = labels
+    return f"{', '.join(head)} or {last}" if head else last
+
+
 def admin_word(platform: str | None) -> str:
     return words_for(platform).admin if platform in CHAT_PLATFORMS else NEUTRAL_ADMIN
 
@@ -261,14 +294,14 @@ def feature_refusal(
     spec = FEATURES.get(key)
     if spec is None:
         return _refused(
-            f"There is no setting called {key}. Choose one of: {', '.join(FEATURES)}.",
+            f"There is no such setting. Open {_settings_pointer(place.platform)} to see them.",
             "unknown_key",
         )
     reason = unavailable_reason(spec, settings, place)
     for failed, message, code in (
         (
             value != DEFAULT and value not in spec.values,
-            f"{spec.name} can be {', '.join((*spec.values, DEFAULT))}.",
+            f"{spec.name} can be {_joined([*(spec.label(v) for v in spec.values), 'Default'])}.",
             "bad_value",
         ),
         (
@@ -283,17 +316,20 @@ def feature_refusal(
         ),
         (
             reason == "requires",
-            f"{spec.name} is turned off for all of Daimon; the operator would have to change that.",
+            f"{spec.name} isn't set up yet, so it can't be changed here. "
+            f"Ask {admin_word(place.platform)}.",
             "deployment_disabled",
         ),
         (
             tier not in place_tiers(spec, place) or tier == "deployment",
-            f"{spec.name} can't be set for this {tier} here.",
+            f"{spec.name} can't be changed here."
+            if tier == "deployment"
+            else f"{spec.name} can't be set for {where(tier, place.platform)}.",
             "no_such_level",
         ),
         (
             locked and (tier not in LOCKABLE or value == DEFAULT or spec.authority.native),
-            f"{spec.name} can't be locked at the {tier} level.",
+            f"{spec.name} can't be locked for {where(tier, place.platform)}.",
             "bad_lock",
         ),
     ):
@@ -319,13 +355,21 @@ async def may_change(
     actor: FeatureActor, spec: FeatureSpec, tier: Tier, *, locked: bool, agent_id: str | None
 ) -> bool:
     """The tier's authority (not approvals'): a thread is anyone's where the spec says so,
-    an agent its owner's or an admin's, the rest an admin's. A Lock is an admin's."""
+    an agent its owner's (unless `agent_owner` is off) or an admin's, the rest an admin's.
+    A Lock is an admin's."""
     if tier == "thread" and spec.authority.thread_anyone and not locked:
         return True
     if actor.via_agent_key:
         return False
     owner = actor.owns_agent
-    if tier == "agent" and not locked and agent_id and owner and await owner(agent_id):
+    if (
+        tier == "agent"
+        and spec.authority.agent_owner
+        and not locked
+        and agent_id
+        and owner
+        and await owner(agent_id)
+    ):
         return True
     return await actor.admin_for(spec.authority.action)
 
@@ -433,12 +477,10 @@ async def _change_approvals(
 def _locked_above(
     spec: FeatureSpec, above: ResolvedFeature, place: FeaturePlace, tier: Tier
 ) -> ChannelChangeRefused:
-    where = (
-        "everywhere" if above.tier in ("deployment", "default") else f"at the {above.tier} level"
-    )
     return _refused(
-        f"{spec.name} is locked to {spec.label(above.value)} {where}, so this {tier} can't "
-        f"change it. Ask {admin_word(place.platform)}.",
+        f"{spec.name} is locked to {spec.label(above.value)} "
+        f"{_where_set(above.tier, place.platform)}, so {where(tier, place.platform)} "
+        f"can't change it. Ask {admin_word(place.platform)}.",
         "locked_above",
     )
 
@@ -462,9 +504,6 @@ def _loosens(spec: FeatureSpec, after: TierSetting, above: ResolvedFeature) -> b
 def _looser_than_above(
     spec: FeatureSpec, above: ResolvedFeature, place: FeaturePlace, tier: Tier
 ) -> ChannelChangeRefused:
-    where = (
-        "everywhere" if above.tier in ("deployment", "default") else f"at the {above.tier} level"
-    )
     narrow = {
         "stricter": "can only make it stricter",
         "ceiling": "can't turn it on",
@@ -472,8 +511,8 @@ def _looser_than_above(
         "most_specific": "can't change it",
     }[spec.combine]
     return _refused(
-        f"{spec.name} is {spec.label(above.value)} {where}, so this {tier} {narrow}. "
-        f"Ask {admin_word(place.platform)}.",
+        f"{spec.name} is {spec.label(above.value)} {_where_set(above.tier, place.platform)}, "
+        f"so {where(tier, place.platform)} {narrow}. Ask {admin_word(place.platform)}.",
         "looser_than_above",
     )
 

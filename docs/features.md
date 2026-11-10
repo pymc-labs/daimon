@@ -6,7 +6,7 @@ inherits from the level above, and at the top it is the feature's built-in defau
 Settings show which level decided.
 
 An admin can lock a value at the Deployment, Workspace, Agent or Channel level. Levels
-below then cannot change it. `disabled` means Off and locked.
+below then cannot change it. A locked Off turns the feature off below.
 
 Set the deployment level with `DAIMON_FEATURES__<KEY>`, for example
 `DAIMON_FEATURES__PROGRESS_PLANS=on:locked`; a dot in a key is an
@@ -22,18 +22,18 @@ Where each feature can be set, and its default.
 | Chat history | `history_depth` | Model input | 100 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Setup guidance | `guidance` | Model input | On | ✓ | ✓ | ✓ |  |  |  |
 | Daimon tools | `daimon_tools` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always On on Gemini, OpenAI |
-| Built-in tool: bash | `tool.bash` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
-| Built-in tool: read | `tool.read` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
-| Built-in tool: edit | `tool.edit` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
-| Built-in tool: write | `tool.write` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
-| Built-in tool: grep | `tool.grep` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
-| Built-in tool: glob | `tool.glob` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
-| Built-in tool: web fetch | `tool.web_fetch` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
-| Built-in tool: web search | `tool.web_search` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
+| Run commands | `tool.bash` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
+| Read files | `tool.read` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
+| Edit files | `tool.edit` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
+| Write files | `tool.write` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
+| Search file contents | `tool.grep` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
+| Find files | `tool.glob` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
+| Open web pages | `tool.web_fetch` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
+| Search the web | `tool.web_search` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
 | Message controls | `turn_controls` | Model input | Full | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Web app links | `web_awareness` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Connected server briefing | `mcp_briefing` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
-| Run instructions | `origin_fragments` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Notes on non-chat messages | `origin_fragments` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Keys file | `agent_env_file` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
 | Carry working files | `checkpoint_prompt` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
 | Platform prompt | `platform_prompt` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always Off on OpenAI |
@@ -48,18 +48,18 @@ Where each feature can be set, and its default.
 | Completion pings | `completion_pings` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Table images | `table_rendering` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ | Only Discord, Slack; Off by default on Slack |
 | Budget notices | `budget_notices` | Chat | On | ✓ | ✓ |  | ✓ |  |  |
-| Keep messages apart | `status_log` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
-| Cost on hosted-model footers | `native_footer_cost` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Separate agent messages | `status_log` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Cost on Gemini and OpenAI footers | `native_footer_cost` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Vote buttons | `message_feedback` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ | Only Discord |
 | Reply hint | `unmentioned_reply_hint` | Chat | Off | ✓ | ✓ |  | ✓ |  | Only Discord |
 | No-writers notice | `writers_none_notice` | Chat | Off | ✓ | ✓ |  | ✓ |  | Only Discord |
 | Waiting card | `waiting_card` | Chat | Off | ✓ | ✓ |  |  |  | Only Discord |
-| Repository memory | `repo_memory` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs the operator's setup |
+| Repository memory | `repo_memory` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Context provider | `context_provider` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
 | Personal memory | `memory_personal` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always Off on Gemini, OpenAI |
 | Shared memory | `memory_shared` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always On on Gemini, OpenAI |
 | Channel memory | `memory_channel` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
-| Private channel messages | `private_channel_messages` | Capability | On | ✓ |  |  |  |  | Needs the operator's setup; Only Teams |
+| Private channel messages | `private_channel_messages` | Capability | On | ✓ |  |  |  |  | Needs setup by whoever runs Daimon; Only Teams |
 | Direct messages | `direct_messages` | Capability | Off | ✓ | ✓ |  |  |  | Only Discord, Slack |
 | Web app: chat | `web.chat` | Capability | On | ✓ | ✓ |  |  |  |  |
 | Web app: agents | `web.agents` | Capability | On | ✓ | ✓ |  |  |  |  |
@@ -70,33 +70,33 @@ Where each feature can be set, and its default.
 | Watches | `watches` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Routines | `routines` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Long jobs | `long_jobs` | Capability | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
-| Cloud computers | `compute` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs the operator's setup |
-| Notebooks | `notebooks` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs the operator's setup |
-| Report publishing | `report_publish` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs the operator's setup |
-| Video transcripts | `media` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs the operator's setup |
-| Microsoft 365 | `microsoft_365` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs the operator's setup |
+| Cloud computers | `compute` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
+| Notebooks | `notebooks` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
+| Report publishing | `report_publish` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
+| Video transcripts | `media` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
+| Microsoft 365 | `microsoft_365` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Chart images in answers | `artifact_images` | Capability | On | ✓ | ✓ |  |  |  |  |
-| Ask a person | `support_escalation` | Capability | On | ✓ | ✓ |  |  |  | Needs the operator's setup |
+| Ask a person | `support_escalation` | Capability | On | ✓ | ✓ |  |  |  | Needs setup by whoever runs Daimon |
 | GitHub access | `github` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Lead intake | `lead_intake` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Long job dollar cap | `long_jobs_max_usd` | Limit | $5 | ✓ | ✓ | ✓ |  |  |  |
 | Long job time limit | `long_jobs_max_deadline` | Limit | 70 minutes | ✓ | ✓ | ✓ |  |  |  |
-| New threads per reply | `outbound_threads` | Limit | 2 | ✓ | ✓ | ✓ | ✓ | ✓ |  |
-| Places per reply | `outbound_places` | Limit | 2 | ✓ | ✓ | ✓ | ✓ | ✓ |  |
-| People tagged per reply | `outbound_people` | Limit | 5 | ✓ | ✓ | ✓ | ✓ | ✓ |  |
-| Post length outside the conversation | `outbound_length` | Limit | 1500 | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| New threads per reply | `outbound_threads` | Limit | 2 threads | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Places per reply | `outbound_places` | Limit | 2 places | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| People tagged per reply | `outbound_people` | Limit | 5 people | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Post length elsewhere | `outbound_length` | Limit | 1500 characters | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Daily spend per model | `daily_model_cap` | Limit | $20 | ✓ | ✓ | ✓ |  |  |  |
 | Approvals | `approvals` | Guardrail | Ask |  | ✓ |  | ✓ | ✓ |  |
 | Read-only memory in direct messages | `dm_memory_read_only` | Guardrail | Writable | ✓ | ✓ |  |  |  | Only Discord, Slack |
 | Tool safety | `tool_safety` | Guardrail | On | ✓ |  |  |  |  |  |
 | Reach check | `reach_budget` | Guardrail | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
-| Built-in tools in routines | `unattended_capabilities` | Guardrail | Per routine | ✓ | ✓ | ✓ |  |  |  |
+| Built-in tools in routines | `unattended_capabilities` | Guardrail | Allowed | ✓ | ✓ | ✓ |  |  |  |
 | Routines must say where they post | `require_routine_destination` | Guardrail | Optional | ✓ | ✓ |  |  |  |  |
 
 ## Approvals
 
-Ask before an agent writes to a third-party service. Decided most specific first: only a native platform admin, checked live, may change it, and it applies only once the operator enables approval overrides.
+Ask before an agent writes to an outside service. Only an admin of the chat app can change it, once whoever runs Daimon allows approval changes.
 
 | | |
 | --- | --- |
@@ -108,7 +108,7 @@ Ask before an agent writes to a third-party service. Decided most specific first
 
 ## Thread participation
 
-Reply in a thread without being mentioned when a short classifier call says the agent can help. A lower tier may turn it on under a higher Off, as before the registry; a Lock stops that. There is no agent level: the gate decides before an agent answers, so an agent setting would never be read.
+The agent joins a thread without being mentioned when it can help. A channel or thread can turn it on where it is off above, unless that is locked.
 
 | | |
 | --- | --- |
@@ -146,7 +146,7 @@ Finished answers end with a footer naming the agent, the time taken, what the an
 
 ## Repository memory
 
-Each message starts with the notes the agent keeps in its repository memory. Needs the operator's setup (an import of existing memory, then `DAIMON_REPO_MEMORY__ENABLED`), which also adds the memory tools. Off hides the tools and the notes here.
+Each message starts with the notes in the agent's repository memory, and the agent gets the memory tools. Off hides both here. Whoever runs Daimon must set it up first.
 
 | | |
 | --- | --- |
@@ -158,7 +158,7 @@ Each message starts with the notes the agent keeps in its repository memory. Nee
 
 ## Context provider
 
-A context provider set up for this channel or agent adds what it knows to each message. Off skips it here. Managed Agents only.
+A context provider set up for this channel or agent adds what it knows to each message. Off skips it here. Claude agents only.
 
 | | |
 | --- | --- |
@@ -184,7 +184,7 @@ How many earlier chat messages a new conversation reads, up to 100 from the thre
 
 ## Setup guidance
 
-Instructions at the top of the agent's prompt on where its keys, repo, memory and files are and what it may share. Off leaves the agent's own prompt and the safety rules. Applies when the agent is next saved or synced.
+Instructions at the top of the agent's prompt on where its keys, repo, memory and files are and what it may share. Off leaves the agent's own prompt and the safety rules. Applies the next time the agent is saved.
 
 | | |
 | --- | --- |
@@ -196,7 +196,7 @@ Instructions at the top of the agent's prompt on where its keys, repo, memory an
 
 ## Daimon tools
 
-Daimon's own tools: chat, settings, routines, memory and the rest. On keeps at least the conversation ids the tools need. An isolated agent never has them. Gemini and OpenAI agents always have them, so it can't be changed there. Applies from the next message in a conversation.
+Daimon's own tools: chat, settings, routines, memory and the rest. An agent kept apart from the team's data never has them, and Gemini and OpenAI agents always do. Applies from the next message in a conversation.
 
 | | |
 | --- | --- |
@@ -206,9 +206,9 @@ Daimon's own tools: chat, settings, routines, memory and the rest. On keeps at l
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
 
-## Built-in tool: bash
+## Run commands
 
-The agent's built-in bash tool. The agent level is the agent's own tool settings. On never widens what a self-hosted harness allows. Applies from the next message in a conversation.
+The agent can run commands. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message in a conversation.
 
 | | |
 | --- | --- |
@@ -220,9 +220,9 @@ The agent's built-in bash tool. The agent level is the agent's own tool settings
 | Levels on Gemini | Deployment, Workspace, Agent |
 | Levels on OpenAI | Deployment, Workspace, Agent |
 
-## Built-in tool: read
+## Read files
 
-The agent's built-in read tool. The agent level is the agent's own tool settings. On never widens what a self-hosted harness allows. Applies from the next message in a conversation.
+The agent can read files. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message in a conversation.
 
 | | |
 | --- | --- |
@@ -234,9 +234,9 @@ The agent's built-in read tool. The agent level is the agent's own tool settings
 | Levels on Gemini | Deployment, Workspace, Agent |
 | Levels on OpenAI | Deployment, Workspace, Agent |
 
-## Built-in tool: edit
+## Edit files
 
-The agent's built-in edit tool. The agent level is the agent's own tool settings. On never widens what a self-hosted harness allows. Applies from the next message in a conversation.
+The agent can edit files. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message in a conversation.
 
 | | |
 | --- | --- |
@@ -248,9 +248,9 @@ The agent's built-in edit tool. The agent level is the agent's own tool settings
 | Levels on Gemini | Deployment, Workspace, Agent |
 | Levels on OpenAI | Deployment, Workspace, Agent |
 
-## Built-in tool: write
+## Write files
 
-The agent's built-in write tool. The agent level is the agent's own tool settings. On never widens what a self-hosted harness allows. Applies from the next message in a conversation.
+The agent can write new files. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message in a conversation.
 
 | | |
 | --- | --- |
@@ -262,9 +262,9 @@ The agent's built-in write tool. The agent level is the agent's own tool setting
 | Levels on Gemini | Deployment, Workspace, Agent |
 | Levels on OpenAI | Deployment, Workspace, Agent |
 
-## Built-in tool: grep
+## Search file contents
 
-The agent's built-in grep tool. The agent level is the agent's own tool settings. On never widens what a self-hosted harness allows. Applies from the next message in a conversation.
+The agent can search inside files. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message in a conversation.
 
 | | |
 | --- | --- |
@@ -276,9 +276,9 @@ The agent's built-in grep tool. The agent level is the agent's own tool settings
 | Levels on Gemini | Deployment, Workspace, Agent |
 | Levels on OpenAI | Deployment, Workspace, Agent |
 
-## Built-in tool: glob
+## Find files
 
-The agent's built-in glob tool. The agent level is the agent's own tool settings. On never widens what a self-hosted harness allows. Applies from the next message in a conversation.
+The agent can find files by name. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message in a conversation.
 
 | | |
 | --- | --- |
@@ -290,9 +290,9 @@ The agent's built-in glob tool. The agent level is the agent's own tool settings
 | Levels on Gemini | Deployment, Workspace, Agent |
 | Levels on OpenAI | Deployment, Workspace, Agent |
 
-## Built-in tool: web fetch
+## Open web pages
 
-The agent's built-in web fetch tool. The agent level is the agent's own tool settings. On never widens what a self-hosted harness allows. Applies from the next message in a conversation.
+The agent can open web pages. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message in a conversation.
 
 | | |
 | --- | --- |
@@ -304,9 +304,9 @@ The agent's built-in web fetch tool. The agent level is the agent's own tool set
 | Levels on Gemini | Deployment, Workspace, Agent |
 | Levels on OpenAI | Deployment, Workspace, Agent |
 
-## Built-in tool: web search
+## Search the web
 
-The agent's built-in web search tool. The agent level is the agent's own tool settings. On never widens what a self-hosted harness allows. Applies from the next message in a conversation.
+The agent can search the web. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message in a conversation.
 
 | | |
 | --- | --- |
@@ -320,12 +320,12 @@ The agent's built-in web search tool. The agent level is the agent's own tool se
 
 ## Message controls
 
-Facts sent with each message: where it was sent, who is answering, and how to use them. Origin only keeps the ids and the honesty facts; Minimal keeps only the facts about the model and the conversation. Daimon tools keep it at Origin only or more.
+What each message tells the agent: where it was sent, who is answering and how to act on that. Where and who drops the how-to; Basics keeps only the model and the conversation. Daimon tools need Where and who or more.
 
 | | |
 | --- | --- |
 | Key | `turn_controls` |
-| Values | `full` (Full), `origin` (Origin only), `minimal` (Minimal) |
+| Values | `full` (Full), `origin` (Where and who), `minimal` (Basics) |
 | Default | `full` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
@@ -344,7 +344,7 @@ Each message tells the agent the web app's address and the pages it may link to.
 
 ## Connected server briefing
 
-Before each chat message, the agent's connected servers that offer a context tool are sent the message, and their answers go in front of it as quoted data. Managed Agents only.
+Before each chat message, the agent's connected servers that offer a context tool see the message, and their answers go in front of it as quoted text. Claude agents only.
 
 | | |
 | --- | --- |
@@ -357,9 +357,9 @@ Before each chat message, the agent's connected servers that offer a context too
 | Levels on OpenAI | Not available |
 | Deprecated | `DAIMON_MCP_CONTEXT__ENABLED` |
 
-## Run instructions
+## Notes on non-chat messages
 
-A short note in front of a message that did not come from chat: a routine, a relayed draft, a handoff or another agent's request, with any wording the agent's spec adds. Off sends the message alone.
+A short note in front of a message that did not come from chat, such as a routine, a handoff or another agent's request. Off sends the message alone.
 
 | | |
 | --- | --- |
@@ -371,7 +371,7 @@ A short note in front of a message that did not come from chat: a routine, a rel
 
 ## Keys file
 
-The agent's saved keys as a .env file in its working files. Off leaves the file out; the keys stay saved. Applies from the next message in a conversation. Managed Agents only.
+The agent's saved keys as a .env file in its working files. Off leaves the file out; the keys stay saved. Applies from the next message in a conversation. Claude agents only.
 
 | | |
 | --- | --- |
@@ -385,7 +385,7 @@ The agent's saved keys as a .env file in its working files. Off leaves the file 
 
 ## Carry working files
 
-When a long conversation starts over, the agent is first asked to save its working files to carry across. Off carries only the conversation and skips that extra paid step. Managed Agents only.
+When a long conversation starts over, the agent is first asked to save its working files to carry across. Off carries only the conversation and skips that extra paid step. Claude agents only.
 
 | | |
 | --- | --- |
@@ -411,7 +411,7 @@ The agent's prompt is adjusted to the chat platform's words and formatting. Off 
 
 ## Platform skills
 
-The skills Daimon adds for the chat platform, such as its formatting. A conversation keeps what it started with until /new. Managed Agents only.
+The skills Daimon adds for the chat app, such as its formatting. A conversation keeps what it started with until /new. Claude agents only.
 
 | | |
 | --- | --- |
@@ -437,7 +437,7 @@ The skills listed on the agent. Off leaves them out of new conversations; the ag
 
 ## Channel skills
 
-The skills added to a channel. They need the read tool, so they are off wherever it is. A conversation keeps what it started with until /new. Managed Agents only.
+The skills added to a channel. They need the read tool, so they are off wherever it is. A conversation keeps what it started with until /new. Claude agents only.
 
 | | |
 | --- | --- |
@@ -475,7 +475,7 @@ The agent's memory shared by everyone who talks to it. A conversation keeps what
 
 ## Channel memory
 
-The memory a restricted channel keeps for itself in place of the shared one. A conversation keeps what it started with until /new. Managed Agents only.
+The memory a restricted channel keeps for itself in place of the shared one. A conversation keeps what it started with until /new. Claude agents only.
 
 | | |
 | --- | --- |
@@ -551,7 +551,7 @@ Admins are told in a direct message when a channel's budget is nearly used or sp
 | Combines | Most specific wins |
 | Deprecated | `DAIMON_BUDGET_NOTICES` |
 
-## Keep messages apart
+## Separate agent messages
 
 An answer made of several agent messages keeps each one, set apart by a blank line, instead of joining them into one block.
 
@@ -564,9 +564,9 @@ An answer made of several agent messages keeps each one, set apart by a blank li
 | Combines | Most specific wins |
 | Deprecated | `DAIMON_TURN__STATUS_LOG` |
 
-## Cost on hosted-model footers
+## Cost on Gemini and OpenAI footers
 
-A finished answer from an OpenAI or Gemini agent shows what it cost, or that the cost is unknown or partial. Managed Agents footers are unchanged.
+A finished answer from a Gemini or OpenAI agent shows what it cost, or that the cost is unknown or partial. Claude agent footers are unchanged.
 
 | | |
 | --- | --- |
@@ -630,7 +630,7 @@ A card shows in a channel whose reply is waiting on the team's limit on replies 
 
 ## Private channel messages
 
-Every message in private and shared channels is read through Microsoft Graph, not only the ones that mention the agent. Needs the public address the bot is reached at. Read once at startup, so only the server operator sets it and a restart applies it.
+Every message in private and shared channels is read through Microsoft Graph, not only the ones that mention the agent. Needs the public address the bot is reached at. Whoever runs Daimon sets it, and it applies after a restart.
 
 | | |
 | --- | --- |
@@ -739,7 +739,7 @@ The integrations pages of the web app. Off hides them for everyone on the team.
 
 ## Watches
 
-The agent can watch a page or feed and start a conversation when it changes. Off removes the watch tools here and stops the watches made here. Watches fire only once the operator enables them, whatever this says.
+The agent can watch a page or feed and start a conversation when it changes. Off removes the watch tools here and stops the watches made here. Watches only run once whoever runs Daimon allows them, whatever this says.
 
 | | |
 | --- | --- |
@@ -764,7 +764,7 @@ The agent can set up and run routines: tasks that run on a schedule. Off removes
 
 ## Long jobs
 
-The agent can start a long job that keeps working after the chat moves on. Off until an admin turns it on; off removes the long-job tools here.
+The agent can start a long job that keeps working after the chat moves on. Off until a server admin turns it on; off removes the long-job tools here.
 
 | | |
 | --- | --- |
@@ -849,7 +849,7 @@ Charts the agent makes come back inside its answer to a connected app as picture
 
 ## Ask a person
 
-Answers offer a way to ask the Daimon team for help, which posts the request in the operator's support channel. Off removes the button and the form. The operator sets the channel and each person's credits.
+Answers offer a way to ask the Daimon team for help, which posts the request in the support channel. Off removes the button and the form. Whoever runs Daimon sets the channel and each person's credits.
 
 | | |
 | --- | --- |
@@ -928,7 +928,7 @@ How many new threads or forum posts outside its own channel, or tagging someone 
 | | |
 | --- | --- |
 | Key | `outbound_threads` |
-| Values | `2` (2), `1` (1), `0` (None) |
+| Values | `2` (2 threads), `1` (1 thread), `0` (None) |
 | Default | `2` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Lowest wins |
@@ -941,7 +941,7 @@ How many channels, threads and direct-message recipients outside its own convers
 | | |
 | --- | --- |
 | Key | `outbound_places` |
-| Values | `2` (2), `1` (1), `0` (None) |
+| Values | `2` (2 places), `1` (1 place), `0` (None) |
 | Default | `2` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Lowest wins |
@@ -954,20 +954,20 @@ How many different people one reply may tag without approval. The smallest setti
 | | |
 | --- | --- |
 | Key | `outbound_people` |
-| Values | `5` (5), `3` (3), `1` (1), `0` (None) |
+| Values | `5` (5 people), `3` (3 people), `1` (1 person), `0` (None) |
 | Default | `5` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Lowest wins |
 | Deprecated | `DAIMON_OUTBOUND__MAX_PEOPLE` |
 
-## Post length outside the conversation
+## Post length elsewhere
 
 The longest post, in characters, a reply may send outside its own conversation. The smallest setting wins.
 
 | | |
 | --- | --- |
 | Key | `outbound_length` |
-| Values | `1500` (1500), `1000` (1000), `500` (500), `250` (250) |
+| Values | `1500` (1500 characters), `1000` (1000 characters), `500` (500 characters), `250` (250 characters) |
 | Default | `1500` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Lowest wins |
@@ -975,7 +975,7 @@ The longest post, in characters, a reply may send outside its own conversation. 
 
 ## Daily spend per model
 
-The most the team may spend on one OpenAI or Gemini model in a day, at list price. The smallest setting wins, and the operator's provider cap still applies.
+The most the team may spend on one OpenAI or Gemini model in a day, at list price. The smallest setting wins, and the provider cap set by whoever runs Daimon still applies.
 
 | | |
 | --- | --- |
@@ -987,7 +987,7 @@ The most the team may spend on one OpenAI or Gemini model in a day, at list pric
 
 ## Tool safety
 
-A change through a connected tool waits for the person to press Approve. In a routine or other run nobody watches, it is refused unless the operator allowed that tool. Reads always run.
+A change through a connected tool waits for the person to press Approve. In a routine or other run nobody watches, it is refused unless whoever runs Daimon allowed that tool. Reads always run.
 
 | | |
 | --- | --- |
@@ -1013,12 +1013,12 @@ Before one reply posts in more places, opens more threads or tags more people th
 
 ## Built-in tools in routines
 
-Per routine lets an admin turn on built-in tools for one routine. Off keeps them off in every routine, even one an admin turned them on for.
+Allowed lets an admin turn on built-in tools for one routine. Off keeps them off in every routine, even one an admin turned them on for.
 
 | | |
 | --- | --- |
 | Key | `unattended_capabilities` |
-| Values | `on` (Per routine), `off` (Off) |
+| Values | `on` (Allowed), `off` (Off) |
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent |
 | Combines | Stricter wins |

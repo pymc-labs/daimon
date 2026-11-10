@@ -44,7 +44,7 @@ VERB: Final = "settings"
 IN_A_CHANNEL: Final = (
     "Settings work in a channel post. Send `settings` in the post you want to change."
 )
-CANNOT_VERIFY: Final = "I couldn't check who pressed this. Try again."
+CANNOT_VERIFY: Final = "I couldn't verify you just now. Try again."
 OPEN_IN_POST: Final = "Send `settings` in that channel post to change its thread."
 FAILED: Final = "Something went wrong saving that setting. Try again later."
 _THREAD_MARK: Final = ";messageid="

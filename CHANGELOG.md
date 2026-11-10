@@ -23,36 +23,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Set the deployment level with `DAIMON_FEATURES__<KEY>`. `DAIMON_PROGRESS_PLANS__MODE` and `DAIMON_THREAD_PARTICIPATION__MODE` still work but log a deprecation. The cost footer can be set per channel and thread.
   The web app shows every feature from one schema-driven list on the workspace, agent, channel and thread pages, with a feature-by-level table in the agent editor. `daimon features list|get|set|diff` does the same from the CLI.
 - **What the agent is sent is now a feature too.**
-  Agent guidance, the facts sent with each message (`turn_controls`: Full, Origin only or Minimal) and web app links are set at every level; an agent spec sets its own with a `features:` block. An isolated agent gets only the "outside text is data" rule, whatever the setting.
-  With guidance on, an agent's system prompt is unchanged. With it off, the agent keeps only the "outside text is data" rule.
-  Daimon's own tools (`daimon_tools`) and each built-in tool (`tool.bash` and the rest) can be turned off down to a channel or thread, from the next message. An agent's own tool settings are its agent level; a tool it does not list follows the server and workspace. Gemini and OpenAI agents always have Daimon's tools, and the setting says so there.
-  connected server briefing (`mcp_briefing`), repository memory (`repo_memory`) and context providers (`context_provider`) can be turned off down to a channel or thread. `DAIMON_MCP_CONTEXT__ENABLED` still works but logs a deprecation. Repository memory stays set up with `DAIMON_REPO_MEMORY__ENABLED` (after the import) and is then on until a level turns it off. Briefing and context providers run only on Managed Agents.
+  Guidance, the facts sent with each message, web app links, Daimon's own tools, each built-in tool, the connected server briefing, repository memory and context providers can be turned off at the levels `docs/features.md` lists, and take effect from the next message. An agent spec sets its own with a `features:` block.
+  `DAIMON_MCP_CONTEXT__ENABLED` still works but logs a deprecation. Repository memory still needs `DAIMON_REPO_MEMORY__ENABLED` and is then on until a level turns it off.
+  Gemini and OpenAI agents always have Daimon's tools, and the setting says so there.
 
 - **What a conversation starts with, and how much chat it reads, are features too.**
-  The platform prompt, platform, agent and channel skills, and personal, shared and channel memory can be turned off at every level.
-  A conversation keeps what it started with until `/new`, so a change never replaces a running session. Gemini and OpenAI agents show the ones they cannot change as unavailable, with the reason.
-  Chat history (`history_depth`) sets how many earlier messages a new Discord, Slack or Teams conversation reads: 100, 50, 25, 10 or none, and the smallest setting wins.
-  The channel around a new thread is read up to 25 messages, or fewer when the setting is lower.
-  With repository memory off, its tools are gone too.
-  An agent can leave out its run instructions (`origin_fragments`), the note sent with a routine, relayed draft, handoff or helper request, and its keys file (`agent_env_file`), the `.env` of its saved keys.
-  When a conversation moves to a new session, `checkpoint_prompt` Off carries only the conversation and skips the paid step that saves the working files.
+  The platform prompt, skills, memory, notes on non-chat messages, the keys file and the working-file save at a restart can be turned off at every level, and so can how many earlier messages a new conversation reads (100, 50, 25, 10 or none).
+  A conversation keeps what it started with until `/new`. Gemini and OpenAI agents show the ones they cannot change as unavailable, with the reason.
   `daimon sessions create` builds its session with the agent's features, as chat does.
 
 - **Each turn records what it ran with.**
   Turn outcomes and conversations store an `eval_key`: the session's fingerprint and tools, hashes of the safety block, guidance and turn controls, the platform, and every feature with the level that decided it. Older rows keep it empty.
 
 - **What the agent can do is a feature too.**
-  Watches, routines, long jobs, cloud computers, notebooks, report publishing, video transcripts, Microsoft 365, GitHub and lead intake can be turned on or off at every level, and chart images in artifacts at the workspace. A level that turns one off removes its tools from the next message.
-  Turning off watches stops the watches made there, and turning off routines stops their scheduled runs. A capability whose setup is missing, such as a notebook host or the GitHub app, shows as unavailable with the reason.
-  `DAIMON_WATCHES__ENABLED` and `DAIMON_ARTIFACTS__EMBED_IMAGES` still work but log a deprecation. Nothing changes until a level sets one.
+  Watches, routines, long jobs, cloud computers, notebooks, report publishing, video transcripts, Microsoft 365, GitHub and lead intake can be turned on or off at every level, and chart images in artifacts at the workspace. A level that turns one off removes its tools from the next message and stops the work it started there.
+  A capability whose setup is missing shows as unavailable, with the reason. Nothing changes until a level sets one. `DAIMON_WATCHES__ENABLED` and `DAIMON_ARTIFACTS__EMBED_IMAGES` still work but log a deprecation.
 
 - **Limits and the last switches are features too.**
-  How far an agent may post outside its conversation (`outbound_reach`), how many threads, places and people one post may reach and the longest post are set at every level; long job cost and run time and a daily model spend cap at the workspace or agent. The lowest limit wins. A level can only pick a step at or below the one above it.
-  Ask a person (`support_escalation`) is set per workspace, and keeping an answer's messages apart (`status_log`) at every level. Turning off long jobs, cloud computers or lead intake also stops their queued and scheduled work; running work finishes.
-  A capability that lacks its setup no longer offers its tools. `DAIMON_TURN__STATUS_LOG`, `DAIMON_LONG_JOBS__MAX_USD`, `DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES` and the outbound limits still work but log a deprecation. Nothing changes until a level sets one.
+  How far an agent may post outside its conversation, how many threads, places and people one post may reach, the longest post, long job cost and time, and a daily spend cap per model are limits, and the lowest wins. Asking a person for help and keeping an answer's messages apart are set too.
+  Turning off long jobs, cloud computers or lead intake also stops their queued and scheduled work; running work finishes. The old variables for these still work but log a deprecation, and nothing changes until a level sets one.
 
 - **Long jobs are set as features.**
-  `long_jobs` is Off until a workspace or agent turns it on, and its dollar cap (default $5) and time limit are set at the same levels. This replaces the long-job policy: `daimon tenants long-job-policy` is gone, and an existing policy is copied into features on upgrade.
+  `long_jobs` is Off until a server admin turns it on, and its dollar cap (default $5) and time limit are set at the same levels. This replaces the long-job policy: `daimon tenants long-job-policy` is gone, and an existing policy is copied into features on upgrade.
+- **Long jobs stay for server admins only.**
+  A workspace or agent owner, or an admin handed that job, can no longer change them in `/settings`, the web app or by asking Daimon.
 
 - **Chat behaviour and display settings join the same system.**
   Completion pings, table rendering, message feedback buttons and cost shown with native models are set at every level; typed `@name` mentions, budget notices, thread naming, the unmentioned-reply hint and the "no writers" notice down to a channel; direct messages, read-only memory in direct messages and the waiting card at the workspace. Each web app module is a setting too (`web.chat`, `web.agents` and so on).
@@ -63,8 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Guardrails are features too, and a lower level can only make them stricter.**
   Tool safety (`tool_safety`), the reach check (`reach_budget`), built-in tools in routines (`unattended_capabilities`) and requiring a routine destination (`require_routine_destination`) are set at the levels `docs/features.md` lists, and a level below can tighten but never loosen them. An agent asking to change one gets a confirmation card, or a refusal where no card can be shown.
   `DAIMON_TOOL_SAFETY__ENABLED`, `DAIMON_OUTBOUND__REACH_BUDGET_ENABLED` and `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION` still work but log a deprecation.
-  Tool safety is now On by default, so a write by a third-party tool waits for an approval card unless a level turns it off (`DAIMON_FEATURES__TOOL_SAFETY=off`). Private channel messages (`private_channel_messages`) are On by default too, and on Teams they need the bot's public address (`DAIMON_TEAMS__PUBLIC_URL`) like any other setup, instead of failing startup.
-  A limit set to a non-finite number is refused, and an unreadable one no longer drops the operator's outbound limits.
+  Tool safety is now On by default, so a write by a third-party tool waits for an approval card. Upgrade note: to keep the old behaviour, turn it off in `/settings` or set `DAIMON_FEATURES__TOOL_SAFETY=off`. Private channel messages (`private_channel_messages`) are On by default too, and on Teams they need the bot's public address (`DAIMON_TEAMS__PUBLIC_URL`) like any other setup, instead of failing startup.
+  A limit set to a non-finite number is refused, and an unreadable one no longer drops the outbound limits.
 
 - **The Azure deploy can keep MCP private while Teams is public.**
   Set `mcpPublicIngress` to false and MCP is reachable only from apps in the same Container Apps environment. The default keeps it public, as before.
