@@ -15,6 +15,7 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from mux.contracts._base import Contract, FrozenMap
+from mux.contracts.digest import digest_body
 from mux.contracts.errors import InvalidConfig
 from mux.contracts.ids import ChannelRef, Provider
 from mux.contracts.profile import Capability
@@ -88,7 +89,7 @@ class ResolvedBackend(Contract):
 
     def content_digest(self) -> str:
         """A content digest: equal configurations hash equal."""
-        body = self.model_dump(mode="json", include=set(ResolvedBackend.model_fields))
+        body = digest_body(self, include=set(ResolvedBackend.model_fields))
         canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode()).hexdigest()
 
