@@ -20,7 +20,6 @@ from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.errors import StaleChannelValue
 from daimon.core.scope_settings import (
     SettingChange,
-    SettingKey,
     SettingLevel,
     SettingsActor,
     SettingsPlace,
@@ -117,7 +116,7 @@ async def _change_setting_impl(
         runtime.session_factory,
         runtime.settings,
         actor,
-        key=cast(SettingKey, key),
+        key=key,
         level=cast(SettingLevel, level),
         platform=place.platform,
         agent_id=place.agent_id,
