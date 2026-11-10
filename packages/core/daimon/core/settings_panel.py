@@ -3,8 +3,8 @@
 Three screens, one control kind. The first picks a group of features, the second a
 feature of it, the third sets that feature where the viewer may: for this thread, this
 channel, the server, or an agent picked from a list. Each control is one choice
-(`features.surface.parse_choice`) applied by `scope_settings.apply_choice`, which
-re-checks the presser. A new registry key shows up here with no surface code.
+(`features.surface.parse_choice`) applied by `apply_choice`, which re-checks the presser.
+A new registry key shows up here with no surface code.
 
 A platform draws a `PanelScreen`: its selects, a way back and a notice. Pressing a
 control or `open:<group>[:<key>[@<agent>]]` is `press`. Pure apart from the reads.
@@ -18,15 +18,25 @@ from dataclasses import dataclass, replace
 from typing import Final
 
 from anthropic import AsyncAnthropic
+from daimon.core.admin_actions import DelegatedAction
+from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.features.registry import DEFAULT, FEATURES, LOCKABLE, Category, FeatureSpec
-from daimon.core.features.service import FeatureView, TierSetting, admin_word, read_features
+from daimon.core.features.service import (
+    FeatureActor,
+    FeatureView,
+    TierSetting,
+    admin_word,
+    change_feature,
+    read_features,
+)
 from daimon.core.features.service import change_refusal as feature_refusal
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.features.surface import (
     CATEGORIES,
+    change_note,
     own_text,
     parse_choice,
     source_text,
@@ -34,7 +44,7 @@ from daimon.core.features.surface import (
     tier_word,
     where,
 )
-from daimon.core.scope_settings import SettingsActor, SettingsPlace, apply_choice
+from daimon.core.stores.identity import find_platform_principal
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 Sessions = async_sessionmaker[AsyncSession]
@@ -62,6 +72,54 @@ def tenant_agents(client: AsyncAnthropic, tenant_id: uuid.UUID) -> AgentLoader:
         return sorted(named, key=lambda agent: agent.name.lower())
 
     return load
+
+
+async def chat_actor(
+    sessions: Sessions,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    user_id: str,
+    admin_for: Callable[[DelegatedAction | None], Awaitable[bool]],
+) -> FeatureActor:
+    """A person pressing a chat control, recorded under their account (never created here)."""
+    async with sessions() as session:
+        found = await find_platform_principal(
+            session, tenant_id=tenant_id, platform=platform, external_id=user_id
+        )
+    account = found.account_id if found is not None else None
+    return FeatureActor(tenant_id, account, "panel", user_id, admin_for)
+
+
+async def apply_choice(
+    sessions: Sessions,
+    settings: Settings,
+    actor: FeatureActor,
+    raw: object,
+    place: FeaturePlace,
+) -> tuple[bool, str] | None:
+    """Apply a pressed choice (`features.surface.parse_choice`): ``(True, what changed)``,
+    ``(False, why not)``, or None for a forged choice, which changes nothing and says nothing."""
+    if (choice := parse_choice(raw)) is None:
+        return None
+    if choice.agent:
+        place = replace(place, agent_id=choice.agent)
+    try:
+        change = await change_feature(
+            sessions,
+            settings,
+            actor,
+            key=choice.key,
+            tier=choice.tier,
+            value=choice.value,
+            place=place,
+            locked=choice.locked,
+        )
+    except ChannelChangeRefused as exc:
+        return False, str(exc)
+    return True, change_note(
+        change, place.platform, overrides_active=settings.tool_safety.gate_overrides_active
+    )
 
 
 @dataclass(frozen=True)
@@ -114,7 +172,7 @@ def parse_open(raw: object) -> tuple[Category | None, str | None, str | None] | 
     return category, key, agent or None
 
 
-def _on_platform(place: SettingsPlace) -> list[FeatureSpec]:
+def _on_platform(place: FeaturePlace) -> list[FeatureSpec]:
     return [spec for spec in FEATURES.values() if spec.on_platform(place.platform)]
 
 
@@ -125,7 +183,7 @@ def _short(view: FeatureView, platform: str) -> str:
     return view.spec.label(resolved.value) + (", locked" if resolved.locked else "")
 
 
-def _root(place: SettingsPlace) -> PanelScreen:
+def _root(place: FeaturePlace) -> PanelScreen:
     groups = {spec.category for spec in _on_platform(place)}
     here = "this thread" if place.thread_id else "this channel"
     return PanelScreen(
@@ -147,14 +205,12 @@ def _root(place: SettingsPlace) -> PanelScreen:
 async def _category(
     sessions: Sessions,
     settings: Settings,
-    actor: SettingsActor,
-    place: SettingsPlace,
+    actor: FeatureActor,
+    place: FeaturePlace,
     category: Category,
 ) -> PanelScreen:
     specs = [spec for spec in _on_platform(place) if spec.category == category]
-    views = await read_features(
-        sessions, settings, place.feature_place(actor.tenant_id), keys=[s.key for s in specs]
-    )
+    views = await read_features(sessions, settings, place, keys=[s.key for s in specs])
     shorts = [(view.spec, _short(view, place.platform)) for view in views]
     return PanelScreen(
         CATEGORIES[category],
@@ -175,8 +231,8 @@ async def _category(
 async def _feature(
     sessions: Sessions,
     settings: Settings,
-    actor: SettingsActor,
-    place: SettingsPlace,
+    actor: FeatureActor,
+    place: FeaturePlace,
     key: str,
     agent: str | None,
     agents: AgentLoader | None,
@@ -184,8 +240,7 @@ async def _feature(
     spec = FEATURES[key]
     if agent:
         place = replace(place, agent_id=agent)
-    fplace = place.feature_place(actor.tenant_id)
-    (view,) = await read_features(sessions, settings, fplace, keys=(key,))
+    (view,) = await read_features(sessions, settings, place, keys=(key,))
     back = PanelOption(open_op(spec.category, key if agent else None), "Back")
     title = spec.name
     lines = [f"In effect: {source_text(spec, view.resolved, place.platform)}."]
@@ -200,7 +255,7 @@ async def _feature(
         lines.append(f"{word}: {own_text(spec, own)}{_overridden(view, own, place.platform)}.")
         if (own.tier == "agent") != bool(agent):
             continue
-        if await feature_refusal(sessions, settings, actor, key=key, tier=own.tier, place=fplace):
+        if await feature_refusal(sessions, settings, actor, key=key, tier=own.tier, place=place):
             continue
         options = tier_options(
             spec, own.tier, own, can_lock=can_lock and own.tier in LOCKABLE, agent=agent
@@ -238,8 +293,8 @@ def _agent_level(spec: FeatureSpec) -> bool:
 async def _agent_picker(
     sessions: Sessions,
     settings: Settings,
-    actor: SettingsActor,
-    place: SettingsPlace,
+    actor: FeatureActor,
+    place: FeaturePlace,
     spec: FeatureSpec,
     agents: AgentLoader,
 ) -> PanelSelect | None:
@@ -267,8 +322,8 @@ async def _agent_picker(
 async def show(
     sessions: Sessions,
     settings: Settings,
-    actor: SettingsActor,
-    place: SettingsPlace,
+    actor: FeatureActor,
+    place: FeaturePlace,
     op: object = OPEN,
     *,
     agents: AgentLoader | None = None,
@@ -290,9 +345,9 @@ async def show(
 async def press(
     sessions: Sessions,
     settings: Settings,
-    actor: SettingsActor,
+    actor: FeatureActor,
     raw: object,
-    place: SettingsPlace,
+    place: FeaturePlace,
     *,
     agents: AgentLoader | None = None,
 ) -> PanelScreen | None:
@@ -312,8 +367,8 @@ async def press(
 async def open_panel(
     sessions: Sessions,
     settings: Settings,
-    actor: SettingsActor,
-    place: SettingsPlace,
+    actor: FeatureActor,
+    place: FeaturePlace,
     *,
     agents: AgentLoader | None = None,
 ) -> PanelScreen:
@@ -329,6 +384,8 @@ __all__ = [
     "PanelOption",
     "PanelScreen",
     "PanelSelect",
+    "apply_choice",
+    "chat_actor",
     "open_op",
     "open_panel",
     "parse_open",

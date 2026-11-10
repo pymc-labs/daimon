@@ -17,9 +17,10 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.errors import DaimonError
+from daimon.core.features.service import FeatureActor
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.scope_settings import SettingsActor, SettingsPlace, chat_actor
-from daimon.core.settings_panel import PanelScreen, open_panel, press, tenant_agents
+from daimon.core.settings_panel import PanelScreen, chat_actor, open_panel, press, tenant_agents
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.webhook.async_client import AsyncWebhookClient
@@ -73,7 +74,7 @@ def screen_fields(screen: PanelScreen) -> dict[str, Any]:
 
 async def _actor(
     runtime: SlackRuntime, client: AsyncWebClient, team_id: str, user_id: str
-) -> SettingsActor:
+) -> FeatureActor:
     async def admin_for(action: DelegatedAction | None) -> bool:
         return await resolve_is_admin(client, user_id=user_id, host_team_id=team_id, action=action)
 
@@ -102,7 +103,7 @@ async def handle_settings_command(runtime: SlackRuntime, payload: dict[str, Any]
             runtime.sessionmaker,
             runtime.settings,
             actor,
-            SettingsPlace.of("slack", channel_id, None),
+            FeaturePlace.of(actor.tenant_id, "slack", channel_id, None),
             agents=tenant_agents(runtime.anthropic, actor.tenant_id),
         )
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
@@ -149,7 +150,7 @@ async def handle_settings_change(runtime: SlackRuntime, payload: dict[str, Any])
         runtime.settings,
         actor,
         raw,
-        SettingsPlace.of("slack", channel_id, None),
+        FeaturePlace.of(actor.tenant_id, "slack", channel_id, None),
         agents=tenant_agents(runtime.anthropic, actor.tenant_id),
     )
     if screen is not None:

@@ -338,7 +338,7 @@ HTTP with capability tokens.
 | Why a turn ended | `turn/termination.py`, `turn/notices.py` |
 | Access decisions | `core/authz.py` |
 | Config cascade | `core/stores/scoped_config_read.py`, `core/scope.py` |
-| Per-place settings: `/settings`, `get_settings`/`change_setting` and the web Settings section all read and write here | `core/scope_settings.py` |
+| Per-place settings: `/settings`, `get_settings`/`change_setting` and the web Settings section all read and write here | `core/features/service.py`, `core/settings_panel.py` |
 | Web page styles | `uv run python scripts/generate_web_css.py` after editing `static/input.css` (Linux x64; CI runs it with `--check`) |
 
 See also [routines](routines.md), [mcp-tools](mcp-tools.md) and

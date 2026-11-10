@@ -244,7 +244,7 @@ export type SwitchChoice = "inherit" | SwitchMode
 
 export const choiceOf = (s: Pick<ChannelSwitch, "own">): SwitchChoice => s.own ?? "inherit"
 
-/** The Settings group's names and value words, the same as in chat (`daimon.core.scope_settings.SPECS`). */
+/** The Settings group's names and value words, the same as in chat (`daimon.core.features.registry.FEATURES`). */
 export const SETTING_NAMES = {
   approvals: "Approvals", participation: "Thread participation", progress_plans: "Progress plans", cost_footer: "Cost footer",
 } as const
@@ -257,7 +257,7 @@ export const APPROVAL_OPTIONS = (Object.keys(APPROVAL_VALUE) as ApprovalMode[]).
 
 /** Where an inherited value comes from, as the default item reads it. */
 export const switchFrom = (s: ChannelSwitch) => (s.source === "deployment" ? "Built-in" : "Workspace") as "Built-in" | "Workspace"
-export const approvalsFrom = (a: ChannelApprovals) => (a.source === "server" ? "Workspace" : "Built-in") as "Built-in" | "Workspace"
+export const approvalsFrom = (a: ChannelApprovals) => (a.source === "workspace" ? "Workspace" : "Built-in") as "Built-in" | "Workspace"
 
 /** What "not available" reads as for a switch: participation is on Discord and Teams only. */
 export const unavailableText = (what: "participation" | "progress_plans", platform: string) =>

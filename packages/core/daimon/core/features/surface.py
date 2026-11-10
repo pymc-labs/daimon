@@ -24,7 +24,7 @@ from daimon.core.features.registry import (
     Tier,
 )
 from daimon.core.features.resolver import ResolvedFeature
-from daimon.core.features.service import FeatureView, TierSetting
+from daimon.core.features.service import FeatureChange, FeatureView, TierSetting
 from daimon.core.platform_words import space_for
 
 CATEGORIES: Final[Mapping[Category, str]] = {
@@ -82,6 +82,28 @@ def source_text(spec: FeatureSpec, resolved: ResolvedFeature, platform: str | No
 
 def own_text(spec: FeatureSpec, own: TierSetting) -> str:
     return value_text(spec, own.value, own.locked)
+
+
+OVERRIDES_OFF: Final = "Saved but ignored until the operator enables approval overrides."
+
+
+def _ignored(spec: FeatureSpec, overrides_active: bool) -> str:
+    return f" {OVERRIDES_OFF}" if spec.key == "approvals" and not overrides_active else ""
+
+
+def change_note(
+    change: FeatureChange, platform: str | None, *, overrides_active: bool = True
+) -> str:
+    """What a change saved, and what is in effect when another tier still decides."""
+    spec, after, resolved = change.view.spec, change.after, change.view.resolved
+    where_ = where(change.tier, platform)
+    if after.value == DEFAULT:
+        note = f"{spec.name} is back to the default for {where_}."
+    else:
+        note = f"{spec.name} is now {value_text(spec, after.value, after.locked)} for {where_}."
+    if resolved.tier != change.tier:
+        note += f" In effect: {source_text(spec, resolved, platform)}."
+    return note + _ignored(spec, overrides_active)
 
 
 def choice(
@@ -169,12 +191,15 @@ def feature_schema() -> list[dict[str, Any]]:
     ]
 
 
-def view_json(view: FeatureView, platform: str | None) -> dict[str, Any]:
+def view_json(
+    view: FeatureView, platform: str | None, *, overrides_active: bool = True
+) -> dict[str, Any]:
     """One feature at a place for a surface that draws its own controls: each tier's own
     value (with its `expected` text), what is in effect, where from, and why it cannot apply."""
     resolved = view.resolved
     return {
         "key": view.spec.key,
+        "name": view.spec.name,
         "tiers": [
             {"tier": t.tier, "value": t.value, "locked": t.locked, "text": t.text}
             for t in view.tiers
@@ -183,5 +208,6 @@ def view_json(view: FeatureView, platform: str | None) -> dict[str, Any]:
         "source": resolved.tier,
         "locked": resolved.locked,
         "unavailable": resolved.unavailable,
-        "summary": source_text(view.spec, resolved, platform),
+        "summary": source_text(view.spec, resolved, platform)
+        + _ignored(view.spec, overrides_active),
     }

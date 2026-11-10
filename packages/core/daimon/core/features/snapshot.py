@@ -30,8 +30,10 @@ from daimon.core.features.resolver import (
     ResolvedFeature,
     TierValue,
     Unavailable,
+    as_cascade,
     resolve_feature,
 )
+from daimon.core.scope_cascade import CascadeMode
 from daimon.core.stores.domain import FeatureValueRow
 from daimon.core.stores.feature_values import feature_revision, place_values
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -208,6 +210,13 @@ def resolve_one(
     return resolve_feature(
         spec, values, unavailable=reason, fixed=fixed, default=spec.default_for(place.platform)
     )
+
+
+def switch_default(settings: Settings, key: str, platform: str) -> CascadeMode:
+    """A switch where no tier sets it: the deployment tier or the registry default; off
+    for good where the feature cannot run (participation without its adapter)."""
+    place = FeaturePlace(uuid.UUID(int=0), platform)
+    return as_cascade(resolve_one(FEATURES[key], settings, place, ())).mode
 
 
 @dataclass(frozen=True)

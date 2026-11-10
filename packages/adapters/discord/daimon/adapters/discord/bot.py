@@ -133,7 +133,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.errors import DaimonError, TurnError, UserFacingError
-from daimon.core.features.snapshot import FeaturePlace, place_feature
+from daimon.core.features.snapshot import FeaturePlace, place_feature, switch_default
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_request_expiry import run_request_expiry_poller
@@ -148,7 +148,6 @@ from daimon.core.permissions import channel_permissions
 from daimon.core.platform_words import words_for
 from daimon.core.posted_controls.lifecycle import drain_card_edits
 from daimon.core.routine_delivery import resolve_routine_identity, run_delivery_poller
-from daimon.core.scope_settings import switch_default
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.discord_message_admissions import (

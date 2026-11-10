@@ -8,11 +8,11 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 from daimon.adapters.discord.commands import settings as cog
-from daimon.core.scope_settings import SettingsPlace
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.settings_panel import PanelOption, PanelScreen, PanelSelect
 
 TENANT = uuid.uuid4()
-PLACE = SettingsPlace.of("discord", "C1", "T1")
+PLACE = FeaturePlace.of(TENANT, "discord", "C1", "T1")
 SCREEN = PanelScreen(
     "Cost footer",
     ("In effect: Shown, the default.", "Channel: Default."),
@@ -47,7 +47,7 @@ def _args(mock: AsyncMock) -> tuple[object, ...]:
 
 
 def _view() -> cog.SettingsView:
-    return cog.SettingsView(MagicMock(), TENANT, PLACE, SCREEN)
+    return cog.SettingsView(MagicMock(), PLACE, SCREEN)
 
 
 def test_guild_only_and_a_select_per_control_with_a_back_button() -> None:
