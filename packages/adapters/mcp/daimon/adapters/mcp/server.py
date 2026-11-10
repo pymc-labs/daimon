@@ -127,6 +127,7 @@ from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.errors import BootstrapError
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.logging_setup import configure_logging, mark_shutting_down
+from daimon.core.mcp_tool_call import pinned_http_client
 from daimon.core.node_exchange import node_identity_key
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.observability import init_sentry
@@ -808,7 +809,9 @@ def create_mcp_app(
         mcp_oauth_start, mcp_oauth_callback = build_oauth_mcp_routes(
             runtime=runtime,
             fernet=fernet,
-            http_client_factory=lambda: httpx.AsyncClient(timeout=20.0, follow_redirects=False),
+            # Discovery, registration and the code exchange reach URLs a remote
+            # server names: pinned to a public address, no redirects, no proxies.
+            http_client_factory=lambda: pinned_http_client(timeout=20.0),
         )
         app.add_route("/oauth/mcp/start", mcp_oauth_start, methods=["GET"])
         app.add_route("/oauth/mcp/callback", mcp_oauth_callback, methods=["GET"])

@@ -27,7 +27,7 @@ import socket
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import Final, Literal, cast
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 import httpx
 from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_https_url
@@ -36,9 +36,12 @@ from pydantic import JsonValue
 __all__ = [
     "MAX_RESPONSE_BYTES",
     "REQUEST_TIMEOUT_S",
+    "AddressRefusedError",
     "McpCallError",
     "McpToolSession",
+    "PinnedTransport",
     "mcp_tool_session",
+    "pinned_http_client",
     "resolve_public_address",
 ]
 
@@ -95,6 +98,67 @@ async def resolve_public_address(host: str, port: int) -> str:
     return str(addresses[0])
 
 
+class AddressRefusedError(httpx.TransportError):
+    """A request named a host that is not public https, or that resolves to a private address."""
+
+
+class PinnedTransport(httpx.AsyncBaseTransport):
+    """Sends each request to the one public address its host resolved to, first time asked.
+
+    The check and the connection use the same address, so a name cannot answer
+    public for the check and private for the connection (DNS rebinding); TLS
+    and `Host` still name the URL's host. Every URL is refused unless public
+    https, so a redirect target or an endpoint a remote document names is
+    judged like the first URL.
+    """
+
+    def __init__(self, inner: httpx.AsyncBaseTransport | None = None, *, resolve: Resolver) -> None:
+        self._inner = inner if inner is not None else httpx.AsyncHTTPTransport()
+        self._resolve = resolve
+        self._pinned: dict[tuple[str, int], str] = {}
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        try:
+            assert_public_https_url(str(request.url), what="request URL")
+        except McpUrlError:
+            raise AddressRefusedError("address", request=request) from None
+        if not host or not host.isascii() or request.url.userinfo:
+            raise AddressRefusedError("address", request=request)
+        key = (host, request.url.port or 443)
+        address = self._pinned.get(key)
+        if address is None:
+            try:
+                address = await self._resolve(*key)
+            except McpCallError:
+                raise AddressRefusedError("address", request=request) from None
+            self._pinned[key] = address
+        request.url = request.url.copy_with(host=address)
+        request.extensions = {**request.extensions, "sni_hostname": host}
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+def pinned_http_client(
+    *,
+    resolve: Resolver = resolve_public_address,
+    transport: httpx.AsyncBaseTransport | None = None,
+    timeout: float = REQUEST_TIMEOUT_S,
+) -> httpx.AsyncClient:
+    """The one client for URLs a model or a remote server names: pinned, no redirects, no proxies.
+
+    `transport` is the wire under the pinning, for tests.
+    """
+    return httpx.AsyncClient(
+        transport=PinnedTransport(transport, resolve=resolve),
+        trust_env=False,
+        follow_redirects=False,
+        timeout=timeout,
+    )
+
+
 def _refuse_constant(_: str) -> object:
     raise ValueError("non-finite number")
 
@@ -142,15 +206,11 @@ class McpToolSession:
         http: httpx.AsyncClient,
         *,
         target: str,
-        host_header: str,
-        sni_host: str,
         token: str | None,
     ) -> None:
         self._http = http
         self._target = target
-        self._sni_host = sni_host
         self._headers = {
-            "Host": host_header,
             "Accept": "application/json, text/event-stream",
             # An encoded reply is refused unread; see `_post`.
             "Accept-Encoding": "identity",
@@ -167,10 +227,11 @@ class McpToolSession:
             self._target,
             content=json.dumps(body).encode(),
             headers=self._headers,
-            extensions={"sni_hostname": self._sni_host},
         )
         try:
             response = await self._http.send(request, stream=True, follow_redirects=False)
+        except AddressRefusedError:
+            raise McpCallError("address") from None
         except httpx.TimeoutException:
             raise McpCallError("timeout") from None
         except httpx.HTTPError:
@@ -321,28 +382,12 @@ async def mcp_tool_session(
         assert_public_https_url(url, what="watch source")
         parts = urlsplit(url)
         host = parts.hostname
-        port = parts.port
+        _ = parts.port  # A malformed port raises ValueError here, not mid-request.
     except (McpUrlError, ValueError):
         raise McpCallError("address") from None
     if not host or not host.isascii() or parts.username or parts.password:
         raise McpCallError("address")
-    address = await resolve(host, port or 443)
-    literal = f"[{address}]" if ":" in address else address
-    target = urlunsplit(
-        ("https", literal if port is None else f"{literal}:{port}", parts.path, parts.query, "")
-    )
-    async with httpx.AsyncClient(
-        transport=transport,
-        trust_env=False,
-        follow_redirects=False,
-        timeout=REQUEST_TIMEOUT_S,
-    ) as http:
-        session = McpToolSession(
-            http,
-            target=target,
-            host_header=host if port is None else f"{host}:{port}",
-            sni_host=host,
-            token=token,
-        )
+    async with pinned_http_client(resolve=resolve, transport=transport) as http:
+        session = McpToolSession(http, target=url, token=token)
         await session.initialize()
         yield session
