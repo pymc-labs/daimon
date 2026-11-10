@@ -34,13 +34,15 @@ def covers(
     """`consent` still holds for `target`, the copy today's rules build for the source.
 
     Holds when the target is the one confirmed (digest and drops), when the model
-    is the confirmed one and the losses differ only by Daimon's own decisions, or
-    when the target differs only as a release before #1438 or #1483 built it.
+    is the confirmed one and the losses differ only by Daimon's own decisions, when
+    it differs only by Daimon tools it offers again behind a card, or when it
+    differs only as a release before #1438 or #1483 built it.
     """
     if target is None:
         return False
     return (
         _same_target(target, consent)
+        or _regains_carded(target, source_system, consent)
         or (model_consented(backend, model, picked) and same_losses(target, consent))
         or _consented_before(target, source_system, consent)
     )
@@ -118,38 +120,39 @@ def same_losses(target: AgentSpec, consent: _BackendDropConsent) -> bool:
     return today == accepted
 
 
-def _with_switch_tool_dropped(target: AgentSpec, source_system: str | None) -> AgentSpec | None:
-    """`target` as a consent recorded before the switch tool was offered names it.
+def _with_daimon_tools_dropped(
+    target: AgentSpec, source_system: str | None, tools: frozenset[str]
+) -> AgentSpec | None:
+    """`target` as a consent that named Daimon's `tools` losses builds it.
 
-    That consent declared the tool a loss: not allowed on Daimon's MCP, one more
-    drop, and the drops line in the instructions. Only that one difference is
-    rebuilt; anything else still differs and still needs a fresh confirmation.
+    Each tool leaves Daimon's MCP allowlist and joins the drops and the drops line
+    in the instructions. Only that difference is rebuilt; anything else still
+    differs and still needs a fresh confirmation.
     """
     from daimon.core.turn.runtime_manifest import compose_source_instructions
-
-    if _SWITCH_TOOL_DROP in target.declared_drops:
-        return None
-    tool = _SWITCH_TOOL_DROP.rsplit(":", 1)[1]
     from mux.contracts.resources import MCPConnection
 
+    named = {f"mcp_tool:{DAIMON_SERVER_NAME}:{tool}" for tool in tools}
+    if not tools or named & set(target.declared_drops):
+        return None
     servers: list[MCPConnection] = []
-    found = False
+    found: set[str] = set()
     for server in target.mcp_servers or ():
         allowed = server.tool_policy.get("allowed_tools") if server.tool_policy else None
-        if server.name == DAIMON_SERVER_NAME and isinstance(allowed, list) and tool in allowed:
-            found = True
+        if server.name == DAIMON_SERVER_NAME and isinstance(allowed, list):
+            found.update(name for name in allowed if name in tools)
             server = server.model_copy(
                 update={
                     "tool_policy": {
                         **server.tool_policy,
-                        "allowed_tools": [name for name in allowed if name != tool],
+                        "allowed_tools": [name for name in allowed if name not in tools],
                     }
                 }
             )
         servers.append(server)
-    if not found:
+    if frozenset(found) != tools:
         return None
-    drops = tuple(sorted((*target.declared_drops, _SWITCH_TOOL_DROP)))
+    drops = tuple(sorted({*target.declared_drops, *named}))
     return target.model_copy(
         update={
             "mcp_servers": tuple(servers),
@@ -159,6 +162,49 @@ def _with_switch_tool_dropped(target: AgentSpec, source_system: str | None) -> A
             ),
         }
     )
+
+
+def _with_switch_tool_dropped(target: AgentSpec, source_system: str | None) -> AgentSpec | None:
+    """`target` as a consent recorded before the switch tool was offered (#1438) names it."""
+    return _with_daimon_tools_dropped(
+        target, source_system, frozenset({_SWITCH_TOOL_DROP.rsplit(":", 1)[1]})
+    )
+
+
+def _regained(target: AgentSpec, consent: _BackendDropConsent) -> frozenset[str] | None:
+    """Daimon tools `consent` named lost that `target` offers again, or None.
+
+    None when `target` drops anything `consent` did not accept, or regains
+    anything but a tool Daimon cards per call: a gain the person never saw asks
+    again. A relay connector with a per-person grant would count here too.
+    """
+    from daimon.core.tool_safety import host_call_carded_tools, self_carded_tools
+
+    if not set(target.declared_drops) <= set(consent.declared_drops):
+        return None
+    prefix = f"mcp_tool:{DAIMON_SERVER_NAME}:"
+    carded = host_call_carded_tools() | self_carded_tools()
+    regained = set(consent.declared_drops) - set(target.declared_drops)
+    tools = {drop.removeprefix(prefix) for drop in regained}
+    if not all(drop.startswith(prefix) for drop in regained) or not tools <= carded:
+        return None
+    return frozenset(tools)
+
+
+def _regains_carded(
+    target: AgentSpec, source_system: str | None, consent: _BackendDropConsent
+) -> bool:
+    """`target` is the confirmed one except for Daimon tools it offers again behind a card.
+
+    With the host call gate on a provider turn runs a gated tool after a press,
+    so a consent that named it lost still holds: the rest of the target, its
+    model and MCP URL included, must still digest to the confirmed one.
+    """
+    tools = _regained(target, consent)
+    if not tools:
+        return False
+    rebuilt = _with_daimon_tools_dropped(target, source_system, tools)
+    return rebuilt is not None and _same_target(rebuilt, consent)
 
 
 def with_tools_dropped(target: AgentSpec, source_system: str | None) -> AgentSpec | None:

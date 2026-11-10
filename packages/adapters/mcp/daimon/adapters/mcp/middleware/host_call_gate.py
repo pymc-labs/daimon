@@ -23,7 +23,7 @@ from daimon.core.stores import host_call_cards as cards
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
 from daimon.core.stores.turn_origins import get_session_origin
 from daimon.core.switch_cards import SWITCH_CARD_MAX_S
-from daimon.core.tool_safety import DAIMON_SERVER_NAME, REACH_APPROVAL_TOOLS, ToolCall
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, host_call_carded_tools
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, MiddlewareContext
 from fastmcp.tools import ToolResult
@@ -144,7 +144,7 @@ class HostCallGate:
         platform = identity.platform or ""
         if not deployment_on(settings, "host_call_gate", platform):
             raise _refuse("off")
-        if name in REACH_APPROVAL_TOOLS:
+        if name not in host_call_carded_tools():
             # A reach approval is tallied under the asking turn, which is gone by the press.
             raise _refuse("reach")
         if (

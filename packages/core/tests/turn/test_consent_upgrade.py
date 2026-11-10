@@ -13,6 +13,8 @@ from mux.contracts.resources import AgentSpec, MCPConnection, ToolSpec
 from mux.state.operations import request_digest
 
 SWITCH = "mcp_tool:daimon-mcp:request_agent_backend_switch"
+PUBLISH = "mcp_tool:daimon-mcp:publish_report"
+CARDED = ("describe_agent", "publish_report")
 
 
 def copy_for(
@@ -20,6 +22,7 @@ def copy_for(
     *,
     drops: tuple[str, ...] = ("memory",),
     url: str = "https://a.invalid/mcp",
+    allowed: tuple[str, ...] = ("describe_agent",),
 ) -> AgentSpec:
     return AgentSpec(
         name="copy",
@@ -31,7 +34,7 @@ def copy_for(
                 name="daimon-mcp",
                 url=url,
                 credential_ref="turn",
-                tool_policy={"allowed_tools": ["describe_agent"]},
+                tool_policy={"allowed_tools": list(allowed)},
             ),
         ),
         declared_drops=drops,
@@ -83,6 +86,42 @@ def test_covers_refuses_a_gained_loss_the_owner_never_accepted() -> None:
     then = copy_for()
     today = copy_for(drops=("builtin_tool:web_fetch", "memory"))
     assert not holds(consent_for(then), today, "gpt-6-luna"), "a new loss asks again"
+
+
+def _regained(consent: _BackendDropConsent, today: AgentSpec) -> bool:
+    """Only the regained-tool rule can pass: the picked model is another one."""
+    return covers(consent, today, source_system="Source.", backend="openai", model="x", picked="y")
+
+
+def test_covers_a_gated_tool_the_call_gate_offers_again() -> None:
+    """With the gate on, a tool the consent named lost runs behind a card: no re-confirm."""
+    then = copy_for(drops=(PUBLISH, "memory"))
+    today = copy_for(allowed=CARDED)
+    assert _regained(consent_for(then), today), "a carded tool regained is consented"
+
+
+def test_a_regained_tool_still_pins_the_rest_of_the_target() -> None:
+    """Regaining a carded tool never lets a model or MCP URL change through."""
+    consent = consent_for(copy_for(drops=(PUBLISH, "memory")))
+    moved = copy_for(allowed=CARDED, url="https://b.invalid/mcp")
+    other = copy_for("gpt-6-other", allowed=CARDED)
+    assert not _regained(consent, moved), "an MCP URL change asks again"
+    assert not _regained(consent, other), "a model change asks again"
+
+
+def test_only_a_carded_tool_may_be_regained() -> None:
+    """A regained loss Daimon does not card per call, or a new loss, asks again."""
+    fetch = consent_for(copy_for(drops=("builtin_tool:web_fetch", "memory")))
+    assert not _regained(fetch, copy_for()), "a regained web tool asks again"
+    lost = consent_for(copy_for(drops=(PUBLISH, "memory")))
+    assert not _regained(lost, copy_for(allowed=CARDED, drops=("memory", "skills"))), "new loss"
+
+
+def test_the_gate_turned_off_is_a_daimon_decided_drop() -> None:
+    """A rollback drops gated tools again; agents confirmed with them on are not asked."""
+    then = copy_for(allowed=CARDED)
+    today = copy_for(drops=(PUBLISH, "memory"))
+    assert holds(consent_for(then), today, "gpt-6-luna"), "the gate's drop is no new loss"
 
 
 def test_no_module_compares_a_consent_digest_outside_the_helper() -> None:
