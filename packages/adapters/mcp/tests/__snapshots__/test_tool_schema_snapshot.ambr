@@ -2587,7 +2587,7 @@
         (this turn's), and a run is skipped while that budget is used up.
         <blank line>
         ``agent_name`` MUST be the exact daimon-side display name of an
-        existing agent on this tenant (e.g. ``"daimon"``, ``"daimon-copy"``,
+        existing agent on this tenant (e.g. ``"default"``, ``"daimon-copy"``,
         ``"research-bot"``). It is NOT:
         <blank line>
         - a free-text description of the routine
@@ -2607,7 +2607,7 @@
         <blank line>
         Example: a user says "daimon, create a routine that pings me every
         5 minutes with the message 'ping'". The correct call is
-        ``create_routine(agent_name="daimon", cron_expr="*/5 * * * *",
+        ``create_routine(agent_name="default", cron_expr="*/5 * * * *",
         timezone="UTC", trigger_message="ping")``.
       ''',
       'parameters': dict({

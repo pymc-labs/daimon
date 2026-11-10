@@ -1337,7 +1337,7 @@ async def test_selfhosted_send_uses_local_persona_without_anthropic(
     )
     # Selfhosted records, including missing/archived ones, must bypass stale remote names.
     monkeypatch.setitem(
-        _send_mod._actor_names, (tenant.id, actor_id), ("stale name", time.monotonic() + 600)
+        _send_mod._actor_names, (tenant.id, actor_id), ("stale name", False, time.monotonic() + 600)
     )
     forbidden_lookup = AsyncMock(side_effect=AssertionError("Anthropic lookup attempted"))
     monkeypatch.setattr(_send_mod, "find_agent_by_derived_uuid_cached", forbidden_lookup)
