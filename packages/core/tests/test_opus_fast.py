@@ -3,7 +3,7 @@
 import pytest
 from daimon.core.constants import ALLOWED_MODEL_IDS
 from daimon.core.model_presets import OPUS, OPUS_FAST, model_choice_id, resolve_model
-from daimon.core.models_catalog import list_model_choices
+from daimon.core.models_catalog import claude_model_choices
 from daimon.core.mux_compat import agent_spec
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.session_snapshot import SessionSnapshot, fingerprint_identity
@@ -13,7 +13,7 @@ from mux.drivers.anthropic.resources.agents import agent_payload
 
 def test_fast_is_a_distinct_catalog_choice():
     assert OPUS in ALLOWED_MODEL_IDS and OPUS_FAST in ALLOWED_MODEL_IDS
-    choice = next(c for c in list_model_choices(default=OPUS_FAST) if c.id == OPUS_FAST)
+    choice = next(c for c in claude_model_choices(default=OPUS_FAST) if c.id == OPUS_FAST)
     assert choice.label == "Opus 5.5 fast"
     assert choice.is_default
 

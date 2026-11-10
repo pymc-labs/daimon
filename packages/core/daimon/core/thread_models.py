@@ -23,10 +23,11 @@ from typing import Final
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsModelConfig
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, authorize, build_subject, build_turn_place
-from daimon.core.constants import ALLOWED_MODEL_IDS, MODEL_DISPLAY_NAMES
+from daimon.core.constants import MODEL_DISPLAY_NAMES
 from daimon.core.errors import UserFacingError
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
+from daimon.core.models_catalog import is_priced_claude_model
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.thread_models import (
     clear_thread_model,
@@ -63,7 +64,7 @@ def resolve_choice(choice: str) -> str | None:
     if word == "default":
         return None
     model_id = THREAD_MODEL_CHOICES.get(word)
-    if model_id is None or model_id not in ALLOWED_MODEL_IDS:
+    if model_id is None or not is_priced_claude_model(model_id):
         offered = ", ".join((*THREAD_MODEL_CHOICES, "default"))
         raise ThreadModelRefused(
             f"{choice.strip() or 'That'} isn't a model this conversation can use. "
@@ -208,7 +209,7 @@ async def apply_thread_model(
     )
     if model_id is None:
         return unchanged
-    if not anthropic_backend or model_id not in ALLOWED_MODEL_IDS:
+    if not anthropic_backend or not is_priced_claude_model(model_id):
         return AppliedThreadModel(agent=agent, model_override=None, fell_back=True)
     return AppliedThreadModel(
         agent=with_model_override(agent, model_id),

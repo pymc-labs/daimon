@@ -142,7 +142,7 @@ from daimon.core.github_panel import (
     sync_connect_admin,
 )
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
-from daimon.core.models_catalog import list_model_choices
+from daimon.core.models_catalog import claude_model_choices
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.panel_audit import record_panel_write
 from daimon.core.panel_operator_tokens import list_panel_operator_tokens
@@ -1297,7 +1297,7 @@ async def _dispatch_panel_action(
             trigger_id=trigger_id,
             view=build_new_agent_form(
                 meta=meta.with_view("new_agent", root_view_id=view_id),
-                model_choices=list_model_choices(default=DEFAULT_AGENT_MODEL),
+                model_choices=claude_model_choices(default=DEFAULT_AGENT_MODEL),
             ),
         )
         return

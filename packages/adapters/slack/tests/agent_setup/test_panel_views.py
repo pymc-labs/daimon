@@ -56,7 +56,7 @@ from daimon.core.answering_map import AnsweringMap, build_answering_map
 from daimon.core.channel_rules import ChannelRuleStatus
 from daimon.core.config import TurnSettings
 from daimon.core.github_repo_auth import RepoAccess, RepoAccessKind
-from daimon.core.models_catalog import list_model_choices
+from daimon.core.models_catalog import claude_model_choices
 from daimon.core.roster import Page, Roster, RosterAgent, paginate
 from daimon.core.routing_facts import UNROUTED_LINE, precedence_line
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, ResolvedConfig, TenantConfigRow
@@ -1155,7 +1155,7 @@ def test_creating_view_names_the_agent_being_created() -> None:
 def test_new_agent_form_uses_the_ids_the_submission_evaluator_reads() -> None:
     """The evaluator reads inputs by block_id and action_id; those must not move."""
     current = build_new_agent_form(
-        meta=_meta(), model_choices=list_model_choices(default="claude-sonnet-4-6")
+        meta=_meta(), model_choices=claude_model_choices(default="claude-sonnet-4-6")
     )
     assert current["callback_id"] == CALLBACK_NEW_AGENT, (
         "the submission arrives on the callback id app.py dispatches on"
@@ -1172,7 +1172,7 @@ def test_new_agent_form_uses_the_ids_the_submission_evaluator_reads() -> None:
 
 
 def test_new_agent_form_when_validation_failed_restores_inputs_and_shows_the_error() -> None:
-    choices = list_model_choices(default="claude-sonnet-4-6")
+    choices = claude_model_choices(default="claude-sonnet-4-6")
     view = build_new_agent_form(
         meta=_meta(),
         model_choices=choices,
@@ -1242,7 +1242,7 @@ def test_every_panel_view_private_metadata_under_limit_and_without_tenant_id() -
         ),
         build_creating_view(agent_name=long_name, meta=meta),
         build_new_agent_form(
-            meta=meta, model_choices=list_model_choices(default="claude-sonnet-4-6")
+            meta=meta, model_choices=claude_model_choices(default="claude-sonnet-4-6")
         ),
     ]
     for view in views:
@@ -1259,7 +1259,7 @@ def test_every_panel_view_private_metadata_under_limit_and_without_tenant_id() -
 def test_new_agent_form_metadata_carries_the_page_the_reader_was_on() -> None:
     meta = _meta(page=3, root_view_id="V1")
     form = build_new_agent_form(
-        meta=meta, model_choices=list_model_choices(default="claude-sonnet-4-6")
+        meta=meta, model_choices=claude_model_choices(default="claude-sonnet-4-6")
     )
     decoded = json.loads(form["private_metadata"])
     assert decoded["p"] == 3, (

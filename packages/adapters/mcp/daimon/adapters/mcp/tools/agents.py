@@ -64,7 +64,6 @@ from daimon.core.agent_lifecycle import forget_archived_agent
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
 from daimon.core.agent_ownership import agent_name_lock, member_copies_lock
 from daimon.core.authz import Surface
-from daimon.core.constants import ALLOWED_MODEL_IDS
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.mcp_merge import DAIMON_MCP_SERVER_NAME, get_reserved_mcp_rejection
@@ -83,6 +82,7 @@ from daimon.core.mcp_attach import (
 )
 from daimon.core.memory_resource import archive_memory_store_for_agent
 from daimon.core.model_presets import ModelSelection, model_choice_id
+from daimon.core.models_catalog import is_priced_claude_model
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent, retrieve_agent
 from daimon.core.routing_facts import build_unrouted_note
@@ -627,7 +627,7 @@ async def _move_this_thread(
 def _resolve_native_agent_model(model: ModelSelection) -> ModelSelection:
     """Native agent edits share the alias resolver without changing model controls."""
     choice = model_choice_id(model)
-    if choice in ALLOWED_MODEL_IDS:
+    if is_priced_claude_model(choice):
         return model
     from daimon.core.agent_model_names import agent_catalog, model_name, resolve_model
     from daimon.core.turn.notices import provider_name
@@ -669,7 +669,7 @@ def _create_model(model: ModelSelection) -> tuple[ModelSelection, tuple[Provider
     from mux.profiles import MANAGED_AGENTS
 
     choice = model_choice_id(model)
-    if choice in ALLOWED_MODEL_IDS:
+    if is_priced_claude_model(choice):
         return model, None
     try:
         other = resolve_model(choice)

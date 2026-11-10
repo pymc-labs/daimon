@@ -44,11 +44,12 @@ from daimon.core.agent_view import (
     SkillDoc,
 )
 from daimon.core.channel_backend import NO_CAPTURE, make_backend_service
-from daimon.core.constants import ALLOWED_MODEL_IDS, DEFAULT_AGENT_MODEL, MODEL_DISPLAY_NAMES
+from daimon.core.constants import DEFAULT_AGENT_MODEL, MODEL_DISPLAY_NAMES
 from daimon.core.defaults.ma_index import list_agents_by_tenant, list_skills_lenient
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import list_skills_lenient_cached
 from daimon.core.model_presets import ModelSelection
+from daimon.core.models_catalog import priced_claude_ids
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import agent_drafts as drafts_store
 from daimon.core.stores import agent_mcp_credentials as credentials_store
@@ -273,7 +274,7 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
         )
         return Catalog(
             models=agent_catalog.models_of(
-                agent_model_names.agent_catalog(), providers=providers, priced=ALLOWED_MODEL_IDS
+                agent_model_names.agent_catalog(), providers=providers, priced=priced_claude_ids()
             ),
             skills=agent_catalog.skills_of(
                 rows, tenant_id=tenant_id, descriptions=runtime.skill_descriptions

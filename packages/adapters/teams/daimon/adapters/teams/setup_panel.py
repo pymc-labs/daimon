@@ -62,7 +62,7 @@ from daimon.core.agent_ownership import owns_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
 from daimon.core.answering_map import AnsweringMap, load_answering_map, routed_agent_names
 from daimon.core.authz import AgentRef, build_agent_ref, build_subject
-from daimon.core.constants import ALLOWED_MODEL_IDS, DEFAULT_AGENT_MODEL
+from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError
 from daimon.core.github_panel import load_grants_panel
@@ -73,7 +73,11 @@ from daimon.core.mcp_auth import (
     mint_agent_mcp_token,
     token_jti,
 )
-from daimon.core.models_catalog import ModelChoice, list_model_choices
+from daimon.core.models_catalog import (
+    ModelChoice,
+    claude_model_choices,
+    is_priced_claude_model,
+)
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.native_admins import AdminCaller, load_live_subject
@@ -152,7 +156,7 @@ def _page(data: Mapping[str, object]) -> int:
 
 
 def _models() -> tuple[ModelChoice, ...]:
-    return list_model_choices(default=DEFAULT_AGENT_MODEL)
+    return claude_model_choices(default=DEFAULT_AGENT_MODEL)
 
 
 class SetupPanel:
@@ -804,7 +808,7 @@ class SetupPanel:
         error, created_id = None, None
         if not _NAME.match(name):
             error = "Name must be 1-64 characters: letters, digits, hyphens, underscores."
-        elif values["model"] not in ALLOWED_MODEL_IDS:
+        elif not is_priced_claude_model(values["model"]):
             error = "Choose a model from the list."
         else:
             mcp_url = self._runtime.settings.mcp.public_url
