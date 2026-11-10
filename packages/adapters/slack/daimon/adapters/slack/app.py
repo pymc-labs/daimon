@@ -160,6 +160,7 @@ from daimon.adapters.slack.names import (
     remember_payload_names,
 )
 from daimon.adapters.slack.output_delivery import NoticeKeys, deliver_session_outputs
+from daimon.adapters.slack.own_cards import handle_own_card_click, is_own_card_action
 from daimon.adapters.slack.privacy_panel.actions import (
     handle_privacy_block_action,
     handle_privacy_command,
@@ -246,6 +247,7 @@ from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_request_expiry import run_request_expiry_poller
+from daimon.core.host_calls import wake_prefix
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.mux_backend import resource_scope
@@ -293,6 +295,7 @@ from daimon.core.turn.errors import (
     SessionPreparationFailed,
 )
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.mutation_gate import send_prefix
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import protection_state, turn_target_protected
@@ -1581,6 +1584,8 @@ class SlackApp:
             self._spawn(self._provider_actions.handle_click(payload))
         elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):
             self._spawn(self._confirmations.handle_click(payload))
+        elif is_own_card_action(action_id):
+            self._spawn(handle_own_card_click(self.runtime, payload))
         elif action_id == HAND_OVER_ACTION_ID:
             self._spawn(handle_hand_over_click(self.runtime, payload, app=self))
 
@@ -3700,26 +3705,42 @@ class SlackApp:
             return new_lifecycle
 
         try:
-            async with turn_origin(
-                self.runtime.sessionmaker,
-                attended=continuation_attended(row),
-                tenant_id=tenant_id,
-                account_id=follow_admission.account_id,
-                platform="slack",
-                parent_channel_id=channel,
-                thread_id=thread_id,
-                responder_ma_agent_id=str(follow_admission.agent.id),
-                responder_name=follow_admission.config.agent_name or follow_admission.agent.name,
-                configuration_target_ma_agent_id=(
-                    follow_admission.config.configuration_target_ma_agent_id
+            async with (
+                turn_origin(
+                    self.runtime.sessionmaker,
+                    attended=continuation_attended(row),
+                    tenant_id=tenant_id,
+                    account_id=follow_admission.account_id,
+                    platform="slack",
+                    parent_channel_id=channel,
+                    thread_id=thread_id,
+                    responder_ma_agent_id=str(follow_admission.agent.id),
+                    responder_name=follow_admission.config.agent_name
+                    or follow_admission.agent.name,
+                    configuration_target_ma_agent_id=(
+                        follow_admission.config.configuration_target_ma_agent_id
+                    ),
+                    configuration_target_name=(follow_admission.config.configuration_target_name),
+                    role=Role.ADMIN if follow_admission.is_platform_admin else Role.USER,
+                    sender_foreign=follow_admission.hold is not None
+                    and follow_admission.hold.client,
+                    shared_channel=follow_admission.shared_channel,
+                    is_setup=follow_admission.config.thread_binding_kind == "setup",
+                    platform_channel_id=channel,
+                ) as follow_origin,
+                send_prefix(
+                    wake_prefix(
+                        self.runtime.sessionmaker,
+                        self.runtime.settings.mcp,
+                        tenant_id=tenant_id,
+                        platform="slack",
+                        thread_id=thread_id,
+                        target_ma_agent_id=row.target_ma_agent_id,
+                    )
+                    if row.reason == "confirmed_call"
+                    else None
                 ),
-                configuration_target_name=(follow_admission.config.configuration_target_name),
-                role=Role.ADMIN if follow_admission.is_platform_admin else Role.USER,
-                sender_foreign=follow_admission.hold is not None and follow_admission.hold.client,
-                shared_channel=follow_admission.shared_channel,
-                is_setup=follow_admission.config.thread_binding_kind == "setup",
-                platform_channel_id=channel,
-            ) as follow_origin:
+            ):
                 await run_prepared_turn(
                     self.runtime.turn_deps,
                     follow_prepared,
