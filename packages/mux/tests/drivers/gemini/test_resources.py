@@ -298,8 +298,16 @@ async def test_output_snapshot_pagination_is_stable_and_download_revalidates_byt
     transport.snapshots["e1"] = snapshot({"a.bin": b"changed"})
     with pytest.raises(ProviderError, match="artifact_changed"):
         _ = [part async for part in ma.artifacts.download(SCOPE, first.data[0].ref)]
-    with pytest.raises(UnsupportedCapability, match="workspace_artifact_delete"):
-        await ma.artifacts.delete(SCOPE, first.data[0].ref, key="delete")
+    # A workspace file cannot be removed: deleting records it as delivered.
+    await ma.artifacts.delete(SCOPE, first.data[0].ref, key="delete")
+    transport.snapshots["e1"] = snapshot({"a.bin": b"changed", "c.txt": b"new"})
+    relisted = await ma.artifacts.list(SCOPE, s.ref, page=PageRequest())
+    assert [a.filename for a in relisted.data] == ["a.bin", "c.txt"], (
+        "a changed file is a new artifact; the delivered original is not listed"
+    )
+    transport.snapshots["e1"] = snapshot({"a.bin": data, "c.txt": b"new"})
+    relisted = await ma.artifacts.list(SCOPE, s.ref, page=PageRequest())
+    assert [a.filename for a in relisted.data] == ["c.txt"], "delivered file left the listing"
     transport.snapshots["e1"] = ProviderError("not_found", retryable=False)
     with pytest.raises(ContinuityLost) as lost:
         _ = [part async for part in ma.artifacts.download(SCOPE, first.data[0].ref)]

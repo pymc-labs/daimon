@@ -83,6 +83,11 @@ class Records:
     artifact_pages: dict[str, tuple[str, str | None, str, tuple[str, ...]]] = field(
         default_factory=dict[str, tuple[str, str | None, str, tuple[str, ...]]]
     )
+    # Workspace snapshot files the host reports as delivered, by artifact id ->
+    # session id. Gemini cannot delete a file from a workspace, so this is the
+    # delete: a listing leaves these out. The id covers the content digest, so a
+    # rewritten file is listed again.
+    delivered_artifacts: dict[str, str] = field(default_factory=dict[str, str])
     deletions: dict[tuple[str, str, str], tuple[str, str, DeletionReceipt]] = field(
         default_factory=dict[tuple[str, str, str], tuple[str, str, DeletionReceipt]]
     )
