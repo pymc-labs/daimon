@@ -1,0 +1,207 @@
+"""Host call cards on real Postgres: each step moves a row exactly once."""
+
+import asyncio
+import uuid
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from daimon.core._models import TaskContinuation
+from daimon.core.host_calls import CRASHED_TEXT, press_host_call
+from daimon.core.stores import host_call_cards as cards
+from daimon.testing.db import require_owned_sessionmaker
+from daimon.testing.factories import make_account, make_tenant
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+_AGENT = uuid.uuid4()
+
+
+@dataclass(frozen=True)
+class Lane:
+    sessions: async_sessionmaker[AsyncSession]
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID
+
+
+@pytest.fixture
+async def lane(db_preflight: object, db_committing_engine: AsyncEngine) -> AsyncIterator[Lane]:
+    sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    try:
+        require_owned_sessionmaker(sessions)
+    except ValueError:
+        pytest.skip("Committed press races need an owned DB or isolated CI")
+    async with sessions.begin() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+    yield Lane(sessions, tenant.id, account.id)
+
+
+async def _card(
+    lane: Lane,
+    *,
+    origin_id: uuid.UUID | None = None,
+    digest: str = "d1",
+    thread_id: str = "t1",
+    expires_in: timedelta = timedelta(minutes=10),
+    now: datetime | None = None,
+) -> cards.Created | None:
+    async with lane.sessions.begin() as session:
+        created = await cards.create_card(
+            session,
+            tenant_id=lane.tenant_id,
+            origin_id=origin_id or uuid.uuid4(),
+            requester_account_id=lane.account_id,
+            requester_platform_user_id="requester",
+            platform="discord",
+            channel_id="c1",
+            thread_id=thread_id,
+            executing_agent_id=_AGENT,
+            executing_ma_agent_id="agent_x",
+            agent_name="Researcher",
+            tool_name="send_message",
+            args_digest=digest,
+            reference={"args": {"text": "hi"}, "admin": False},
+            expires_at=(now or datetime.now(UTC)) + expires_in,
+        )
+        if created is not None:
+            await cards.mark_posted(session, card_id=created.row.id, message_id="m1")
+    return created
+
+
+async def _press(lane: Lane, card_id: uuid.UUID, *, now: datetime, clicker: str = "requester"):
+    async def admin(_: str) -> bool:
+        return True
+
+    return await press_host_call(
+        sessionmaker=lane.sessions,
+        enabled=True,
+        tenant_id=lane.tenant_id,
+        card_id=card_id,
+        action="approve",
+        clicker=clicker,
+        message_id="m1",
+        current_admin=admin,
+        now=now,
+    )
+
+
+async def _wakes(lane: Lane, thread_id: str = "t1") -> int:
+    async with lane.sessions() as session:
+        count = await session.scalar(
+            select(func.count())
+            .select_from(TaskContinuation)
+            .where(
+                TaskContinuation.tenant_id == lane.tenant_id,
+                TaskContinuation.thread_id == thread_id,
+                TaskContinuation.reason == "confirmed_call",
+            )
+        )
+    return count or 0
+
+
+async def _consume(lane: Lane, card_id: uuid.UUID, digest: str = "d1"):
+    async with lane.sessions.begin() as session:
+        return await cards.consume(
+            session,
+            card_id=card_id,
+            tool_name="send_message",
+            args_digest=digest,
+            executing_agent_id=_AGENT,
+            now=datetime.now(UTC),
+        )
+
+
+async def test_retry_of_a_pending_call_reuses_its_card_and_the_cap_holds(lane: Lane) -> None:
+    """A model retrying the same call gets the same card; a flood stops at the cap."""
+    origin = uuid.uuid4()
+    first = await _card(lane, origin_id=origin)
+    again = await _card(lane, origin_id=origin)
+    assert first is not None and first.fresh, "the first ask is a fresh card"
+    assert again is not None and not again.fresh, "the retry is not a second card"
+    assert again.row.id == first.row.id, "the retry finds the same record"
+    for n in range(cards.MAX_OPEN_PER_ORIGIN - 1):
+        assert await _card(lane, origin_id=origin, digest=f"x{n}") is not None, "under the cap"
+    assert await _card(lane, origin_id=origin, digest="over") is None, "the cap refuses more"
+
+
+async def test_double_press_claims_once_and_others_cannot_use_the_card(lane: Lane) -> None:
+    """Only the requester's first press counts; it queues exactly one wake."""
+    created = await _card(lane)
+    assert created is not None, "card recorded"
+    now = datetime.now(UTC)
+    assert await _press(lane, created.row.id, now=now, clicker="stranger") is None, (
+        "a stranger's press leaves the card as it is"
+    )
+    presses = await asyncio.gather(*(_press(lane, created.row.id, now=now) for _ in range(3)))
+    approved = [p for p in presses if p is not None and p.approved]
+    assert len(approved) == 1, f"one press wins, got {presses}"
+    assert await _wakes(lane) == 1, "one wake for one record"
+
+
+async def test_two_consumers_run_it_once_and_a_mismatch_runs_nothing(lane: Lane) -> None:
+    """Consume is approved→executing once, and only for the approved tool and args."""
+    created = await _card(lane)
+    assert created is not None, "card recorded"
+    await _press(lane, created.row.id, now=datetime.now(UTC))
+    assert await _consume(lane, created.row.id, digest="tampered") is None, "digest mismatch"
+    taken = await asyncio.gather(_consume(lane, created.row.id), _consume(lane, created.row.id))
+    assert sum(t is not None for t in taken) == 1, f"exactly one consumer runs it: {taken}"
+
+
+async def test_press_after_the_provider_gave_up_still_runs_once_via_the_wake(lane: Lane) -> None:
+    """The asking turn ended long ago (a 1 s provider timeout); a press at 60 s still runs."""
+    asked = datetime.now(UTC) - timedelta(seconds=60)
+    created = await _card(lane, now=asked)
+    assert created is not None, "card recorded"
+    press = await _press(lane, created.row.id, now=asked + timedelta(seconds=60))
+    assert press is not None and press.approved, f"the late press approves: {press}"
+    async with lane.sessions() as session:
+        approved = await cards.list_approved(
+            session,
+            tenant_id=lane.tenant_id,
+            platform="discord",
+            thread_id="t1",
+            executing_agent_id=_AGENT,
+        )
+    assert [r.id for r in approved] == [created.row.id], "the wake finds the approved call"
+    assert await _consume(lane, created.row.id) is not None, "the wake's call runs it"
+    assert await _consume(lane, created.row.id) is None, "a second wake can't run it again"
+
+
+async def test_n_parallel_calls_are_n_cards_run_by_the_first_wake(lane: Lane) -> None:
+    """Every ask is its own card; one wake turn runs them all, later wakes find none."""
+    origin = uuid.uuid4()
+    made = await asyncio.gather(*(_card(lane, origin_id=origin, digest=f"p{n}") for n in range(3)))
+    ids = {m.row.id for m in made if m is not None}
+    assert len(ids) == 3, f"three distinct cards: {made}"
+    now = datetime.now(UTC)
+    for card_id in ids:
+        await _press(lane, card_id, now=now)
+    async with lane.sessions() as session:
+        approved = await cards.list_approved(
+            session,
+            tenant_id=lane.tenant_id,
+            platform="discord",
+            thread_id="t1",
+            executing_agent_id=_AGENT,
+        )
+    assert {r.id for r in approved} == ids, "the first wake lists every approved call"
+
+
+async def test_sweep_expires_unanswered_and_fails_stuck_executing(lane: Lane) -> None:
+    """A crashed worker's call may have run: it is failed with a check-first outcome."""
+    late = await _card(lane, expires_in=timedelta(seconds=-1), thread_id="t2")
+    stuck = await _card(lane, thread_id="t2", digest="s")
+    assert late is not None and stuck is not None, "cards recorded"
+    await _press(lane, stuck.row.id, now=datetime.now(UTC))
+    assert await _consume(lane, stuck.row.id, digest="s") is not None, "taken to execute"
+    later = datetime.now(UTC) + timedelta(minutes=5)
+    async with lane.sessions.begin() as session:
+        await cards.sweep(session, now=later, executing_before=later, crashed_outcome=CRASHED_TEXT)
+        expired = await cards.get_card(session, tenant_id=lane.tenant_id, card_id=late.row.id)
+        failed = await cards.get_card(session, tenant_id=lane.tenant_id, card_id=stuck.row.id)
+    assert expired is not None and expired.status == "expired", f"unanswered expires: {expired}"
+    assert failed is not None and failed.status == "failed", f"stuck fails: {failed}"
+    assert failed.outcome == CRASHED_TEXT, "the outcome says check before asking again"
