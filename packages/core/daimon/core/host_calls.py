@@ -204,11 +204,13 @@ async def press_host_call(
     message_id: str,
     current_admin: Callable[[str], Awaitable[bool]],
     now: dt.datetime,
+    queue_wake: bool = True,
 ) -> CallPress | None:
     """Answer one press. None: not the requester's card (it stays as it is).
 
     The requester and message are checked before the claim, so nobody else's press
-    can use the card up. An approve claims and queues its wake in one transaction.
+    can use the card up. An approve claims and queues its wake in one transaction;
+    with `queue_wake` off the caller runs the wake turn itself (the web press's reply).
     """
     from daimon.core.continuity.continuation import ContinuationRequest
     from daimon.core.continuity.wakes import enqueue_wake
@@ -238,7 +240,7 @@ async def press_host_call(
             now=now,
             outcome=APPROVED_TEXT if to == "approved" else DENIED_TEXT,
         )
-        if claimed is not None and to == "approved":
+        if claimed is not None and to == "approved" and queue_wake:
             await enqueue_wake(
                 session,
                 ContinuationRequest(
