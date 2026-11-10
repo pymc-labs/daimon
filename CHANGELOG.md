@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Cards expire with the confirmation timeout. A call interrupted by a restart is never rerun;
   the card says to check before asking again. Operators can turn this off with the
   `host_call_gate` deployment feature. Slack, Teams and the web still refuse these tools.
+- **MCP tools and the CLI can pick any model the workspace can run.**
+  The models an agent can run come from one catalog: Claude's models plus the
+  OpenAI and Gemini models the workspace has enabled, without unpriced or
+  expired ones. Outside chat, `update_agent` takes another provider's model and
+  moves the agent there with the same preview and checks as a provider switch;
+  in chat the switch card still confirms the move. `daimon agents create` and
+  `daimon agents update` take `--model provider:id` (for example
+  `openai:gpt-6-luna`), with `--yes` and `--accept-drops` for the switch.
 - **A conversation on OpenAI, Gemini or a self-hosted model survives a changed setup.**
   When the agent, model, provider or plan behind a thread changes, its next message starts a new session that carries over the recent conversation (and, on OpenAI's persistent workspace, saved files) instead of failing.
 - **Switching an agent's provider from a panel or the web now records what the move drops.**
