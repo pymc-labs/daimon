@@ -90,7 +90,7 @@ Where each feature can be set, and its default.
 | Approvals | `approvals` | Guardrail | Ask |  | ✓ |  | ✓ | ✓ |  |
 | Read-only memory in direct messages | `dm_memory_read_only` | Guardrail | Writable | ✓ | ✓ |  |  |  | Only Discord, Slack |
 | Tool safety | `tool_safety` | Guardrail | On | ✓ |  |  |  |  |  |
-| Approve cards for OpenAI and Gemini | `host_call_gate` | Guardrail | On | ✓ |  |  |  |  | Only Discord |
+| Approve cards for OpenAI and Gemini | `host_call_gate` | Guardrail | On | ✓ |  |  |  |  |  |
 | Reach check | `reach_budget` | Guardrail | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Built-in tools in routines | `unattended_capabilities` | Guardrail | Per routine | ✓ | ✓ | ✓ |  |  |  |
 | Routines must say where they post | `require_routine_destination` | Guardrail | Optional | ✓ | ✓ |  |  |  |  |

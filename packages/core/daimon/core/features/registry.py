@@ -466,6 +466,7 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
 
 _DM_PLATFORMS: Final = frozenset({"discord", "slack"})
 _DISCORD: Final = frozenset({"discord"})
+_CALL_GATE_PLATFORMS: Final = frozenset({"discord", "slack", "teams"})
 _SETTINGS: Final = Authority(DelegatedAction.AGENT_SETTINGS)
 _CHANNELS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "channel")
 _ADMIN: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS)
@@ -696,7 +697,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
             "On an OpenAI or Gemini agent, a tool that needs approval posts an Approve card "
             "and runs once the person presses it. Off refuses those tools there."
         ),
-        platforms=_DISCORD,
+        platforms=_CALL_GATE_PLATFORMS,
         authority=_ADMIN,
     ),
     FeatureSpec(
