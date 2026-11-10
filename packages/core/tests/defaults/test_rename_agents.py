@@ -82,13 +82,20 @@ def _actions(report: ApplyReport) -> list[tuple[str, Action]]:
 
 
 async def _apply(
-    factory: async_sessionmaker[AsyncSession], state: FakeMAState, root: Path, *, dry_run: bool
+    factory: async_sessionmaker[AsyncSession],
+    state: FakeMAState,
+    root: Path,
+    *,
+    dry_run: bool,
+    refuse_update: str | None = None,
 ) -> ApplyReport:
     agents = make_fake_ma_handler(state)
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET" and request.url.path == "/v1/environments":
             return list_response([])
+        if request.method == "POST" and request.url.path == f"/v1/agents/{refuse_update}":
+            return httpx.Response(400, json={"type": "error", "error": {"message": "refused"}})
         return agents(request)
 
     client = build_fake_anthropic(handler)
@@ -163,8 +170,11 @@ async def test_apply_when_seeded_daimon_exists_then_renames_it_in_place(
 
 
 async def test_apply_when_workspace_has_own_default_then_fails_and_leaves_both(
-    tmp_path: Path, db_session_factory: async_sessionmaker[AsyncSession]
+    tmp_path: Path,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    await _selfhosted(db_session, db_session_factory)
     own = ma_agent(id="ag_own", name="default", tenant_id=_TENANT)
     state = FakeMAState()
     _seed(state, _legacy_daimon(), own)
@@ -180,6 +190,8 @@ async def test_apply_when_workspace_has_own_default_then_fails_and_leaves_both(
     assert live["daimon"]["id"] == "ag_daimon", "the seeded agent keeps its name"
     assert live["default"]["id"] == "ag_own", "the workspace's own agent is not taken over"
     assert len(state.agents) == 2, "no agent is created or archived"
+    routines = await _names(db_session, "SELECT agent_name FROM routines WHERE tenant_id = :t")
+    assert routines == ["daimon"], "database references are unchanged"
 
 
 async def test_apply_when_dry_run_then_reports_rename_without_writing(
@@ -332,3 +344,30 @@ async def test_apply_when_new_reader_exists_then_fails_and_moves_nothing(
     )
     routines = await _names(db_session, "SELECT agent_name FROM routines WHERE tenant_id = :t")
     assert routines == ["daimon"], "database references are unchanged"
+
+
+async def test_apply_when_provider_rename_fails_after_commit_then_rerun_finishes(
+    tmp_path: Path,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _selfhosted(db_session, db_session_factory)
+    root = _tree(tmp_path)
+    state = FakeMAState()
+    _seed(state, _legacy_daimon())
+
+    failed = await _apply(db_session_factory, state, root, dry_run=False, refuse_update="ag_daimon")
+
+    assert failed.is_failure(), "a provider refusal fails the apply"
+    assert list(_live(state)) == ["daimon"], "the agent keeps its old name and nothing is created"
+    routines = await _names(db_session, "SELECT agent_name FROM routines WHERE tenant_id = :t")
+    assert routines == ["default"], "the database references committed first"
+
+    again = await _apply(db_session_factory, state, root, dry_run=False)
+
+    assert not again.is_failure(), f"the re-run succeeds: {again}"
+    assert ("default", Action.RENAMED) in _actions(again), "the re-run finishes the rename"
+    live = _live(state)
+    assert list(live) == ["default"] and live["default"]["id"] == "ag_daimon", (
+        f"the same agent now holds the new name: {live}"
+    )
