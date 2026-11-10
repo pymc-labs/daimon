@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Agents on OpenAI, Gemini or a self-hosted harness answer in shared and external channels.**
+  A turn held to a Slack Connect or other shared channel used to be refused on
+  these backends. It now runs with the same limits as on Anthropic: it sees only
+  that channel's memory, never a caller's personal stores, and Daimon lists only
+  the tools a held turn may use. A turn whose memory is read-only also runs on
+  OpenAI, and its memory tools stay read-only. Sealed channels, Slack DM context
+  and shared threads still refuse these backends.
 - **Routines, watch wakes and long jobs on OpenAI or Gemini keep Daimon's tools.**
   With the `host_call_gate` deployment feature on, a turn nobody watches no
   longer refuses its MCP tools up front. Each call is decided like on Anthropic:
