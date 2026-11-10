@@ -809,7 +809,6 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "The agent can start a short-lived cloud computer to run code and keep files. Off "
         "removes the computer tools here.",
         requires=("compute_setup",),
-        legacy_env=("DAIMON_COMPUTE__ENABLED",),
     ),
     _capability(
         "notebooks",

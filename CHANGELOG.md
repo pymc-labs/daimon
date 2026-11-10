@@ -35,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **What the agent can do is a feature too.**
   Watches, routines, long jobs, cloud computers, notebooks, report publishing, video transcripts, Microsoft 365, GitHub and lead intake can be turned on or off at every level, and chart images in artifacts at the workspace. A level that turns one off removes its tools from the next message.
   Turning off watches stops the watches made there, and turning off routines stops their scheduled runs. A capability whose setup is missing, such as a notebook host or the GitHub app, shows as unavailable with the reason.
-  `DAIMON_WATCHES__ENABLED`, `DAIMON_COMPUTE__ENABLED` and `DAIMON_ARTIFACTS__EMBED_IMAGES` still work but log a deprecation. Nothing changes until a level sets one.
+  `DAIMON_WATCHES__ENABLED` and `DAIMON_ARTIFACTS__EMBED_IMAGES` still work but log a deprecation. Nothing changes until a level sets one.
 
 - **Limits and the last switches are features too.**
   How far an agent may post outside its conversation (`outbound_reach`), how many threads, places and people one post may reach and the longest post are set at every level; long job cost and run time and a daily model spend cap at the workspace or agent. The lowest limit wins. A level can only pick a step at or below the one above it.

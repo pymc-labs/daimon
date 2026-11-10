@@ -785,7 +785,6 @@ The agent can start a short-lived cloud computer to run code and keep files. Off
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Off above is a ceiling |
-| Deprecated | `DAIMON_COMPUTE__ENABLED` |
 
 ## Notebooks
 
