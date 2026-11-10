@@ -13,6 +13,9 @@ from mux.contracts.ids import ModelRef
         ("opus", "claude-opus-5-5"),
         ("sonnet", "claude-sonnet-5-5"),
         ("haiku", "claude-haiku-5-5"),
+        ("fable", "claude-fable-5-2"),
+        ("fable 5.2", "claude-fable-5-2"),
+        ("claude fable", "claude-fable-5-2"),
         ("cheapest claude", "claude-haiku-5-5"),
         ("cheap claude", "claude-haiku-5-5"),
         ("cheapest anthropic", "claude-haiku-5-5"),
@@ -90,6 +93,7 @@ def test_family_shorthand_never_means_the_pricier_fast_preset():
     ("provider", "model_id", "name"),
     [
         ("anthropic", "claude-opus-5-5", "Claude Opus 5.5"),
+        ("anthropic", "claude-fable-5-2", "Claude Fable 5.2"),
         ("anthropic", "claude-opus-5-5-fast", "Claude Opus 5.5 fast"),
         ("anthropic", "claude-opus-9-1", "Claude Opus 9.1"),
         ("openai", "gpt-6-astra", "GPT-6 Astra"),

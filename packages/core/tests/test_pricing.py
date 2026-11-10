@@ -89,6 +89,22 @@ def test_sonnet_5_and_opus_4_7_are_metered_at_list_price() -> None:
     ), "opus 4.7 is priced like opus 4.8"
 
 
+def test_fable_5_2_is_metered_at_list_price_with_its_cheap_cache_reads() -> None:
+    """Fable 5.2 cache reads are 2.5% of input, not the usual 10%."""
+    rates = MODEL_PRICING["claude-fable-5-2"]
+    assert rates == ModelRates(input=8.0, output=40.0, cache_write=10.0, cache_read=0.20)
+    usage = BetaManagedAgentsSpanModelUsage(
+        input_tokens=1_000_000,
+        output_tokens=1_000_000,
+        cache_creation_input_tokens=1_000_000,
+        cache_read_input_tokens=1_000_000,
+    )
+    cost = cost_of(usage, rates)
+    assert cost is not None and abs(cost - (8.0 + 40.0 + 10.0 + 0.20)) < 1e-9, (
+        f"1M of each token kind on fable 5.2 should cost $58.20, got {cost}"
+    )
+
+
 def test_allowed_model_ids_holds_agent_models_only() -> None:
     assert "claude-opus-5-5" in ALLOWED_MODEL_IDS, "opus 5.5 must be selectable"
     assert "claude-sonnet-5-5" in ALLOWED_MODEL_IDS, "sonnet 5.5 must be selectable"
@@ -162,7 +178,8 @@ def test_cost_of_gemini_catalog_name_returns_none() -> None:
 # The published list price of every agent model, as read from
 # AGENT_PRICING_SOURCE on the date below. Changing a row in pricing.py without
 # changing it here fails, so a price edit always comes with a fresh check.
-_PUBLISHED_AGENT_PRICES_2026_10_10: dict[str, ModelRates] = {
+_PUBLISHED_AGENT_PRICES_2026_11_10: dict[str, ModelRates] = {
+    "claude-fable-5-2": ModelRates(input=8.0, output=40.0, cache_write=10.0, cache_read=0.20),
     "claude-opus-5-5-fast": ModelRates(input=8.0, output=40.0, cache_write=10.0, cache_read=0.40),
     "claude-opus-5-5": ModelRates(input=4.0, output=20.0, cache_write=5.0, cache_read=0.20),
     "claude-opus-5": ModelRates(input=5.0, output=25.0, cache_write=6.25, cache_read=0.50),
@@ -183,10 +200,10 @@ _PUBLISHED_AGENT_PRICES_2026_10_10: dict[str, ModelRates] = {
 
 
 def test_agent_rows_match_the_dated_price_list() -> None:
-    assert AGENT_PRICING_CHECKED_ON == "2026-10-10", (
+    assert AGENT_PRICING_CHECKED_ON == "2026-11-10", (
         "re-check every row against the pricing page, then move this date and the table name"
     )
-    assert AGENT_MODEL_PRICING == _PUBLISHED_AGENT_PRICES_2026_10_10, (
+    assert AGENT_MODEL_PRICING == _PUBLISHED_AGENT_PRICES_2026_11_10, (
         "an agent price changed: check it against AGENT_PRICING_SOURCE and update both tables"
     )
 
