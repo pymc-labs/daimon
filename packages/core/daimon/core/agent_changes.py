@@ -562,6 +562,11 @@ _PROVIDER_REFUSALS: dict[str, tuple[str, AgentEditRefusal]] = {
     "stale_revision": ("The model changed since your draft began", "stale"),
     "drops_required": ("That model can't use some of this agent's skills or servers.", "invalid"),
     "stale_preview": ("The model changed since your draft began", "stale"),
+    "drops_mismatch": ("What that model drops changed since you looked.", "stale"),
+    "source_unavailable": (
+        "The agent's setup couldn't be read, so its model can't change now.",
+        "unavailable",
+    ),
 }
 
 
@@ -592,6 +597,7 @@ class ProviderSwitch:
     model: str | None
     preview: CompatibilityPreview
     expected_revision: int
+    accepted_drops: tuple[str, ...] | None = None
 
 
 def _refused_switch(exc: Exception, *, agent_id: str, provider: Provider) -> AgentEditError:
@@ -610,11 +616,14 @@ async def check_provider_switch(
     provider: Provider,
     model_id: str,
     expected_revision: int | None = None,
+    accepted_drops: tuple[str, ...] | None = None,
+    expected_preview_digest: str | None = None,
 ) -> ProviderSwitch:
     """Refuse now what pointing the agent at ``provider`` would refuse, writing nothing.
 
     ``expected_revision`` is the provider setting the change was made against; a setting
-    that moved since is stale. None takes the current one.
+    that moved since is stale. None takes the current one. A preview that declares drops
+    needs them accepted exactly, as shown; ``expected_preview_digest`` is that preview's.
     """
     if deps.backends is None or not deps.backends.enabled:
         raise _provider_refusal(AgentBackendRefused("feature_disabled"), provider)
@@ -636,8 +645,12 @@ async def check_provider_switch(
         preview = await deps.backends.preview(source, backend, model)
         if not preview.allowed:
             raise AgentBackendRefused("backend_not_allowed")
-        if preview.declared_drops:
+        if preview.declared_drops and accepted_drops is None:
             raise AgentBackendRefused("drops_required")
+        if accepted_drops is not None and tuple(accepted_drops) != preview.declared_drops:
+            raise AgentBackendRefused("drops_mismatch")
+        if expected_preview_digest is not None and preview.digest != expected_preview_digest:
+            raise AgentBackendRefused("stale_preview")
         if expected_revision is not None and preview.setting_revision != expected_revision:
             raise AgentBackendRefused("stale_revision")
     except (AgentBackendRefused, BackendUnsupported) as exc:
@@ -651,6 +664,7 @@ async def check_provider_switch(
         model=model,
         preview=preview,
         expected_revision=preview.setting_revision,
+        accepted_drops=accepted_drops,
     )
 
 
@@ -674,6 +688,7 @@ async def write_provider_switch(deps: AgentChangeDeps, switch: ProviderSwitch) -
                 switch.actor,
                 expected_preview_digest=switch.preview.digest,
                 model=switch.model,
+                accepted_drops=switch.accepted_drops,
             )
     except (AgentBackendRefused, BackendUnsupported) as exc:
         raise _refused_switch(exc, agent_id=switch.agent_id, provider=switch.provider) from exc

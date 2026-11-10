@@ -1020,6 +1020,21 @@ def backend_selection_enabled(settings: TurnSettings) -> bool:
     return settings.path == "mux" and settings.channel_backends
 
 
+CaptureSource = Callable[[BackendAgent], Awaitable[BackendAgent]]
+
+
+class _NoCapture:
+    """The explicit marker of a read-only caller: it reads settings, it never switches."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "NO_CAPTURE"
+
+
+NO_CAPTURE: Final = _NoCapture()
+
+
 class AgentBackendService:
     """Agent preferences build through channel admission, policy and audit owners."""
 
@@ -1029,10 +1044,12 @@ class AgentBackendService:
         *,
         enabled: bool = False,
         cost_line: Callable[[BackendAgent, Provider], str] | None = None,
-        capture_source: Callable[[BackendAgent], Awaitable[BackendAgent]] | None = None,
+        capture_source: CaptureSource | None = None,
+        read_only: bool = False,
     ) -> None:
         self._sessions = sessionmaker
         self._capture_source = capture_source
+        self._read_only = read_only
         self.enabled = enabled
         self._cost_line: Callable[[BackendAgent, Provider], str] = cost_line or _default_cost
 
@@ -1263,6 +1280,9 @@ class AgentBackendService:
         settings: AgentSettings | None = None,
     ) -> AgentBackendRevision:
         self._check_editor(agent.tenant_id, actor)
+        if self._read_only:
+            # A service built without a source capture would store no loss consent.
+            raise AgentBackendRefused("source_unavailable")
         async with policy_store.policy_write_transaction(
             self._sessions, tenant_id=agent.tenant_id
         ) as session:
@@ -1680,10 +1700,13 @@ def make_backend_service(
     sessionmaker: async_sessionmaker[AsyncSession],
     settings: TurnSettings,
     *,
+    capture_source: CaptureSource | _NoCapture,
     cost_line: Callable[[BackendAgent, Provider], str] | None = None,
     prices: Mapping[str, ProviderPrice] | None = None,
-    capture_source: Callable[[BackendAgent], Awaitable[BackendAgent]] | None = None,
 ) -> AgentBackendService:
+    """A backend service. `capture_source` is required: every surface that can switch an
+    agent reads its source to record the loss consent; `NO_CAPTURE` marks a read-only one."""
+
     def configured_cost(agent: BackendAgent, target: Provider) -> str:
         return _default_cost(agent, target, prices=prices)
 
@@ -1691,7 +1714,8 @@ def make_backend_service(
         sessionmaker,
         enabled=backend_selection_enabled(settings),
         cost_line=cost_line or configured_cost,
-        capture_source=capture_source,
+        capture_source=None if isinstance(capture_source, _NoCapture) else capture_source,
+        read_only=isinstance(capture_source, _NoCapture),
     )
 
 

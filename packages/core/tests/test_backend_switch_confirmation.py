@@ -148,8 +148,11 @@ def test_preview_is_a_read_but_confirm_is_never_unattended() -> None:
 @pytest.fixture
 async def owned_preview(db_preflight, db_committing_engine):
     from daimon.core.authz import Subject
-    from daimon.core.channel_backend import BackendActor, load_backend_agent, make_backend_service
-    from daimon.core.config import TurnSettings
+    from daimon.core.channel_backend import (
+        AgentBackendService,
+        BackendActor,
+        load_backend_agent,
+    )
     from daimon.testing.db import require_owned_sessionmaker
     from daimon.testing.factories import make_account, make_platform_principal, make_tenant
     from daimon.testing.ma_models import ma_agent
@@ -181,7 +184,9 @@ async def owned_preview(db_preflight, db_committing_engine):
         agent = await load_backend_agent(
             client, sessions, tenant_id=tenant.id, agent_name="Researcher"
         )
-        service = make_backend_service(sessions, TurnSettings(path="mux", channel_backends=True))
+
+        # These tests pin the service without a source capture.
+        service = AgentBackendService(sessions, enabled=True)
         actor = BackendActor(tenant.id, account.id, Subject(is_admin=True))
         policy = await service.tenant_policy(tenant.id)
         await service.set_tenant_allowlist(

@@ -18,6 +18,7 @@ from alembic.operations import Operations
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.authz import Subject
 from daimon.core.channel_backend import (
+    NO_CAPTURE,
     AgentBackendRefused,
     AgentBackendService,
     BackendActor,
@@ -268,10 +269,18 @@ async def test_disallowed_retained_backend_is_refused_by_same_admission_gate(own
 
 
 def test_factory_uses_existing_flags() -> None:
-    assert make_backend_service(None, TurnSettings()).enabled, "on by default"
-    assert not make_backend_service(None, TurnSettings(path="legacy")).enabled
-    assert not make_backend_service(None, TurnSettings(channel_backends=False)).enabled
-    assert make_backend_service(None, TurnSettings(path="mux", channel_backends=True)).enabled
+    assert make_backend_service(None, TurnSettings(), capture_source=NO_CAPTURE).enabled, (
+        "on by default"
+    )
+    assert not make_backend_service(
+        None, TurnSettings(path="legacy"), capture_source=NO_CAPTURE
+    ).enabled
+    assert not make_backend_service(
+        None, TurnSettings(channel_backends=False), capture_source=NO_CAPTURE
+    ).enabled
+    assert make_backend_service(
+        None, TurnSettings(path="mux", channel_backends=True), capture_source=NO_CAPTURE
+    ).enabled
 
 
 async def test_public_loader_uses_actual_scoped_sdk_projection_and_never_updates(owned) -> None:
@@ -316,7 +325,7 @@ async def test_audit_filters_before_pagination_and_unknown_accounts_are_not_acce
 async def test_factory_preserves_actual_agent_model_and_unknown_native_rates(owned) -> None:
     _, agent, _, sessions = owned
     settings = TurnSettings(path="mux", channel_backends=True)
-    service = make_backend_service(sessions, settings)
+    service = make_backend_service(sessions, settings, capture_source=NO_CAPTURE)
     opus = await service.preview(agent.model_copy(update={"model": "claude-opus-5-5"}), "anthropic")
     assert "claude-opus-5-5" in opus.cost_line
     assert "haiku" not in opus.cost_line.lower()
