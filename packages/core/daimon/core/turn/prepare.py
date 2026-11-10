@@ -969,7 +969,13 @@ def admitted_session_scope(
         if (
             prepared.is_platform
             or prepared.is_legacy_host_authorized
-            or (prepared.tenant_id, prepared.account_id) != (scope.tenant_id, scope.account_id)
+            or prepared.tenant_id != scope.tenant_id
+            # A shared thread's provider state runs as the thread's own owner.
+            or prepared.account_id
+            not in (
+                scope.account_id,
+                *((str(admission.shared_owner),) if admission.shared_owner is not None else ()),
+            )
         ):
             raise ScopeViolation(session_id, "prepared scope differs from admitted identity")
         return prepared
@@ -1196,6 +1202,11 @@ async def bind_session_impl(
             result = replace(result, _native_spec=native_spec)
             ref = result.session_ref
             backend = result.backend
+            # A shared thread's session may belong to the thread's owner (Gemini) or
+            # carry the caller (OpenAI); never anyone else.
+            ref_accounts = {scope.account_id}
+            if admission.shared_owner is not None:
+                ref_accounts.add(str(admission.shared_owner))
             if ref is None or (
                 _admitted_profile(result.admission) != profile
                 or result.admission.backend_revision != admission.backend_revision
@@ -1205,7 +1216,7 @@ async def bind_session_impl(
                 or ref.id != result.ma_session_id
                 or ref.kind != "session"
                 or ref.tenant_id != scope.tenant_id
-                or ref.account_id != scope.account_id
+                or ref.account_id not in ref_accounts
                 or result.admission.account_id != admission.account_id
                 or result.session_account_id != session_account_id
             ):

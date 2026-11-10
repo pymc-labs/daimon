@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Literal, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import structlog
@@ -27,7 +27,7 @@ from anthropic.types.beta.sessions import (
 )
 from daimon.core.errors import TurnError
 from daimon.core.ma import REPLAY_TIMEOUT_S
-from daimon.core.mux_backend import TurnBackend, TurnBackendRequest, TurnRuntime
+from daimon.core.mux_backend import TurnBackend, TurnBackendRequest, TurnRuntime, resource_scope
 from daimon.core.pricing import ProviderPrice
 from daimon.core.turn.io import (
     TurnCodecRequest,
@@ -154,6 +154,22 @@ def compose_gemini_backend(request: TurnBackendRequest) -> TurnBackend:
     return TurnBackend(
         backend=gemini_backend(config, request.scope, runtime, session.account_scope_id),
         session=session,
+    )
+
+
+def gemini_turn_scope(scope: Scope, shared_owner: UUID | None) -> Scope:
+    """The scope a Gemini turn runs under.
+
+    The driver and its stored state belong to one account, so a shared thread runs as the
+    thread's own derived owner: every caller continues one session, and none of its
+    state is any caller's.
+    """
+    if shared_owner is None:
+        return scope
+    return resource_scope(
+        tenant_id=scope.tenant_id,
+        account_id=str(shared_owner),
+        authorization_id=scope.authorization_id,
     )
 
 

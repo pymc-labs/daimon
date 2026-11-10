@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, tzinfo
 from decimal import Decimal
@@ -15,6 +16,7 @@ import httpx
 import pytest
 from daimon.core import pricing
 from daimon.core.channel_backend import check_backend
+from daimon.core.shared_threads import shared_owner
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.gemini import PROFILE, GeminiJournal, GeminiUsageRuntime
@@ -26,7 +28,7 @@ from daimon.core.turn.runtimes import build_channel_runtime
 from daimon.testing.factories import make_tenant
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
-from mux.contracts.ids import ModelRef, ResourceRef
+from mux.contracts.ids import ModelRef, ResourceRef, ThreadRef
 from mux.contracts.resources import Artifact
 from mux.drivers.gemini.core import compile_agent
 from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAttempt
@@ -35,6 +37,7 @@ from mux.drivers.gemini.transport import NO_TOOLS_TOOL
 from mux.errors import ScopeViolation
 from mux.profiles import selectable_models
 from mux.profiles.gemini import ARGON_MODEL
+from mux.state.lease import Slot
 from pydantic import JsonValue
 
 from ..test_native_tariffs import fixed_source_date as fixed_source_date
@@ -936,3 +939,54 @@ async def test_a_used_up_daily_model_cap_refuses_before_google_is_called(
     model = selected.admission.backend_revision.model
     assert (refused.value.reason, refused.value.provider) == ("provider_daily_cap_reached", model)
     assert not [call for call in calls if call.method == "POST"], "nothing was created"
+
+
+async def test_a_shared_turn_runs_as_the_thread_owner_without_any_caller_credential(
+    selected: ProviderPreparationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A shared turn's transport is the thread's own and mints no caller credential."""
+    revision = selected.admission.backend_revision
+    assert revision is not None
+    config = ConfigRevision.create(
+        revision.channel,
+        2,
+        resolve_default(
+            BackendConfig(
+                backend="gemini", profile=PROFILE, model=FLASH_PRIMARY, thread_mode="shared"
+            )
+        ),
+    )
+    owner = shared_owner(Slot(thread=ThreadRef(channel=config.channel, thread_id="thread")))
+    shared = replace(
+        selected,
+        thread_id="thread",
+        session_account_id=owner,
+        admission=replace(
+            selected.admission,
+            backend_revision=config,
+            backend=check_backend(config),
+            shared_owner=owner,
+        ),
+    )
+    manifest(monkeypatch, tmp_path / "manifest.json", [entry(shared, tmp_path)])
+    monkeypatch.setenv("N4_OFFLINE_GEMINI_KEY", "offline-key")
+    runtime = build_channel_runtime(shared)
+    assert runtime.end_of_turn is None
+    # The transport accepts only the thread owner's scope, never a caller's.
+    transport = runtime.transport_factory(
+        config, shared.scope.model_copy(update={"account_id": str(owner)})
+    )
+    assert getattr(transport, "mcp_secrets", None) is None
+    with pytest.raises(ScopeViolation):
+        runtime.transport_factory(config, shared.scope)
+    # An owner that is not the thread's derived one is refused before any state is built.
+    stranger = uuid.uuid4()
+    forged = replace(
+        shared,
+        session_account_id=stranger,
+        admission=replace(shared.admission, shared_owner=stranger),
+    )
+    with pytest.raises(ScopeViolation):
+        build_gemini_runtime(forged)

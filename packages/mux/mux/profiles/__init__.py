@@ -205,7 +205,7 @@ _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
     ),
     "gemini": BackendSelection(
         BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"),
-        ("per_caller",),
+        ("per_caller", "shared"),
         allowed_models=(ARGON_MODEL,),
         tariff_gated_models=(ARGON_MODEL,),
     ),

@@ -169,7 +169,8 @@ def build_channel_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         revision.channel.tenant_id != request.scope.tenant_id
         or revision.channel.platform != request.platform
         or str(request.tenant_id) != request.scope.tenant_id
-        or str(request.session_account_id) != request.scope.account_id
+        or str(request.session_account_id)
+        != str(request.admission.shared_owner or request.scope.account_id)
         or request.scope.is_platform
         or request.scope.is_legacy_host_authorized
         or revision.backend != get_profile(revision.profile).provider

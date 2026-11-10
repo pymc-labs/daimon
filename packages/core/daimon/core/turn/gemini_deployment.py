@@ -20,6 +20,7 @@ from daimon.core.infrastructure_cost import known_infrastructure_usd
 from daimon.core.mcp_auth import read_private_credential_bytes, resolve_agent_mcp_credential
 from daimon.core.mux_backend import TurnRuntime, register_turn_backend
 from daimon.core.neutral_resources import NeutralResourceHost
+from daimon.core.shared_threads import shared_owner
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
@@ -32,6 +33,7 @@ from daimon.core.turn.gemini import (
     compose_gemini_backend,
     compose_gemini_codec,
     gemini_backend,
+    gemini_turn_scope,
 )
 from daimon.core.turn.gemini_prepare import old_gemini_session, prepare_gemini_turn
 from daimon.core.turn.gemini_state import (
@@ -55,7 +57,7 @@ from daimon.core.turn.runtime_manifest import (
     validate_counterpart_request,
 )
 from mux.contracts.config import ConfigRevision
-from mux.contracts.ids import ModelRef, Scope
+from mux.contracts.ids import ModelRef, Scope, ThreadRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
 from mux.drivers.gemini import (
     FlashAccounting,
@@ -70,6 +72,7 @@ from mux.drivers.gemini import (
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.profiles import selectable_models
 from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE
+from mux.state.lease import Slot
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 Nonblank = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
@@ -368,7 +371,17 @@ def load_gemini_deployment(request: ProviderPreparationRequest) -> GeminiPlan:
 
 
 def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
-    revision, scope = request.admission.backend_revision, request.scope
+    revision = request.admission.backend_revision
+    shared = request.admission.shared_owner
+    # A shared thread's state is keyed by its derived owner, verified against the thread.
+    shared_slot = (
+        Slot(thread=ThreadRef(channel=revision.channel, thread_id=request.thread_id))
+        if shared is not None and revision is not None
+        else None
+    )
+    if shared_slot is not None and shared_owner(shared_slot) != shared:
+        raise ScopeViolation(request.thread_id, "shared Gemini thread differs from its owner")
+    scope = gemini_turn_scope(request.scope, shared)
     if (
         revision is None
         or revision.model not in selectable_models(INLINE_REUSE.provider)
@@ -535,7 +548,10 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             configured_catalog_transport(api_key=secret)
             if request.admission.backend_revision_origin == "agent"
             else None,
-            mcp_secrets=resolve_mcp
+            # A shared thread has no caller to mint for: its session carries no MCP.
+            mcp_secrets=None
+            if shared is not None
+            else resolve_mcp
             if plan.source_capabilities is not None
             else template_mcp.resolve
             if mcp_template
@@ -605,7 +621,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     accounting: FlashAccounting
     if plan.storage_backend == "postgres":
         records = PostgresGeminiStorage(
-            request.deps.sessionmaker, scope=scope, project=plan.project
+            request.deps.sessionmaker, scope=scope, project=plan.project, shared_slot=shared_slot
         )
         accounting = PostgresFlashAccounting(
             request.deps.sessionmaker,
@@ -613,6 +629,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             project=plan.project,
             hold_usd=plan.hold_usd,
             cap_usd=plan.cap_usd,
+            shared_slot=shared_slot,
         )
     else:
         assert plan.records_path is not None and plan.holds_path is not None
@@ -635,7 +652,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         read_agent_counterpart=read,
         materialize_root=materialize_root if plan.root_materialization else None,
         end_of_turn=template_mcp.finalize
-        if mcp_template or needs_turn_credential(request.admission)
+        if shared is None and (mcp_template or needs_turn_credential(request.admission))
         else None,
         journal=GeminiJournal(
             records,

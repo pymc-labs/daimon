@@ -10,7 +10,9 @@ from uuid import UUID
 
 from daimon.core._models import Account, GeminiRuntimeState
 from daimon.core.session_fence_retry import FenceUnavailable, retry_fences, try_fence
+from daimon.core.shared_threads import shared_owner
 from mux.contracts.ids import Scope
+from mux.state.lease import Slot
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import CursorResult
@@ -61,9 +63,18 @@ class PostgresPayloadDatabase:
         scope: Scope,
         project: str,
         kind: Literal["records", "holds"],
+        shared_slot: Slot | None = None,
     ) -> None:
         if scope.is_platform or scope.is_legacy_host_authorized or not project.strip():
             raise ValueError("PostgreSQL Gemini state requires a tenant account and project")
+        # A shared thread's state belongs to the thread: its owner is derived from the
+        # slot and has no Account row, so the slot stands in for the account check.
+        if shared_slot is not None and (
+            shared_slot.thread.channel.tenant_id != scope.tenant_id
+            or str(shared_owner(shared_slot)) != scope.account_id
+        ):
+            raise ValueError("Gemini shared state differs from its thread")
+        self._shared = shared_slot is not None
         self._sessions = sessions
         self._key = {
             "tenant_id": UUID(scope.tenant_id),
@@ -73,6 +84,8 @@ class PostgresPayloadDatabase:
         }
 
     async def _require_account(self, session: AsyncSession, *, locking: bool) -> None:
+        if self._shared:
+            return
         statement = select(Account.id).where(
             Account.id == self._key["account_id"], Account.tenant_id == self._key["tenant_id"]
         )

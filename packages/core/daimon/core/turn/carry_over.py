@@ -181,13 +181,14 @@ async def carry_over(
     key = f"carry-over:{predecessor.id}:g{predecessor.generation}"
     async with hold_slot(store, slot, request.now()) as lease:
         # Host journals serve a session's events only inside its turn context.
+        reading_scope = old.scope or request.scope
         reading = TurnPersistence(
-            store, old.binding, request.scope, operation_key=key, session_ref=old.ref
+            store, old.binding, reading_scope, operation_key=key, session_ref=old.ref
         )
         with reading.holding(lease):
-            turns = await read_turns(request.scope, old)
+            turns = await read_turns(reading_scope, old)
             mounts, files = (
-                await carry_files(request.scope, old, target_artifacts, key)
+                await carry_files(reading_scope, old, target_artifacts, key)
                 if target_artifacts is not None and turns is not None
                 else ((), ())
             )

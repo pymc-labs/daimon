@@ -207,7 +207,10 @@ def prepared_billing(prepared: PreparedTurn, *, tenant_id: uuid.UUID) -> Billing
             )
         return Billed(record=cast(UsageRecorder, prepared._record))  # pyright: ignore[reportPrivateUsage]
     scope = admitted_session_scope(
-        prepared.admission, tenant_id=tenant_id, session_id=prepared.ma_session_id
+        prepared.admission,
+        tenant_id=tenant_id,
+        session_id=prepared.ma_session_id,
+        prepared=prepared._scope,  # pyright: ignore[reportPrivateUsage]
     )
     if ref is None or (
         ref.kind != "session"

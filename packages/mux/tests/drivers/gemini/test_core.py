@@ -694,9 +694,7 @@ def test_argon_is_an_opt_in_gemini_selection_that_never_changes_the_default() ->
     assert backend_selection("gemini").model == "gemini-3.8-flash"
     argon = BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-4-argon")
     assert runnable_selection(resolve_default(argon))
-    assert not runnable_selection(
-        resolve_default(argon.model_copy(update={"thread_mode": "shared"}))
-    )
+    assert runnable_selection(resolve_default(argon.model_copy(update={"thread_mode": "shared"})))
     for near in ("gemini-4-argon-preview", "gemini-4", "Gemini-4-Argon"):
         assert not runnable_selection(resolve_default(argon.model_copy(update={"model": near})))
 

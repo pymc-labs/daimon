@@ -17,10 +17,17 @@ from daimon.core.mux_backend import TurnRuntime
 from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.pricing import ProviderPrice, provider_cost_of
 from daimon.core.session_compat import ReplaceSession
+from daimon.core.shared_threads import shared_owner
 from daimon.core.turn.admission import reauthorize
 from daimon.core.turn.carry_over import carry_on_adoption
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.gemini import PROFILE, GeminiJournal, GeminiUsageRuntime, gemini_backend
+from daimon.core.turn.gemini import (
+    PROFILE,
+    GeminiJournal,
+    GeminiUsageRuntime,
+    gemini_backend,
+    gemini_turn_scope,
+)
 from daimon.core.turn.gemini_state import HoldSettlement, interaction_of
 from daimon.core.turn.prepare import CONTINUED, PreparedTurn, ProviderPreparationRequest
 from daimon.core.turn.replace_binding import (
@@ -56,12 +63,18 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     runtime = request.deps.turn_runtimes.get(PROFILE)
     if config is None or runtime is None or config.profile != PROFILE:
         raise UnsupportedCapability(("gemini_explicit_runtime",), PROFILE)
+    # A shared thread binds the account-less slot and runs as the thread's own owner,
+    # with no caller MCP; an agent-origin counterpart and its MCP are per caller.
+    shared = admission.shared_owner
+    if shared is not None and admission.backend_revision_origin == "agent":
+        raise AdmissionDenied(reason="backend_unsupported")
+    scope = gemini_turn_scope(request.scope, shared)
     if (
         config.channel.tenant_id != request.scope.tenant_id
         or config.channel.platform != request.platform
         or str(admission.account_id) != request.scope.account_id
         or str(request.tenant_id) != request.scope.tenant_id
-        or request.session_account_id != admission.account_id
+        or request.session_account_id != (shared if shared is not None else admission.account_id)
     ):
         raise ScopeViolation(request.thread_id, "Gemini preparation differs from admission")
     if admission.daimon_rules_need_driver:
@@ -69,17 +82,12 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         # Refused before any key, transport or journal is touched.
         raise UnsupportedCapability(("daimon_tool_rules",), PROFILE)
     target = request.target_spec
-    # Shared ownership, mounts and transfer require a separate complete deployment
-    # adapter. Never silently drop those obligations in this slice. Seals ride the
-    # turn credential (`template_mcp`).
+    # Mounts and transfer require a separate complete deployment adapter. Never
+    # silently drop those obligations in this slice. Seals ride the turn credential
+    # (`template_mcp`).
     if (
-        config.thread_mode != "per_caller"
-        or admission.shared_owner is not None
-        or (
-            admission.memory_read_only and (target is None or "memory" not in target.declared_drops)
-        )
-        or (admission.channel_skills and (target is None or "skills" not in target.declared_drops))
-    ):
+        admission.memory_read_only and (target is None or "memory" not in target.declared_drops)
+    ) or (admission.channel_skills and (target is None or "skills" not in target.declared_drops)):
         raise UnsupportedCapability(("gemini_host_deployment_policy",), PROFILE)
     if not isinstance(runtime.journal, GeminiJournal) or not isinstance(
         runtime.usage_store, GeminiUsageRuntime
@@ -143,10 +151,14 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     ):
         raise UnsupportedCapability(("gemini_pinned_deployment",), PROFILE)
     thread = ThreadRef(channel=config.channel, thread_id=request.thread_id)
-    slot = Slot(thread=thread, account_id=request.scope.account_id)
+    slot = Slot(thread=thread, account_id=None if shared is not None else scope.account_id)
     store = journal.state_store
     prior = await store.get_binding(slot)
-    derived_id = str(uuid5(NAMESPACE_URL, f"gemini.host:{slot.model_dump_json()}"))
+    derived_id = (
+        str(shared)
+        if shared is not None
+        else str(uuid5(NAMESPACE_URL, f"gemini.host:{slot.model_dump_json()}"))
+    )
     # A released slot keeps its id; its era suffix keeps earlier creations from
     # replaying. Only a binding this host adopted (it carries its era) may differ
     # from the derived id.
@@ -157,7 +169,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     )
     if prior is not None and (prior.id != binding_id or "session" not in prior.native_refs):
         raise ScopeViolation(binding_id, "Gemini binding differs from admitted revision")
-    backend = gemini_backend(config, request.scope, runtime, deployment.account_scope_id)
+    backend = gemini_backend(config, scope, runtime, deployment.account_scope_id)
 
     def ref_of(bound: ProviderBinding) -> ResourceRef:
         return ResourceRef(
@@ -165,8 +177,8 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             kind="session",
             provider="gemini",
             account_scope_id=deployment.account_scope_id,
-            tenant_id=request.scope.tenant_id,
-            account_id=request.scope.account_id,
+            tenant_id=scope.tenant_id,
+            account_id=scope.account_id,
         )
 
     async def created(era: str) -> ProviderBinding:
@@ -179,16 +191,16 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             variant = admission.identity.system(spec.system, request.platform)
             if variant is not None:
                 spec = spec.model_copy(update={"system": variant})
-            agent = await backend.agents.create(request.scope, spec, key=f"{binding_id}{era}:agent")
+            agent = await backend.agents.create(scope, spec, key=f"{binding_id}{era}:agent")
         environment = (
             await backend.environments.create(
-                request.scope, deployment.environment, key=f"{binding_id}{era}:environment"
+                scope, deployment.environment, key=f"{binding_id}{era}:environment"
             )
             if deployment.max_output_tokens is None
             else None
         )
         session = await backend.sessions.create(
-            request.scope,
+            scope,
             SessionSpec(
                 agent=agent.ref,
                 agent_revision=agent.revision,
@@ -206,7 +218,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         )
         return session.binding.model_copy(
             update={
-                "legacy_account_id": request.scope.account_id,
+                "legacy_account_id": None if shared is not None else scope.account_id,
                 "native_refs": {**session.binding.native_refs, **({ERA_REF: era} if era else {})},
             }
         )
@@ -261,7 +273,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         replacement = await replace_binding(
             store=store,
             slot=slot,
-            scope=request.scope,
+            scope=scope,
             old=OldSession(
                 binding=prior,
                 ref=ref_of(prior),
@@ -277,7 +289,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         session_ref = ref_of(binding)
     else:
         binding = prior
-        session = await backend.sessions.retrieve(request.scope, ref_of(prior))
+        session = await backend.sessions.retrieve(scope, ref_of(prior))
         if (
             session.binding.id != prior.id
             or session.binding.thread != prior.thread
@@ -299,7 +311,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     footer_cost = (
         NativeFooterCostContext(
             request.deps.sessionmaker,
-            request.scope,
+            scope,
             binding,
             session_ref,
             request.deps.markup,
@@ -351,6 +363,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         watermark=None,
         reused=prior is not None and binding is prior,
         session_account_id=request.session_account_id,
+        _scope=scope if shared is not None else None,
         _record=record,
         backend=backend,
         session_ref=session_ref,
@@ -429,6 +442,9 @@ def old_gemini_session(
     deployment = runtime.journal.deployment if isinstance(runtime.journal, GeminiJournal) else None
     if deployment is None:
         raise UnsupportedCapability(("gemini_pinned_deployment",), PROFILE)
+    # An account-less binding is a shared thread's: its session is the thread owner's.
+    if binding.legacy_account_id is None:
+        scope = gemini_turn_scope(scope, shared_owner(Slot(thread=binding.thread)))
     ref = ResourceRef(
         id=binding.native_refs["session"],
         kind="session",
@@ -438,4 +454,4 @@ def old_gemini_session(
         account_id=scope.account_id,
     )
     backend = gemini_backend(revision, scope, runtime, deployment.account_scope_id)
-    return OldSession(binding=binding, ref=ref, backend=backend)
+    return OldSession(binding=binding, ref=ref, backend=backend, scope=scope)

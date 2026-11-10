@@ -152,6 +152,8 @@ class OldSession:
     binding: ProviderBinding
     ref: ResourceRef | None
     backend: ManagedAgents | None
+    # Where the session was authorized, when not the caller's: a shared thread's own owner.
+    scope: Scope | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,11 +346,14 @@ async def replace_binding(
         era = f":g{expected.generation}"
         key = f"binding-replace:{expected.id}{era}"
         # Host journals serve a bound session's events only inside its turn context.
-        reading = TurnPersistence(store, expected, scope, operation_key=key, session_ref=old.ref)
+        reading_scope = old.scope or scope
+        reading = TurnPersistence(
+            store, expected, reading_scope, operation_key=key, session_ref=old.ref
+        )
         with reading.holding(lease):
-            turns = await read_turns(scope, old)
+            turns = await read_turns(reading_scope, old)
             mounts, files = (
-                await carry_files(scope, old, target_artifacts, key)
+                await carry_files(reading_scope, old, target_artifacts, key)
                 if target_artifacts is not None and turns is not None
                 else ((), ())
             )
@@ -362,7 +367,7 @@ async def replace_binding(
         )
         await store.renew_lease(lease, now=now, ttl=REPLACEMENT_LEASE_TTL)
         binding = await store.put_binding(successor, expected_generation=expected.generation)
-        terminated = await _terminate(scope, old, key + ":terminate")
+        terminated = await _terminate(old.scope or scope, old, key + ":terminate")
     framing, state = carry_framing(
         turns=turns,
         files=files,

@@ -20,10 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Long jobs, compute sessions and agent-chat sessions started from a sealed turn
   now carry that turn's seal, so their transcripts stay readable only inside it,
   as on Anthropic.
-- **Shared threads run on OpenAI.** Everyone in the thread continues one session.
+- **Shared threads run on OpenAI and Gemini.** Everyone in the thread continues one session.
   It runs without Daimon's tools or any caller's personal stores, so nobody's
-  credentials reach the others. Gemini and self-hosted harnesses still refuse
-  shared threads.
+  credentials reach the others. Self-hosted harnesses still refuse shared
+  threads.
 - **Routines, watch wakes and long jobs on OpenAI or Gemini keep Daimon's tools.**
   With the `host_call_gate` deployment feature on, a turn nobody watches no
   longer refuses its MCP tools up front. Each call is decided like on Anthropic:

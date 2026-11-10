@@ -16,6 +16,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.mux_backend import TurnRuntime
 from daimon.core.pricing import ProviderPrice
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
+from daimon.core.shared_threads import shared_owner
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission
@@ -321,7 +322,69 @@ async def test_two_host_turns_bill_actual_interactions_and_journal_under_fence(h
     ] == ["first", "second"]
 
 
-@pytest.mark.parametrize("failure", ["runtime", "model", "shared", "daimon_rules"])
+async def test_a_shared_thread_binds_once_and_a_second_caller_continues_it(host: Host) -> None:
+    """Both callers reach one shared-owner session; no caller credential is minted."""
+    owner = shared_owner(Slot(thread=ThreadRef(channel=CHANNEL, thread_id="thread")))
+    other = uuid.UUID(int=12003)
+    revision = ConfigRevision.create(
+        CHANNEL,
+        1,
+        resolve_default(
+            BackendConfig(
+                backend="gemini", profile=PROFILE, model=FLASH_PRIMARY, thread_mode="shared"
+            )
+        ),
+    )
+    shared = replace(
+        host.admission,
+        backend_revision=revision,
+        backend=check_backend(revision),
+        shared_owner=owner,
+    )
+    runtime = host.deps.turn_runtimes[PROFILE]
+    deployment = replace(
+        host.journal.deployment, config_digest=revision.digest, config_revision=revision.local
+    )
+    host.deps = replace(
+        host.deps,
+        turn_runtimes={
+            PROFILE: replace(runtime, journal=replace(host.journal, deployment=deployment))
+        },
+    )
+
+    async def as_caller(account: uuid.UUID, admission: Admission) -> PreparedTurn:
+        return await bind_session_impl(
+            host.deps,
+            replace(admission, account_id=account),
+            tenant_id=TENANT,
+            platform="slack",
+            external_user_id=str(account),
+            thread_id="thread",
+            session_account_id=owner,
+            reuse_existing=True,
+        )
+
+    first = await as_caller(ACCOUNT, shared)
+    second = await as_caller(other, shared)
+    assert first.session_ref == second.session_ref and second.reused and not first.reused
+    assert first.session_ref is not None and first.session_ref.account_id == str(owner)
+    assert first._scope is not None and first._scope.account_id == str(owner)  # pyright: ignore[reportPrivateUsage]
+    store = host.journal.state_store
+    thread = ThreadRef(channel=CHANNEL, thread_id="thread")
+    binding = await store.get_binding(Slot(thread=thread, account_id=None))
+    assert binding is not None, "the shared slot holds the binding"
+    assert binding.id == str(owner) and binding.legacy_account_id is None
+    for account in (ACCOUNT, other):
+        assert await store.get_binding(Slot(thread=thread, account_id=str(account))) is None, (
+            "no per-caller slot is bound for a shared thread"
+        )
+    assert first._finalize is None, "a shared turn mints no per-caller credential"  # pyright: ignore[reportPrivateUsage]
+    agent_origin = replace(shared, backend_revision_origin="agent")
+    with pytest.raises(AdmissionDenied):
+        await as_caller(other, agent_origin)
+
+
+@pytest.mark.parametrize("failure", ["runtime", "model", "daimon_rules"])
 async def test_unsupported_host_configuration_is_visible_refusal_before_factory(
     host: Host, failure: str
 ) -> None:
@@ -336,17 +399,12 @@ async def test_unsupported_host_configuration_is_visible_refusal_before_factory(
     admission = host.admission
     if failure == "runtime":
         host.deps = replace(host.deps, turn_runtimes={})
-    elif failure in ("model", "shared"):
+    elif failure == "model":
         revision = ConfigRevision.create(
             CHANNEL,
             1,
             resolve_default(
-                BackendConfig(
-                    backend="gemini",
-                    profile=PROFILE,
-                    model="gemini-3.5-pro" if failure == "model" else FLASH_PRIMARY,
-                    thread_mode="shared" if failure == "shared" else "per_caller",
-                )
+                BackendConfig(backend="gemini", profile=PROFILE, model="gemini-3.5-pro")
             ),
         )
         with pytest.raises(BackendUnsupported):
