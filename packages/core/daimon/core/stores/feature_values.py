@@ -60,6 +60,12 @@ async def feature_revision(session: AsyncSession, *, tenant_id: uuid.UUID) -> in
     return found or 0
 
 
+async def lock_tenant(session: AsyncSession, tenant_id: uuid.UUID) -> None:
+    """Hold the workspace's row until the transaction ends, so a writer that reads a value
+    before changing it is serial with every other writer of that workspace."""
+    await session.scalar(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update())
+
+
 async def place_values(
     session: AsyncSession,
     *,

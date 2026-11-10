@@ -57,6 +57,7 @@ from daimon.core.stores.domain import CHAT_PLATFORMS, ChangeSurface, ChannelSett
 from daimon.core.stores.feature_values import (
     clear_feature_value,
     list_feature_values,
+    lock_tenant,
     place_values,
     replace_agent_values,
     set_feature_value,
@@ -541,6 +542,7 @@ async def _write_in(
 ) -> TierSetting:
     """One tier's write in the caller's transaction: the lock check, the row, the record."""
     tier = after.tier
+    await lock_tenant(session, place.tenant_id)  # the `expected` check below is then atomic
     values = await _values_at(session, settings, spec, place)
     before = next((s for s in _own(spec, place, values) if s.tier == tier), TierSetting(tier))
     if expected is not None and expected.value != before.text:
