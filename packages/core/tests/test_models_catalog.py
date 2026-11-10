@@ -73,9 +73,10 @@ def _production_sources() -> list[Path]:
 def _id_table_reads(path: Path) -> list[int]:
     lines: list[int] = []
     for node in ast.walk(ast.parse(path.read_text())):
-        if isinstance(node, ast.ImportFrom) and any(
+        imported = isinstance(node, ast.ImportFrom) and any(
             alias.name == "ALLOWED_MODEL_IDS" for alias in node.names
-        ) or isinstance(node, ast.Attribute) and node.attr == "ALLOWED_MODEL_IDS":
+        )
+        if imported or (isinstance(node, ast.Attribute) and node.attr == "ALLOWED_MODEL_IDS"):
             lines.append(node.lineno)
     return lines
 
