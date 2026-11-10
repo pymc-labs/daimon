@@ -77,12 +77,11 @@ async def test_token_urls_list_only_daimon_owned_personal_rows(db_session: Async
         tenant_id=tenant.id,
         agent_id=_AGENT,
         account_id=account.id,
-        server_urls=[_URL, "https://other.example.com/mcp"],
     )
-    assert urls == frozenset({_URL}), "only the URL the person holds a token for is listed"
+    assert urls == frozenset({_URL}), "the URL the person holds a token for is listed"
     await _put(db_session, tenant.id, account.id, owner="ma", now=_NOW + timedelta(1))
     urls = await store.list_connector_token_urls(
-        db_session, tenant_id=tenant.id, agent_id=_AGENT, account_id=account.id, server_urls=[_URL]
+        db_session, tenant_id=tenant.id, agent_id=_AGENT, account_id=account.id
     )
     assert urls == frozenset(), "an MA-owned row is not a Daimon token"
 
