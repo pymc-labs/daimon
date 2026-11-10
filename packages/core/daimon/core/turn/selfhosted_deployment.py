@@ -477,6 +477,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                         deadline_s=token_deadline_s,
                         slack_turn_context_id=request.admission.slack_turn_context_id,
                         hold=request.admission.hold,
+                        seal_ids=request.admission.origin_seal_ids,
                         memory_read_only=origin_read_only(request.admission),
                     )
 

@@ -34,7 +34,11 @@ if TYPE_CHECKING:
 
 def needs_turn_credential(admission: Admission) -> bool:
     """Whether the turn's flags must travel on a credential minted for this turn."""
-    return admission.hold is not None or admission.slack_turn_context_id is not None
+    return (
+        admission.hold is not None
+        or admission.slack_turn_context_id is not None
+        or bool(admission.origin_seal_ids)
+    )
 
 
 def origin_read_only(admission: Admission) -> bool | None:
@@ -147,6 +151,7 @@ class TemplateMCPCredential:
                 surface="provider_turn",
                 hold=admission.hold,
                 slack_turn_context_id=admission.slack_turn_context_id,
+                seal_ids=admission.origin_seal_ids,
             )
         self._minted = token, token_jti(token)
         try:

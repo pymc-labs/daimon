@@ -22,7 +22,7 @@ import json
 import os
 import stat
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from decimal import Decimal
@@ -47,6 +47,7 @@ from daimon.core.mcp_hold import HOLD_CLAIM, hold_claim, parse_hold_claim
 from daimon.core.mcp_identity import RELAY_CLAIM, RelayBinding
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.permissions import agent_permissions, channel_rule
+from daimon.core.session_seal import SEAL_CLAIM, seal_claim
 from daimon.core.stores.domain import McpTokenPurpose, McpTokenRow, McpTokenSurface
 from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
@@ -236,6 +237,7 @@ def mint_jwt(
     hold: TurnHold | None = None,
     relay: RelayBinding | None = None,
     anthropic_disabled: bool = False,
+    seal_ids: Collection[str] = (),
 ) -> str:
     """Sign `{sub: <account_uuid>, iat: <unix ts>}` HS256 with `secret`.
 
@@ -259,6 +261,7 @@ def mint_jwt(
       DM session credentials. Readers require the matching live tenant/account row.
     - ``hold`` signs the channel a held turn is kept to (`daimon.core.mcp_hold`).
       The MCP server honours it only when the registry row names the same channel.
+    - ``seal_ids`` signs a self-hosted turn's seals (`SEAL_CLAIM`).
     - ``relay`` binds a signed-identity relay credential to its session
       (`daimon.core.mcp_identity.RelayBinding`); only the relay reads it.
     - When ``is_admin`` is ``True``, an ``"is_admin": True`` claim is added
@@ -268,7 +271,7 @@ def mint_jwt(
       Discord vault token's baked
       ``is_admin`` claim alone never elevates a non-admin caller.
     """
-    claims: dict[str, str | int | bool | dict[str, str | bool] | dict[str, str]] = {
+    claims: dict[str, str | int | bool | dict[str, str | bool] | dict[str, str] | list[str]] = {
         "sub": str(account_id),
         "iat": int(now.timestamp()),
     }
@@ -295,6 +298,8 @@ def mint_jwt(
         claims[HOLD_CLAIM] = hold_claim(hold)
     if relay is not None:
         claims[RELAY_CLAIM] = relay.claim()
+    if seal_ids:
+        claims[SEAL_CLAIM] = seal_claim(seal_ids)
     if anthropic_disabled:
         claims["anthropic_disabled"] = True
     if is_admin:
@@ -351,6 +356,7 @@ async def mint_chat_mcp_token(
     relay: RelayBinding | None = None,
     ttl: dt.timedelta = CHAT_TOKEN_TTL,
     anthropic_disabled: bool = False,
+    seal_ids: Collection[str] = (),
 ) -> tuple[str, uuid.UUID, dt.datetime]:
     """Register one expiring ordinary-chat credential with the existing token owner.
 
@@ -405,6 +411,7 @@ async def mint_chat_mcp_token(
         relay=relay,
         jti=jti,
         expires_at=expires_at,
+        seal_ids=seal_ids,
     )
     return token, jti, expires_at
 
@@ -428,6 +435,7 @@ async def mint_agent_mcp_token(
     client: str | None = None,
     hold: TurnHold | None = None,
     slack_turn_context_id: uuid.UUID | None = None,
+    seal_ids: Collection[str] = (),
 ) -> str:
     """Mint a long-lived, revocable, agent-scoped MCP JWT.
 
@@ -470,7 +478,8 @@ async def mint_agent_mcp_token(
     A provider-turn credential carries its turn's flags as MA's chat credential
     does (`mint_chat_mcp_token`): a ``hold`` binds the row to the held channel
     under the held label and signs `HOLD_CLAIM`, and ``slack_turn_context_id`` is
-    signed as its own claim. Nothing else may carry either.
+    signed as its own claim, and ``seal_ids`` as `SEAL_CLAIM`: the server reads
+    sealed sessions inside those ids only. Nothing else may carry any of them.
     """
     # Registered chat execution retains the ordinary chat surface. External
     # agent keys keep their existing restricted agent-chat surface. The signed
@@ -487,7 +496,9 @@ async def mint_agent_mcp_token(
     if internal and purpose != "internal":
         raise ValueError("a chat-execution or provider-turn credential is internal")
     assert (platform is None) == (channel_id is None), "a channel binding needs both"
-    if (hold is not None or slack_turn_context_id is not None) and surface != "provider_turn":
+    if (
+        hold is not None or slack_turn_context_id is not None or seal_ids
+    ) and surface != "provider_turn":
         raise ValueError("only a provider-turn credential carries turn flags")
     jti = jti or uuid.uuid4()
     if hold is not None:
@@ -514,7 +525,7 @@ async def mint_agent_mcp_token(
         purpose=purpose,
         client=client,
     )
-    claims: dict[str, str | int | dict[str, str | bool]] = {
+    claims: dict[str, str | int | dict[str, str | bool] | list[str]] = {
         "sub": str(account_id),
         "chat_agent_id" if chat_execution else "agent_id": str(agent_id),
         "jti": str(jti),
@@ -524,6 +535,8 @@ async def mint_agent_mcp_token(
         claims[HOLD_CLAIM] = hold_claim(hold)
     if slack_turn_context_id is not None:
         claims["slack_turn_context_id"] = str(slack_turn_context_id)
+    if seal_ids:
+        claims[SEAL_CLAIM] = seal_claim(seal_ids)
     return pyjwt.encode(claims, secret, algorithm="HS256")
 
 
@@ -579,12 +592,12 @@ def registered_agent_claims_match(
     expected = {"sub", identity_claim, "jti", "exp"}
     # A provider turn's Slack DM context, as on MA's chat credential. The hold
     # claim never reaches here: both readers check it against the row first.
-    if (
-        chat_execution
-        and row.surface == "provider_turn"
-        and isinstance(claims.get("slack_turn_context_id"), str)
-    ):
-        expected.add("slack_turn_context_id")
+    if chat_execution and row.surface == "provider_turn":
+        if isinstance(claims.get("slack_turn_context_id"), str):
+            expected.add("slack_turn_context_id")
+        # Its turn's seals; the identity reader refuses a malformed value.
+        if SEAL_CLAIM in claims:
+            expected.add(SEAL_CLAIM)
     if allow_session_grant and chat_execution and isinstance(claims.get("chat_session_id"), str):
         expected.add("chat_session_id")
         if isinstance(claims.get("requester_account_id"), str):

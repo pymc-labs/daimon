@@ -15,6 +15,7 @@ seal can't be read, the successor is sealed to its own thread.
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
+from typing import cast
 
 import anthropic as anthropic_pkg
 import structlog
@@ -104,6 +105,24 @@ def session_facts(
 
 def format_seal_ids(ids: Collection[str]) -> str:
     return _SEPARATOR.join(sorted(ids))
+
+
+SEAL_CLAIM = "seal_ids"
+"""A provider turn credential's signed seals: the ids its turn runs sealed under."""
+
+
+def seal_claim(ids: Collection[str]) -> list[str]:
+    return sorted(ids)
+
+
+def parse_seal_claim(value: object) -> frozenset[str] | None:
+    """The signed seal ids, or None when malformed (absent reads as no seal)."""
+    if value is None:
+        return frozenset()
+    if not isinstance(value, list) or not value:
+        return None
+    parts = [part for part in cast("list[object]", value) if isinstance(part, str) and part]
+    return frozenset(parts) if len(parts) == len(cast("list[object]", value)) else None
 
 
 def origin_stamp(

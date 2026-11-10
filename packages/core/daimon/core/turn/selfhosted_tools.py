@@ -10,7 +10,7 @@ import math
 import re
 import socket
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -347,12 +347,14 @@ async def mint_turn_mcp_authorization(
     now: datetime | None = None,
     slack_turn_context_id: uuid.UUID | None = None,
     hold: TurnHold | None = None,
+    seal_ids: Collection[str] = (),
     memory_read_only: bool | None = None,
 ) -> MintedMcpAuthorization:
     """Register a live agent's token; the host revokes jti in its turn-finally path.
 
     A `hold` binds it to the held channel as MA's chat credential does; the server
-    then lists only the held allowlist. `memory_read_only` binds the token to the
+    then lists only the held allowlist. `seal_ids` signs the turn's seals.
+    `memory_read_only` binds the token to the
     executing turn's origin, so the server reads that turn's memory as read-only."""
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.mcp_auth import CHAT_TOKEN_TTL, bind_execution_session, mint_chat_mcp_token
@@ -406,6 +408,7 @@ async def mint_turn_mcp_authorization(
             anthropic_disabled=True,
             slack_turn_context_id=slack_turn_context_id,
             hold=hold,
+            seal_ids=seal_ids,
         )
     if memory_read_only:
         token = await bind_execution_session(
