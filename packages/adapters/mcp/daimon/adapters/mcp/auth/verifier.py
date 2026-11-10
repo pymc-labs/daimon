@@ -40,6 +40,8 @@ from daimon.core.config import McpSettings
 from daimon.core.mcp_auth import (
     CHAT_TOKEN_TTL,
     chat_token_label,
+    is_held_provider_row,
+    provider_hold_refusal,
     registered_agent_claims_match,
 )
 from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
@@ -88,7 +90,12 @@ def _hold_refusal(
     signed claim names: row and claim must say the same, so neither a claim
     forged on an unheld row nor a row bound without its claim counts. Nothing
     else may carry the claim, and a bound chat row is never admitted without it.
+
+    A provider turn's held credential (`is_held_provider_row`) is the one other
+    held binding, checked the same way; it is never a vault chat token.
     """
+    if row.surface == "provider_turn":
+        return provider_hold_refusal(row, hold_claim)
     if hold_claim is None:
         bound = vault_chat and (row.channel_id is not None or held_label)
         return "hold_claim_missing" if bound else None
@@ -133,7 +140,10 @@ def token_row_refusal(
     if row.platform is not None and row.platform != identity.platform:
         return "platform_mismatch"  # a channel binding this deployment never minted
     held_label = row.kind == "agent" and row.label == chat_token_label(row.jti, held=True)
-    vault_chat = held_label or (row.kind == "agent" and row.label == chat_token_label(row.jti))
+    provider_held = is_held_provider_row(row)
+    vault_chat = not provider_held and (
+        held_label or (row.kind == "agent" and row.label == chat_token_label(row.jti))
+    )
     hold_refusal = _hold_refusal(
         row, hold_claim=hold_claim, vault_chat=vault_chat, held_label=held_label
     )
@@ -166,7 +176,12 @@ def token_row_refusal(
         if is_coding_key(row):
             if not coding_key_standing:
                 return "not_admin_or_owner"
-        elif row.channel_id is not None and not vault_chat and identity.role is not Role.ADMIN:
+        elif (
+            row.channel_id is not None
+            and not vault_chat
+            and not provider_held
+            and identity.role is not Role.ADMIN
+        ):
             return "admin_required"
         return None
     if claims.get("kind") != row.kind:
