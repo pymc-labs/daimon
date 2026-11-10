@@ -90,10 +90,6 @@ async def defaults_apply(
     defaults_root: Path,
 ) -> None:
     client = None if rt.settings.anthropic.api_key is None else rt.anthropic
-    # Self-hosted records need only Postgres, so they move even without a key.
-    renames = await rename_selfhosted_defaults(
-        rt.sessionmaker, client, defaults_root, dry_run=dry_run
-    )
     if client is None:
         # OpenAI-only deployment (see docs/providers.md's "Run on OpenAI"):
         # there is no Anthropic-backed default agent/environment/
@@ -104,17 +100,25 @@ async def defaults_apply(
             "Anthropic default agent/environment/skill reconciliation. Run "
             "`daimon openai init` to provision and seed defaults on OpenAI instead."
         )
-        report = renames
+        # Self-hosted records need only Postgres, so they still move.
+        report = await rename_selfhosted_defaults(
+            rt.sessionmaker, None, defaults_root, dry_run=dry_run
+        )
     else:
         public_url = (
             str(rt.settings.mcp.public_url) if rt.settings.mcp.public_url is not None else None
         )
+        # Apply goes first: it renames cli:local itself, after its pre-flight and
+        # spec checks, so a failure there leaves every self-hosted record untouched.
         report = await apply_defaults(
             rt.sessionmaker,
             client,
             defaults_root,
             dry_run=dry_run,
             public_url=public_url,
+        )
+        renames = await rename_selfhosted_defaults(
+            rt.sessionmaker, client, defaults_root, dry_run=dry_run
         )
         for outcome in renames.agents:
             report.add(outcome)

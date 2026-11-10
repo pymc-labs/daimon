@@ -38,6 +38,7 @@ from daimon.core.defaults.sweep import (
 )
 from daimon.core.errors import DaimonError, DefaultsError
 from daimon.core.model_presets import model_choice_id
+from daimon.core.specs import AgentSpec
 from daimon.core.stores.agent_rename import list_tenants_with_selfhosted_agent
 from daimon.core.stores.channel_skills import list_channel_skill_ids
 from daimon.core.stores.seeded_skills import prune_seeded_skills
@@ -106,6 +107,17 @@ async def _channel_skill_ids(
         return None
 
 
+def _check_skill_references(agent_specs: list[AgentSpec], skill_names_present: set[str]) -> None:
+    """Raise `DefaultsError` for an agent that names a custom skill the tree lacks."""
+    for spec in agent_specs:
+        for ref in spec.skills:
+            if ref.type == "custom" and ref.skill_id not in skill_names_present:
+                raise DefaultsError(
+                    f"agent {spec.name!r} references unknown skill {ref.skill_id!r}; "
+                    "add defaults/skills/<name>/SKILL.md first."
+                )
+
+
 def reconcile_lock_key(tenant_id: uuid.UUID) -> str:
     """The advisory lock key every reconcile and rename of this tenant takes."""
     return f"{_RECONCILE_LOCK_NAMESPACE}:{tenant_id}"
@@ -122,10 +134,14 @@ async def rename_selfhosted_defaults(
 
     Self-hosted deployments may have no Anthropic credentials, so this needs only
     Postgres; a `client` also lets each tenant's managed agents move with it.
+    The tree is checked first, so a bad one fails before any write. Run it after
+    `apply_defaults` has passed its pre-flight.
     """
     report = ApplyReport()
     agents_root = defaults_root / "agents"
     specs = load_agent_specs(agents_root) if agents_root.exists() else []
+    skill_names = {load_skill_spec(d)[0].name for d in load_skill_paths(defaults_root / "skills")}
+    _check_skill_references(specs, skill_names)
     for old, new in pending_renames({spec.name for spec in specs}):
         async with session_factory() as session:
             tenant_ids = await list_tenants_with_selfhosted_agent(session, name=old)
@@ -228,13 +244,7 @@ async def _reconcile_core(
     skill_names_present = {load_skill_spec(d)[0].name for d in skill_dirs}
 
     # Validate agent->skill references before any MA write.
-    for spec in agent_specs:
-        for ref in spec.skills:
-            if ref.type == "custom" and ref.skill_id not in skill_names_present:
-                raise DefaultsError(
-                    f"agent {spec.name!r} references unknown skill {ref.skill_id!r}; "
-                    "add defaults/skills/<name>/SKILL.md first."
-                )
+    _check_skill_references(agent_specs, skill_names_present)
 
     # Pre-flight: verify MA accepts every unique agent model before any writes.
     # Catches MA whitelist drift. Skip in dry-run — dry-run must be 100% read-only.
