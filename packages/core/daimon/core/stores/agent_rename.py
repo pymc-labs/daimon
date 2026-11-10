@@ -141,7 +141,8 @@ async def rename_selfhosted_agent(
 ) -> SelfHostedRename:
     """Rename the tenant's live self-hosted agent `old` in place.
 
-    A live `new` is never merged into: both are left alone ("taken").
+    A live `new` is never merged into: both are left alone ("taken"). The
+    revision stays: no turn pins the name, so an in-flight turn is unaffected.
     """
     table = _table("selfhosted_agents")
     live = and_(table.c.tenant_id == tenant_id, table.c.archived_at.is_(None))
@@ -162,7 +163,6 @@ async def rename_selfhosted_agent(
             .values(
                 name=new,
                 spec={**row.spec, "name": new},
-                revision=table.c.revision + 1,
                 updated_at=func.now(),
             )
         )

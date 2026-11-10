@@ -125,3 +125,10 @@ async def test_rename_selfhosted_when_agents_exist_then_reports_outcome(
         )
     ).tuples()
     assert [(n, n) for n in after] == list(rows), "the record and its spec carry the same name"
+    revisions = (
+        await db_session.execute(
+            text("SELECT DISTINCT revision FROM selfhosted_agents WHERE tenant_id = :t"),
+            {"t": tenant.id},
+        )
+    ).scalars()
+    assert list(revisions) == [1], "the rename keeps the revision a running turn pinned"
