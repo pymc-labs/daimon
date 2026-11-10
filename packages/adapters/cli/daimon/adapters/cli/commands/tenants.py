@@ -589,7 +589,6 @@ def _print_policy(
     console.print(f"  invoker_role_ids: {', '.join(policy.invoker_role_ids) or '-'}")
     console.print(f"  invoker_user_ids: {', '.join(policy.invoker_user_ids) or '-'}")
     console.print(f"  invoker_admin_bypass: {str(policy.invoker_admin_bypass).lower()}")
-    console.print(f"  dm_memory_read_only: {str(policy.dm_memory_read_only).lower()}")
     rules = len(policy.channel_rules) + len(policy.category_rules) + len(policy.agent_rules)
     console.print(f"  rules: {rules or '-'} (see access-policy rules)")
 
@@ -768,13 +767,6 @@ def tenants_access_policy_set_command(
             help="Allow server admins to bypass the invoker user/role lists.",
         ),
     ] = None,
-    dm_memory_read_only: Annotated[
-        bool | None,
-        typer.Option(
-            "--dm-memory-read-only/--no-dm-memory-read-only",
-            help="Give turns started from a DM read-only memory.",
-        ),
-    ] = None,
     drop_agent_rules: Annotated[
         bool,
         typer.Option(
@@ -818,7 +810,6 @@ def tenants_access_policy_set_command(
                 clear_internal_roles=clear_internal_roles,
                 clear_invoker_roles=clear_invoker_roles,
                 invoker_admin_bypass=invoker_admin_bypass,
-                dm_memory_read_only=dm_memory_read_only,
                 drop_agent_rules=drop_agent_rules,
                 clear=clear,
                 as_json=as_json,
@@ -848,7 +839,6 @@ async def tenants_access_policy_set(
     internal_role: list[str] | None = None,
     clear_internal_roles: bool = False,
     invoker_admin_bypass: bool | None = None,
-    dm_memory_read_only: bool | None = None,
     drop_agent_rules: bool = False,
     clear: bool = False,
     as_json: bool = False,
@@ -883,8 +873,6 @@ async def tenants_access_policy_set(
         changes["invoker_user_ids"] = _parse_invokers(invoker, platform=validated_platform)
     if invoker_admin_bypass is not None:
         changes["invoker_admin_bypass"] = invoker_admin_bypass
-    if dm_memory_read_only is not None:
-        changes["dm_memory_read_only"] = dm_memory_read_only
     if drop_agent_rules and not clear:
         raise typer.BadParameter("--drop-agent-rules only applies to --clear")
     if clear and changes:

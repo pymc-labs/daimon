@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from daimon.adapters.slack import settings as module
 from daimon.adapters.slack.blockkit import ERROR_COLOR
-from daimon.core.scope_settings import SettingsPlace
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.settings_panel import PanelOption, PanelScreen, PanelSelect
 
-PLACE = SettingsPlace.of("slack", "C1", None)
+TENANT = uuid.uuid4()
+PLACE = FeaturePlace.of(TENANT, "slack", "C1", None)
 SCREEN = PanelScreen(
     "Cost footer",
     ("In effect: Shown, the default.",),
@@ -25,7 +27,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     client = MagicMock()
     client.chat_postEphemeral = AsyncMock()
     monkeypatch.setattr(module, "resolve_web_client", AsyncMock(return_value=client))
-    actor = MagicMock(tenant_id="tenant")
+    actor = MagicMock(tenant_id=TENANT)
     monkeypatch.setattr(module, "chat_actor", AsyncMock(return_value=actor))
     monkeypatch.setattr(module, "tenant_agents", MagicMock(return_value="agents"))
     return client

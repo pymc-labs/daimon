@@ -21,7 +21,6 @@ import { GithubPanel } from "../setup/GithubPanel"
 import { KeysPanel } from "../setup/KeysPanel"
 import { PeoplePanel } from "../setup/PeoplePanel"
 import { nodeUi } from "../nodes/registry"
-import { FeatureMatrix } from "@/modules/features/Matrix"
 import { FeatureSettings } from "@/modules/features/Settings"
 
 const TITLES: Record<string, string> = {
@@ -56,7 +55,7 @@ export function Inspector(p: Props) {
   else if (node === "mcp:new") body = <NewServer {...p} />
   else if (server) body = <ServerEditor {...p} server={server} />
   else if (node === "history") body = <History agent={agent} />
-  else if (node === "features") body = <><FeatureSettings place={{ agent: agent.id }} tier="agent" edit={!p.ro} /><FeatureMatrix agent={agent.id} /></>
+  else if (node === "features") body = <FeatureSettings place={{ agent: agent.id }} tier="agent" edit={!p.ro} />
   else if (platform) {
     const { Panel } = nodeUi(platform.kind)
     body = <Panel agent={agent} node={platform} ro={p.ro} select={select} />

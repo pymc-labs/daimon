@@ -4,12 +4,16 @@ resolution would override is refused, and every feature write can be listed back
 from __future__ import annotations
 
 import pytest
+from cryptography.fernet import Fernet
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.config import (
     AnthropicSettings,
+    ComputeSettings,
+    CryptoSettings,
     DatabaseSettings,
     DiscordSettings,
     GeminiSettings,
+    MicrosoftAccountsSettings,
     NotebookSettings,
     ReportHostSettings,
     Settings,
@@ -52,9 +56,24 @@ def _history_keys() -> list[str]:
 
 
 def _integrated_settings() -> Settings:
-    """`_settings()` with the notebook, report and Gemini setup, so those features are offered."""
-    return _settings().model_copy(
+    """`_settings()` with every integration set up, so those features are offered."""
+    base = _settings()
+    return base.model_copy(
         update={
+            "compute": ComputeSettings(
+                enabled=True,
+                deployment_id="d",
+                api_token=SecretStr("s"),
+                org_slug="o",
+                session_auth_key=SecretStr("s"),
+            ),
+            "microsoft_accounts": MicrosoftAccountsSettings(
+                client_id="app",
+                client_secret=SecretStr("s"),
+                tenant_id="11111111-1111-1111-1111-111111111111",
+            ),
+            "crypto": CryptoSettings(keys=(SecretStr(Fernet.generate_key().decode()),)),
+            "mcp": base.mcp.model_copy(update={"public_url": HttpUrl("https://mcp.example")}),
             "notebook": NotebookSettings(
                 host_url=HttpUrl("http://notebook-host:8001"), admin_secret=SecretStr("s")
             ),

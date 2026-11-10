@@ -238,13 +238,13 @@ export function accessFlags(
 
 export const SWITCH_VALUE: Record<SwitchMode, string> = { on: "On", off: "Off", disabled: "Disabled" }
 export const SWITCH_SOURCE: Record<ChannelSwitch["source"], string> = {
-  deployment: "Built-in default", workspace: "Workspace default", channel: "Set here", thread: "Set in a thread",
+  deployment: "Deployment default", workspace: "Workspace default", channel: "Set here", thread: "Set in a thread",
 }
 export type SwitchChoice = "inherit" | SwitchMode
 
 export const choiceOf = (s: Pick<ChannelSwitch, "own">): SwitchChoice => s.own ?? "inherit"
 
-/** The Settings group's names and value words, the same as in chat (`daimon.core.scope_settings.SPECS`). */
+/** The Settings group's names and value words, the same as in chat (`daimon.core.features.registry.FEATURES`). */
 export const SETTING_NAMES = {
   approvals: "Approvals", participation: "Thread participation", progress_plans: "Progress plans", cost_footer: "Cost footer",
 } as const
@@ -256,8 +256,8 @@ export const SWITCH_OPTIONS = (Object.keys(SWITCH_VALUE) as SwitchMode[]).map((v
 export const APPROVAL_OPTIONS = (Object.keys(APPROVAL_VALUE) as ApprovalMode[]).map((value) => ({ value, label: APPROVAL_VALUE[value] }))
 
 /** Where an inherited value comes from, as the default item reads it. */
-export const switchFrom = (s: ChannelSwitch) => (s.source === "deployment" ? "Built-in" : "Workspace") as "Built-in" | "Workspace"
-export const approvalsFrom = (a: ChannelApprovals) => (a.source === "server" ? "Workspace" : "Built-in") as "Built-in" | "Workspace"
+export const switchFrom = (s: ChannelSwitch) => (s.source === "deployment" ? "Deployment" : "Workspace") as "Deployment" | "Workspace"
+export const approvalsFrom = (a: ChannelApprovals) => (a.source === "workspace" ? "Workspace" : a.source === "deployment" ? "Deployment" : "Default") as "Deployment" | "Workspace" | "Default"
 
 /** What "not available" reads as for a switch: participation is on Discord and Teams only. */
 export const unavailableText = (what: "participation" | "progress_plans", platform: string) =>
@@ -332,7 +332,7 @@ export function toolRuleChange(
   return { agent: next.agent, tool: next.tool, rule: next.rule, scope: next.scope ?? prior?.scope, expected_revision: prior?.revision ?? 0 }
 }
 
-const DEFAULT_SOURCE = { workspace: "Workspace", deployment: "Built-in default" } as const
+const DEFAULT_SOURCE = { workspace: "Workspace", deployment: "Deployment default" } as const
 
 /** Where a workspace default comes from, shown apart from its value. */
 export const defaultSource = (s: { source: Sourced["source"] | ChannelSwitch["source"] }) =>

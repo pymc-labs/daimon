@@ -1,8 +1,7 @@
-import { render, screen, within } from "@testing-library/react"
+import { render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
-import { FeatureMatrix } from "./Matrix"
 import { FeatureSettings } from "./Settings"
 import type { FeatureSchema, FeatureView } from "./types"
 
@@ -37,7 +36,7 @@ describe("FeatureSettings", () => {
 
   it("draws a control for each key set at this level, from the schema", () => {
     render(<FeatureSettings place={{ channel: "c1" }} tier="channel" edit />)
-    expect(screen.getByRole("combobox", { name: "Progress plans" })).toHaveTextContent("Built-in default (On)")
+    expect(screen.getByRole("combobox", { name: "Progress plans" })).toHaveTextContent("Default (On)")
     expect(screen.queryByRole("combobox", { name: "Setup guidance" })).not.toBeInTheDocument()
   })
 
@@ -100,18 +99,5 @@ describe("FeatureSettings", () => {
     render(<FeatureSettings place={{ channel: "c1" }} tier="channel" edit />)
     expect(screen.queryByRole("combobox", { name: "Progress plans" })).not.toBeInTheDocument()
     expect(screen.getByText("Off, locked by the workspace")).toBeInTheDocument()
-  })
-})
-
-describe("FeatureMatrix", () => {
-  it("lists each feature against the levels an agent inherits from, and what wins", () => {
-    schemas = [schema("guidance", { name: "Setup guidance" })]
-    features = [view("guidance", {
-      value: "off", source: "agent",
-      tiers: [{ tier: "workspace", value: "on", locked: false, text: "on" }, { tier: "agent", value: "off", locked: false, text: "off" }],
-    })]
-    render(<FeatureMatrix agent="ag1" />)
-    const row = screen.getByRole("row", { name: /Setup guidance/ })
-    expect(within(row).getAllByRole("cell").map((c) => c.textContent)).toEqual(["Setup guidance", "-", "On", "Off", "Off"])
   })
 })

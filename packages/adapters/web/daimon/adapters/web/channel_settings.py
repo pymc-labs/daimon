@@ -59,11 +59,6 @@ from daimon.core.features.registry import DEFAULT, Tier
 from daimon.core.features.service import TierSetting, read_features
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.routine_service import RoutineCaller, RoutineRefused
-from daimon.core.scope_settings import (
-    LEVELS,
-    SettingsPlace,
-    read_settings,
-)
 from daimon.core.stores import agent_tool_rules as tool_rules
 from daimon.core.stores.channel_changes import WORKSPACE_ID
 from daimon.core.stores.channel_skills import list_channel_skills
@@ -80,7 +75,7 @@ ChannelAdmin = Annotated[WebCaller, Depends(requires("channels.manage"))]
 WorkspaceAdmin = Annotated[WebCaller, Depends(requires("workspace.manage"))]
 Mode = Literal["on", "off", "disabled"]
 ApprovalMode = Literal["on", "off"]
-Source = Literal["default", "server", "agent", "channel", "thread"]
+Source = Literal["default", "deployment", "workspace", "agent", "channel", "thread"]
 _SPEND_DAYS = 30
 _NO_WEB = "Web chat has no such setting."
 _NO_AGENT = "Pick an agent from this workspace."
@@ -317,25 +312,22 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
     async def approvals_json(
         caller: WebCaller, tenant_id: uuid.UUID, platform: str, channel_id: str | None
     ) -> ApprovalsJson:
-        place = SettingsPlace(platform, channel_id)
-        (view,) = await read_settings(
+        (view,) = await read_features(
             runtime.sessionmaker,
-            tenant_id=tenant_id,
-            place=place,
-            settings=settings,
+            settings,
+            FeaturePlace(tenant_id, platform, channel_id),
             keys=("approvals",),
         )
-        own = view.own("channel" if channel_id is not None else "server")
+        own = view.own("channel" if channel_id is not None else "workspace")
+        available = view.spec.on_platform(platform)
         linked = await native_user_id(caller, platform)
         return ApprovalsJson(
-            available=view.available,
-            own=None if own in (None, "inherit") else _approval(own),
-            value=_approval(view.effective),
-            source=view.decided_by if view.decided_by in LEVELS else "default",
-            active=view.active,
-            editable=view.available
-            and "channels.manage" in caller.capabilities
-            and linked is not None,
+            available=available,
+            own=None if own is None or own.value == DEFAULT else _approval(own.value),
+            value=_approval(view.resolved.value),
+            source=view.resolved.tier,
+            active=settings.tool_safety.gate_overrides_active,
+            editable=available and "channels.manage" in caller.capabilities and linked is not None,
         )
 
     async def member_routines(
@@ -690,11 +682,10 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
         participation = await switch_json("participation", tenant_id, platform, None)
         plans = await switch_json("progress_plans", tenant_id, platform, None)
         approvals = await approvals_json(caller, tenant_id, platform, None)
-        (footer,) = await read_settings(
+        (footer,) = await read_features(
             runtime.sessionmaker,
-            tenant_id=tenant_id,
-            place=SettingsPlace(platform, None),
-            settings=settings,
+            settings,
+            FeaturePlace(tenant_id, platform),
             keys=("cost_footer",),
         )
         return DefaultsJson(
@@ -709,7 +700,7 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
             progress_plans=plans,
             approvals=approvals,
             cost_footer=CostFooterJson(
-                shown=footer.effective == "shown",
+                shown=footer.resolved.value == "shown",
                 editable="workspace.manage" in caller.capabilities,
             ),
         )

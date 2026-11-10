@@ -116,7 +116,7 @@ does not hide what others wrote to the shared store.
 
 - A channel or thread with limited readers, unless the agent is that channel's
   own.
-- A DM, when the tenant sets `dm_memory_read_only`.
+- A DM, when the workspace turns on `dm_memory_read_only`.
 - A routine run, except an owner-DM routine, which follows the DM rule.
 
 Tightening access replaces an idle writable session. An active session refuses

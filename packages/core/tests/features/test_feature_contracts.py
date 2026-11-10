@@ -67,6 +67,41 @@ def test_every_feature_is_well_formed(spec: FeatureSpec) -> None:
     assert not spec.legacy_env or "deployment" in tiers
 
 
+_PRE_AGENT = "read before the turn's agent is chosen, so it stops at the channel"
+_NARROWED: dict[str, str] = {
+    "approvals": "set in the access policy; only a live native platform admin changes it",
+    "guidance": "provision: applied when an agent is saved or synced, with no channel or thread",
+    "participation": _PRE_AGENT,
+    "thread_naming": "read when a thread opens, before an agent or thread exists",
+    "plain_text_mentions": _PRE_AGENT,
+    "unmentioned_reply_hint": _PRE_AGENT,
+    "writers_none_notice": _PRE_AGENT,
+    "budget_notices": "read when a turn is refused for budget, before an agent or thread resolves",
+    "waiting_card": "read before the turn's place resolves, so workspace only",
+    "cost_footer": "read by the finished-turn footer, which has no deployment settings or agent",
+    "support_escalation": "the escalation button re-checks at the workspace when pressed",
+    "private_channel_messages": "operator-only: read once at startup",
+    "direct_messages": "a workspace policy for DMs, which have no agent or thread to choose",
+    "dm_memory_read_only": "a workspace policy for DMs, which have no agent or thread to choose",
+    "artifact_images": "read by the artifact tool at the workspace",
+    "tool_safety": "operator-only security switch",
+    "unattended_capabilities": "read for unattended runs, which have no channel or thread",
+    "require_routine_destination": "read when a routine is created, at the workspace",
+    "long_jobs_max_usd": "checked when a job starts, from its workspace and agent",
+    "long_jobs_max_deadline": "checked when a job starts, from its workspace and agent",
+    "daily_model_cap": "counts the team's spend, so a workspace or agent limit",
+    **{f"web.{module}": "workspace-only web app surface" for module in WEB_MODULES},
+}
+
+
+def test_every_feature_has_all_five_tiers_unless_narrowed_for_a_reason() -> None:
+    narrowed = {key for key, spec in FEATURES.items() if spec.tiers != TIERS}
+    assert narrowed == set(_NARROWED), (
+        f"narrowed without a reason: {sorted(narrowed - set(_NARROWED))}; "
+        f"listed but at every tier: {sorted(set(_NARROWED) - narrowed)}"
+    )
+
+
 def test_most_specific_wins_and_says_which_tier_decided() -> None:
     plans = FEATURES["progress_plans"]
     got = resolve_feature(plans, [TierValue("workspace", "on"), TierValue("thread", "off")])
