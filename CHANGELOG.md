@@ -12,6 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on, a self-hosted model that isn't enabled, a shared thread that needs an
   admin, a price window that ended, or a switch to review or confirm again.
   Setup panels and switch cards no longer show an internal label as the reason.
+- **Connector sign-ins on OpenAI, Gemini and self-hosted agents are kept and
+  refreshed by Daimon.** Signing in to an OAuth MCP server from one of these
+  agents stores the token for that person and that server only. Daimon renews it
+  before it expires, with one renewal at a time, never with more access than was
+  granted. Token, renewal and discovery requests go only to the server's public
+  address and never follow a redirect. Anthropic Managed Agents keep their vault
+  as before. After an agent changes backend, people sign in to its connectors
+  once more.
 - **Agents on OpenAI, Gemini or a self-hosted harness answer in shared and external channels.**
   A turn held to a Slack Connect or other shared channel used to be refused on
   these backends. It now runs with the same limits as on Anthropic: it sees only
