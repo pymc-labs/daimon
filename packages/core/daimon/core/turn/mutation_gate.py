@@ -19,3 +19,10 @@ async def recheck_retry() -> None:
         await check()
     if (gate := unattended_gate.get()) is not None:
         await gate()
+
+
+#: Text the initial send puts first, built once inside the turn's lease
+#: (`daimon.core.host_calls.confirmed_call_prefix`).
+initial_send_prefix: ContextVar[Callable[[], Awaitable[str]] | None] = ContextVar(
+    "turn_initial_send_prefix", default=None
+)

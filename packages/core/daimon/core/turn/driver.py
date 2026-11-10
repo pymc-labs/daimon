@@ -98,6 +98,7 @@ from daimon.core.turn.io import (
 from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle, acknowledge, stop_rendering
 from daimon.core.turn.mutation_gate import (
     initial_send_check,
+    initial_send_prefix,
     unattended_execution,
     unattended_gate,
 )
@@ -913,12 +914,10 @@ async def run_turn(
         context_prefix = context_input.response.turn_fragment
         if provider_system and not privileged:
             context_prefix = provider_system + "\n\n" + context_prefix
+        text = f"{context_prefix}\n\n{user_message}" if context_prefix else user_message
         content: list[BetaManagedAgentsImageBlockParam | BetaManagedAgentsTextBlockParam] = [
             *(image_blocks or []),
-            BetaManagedAgentsTextBlockParam(
-                type="text",
-                text=f"{context_prefix}\n\n{user_message}" if context_prefix else user_message,
-            ),
+            BetaManagedAgentsTextBlockParam(type="text", text=text),
         ]
         event: BetaManagedAgentsUserMessageEventParams = {
             "type": "user.message",
@@ -943,6 +942,13 @@ async def run_turn(
                 await before_send()
             if (gate := unattended_gate.get()) is not None:
                 await gate()
+            if (prefix_hook := initial_send_prefix.get()) is not None and (
+                prefix := await prefix_hook()
+            ):
+                # Confirmed calls run here: after the last checks, inside the lease.
+                content[-1] = BetaManagedAgentsTextBlockParam(
+                    type="text", text=f"{prefix}\n\n{text}"
+                )
             mark = SEND_ATTEMPTED.get()
             if mark is not None:
                 mark.append(True)  # from here the message may have been delivered

@@ -21,6 +21,8 @@ HostCallStatus = Literal[
     "pending", "approved", "executing", "applied", "failed", "denied", "cancelled", "expired"
 ]
 
+Finished = Literal["applied", "failed"]
+
 # Open asks one origin may hold. Denied cards count too, so a model that keeps asking
 # after a No can't flood the thread with cards.
 MAX_OPEN_PER_ORIGIN = 5
@@ -178,6 +180,7 @@ async def claim(
     card_id: uuid.UUID,
     to: Literal["approved", "denied"],
     now: datetime,
+    outcome: str | None = None,
 ) -> HostCallCardRow | None:
     """Answer a pending, unexpired card once; None when another press or time won."""
     record = await session.scalar(
@@ -188,7 +191,7 @@ async def claim(
             HostCallCard.status == "pending",
             HostCallCard.expires_at > now,
         )
-        .values(status=to)
+        .values(status=to, outcome=outcome)
         .returning(HostCallCard)
     )
     return _row(record) if record is not None else None
@@ -263,7 +266,7 @@ async def finish(
     session: AsyncSession,
     *,
     card_id: uuid.UUID,
-    status: Literal["applied", "failed"],
+    status: Finished,
     outcome: str,
 ) -> None:
     await session.execute(
@@ -284,7 +287,9 @@ async def fail_approved(session: AsyncSession, *, card_id: uuid.UUID, outcome: s
     return failed is not None
 
 
-async def sweep(session: AsyncSession, *, now: datetime, executing_before: datetime) -> int:
+async def sweep(
+    session: AsyncSession, *, now: datetime, executing_before: datetime, crashed_outcome: str
+) -> int:
     """Expire unanswered cards and fail calls a crashed worker left executing.
 
     A stuck `executing` row may or may not have run, so it is failed, never retried.
@@ -298,7 +303,7 @@ async def sweep(session: AsyncSession, *, now: datetime, executing_before: datet
     stuck = await session.execute(
         update(HostCallCard)
         .where(HostCallCard.status == "executing", HostCallCard.executing_at <= executing_before)
-        .values(status="failed", outcome="crashed")
+        .values(status="failed", outcome=crashed_outcome)
         .returning(HostCallCard.id)
     )
     return len(expired.all()) + len(stuck.all())

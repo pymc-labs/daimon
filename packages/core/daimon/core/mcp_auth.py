@@ -477,6 +477,10 @@ async def mint_agent_mcp_token(
     )
 
 
+#: Mirrors `host_calls.CONFIRMED_CALL_TTL_S`; the verifier's own bound.
+CONFIRMED_CALL_MAX_TTL_S = 120
+
+
 def registered_agent_claims_match(
     row: McpTokenRow,
     claims: Mapping[str, object],
@@ -497,6 +501,15 @@ def registered_agent_claims_match(
     expected = {"sub", identity_claim, "jti", "exp"}
     if allow_session_grant and chat_execution and isinstance(claims.get("chat_session_id"), str):
         expected.add("chat_session_id")
+        if isinstance(claims.get("requester_account_id"), str):
+            expected.add("requester_account_id")
+        # A press-approved call's one-shot credential (`daimon.core.host_calls`): a
+        # provider turn's only, and never longer-lived than one call.
+        if isinstance(claims.get("confirmed_call"), str):
+            if row.surface != "provider_turn":
+                return False
+            expected.add("confirmed_call")
+            max_ttl_s = min(max_ttl_s, CONFIRMED_CALL_MAX_TTL_S)
     return (
         0 < max_ttl_s <= 900
         and set(claims) == expected
