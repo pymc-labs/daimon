@@ -7,7 +7,8 @@ from typing import Final
 
 from anthropic import APIStatusError, AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
+from daimon.core.defaults.builtin_agent import route_builtin_agent
+from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import (
     BUILTIN_AGENT_NAME,
     LEGACY_AGENT_RENAMES,
@@ -119,14 +120,12 @@ async def resolve_setup_agents(
     tenant_id: uuid.UUID,
     target_ma_agent_id: str | None = None,
 ) -> tuple[BetaManagedAgentsAgent, BetaManagedAgentsAgent | None]:
-    responders = [
-        agent
-        for agent in await find_agents_by_daimon_tag(
-            anthropic, tenant_id=tenant_id, name=BUILTIN_AGENT_NAME
-        )
-        if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    ]
-    if len(responders) != 1:
+    responders = route_builtin_agent(
+        await list_agents_by_tenant(anthropic, tenant_id=tenant_id),
+        tenant_id=tenant_id,
+        surface="setup_conversation",
+    )
+    if responders is None or len(responders) != 1:
         raise UserFacingError(
             "The built-in Daimon is unavailable. Ask the operator to restore it, then retry setup."
         )

@@ -25,12 +25,14 @@ from anthropic import APIStatusError, AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from anthropic.types.beta.skill_list_response import SkillListResponse
 from cachetools import TTLCache
+from daimon.core.defaults.builtin_agent import route_builtin_agent
 from daimon.core.defaults.ma_index import (
     list_agents_by_tenant,
     list_environments_by_tenant,
     list_skills_lenient,
 )
 from daimon.core.defaults.metadata import (
+    BUILTIN_AGENT_NAME,
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
@@ -330,8 +332,9 @@ async def _is_live_environment(client: AsyncAnthropic, env_id: str, tenant_id: u
 
 
 async def _list_tag_ids(client: AsyncAnthropic, tenant_id: uuid.UUID, kind: Kind) -> dict[str, str]:
+    agents: list[BetaManagedAgentsAgent] | None = None
     if kind == "agent":
-        resources = await list_agents_by_tenant(client, tenant_id=tenant_id)
+        resources = agents = await list_agents_by_tenant(client, tenant_id=tenant_id)
     else:
         resources = await list_environments_by_tenant(client, tenant_id=tenant_id)
     canonical: dict[str, tuple[str, object, str | None]] = {}
@@ -362,7 +365,21 @@ async def _list_tag_ids(client: AsyncAnthropic, tenant_id: uuid.UUID, kind: Kind
                 adopted_account=adopted_account,
                 duplicate_accounts=accounts,
             )
-    return {name: resource_id for name, (resource_id, _, _) in canonical.items()}
+    found = {name: resource_id for name, (resource_id, _, _) in canonical.items()}
+    if agents is not None:
+        _route_builtin(found, agents, tenant_id)
+    return found
+
+
+def _route_builtin(
+    found: dict[str, str], agents: list[BetaManagedAgentsAgent], tenant_id: uuid.UUID
+) -> None:
+    """Point the built-in name at the seeded agent, never at a workspace's own."""
+    seeded = route_builtin_agent(agents, tenant_id=tenant_id, surface="ma_resolver")
+    if seeded is None:
+        found.pop(BUILTIN_AGENT_NAME, None)
+    elif seeded:
+        found[BUILTIN_AGENT_NAME] = seeded[0].id
 
 
 async def _lookup_tags(

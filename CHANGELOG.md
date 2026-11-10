@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   On upgrade, `daimon defaults apply` renames the existing agent in place on each workspace, so its sessions, threads, routines, channel and workspace defaults, tool rules and access-policy rules keep working. Audit and history records keep the old name.
   A self-hosted `daimon` agent record is renamed the same way.
   If a workspace already has its own agent named `default`, apply leaves the built-in agent untouched, reports that workspace as failed and says what to do: rename or archive that agent, then run apply again.
+  Until then, requests for `default` still reach the built-in agent, never the workspace's own.
   Agent copies such as `daimon-copy` keep their names. Skills synced to the built-in agent before the rename keep their `daimon/` title prefix.
   `daimon selfhosted init --name` defaults to `default`.
 - **Claude Fable 5.2 can be picked as an agent's model.**
