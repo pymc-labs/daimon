@@ -35,7 +35,7 @@ from mux.drivers.gemini.flash import (
     FlashAttempt,
     FlashTransport,
 )
-from mux.drivers.gemini.mcp_auth import GCSSecretResolver, MCPSecretResolver
+from mux.drivers.gemini.mcp_auth import GCSSecretResolver, MCPSecretResolver, native_server_name
 from mux.drivers.gemini.resources import GeminiArtifacts, GeminiSkills
 from mux.drivers.gemini.skill_deployment import (
     GCSBundleDeployment,
@@ -193,5 +193,6 @@ __all__ = [
     "configured_catalog_transport",
     "configured_transport",
     "downscoped_storage_token",
+    "native_server_name",
     "verify_retained_deployments",
 ]

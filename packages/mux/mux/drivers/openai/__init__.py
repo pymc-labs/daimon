@@ -15,7 +15,7 @@ from mux.drivers.openai.artifacts import OpenAIArtifacts
 from mux.drivers.openai.completions import OpenAICompletions
 from mux.drivers.openai.deployment import configured_transport
 from mux.drivers.openai.environments import OpenAIEnvironments
-from mux.drivers.openai.mcp_auth import MCPSecretResolver
+from mux.drivers.openai.mcp_auth import MCPSecretResolver, fits_shared_credential
 from mux.drivers.openai.normalize import SCHEMA_DATE
 from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.sessions import BindingLookup, OpenAISessions
@@ -145,6 +145,7 @@ __all__ = [
     "UsageRevisions",
     "bundle_digest",
     "configured_transport",
+    "fits_shared_credential",
     "merge_history",
     "object_json",
 ]

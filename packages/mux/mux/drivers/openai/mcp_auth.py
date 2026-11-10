@@ -16,6 +16,8 @@ from mux.drivers.openai._common import Context, objects, text
 from mux.drivers.openai.transport import Object, object_json
 
 KEY = "mux_mcp_credential_refs"
+#: OpenAI caps each agent metadata value at 512 characters.
+METADATA_LIMIT = 512
 _CONNECTIONS = TypeAdapter(tuple[MCPConnection, ...])
 _REF = re.compile(r"[A-Za-z0-9_.:/-]{1,128}\Z")
 # The host must authorize both the secret reference and exact destination.
@@ -89,7 +91,7 @@ def encode(connections: Sequence[MCPConnection], context: Context) -> Object:
         value = json.dumps([authenticated[0].model_dump(mode="json")], separators=(",", ":"))
     else:
         value = _shared_intent(authenticated, context)
-    if len(value) > 512:
+    if len(value) > METADATA_LIMIT:
         raise context.unsupported("mcp_credential_metadata_size")
     return {KEY: value}
 
@@ -111,8 +113,22 @@ def _digest(connections: Sequence[MCPConnection]) -> str:
 
 
 def _shared_intent(connections: Sequence[MCPConnection], context: Context) -> str:
+    value = shared_intent(connections)
+    if value is None:
+        raise context.unsupported("single_bound_mcp_server")
+    return value
+
+
+def fits_shared_credential(connections: Sequence[MCPConnection]) -> bool:
+    """`connections` bind as one shared credential within OpenAI's metadata room."""
+    value = shared_intent(connections)
+    return value is not None and len(value) <= METADATA_LIMIT
+
+
+def shared_intent(connections: Sequence[MCPConnection]) -> str | None:
     """Several servers on one credential, all under the first one's URL (a host's own
-    routes), in a form that fits OpenAI's 512-character metadata value.
+    routes), in a form that fits OpenAI's 512-character metadata value; None if they
+    don't share one. A host checks `fits_shared_credential` before it builds a request.
 
     The digest binds every name, URL and tool policy; decoding rebuilds them from
     the native tools and must reproduce it.
@@ -126,7 +142,7 @@ def _shared_intent(connections: Sequence[MCPConnection], context: Context) -> st
         or c.transport != first.transport
         for c in connections
     ):
-        raise context.unsupported("single_bound_mcp_server")
+        return None
     servers = [[c.name, c.url.removeprefix(base)] for c in connections]
     shared = {"ref": reference, "url": base, "servers": servers, "digest": _digest(connections)}
     return json.dumps(shared, separators=(",", ":"))
@@ -217,7 +233,7 @@ def decode(raw: Object, context: Context) -> tuple[MCPConnection, ...]:
     if KEY not in metadata:
         return ()
     value = text(metadata[KEY])
-    if len(value) > 512:
+    if len(value) > METADATA_LIMIT:
         raise ValueError("oversized MCP credential intent")
     if value.startswith("{"):
         connections = _decode_shared(value, tools)
