@@ -120,7 +120,7 @@ class AuthoredDefault(BaseModel):
 @pytest.fixture
 def defaults() -> dict[str, SkillUpload]:
     authored = AuthoredDefault.model_validate(
-        yaml.safe_load((ROOT / "defaults/agents/daimon.yaml").read_text())
+        yaml.safe_load((ROOT / "defaults/agents/default.yaml").read_text())
     )
     return {
         skill.skill_id: SkillUpload(

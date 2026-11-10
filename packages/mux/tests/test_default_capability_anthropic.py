@@ -69,7 +69,7 @@ ENVIRONMENT = ResourceRef(
 
 
 def manifest() -> DefaultManifest:
-    authored = yaml.safe_load((ROOT / "defaults/agents/daimon.yaml").read_text())
+    authored = yaml.safe_load((ROOT / "defaults/agents/default.yaml").read_text())
     uploads = []
     for ref in authored["skills"]:
         if ref["type"] != "custom" or "platforms" in ref:
