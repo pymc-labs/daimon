@@ -14,8 +14,7 @@ it again and redoes both; every step is idempotent.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection, Mapping
-from types import MappingProxyType
+from collections.abc import Collection
 from typing import Final
 
 import structlog
@@ -23,7 +22,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.defaults.metadata import (
-    BUILTIN_AGENT_NAME,
+    LEGACY_AGENT_RENAMES,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_READER_SOURCE,
@@ -39,12 +38,23 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
 
-LEGACY_AGENT_RENAMES: Final[Mapping[str, str]] = MappingProxyType({"daimon": BUILTIN_AGENT_NAME})
 _READER_SUFFIX: Final = "-reader"
 
 
 class AgentRenameBlocked(DefaultsError):
     """The tenant already has its own agent under the new seeded name."""
+
+    def __init__(self, *, old: str, new: str) -> None:
+        super().__init__(
+            f"This workspace already has its own agent named {new!r}, so the built-in "
+            f"{old!r} cannot take that name. Rename or archive that agent, then run "
+            "`daimon defaults apply` again."
+        )
+
+
+def _only_unmanaged(agents: Collection[BetaManagedAgentsAgent]) -> bool:
+    """Whether only a workspace's own agents hold this name, never the seeded one."""
+    return bool(agents) and not any(_managed(agent) for agent in agents)
 
 
 def pending_renames(present_names: Collection[str]) -> list[tuple[str, str]]:
@@ -130,20 +140,14 @@ async def rename_seeded_agent(
 ) -> ResourceOutcome | None:
     """Rename the tenant's seeded `old` to `new`; None when there is nothing to do.
 
-    Raises `AgentRenameBlocked` when the tenant has its own unmanaged `new`:
-    the seeded agent stays as it is and the caller skips the agent pass.
+    Raises `AgentRenameBlocked` when the tenant's own unmanaged agent or
+    self-hosted record holds `new`, with or without a seeded `old`: nothing is
+    renamed and the caller skips the agent pass, so that agent is never adopted.
     """
     olds = await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=old)
     legacy = [agent for agent in olds if _managed(agent)]
-    if legacy and any(
-        not _managed(agent)
-        for agent in await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=new)
-    ):
-        raise AgentRenameBlocked(
-            f"This workspace already has its own agent named {new!r}, so the built-in "
-            f"{old!r} cannot take that name. Rename or archive that agent, then run "
-            "`daimon defaults apply` again."
-        )
+    if _only_unmanaged(await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=new)):
+        raise AgentRenameBlocked(old=old, new=new)
     readers = await _legacy_readers(
         client, tenant_id=tenant_id, old=old, new=new, old_agent_live=len(olds) > len(legacy)
     )
@@ -158,7 +162,7 @@ async def rename_seeded_agent(
         )
         selfhosted = await rename_selfhosted_agent(session, tenant_id=tenant_id, old=old, new=new)
         if selfhosted == "taken":
-            _log.warning("defaults.rename_selfhosted_taken", tenant_id=str(tenant_id), name=new)
+            raise AgentRenameBlocked(old=old, new=new)
         if legacy or selfhosted == "renamed":
             await rename_agent_references(session, tenant_id=tenant_id, old=old, new=new)
     for agent in (*legacy, *readers):

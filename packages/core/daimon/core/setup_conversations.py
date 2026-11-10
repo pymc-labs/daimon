@@ -10,11 +10,11 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.defaults.metadata import (
     BUILTIN_AGENT_NAME,
+    LEGACY_AGENT_RENAMES,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
 )
-from daimon.core.defaults.rename_agents import LEGACY_AGENT_RENAMES
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent

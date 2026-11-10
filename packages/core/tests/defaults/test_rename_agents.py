@@ -16,6 +16,8 @@ from daimon.core.defaults.metadata import (
 from daimon.core.defaults.report import Action, ApplyReport
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.agent_avatars import get_or_create_avatar
+from daimon.core.stores.selfhosted_resources import SelfHostedAgents
+from daimon.testing.factories import make_account, make_routine, make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
@@ -25,6 +27,8 @@ from mux.testing.drivers.anthropic.ma import (
 )
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..stores.test_selfhosted_resources import agent_spec, scope
 
 _TENANT = derive_tenant_uuid(platform="cli", workspace_id="local")
 _MANAGED = {MA_METADATA_KEY_MANAGED: "true"}
@@ -46,6 +50,23 @@ def _seed(state: FakeMAState, *agents: object) -> None:
 
 def _legacy_daimon() -> object:
     return ma_agent(id="ag_daimon", name="daimon", tenant_id=_TENANT, metadata=_MANAGED)
+
+
+async def _selfhosted(
+    session: AsyncSession, factory: async_sessionmaker[AsyncSession], *names: str
+) -> None:
+    """The cli tenant with a routine on `daimon` and live self-hosted records `names`."""
+    tenant = await make_tenant(session, platform="cli", workspace_id="local")
+    account = await make_account(session, tenant=tenant)
+    await make_routine(session, tenant=tenant, agent_name="daimon")
+    await session.commit()
+    agents = SelfHostedAgents(factory)
+    for name in names:
+        await agents.create(scope(str(_TENANT), str(account.id)), agent_spec(name), key=name)
+
+
+async def _names(session: AsyncSession, sql: str) -> list[str]:
+    return list((await session.execute(text(sql), {"t": _TENANT})).scalars())
 
 
 def _live(state: FakeMAState) -> dict[str, dict[str, object]]:
@@ -197,3 +218,57 @@ async def test_apply_when_reader_source_is_not_seeded_then_reader_stays(
         )
     else:
         assert {"default", "default-reader"} == set(live), "the seeded agent's reader follows it"
+
+
+async def test_apply_when_only_own_default_exists_then_fails_without_adopting_it(
+    tmp_path: Path, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    own = ma_agent(id="ag_own", name="default", tenant_id=_TENANT)
+    state = FakeMAState()
+    _seed(state, own)
+
+    report = await _apply(db_session_factory, state, _tree(tmp_path), dry_run=False)
+
+    assert report.is_failure(), "a workspace's own default blocks the seeded agent"
+    live = _live(state)
+    assert list(live) == ["default"], f"nothing is created or archived: {live}"
+    metadata = live["default"]["metadata"]
+    assert isinstance(metadata, dict)
+    assert MA_METADATA_KEY_MANAGED not in metadata, "the workspace's agent is never stamped managed"
+
+
+async def test_apply_when_seeded_and_own_default_exist_then_keeps_both(
+    tmp_path: Path, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    seeded = ma_agent(id="ag_seeded", name="default", tenant_id=_TENANT, metadata=_MANAGED)
+    own = ma_agent(id="ag_own", name="default", tenant_id=_TENANT)
+    state = FakeMAState()
+    _seed(state, seeded, own)
+
+    report = await _apply(db_session_factory, state, _tree(tmp_path), dry_run=False)
+
+    assert not report.is_failure(), f"the seeded agent is reconciled: {report}"
+    live = sorted(str(a["id"]) for a in state.agents.values() if not a.get("archived_at"))
+    assert live == ["ag_own", "ag_seeded"], "the workspace's agent is neither adopted nor archived"
+
+
+async def test_apply_when_selfhosted_default_taken_then_fails_and_moves_nothing(
+    tmp_path: Path,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _selfhosted(db_session, db_session_factory, "daimon", "default")
+    state = FakeMAState()
+    _seed(state, _legacy_daimon())
+
+    report = await _apply(db_session_factory, state, _tree(tmp_path), dry_run=False)
+
+    assert report.is_failure(), "a taken self-hosted name blocks the rename"
+    assert list(_live(state)) == ["daimon"], "the seeded agent keeps its name on the provider"
+    routines = await _names(db_session, "SELECT agent_name FROM routines WHERE tenant_id = :t")
+    assert routines == ["daimon"], "database references are unchanged"
+    records = await _names(
+        db_session,
+        "SELECT name FROM selfhosted_agents WHERE tenant_id = :t AND archived_at IS NULL ORDER BY 1",
+    )
+    assert records == ["daimon", "default"], "both self-hosted records keep their names"

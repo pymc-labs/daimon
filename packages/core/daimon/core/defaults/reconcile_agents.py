@@ -25,7 +25,9 @@ from daimon.core.defaults.mcp_merge import (
     merge_default_mcp_toolset,
 )
 from daimon.core.defaults.metadata import (
+    BUILTIN_AGENT_NAME,
     MA_METADATA_KEY_ACCOUNT,
+    MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_SPEC_HASH,
     build_metadata,
     compute_spec_fingerprint,
@@ -44,6 +46,7 @@ from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent, create_agent, update_agent
 from daimon.core.specs import AgentSpec, dump_agent_spec
+from daimon.core.stores.agent_avatars import normalize_agent_name
 
 _log = structlog.get_logger(__name__)
 
@@ -124,6 +127,15 @@ async def reconcile_agent(
     ma_match = matches[0] if matches else None
     if create_only and ma_match is not None:
         raise AgentNameTaken(spec.name)
+    if managed and ma_match is not None and normalize_agent_name(spec.name) == BUILTIN_AGENT_NAME:
+        # Never adopt (and re-stamp as managed) a workspace's own agent that
+        # holds the built-in's name: prefer the seeded one, else refuse.
+        seeded = [m for m in matches if m.metadata.get(MA_METADATA_KEY_MANAGED) == "true"]
+        if not seeded:
+            raise AgentNameTaken(spec.name)
+        if len(seeded) < len(matches):
+            _log.warning("reconcile.unmanaged_builtin_skipped", tenant_id=str(tenant_id))
+        matches, ma_match = seeded, seeded[0]
     # Dedup: when MA holds multiple agents with the same daimon_name (the
     # multi_match condition), keep the canonical one (max
     # created_at, returned first by find_agents_by_daimon_tag) and archive
