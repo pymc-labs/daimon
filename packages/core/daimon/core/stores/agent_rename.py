@@ -86,7 +86,7 @@ async def rename_agent_references(
         other = table.alias("taken")
         taken = exists().where(
             and_(*(other.c[key] == table.c[key] for key in key_columns)),
-            other.c[column_name] == new,
+            _matches(other.c[column_name], new),
         )
         await session.execute(
             update(table)
@@ -119,11 +119,11 @@ async def _rename_policy_keys(
     if policy is None:
         return
     renamed = dict(policy)
+    legacy, current = normalize_agent_name(old), normalize_agent_name(new)
     for key in _POLICY_NAME_KEYS:
         rules = cast("dict[str, object] | None", renamed.get(key))
-        if not rules or new in rules:
+        if not rules or any(normalize_agent_name(name) == current for name in rules):
             continue
-        legacy = normalize_agent_name(old)
         renamed[key] = {
             (new if normalize_agent_name(name) == legacy else name): rule
             for name, rule in rules.items()

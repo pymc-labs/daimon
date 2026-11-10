@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from daimon.core._models import TenantAccessPolicyRecord
 from daimon.core.stores.agent_avatars import get_or_create_avatar
@@ -51,25 +53,81 @@ async def test_rename_references_when_new_avatar_exists_then_keeps_both_rows(
     assert list(rows) == ["daimon", "default"], "the row already under the new name wins"
 
 
+async def test_rename_references_when_skill_exists_under_new_name_in_other_case_then_keeps_both(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    principal = uuid.uuid4()
+    for agent_name in ("daimon", "Default"):
+        await db_session.execute(
+            text(
+                "INSERT INTO user_skills (tenant_id, principal_id, agent_name, name,"
+                " source_repo_url, content_hash) VALUES (:t, :p, :a, 'notes', 'repo', 'h')"
+            ),
+            {"t": tenant.id, "p": principal, "a": agent_name},
+        )
+
+    await rename_agent_references(db_session, tenant_id=tenant.id, old="daimon", new="default")
+
+    rows = (
+        await db_session.execute(
+            text("SELECT agent_name FROM user_skills WHERE tenant_id = :t ORDER BY 1"),
+            {"t": tenant.id},
+        )
+    ).scalars()
+    assert list(rows) == ["Default", "daimon"], "a case variant of the new name counts as taken"
+
+
+async def test_rename_references_when_user_config_names_agent_then_moves_it(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    other = await make_tenant(db_session, workspace_id="guild-other")
+    mine = await make_account(db_session, tenant=tenant)
+    theirs = await make_account(db_session, tenant=other)
+    for account in (mine, theirs):
+        await db_session.execute(
+            text("INSERT INTO user_config (account_id, agent_name) VALUES (:a, 'Daimon')"),
+            {"a": account.id},
+        )
+
+    await rename_agent_references(db_session, tenant_id=tenant.id, old="daimon", new="default")
+
+    names = dict(
+        (await db_session.execute(text("SELECT account_id, agent_name FROM user_config")))
+        .tuples()
+        .all()
+    )
+    assert names[mine.id] == "default", "the tenant's own choice follows the rename"
+    assert names[theirs.id] == "Daimon", "another tenant's choice is untouched"
+
+
 @pytest.mark.parametrize(
-    ("rules", "expected"),
+    ("key", "rules", "expected"),
     [
-        ({"Daimon": {"runs_in": ["c1"]}}, {"default": {"runs_in": ["c1"]}}),
+        ("agent_rules", {"Daimon": {"runs_in": ["c1"]}}, {"default": {"runs_in": ["c1"]}}),
         (
+            "agent_rules",
             {"daimon": {"runs_in": ["c1"]}, "default": {"runs_in": ["c2"]}},
             {"daimon": {"runs_in": ["c1"]}, "default": {"runs_in": ["c2"]}},
         ),
+        (
+            "agent_rules",
+            {"daimon": {"runs_in": ["c1"]}, "Default": {"runs_in": ["c2"]}},
+            {"daimon": {"runs_in": ["c1"]}, "Default": {"runs_in": ["c2"]}},
+        ),
+        ("agent_channel_pins", {"daimon": ["c1"]}, {"default": ["c1"]}),
     ],
-    ids=["moved", "new-exists"],
+    ids=["moved", "new-exists", "new-exists-other-case", "pins-moved"],
 )
 async def test_rename_references_when_policy_names_agent_then_moves_rule_unless_taken(
-    rules: dict[str, object], expected: dict[str, object], db_session: AsyncSession
+    key: str, rules: dict[str, object], expected: dict[str, object], db_session: AsyncSession
 ) -> None:
     tenant = await make_tenant(db_session)
     db_session.add(
         TenantAccessPolicyRecord(
             tenant_id=tenant.id,
-            policy={"agent_rules": rules, "channel_rules": {"c1": {}}},
+            policy={key: rules, "channel_rules": {"c1": {}}},
         )
     )
     await db_session.flush()
@@ -82,7 +140,7 @@ async def test_rename_references_when_policy_names_agent_then_moves_rule_unless_
         .execution_options(populate_existing=True)
     )
     assert policy is not None, "the policy row stays"
-    assert policy["agent_rules"] == expected, f"agent rules after the rename: {policy}"
+    assert policy[key] == expected, f"{key} after the rename: {policy}"
     assert policy["channel_rules"] == {"c1": {}}, "other policy keys are untouched"
 
 
