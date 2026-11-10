@@ -9,10 +9,12 @@ from anthropic import APIStatusError, AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.defaults.metadata import (
+    BUILTIN_AGENT_NAME,
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
 )
+from daimon.core.defaults.rename_agents import LEGACY_AGENT_RENAMES
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
@@ -32,6 +34,9 @@ EMPTY_ROSTER_COPY: Final = "No agent answers here yet. Use Set up agents to add 
 # Discord rejects a thread name longer than 100 characters outright, so the
 # name is truncated rather than left to fail at thread creation.
 _MAX_SETUP_THREAD_NAME_CHARS: Final = 100
+
+# A setup thread opened before the built-in agent's rename keeps its responder.
+_RESPONDER_NAMES = frozenset({BUILTIN_AGENT_NAME, *LEGACY_AGENT_RENAMES})
 
 
 def setup_thread_name(target_name: str | None) -> str:
@@ -99,7 +104,7 @@ async def get_setup_responder(
         ) from error
     if (
         responder.metadata.get(MA_METADATA_KEY_MANAGED) != "true"
-        or responder.metadata.get(MA_METADATA_KEY_NAME) != "daimon"
+        or responder.metadata.get(MA_METADATA_KEY_NAME) not in _RESPONDER_NAMES
     ):
         raise UserFacingError(
             "This conversation's agent is no longer the built-in Daimon. "
@@ -116,7 +121,9 @@ async def resolve_setup_agents(
 ) -> tuple[BetaManagedAgentsAgent, BetaManagedAgentsAgent | None]:
     responders = [
         agent
-        for agent in await find_agents_by_daimon_tag(anthropic, tenant_id=tenant_id, name="daimon")
+        for agent in await find_agents_by_daimon_tag(
+            anthropic, tenant_id=tenant_id, name=BUILTIN_AGENT_NAME
+        )
         if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
     ]
     if len(responders) != 1:
