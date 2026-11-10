@@ -48,8 +48,15 @@ def test_daimon_tools_lift_minimal_turn_controls_to_origin() -> None:
 
 
 def test_toolset_defaults_change_nothing() -> None:
-    """With nothing set the session keeps the agent's own tools."""
-    assert not SessionToolset.of(_snapshot(), {}).changes, "defaults must not change tools"
+    """With nothing set the session keeps the agent's own tools, minus default-Off capabilities."""
+    toolset = SessionToolset.of(_snapshot(), {})
+    assert toolset.off_capabilities == {"long_jobs"}, "only the default-Off capability is hidden"
+    assert (toolset.daimon_tools, toolset.builtins, toolset.repo_memory, toolset.env_file) == (
+        True,
+        {},
+        True,
+        True,
+    ), "defaults must not change anything else"
 
 
 def test_agent_tool_config_is_the_agent_tier() -> None:

@@ -79,9 +79,13 @@ def _dicts(tools: Any) -> list[Any]:
     return [tool.model_dump(mode="json") for tool in tools]
 
 
-def _snapshot(**values: str) -> FeatureSnapshot:
+def _snapshot(*, plain: bool = False, **values: str) -> FeatureSnapshot:
+    """A web place with nothing set but long jobs turned On, so the baseline hides nothing;
+    `plain` leaves long jobs at its default (Off)."""
     place = FeaturePlace(uuid.uuid4(), "web", agent_id="agent_tools", backend="anthropic")
     features = {key: resolve_one(spec, None, place, []) for key, spec in FEATURES.items()}
+    if not plain:
+        features["long_jobs"] = ResolvedFeature("long_jobs", "on", "workspace")
     for key, value in values.items():
         name = key.replace("__", ".")
         features[name] = features[name].__class__(name, value, "channel")
@@ -184,8 +188,11 @@ def test_repo_memory_off_at_the_deployment_hides_nothing() -> None:
 
 
 def test_capabilities_change_nothing_at_their_defaults() -> None:
-    """No tier set: every capability's tools stay offered, set up or not."""
+    """No tier set: every capability's tools stay offered, set up or not, except the ones
+    that are Off by default."""
     assert agent_toolset(_snapshot(), _agent()) == DEFAULT_TOOLSET, "byte-identical by default"
+    plain = agent_toolset(_snapshot(plain=True), _agent())
+    assert plain.hidden_daimon_tools == CAPABILITY_TOOLS["long_jobs"], "long jobs are Off"
 
 
 @pytest.mark.parametrize("key", CAPABILITY_KEYS)
@@ -232,12 +239,18 @@ def test_a_capability_without_setup_hides_its_tools_and_only_those() -> None:
     features = {key: resolve_one(spec, SETTINGS, place, []) for key, spec in FEATURES.items()}
     toolset = agent_toolset(FeatureSnapshot(place, 1, features), _agent())
     unset = {"notebooks", "report_publish", "media", "microsoft_365", "compute"}
-    assert toolset.off_capabilities == unset, "exactly the features whose setup is missing"
-    assert not features["long_jobs"].on, (
-        "long jobs start Off, and stay offered until a level says so"
-    )
+    assert toolset.off_capabilities == unset | {"long_jobs"}, "setup missing, or Off by default"
     for key in ("watches", "github", "routines", "lead_intake"):
         assert features[key].on, f"{key} has no setup condition its tools share"
+
+
+def test_long_jobs_tools_return_when_a_workspace_turns_them_on() -> None:
+    place = FeaturePlace(uuid.uuid4(), "web", agent_id="agent_tools", backend="anthropic")
+    features = {key: resolve_one(spec, SETTINGS, place, []) for key, spec in FEATURES.items()}
+    features["long_jobs"] = ResolvedFeature("long_jobs", "on", "workspace")
+    toolset = agent_toolset(FeatureSnapshot(place, 1, features), _agent())
+    assert "long_jobs" not in toolset.off_capabilities
+    assert not CAPABILITY_TOOLS["long_jobs"] & toolset.hidden_daimon_tools
 
 
 def test_support_escalation_needs_the_platforms_own_channel() -> None:

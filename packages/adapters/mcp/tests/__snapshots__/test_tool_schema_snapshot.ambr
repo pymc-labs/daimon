@@ -9834,7 +9834,7 @@
         <blank line>
         Requires an attended owner turn and approval card. The parent thread goes idle;
         completion wakes it to read and report. Worker waits are bounded to 280 seconds.
-        Tenant/agent admin policy must enable jobs. Omitted limits use effective policy;
+        The long_jobs feature must be on here. Omitted limits use the feature limits;
         a deadline or dollar cap above its maximum is refused. No connectors, skills,
         shared memory or credentials are mounted. Jobs are billed to the owner.
       ''',

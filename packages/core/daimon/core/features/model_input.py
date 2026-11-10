@@ -98,7 +98,8 @@ class SessionToolset:
     env_file: bool = True
     """`agent_env_file`: the agent's keys are mounted as `.env`."""
     off_capabilities: frozenset[str] = frozenset()
-    """Capabilities a tier turned Off or whose setup is missing: their tools are not offered."""
+    """Capabilities that are Off (a tier or their default) or whose setup is missing: their tools
+    are not offered. Platform, backend and dependency gaps at the default tier hide nothing."""
 
     @classmethod
     def of(
@@ -138,7 +139,7 @@ class SessionToolset:
                 for key in CAPABILITY_KEYS
                 if (cap := features.features.get(key)) is not None
                 and not cap.on
-                and (cap.tier != "default" or cap.unavailable == "requires")
+                and (cap.tier != "default" or cap.unavailable in (None, "requires"))
             ),
         )
 
