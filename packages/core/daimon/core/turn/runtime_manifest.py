@@ -16,6 +16,7 @@ from uuid import UUID
 
 import structlog
 from daimon.core.config import get_repo_memory_settings
+from daimon.core.connector_relay import relay_key
 from daimon.core.errors import DaimonError
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.admission import Admission
@@ -26,7 +27,13 @@ from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMo
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, ResourceRef, SkillRef
 from mux.contracts.profile import Capability
-from mux.contracts.resources import AgentSpec, EnvironmentSpec, ResourceBinding, ToolSpec
+from mux.contracts.resources import (
+    AgentSpec,
+    EnvironmentSpec,
+    MCPConnection,
+    ResourceBinding,
+    ToolSpec,
+)
 from mux.errors import InvalidConfig, MuxError, UnsupportedCapability
 from mux.profiles import (
     PROFILES,
@@ -338,6 +345,41 @@ def carries_caller_resources(request: ProviderPreparationRequest, preview: bool)
 _CONNECTOR_NAME = re.compile(r"[A-Za-z0-9_.-]+")
 
 
+def relayed_connectors(
+    source: AgentSpec,
+    daimon: MCPConnection,
+    *,
+    provider: str,
+    relay_on: bool,
+    public_url: str,
+) -> tuple[MCPConnection, ...]:
+    """The source's connectors this target mounts through Daimon's relay.
+
+    Each shares Daimon's turn credential (`connector_relay.daimon_destination`) and
+    sits under its URL, as mux's shared-credential contract needs. A connector Gemini
+    could not tell apart, or one past OpenAI's metadata room, stays a named loss.
+    """
+    from daimon.core.connector_relay import connectors_of, relay_url
+    from mux.drivers.gemini import native_server_name
+    from mux.drivers.openai import fits_shared_credential
+
+    if not relay_on:
+        return ()
+    names = sorted(n for n in connectors_of(source) if _CONNECTOR_NAME.fullmatch(n))
+    if provider == "gemini":
+        natives = [native_server_name(n) for n in (DAIMON_SERVER_NAME, *names)]
+        names = [n for n in names if natives.count(native_server_name(n)) == 1]
+    relayed: list[MCPConnection] = []
+    for name in names:
+        connection = MCPConnection(
+            name=name, url=relay_url(public_url, name), credential_ref=daimon.credential_ref
+        )
+        if provider == "openai" and not fits_shared_credential((daimon, *relayed, connection)):
+            break
+        relayed.append(connection)
+    return tuple(relayed)
+
+
 async def _capture_source_capabilities(
     request: ProviderPreparationRequest, source: BackendAgent, *, capability_preview: bool = False
 ) -> BackendAgent:
@@ -356,7 +398,7 @@ async def _capture_source_capabilities(
     from daimon.core.stores.domain import SourceRepresentation
     from daimon.core.stores.mcp_tokens import revoke_mcp_token
     from daimon.core.turn.runtime_defaults import capture_template_rows
-    from mux.contracts.resources import MCPConnection, SkillUpload, SkillUploadFile
+    from mux.contracts.resources import SkillUpload, SkillUploadFile
     from mux.drivers.anthropic import (
         AGENT_TOOLS_NAMESPACE,
         AgentToolsConfig,
@@ -751,6 +793,16 @@ async def _capture_source_capabilities(
                     },
                 }
             )
+            relayed = relayed_connectors(
+                spec,
+                connection,
+                provider=profile.provider,
+                relay_on=settings is not None
+                and deployment_on(settings, "mcp_connector_relay", request.platform),
+                public_url=str(request.deps.mcp.public_url),
+            )
+            mounted = {f"mcp_server:{server.name}" for server in relayed}
+            connector_losses = tuple(c for c in connector_losses if c not in mounted)
             # The provider's built-in skills (docx, pptx, ...) have no bytes to
             # carry and run only there: another backend goes without them.
             portable = tuple(
@@ -831,7 +883,7 @@ async def _capture_source_capabilities(
                 metadata=spec.metadata,
                 tools=mapped_tools,
                 skills=tuple(item.target for item in inputs.skills),
-                mcp_servers=(connection,),
+                mcp_servers=(connection, *relayed),
             )
             represented.append(
                 SourceRepresentation(
@@ -1146,6 +1198,17 @@ def classify_source_obligations(
         else set()
     )
     retained_servers = (target.mcp_servers or ()) if target is not None else ()
+    # Relayed connectors run on Daimon's turn credential; their own stays with Daimon.
+    relayed = {
+        server.name
+        for server in retained_servers
+        if represented is not None
+        and server.name != DAIMON_SERVER_NAME
+        and relay_key(server.url) == server.name
+        and server.credential_ref in represented.credential_refs
+    }
+    lost_servers |= relayed
+    retained_servers = tuple(s for s in retained_servers if s.name not in relayed)
     retained_mcp = {server.name for server in retained_servers}
     retained_credentials = {binding.credential_ref for binding in resources} | {
         server.credential_ref for server in retained_servers

@@ -421,6 +421,33 @@ async def test_a_copy_switched_before_this_deploy_is_asked_to_confirm_again_once
     assert [tool["type"] for tool in body["agent"]["tools"]].count("mcp") == 1
 
 
+@pytest.mark.parametrize("consent_request", [CONNECTOR_PARAMS], indirect=True)
+async def test_the_relay_mounts_a_user_connector_instead_of_losing_it(template, monkeypatch):
+    """With the relay on the connector is bound under Daimon's URL on its credential."""
+    from daimon.core.features import snapshot
+    from daimon.core.turn.runtime_manifest import capture_preparation_source, represented_source
+
+    request, _, wire, _ = template
+    monkeypatch.setattr(snapshot, "deployment_on", lambda _s, k, _p: k == "mcp_connector_relay")
+    request = replace(request, deps=replace(request.deps, settings=object()))
+    captured = await capture_preparation_source(request, fresh=True)
+    (representation,) = [r for r in captured.representations if r.target.mcp_servers]
+    daimon, linear = representation.target.mcp_servers
+    public = str(request.deps.mcp.public_url).rstrip("/")
+    assert (linear.name, linear.url) == ("linear", f"{public}/connectors/linear"), "relayed"
+    assert linear.credential_ref == daimon.credential_ref, "the relay takes Daimon's credential"
+    assert "mcp_server:linear" not in representation.target.declared_drops, "never a loss"
+    assert "mcp.linear.app" not in representation.target.model_dump_json(), "no upstream URL"
+    assert represented_source(captured, representation.target) == representation, "verifies"
+    # The consent named the connector lost; the relay's mount keeps it, and one
+    # vault credential per destination carries Daimon's turn token to both.
+    await _turn(request, 0)
+    (body,) = wire.posts
+    servers = [tool["server_label"] for tool in body["agent"]["tools"] if tool["type"] == "mcp"]
+    assert servers == ["daimon-mcp", "linear"], "the connector reaches OpenAI through the relay"
+    assert "mcp.linear.app" not in json.dumps([wire.agent, body]), "never the upstream URL"
+
+
 @pytest.mark.parametrize(
     "consent_request",
     [

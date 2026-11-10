@@ -481,7 +481,13 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             raise ScopeViolation("skill-deployment", "storage credential unavailable")
         return token
 
+    # The token resolved for Daimon's own server, reused for its relay URLs in the same
+    # request: mux resolves Daimon's destination first, then each relayed connector.
+    daimon_token: list[str] = []
+
     async def resolve_mcp(authorized: Scope, reference: str, destination: str) -> str:
+        from daimon.core.connector_relay import daimon_destination
+
         expected = f"caller-mcp:{scope.tenant_id}:{scope.account_id}:{plan.source_agent_id}"
         public_url = request.deps.mcp.public_url
         if (
@@ -489,12 +495,14 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             or authorized != scope
             or reference != expected
             or public_url is None
-            or destination.rstrip("/") != str(public_url).rstrip("/")
+            or (own := daimon_destination(destination, str(public_url))) is None
             or plan.mcp_credential_file is None
             or request.deps.mcp.jwt_secret is None
             or plan.source_agent_id is None
         ):
             raise ScopeViolation("mcp-credential", "MCP credential has no verified source binding")
+        if own.rstrip("/") != destination.rstrip("/") and daimon_token:
+            return daimon_token[-1]
         admission = request.admission
         try:
             assert plan.source_capabilities is not None
@@ -504,7 +512,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
                 secret=request.deps.mcp.jwt_secret.get_secret_value().encode(),
                 scope=scope,
                 agent_id=plan.source_agent_id,
-                destination=destination,
+                destination=own,
                 tools=plan.source_capabilities.mcp_tools,
                 chat_execution=True,
                 # A pinned OpenAI/Gemini turn has no confirmation card: its credential
@@ -517,8 +525,9 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
                 # The pinned file cannot carry this turn's hold, seals or Slack context:
                 # once it is proven, the turn runs on its own minted credential.
                 template_mcp.catalogue = frozenset(plan.source_capabilities.mcp_tools)
-                token = await template_mcp.mint(destination, agent_id=plan.source_agent_id)
+                token = await template_mcp.mint(own, agent_id=plan.source_agent_id)
             await verify_storage()
+            daimon_token[:] = [token]
             return token
         except (OSError, ValueError):
             raise ScopeViolation("mcp-credential", "invalid scoped MCP credential") from None

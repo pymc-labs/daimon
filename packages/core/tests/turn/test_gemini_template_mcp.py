@@ -412,6 +412,43 @@ GATED = (
 )
 
 
+CONNECTOR_PARAMS = {
+    **PARAMS,
+    "mcp_servers": [{"type": "url", "name": "linear", "url": "https://mcp.linear.app/mcp"}],
+    "tools": [
+        *PARAMS["tools"],
+        {
+            "type": "mcp_toolset",
+            "mcp_server_name": "linear",
+            "configs": [],
+            "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+        },
+    ],
+}
+
+
+@pytest.mark.parametrize("consent_request", [CONNECTOR_PARAMS], indirect=True)
+async def test_the_relay_mounts_a_user_connector_instead_of_losing_it(template, monkeypatch):
+    """With the relay on the connector is a second server on Daimon's one credential."""
+    from daimon.core.features import snapshot
+
+    request, quote, native, *_ = template
+    assert "mcp_server:linear" in quote.declared_drops, "confirmed while the relay was off"
+    monkeypatch.setattr(snapshot, "deployment_on", lambda _s, k, _p: k == "mcp_connector_relay")
+    request = replace(request, deps=replace(request.deps, settings=object()))
+    selected, runtime = await _prepared(request)
+    daimon, linear = selected.target_spec.mcp_servers
+    public = str(request.deps.mcp.public_url).rstrip("/")
+    assert linear.url == f"{public}/connectors/linear", "relayed under Daimon's URL"
+    assert "mcp_server:linear" not in selected.target_spec.declared_drops, "never a loss"
+    served = [tool["url"] for tool in native["tools"] if tool.get("type") == "mcp_server"]
+    assert served == [daimon.url, linear.url], "both reach Gemini, never the upstream URL"
+    transport = runtime.transport_factory(request.admission.backend_revision, request.scope)
+    token = await transport.mcp_secrets(request.scope, daimon.credential_ref, daimon.url)
+    relayed = await transport.mcp_secrets(request.scope, linear.credential_ref, linear.url)
+    assert relayed == token, "the relay authenticates the turn's own Daimon credential"
+
+
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
 async def test_gated_and_publishing_tools_stay_unavailable_in_a_template(template, monkeypatch):
     from daimon.core.mcp_oauth import discovery

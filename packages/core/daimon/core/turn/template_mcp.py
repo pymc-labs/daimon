@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
+from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.errors import AdmissionDenied
 from mux.errors import ScopeViolation
 
@@ -58,7 +59,8 @@ def consented_catalogue(source: BackendAgent, target: AgentSpec | None) -> froze
     represented = represented_source(source, target)
     if represented is None:
         raise AdmissionDenied(reason="backend_unsupported")
-    servers = represented.target.mcp_servers or ()
+    # Relayed connectors sit beside Daimon's server; the catalogue is Daimon's own.
+    servers = [s for s in represented.target.mcp_servers or () if s.name == DAIMON_SERVER_NAME]
     if len(servers) != 1:
         raise AdmissionDenied(reason="backend_unsupported")
     connection = servers[0]
@@ -104,6 +106,7 @@ class TemplateMCPCredential:
 
     async def mint(self, destination: str, *, agent_id: UUID) -> str:
         """Mint (once) and check this turn's credential for `agent_id`'s Daimon MCP."""
+        from daimon.core.connector_relay import daimon_destination
         from daimon.core.mcp_auth import (
             bind_execution_session,
             mint_agent_mcp_token,
@@ -117,12 +120,13 @@ class TemplateMCPCredential:
         request, scope = self._request, self._scope
         admission = request.admission
         public_url = request.deps.mcp.public_url
+        # A relay URL authenticates this same credential: mint and check it for Daimon's.
+        own = None if public_url is None else daimon_destination(destination, str(public_url))
         if (
             self.catalogue is None
             or scope.is_platform
             or scope.is_legacy_host_authorized
-            or public_url is None
-            or destination.rstrip("/") != str(public_url).rstrip("/")
+            or own is None
             or request.deps.mcp.jwt_secret is None
         ):
             raise ScopeViolation("mcp-credential", "MCP credential has no verified source binding")
@@ -165,7 +169,7 @@ class TemplateMCPCredential:
                 max_ttl_s=ttl_s,
                 chat_execution=True,
             )
-            if await list_mcp_tools(destination, token) != expected:
+            if await list_mcp_tools(own, token) != expected:
                 raise ValueError("target MCP catalogue differs from captured source")
             # The host call gate finds the turn's origin through this claim, and
             # the server reads a sealed or read-only turn's memory posture from it.

@@ -18,6 +18,7 @@ from daimon.core.turn.runtime_manifest import (
     validate_configured_runtime_manifest,
 )
 from mux.contracts.ids import Provider
+from mux.profiles import PROFILES
 from pydantic import TypeAdapter, ValidationError
 
 PREFIXES = ("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_")
@@ -486,3 +487,37 @@ async def test_a_counterpart_that_wont_prepare_names_its_real_error(monkeypatch)
     assert cause["frame"].startswith("daimon.core.turn.runtime_manifest:")
     # Fixed labels only: the exception's own text never reaches the log.
     assert "catalogue read failed" not in json.dumps(logs)
+
+
+@pytest.mark.parametrize(
+    "profile",
+    sorted(p.profile_id for p in PROFILES.values() if p.provider in ("openai", "gemini")),
+)
+def test_every_template_profile_mounts_connectors_never_a_loss(profile: str) -> None:
+    """Every OpenAI and Gemini profile relays each connector on Daimon's credential."""
+    from daimon.core.turn.runtime_manifest import relayed_connectors
+    from mux.contracts.ids import ModelRef
+    from mux.contracts.resources import AgentSpec, MCPConnection, ToolSpec
+
+    names = ("github", "linear", "notion")
+    source = AgentSpec(
+        name="source",
+        model=ModelRef(provider="anthropic", id="m"),
+        mcp_servers=tuple(MCPConnection(name=n, url=f"https://{n}.invalid/mcp") for n in names),
+        tools=tuple(ToolSpec(name=n, kind="mcp_toolset") for n in names),
+    )
+    daimon = MCPConnection(name="daimon-mcp", url="https://d.invalid/mcp", credential_ref="turn")
+    relayed = relayed_connectors(
+        source,
+        daimon,
+        provider=PROFILES[profile].provider,
+        relay_on=True,
+        public_url=daimon.url,
+    )
+    assert [(s.name, s.url, s.credential_ref) for s in relayed] == [
+        (n, f"https://d.invalid/mcp/connectors/{n}", "turn") for n in names
+    ], "each connector mounts through the relay"
+    off = relayed_connectors(
+        source, daimon, provider=PROFILES[profile].provider, relay_on=False, public_url=daimon.url
+    )
+    assert off == (), "with the relay off nothing mounts"
