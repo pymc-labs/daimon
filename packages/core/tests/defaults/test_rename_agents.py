@@ -372,3 +372,34 @@ async def test_apply_when_provider_rename_fails_after_commit_then_rerun_finishes
     assert list(live) == ["default"] and live["default"]["id"] == "ag_daimon", (
         f"the same agent now holds the new name: {live}"
     )
+
+
+async def test_rename_when_reader_name_differs_in_case_then_reader_is_renamed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A reader tagged `Daimon-Reader` moves with its source and keeps its `-reader` suffix."""
+    reader = ma_agent(
+        id="ag_reader",
+        name="Daimon-Reader",
+        tenant_id=_TENANT,
+        metadata={MA_METADATA_KEY_READER_SOURCE: "daimon"},
+    )
+    state = FakeMAState()
+    _seed(state, reader)
+
+    outcome = await rename_seeded_agent(
+        build_fake_anthropic(make_fake_ma_handler(state)),
+        db_session_factory,
+        tenant_id=_TENANT,
+        old="daimon",
+        new="default",
+        lock_key="rename-case-test",
+        dry_run=False,
+    )
+
+    assert outcome is not None, "a pending reader is a rename to do"
+    live = _live(state)
+    assert list(live) == ["default-reader"], f"the reader takes the new name: {live}"
+    metadata = live["default-reader"]["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata[MA_METADATA_KEY_NAME] == "default-reader", "the tag keeps the reader suffix"

@@ -134,11 +134,16 @@ async def _rename_on_provider(
     async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
         metadata = dict(fresh.metadata)
         name = metadata.get(MA_METADATA_KEY_NAME, "")
-        renamed = new + name.removeprefix(old) if name.startswith(old) else new
+        # Compare as `_named` does, which picked this agent; a reader's suffix is plain ASCII.
+        folded, folded_old = normalize_agent_name(name), normalize_agent_name(old)
+        renamed = new + folded.removeprefix(folded_old) if folded.startswith(folded_old) else new
         metadata[MA_METADATA_KEY_NAME] = renamed
         if MA_METADATA_KEY_READER_SOURCE in metadata:
             metadata[MA_METADATA_KEY_READER_SOURCE] = "\n".join(
-                dict.fromkeys(new if s == old else s for s in _reader_sources(fresh))
+                dict.fromkeys(
+                    new if normalize_agent_name(s) == normalize_agent_name(old) else s
+                    for s in _reader_sources(fresh)
+                )
             )
         return await update_agent(
             client,
