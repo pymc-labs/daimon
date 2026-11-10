@@ -390,8 +390,12 @@ async def project_session_resources(
     private_dm_id: str | None = None,
     origin_seal_ids: Collection[str] = (),
     extra_resources: Sequence[Resource] = (),
+    caller_resources_on_credential: bool = False,
 ) -> BackendAgent:
     """Read the existing composer's obligations without resolving or materializing secrets.
+
+    `caller_resources_on_credential`: the target host signs seals, Slack turn context
+    and private DM onto its per-turn credential, so they add no native obligation.
 
     The result describes source intent, never preservation or execution authority.
     Every target mapping remains unproven until the existing preparation seam proves it.
@@ -535,13 +539,14 @@ async def project_session_resources(
         requirements.append(
             ResourceBinding(id=f"{APP_SESSION_VAULT_PREFIX}{tenant_id}:{agent_uuid}", kind="native")
         )
+    carried_natively = not caller_resources_on_credential and (
+        slack_turn_context_id is not None or private_dm_id is not None or bool(origin_seal_ids)
+    )
     if (
         extra_resources
-        or slack_turn_context_id is not None
-        or private_dm_id is not None
+        or carried_natively
         or app_session_unmapped
         or (requester_is_headless and app_mode)
-        or origin_seal_ids
         or (app_mode and agent_github_app is not None and repos)
     ):
         # Opaque carry resources and private credentials are not absent obligations.

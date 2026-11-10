@@ -29,6 +29,7 @@ from mux.contracts.profile import Capability
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ResourceBinding, ToolSpec
 from mux.errors import InvalidConfig, MuxError, UnsupportedCapability
 from mux.profiles import (
+    PROFILES,
     backend_selection,
     get_profile,
     native_agent_tools,
@@ -314,10 +315,19 @@ async def capture_preparation_source(
         hold=request.admission.hold,
         private_dm_id=request.admission.private_dm_id,
         origin_seal_ids=request.admission.origin_seal_ids,
+        caller_resources_on_credential=carries_caller_resources(request, capability_preview),
     )
     return await _capture_source_capabilities(
         request, captured, capability_preview=capability_preview
     )
+
+
+def carries_caller_resources(request: ProviderPreparationRequest, preview: bool) -> bool:
+    """Whether the target host signs the caller's seals and contexts on its turn
+    credential. A preview captures for a provider target, so it matches that turn."""
+    revision = request.admission.backend_revision
+    profile = None if revision is None else PROFILES.get(revision.profile)
+    return preview or (profile is not None and profile.carries_caller_resources)
 
 
 #: A connector name a declared `mcp_server:<name>` loss can spell (mux contracts).
@@ -381,9 +391,12 @@ async def _capture_source_capabilities(
         ),
     ]
     revision = request.admission.backend_revision
-    if (
-        (request.admission.private_dm_id is not None)
+    private = (
+        request.admission.private_dm_id is not None
         or request.admission.slack_turn_context_id is not None
+    )
+    if (
+        (private and not carries_caller_resources(request, capability_preview))
         or request.admission.origin_channel_id is None
         or not capability_preview
         and (revision is None or request.admission.backend_revision_origin != "agent")
