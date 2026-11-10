@@ -17,6 +17,7 @@ from daimon.adapters.teams import (
     billing_panel,
     card,
     credential_requests,
+    own_cards,
     privacy_card,
     provider_actions,
     routines_card,
@@ -447,6 +448,7 @@ def create_teams_http_service(
     teams_app.on_card_action_execute(billing_panel.VERB, billing.on_action)
     teams_app.on_card_action_execute(tool_confirmation.VERB, turns.confirmations.on_action)
     teams_app.on_card_action_execute(provider_actions.VERB, turns.provider_actions.on_action)
+    teams_app.on_card_action_execute(own_cards.VERB, own_cards.TeamsOwnCards(runtime).on_action)
     handover = TeamsThreadHandoff(
         runtime,
         dispatch=turns._dispatch_inbound,  # pyright: ignore[reportPrivateUsage]  # verified message ingress
