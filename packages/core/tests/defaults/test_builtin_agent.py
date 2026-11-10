@@ -191,7 +191,10 @@ _RESOLVERS = {
     "channel_backend.py": "load_backend_agent",
 }
 # Direct by-name lookups of the configured default that bypass those resolvers,
-# with why each is safe.
+# with why each is safe. Deliberate limit: lookups by a stored agent name
+# (memory view, routine delivery, channel rules) are not listed and miss while a
+# provider rename keeps failing, since the database moves first. That is
+# transient, the next apply retries it, and turns still route through the resolver.
 _ALLOWED_DIRECT = {
     "adapters/discord/daimon/adapters/discord/bot.py": "roster check after a passing reconcile; "
     "a blocked rename fails the reconcile first",
@@ -228,6 +231,7 @@ def _names_default(node: ast.expr) -> bool:
 
 
 def test_direct_default_lookups_when_discovered_then_are_listed_with_a_reason() -> None:
+    """Lookups that name the configured default must be listed; stored-name ones are out of scope."""
     found: set[str] = set()
     for source in _PACKAGES.rglob("daimon/**/*.py"):
         if "tests" in source.parts:
