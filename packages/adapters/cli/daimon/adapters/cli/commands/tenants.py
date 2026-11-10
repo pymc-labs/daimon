@@ -168,7 +168,9 @@ async def tenants_backend_policy(
             external_id,
         ):
             raise typer.BadParameter("policy snapshot belongs to another tenant or workspace")
-    service = channel_backend.make_backend_service(rt.sessionmaker, rt.settings.turn)
+    service = channel_backend.make_backend_service(
+        rt.sessionmaker, rt.settings.turn, capture_source=channel_backend.NO_CAPTURE
+    )
 
     async def actor() -> channel_backend.BackendActor:
         return await verify_backend_actor(

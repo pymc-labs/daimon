@@ -11,7 +11,12 @@ import pytest
 import typer
 from daimon.adapters.cli.commands.agents import agents_backend_change
 from daimon.core.authz import Subject
-from daimon.core.channel_backend import BackendActor, load_backend_agent, make_backend_service
+from daimon.core.channel_backend import (
+    NO_CAPTURE,
+    BackendActor,
+    load_backend_agent,
+    make_backend_service,
+)
 from daimon.core.config import Settings
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import security_audit
@@ -83,7 +88,7 @@ async def operator(db_preflight, db_nullpool_engine, db_clean, request):
                 agent_name="Research", environment_name="Workspace"
             ),
         )
-        service = make_backend_service(sessions, settings.turn)
+        service = make_backend_service(sessions, settings.turn, capture_source=NO_CAPTURE)
         actor = BackendActor(tenant.id, principal.account_id, Subject(is_admin=True))
         policy = await service.tenant_policy(tenant.id)
         await service.set_tenant_allowlist(
@@ -112,7 +117,9 @@ async def revisions(operator):
     source = await load_backend_agent(
         rt.anthropic, rt.sessionmaker, tenant_id=tenant.id, agent_name="Research"
     )
-    return await make_backend_service(rt.sessionmaker, rt.settings.turn).current(source)
+    return await make_backend_service(
+        rt.sessionmaker, rt.settings.turn, capture_source=NO_CAPTURE
+    ).current(source)
 
 
 @pytest.mark.parametrize(

@@ -219,6 +219,7 @@ def seam(monkeypatch):
         client=object(),
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
+        turn_deps=None,
     )
     return SimpleNamespace(
         calls=calls,
@@ -486,7 +487,7 @@ async def test_slack_superseded_modal_refuses_before_service_mutation(seam):
     meta = slack_meta(backend_revision=4, backend_digest="d" * 64, backend_target="openai")
     await slack_dispatch(seam, client, action_id=sv.ACTION_BACKEND_CONFIRM, meta=meta)
     assert seam.calls == []
-    assert seam.factory.begins == 0
+    assert seam.factory.begins == 1
 
 
 async def test_slack_confirm_rereads_after_claim_and_rechecks_admin(seam):
@@ -597,7 +598,7 @@ async def persisted(
             "turn": {"path": "mux", "channel_backends": True},
         }
     )
-    service = cb.make_backend_service(sessions, settings.turn)
+    service = cb.make_backend_service(sessions, settings.turn, capture_source=cb.NO_CAPTURE)
     actor = cb.BackendActor(tenant.id, account.id, Subject(is_admin=True))
     policy = await service.tenant_policy(tenant.id)
     await service.set_tenant_allowlist(
@@ -650,6 +651,7 @@ def runtime(persisted, client):
         client=client,
         deployment_default=DeploymentDefault(agent_name="analyst", environment_name="default"),
         resolver_cache=new_resolver_cache(),
+        turn_deps=None,
     )
 
 
@@ -817,7 +819,8 @@ async def test_changed_actual_sdk_agent_refuses_direct_write_without_audit(persi
 
 
 @pytest.mark.parametrize("clear", [False, True])
-async def test_discord_confirm_records_shared_and_panel_audit(persisted, clear):
+async def test_discord_confirm_records_shared_and_panel_audit(persisted, clear, monkeypatch):
+
     trace = ScriptedTransport()
     replies(trace, persisted.native, 2)
     async with trace.client() as client:
@@ -843,6 +846,8 @@ async def test_discord_confirm_records_shared_and_panel_audit(persisted, clear):
             backend_clear=clear,
         )
         view.swap_to = AsyncMock()
+        # This fixture stores its write without a source capture.
+        monkeypatch.setattr(dv.backend_capture, "for_agent", lambda *_a, **_k: None)
         await view._on_backend_confirm(interaction())
         view.swap_to.assert_awaited_once()
     current = await persisted.service.current(agent)

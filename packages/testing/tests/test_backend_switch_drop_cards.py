@@ -102,7 +102,7 @@ async def chat(request: pytest.FixtureRequest, db_preflight, db_committing_engin
     from daimon.adapters.mcp.auth.resolver import AuthIdentity
     from daimon.adapters.mcp.runtime import McpRuntime
     from daimon.core.authz import Place, Subject, Surface, build_agent_ref, build_subject
-    from daimon.core.channel_backend import BackendActor, make_backend_service
+    from daimon.core.channel_backend import NO_CAPTURE, BackendActor, make_backend_service
     from daimon.core.config import McpSettings, Settings, TurnSettings
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.ma_resolver import new_resolver_cache
@@ -232,7 +232,7 @@ async def chat(request: pytest.FixtureRequest, db_preflight, db_committing_engin
             chat_session_id="test-session",
             chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_owned"),
         )
-        service = make_backend_service(sessions, settings.turn)
+        service = make_backend_service(sessions, settings.turn, capture_source=NO_CAPTURE)
         policy = await service.tenant_policy(tenant.id)
         await service.set_tenant_allowlist(
             tenant.id,
