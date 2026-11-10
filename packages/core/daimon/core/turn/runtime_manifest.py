@@ -599,15 +599,23 @@ async def _capture_source_capabilities(
                 for tool in tools
             ):
                 raise ValueError("source has no enabled daimon-mcp toolset")
-            # No OpenAI/Gemini turn has a confirmation card, pinned or template:
-            # every confirmation-gated or publishing tool stays unavailable (and
-            # the server refuses it for their provider-turn credentials too),
-            # except those whose card Daimon posts itself.
-            from daimon.core.tool_safety import confirmation_gated_tools, self_carded_tools
+            # No OpenAI/Gemini turn has a confirmation card of its own. Daimon
+            # posts one for a self-carded tool and, with the host call gate on
+            # for this platform, for each gated call; any other gated tool stays
+            # unavailable (and the server refuses it for provider-turn credentials).
+            from daimon.core.features.snapshot import deployment_on
+            from daimon.core.tool_safety import (
+                confirmation_gated_tools,
+                host_call_carded_tools,
+                self_carded_tools,
+            )
 
+            settings = request.deps.settings
             gated, carded = confirmation_gated_tools(), self_carded_tools()
+            if settings is not None and deployment_on(settings, "host_call_gate", request.platform):
+                carded |= host_call_carded_tools()
             permissions = {
-                # A self-carded tool runs (Daimon posts its card) unless the agent
+                # A carded tool runs (Daimon posts its card) unless the agent
                 # turned it off, which stays a named loss as before.
                 name: (
                     "auto"

@@ -323,7 +323,7 @@ async def test_two_host_turns_bill_actual_interactions_and_journal_under_fence(h
     ] == ["first", "second"]
 
 
-@pytest.mark.parametrize("failure", ["runtime", "model", "shared", "publishing", "daimon_rules"])
+@pytest.mark.parametrize("failure", ["runtime", "model", "shared", "daimon_rules"])
 async def test_unsupported_host_configuration_is_visible_refusal_before_factory(
     host: Host, failure: str
 ) -> None:
@@ -356,15 +356,13 @@ async def test_unsupported_host_configuration_is_visible_refusal_before_factory(
         # Independently prove the preparation boundary also refuses a stale or
         # manually supplied admission, rather than relying on the first gate.
         admission = replace(admission, backend_revision=revision)
-    elif failure == "daimon_rules":
+    else:
         # A rule that makes daimon's own tools ask is a gate this backend cannot hold.
         admission = replace(
             admission,
             daimon_rule_tools=frozenset({"get_session"}),
             daimon_rules_need_driver=True,
         )
-    else:
-        admission = replace(admission, asks_before_publishing=True)
     with pytest.raises(AdmissionDenied) as refusal:
         await prepare(host, admission)
     assert refusal.value.reason == "backend_unsupported"

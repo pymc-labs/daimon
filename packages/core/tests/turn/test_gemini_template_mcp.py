@@ -434,6 +434,33 @@ async def test_gated_and_publishing_tools_stay_unavailable_in_a_template(templat
     assert represented_source(captured, representation.target) == representation
 
 
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_the_host_call_gate_offers_gated_tools_behind_a_card(template, monkeypatch):
+    """With the gate on for the platform each gated call is carded, so it is no loss;
+    a reach approval, tallied under a turn gone by the press, still is."""
+    from daimon.core.features import snapshot
+    from daimon.core.mcp_oauth import discovery
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+    request, *_ = template
+    catalogue = frozenset({"search_tools", "call_tool", "approve_reach", *GATED})
+
+    async def listed(_url, _token):
+        return catalogue
+
+    monkeypatch.setattr(discovery, "list_mcp_tools", listed)
+    monkeypatch.setattr(snapshot, "deployment_on", lambda _s, key, _p: key == "host_call_gate")
+    request = replace(request, deps=replace(request.deps, settings=object()))
+    captured = await capture_preparation_source(request, fresh=True)
+    (representation,) = [r for r in captured.representations if r.target.mcp_servers]
+    (connection,) = representation.target.mcp_servers
+    allowed = set(connection.tool_policy["allowed_tools"])  # pyright: ignore[reportArgumentType]
+    assert set(GATED) <= allowed, "every gated tool is offered behind its card"
+    assert representation.unavailable_mcp_tools == ("mcp_tool:daimon-mcp:approve_reach",), (
+        "a reach approval stays a named loss"
+    )
+
+
 def _gated(request, gating):
     from daimon.core.tool_safety import ToolSafetyPolicy
 
@@ -1018,22 +1045,23 @@ async def test_a_consent_that_dropped_the_switch_tool_still_prepares(
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-async def test_an_old_consent_with_any_other_difference_still_needs_a_new_confirmation(
+async def test_an_old_consent_holds_when_another_carded_tool_is_offered(
     consent_recorded_before_self_cards, template, monkeypatch
 ):
+    """Each tool regained runs behind Daimon's card, so neither asks again; any other
+    difference does (`test_consent_upgrade`)."""
     from daimon.core import tool_safety
-    from daimon.core.channel_backend import AgentBackendRefused
 
     request, *_ = template
     consent_recorded_before_self_cards["old"] = False
-    # One more gated tool now offered as well: more than the switch tool changed.
     monkeypatch.setattr(
         tool_safety,
         "self_carded_tools",
         lambda: frozenset({"request_agent_backend_switch", "add_skill"}),
     )
-    with pytest.raises((AgentBackendRefused, AdmissionDenied)):
-        await _prepared(request)
+    selected, _ = await _prepared(request)
+    allowed = _connection(selected).tool_policy["allowed_tools"]
+    assert {"request_agent_backend_switch", "add_skill"} <= set(allowed), "both are offered"
 
 
 @pytest.fixture

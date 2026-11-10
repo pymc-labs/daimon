@@ -405,7 +405,6 @@ async def _prepare_with_runtime(
     if (
         current.origin_seal_ids
         or current.source_sealed
-        or current.asks_before_publishing
         or current.slack_turn_context_id is not None
     ):
         raise AdmissionDenied(reason="backend_unsupported")

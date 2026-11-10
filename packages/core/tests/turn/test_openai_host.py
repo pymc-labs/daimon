@@ -876,7 +876,6 @@ async def test_origin_approval_has_separate_claim_and_native_response(composed):
     ("policy", "value"),
     [
         ("source_sealed", True),
-        ("asks_before_publishing", True),
         ("daimon_rules_need_driver", True),
     ],
 )
@@ -929,7 +928,7 @@ async def test_configured_channel_refuses_unavailable_runtime_before_io(composed
     admission = (
         request.admission
         if missing_runtime
-        else replace(request.admission, asks_before_publishing=True)
+        else replace(request.admission, daimon_rules_need_driver=True)
     )
     with pytest.raises(AdmissionDenied) as refused:
         await bind_session_impl(

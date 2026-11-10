@@ -397,7 +397,11 @@ async def test_policy_refusal_precedes_selected_key_and_transport(
     with pytest.raises(AdmissionDenied):
         await bind_session_impl(
             selected.deps,
-            replace(selected.admission, asks_before_publishing=True),
+            replace(
+                selected.admission,
+                daimon_rule_tools=frozenset({"get_session"}),
+                daimon_rules_need_driver=True,
+            ),
             tenant_id=selected.tenant_id,
             platform=selected.platform,
             external_user_id=selected.external_user_id,

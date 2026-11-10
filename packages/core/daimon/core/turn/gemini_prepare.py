@@ -78,7 +78,6 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         or (
             admission.memory_read_only and (target is None or "memory" not in target.declared_drops)
         )
-        or admission.asks_before_publishing
         or (admission.channel_skills and (target is None or "skills" not in target.declared_drops))
     ):
         raise UnsupportedCapability(("gemini_host_deployment_policy",), PROFILE)
