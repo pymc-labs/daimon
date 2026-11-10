@@ -264,6 +264,28 @@ async def list_live_session_channel_ids(
     return list(channels)
 
 
+async def thread_in_channel(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    channel_id: str,
+    thread_key: str,
+) -> bool:
+    """Whether the workspace has a session in this thread, run for this channel."""
+    found = await session.scalar(
+        select(ThreadSession.id)
+        .where(
+            ThreadSession.tenant_id == tenant_id,
+            ThreadSession.platform == platform,
+            ThreadSession.thread_id == thread_key,
+            ThreadSession.channel_id == channel_id,
+        )
+        .limit(1)
+    )
+    return found is not None
+
+
 async def get_latest_thread_session(
     session: AsyncSession,
     *,

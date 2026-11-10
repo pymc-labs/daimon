@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from daimon.core.features.registry import FEATURES
+from daimon.core.stores.tenants import get_tenant
+from daimon.testing.factories import make_thread_session
 from httpx import Response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -54,6 +56,33 @@ async def test_an_admin_changes_a_channel_and_a_stale_read_is_refused(
     assert _tier(read, "progress_plans", "thread") is None
     assert _tier(thread, "progress_plans", "thread") == "default"
     assert (no_channel.status_code, web.status_code) == (422, 422)
+
+
+async def test_a_thread_is_changed_only_by_a_channel_admin_and_only_if_it_is_there(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Progress plans are anyone's in a chat thread; on the web a member may not, and a
+    thread the workspace has no session in, or one in another channel, is not found."""
+    body = {"key": "progress_plans", "tier": "thread", "value": "on"}
+    async with _channels(web_client, db_session_factory, tmp_path) as admin:
+        async with db_session_factory.begin() as db:
+            tenant = await get_tenant(db, admin.ws.tenant_id)
+            assert tenant is not None, "the signed-in workspace exists"
+            await make_thread_session(
+                db, tenant=tenant, platform="discord", thread_id="t1", channel_id="c1"
+            )
+        ok = await admin.client.put("/api/features?channel=c1&thread=t1", json=body)
+        nonexistent = await admin.client.put("/api/features?channel=c1&thread=t9", json=body)
+        other_channel = await admin.client.put("/api/features?channel=c2&thread=t1", json=body)
+        admin.as_member()
+        member = await admin.client.put("/api/features?channel=c1&thread=t1", json=body)
+
+    assert ok.status_code == 200, ok.text
+    assert nonexistent.status_code == 404, "a thread with no session is not found"
+    assert other_channel.status_code == 404, "a thread of another channel is not found"
+    assert member.status_code in (403, 404), "a member cannot change a thread on the web"
 
 
 async def test_members_read_but_cannot_change_the_workspace_or_a_channel(

@@ -37,6 +37,7 @@ from daimon.core.features.surface import feature_schema, view_json
 from daimon.core.stores.domain import CHAT_PLATFORMS
 from daimon.core.stores.platform_names import get_channel_names
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.thread_sessions import thread_in_channel
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -171,6 +172,25 @@ def features_router(runtime: WebRuntime) -> APIRouter:
         place = await read_place(caller, tenant, agent, channel, thread)
         readable(caller, place)
         needed = _NEEDED.get(body.tier)
+        if body.tier == "thread":
+            # In chat anyone present may set a thread; on the web only a channel admin may, and
+            # only for a thread this workspace has a session in, run for this channel.
+            if needed not in caller.capabilities:
+                raise HTTPException(403, "You can't change this.")
+            thread_key, channel_id = place.thread_key, place.channel_id
+            async with runtime.sessionmaker() as db:
+                if (
+                    thread_key is None
+                    or channel_id is None
+                    or not await thread_in_channel(
+                        db,
+                        tenant_id=place.tenant_id,
+                        platform=place.platform,
+                        channel_id=channel_id,
+                        thread_key=thread_key,
+                    )
+                ):
+                    raise HTTPException(404, "No such thread in this channel.")
         account = caller.person.account_id
 
         async def admin_for(_: DelegatedAction | None) -> bool:
