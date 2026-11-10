@@ -74,7 +74,7 @@ _log = structlog.get_logger(__name__)
 
 routines_app = typer.Typer(help="Routines admin tasks.")
 
-_FALLBACK_NAME = "daimon"
+_FALLBACK_NAME = "default"
 
 
 @routines_app.command("backfill-agent-names")
@@ -84,7 +84,7 @@ def backfill_agent_names_command(
     """Populate ``routines.agent_name`` from MA agent metadata.
 
     Idempotent — skips rows where ``agent_name`` is already non-NULL.
-    Falls back to ``"daimon"`` when MA returns 404 OR the agent is archived
+    Falls back to ``"default"`` when MA returns 404 OR the agent is archived
     OR the agent's metadata lacks ``daimon_name`` (only one
     daimon-tagged agent per tenant today).
 

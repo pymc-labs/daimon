@@ -123,7 +123,7 @@ def selfhosted_init_command(
     model: Annotated[
         str, typer.Option("--model", help="Azure model deployment name.")
     ] = "gpt-6.1-sol",
-    name: Annotated[str, typer.Option("--name")] = "daimon",
+    name: Annotated[str, typer.Option("--name")] = "default",
     environment_name: Annotated[str, typer.Option("--environment-name")] = "default",
     auth_mode: Annotated[
         str, typer.Option("--auth-mode", help="bearer_env or entra.")
