@@ -54,7 +54,7 @@ Where each feature can be set, and its default.
 | Reply hint | `unmentioned_reply_hint` | Chat | Off | ✓ | ✓ |  | ✓ |  | Only Discord |
 | No-writers notice | `writers_none_notice` | Chat | Off | ✓ | ✓ |  | ✓ |  | Only Discord |
 | Waiting card | `waiting_card` | Chat | Off | ✓ | ✓ |  |  |  | Only Discord |
-| Repository memory | `repo_memory` | Capability | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Repository memory | `repo_memory` | Capability | Off | ✓ | ✓ | ✓ | ✓ | ✓ | Off and locked until the operator turns it on |
 | Context provider | `context_provider` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
 | Personal memory | `memory_personal` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always Off on Gemini, OpenAI |
 | Shared memory | `memory_shared` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always On on Gemini, OpenAI |

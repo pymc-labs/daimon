@@ -8,8 +8,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
+from daimon.core.features.deployment import deployment_value
 from daimon.core.features.registry import EVERY_PLATFORM, FEATURES, FeatureSpec
 from daimon.core.stores.domain import CHAT_PLATFORMS
+from pydantic import PostgresDsn, SecretStr
 
 OUT = Path(__file__).resolve().parents[1] / "docs" / "features.md"
 _TIER = {
@@ -50,8 +53,26 @@ the `change_setting` MCP tool, the web app or `daimon features`.
 """
 
 
+_BARE = Settings.model_validate(
+    {
+        "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
+        "anthropic": AnthropicSettings(api_key=SecretStr("x")),
+        "discord": DiscordSettings(bot_token=SecretStr("x")),
+    }
+)
+"""A deployment where the operator set nothing."""
+
+
+def _locked_until_set(spec: FeatureSpec) -> str | None:
+    """The deployment value a feature holds, locked, until the operator sets it."""
+    found = deployment_value(_BARE, spec) if "deployment" in spec.tiers else None
+    return spec.values.get(found.value, found.value) if found is not None and found.locked else None
+
+
 def _notes(spec: FeatureSpec) -> str:
     notes: list[str] = []
+    if (held := _locked_until_set(spec)) is not None:
+        notes.append(f"{held} and locked until the operator turns it on")
     if spec.platforms != EVERY_PLATFORM and set(spec.platforms) != set(CHAT_PLATFORMS):
         notes.append("Only " + ", ".join(sorted(p.title() for p in spec.platforms)))
     for platform, value in sorted(spec.platform_defaults.items()):
