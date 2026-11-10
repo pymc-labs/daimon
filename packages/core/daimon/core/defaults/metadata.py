@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import unicodedata
 import uuid
 from collections.abc import Iterable, Mapping
 from typing import Any, Final
-
-from daimon.core.stores.agent_avatars import normalize_agent_name
 
 MA_METADATA_KEY_PRIVATE_DM = "daimon_private_dm"
 # A routine's session carries the private-DM stamp as "routine:<id>": as with a
@@ -97,7 +96,7 @@ SEEDED_AGENT_RENAME: Final = ("daimon", "default")
 
 def is_renamed_seeded_agent(metadata: Mapping[str, str]) -> bool:
     """True for a defaults-managed agent named `default`: the seeded agent after its rename."""
-    name = normalize_agent_name(metadata.get(MA_METADATA_KEY_NAME, ""))
+    name = unicodedata.normalize("NFKC", metadata.get(MA_METADATA_KEY_NAME, "")).casefold()
     return metadata.get(MA_METADATA_KEY_MANAGED) == "true" and name == SEEDED_AGENT_RENAME[1]
 
 
