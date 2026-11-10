@@ -56,7 +56,7 @@ _KEYED_NAME_COLUMNS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 )
 _POLICY_NAME_KEYS = ("agent_rules", "agent_channel_pins")
 
-SelfHostedRename = Literal["renamed", "absent", "taken"]
+SelfHostedRename = Literal["renamed", "absent", "taken", "ambiguous"]
 
 
 def _table(name: str) -> Table:
@@ -141,7 +141,8 @@ async def rename_selfhosted_agent(
 ) -> SelfHostedRename:
     """Rename the tenant's live self-hosted agent `old` in place.
 
-    A live `new` is never merged into: both are left alone ("taken"). The
+    A live `new` is never merged into: both are left alone ("taken"). Two live
+    records that differ only in case are left alone too ("ambiguous"). The
     revision stays: no turn pins the name, so an in-flight turn is unaffected.
     """
     table = _table("selfhosted_agents")
@@ -154,16 +155,14 @@ async def rename_selfhosted_agent(
     legacy = [row for row in rows if normalize_agent_name(row.name) == normalize_agent_name(old)]
     if not legacy:
         return "absent"
+    if len(legacy) > 1:
+        return "ambiguous"
     if any(normalize_agent_name(row.name) == normalize_agent_name(new) for row in rows):
         return "taken"
-    for row in legacy:
-        await session.execute(
-            update(table)
-            .where(table.c.id == row.id)
-            .values(
-                name=new,
-                spec={**row.spec, "name": new},
-                updated_at=func.now(),
-            )
-        )
+    [row] = legacy
+    await session.execute(
+        update(table)
+        .where(table.c.id == row.id)
+        .values(name=new, spec={**row.spec, "name": new}, updated_at=func.now())
+    )
     return "renamed"

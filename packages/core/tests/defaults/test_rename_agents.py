@@ -252,18 +252,22 @@ async def test_apply_when_seeded_and_own_default_exist_then_keeps_both(
     assert live == ["ag_own", "ag_seeded"], "the workspace's agent is neither adopted nor archived"
 
 
-async def test_apply_when_selfhosted_default_taken_then_fails_and_moves_nothing(
+@pytest.mark.parametrize(
+    "names", [("daimon", "default"), ("Daimon", "daimon")], ids=["taken", "case-duplicates"]
+)
+async def test_apply_when_selfhosted_rename_unsafe_then_fails_and_moves_nothing(
+    names: tuple[str, str],
     tmp_path: Path,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    await _selfhosted(db_session, db_session_factory, "daimon", "default")
+    await _selfhosted(db_session, db_session_factory, *names)
     state = FakeMAState()
     _seed(state, _legacy_daimon())
 
     report = await _apply(db_session_factory, state, _tree(tmp_path), dry_run=False)
 
-    assert report.is_failure(), "a taken self-hosted name blocks the rename"
+    assert report.is_failure(), f"self-hosted records {names} block the rename"
     assert list(_live(state)) == ["daimon"], "the seeded agent keeps its name on the provider"
     routines = await _names(db_session, "SELECT agent_name FROM routines WHERE tenant_id = :t")
     assert routines == ["daimon"], "database references are unchanged"
@@ -271,4 +275,4 @@ async def test_apply_when_selfhosted_default_taken_then_fails_and_moves_nothing(
         db_session,
         "SELECT name FROM selfhosted_agents WHERE tenant_id = :t AND archived_at IS NULL ORDER BY 1",
     )
-    assert records == ["daimon", "default"], "both self-hosted records keep their names"
+    assert records == sorted(names), "both self-hosted records keep their names"

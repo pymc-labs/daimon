@@ -52,6 +52,16 @@ class AgentRenameBlocked(DefaultsError):
         )
 
 
+class AgentRenameAmbiguous(DefaultsError):
+    """Two of the tenant's self-hosted records differ from the old name only in case."""
+
+    def __init__(self, *, old: str) -> None:
+        super().__init__(
+            f"This workspace has more than one self-hosted agent named {old!r} in "
+            "different cases. Archive the extra ones, then run `daimon defaults apply` again."
+        )
+
+
 def _only_unmanaged(agents: Collection[BetaManagedAgentsAgent]) -> bool:
     """Whether only a workspace's own agents hold this name, never the seeded one."""
     return bool(agents) and not any(_managed(agent) for agent in agents)
@@ -141,8 +151,9 @@ async def rename_seeded_agent(
     """Rename the tenant's seeded `old` to `new`; None when there is nothing to do.
 
     Raises `AgentRenameBlocked` when the tenant's own unmanaged agent or
-    self-hosted record holds `new`, with or without a seeded `old`: nothing is
-    renamed and the caller skips the agent pass, so that agent is never adopted.
+    self-hosted record holds `new`, with or without a seeded `old`, and
+    `AgentRenameAmbiguous` when self-hosted records differ from `old` only in
+    case: nothing is renamed and the caller skips the agent pass, so that agent is never adopted.
     """
     olds = await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=old)
     legacy = [agent for agent in olds if _managed(agent)]
@@ -163,6 +174,8 @@ async def rename_seeded_agent(
         selfhosted = await rename_selfhosted_agent(session, tenant_id=tenant_id, old=old, new=new)
         if selfhosted == "taken":
             raise AgentRenameBlocked(old=old, new=new)
+        if selfhosted == "ambiguous":
+            raise AgentRenameAmbiguous(old=old)
         if legacy or selfhosted == "renamed":
             await rename_agent_references(session, tenant_id=tenant_id, old=old, new=new)
     for agent in (*legacy, *readers):

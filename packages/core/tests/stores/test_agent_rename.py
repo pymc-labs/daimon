@@ -150,7 +150,9 @@ async def test_rename_references_when_policy_names_agent_then_moves_rule_unless_
         (["daimon"], "renamed", ["default"]),
         (["daimon", "default"], "taken", ["daimon", "default"]),
         (["daimon-copy"], "absent", ["daimon-copy"]),
+        (["daimon", "Daimon"], "ambiguous", ["Daimon", "daimon"]),
     ],
+    ids=["renamed", "taken", "absent", "case-duplicates"],
 )
 async def test_rename_selfhosted_when_agents_exist_then_reports_outcome(
     names: list[str],
