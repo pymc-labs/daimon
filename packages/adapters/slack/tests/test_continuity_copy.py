@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from anthropic import AsyncAnthropic
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -38,6 +39,7 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.output_runtime import AnthropicOutputRuntime
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
@@ -60,6 +62,7 @@ from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn_origin import turn_origin as real_turn_origin
 from daimon.testing.ma import resolved_agent_env_router
 from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.contracts.ids import Scope
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -1138,7 +1141,11 @@ async def test_output_sweep_when_opt_out_lookup_fails_then_files_still_go_out_un
         await app._sweep_session_outputs(  # pyright: ignore[reportPrivateUsage]
             None,
             MagicMock(),
-            session_id="sesn_1",
+            outputs=AnthropicOutputRuntime(
+                AsyncAnthropic(api_key="test-key"),
+                "sesn_1",
+                scope=Scope.legacy_host_authorized(call_site="test_slack_continuity"),
+            ),
             channel_id="C_TEST",
             thread_ts="1.2",
             team_id="T_TEST",

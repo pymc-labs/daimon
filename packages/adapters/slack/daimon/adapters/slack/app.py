@@ -255,6 +255,7 @@ from daimon.core.mux_compat import retrieve_agent
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.output_delivery import NoticedFiles
+from daimon.core.output_runtime import OutputRuntime
 from daimon.core.platform_words import words_for
 from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.stores.credential_requests import peek_credential_request
@@ -723,34 +724,37 @@ class SlackApp:
         selfhosted: bool,
         requester_user_id: str,
     ) -> None:
-        """Serialize the optional Anthropic file sweep after a tool turn."""
+        """Serialize the file sweep after a tool turn."""
 
-        if selfhosted or not any(
-            isinstance(block, ToolUseBlock) for block in outcome.state.content
+        outputs = outcome.outputs
+        if (
+            selfhosted
+            or outputs is None
+            or not any(isinstance(block, ToolUseBlock) for block in outcome.state.content)
         ):
             return
         # Read the chain link synchronously, before spawning, so it cannot be lost.
-        previous = self._output_sweeps.get(outcome.ma_session_id)
+        previous = self._output_sweeps.get(outputs.session_id)
         task = self._spawn(
             self._sweep_session_outputs(
                 previous,
                 web_client,
-                session_id=outcome.ma_session_id,
+                outputs=outputs,
                 channel_id=channel,
                 thread_ts=thread_id,
                 team_id=team_id,
                 requester_user_id=requester_user_id,
             )
         )
-        self._output_sweeps[outcome.ma_session_id] = task
-        task.add_done_callback(functools.partial(self._forget_output_sweep, outcome.ma_session_id))
+        self._output_sweeps[outputs.session_id] = task
+        task.add_done_callback(functools.partial(self._forget_output_sweep, outputs.session_id))
 
     async def _sweep_session_outputs(
         self,
         previous: asyncio.Task[None] | None,
         web_client: AsyncWebClient,
         *,
-        session_id: str,
+        outputs: OutputRuntime,
         channel_id: str,
         thread_ts: str,
         team_id: str,
@@ -780,11 +784,11 @@ class SlackApp:
         except Exception:  # named boundary: the files still go out, pinging nobody
             log.warning("slack.output_delivery.opt_out_lookup_failed", exc_info=True)
             requester_label = "@someone"
+        session_id = outputs.session_id
         try:
             await deliver_session_outputs(
-                self.runtime.turn_deps.anthropic,
+                outputs,
                 web_client,
-                session_id=session_id,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
                 notice_keys=self._delivery_notice_keys,
