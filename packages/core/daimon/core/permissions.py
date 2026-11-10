@@ -537,7 +537,7 @@ def memory_writable(agent: AgentPermissions, here: ChannelPermissions) -> bool:
 
     Not where readers are limited, except for a channel's own agents in it
     (`at_home`), whose memory is read nowhere else. A DM's memory follows the
-    tenant's `dm_memory_read_only`.
+    `dm_memory_read_only` feature.
     """
     return here.readers == "any" or at_home(agent, here)
 

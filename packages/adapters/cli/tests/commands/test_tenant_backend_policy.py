@@ -108,7 +108,7 @@ async def audit(value):
 
 async def test_verified_snapshot_apply_revert_preserves_other_policy_and_audits(policy_cli):
     rt, tenant, account, facts, _, path = policy_cli
-    original = TenantAccessPolicy(invoker_user_ids=(USER,), dm_memory_read_only=True)
+    original = TenantAccessPolicy(invoker_user_ids=(USER,), invoker_admin_bypass=False)
     async with rt.sessionmaker.begin() as db:
         await access_policy.set_access_policy(db, tenant_id=tenant.id, policy=original)
     snapshot = await command(policy_cli, "snapshot")
@@ -149,7 +149,7 @@ async def test_full_policy_edit_makes_saved_allowlist_revision_stale(policy_cli,
     await command(policy_cli, "snapshot")
     async with rt.sessionmaker.begin() as db:
         await access_policy.set_access_policy(
-            db, tenant_id=tenant.id, policy=TenantAccessPolicy(dm_memory_read_only=True)
+            db, tenant_id=tenant.id, policy=TenantAccessPolicy(invoker_admin_bypass=False)
         )
     with pytest.raises(DaimonError, match="stale revision"):
         await command(policy_cli, "apply", backends="anthropic,openai", dry_run=dry_run)
@@ -165,7 +165,9 @@ async def test_revert_requires_exact_post_apply_revision_and_never_overwrites_a_
     async with rt.sessionmaker.begin() as db:
         current = await access_policy.load_access_policy(db, tenant_id=tenant.id)
         await access_policy.set_access_policy(
-            db, tenant_id=tenant.id, policy=current.model_copy(update={"dm_memory_read_only": True})
+            db,
+            tenant_id=tenant.id,
+            policy=current.model_copy(update={"invoker_admin_bypass": False}),
         )
     with pytest.raises(DaimonError, match="stale revision"):
         await command(policy_cli, "revert", expected_revision=applied["result"]["revision"])

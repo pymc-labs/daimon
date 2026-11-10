@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Chat behaviour and display settings join the same system.**
   Completion pings, table rendering, message feedback buttons and cost shown with native models are set at every level; typed `@name` mentions, budget notices, thread naming, the unmentioned-reply hint and the "no writers" notice down to a channel; direct messages, read-only memory in direct messages and the waiting card at the workspace. Each web app module is a setting too (`web.chat`, `web.agents` and so on).
   The old per-workspace variables (`DAIMON_COMPLETION_PINGS`, `DAIMON_TABLE_RENDERING`, `DAIMON_BUDGET_NOTICES`) keep working, log a deprecation, and lose to any workspace setting; `daimon features import-env` writes them as workspace settings. The other old variables still work but log a deprecation.
+  `daimon tenants access-policy set --dm-memory-read-only` is gone, as nothing read it; set the `dm_memory_read_only` feature instead.
   The remaining older controls (the web settings, `PATCH /api/admin/settings` and the direct-message commands) behave as before and now change the same stored values, so the two never disagree.
 
 - **Guardrails are features too, and a lower level can only make them stricter.**

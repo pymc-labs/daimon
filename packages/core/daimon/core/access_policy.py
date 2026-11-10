@@ -145,8 +145,6 @@ class TenantAccessPolicy(BaseModel):
     channel_rules: dict[str, ChannelRule] = Field(default_factory=dict)
     # Discord category id -> its rule; only `writers: none` applies.
     category_rules: dict[str, ChannelRule] = Field(default_factory=dict)
-    # Read by nothing: `dm_memory_read_only` is a feature value now. Kept so stored policies load.
-    dm_memory_read_only: bool = False
     # Agent name -> its rule. An agent not named here runs wherever the cascade sends it.
     agent_rules: dict[str, AgentRule] = Field(default_factory=dict)
     enabled_backends: tuple[Provider, ...] = ("anthropic",)
@@ -159,7 +157,10 @@ class TenantAccessPolicy(BaseModel):
     def _given_backends_are_explicit(cls, data: object) -> object:
         if not isinstance(data, dict):
             return data
-        fields = cast("dict[str, Any]", data)
+        # `dm_memory_read_only` is a feature value now; an older stored policy may still carry it.
+        fields = {
+            k: v for k, v in cast("dict[str, Any]", data).items() if k != "dm_memory_read_only"
+        }
         if "enabled_backends" in fields and "backends_explicit" not in fields:
             return {**fields, "backends_explicit": True}
         return fields

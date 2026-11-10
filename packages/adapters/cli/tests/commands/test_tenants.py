@@ -514,11 +514,11 @@ async def test_access_policy_set_writes_given_fields_and_keeps_the_rest(
         platform="discord",
         external_id="guild-ap2",
         invoker=["333333333333333333"],
-        dm_memory_read_only=True,
+        invoker_admin_bypass=False,
     )
 
     assert await _policy(db_session_factory, workspace_id="guild-ap2") == _RULES.model_copy(
-        update={"invoker_user_ids": ("333333333333333333",), "dm_memory_read_only": True}
+        update={"invoker_user_ids": ("333333333333333333",), "invoker_admin_bypass": False}
     ), "a given flag replaces its field; untouched fields and every rule keep their value"
 
     console = _make_console()
@@ -714,7 +714,6 @@ def test_access_policy_set_is_registered_with_its_flags() -> None:
         "--invoker-admin-bypass",
         "--no-invoker-admin-bypass",
         "--invoker",
-        "--dm-memory-read-only",
         "--drop-agent-rules",
         "--clear",
     }, flags
@@ -846,7 +845,7 @@ async def test_concurrent_policy_edits_preserve_both_fields(
                 console=_make_console(),
                 platform="discord",
                 external_id="race-policy",
-                dm_memory_read_only=True,
+                invoker_admin_bypass=False,
             )
         )
         await asyncio.wait_for(second_lock_started.wait(), 5)
@@ -858,7 +857,7 @@ async def test_concurrent_policy_edits_preserve_both_fields(
         await asyncio.wait_for(asyncio.gather(first, *([second] if second else [])), 5)
     policy = await _policy(factory, workspace_id="race-policy")
     assert policy.invoker_user_ids == ("444444444444444444",)
-    assert policy.dm_memory_read_only
+    assert not policy.invoker_admin_bypass
     assert policy.channel_rules == (_RULES.channel_rules if existing else {})
     assert await _policy(factory, workspace_id="untouched-policy") == OPEN_ACCESS_POLICY
     await tenants_access_policy_set(

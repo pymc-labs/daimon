@@ -2186,9 +2186,8 @@ async def test_admit_admits_a_pinned_agent_in_its_channels_and_leaves_others_alo
             True,
         ),
         (TenantAccessPolicy(sealed_channel_ids=("C1",)), "C2", None, True, False),
-        (TenantAccessPolicy(dm_memory_read_only=True), "C1", None, True, False),
     ],
-    ids=["sealed", "thread-under-sealed", "slack-thread-sealed", "unsealed", "dm-read-only"],
+    ids=["sealed", "thread-under-sealed", "slack-thread-sealed", "unsealed"],
 )
 async def test_admit_flags_a_sealed_source_apart_from_dm_memory_policy(
     db_session: AsyncSession,
