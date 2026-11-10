@@ -124,12 +124,24 @@ def append_message_deltas(wire, count):
 
 
 class Resources:
+    """Every value set stays retrievable by its ref, as a replaced provider resource does."""
+
     def __init__(self, value):
+        self.known = {}
         self.value = value
 
+    @property
+    def value(self):
+        return self._value
+
+    @value.setter
+    def value(self, value):
+        self._value = value
+        self.known.setdefault(value.ref, value)
+
     async def retrieve(self, scope, ref):
-        assert scope == SCOPE and ref == self.value.ref
-        return self.value
+        assert scope == SCOPE and ref in self.known
+        return self.value if ref == self.value.ref else self.known[ref]
 
 
 @pytest.fixture

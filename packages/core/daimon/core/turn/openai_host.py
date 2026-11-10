@@ -26,6 +26,7 @@ from daimon.core.mux_backend import (
 )
 from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.pricing import ProviderPrice
+from daimon.core.session_compat import ReplaceSession
 from daimon.core.stores import mux_state
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import reauthorize
@@ -40,14 +41,23 @@ from daimon.core.turn.openai_state import (
 )
 from daimon.core.turn.persistence import UncertainSend, current_persistence
 from daimon.core.turn.prepare import (
+    CONTINUED,
     PreparedTurn,
     ProviderPreparationRequest,
     register_turn_preparation,
 )
+from daimon.core.turn.replace_binding import (
+    BindingFacts,
+    OldSession,
+    binding_decision,
+    recorded_facts,
+    replace_binding,
+)
 from daimon.core.usage_recording import record_provider_usage
 from mux.contracts.config import ConfigRevision
+from mux.contracts.digest import digest_body
 from mux.contracts.ids import ResourceRef, Scope, ThreadRef
-from mux.contracts.resources import ProviderBinding, Session, SessionSpec
+from mux.contracts.resources import ProviderBinding, ResourceBinding, Session, SessionSpec
 from mux.contracts.usage import UsageObservation
 from mux.drivers.openai import (
     Authorization,
@@ -58,12 +68,14 @@ from mux.drivers.openai import (
 )
 from mux.errors import ContinuityLost, ProviderError, ScopeViolation, UnsupportedCapability
 from mux.profiles.openai import NATIVE_MODELS
-from mux.state.lease import Slot
+from mux.state.lease import Lease, Slot
 from mux.state.operations import request_digest
 from mux.state.store import ERA_REF, StateStore, adopted_identity
 
 #: HTTP answers that reject a session create outright: no session exists afterwards.
 #: A 409 or 429 may follow an accepted create, so those stay `outcome_unknown`.
+# Profiles whose sessions mount uploaded files, so a replacement can carry them.
+_MOUNTING_PROFILES = frozenset({"openai.persistent_workspace"})
 _DEFINITE_REJECTIONS = frozenset({"400", "401", "403", "404", "422"})
 
 
@@ -217,19 +229,23 @@ async def _create(
     backend: OpenAIDriver,
     spec: SessionSpec,
     runtime: OpenAIHostRuntime,
+    *,
+    replacing: tuple[ProviderBinding, str, Lease] | None = None,
 ) -> Session:
     # Stable per empty slot, including after a crash. Changed config/plan gets a
     # digest conflict, not a fresh operation which might create a second session.
-    # A released slot's era suffix keeps an earlier era's creation from replaying.
-    _, era = adopted_identity(await store.get_binding(slot, include_released=True), "")
+    # A released slot's era suffix keeps an earlier era's creation from replaying,
+    # as a replacement's does (`replace_binding`, which already holds the lease).
+    if replacing is None:
+        _, era = adopted_identity(await store.get_binding(slot, include_released=True), "")
+    else:
+        _, era, _ = replacing
     key = await _create_key(
         store,
         request.scope,
         "openai:prepare:" + str(uuid5(NAMESPACE_URL, slot.model_dump_json())) + era,
     )
-    digest = request_digest(
-        {"spec": spec.model_dump(mode="json"), "controls": runtime.controls.model_dump(mode="json")}
-    )
+    digest = request_digest({"spec": digest_body(spec), "controls": digest_body(runtime.controls)})
     begun = await store.begin_operation(
         request.scope,
         key=key,
@@ -243,12 +259,19 @@ async def _create(
         return Session.model_validate(dict(record.result))
     if record.operation.status != "pending":
         raise UncertainSend("OpenAI session creation was claimed; reconcile before provisioning")
-    lease = await store.acquire_lease(
-        slot, holder=str(uuid4()), turn_id=key, now=request.now(), ttl=timedelta(minutes=5)
+    lease = (
+        await store.acquire_lease(
+            slot, holder=str(uuid4()), turn_id=key, now=request.now(), ttl=timedelta(minutes=5)
+        )
+        if replacing is None
+        else replacing[2]
     )
     try:
         # The lease winner rechecks after acquisition before claiming or creating.
-        if await store.get_binding(slot) is not None:
+        bound = await store.get_binding(slot)
+        if (None if bound is None else (bound.id, bound.generation)) != (
+            None if replacing is None else (replacing[0].id, replacing[0].generation)
+        ):
             raise ScopeViolation("preparation", "OpenAI slot was bound during preparation")
         final = await reauthorize(request.deps, request.admission)
         if final != request.admission:
@@ -290,7 +313,8 @@ async def _create(
         )
         return native
     finally:
-        await store.release_lease(lease)
+        if replacing is None:
+            await store.release_lease(lease)
 
 
 async def _create_key(store: StateStore, scope: Scope, base: str) -> str:
@@ -364,7 +388,6 @@ async def _prepare_with_runtime(
         request.admission.shared_owner is not None
         or request.admission.hold is not None
         or revision.thread_mode != "per_caller"
-        or request.transfer is not None
     ):
         raise AdmissionDenied(reason="backend_unsupported")
     if (
@@ -429,28 +452,18 @@ async def _prepare_with_runtime(
             update={"metadata": {**spec.metadata, "daimon_chat_session_id": chat_session_id}}
         )
     plan_digest = request_digest(
-        {"spec": spec.model_dump(mode="json"), "controls": runtime.controls.model_dump(mode="json")}
+        {"spec": digest_body(spec), "controls": digest_body(runtime.controls)}
     )
     binding = await store.get_binding(slot)
+    if request.transfer is not None and binding is None:
+        # Work bound to another backend has no reader here yet.
+        raise AdmissionDenied(reason="backend_unsupported")
     reused = binding is not None
-    if binding is not None and (
-        not request.reuse_existing
-        or binding.profile != revision.profile
-        or binding.provider != "openai"
-        or binding.config_revision != revision.local
-        or binding.native_refs.get("agent") != spec.agent.id
-        or binding.native_refs.get("account_scope") != runtime.account_scope_id
-        or binding.native_refs.get("model") != revision.model
-        or binding.native_refs.get("plan_digest") != plan_digest
-    ):
-        raise ContinuityLost(
-            binding.id,
-            ("bound OpenAI configuration changed; native replacement is not implemented",),
-        )
-    backend = driver(runtime, revision, request.scope, binding)
-    if binding is None:
-        with native_mcp_session(request.scope, chat_session_id):
-            native = await _create(request, store, slot, backend, spec, runtime)
+    continuity = CONTINUED
+
+    async def publishable(
+        native: Session, binding_id: str, era: str
+    ) -> tuple[Session, ProviderBinding]:
         # An acknowledged cached create may predate a process restart. Validate
         # actual provider ownership/model/environment before publishing it.
         verifying = driver(runtime, revision, request.scope, native.binding)
@@ -465,11 +478,7 @@ async def _prepare_with_runtime(
             raise ScopeViolation(native.ref.id, "OpenAI creation returned a foreign session")
         if native.state == "terminated":
             raise ContinuityLost(native.ref.id, ("OpenAI session terminated during creation",))
-        binding_id, era = adopted_identity(
-            await store.get_binding(slot, include_released=True),
-            str(uuid5(NAMESPACE_URL, "openai:binding:" + slot.model_dump_json())),
-        )
-        binding = ProviderBinding(
+        return native, ProviderBinding(
             id=binding_id,
             thread=slot.thread,
             provider="openai",
@@ -491,18 +500,97 @@ async def _prepare_with_runtime(
             config_revision=revision.local,
             legacy_account_id=request.scope.account_id,
         )
-        binding = await store.put_binding(binding, expected_generation=0)
-        backend = driver(runtime, revision, request.scope, binding)
-    else:
-        ref = ResourceRef(
-            id=binding.native_refs["session"],
+
+    def session_ref(bound: ProviderBinding, account_scope_id: str) -> ResourceRef:
+        return ResourceRef(
+            id=bound.native_refs["session"],
             kind="session",
             provider="openai",
-            account_scope_id=runtime.account_scope_id,
+            account_scope_id=account_scope_id,
             tenant_id=request.scope.tenant_id,
             account_id=request.scope.account_id,
         )
-        native = await backend.sessions.retrieve(request.scope, ref)
+
+    desired = BindingFacts(
+        profile=revision.profile,
+        provider="openai",
+        config_revision=revision.local,
+        agent=spec.agent.id,
+        account_scope=runtime.account_scope_id,
+        model=revision.model or "",
+        plan_digest=plan_digest,
+    )
+    decision = (
+        None
+        if binding is None
+        else binding_decision(
+            recorded_facts(binding),
+            desired,
+            reuse_existing=request.reuse_existing and request.transfer is None,
+        )
+    )
+    if binding is not None and isinstance(decision, ReplaceSession):
+        old = binding
+        # A session of another provider or account scope is not read with this one's driver.
+        readable = (
+            old.provider == "openai"
+            and "session" in old.native_refs
+            and old.native_refs.get("account_scope") == runtime.account_scope_id
+        )
+        target = driver(runtime, revision, request.scope)
+
+        async def successor(
+            era: str, resources: tuple[ResourceBinding, ...], lease: Lease
+        ) -> ProviderBinding:
+            planned = (
+                spec.model_copy(update={"resources": (*spec.resources, *resources)})
+                if resources
+                else spec
+            )
+            with native_mcp_session(request.scope, chat_session_id):
+                created = await _create(
+                    request, store, slot, target, planned, runtime, replacing=(old, era, lease)
+                )
+            verified, published = await publishable(created, old.id, era)
+            successors.append(verified)
+            return published
+
+        successors: list[Session] = []
+
+        replaced = await replace_binding(
+            store=store,
+            slot=slot,
+            scope=request.scope,
+            old=OldSession(
+                binding=old,
+                ref=session_ref(old, runtime.account_scope_id) if readable else None,
+                backend=driver(runtime, revision, request.scope, old) if readable else None,
+            ),
+            reasons=decision.reasons,
+            create=successor,
+            now=request.now(),
+            model_id=revision.model or "",
+            agent_name=current.agent.name,
+            target_artifacts=target.artifacts if revision.profile in _MOUNTING_PROFILES else None,
+        )
+        binding, continuity, native = replaced.binding, replaced.continuity, successors[-1]
+        backend = driver(runtime, revision, request.scope, binding)
+    elif binding is None:
+        backend = driver(runtime, revision, request.scope)
+        with native_mcp_session(request.scope, chat_session_id):
+            created = await _create(request, store, slot, backend, spec, runtime)
+        binding_id, era = adopted_identity(
+            await store.get_binding(slot, include_released=True),
+            str(uuid5(NAMESPACE_URL, "openai:binding:" + slot.model_dump_json())),
+        )
+        native, published = await publishable(created, binding_id, era)
+        binding = await store.put_binding(published, expected_generation=0)
+        backend = driver(runtime, revision, request.scope, binding)
+    else:
+        backend = driver(runtime, revision, request.scope, binding)
+        native = await backend.sessions.retrieve(
+            request.scope, session_ref(binding, runtime.account_scope_id)
+        )
         if native.state == "terminated":
             raise ContinuityLost(binding.id, ("OpenAI session terminated",))
     ref = native.ref
@@ -560,6 +648,7 @@ async def _prepare_with_runtime(
         session_ref=ref,
         native_footer_cost=footer_cost,
         native_chat_session_id=binding.native_refs.get("daimon_chat_session_id"),
+        continuity=continuity,
         # Revokes a template turn's per-turn MCP credential however the turn ends.
         _finalize=runtime.end_of_turn,
     )

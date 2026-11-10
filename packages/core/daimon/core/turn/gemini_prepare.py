@@ -8,23 +8,32 @@ clients are never discovered implicitly.
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
 
 import structlog
 from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.pricing import ProviderPrice, provider_cost_of
+from daimon.core.session_compat import ReplaceSession
 from daimon.core.turn.admission import reauthorize
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.gemini import PROFILE, GeminiJournal, GeminiUsageRuntime, gemini_backend
 from daimon.core.turn.gemini_state import HoldSettlement, interaction_of
-from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest
+from daimon.core.turn.prepare import CONTINUED, PreparedTurn, ProviderPreparationRequest
+from daimon.core.turn.replace_binding import (
+    BindingFacts,
+    OldSession,
+    binding_decision,
+    recorded_facts,
+    replace_binding,
+)
 from daimon.core.usage_recording import record_provider_usage
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ResourceRef, ThreadRef
-from mux.contracts.resources import SessionSpec
+from mux.contracts.resources import ProviderBinding, SessionSpec
 from mux.contracts.usage import UsageObservation
-from mux.errors import BindingConflict, ContinuityLost, ScopeViolation, UnsupportedCapability
+from mux.errors import BindingConflict, ScopeViolation, UnsupportedCapability
 from mux.state.lease import Slot
 from mux.state.store import ERA_REF, adopted_identity
 
@@ -69,7 +78,6 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         )
         or admission.asks_before_publishing
         or (admission.channel_skills and (target is None or "skills" not in target.declared_drops))
-        or request.transfer is not None
     ):
         raise UnsupportedCapability(("gemini_host_deployment_policy",), PROFILE)
     if not isinstance(runtime.journal, GeminiJournal) or not isinstance(
@@ -137,11 +145,9 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     slot = Slot(thread=thread, account_id=request.scope.account_id)
     store = journal.state_store
     prior = await store.get_binding(slot)
-    if prior is not None and not request.reuse_existing:
-        raise ContinuityLost(
-            prior.id,
-            ("bound Gemini session cannot be replaced by fresh preparation",),
-        )
+    if request.transfer is not None and prior is None:
+        # A transfer replaces a bound session; there is nothing here to carry from.
+        raise UnsupportedCapability(("gemini_host_deployment_policy",), PROFILE)
     derived_id = str(uuid5(NAMESPACE_URL, f"gemini.host:{slot.model_dump_json()}"))
     # A released slot keeps its id; its era suffix keeps earlier creations from
     # replaying. Only a binding this host adopted (it carries its era) may differ
@@ -151,23 +157,24 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         if prior is not None
         else adopted_identity(await store.get_binding(slot, include_released=True), derived_id)
     )
-    if prior is not None and (
-        prior.id != binding_id
-        or prior.provider != "gemini"
-        or prior.profile != PROFILE
-        or prior.config_revision != config.local
-        or "session" not in prior.native_refs
-        or (
-            deployment.native_agent is not None
-            and prior.native_refs.get("agent") != deployment.native_agent.ref.id
-        )
-    ):
+    if prior is not None and (prior.id != binding_id or "session" not in prior.native_refs):
         raise ScopeViolation(binding_id, "Gemini binding differs from admitted revision")
     backend = gemini_backend(config, request.scope, runtime, deployment.account_scope_id)
-    if prior is None:
+
+    def ref_of(bound: ProviderBinding) -> ResourceRef:
+        return ResourceRef(
+            id=bound.native_refs["session"],
+            kind="session",
+            provider="gemini",
+            account_scope_id=deployment.account_scope_id,
+            tenant_id=request.scope.tenant_id,
+            account_id=request.scope.account_id,
+        )
+
+    async def created(era: str) -> ProviderBinding:
         agent = deployment.native_agent
         if agent is None:
-            # The inline agent is created once per thread, with this platform's variant of
+            # The inline agent is created once per session, with this platform's variant of
             # the system prompt (unless the platform prompt is off); a named catalog agent
             # above is shared and keeps its own.
             spec = deployment.agent
@@ -199,12 +206,38 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             ),
             key=f"{binding_id}{era}:session",
         )
-        binding = session.binding.model_copy(
+        return session.binding.model_copy(
             update={
                 "legacy_account_id": request.scope.account_id,
                 "native_refs": {**session.binding.native_refs, **({ERA_REF: era} if era else {})},
             }
         )
+
+    decision = (
+        None
+        if prior is None
+        else binding_decision(
+            recorded_facts(prior),
+            # Gemini records no model, plan or scope ref: those follow config_revision.
+            BindingFacts(
+                profile=PROFILE,
+                provider="gemini",
+                config_revision=config.local,
+                agent=(
+                    deployment.native_agent.ref.id
+                    if deployment.native_agent is not None
+                    else prior.native_refs.get("agent", "")
+                ),
+                account_scope="",
+                model="",
+                plan_digest="",
+            ),
+            reuse_existing=request.reuse_existing and request.transfer is None,
+        )
+    )
+    continuity = CONTINUED
+    if prior is None:
+        binding = await created(era)
         try:
             # A released slot is adopted at its next generation: keep what was written.
             binding = await store.put_binding(binding, expected_generation=0)
@@ -216,25 +249,37 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             ):
                 raise
             binding = winner
-        session_ref = session.ref
+        session_ref = ref_of(binding)
+    elif isinstance(decision, ReplaceSession):
+        replacement = await replace_binding(
+            store=store,
+            slot=slot,
+            scope=request.scope,
+            old=OldSession(
+                binding=prior,
+                ref=ref_of(prior),
+                backend=backend if prior.provider == "gemini" else None,
+            ),
+            reasons=decision.reasons,
+            create=lambda era, _mounts, _lease: created(era),
+            now=datetime.now(UTC),
+            model_id=config.model or "",
+            agent_name=admission.agent.name,
+        )
+        binding, continuity = replacement.binding, replacement.continuity
+        session_ref = ref_of(binding)
     else:
         binding = prior
-        session_ref = ResourceRef(
-            id=prior.native_refs["session"],
-            kind="session",
-            provider="gemini",
-            account_scope_id=deployment.account_scope_id,
-            tenant_id=request.scope.tenant_id,
-            account_id=request.scope.account_id,
-        )
-        session = await backend.sessions.retrieve(request.scope, session_ref)
+        session = await backend.sessions.retrieve(request.scope, ref_of(prior))
         if (
             session.binding.id != prior.id
             or session.binding.thread != prior.thread
             or session.binding.config_revision != prior.config_revision
         ):
-            raise ScopeViolation(session_ref.id, "Gemini session differs from persisted binding")
-    session_ref = session.ref
+            raise ScopeViolation(
+                prior.native_refs["session"], "Gemini session differs from persisted binding"
+            )
+        session_ref = session.ref
     current = await reauthorize(request.deps, admission)
     if (
         current.origin_seal_ids != admission.origin_seal_ids
@@ -297,7 +342,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         ma_session_id=session_ref.id,
         mapping_id=None,
         watermark=None,
-        reused=prior is not None,
+        reused=prior is not None and binding is prior,
         session_account_id=request.session_account_id,
         _record=record,
         backend=backend,
@@ -306,6 +351,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         runtime=runtime if admission.backend_revision_origin == "agent" else None,
         # Revokes a per-turn MCP credential however the turn ends.
         _finalize=runtime.end_of_turn,
+        continuity=continuity,
     )
 
 

@@ -563,7 +563,8 @@ async def test_actual_postgres_pending_then_measured_settlement(composed, monkey
     assert await store.pending_outbox() == []
 
 
-async def test_foreign_plan_and_changed_plan_refuse_before_new_session(composed):
+async def test_changed_plan_replaces_and_foreign_plan_refuses(composed):
+    """A changed plan replaces the bound session; a foreign plan sends nothing."""
     request, wire, store, _, runtime = composed
     await prepare_openai(request)
 
@@ -575,10 +576,12 @@ async def test_foreign_plan_and_changed_plan_refuse_before_new_session(composed)
         request,
         deps=replace(request.deps, turn_runtimes={PROFILE: replace(runtime, session_plan=changed)}),
     )
+    replaced = await prepare_openai(next_request)
+    assert replaced.continuity.state in ("replaced", "replaced_after_loss"), (
+        "a changed plan replaces the session instead of losing the thread"
+    )
+    assert replaced.continuity.state == "replaced", "the old conversation was readable"
     count = len(wire.requests)
-    with pytest.raises(ContinuityLost):
-        await prepare_openai(next_request)
-    assert len(wire.requests) == count
 
     async def foreign(req):
         spec = await runtime.session_plan(req)

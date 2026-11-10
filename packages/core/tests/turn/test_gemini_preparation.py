@@ -41,7 +41,7 @@ from mux.contracts.ids import ChannelRef, ModelRef, Scope, ThreadRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec
 from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAttempt
 from mux.drivers.gemini.transport import Object
-from mux.errors import ContinuityLost, ScopeViolation
+from mux.errors import ScopeViolation
 from mux.state.lease import Slot
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from mux.testing.drivers.gemini.fake import MemoryStorage
@@ -181,7 +181,7 @@ async def test_explicit_registered_preparation_reuses_authorized_persisted_bindi
     assert not host.transport.requests and not host.ancillary.requests
 
 
-async def test_fresh_preparation_creates_empty_slot_but_cannot_replace_binding(host: Host) -> None:
+async def test_fresh_preparation_creates_empty_slot_then_replaces_binding(host: Host) -> None:
     first = await prepare(host, reuse_existing=False)
     assert not first.reused
     assert first.backend is not None and first.session_ref is not None
@@ -189,17 +189,13 @@ async def test_fresh_preparation_creates_empty_slot_but_cannot_replace_binding(h
     retained = await host.journal.state_store.get_binding(slot)
     assert retained is not None
 
-    def forbidden(config: ConfigRevision, scope: Scope) -> object:
-        raise AssertionError("fresh request for existing binding allocated a transport")
-
-    runtime = host.deps.turn_runtimes[PROFILE]
-    host.deps = replace(
-        host.deps, turn_runtimes={PROFILE: replace(runtime, transport_factory=forbidden)}
-    )
-    with pytest.raises(ContinuityLost):
-        await prepare(host, reuse_existing=False)
-    assert await host.journal.state_store.get_binding(slot) == retained
-    assert not host.transport.requests and not host.ancillary.requests
+    second = await prepare(host, reuse_existing=False)
+    replaced = await host.journal.state_store.get_binding(slot)
+    assert replaced is not None and not second.reused
+    assert (replaced.id, replaced.generation) == (retained.id, retained.generation + 1)
+    assert second.session_ref != first.session_ref
+    assert second.continuity.state in {"replaced", "replaced_after_loss"}
+    assert "summar" not in second.continuity.user_prefix
 
 
 def _causes(error: BaseException) -> list[tuple[str, ...]]:
