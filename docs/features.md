@@ -39,7 +39,7 @@ Where each feature can be set, and its default.
 | Platform skills | `platform_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
 | Agent skills | `agent_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ |  | Always On on Gemini, OpenAI |
 | Channel skills | `channel_skills` | Model input | On |  | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
-| Thread participation | `participation` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ | Only Discord, Teams |
+| Thread participation | `participation` | Chat | Off | ✓ | ✓ |  | ✓ | ✓ | Only Discord, Teams |
 | Progress plans | `progress_plans` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Cost footer | `cost_footer` | Chat | Shown |  | ✓ |  | ✓ | ✓ |  |
 | Thread titles | `thread_naming` | Chat | On | ✓ | ✓ |  | ✓ |  | Only Discord |
@@ -58,7 +58,7 @@ Where each feature can be set, and its default.
 | Personal memory | `memory_personal` | Capability | On | ✓ | ✓ | ✓ | ✓ |  | Always Off on Gemini, OpenAI |
 | Shared memory | `memory_shared` | Capability | On | ✓ | ✓ | ✓ | ✓ |  | Always On on Gemini, OpenAI |
 | Channel memory | `memory_channel` | Capability | On |  | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
-| Private channel messages | `private_channel_messages` | Capability | Off | ✓ | ✓ |  | ✓ |  | Only Teams |
+| Private channel messages | `private_channel_messages` | Capability | Off | ✓ |  |  |  |  | Only Teams |
 | Direct messages | `direct_messages` | Capability | Off | ✓ | ✓ |  |  |  | Only Discord, Slack |
 | Web app: chat | `web.chat` | Capability | On | ✓ | ✓ |  |  |  |  |
 | Web app: agents | `web.agents` | Capability | On | ✓ | ✓ |  |  |  |  |
@@ -107,14 +107,14 @@ Ask before an agent writes to a third-party service. Decided most specific first
 
 ## Thread participation
 
-Reply in a thread without being mentioned when a short classifier call says the agent can help. A lower tier may turn it on under a higher Off, as before the registry; a Lock stops that.
+Reply in a thread without being mentioned when a short classifier call says the agent can help. A lower tier may turn it on under a higher Off, as before the registry; a Lock stops that. There is no agent level: the gate decides before an agent answers, so an agent setting would never be read.
 
 | | |
 | --- | --- |
 | Key | `participation` |
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
-| Levels | Deployment, Server, Agent, Channel, Thread |
+| Levels | Deployment, Server, Channel, Thread |
 | Combines | Most specific wins |
 | Deprecated | `DAIMON_THREAD_PARTICIPATION__MODE` |
 
@@ -630,14 +630,14 @@ A card shows in a channel whose reply is waiting on the team's limit on replies 
 
 ## Private channel messages
 
-Every message in private and shared channels is read through Microsoft Graph, not only the ones that mention the agent.
+Every message in private and shared channels is read through Microsoft Graph, not only the ones that mention the agent. Read once when Teams starts, so only the deployment sets it and a restart applies it.
 
 | | |
 | --- | --- |
 | Key | `private_channel_messages` |
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
-| Levels | Deployment, Server, Channel |
+| Levels | Deployment |
 | Combines | Off above is a ceiling |
 | Deprecated | `DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED` |
 

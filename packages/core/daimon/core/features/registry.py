@@ -592,11 +592,12 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         effect="capability",
         values=_ON_OFF,
         default="off",
-        tiers=_CHANNELS,
+        tiers=("deployment",),
         binds="turn",
         doc=(
             "Every message in private and shared channels is read through Microsoft "
-            "Graph, not only the ones that mention the agent."
+            "Graph, not only the ones that mention the agent. Read once when Teams starts, "
+            "so only the deployment sets it and a restart applies it."
         ),
         platforms=frozenset({"teams"}),
         authority=_ADMIN,
@@ -986,12 +987,13 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         effect="capability",
         values=_ON_OFF,
         default="off",
-        tiers=("deployment", "workspace", "agent", "channel", "thread"),
+        tiers=("deployment", "workspace", "channel", "thread"),
         binds="turn",
         doc=(
             "Reply in a thread without being mentioned when a short classifier call says "
             "the agent can help. A lower tier may turn it on under a higher Off, as before "
-            "the registry; a Lock stops that."
+            "the registry; a Lock stops that. There is no agent level: the gate decides before "
+            "an agent answers, so an agent setting would never be read."
         ),
         platforms=frozenset({"discord", "teams"}),
         requires=("platform_adapter",),
