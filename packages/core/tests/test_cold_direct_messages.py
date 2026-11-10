@@ -585,9 +585,11 @@ async def test_dm_reply_names_the_session_whose_files_the_adapter_sends(
     from daimon.core import direct_messages
     from daimon.core.authz import AgentRef, Place, Surface, build_subject
     from daimon.core.direct_messages import reply_to_dm_result
+    from daimon.core.output_runtime import AnthropicOutputRuntime
     from daimon.core.turn.admission import AdmissionGrant
     from daimon.core.turn.run import RunOutcome
     from daimon.core.turn.state import TextBlock, TurnState
+    from mux.contracts.ids import Scope
 
     tenant, admission, deps = await seed(db_session_factory)
     row = await start_cold_dm(
@@ -625,7 +627,13 @@ async def test_dm_reply_names_the_session_whose_files_the_adapter_sends(
 
     async def run(deps, prepared, **kwargs):
         return RunOutcome(
-            TurnState(content=[TextBlock(kind="text", text="the clip")]), "sesn_dm", None, False
+            TurnState(content=[TextBlock(kind="text", text="the clip")]),
+            "sesn_dm",
+            None,
+            False,
+            outputs=AnthropicOutputRuntime(
+                deps.anthropic, "sesn_dm", scope=Scope.legacy_host_authorized(call_site="test")
+            ),
         )
 
     monkeypatch.setattr(direct_messages, "run_prepared_turn", run)
@@ -643,6 +651,6 @@ async def test_dm_reply_names_the_session_whose_files_the_adapter_sends(
     )
 
     assert reply is not None and reply.text == "the clip"
-    assert reply.session_id == files_session, (
+    assert (reply.outputs.session_id if reply.outputs else None) == files_session, (
         "only a Managed Agents session has a file listing to sweep"
     )

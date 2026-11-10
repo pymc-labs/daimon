@@ -143,6 +143,7 @@ from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.output_delivery import NoticedFiles
+from daimon.core.output_runtime import OutputRuntime
 from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
 from daimon.core.permissions import channel_permissions
 from daimon.core.platform_words import words_for
@@ -909,10 +910,11 @@ class DaimonBot(commands.Bot):
         self,
         previous: asyncio.Task[None] | None,
         thread: Conversation,
-        session_id: str,
+        outputs: OutputRuntime,
         may_post: Callable[[], Awaitable[bool]],
         lifecycle: DiscordTurnLifecycle | None = None,
     ) -> None:
+        session_id = outputs.session_id
         # A previous sweep owns post-then-delete for this MA session until it finishes.
         if previous is not None:
             with contextlib.suppress(Exception):
@@ -922,9 +924,8 @@ class DaimonBot(commands.Bot):
         try:
             requester_label = await self._sweep_requester_label(thread, attributed)
             await deliver_session_outputs(
-                self.runtime.turn_deps.anthropic,
+                outputs,
                 thread,
-                session_id=session_id,
                 may_post=may_post,
                 notice_thread_ids=self._delivery_notice_thread_ids,
                 noticed_files=self._noticed_output_files,
@@ -1058,13 +1059,15 @@ class DaimonBot(commands.Bot):
         if lifecycle is not None and lifecycle.output_authorization is not None:
             # A watch's execution grant ends with the turn, before detached sweeps.
             return
-        if selfhosted or not any(
-            isinstance(block, ToolUseBlock) for block in outcome.state.content
+        if (
+            selfhosted
+            or outcome.outputs is None
+            or not any(isinstance(block, ToolUseBlock) for block in outcome.state.content)
         ):
             return
         self._queue_output_sweep(
             thread,
-            outcome.ma_session_id,
+            outcome.outputs,
             may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
             lifecycle=lifecycle,
         )
@@ -1072,7 +1075,7 @@ class DaimonBot(commands.Bot):
     def schedule_dm_output_sweep(
         self,
         channel: discord.DMChannel,
-        session_id: str,
+        outputs: OutputRuntime,
         *,
         may_post: Callable[[], Awaitable[bool]],
         lifecycle: DiscordTurnLifecycle | None,
@@ -1082,19 +1085,20 @@ class DaimonBot(commands.Bot):
         ``may_post`` is the DM's own delivery check, asked again before each
         file: the thread gate's channel permissions mean nothing in a DM.
         """
-        self._queue_output_sweep(channel, session_id, may_post=may_post, lifecycle=lifecycle)
+        self._queue_output_sweep(channel, outputs, may_post=may_post, lifecycle=lifecycle)
 
     def _queue_output_sweep(
         self,
         thread: Conversation,
-        session_id: str,
+        outputs: OutputRuntime,
         *,
         may_post: Callable[[], Awaitable[bool]],
         lifecycle: DiscordTurnLifecycle | None,
     ) -> None:
+        session_id = outputs.session_id
         previous = self._output_sweeps.get(session_id)
         task = self._spawn(
-            self._sweep_session_outputs(previous, thread, session_id, may_post, lifecycle)
+            self._sweep_session_outputs(previous, thread, outputs, may_post, lifecycle)
         )
         self._output_sweeps[session_id] = task
         task.add_done_callback(functools.partial(self._forget_output_sweep, session_id))

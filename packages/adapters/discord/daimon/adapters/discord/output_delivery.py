@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import structlog
-from anthropic import AsyncAnthropic
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.core.media.filenames import display_filename_for, sanitize_title
 from daimon.core.output_delivery import (
@@ -27,8 +26,9 @@ from daimon.core.output_delivery import (
     OutputPostingUnavailable,
     SkippedFile,
     render_oversize_notice,
-    sweep_session_outputs,
+    sweep_outputs,
 )
+from daimon.core.output_runtime import OutputRuntime
 
 import discord
 
@@ -93,10 +93,9 @@ def _attribution(
 
 
 async def deliver_session_outputs(
-    anthropic_client: AsyncAnthropic,
+    runtime: OutputRuntime,
     thread: Conversation,
     *,
-    session_id: str,
     may_post: Callable[[], Awaitable[bool]],
     notice_thread_ids: set[int],
     noticed_files: NoticedFiles | None = None,
@@ -118,6 +117,7 @@ async def deliver_session_outputs(
     own, and an oversize notice, reply to the message ``reply_to`` and name
     the user ``requester_id``, whose turn made the file.
     """
+    session_id = runtime.session_id
     max_bytes = upload_limit(thread)
     mention, attributed = _attribution(thread, requester_id=requester_id, reply_to=reply_to)
     if mention is not None and requester_label:
@@ -181,9 +181,8 @@ async def deliver_session_outputs(
         )
 
     try:
-        await sweep_session_outputs(
-            anthropic_client,
-            session_id=session_id,
+        await sweep_outputs(
+            runtime,
             post=post,
             on_skip=on_skip,
             sleep=sleep,
