@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **One model select on the Discord, Slack and Teams agent panels.** The panel
+  lists every model the organisation can run with its price. Picking a model on
+  another provider shows what would be lost and what it costs, then asks for one
+  confirm; that confirm accepts the losses shown, so the switch is no longer
+  refused afterwards. A refused switch offers "Switch back to Claude" or
+  "Review again" on the same card. The separate provider step is gone.
+
 - **Output files arrive on every provider.** Files an agent produces during a
   turn are now posted to Discord, Slack, Teams and the web chat whichever
   provider runs the agent, not only on Anthropic. Each file is delivered once
