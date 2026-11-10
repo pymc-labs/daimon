@@ -34,6 +34,8 @@ from anthropic import APIError, APIStatusError
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core import channel_backend
 from daimon.core.access_policy import TenantAccessPolicy, agent_invoker_roles
+from daimon.core.agent_record_ports import DAIMON_ID_PREFIXES
+from daimon.core.anthropic_guard import anthropic_configured
 from daimon.core.approval_gate import ApprovalGate, resolve_approval_gate
 from daimon.core.authz import (
     Action,
@@ -558,6 +560,19 @@ def _observe_admission(observer: AdmissionObserver, decision: AdmissionDecision)
         observer(decision)
     except Exception:
         _log.warning("turn.admission_observer_failed")
+
+
+def _refuse_managed_fallback(
+    *, daimon_record: bool, revision: AgentBackendRevision | ConfigRevision | None
+) -> None:
+    """A Daimon record never runs on Managed Agents: refuse rather than fall back."""
+    if not daimon_record or (revision is not None and revision.backend != MANAGED_AGENTS.provider):
+        return
+    raise AdmissionDenied(
+        reason="backend_unsupported",
+        cause="agent_backend",
+        provider=MANAGED_AGENTS.provider if revision is None else revision.backend,
+    )
 
 
 async def admit(
@@ -1196,21 +1211,62 @@ async def _admit_gates(
         ) from err
 
     selfhosted = backend_revision is not None and backend_revision.backend == LOOP.provider
-    if selfhosted:
+    keyed = anthropic_configured(deps.anthropic)
+    responder = config.responder_ma_agent_id
+    # A Daimon record: self-hosted, a `dm_` responder, or any agent on a keyless
+    # install. Everything else is a Managed Agents agent, which needs the key.
+    daimon_record = (
+        selfhosted
+        or (responder is not None and responder.startswith(DAIMON_ID_PREFIXES))
+        or (not keyed and responder is None)
+    )
+    if not daimon_record and not keyed:
+        raise AdmissionDenied(
+            reason="backend_unsupported",
+            cause="anthropic_unconfigured",
+            provider=MANAGED_AGENTS.provider,
+        )
+    if daimon_record:
         from daimon.core.turn.selfhosted_records import resolve_records
 
-        agent, environment = await resolve_records(
+        record_scope = Scope(
+            tenant_id=str(tenant_id),
+            account_id=str(principal.account_id),
+            principal_id=external_user_id,
+            authorization_id="turn-admission",
+        )
+        resolve = partial(
+            resolve_records,
             deps.sessionmaker,
-            Scope(
-                tenant_id=str(tenant_id),
-                account_id=str(principal.account_id),
-                principal_id=external_user_id,
-                authorization_id="turn-admission",
-            ),
+            record_scope,
             agent_name=config.agent_name,
             environment_name=config.environment_name,
-            responder_id=config.responder_ma_agent_id,
+            responder_id=responder,
         )
+        try:
+            agent, environment = await resolve()
+        except MAResolverMissError:
+            # A keyless install seeds its defaults as Daimon records on first use.
+            if selfhosted or keyed or dm_agent_name is not None:
+                raise
+            await reconcile_tenant_defaults(
+                deps.anthropic,
+                deps.sessionmaker,
+                deps.defaults_root,
+                tenant_id=tenant_id,
+                public_url=deps.public_url,
+            )
+            try:
+                agent, environment = await resolve()
+            except MAResolverMissError as miss:
+                if miss.kind != "agent":
+                    raise
+                # Not a Daimon record, so a Managed Agents one the key would reach.
+                raise AdmissionDenied(
+                    reason="backend_unsupported",
+                    cause="anthropic_unconfigured",
+                    provider=MANAGED_AGENTS.provider,
+                ) from miss
         agent_id, env_id = agent.id, environment.id
         if (observation := current_outcome.get()) is not None:
             observation.agent_id = agent.id
@@ -1297,7 +1353,7 @@ async def _admit_gates(
     # raise the existing resolver-miss error so the friendly copy at the four
     # adapter catch sites renders unchanged -- no new error taxonomy. ---
     if agent.archived_at is not None:
-        if not selfhosted:
+        if not daimon_record:
             deps.resolver_cache.pop((tenant_id, "agent", config.agent_name), None)
             deps.resolver_cache.agents.pop((tenant_id, agent_id), None)
             async with deps.sessionmaker() as session, session.begin():
@@ -1671,8 +1727,8 @@ async def _admit_gates(
         )
     )
 
-    if selfhosted:
-        # Self-hosted skills are record references, resolved by the harness's
+    if daimon_record:
+        # Daimon record skills are record references, resolved by the harness's
         # mount pipeline. Anthropic's platform/channel catalog is never queried.
         platform_skills: tuple[MaSkill, ...] = ()
         channel_skills: tuple[MaSkill, ...] = ()
@@ -1708,6 +1764,7 @@ async def _admit_gates(
 
     if deps.agent_backends:
         await resolve_preference()
+    _refuse_managed_fallback(daimon_record=daimon_record, revision=backend_revision)
     platform_skills = backend_platform_skills(
         platform_skills, None if backend_revision is None else backend_revision.profile
     )
@@ -2419,7 +2476,9 @@ async def capture_backend_source(
                 account_id=str(context.account_id),
                 authorization_id="backend-preview",
             )
-            actual = await retrieve_agent(deps.anthropic, source.source.ref.id, scope=scope)
+            actual = await retrieve_agent(
+                deps.anthropic, source.source.ref.id, scope=scope, records=deps.sessionmaker
+            )
             if explicit_target_name is not None:
                 await channel_backend.load_backend_agent(
                     deps.anthropic,

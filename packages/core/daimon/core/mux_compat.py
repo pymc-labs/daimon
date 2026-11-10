@@ -27,7 +27,7 @@ from anthropic.types.beta.memory_stores.beta_managed_agents_memory_list_item imp
 from anthropic.types.beta.skills import VersionCreateResponse, VersionListResponse
 from daimon.core.model_presets import ModelSelection, resolve_model
 from daimon.core.mux_backend import managed_agents, resource_ref
-from mux.contracts.ids import Revision, Scope, SkillRef
+from mux.contracts.ids import Provider, Revision, Scope, SkillRef
 from mux.contracts.ports import SkillVersions
 from mux.contracts.resources import (
     Agent,
@@ -105,15 +105,23 @@ def _list(value: object) -> list[object]:
     return list(cast(Sequence[object], value))
 
 
+def _model_provider(model_id: str) -> Provider:
+    """The provider serving `model_id`: a Daimon record's OpenAI or Gemini model, else Claude."""
+    from mux.profiles import selectable_models
+
+    for provider in ("openai", "gemini"):
+        if model_id in selectable_models(provider):
+            return provider
+    return "anthropic"
+
+
 def _agent_values(payload: Mapping[str, object]) -> dict[str, object]:
     result = dict(payload)
     extensions: dict[str, object] = {}
     if "model" in result and result["model"] is not None:
         model = resolve_model(cast("ModelSelection", result["model"]))
-        result["model"] = {
-            "provider": "anthropic",
-            "id": model if isinstance(model, str) else _mapping(model)["id"],
-        }
+        model_id = model if isinstance(model, str) else str(_mapping(model)["id"])
+        result["model"] = {"provider": _model_provider(model_id), "id": model_id}
         if not isinstance(model, str):
             extensions["anthropic.model_config"] = {
                 "namespace": "anthropic.model_config",
@@ -172,10 +180,21 @@ def agent_spec(payload: Mapping[str, object]) -> AgentSpec:
 def source_agent_record(item: BetaManagedAgentsAgent, scope: Scope) -> Agent | None:
     """Retain the driver's complete source record without another native read."""
     try:
-        return agent_record(item, "", scope)
+        record = agent_record(item, "", scope)
     except (AttributeError, TypeError, ValueError):
         # Preview reads tolerate partial SDK replies; execution needs the full record.
         return None
+    if not item.id.startswith("dm_agent_"):
+        return record
+    # A Daimon record's projection is Managed Agents shaped; restore its provider.
+    provider = _model_provider(record.spec.model.id)
+    model = record.spec.model.model_copy(update={"provider": provider})
+    return record.model_copy(
+        update={
+            "ref": record.ref.model_copy(update={"provider": provider}),
+            "spec": record.spec.model_copy(update={"model": model}),
+        }
+    )
 
 
 def source_environment_record(item: BetaEnvironment, scope: Scope) -> Environment:

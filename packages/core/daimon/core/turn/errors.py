@@ -66,6 +66,9 @@ BackendRefusalCause = Literal[
     # Getting the agent ready failed for a reason nobody proved is missing setup:
     # "couldn't get it ready", with the reference, never "not set up".
     "preparation_failed",
+    # A Managed Agents agent on an install with no Anthropic key: make a copy on a
+    # keyed provider, or add the key. Never a 401.
+    "anthropic_unconfigured",
 ]
 MissingConfigPart = Literal["agent", "environment"]
 

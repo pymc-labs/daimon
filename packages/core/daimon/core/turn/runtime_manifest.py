@@ -265,11 +265,15 @@ async def capture_preparation_source(
     if fresh:
         from daimon.core.mux_compat import retrieve_agent, retrieve_environment
 
+        records = request.deps.sessionmaker
         actual = await retrieve_agent(
-            request.deps.anthropic, request.admission.agent.id, scope=request.scope
+            request.deps.anthropic, request.admission.agent.id, scope=request.scope, records=records
         )
         environment = await retrieve_environment(
-            request.deps.anthropic, request.admission.environment.id, scope=request.scope
+            request.deps.anthropic,
+            request.admission.environment.id,
+            scope=request.scope,
+            records=records,
         )
         request = replace(
             request,
@@ -1449,9 +1453,10 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
                     if setting != provisional or setting is None or setting.drop_consent is None:
                         raise AgentBackendRefused("re_confirm", detail="provisional_mismatch")
     timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
+    owned = request.admission.agent.id.startswith("dm_agent_")
     source = await asyncio.wait_for(
         capture_preparation_source(request, fresh=True)
-        if setting is not None
+        if setting is not None or owned
         else capture_preparation_source(request),
         timeout=timeout,
     )
@@ -1474,6 +1479,16 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
     if spec is None:
         raise UnsupportedCapability(("source_definition",), revision.profile)
     target = None
+    # A Daimon record born on this profile runs natively: no switch, no consent.
+    born_native = (
+        setting is None
+        and owned
+        and revision.profile == backend_selection(spec.model.provider).profile
+    )
+    if born_native:
+        target = preview_source_drops(
+            source, ModelRef(provider=revision.backend, id=revision.model or spec.model.id)
+        )
     if setting is not None:
         consent = setting.drop_consent
         if consent is None:
@@ -1496,7 +1511,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
             picked=setting.model,
         ):
             raise AgentBackendRefused("re_confirm", detail="losses_differ")
-    retain_native = (
+    retain_native = born_native or (
         (setting is not None)
         and not setting.declared_drops
         and revision.profile == backend_selection(spec.model.provider).profile
