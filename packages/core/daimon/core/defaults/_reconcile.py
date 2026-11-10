@@ -10,7 +10,7 @@ This module imports neither `apply` nor `provisioning` (Landmine L4).
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from pathlib import Path
 
 import structlog
@@ -129,13 +129,15 @@ async def rename_selfhosted_defaults(
     defaults_root: Path,
     *,
     dry_run: bool,
+    skip_tenant_ids: Collection[uuid.UUID] = (),
 ) -> ApplyReport:
     """Run pending seeded renames for every tenant with a self-hosted record to move.
 
     Self-hosted deployments may have no Anthropic credentials, so this needs only
     Postgres; a `client` also lets each tenant's managed agents move with it.
     The tree is checked first, so a bad one fails before any write. Run it after
-    `apply_defaults` has passed its pre-flight.
+    `apply_defaults` has passed its pre-flight, and pass the tenants that apply
+    renamed itself as `skip_tenant_ids` so none is reported twice.
     """
     report = ApplyReport()
     agents_root = defaults_root / "agents"
@@ -146,6 +148,8 @@ async def rename_selfhosted_defaults(
         async with session_factory() as session:
             tenant_ids = await list_tenants_with_selfhosted_agent(session, name=old)
         for tenant_id in tenant_ids:
+            if tenant_id in skip_tenant_ids:
+                continue
             await _run_isolated(
                 report,
                 lambda tenant_id=tenant_id, old=old, new=new: rename_seeded_agent(

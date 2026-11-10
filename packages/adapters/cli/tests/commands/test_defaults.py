@@ -20,6 +20,7 @@ from daimon.adapters.cli.commands.defaults import (
 )
 from daimon.adapters.cli.runtime import CliRuntime
 from daimon.core.config import Settings
+from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.provisioning import archive_tenant
 from daimon.core.defaults.report import Action, ApplyReport, ResourceOutcome
 from daimon.core.errors import DefaultsError
@@ -29,6 +30,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from daimon.core.stores.tenants import set_provision_status
 from daimon.testing.factories import make_routine, make_tenant
+from daimon.testing.ma_models import ma_agent
 from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.resources import AgentSpec
 from mux.profiles.selfhosted import LOOP
@@ -243,6 +245,45 @@ async def _agent_outcomes(
     else:
         await call
     return json.loads(buf.getvalue())["agents"]
+
+
+def test_defaults_apply_when_cli_local_rename_blocked_then_reports_one_failure(
+    tmp_path: Path, schema_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    async def run() -> list[dict[str, str]]:
+        await _seed_legacy_tenant(schema_sessionmaker, "cli", "local", "daimon", "default")
+        state = FakeMAState()
+        agent = ma_agent(
+            id="ag_daimon",
+            name="daimon",
+            tenant_id=_CLI_LOCAL,
+            metadata={MA_METADATA_KEY_MANAGED: "true"},
+        )
+        state.agents["ag_daimon"] = agent.model_dump(mode="json")
+        rt = _keyed_runtime(schema_sessionmaker, state)
+        return await _agent_outcomes(rt, _default_tree(tmp_path), dry_run=False, expect_exit=True)
+
+    outcomes = asyncio.run(run())
+
+    failed = [o for o in outcomes if o["action"] == "failed"]
+    assert len(failed) == 1, (
+        f"cli:local is renamed once, by apply, not again by the pre-pass: {outcomes}"
+    )
+
+
+def test_defaults_apply_when_dry_run_then_each_tenant_reports_one_rename(
+    tmp_path: Path, schema_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    async def run() -> list[dict[str, str]]:
+        await _seed_legacy_tenant(schema_sessionmaker, "cli", "local", "daimon")
+        await _seed_legacy_tenant(schema_sessionmaker, "discord", "guild-sh", "daimon")
+        rt = _keyed_runtime(schema_sessionmaker, FakeMAState())
+        return await _agent_outcomes(rt, _default_tree(tmp_path), dry_run=True)
+
+    outcomes = asyncio.run(run())
+
+    renamed = [o for o in outcomes if o["action"] == "renamed"]
+    assert len(renamed) == 2, f"one rename for cli:local and one for the other tenant: {outcomes}"
 
 
 def test_defaults_apply_when_preflight_fails_then_selfhosted_records_are_untouched(

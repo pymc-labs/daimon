@@ -14,6 +14,7 @@ from daimon.core.config import load_settings
 from daimon.core.defaults.apply import apply_defaults, rename_selfhosted_defaults
 from daimon.core.defaults.provisioning import verify_tenant_defaults
 from daimon.core.defaults.report import ApplyReport, ResourceOutcome, classify_verification
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.tenants import list_tenants_by_platform
 from rich.console import Console
 from rich.table import Table
@@ -118,7 +119,11 @@ async def defaults_apply(
             public_url=public_url,
         )
         renames = await rename_selfhosted_defaults(
-            rt.sessionmaker, client, defaults_root, dry_run=dry_run
+            rt.sessionmaker,
+            client,
+            defaults_root,
+            dry_run=dry_run,
+            skip_tenant_ids={derive_tenant_uuid(platform="cli", workspace_id="local")},
         )
         for outcome in renames.agents:
             report.add(outcome)
