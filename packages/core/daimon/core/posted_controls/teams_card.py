@@ -14,6 +14,7 @@ from daimon.core.posted_controls.cards import ENV_FILE_KEPT_LINE, PostedCard, ca
 
 __all__ = [
     "ADAPTIVE_CARD_TYPE",
+    "CONTROL_VERB",
     "CREDENTIAL_DIALOG",
     "build_adaptive_card",
     "card_for_request",
@@ -23,6 +24,9 @@ __all__ = [
 ADAPTIVE_CARD_TYPE: Final[str] = "application/vnd.microsoft.card.adaptive"
 #: `dialog_id` of the private form the card's button opens through `task/fetch`.
 CREDENTIAL_DIALOG: Final[str] = "credential_request"
+#: `Action.Execute` verb of a call or switch card's buttons; `custom_id` names the press.
+CONTROL_VERB: Final[str] = "posted_control"
+_CONTROL_KINDS: Final[frozenset[str]] = frozenset({"call", "switch"})
 # The poster knows the requester's Entra id, not their name, so the footer
 # names the role; only the requester can open the form either way.
 _REQUESTER: Final[str] = "the person who asked"
@@ -80,9 +84,20 @@ def build_adaptive_card(card: PostedCard, *, token: str | None = None) -> dict[s
     # Title, body, buttons and footer each sit apart, a blank line's gap between.
     body += [_text(fact, isSubtle=True, spacing="Medium") for fact in card.facts]
     actions: list[dict[str, object]] = []
-    for button in card.buttons:
+    for index, button in enumerate(card.buttons):
         if button.url is not None:
             actions.append({"type": "Action.OpenUrl", "title": button.label, "url": button.url})
+            continue
+        if card.kind in _CONTROL_KINDS and button.custom_id is not None:
+            execute: dict[str, object] = {
+                "type": "Action.Execute",
+                "title": button.label,
+                "verb": CONTROL_VERB,
+                "data": {"action": CONTROL_VERB, "custom_id": button.custom_id},
+            }
+            if index == 0:
+                execute["style"] = "positive"
+            actions.append(execute)
             continue
         if token is None:
             raise ValueError("a card with a private-form button needs its token")

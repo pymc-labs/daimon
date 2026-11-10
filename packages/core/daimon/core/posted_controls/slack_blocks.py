@@ -20,10 +20,18 @@ from typing import Any, Final
 from daimon.core.credential_requests import SLACK_ACTION_ID
 from daimon.core.posted_controls.cards import PostedCard
 
-__all__ = ["MAX_CONTEXT_ELEMENTS", "build_card_blocks", "card_notification_text"]
+__all__ = [
+    "CONTROL_KINDS",
+    "MAX_CONTEXT_ELEMENTS",
+    "build_card_blocks",
+    "card_notification_text",
+]
 
 #: Slack's documented cap on `context` block elements.
 MAX_CONTEXT_ELEMENTS: Final[int] = 10
+#: Cards whose buttons are answered in place: the click routes by the button's
+#: own `custom_id` (a call or switch card id), not by a form token.
+CONTROL_KINDS: Final[frozenset[str]] = frozenset({"call", "switch"})
 
 
 def _mrkdwn(text: str) -> dict[str, Any]:
@@ -83,6 +91,11 @@ def build_card_blocks(card: PostedCard, *, token: str | None = None) -> list[dic
             if button.url is not None:
                 element["url"] = button.url
                 element["action_id"] = f"{SLACK_ACTION_ID}_link_{index}"
+            elif card.kind in CONTROL_KINDS and button.custom_id is not None:
+                element["action_id"] = button.custom_id
+                element["value"] = button.custom_id
+                if index == 0:
+                    element["style"] = "primary"
             else:
                 if token is None:
                     raise ValueError("a card with a private-form button needs its token")
