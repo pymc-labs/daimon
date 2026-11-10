@@ -222,7 +222,7 @@ FAILED_TEXT: Final[str] = (
 
 async def press_switch_card(
     *,
-    deps: TurnDeps | None,
+    deps: TurnDeps,
     sessionmaker: async_sessionmaker[AsyncSession],
     anthropic: AsyncAnthropic,
     turn_settings: TurnSettings,
@@ -239,8 +239,7 @@ async def press_switch_card(
     """Answer one press. None: not the requester's (the card stays as it is).
 
     The requester is checked before the card is claimed, so nobody else's press
-    can use it up. A claimed card is applied or refused exactly once. `deps`
-    None reads no source (only for a service whose previews read none).
+    can use it up. A claimed card is applied or refused exactly once.
     """
     from daimon.core.stores import backend_switch_cards as cards
 
@@ -309,7 +308,7 @@ async def _apply(
     claimed: SwitchCardRow,
     end: Callable[[Literal["applied", "refused"], str], Awaitable[SwitchCardPress]],
     *,
-    deps: TurnDeps | None,
+    deps: TurnDeps,
     sessionmaker: async_sessionmaker[AsyncSession],
     anthropic: AsyncAnthropic,
     turn_settings: TurnSettings,
@@ -350,29 +349,25 @@ async def _apply(
     subject = build_subject(is_admin=is_admin, platform_user_id=clicker, client=claimed.client)
     # The source is read in the card's own conversation, as the MCP tool read it
     # for the preview, so the same agent setup yields the same preview digest.
-    capture = (
-        None
-        if deps is None
-        else partial(
-            capture_backend_source,
-            deps,
-            context=ScopeContext(
-                tenant_id=tenant_id,
-                account_id=claimed.account_id,
-                platform=claimed.platform,
-                channel_id=claimed.channel_id,
-                thread_id=claimed.thread_id,
-            ),
-            subject=subject,
-            place=Place.from_origin(
-                parent_channel_id=claimed.channel_id,
-                thread_id=claimed.thread_id,
-                setup_thread=claimed.setup_thread,
-            ),
-            is_dm=False,
-            slack_turn_context_id=None,
-            private_dm_id=None,
-        )
+    capture = partial(
+        capture_backend_source,
+        deps,
+        context=ScopeContext(
+            tenant_id=tenant_id,
+            account_id=claimed.account_id,
+            platform=claimed.platform,
+            channel_id=claimed.channel_id,
+            thread_id=claimed.thread_id,
+        ),
+        subject=subject,
+        place=Place.from_origin(
+            parent_channel_id=claimed.channel_id,
+            thread_id=claimed.thread_id,
+            setup_thread=claimed.setup_thread,
+        ),
+        is_dm=False,
+        slack_turn_context_id=None,
+        private_dm_id=None,
     )
     service = make_backend_service(
         sessionmaker,

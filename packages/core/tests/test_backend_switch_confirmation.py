@@ -1,6 +1,7 @@
 """Backend switching uses the existing confirmation gate with a bound reference."""
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from daimon.core.confirmation import prompt_for_tool_call
@@ -145,8 +146,14 @@ def test_preview_is_a_read_but_confirm_is_never_unattended() -> None:
     )
 
 
+#: Turn deps for a card press; the press then uses the fixture's service, which reads
+#: no source (these tests' previews read none).
+_DEPS = SimpleNamespace()
+
+
 @pytest.fixture
-async def owned_preview(db_preflight, db_committing_engine):
+async def owned_preview(db_preflight, db_committing_engine, monkeypatch):
+    from daimon.core import channel_backend
     from daimon.core.authz import Subject
     from daimon.core.channel_backend import (
         AgentBackendService,
@@ -187,6 +194,7 @@ async def owned_preview(db_preflight, db_committing_engine):
 
         # These tests pin the service without a source capture.
         service = AgentBackendService(sessions, enabled=True)
+        monkeypatch.setattr(channel_backend, "make_backend_service", lambda *_, **__: service)
         actor = BackendActor(tenant.id, account.id, Subject(is_admin=True))
         policy = await service.tenant_policy(tenant.id)
         await service.set_tenant_allowlist(
@@ -1331,7 +1339,7 @@ def _press(owned_preview, card_id, *, action="confirm", clicker="requester", adm
 
     _, agent, _, sessions, client, *_ = owned_preview
     return press_switch_card(
-        deps=None,
+        deps=_DEPS,
         sessionmaker=sessions,
         anthropic=client,
         turn_settings=TurnSettings(path="mux", channel_backends=True),
@@ -1461,7 +1469,7 @@ async def test_only_the_posted_message_can_press_its_switch_card(owned_preview):
 
     async def press(message_id: str):
         return await press_switch_card(
-            deps=None,
+            deps=_DEPS,
             sessionmaker=sessions,
             anthropic=client,
             turn_settings=TurnSettings(path="mux", channel_backends=True),
