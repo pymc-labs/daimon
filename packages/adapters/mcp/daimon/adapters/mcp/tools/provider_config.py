@@ -17,7 +17,12 @@ from daimon.core.agent_configuration import (
     configuration_refusal,
     provider_preview_digest,
 )
-from daimon.core.channel_backend import AgentBackendRefused, BackendActor, make_backend_service
+from daimon.core.channel_backend import (
+    NO_CAPTURE,
+    AgentBackendRefused,
+    BackendActor,
+    make_backend_service,
+)
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.ids import Provider
@@ -74,7 +79,9 @@ async def _request_provider_allowlist_impl(
     origin_context_id: str | None = None,
 ) -> ProviderAllowlistInfo:
     await _require_chat(runtime, auth, origin_context_id, "request_provider_allowlist")
-    service = make_backend_service(runtime.session_factory, runtime.settings.turn)
+    service = make_backend_service(
+        runtime.session_factory, runtime.settings.turn, capture_source=NO_CAPTURE
+    )
     try:
         policy = await service.tenant_policy(auth.tenant_id)
         # The existing service validates actor, policy and values without saving.
