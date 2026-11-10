@@ -52,8 +52,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 if TYPE_CHECKING:
+    from cryptography.fernet import MultiFernet
     from daimon.adapters.mcp.runtime import McpRuntime
     from daimon.core.config import Settings
+    from daimon.core.mcp_oauth.connector_tokens import HttpFactory
     from daimon.core.stores.domain import TurnOriginRow
     from daimon.core.stores.host_call_cards import HostCallCardRow
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -125,6 +127,11 @@ def relay_turn(claims: Mapping[str, object]) -> RelayTurn | None:
         or claims.get(CHAT_EXECUTION_CLAIM) is not True
         # Only a provider turn's credential: a card-capable turn calls its connectors natively.
         or claims.get("no_confirmation_surface") is not True
+        # A malformed binding must not read as "no requester": refuse it, as identity does.
+        or any(
+            claims.get(name) is not None and _uuid(claims.get(name)) is None
+            for name in ("requester_account_id", "confirmed_call", TOKEN_JTI_CLAIM)
+        )
     ):
         return None
     return RelayTurn(
@@ -433,6 +440,29 @@ class ConnectorRelay:
             log.info("connector_relay.call_finished", card_id=str(row.id), status=status)
 
 
+async def relay_token(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    fernet: MultiFernet,
+    turn: RelayTurn,
+    connector: Connector,
+    *,
+    http_factory: HttpFactory | None = None,
+) -> str | None:
+    """The requester's own token, or on a shared thread only an agent-wide one."""
+    from daimon.core.mcp_oauth.connector_tokens import connector_access_token
+
+    return await connector_access_token(
+        sessionmaker,
+        tenant_id=turn.tenant_id,
+        agent_id=turn.agent_id,
+        server_url=connector.url,
+        requester_account_id=turn.requester,
+        hide_personal=turn.shared,
+        fernet=fernet,
+        http_factory=http_factory,
+    )
+
+
 def build_connector_relay(
     runtime: McpRuntime, auth: TokenVerifier, public_url: str
 ) -> ConnectorRelay:
@@ -441,7 +471,6 @@ def build_connector_relay(
     from daimon.adapters.mcp.tools._own_card import post_own_card
     from daimon.core.channel_backend import AgentBackendRefused, load_backend_agent
     from daimon.core.connector_relay import connectors_of
-    from daimon.core.mcp_oauth.connector_tokens import connector_access_token
     from daimon.core.stores.domain import Role
 
     sessionmaker = runtime.session_factory
@@ -464,15 +493,7 @@ def build_connector_relay(
     async def token_for(turn: RelayTurn, connector: Connector) -> str | None:
         if runtime.fernet is None:
             return None
-        return await connector_access_token(
-            sessionmaker,
-            tenant_id=turn.tenant_id,
-            agent_id=turn.agent_id,
-            server_url=connector.url,
-            requester_account_id=turn.requester,
-            hide_personal=turn.shared,
-            fernet=runtime.fernet,
-        )
+        return await relay_token(sessionmaker, runtime.fernet, turn, connector)
 
     async def post_card(turn: RelayTurn, origin: TurnOriginRow, row: HostCallCardRow) -> bool:
         identity = AuthIdentity(
