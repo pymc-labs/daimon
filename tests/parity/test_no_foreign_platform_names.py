@@ -383,7 +383,7 @@ _OTHER_APPS_FOR_TEAMS = re.compile(r"discord|slack", re.IGNORECASE)
 def test_the_skills_a_teams_agent_is_seeded_with_name_no_other_chat_platform() -> None:
     """Every custom skill on the default agent that a Teams turn can load, whether it is
     on the agent for everyone or added on Teams alone."""
-    spec = yaml.safe_load((_DEFAULTS / "agents" / "daimon.yaml").read_text())
+    spec = yaml.safe_load((_DEFAULTS / "agents" / "default.yaml").read_text())
     offences: list[str] = []
     checked = 0
     for ref in spec["skills"]:
@@ -405,7 +405,7 @@ def test_each_platforms_system_prompt_names_no_other_chat_platform(platform: Cha
     from daimon.core.agent_guidance import apply_credential_guidance
     from daimon.core.platform_system import system_for_platform
 
-    spec = yaml.safe_load((_DEFAULTS / "agents" / "daimon.yaml").read_text())
+    spec = yaml.safe_load((_DEFAULTS / "agents" / "default.yaml").read_text())
     variant = system_for_platform(apply_credential_guidance(spec["system"]), platform)
 
     assert variant is not None

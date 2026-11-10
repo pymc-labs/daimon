@@ -833,7 +833,7 @@ async def test_a_new_gemini_thread_sends_its_platforms_system_prompt_with_fragme
         platform=platform,
         admission=replace(selected.admission, backend_revision=moved, backend=check_backend(moved)),
     )
-    defaults = Path(__file__).resolve().parents[4] / "defaults" / "agents" / "daimon.yaml"
+    defaults = Path(__file__).resolve().parents[4] / "defaults" / "agents" / "default.yaml"
     shipped = apply_credential_guidance(yaml.safe_load(defaults.read_text())["system"])
     other = "Slack" if platform != "slack" else "Discord"
     system = encode_fragments(

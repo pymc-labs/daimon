@@ -18,12 +18,12 @@ Layout:
 
 Operator workflow: edit YAML → `daimon defaults apply`.
 
-The `daimon` agent also references Anthropic's built-in `docx`, `pptx` and
+The `default` agent also references Anthropic's built-in `docx`, `pptx` and
 `xlsx` skills (`type: anthropic`), limited to Teams with `platforms: [teams]`.
 They have no directory here and stay off the agent itself: a Teams turn on
 the Anthropic backend adds them to its session (see `docs/defaults.md`).
 
-`skills/team-etiquette` is attached to the `daimon` agent on every platform. It
+`skills/team-etiquette` is attached to the `default` agent on every platform. It
 covers posting for other people: cheaper shapes, the reach budget, routines,
 shared media and the never-tag opt-out.
 

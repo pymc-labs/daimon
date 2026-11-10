@@ -122,7 +122,7 @@ def _collect_texts() -> tuple[str, dict[str, str]]:
     not a hardcoded single skill path, so a second seeded skill is covered
     automatically."""
     specs = load_agent_specs(DEFAULTS / "agents")
-    daimon = next(s for s in specs if s.name == "daimon")
+    daimon = next(s for s in specs if s.name == "default")
     system = _strip_fenced_code_blocks(daimon.system or "")
     referenced_skill_ids = {ref.skill_id for ref in daimon.skills if ref.type == "custom"}
     bodies: dict[str, str] = {}

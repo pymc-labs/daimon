@@ -1,4 +1,4 @@
-name: daimon
+name: default
 model: claude-sonnet-5-5
 system: |
   You are Daimon, the agent this workspace starts with — available in the

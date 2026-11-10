@@ -521,7 +521,7 @@ async def test_real_shipped_daimon_agent_builds_with_expected_builtin_skips() ->
     from daimon.core.defaults.loader import load_agent_specs
 
     defaults = Path(__file__).resolve().parents[3] / "defaults"
-    agent = next(spec for spec in load_agent_specs(defaults / "agents") if spec.name == "daimon")
+    agent = next(spec for spec in load_agent_specs(defaults / "agents") if spec.name == "default")
     own = tuple(SkillRef(id=ref.skill_id) for ref in agent.skills if ref.platforms is None)
     teams = tuple(
         SkillRef(id=ref.skill_id, source=ref.type)

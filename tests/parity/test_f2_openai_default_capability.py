@@ -68,7 +68,7 @@ CREDENTIAL = "host:qa-mcp-run"
 
 def _manifest() -> DefaultManifest:
     """The default agent, as F1's OpenAI test builds it, with an authenticated MCP."""
-    raw = yaml.safe_load((ROOT / "defaults/agents/daimon.yaml").read_text())
+    raw = yaml.safe_load((ROOT / "defaults/agents/default.yaml").read_text())
     skills: list[NamedSkill] = []
     # Anthropic's built-in skills run only there; OpenAI gets the authored ones
     # that are on the agent, not the platform-limited ones.

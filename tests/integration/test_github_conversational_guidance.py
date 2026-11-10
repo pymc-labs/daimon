@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_seeded_guidance_describes_one_working_repo_and_token_repos() -> None:
-    prompt = (ROOT / "defaults/agents/daimon.yaml").read_text()
+    prompt = (ROOT / "defaults/agents/default.yaml").read_text()
     setup = (ROOT / "defaults/skills/workspace-setup/SKILL.md").read_text()
     cli_auth = (ROOT / "defaults/skills/cli-auth/SKILL.md").read_text()
     # The seeded prompt points at the guidance block reconcile prepends to it,

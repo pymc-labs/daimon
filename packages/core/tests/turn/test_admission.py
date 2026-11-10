@@ -1210,11 +1210,15 @@ async def test_handoff_thread_refuses_an_agent_from_another_workspace(
 
 
 async def _seed_admittable_tenant(
-    db_session: AsyncSession, *, policy: TenantAccessPolicy | None, platform: str = "discord"
+    db_session: AsyncSession,
+    *,
+    policy: TenantAccessPolicy | None,
+    platform: str = "discord",
+    agent_name: str = "daimon",
 ) -> TenantRow:
     tenant = await make_tenant(db_session, platform=platform)  # type: ignore[arg-type]
     await make_tenant_config(
-        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+        db_session, tenant=tenant, agent_name=agent_name, environment_name="default"
     )
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
     if policy is not None:
@@ -1241,18 +1245,18 @@ async def test_admit_adds_the_default_agents_office_skills_on_teams_only(
 ) -> None:
     """A Teams turn of the seeded agent runs with docx, pptx and xlsx; others run as before.
 
-    They come from `defaults/agents/daimon.yaml`'s `platforms: [teams]` entries
+    They come from `defaults/agents/default.yaml`'s `platforms: [teams]` entries
     and ride the session's skills override, so a Slack or Discord turn adds
     nothing and its agent, skills and session match a deployment without them.
     """
     from daimon.core.defaults.loader import load_platform_skills
     from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 
-    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    tenant = await _seed_admittable_tenant(db_session, policy=None, agent_name="default")
     router = resolved_agent_env_router(
         ma_agent(
             id="ag_1",
-            name="daimon",
+            name="default",
             tenant_id=tenant.id,
             metadata={MA_METADATA_KEY_MANAGED: "true"},
         ),
@@ -1300,7 +1304,7 @@ async def test_admit_adds_the_default_agents_microsoft_365_skill_on_teams_only(
 ) -> None:
     """A Teams turn of the seeded agent runs with the tenant's `microsoft-365` upload.
 
-    It is `platforms: [teams]` in `defaults/agents/daimon.yaml`, so it is found
+    It is `platforms: [teams]` in `defaults/agents/default.yaml`, so it is found
     by its seeded title and added after the Office built-ins, while a Slack or
     Discord turn of the same agent adds no skill at all.
     """
@@ -1310,11 +1314,11 @@ async def test_admit_adds_the_default_agents_microsoft_365_skill_on_teams_only(
         tenant_scoped_display_title,
     )
 
-    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    tenant = await _seed_admittable_tenant(db_session, policy=None, agent_name="default")
     router = resolved_agent_env_router(
         ma_agent(
             id="ag_1",
-            name="daimon",
+            name="default",
             tenant_id=tenant.id,
             metadata={MA_METADATA_KEY_MANAGED: "true"},
         ),
