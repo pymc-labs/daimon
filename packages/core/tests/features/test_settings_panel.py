@@ -12,6 +12,7 @@ from daimon.core.authz import Subject
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.features import service
 from daimon.core.features.registry import FEATURES
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.features.surface import choice
 from daimon.core.scope_settings import SettingsActor, SettingsPlace
 from daimon.testing.factories import make_tenant
@@ -152,3 +153,55 @@ async def test_a_builtin_tool_is_not_offered_per_agent_in_chat(
     screen = await panel.show(db_session_factory, _settings(), actor, CHANNEL, op, agents=_agents)
     assert screen is not None
     assert "Change for an agent" not in [s.placeholder for s in screen.selects]
+
+
+async def test_no_select_is_cut_by_the_platform_option_limit(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    """Discord allows 25 options a select: a group lists every feature on the platform within
+    it, and an agent picker never offers more, so nothing is silently dropped."""
+    actor = _actor(await _tenant(db_session), True)
+    many = [panel.AgentChoice(f"a{i}", f"Agent {i}") for i in range(40)]
+
+    async def agents() -> list[panel.AgentChoice]:
+        return many
+
+    for platform in ("discord", "slack", "teams"):
+        place = SettingsPlace.of(platform, "C1", None)
+        for category in {spec.category for spec in FEATURES.values()}:
+            screen = await panel.show(
+                db_session_factory, _settings(), actor, place, panel.open_op(category)
+            )
+            assert screen is not None
+            listed = len(screen.selects[0].options)
+            wanted = sum(
+                1 for s in FEATURES.values() if s.category == category and s.on_platform(platform)
+            )
+            assert listed == wanted <= panel.SELECT_LIMIT, f"{platform} {category} is cut"
+    op = panel.open_op("chat", "progress_plans")
+    screen = await panel.show(db_session_factory, _settings(), actor, CHANNEL, op, agents=agents)
+    assert screen is not None
+    assert all(len(s.options) <= panel.SELECT_LIMIT for s in screen.selects), "picker is capped"
+
+
+async def test_a_level_overridden_above_says_what_decides(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    """A channel's own On under a server Off reads as overridden, not as in effect. The state
+    arises when the server is turned Off after the channel was set."""
+    tenant = await _tenant(db_session)
+    actor = _actor(tenant, True)
+    on = choice("watches", "channel", "on")
+    assert (await panel.press(db_session_factory, _settings(), actor, on, CHANNEL)) is not None
+    changer = service.FeatureActor(tenant, None, "web", None, actor.admin_for)
+    await service.change_feature(
+        db_session_factory, _settings(), changer, key="watches", tier="workspace", value="off",
+        place=FeaturePlace(tenant, "discord"),
+    )  # fmt: skip
+    op = panel.open_op("capabilities", "watches")
+    screen = await panel.show(db_session_factory, _settings(), actor, CHANNEL, op)
+    assert screen is not None
+    assert "In effect: Off, set for the server." in screen.lines, screen.lines
+    assert "Channel: On, overridden by the server." in screen.lines, screen.lines
+    refused = await panel.press(db_session_factory, _settings(), actor, on, CHANNEL)
+    assert refused is not None and not refused.ok, "turning it on again is refused"

@@ -22,7 +22,7 @@ from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.features.registry import DEFAULT, FEATURES, LOCKABLE, Category, FeatureSpec
-from daimon.core.features.service import FeatureView, admin_word, read_features
+from daimon.core.features.service import FeatureView, TierSetting, admin_word, read_features
 from daimon.core.features.service import change_refusal as feature_refusal
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.features.surface import (
@@ -197,7 +197,7 @@ async def _feature(
         if own.tier == "deployment":
             continue
         word = tier_word(own.tier, place.platform).capitalize()
-        lines.append(f"{word}: {own_text(spec, own)}.")
+        lines.append(f"{word}: {own_text(spec, own)}{_overridden(view, own, place.platform)}.")
         if (own.tier == "agent") != bool(agent):
             continue
         if await feature_refusal(sessions, settings, actor, key=key, tier=own.tier, place=fplace):
@@ -217,6 +217,16 @@ async def _feature(
         who = admin_word(place.platform)
         lines.append(f"Only {who} can change this. Ask {who}.")
     return PanelScreen(title, tuple(lines), tuple(selects), back)
+
+
+def _overridden(view: FeatureView, own: TierSetting, platform: str) -> str:
+    """`, overridden by the server` when another level decides and its value differs from
+    this one's own, so a row never reads as in effect when it is not."""
+    resolved = view.resolved
+    if own.value in (DEFAULT, resolved.value) or resolved.tier in (own.tier, "default"):
+        return ""
+    by = "the deployment" if resolved.tier == "deployment" else where(resolved.tier, platform)
+    return f", overridden by {by}"
 
 
 def _agent_level(spec: FeatureSpec) -> bool:

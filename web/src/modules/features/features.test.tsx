@@ -76,6 +76,25 @@ describe("FeatureSettings", () => {
     expect(screen.getAllByText("On").length).toBeGreaterThan(0)
   })
 
+  it("says what is in effect when another level overrides the value set here", () => {
+    features = [view("progress_plans", {
+      value: "off", source: "workspace", summary: "Off, set for the workspace",
+      tiers: [{ tier: "channel", value: "on", locked: false, text: "on" }],
+    })]
+    render(<FeatureSettings place={{ channel: "c1" }} tier="channel" edit />)
+    expect(screen.getByRole("combobox", { name: "Progress plans" })).toHaveTextContent("On")
+    expect(screen.getByText("Off, set for the workspace")).toBeInTheDocument()
+  })
+
+  it("adds nothing when the value set here is the one in effect", () => {
+    features = [view("progress_plans", {
+      value: "on", source: "channel", summary: "On, set for this channel",
+      tiers: [{ tier: "channel", value: "on", locked: false, text: "on" }],
+    })]
+    render(<FeatureSettings place={{ channel: "c1" }} tier="channel" edit />)
+    expect(screen.queryByText("On, set for this channel")).not.toBeInTheDocument()
+  })
+
   it("shows a value locked above as read-only", () => {
     features = [view("progress_plans", { locked: true, source: "workspace", summary: "Off, locked by the workspace" })]
     render(<FeatureSettings place={{ channel: "c1" }} tier="channel" edit />)

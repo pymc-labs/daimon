@@ -20,7 +20,8 @@ const labelOf = (s: FeatureSchema, value: string) => s.values.find((v) => v.valu
 /**
  * The controls for every feature that can be set at `tier`, grouped by category, from the schema.
  * Each control is the value set at this tier, or the inherited one with where it comes from.
- * A person who may not change it, or a lock above, sees the value in effect instead.
+ * A person who may not change it, or a lock above, sees the value in effect instead; so does
+ * a value another level overrides, next to its control.
  */
 function useGroups(place: FeaturePlace, tier: Tier, edit: boolean, report: (error: string | null) => void) {
   const schema = useFeatureSchema()
@@ -37,6 +38,7 @@ function useGroups(place: FeaturePlace, tier: Tier, edit: boolean, report: (erro
     const ownValue = own && own.value !== DEFAULT ? own.value : null
     if (v.unavailable) return <span className="text-muted-foreground">{v.summary}</span>
     if (!edit || (v.locked && v.source !== tier)) return <span>{v.summary}</span>
+    const overridden = ownValue !== null && v.source !== tier && v.value !== ownValue
     const lockable = s.lockable.includes(tier) && ownValue !== null ? own : undefined
     return (
       <>
@@ -46,6 +48,7 @@ function useGroups(place: FeaturePlace, tier: Tier, edit: boolean, report: (erro
           options={s.values.map((o) => ({ value: o.value, label: o.label }))}
           onChange={(next) => void run(s, v, next ?? DEFAULT, false)}
         />
+        {overridden && <span className="text-xs text-muted-foreground">{v.summary}</span>}
         {lockable && (
           <Button
             variant="ghost" size="icon-sm" disabled={save.pending} aria-pressed={lockable.locked}
