@@ -8,7 +8,7 @@ which re-checks the key's rule after the press (approvals: a native admin, live)
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final, Literal, cast
+from typing import Any, Final, Literal
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -18,17 +18,16 @@ from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivat
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.errors import StaleChannelValue
-from daimon.core.scope_settings import (
-    SettingChange,
-    SettingLevel,
-    SettingsActor,
-    SettingsPlace,
-    SettingView,
+from daimon.core.features.registry import Tier
+from daimon.core.features.service import (
+    FeatureActor,
+    change_feature,
     change_refusal,
-    change_setting,
-    read_settings,
-    setting_refusal,
+    feature_refusal,
+    read_features,
 )
+from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.features.surface import change_note, view_json
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -40,16 +39,22 @@ NO_PLACE: Final = (
 
 @dataclass(frozen=True)
 class SettingsResult:
-    settings: list[SettingView]
+    settings: list[dict[str, Any]]
 
 
-def settings_actor(auth: AuthIdentity) -> SettingsActor:
+@dataclass(frozen=True)
+class SettingChanged:
+    setting: dict[str, Any]
+    note: str
+
+
+def settings_actor(auth: AuthIdentity) -> FeatureActor:
     """The token's own person, never an argument."""
 
     async def admin_for(action: DelegatedAction | None) -> bool:
         return auth.admin_for(action)
 
-    return SettingsActor(
+    return FeatureActor(
         auth.tenant_id,
         auth.account_id,
         "chat",
@@ -61,7 +66,7 @@ def settings_actor(auth: AuthIdentity) -> SettingsActor:
 
 async def _place(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None, *, change: bool
-) -> SettingsPlace:
+) -> FeaturePlace:
     """The verified origin's place. A change also needs a person at an attended chat with a
     card to press: agent keys, routines, executions, holds and clients are refused first."""
     if change and (
@@ -78,11 +83,12 @@ async def _place(
     origin = await get_verified_origin(runtime, auth, origin_context_id)
     if origin is None or (change and not origin.attended):
         raise ToolError(NEEDS_CARD if change else NO_PLACE)
-    return SettingsPlace.of(
+    return FeaturePlace.of(
+        auth.tenant_id,
         origin.platform,
         origin.parent_channel_id,
         origin.thread_id,
-        origin.responder_ma_agent_id or None,
+        agent_id=origin.responder_ma_agent_id or None,
     )
 
 
@@ -90,13 +96,11 @@ async def _get_settings_impl(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
 ) -> SettingsResult:
     place = await _place(runtime, auth, origin_context_id, change=False)
-    views = await read_settings(
-        runtime.session_factory,
-        tenant_id=auth.tenant_id,
-        place=place,
-        settings=runtime.settings,
+    views = await read_features(runtime.session_factory, runtime.settings, place)
+    active = runtime.settings.tool_safety.gate_overrides_active
+    return SettingsResult(
+        [view_json(view, place.platform, overrides_active=active) for view in views]
     )
-    return SettingsResult(list(views))
 
 
 async def _change_setting_impl(
@@ -104,40 +108,47 @@ async def _change_setting_impl(
     auth: AuthIdentity,
     *,
     key: str,
-    level: str,
+    tier: Tier,
     value: str,
     origin_context_id: str | None,
     locked: bool = False,
-) -> SettingChange:
+) -> SettingChanged:
     """Every check before the card, in order; the writer re-checks the key's rule after it."""
     place = await _place(runtime, auth, origin_context_id, change=True)
     actor = settings_actor(auth)
-    refusal = setting_refusal(key, level, value, place=place) or await change_refusal(
+    refusal = feature_refusal(
+        key, tier, value, locked=locked, place=place, settings=runtime.settings
+    ) or await change_refusal(
         runtime.session_factory,
         runtime.settings,
         actor,
         key=key,
-        level=cast(SettingLevel, level),
-        platform=place.platform,
-        agent_id=place.agent_id,
+        tier=tier,
+        place=place,
+        locked=locked,
         value=value,
     )
     if refusal is not None:
         raise ToolError(str(refusal))
     await require_card(runtime, auth, tool_name=TOOL_NAME, origin_context_id=origin_context_id)
     try:
-        return await change_setting(
+        change = await change_feature(
             runtime.session_factory,
             runtime.settings,
             actor,
             key=key,
-            level=level,
+            tier=tier,
             value=value,
             place=place,
             locked=locked,
         )
     except (ChannelChangeRefused, StaleChannelValue) as exc:
         raise ToolError(str(exc)) from exc
+    active = runtime.settings.tool_safety.gate_overrides_active
+    return SettingChanged(
+        view_json(change.view, place.platform, overrides_active=active),
+        change_note(change, place.platform, overrides_active=active),
+    )
 
 
 def register_scope_settings_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
@@ -147,10 +158,11 @@ def register_scope_settings_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> SettingsResult:
         """Report this conversation's settings (every registered feature).
 
-        Each lists its own value at the server, agent, channel and thread level of where
-        you are, what is in effect, which level decided it and whether it is locked.
-        Anyone may read them; read each ``note`` back. People change them with
-        ``/settings``, the web app's Settings section or ``change_setting``.
+        Each lists its own value at the workspace, agent, channel and thread tiers of where
+        you are, what is in effect, which tier decided it (``source``: ``default``,
+        ``deployment``, ``workspace``, ``agent``, ``channel`` or ``thread``) and whether it
+        is locked. Anyone may read them; read each ``summary`` back. People change them
+        with ``/settings``, the web app's Settings section or ``change_setting``.
         """
         return await _get_settings_impl(runtime, await _auth(ctx), origin_context_id)
 
@@ -159,24 +171,25 @@ def register_scope_settings_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         origin_context_id: str,
         key: str,
-        level: Literal["server", "agent", "channel", "thread"],
+        tier: Literal["workspace", "agent", "channel", "thread"],
         value: str,
         locked: bool = False,
-    ) -> SettingChange:
+    ) -> SettingChanged:
         """Change one setting where you are, after the person presses Approve.
 
         ``key`` and ``value`` are one of ``get_settings``' keys and its values, or
-        ``inherit``. ``level`` is the ``server``, ``agent``, ``channel`` or ``thread`` of
-        this conversation; other places cannot be named. ``locked`` (an admin's, not at
-        the thread level) makes the value final below. Approvals need a live admin of
-        the chat platform; a thread's participation or progress plans are anyone's; the
-        rest an admin's. Read the returned ``note`` back.
+        ``default`` to clear the tier's own value. ``tier`` is the ``workspace``,
+        ``agent``, ``channel`` or ``thread`` of this conversation; other places cannot be
+        named. ``locked`` (an admin's, not at the thread tier) makes the value final
+        below. Approvals need a live admin of the chat platform; a thread's participation
+        or progress plans are anyone's; the rest an admin's. Read the returned ``note``
+        back.
         """
         return await _change_setting_impl(
             runtime,
             await _auth(ctx),
             key=key,
-            level=level,
+            tier=tier,
             value=value,
             origin_context_id=origin_context_id,
             locked=locked,

@@ -10,7 +10,7 @@ import { useFeatureSave, useFeatures, useFeatureSchema } from "./api"
 import type { FeaturePlace, FeatureSchema, FeatureView, Tier } from "./types"
 
 const DEFAULT = "default"
-const TIER_NAME: Record<string, string> = { deployment: "Built-in", default: "Built-in", workspace: "Workspace", agent: "Agent", channel: "Channel", thread: "Thread" }
+const TIER_NAME: Record<string, string> = { deployment: "Deployment", default: "Default", workspace: "Workspace", agent: "Agent", channel: "Channel", thread: "Thread" }
 
 type Group = { name: string; rows: { key: string; label: string; control: React.ReactNode }[] }
 
@@ -44,7 +44,7 @@ function useGroups(place: FeaturePlace, tier: Tier, edit: boolean, report: (erro
       <>
         <InheritedSelect
           bare label={s.name} value={ownValue} disabled={save.pending} className="w-60"
-          inherited={{ value: v.value, label: ownValue === null ? labelOf(s, v.value) : "", from: TIER_NAME[v.source] ?? "Built-in" }}
+          inherited={{ value: v.value, label: ownValue === null ? labelOf(s, v.value) : "", from: TIER_NAME[v.source] ?? "Default" }}
           options={s.values.map((o) => ({ value: o.value, label: o.label }))}
           onChange={(next) => void run(s, v, next ?? DEFAULT, false)}
         />

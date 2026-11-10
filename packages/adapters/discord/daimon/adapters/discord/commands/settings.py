@@ -21,9 +21,10 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.theme import COLOR_BLURPLE, COLOR_RED
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.errors import DaimonError, UserFacingError
+from daimon.core.features.service import FeatureActor
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.platform_words import DESCRIPTIONS
-from daimon.core.scope_settings import SettingsActor, SettingsPlace, chat_actor
-from daimon.core.settings_panel import PanelScreen, open_panel, press, tenant_agents
+from daimon.core.settings_panel import PanelScreen, chat_actor, open_panel, press, tenant_agents
 
 import discord
 from discord import Interaction, app_commands
@@ -37,7 +38,7 @@ OTHER_SERVER = "This control belongs to another server. Run /settings here inste
 
 async def _actor(
     runtime: DiscordRuntime, interaction: BotInteraction, tenant_id: uuid.UUID
-) -> SettingsActor:
+) -> FeatureActor:
     async def admin_for(action: DelegatedAction | None) -> bool:
         return await is_guild_admin(interaction, action=action)
 
@@ -50,14 +51,14 @@ async def _actor(
     )
 
 
-def place_of(interaction: BotInteraction) -> SettingsPlace:
+def place_of(interaction: BotInteraction, tenant_id: uuid.UUID) -> FeaturePlace:
     """The channel the command was run in and, inside a thread, the thread."""
     channel = interaction.channel
     if isinstance(channel, discord.Thread):
-        return SettingsPlace.of("discord", str(channel.parent_id), str(channel.id))
+        return FeaturePlace.of(tenant_id, "discord", str(channel.parent_id), str(channel.id))
     if channel is None or interaction.guild is None:
         raise UserFacingError(RUN_IN_CHANNEL)
-    return SettingsPlace.of("discord", str(channel.id), None)
+    return FeaturePlace.of(tenant_id, "discord", str(channel.id), None)
 
 
 class SettingsView(discord.ui.View):
@@ -66,12 +67,11 @@ class SettingsView(discord.ui.View):
     def __init__(
         self,
         runtime: DiscordRuntime,
-        tenant_id: uuid.UUID,
-        place: SettingsPlace,
+        place: FeaturePlace,
         screen: PanelScreen,
     ) -> None:
         super().__init__(timeout=300)
-        self.runtime, self.tenant_id, self.place = runtime, tenant_id, place
+        self.runtime, self.place = runtime, place
         for control in screen.selects:
             select: discord.ui.Select[SettingsView] = discord.ui.Select(
                 placeholder=control.placeholder,
@@ -101,19 +101,22 @@ class SettingsView(discord.ui.View):
 
     async def pressed(self, interaction: BotInteraction, raw: object) -> None:
         await interaction.response.defer()
-        if await resolve_tenant_for_interaction(interaction.client, interaction) != self.tenant_id:
+        if (
+            await resolve_tenant_for_interaction(interaction.client, interaction)
+            != self.place.tenant_id
+        ):
             await interaction.followup.send(embed=build_notice_embed(OTHER_SERVER), ephemeral=True)
             return
         screen = await press(
             self.runtime.sessionmaker,
             self.runtime.settings,
-            await _actor(self.runtime, interaction, self.tenant_id),
+            await _actor(self.runtime, interaction, self.place.tenant_id),
             raw,
             self.place,
-            agents=tenant_agents(self.runtime.anthropic, self.tenant_id),
+            agents=tenant_agents(self.runtime.anthropic, self.place.tenant_id),
         )
         if screen is not None:
-            await _draw(interaction, self.runtime, self.tenant_id, self.place, screen)
+            await _draw(interaction, self.runtime, self.place, screen)
 
 
 def screen_embed(screen: PanelScreen) -> discord.Embed:
@@ -127,11 +130,10 @@ def screen_embed(screen: PanelScreen) -> discord.Embed:
 async def _draw(
     interaction: BotInteraction,
     runtime: DiscordRuntime,
-    tenant_id: uuid.UUID,
-    place: SettingsPlace,
+    place: FeaturePlace,
     screen: PanelScreen,
 ) -> None:
-    view = SettingsView(runtime, tenant_id, place, screen)
+    view = SettingsView(runtime, place, screen)
     await interaction.edit_original_response(
         embed=screen_embed(screen),
         view=view if view.children else None,
@@ -154,7 +156,7 @@ class SettingsCog(commands.Cog):
             tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
             if tenant_id is None:
                 raise UserFacingError(RUN_IN_CHANNEL)
-            place = place_of(interaction)
+            place = place_of(interaction, tenant_id)
             actor = await _actor(runtime, interaction, tenant_id)
             screen = await open_panel(
                 runtime.sessionmaker,
@@ -163,7 +165,7 @@ class SettingsCog(commands.Cog):
                 place,
                 agents=tenant_agents(runtime.anthropic, tenant_id),
             )
-            await _draw(interaction, runtime, tenant_id, place, screen)
+            await _draw(interaction, runtime, place, screen)
         except (DaimonError, discord.HTTPException) as exc:
             await interaction.edit_original_response(
                 content=None,

@@ -17,6 +17,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import list_running_origins
 from daimon.adapters.mcp.tools._session_gate import session_card_gap
+from daimon.core.features.registry import limit_int
 from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.outbound.mentions import (
     Platform,
@@ -136,6 +137,17 @@ async def outbound_rules(
         found = await resolve_features(
             runtime.session_factory, runtime.settings, place, keys=_OUTBOUND_KEYS
         )
+        length = found.get("outbound_length")
+        return OutboundRules(
+            reach=found.on("outbound_reach"),
+            threads=limit_int(found.value("outbound_threads")),
+            places=limit_int(found.value("outbound_places")),
+            people=limit_int(found.value("outbound_people")),
+            # The operator's 0 means no limit: it stays so until a tier picks a length.
+            length=limit_int(length.value) if config.max_length or length.tier != "default" else 0,
+            own_threads=config.max_own_threads,
+            budget=found.on("reach_budget"),
+        )
     except Exception:  # named boundary: the posts keep the operator's limits
         log.warning("outbound.rules_read_failed", exc_info=True)
         return OutboundRules(
@@ -146,17 +158,6 @@ async def outbound_rules(
             config.max_length,
             config.max_own_threads,
         )
-    length = found.get("outbound_length")
-    return OutboundRules(
-        reach=found.on("outbound_reach"),
-        threads=int(found.value("outbound_threads")),
-        places=int(found.value("outbound_places")),
-        people=int(found.value("outbound_people")),
-        # The operator's 0 means no limit: it stays so until a tier picks a length.
-        length=int(length.value) if config.max_length or length.tier != "default" else 0,
-        own_threads=config.max_own_threads,
-        budget=found.on("reach_budget"),
-    )
 
 
 def is_media(filename: str) -> bool:

@@ -468,10 +468,8 @@ async def create_ma_session(
             # person and may carry that person's own memory, unless it is off here.
             personal_memory=True,
             tool_safety=deps.tool_safety,
-            legacy_memory_servers=(
-                get_repo_memory_settings(deps).legacy_mcp_server_names
-                if get_repo_memory_settings(deps).enabled
-                else ()
+            legacy_memory_servers=admission.toolset.legacy_memory_servers(
+                get_repo_memory_settings(deps).legacy_servers
             ),
             asks_before_publishing=admission.asks_before_publishing,
             confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id),

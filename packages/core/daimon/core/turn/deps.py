@@ -34,7 +34,6 @@ from daimon.core.config import (
     GithubAppSettings,
     McpContextSettings,
     McpSettings,
-    ProgressPlansSettings,
     RepoMemorySettings,
     Settings,
     TurnSettings,
@@ -45,14 +44,12 @@ from daimon.core.config import (
 from daimon.core.context_provider import ContextProviders, ProviderConfig
 from daimon.core.defaults.loader import load_platform_skills
 from daimon.core.discord_membership import DiscordRestMembershipResolver
-from daimon.core.features.deployment import deployment_mode
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache
 from daimon.core.membership import MembershipResolver
 from daimon.core.mux_backend import TurnRuntime
 from daimon.core.native_admins import ServerAdminIds
 from daimon.core.scope import DeploymentDefault
-from daimon.core.scope_cascade import CascadeMode
 from daimon.core.session_preparation_gate import PreparationGate
 from daimon.core.specs import SkillRef
 from daimon.core.tool_safety import ToolSafetyPolicy
@@ -140,9 +137,6 @@ class TurnDeps:
     openai_daily_model_cap_usd: Decimal | None = None
     # `DAIMON_BILLING__GEMINI_DAILY_MODEL_CAP_USD`, the same cap for Gemini models.
     gemini_daily_model_cap_usd: Decimal | None = None
-    # `DAIMON_PROGRESS_PLANS__MODE`: the deployment tier of the progress-plans cascade.
-    # Disabled unless built from settings, so a bundle assembled by hand never reads it.
-    progress_plans: CascadeMode = CascadeMode.DISABLED
     # `DAIMON_MCP_CONTEXT__ENABLED`: asks the agent's MCP servers about each chat
     # message (`daimon.core.turn.mcp_context`). None asks nothing.
     turn_context: TurnContextFetch | None = None
@@ -254,11 +248,6 @@ def build_turn_deps(
         preparation_gate=PreparationGate(_preparation_limit(settings)),
         openai_daily_model_cap_usd=settings.billing.openai_daily_model_cap_usd,
         gemini_daily_model_cap_usd=settings.billing.gemini_daily_model_cap_usd,
-        progress_plans=(
-            deployment_mode(settings, "progress_plans")
-            if isinstance(cast(object, settings.progress_plans), ProgressPlansSettings)
-            else CascadeMode.DISABLED
-        ),
         turn_context=(
             build_turn_context_fetch(
                 context,

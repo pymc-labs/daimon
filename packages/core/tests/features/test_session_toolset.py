@@ -4,6 +4,7 @@ self-hosted turn tools, and the agent tier written through the agent's own confi
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -15,10 +16,12 @@ from daimon.core.errors import StaleChannelValue
 from daimon.core.features.model_input import (
     DEFAULT_TOOLSET,
     SessionToolset,
+    agent_builtins,
     agent_toolset,
     builtin_enabled,
+    with_builtin,
 )
-from daimon.core.features.registry import FEATURES
+from daimon.core.features.registry import DEFAULT, FEATURES
 from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.features.service import (
     FeatureActor,
@@ -26,10 +29,12 @@ from daimon.core.features.service import (
     feature_refusal,
     read_features,
 )
-from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot, resolve_one
+from daimon.core.features.snapshot import CACHE, FeaturePlace, FeatureSnapshot, resolve_one
+from daimon.core.features.toolset import place_toolset
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
 from daimon.core.session_snapshot import desired_snapshot, session_mcp_servers, session_tools
-from daimon.core.stores.feature_values import place_values
+from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.feature_values import place_values, set_feature_value
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.selfhosted_tools import build_turn_tools
 from daimon.testing.factories import make_tenant
@@ -74,9 +79,13 @@ def _dicts(tools: Any) -> list[Any]:
     return [tool.model_dump(mode="json") for tool in tools]
 
 
-def _snapshot(**values: str) -> FeatureSnapshot:
+def _snapshot(*, plain: bool = False, **values: str) -> FeatureSnapshot:
+    """A web place with nothing set but long jobs turned On, so the baseline hides nothing;
+    `plain` leaves long jobs at its default (Off)."""
     place = FeaturePlace(uuid.uuid4(), "web", agent_id="agent_tools", backend="anthropic")
     features = {key: resolve_one(spec, None, place, []) for key, spec in FEATURES.items()}
+    if not plain:
+        features["long_jobs"] = ResolvedFeature("long_jobs", "on", "workspace")
     for key, value in values.items():
         name = key.replace("__", ".")
         features[name] = features[name].__class__(name, value, "channel")
@@ -172,12 +181,18 @@ def test_repo_memory_off_at_the_deployment_hides_nothing() -> None:
     base = _snapshot()
     features = {**base.features, "repo_memory": ResolvedFeature("repo_memory", "off", "deployment")}
     snapshot = FeatureSnapshot(base.place, 1, features)
-    assert agent_toolset(snapshot, _agent()) == DEFAULT_TOOLSET, "nothing to hide"
+    toolset = agent_toolset(snapshot, _agent())
+    assert toolset == replace(DEFAULT_TOOLSET, memory_on=False), "nothing to hide"
+    assert toolset.legacy_memory_servers(("old",)) == (), "legacy readers stay while memory is off"
+    assert DEFAULT_TOOLSET.legacy_memory_servers(("old",)) == ("old",), "and step aside when on"
 
 
 def test_capabilities_change_nothing_at_their_defaults() -> None:
-    """No tier set: every capability's tools stay offered, set up or not."""
+    """No tier set: every capability's tools stay offered, set up or not, except the ones
+    that are Off by default."""
     assert agent_toolset(_snapshot(), _agent()) == DEFAULT_TOOLSET, "byte-identical by default"
+    plain = agent_toolset(_snapshot(plain=True), _agent())
+    assert plain.hidden_daimon_tools == CAPABILITY_TOOLS["long_jobs"], "long jobs are Off"
 
 
 @pytest.mark.parametrize("key", CAPABILITY_KEYS)
@@ -224,9 +239,18 @@ def test_a_capability_without_setup_hides_its_tools_and_only_those() -> None:
     features = {key: resolve_one(spec, SETTINGS, place, []) for key, spec in FEATURES.items()}
     toolset = agent_toolset(FeatureSnapshot(place, 1, features), _agent())
     unset = {"notebooks", "report_publish", "media", "microsoft_365", "compute"}
-    assert toolset.off_capabilities == unset, "exactly the features whose setup is missing"
-    for key in ("watches", "github", "routines", "long_jobs", "lead_intake"):
+    assert toolset.off_capabilities == unset | {"long_jobs"}, "setup missing, or Off by default"
+    for key in ("watches", "github", "routines", "lead_intake"):
         assert features[key].on, f"{key} has no setup condition its tools share"
+
+
+def test_long_jobs_tools_return_when_a_workspace_turns_them_on() -> None:
+    place = FeaturePlace(uuid.uuid4(), "web", agent_id="agent_tools", backend="anthropic")
+    features = {key: resolve_one(spec, SETTINGS, place, []) for key, spec in FEATURES.items()}
+    features["long_jobs"] = ResolvedFeature("long_jobs", "on", "workspace")
+    toolset = agent_toolset(FeatureSnapshot(place, 1, features), _agent())
+    assert "long_jobs" not in toolset.off_capabilities
+    assert not CAPABILITY_TOOLS["long_jobs"] & toolset.hidden_daimon_tools
 
 
 def test_support_escalation_needs_the_platforms_own_channel() -> None:
@@ -271,9 +295,9 @@ async def test_agent_tier_tool_writes_the_agent_config_not_a_row(
     """`change_feature` routes a `tool.*` agent tier to the agent's own config."""
     tenant = await make_tenant(db_session)
     await db_session.commit()
-    written: list[tuple[str, bool]] = []
+    written: list[tuple[str, bool | None]] = []
 
-    async def write(tool: str, enabled: bool) -> bool | None:
+    async def write(tool: str, enabled: bool | None) -> bool | None:
         written.append((tool, enabled))
         return True
 
@@ -292,6 +316,16 @@ async def test_agent_tier_tool_writes_the_agent_config_not_a_row(
             session, tenant_id=tenant.id, agent_id="agent_tools", channel_id=None, thread_key=None
         )
     assert rows == [], "no second copy is stored"
+    await change_feature(
+        db_session_factory,
+        SETTINGS,
+        actor,
+        key="tool.bash",
+        tier="agent",
+        value=DEFAULT,
+        place=place,
+    )
+    assert written[-1] == ("bash", None), "Default drops the agent's own entry"
     with pytest.raises(Exception, match="edited"):
         await change_feature(
             db_session_factory,
@@ -330,9 +364,9 @@ async def test_tool_agent_tier_is_read_from_the_agent_and_checks_expected(
     agent_tier = view.own("agent")
     assert agent_tier is not None and agent_tier.value == "off", "agent tier from its config"
     assert (view.resolved.value, view.resolved.tier) == ("off", "agent")
-    written: list[tuple[str, bool]] = []
+    written: list[tuple[str, bool | None]] = []
 
-    async def write(tool: str, enabled: bool) -> bool | None:
+    async def write(tool: str, enabled: bool | None) -> bool | None:
         written.append((tool, enabled))
         return False
 
@@ -368,3 +402,53 @@ async def test_tool_agent_tier_is_read_from_the_agent_and_checks_expected(
         expected=Expected("off"),
     )
     assert written == [("bash", True)], "a current read writes"
+
+
+def test_the_agent_tier_of_a_builtin_is_only_what_the_agent_lists() -> None:
+    """A listed tool is the agent's; an unlisted one is Default, or Off in a closed toolset."""
+    toolset = "agent_toolset_20260401"
+    listed: list[Any] = [
+        {"type": toolset, "default_config": {"enabled": True}, "configs": [{"name": "bash"}]}
+    ]
+    got = agent_builtins(listed)
+    assert (got["bash"], got["grep"]) == (True, None), "listed: its value; unlisted: Default"
+    closed: list[Any] = [{"type": toolset, "default_config": {"enabled": False}, "configs": []}]
+    assert agent_builtins(closed)["grep"] is False, "a closed toolset leaves it Off"
+    dropped = with_builtin(listed, "bash", None)
+    assert agent_builtins(dropped)["bash"] is None, "Default removes the entry"
+
+
+async def test_a_workspace_value_reaches_tools_the_agent_left_unset(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Workspace Off applies to an unlisted tool; the agent's entry beats it unless locked."""
+    tenant = await make_tenant(db_session)
+    for tool in ("bash", "grep"):
+        await set_feature_value(
+            db_session,
+            tenant_id=tenant.id,
+            target=FeatureTarget("workspace"),
+            key=f"tool.{tool}",
+            value="off",
+            set_by=None,
+            surface="web",
+        )
+    await db_session.commit()
+    CACHE.clear()
+    place = FeaturePlace(tenant.id, "web", agent_id="agent_tools")
+    toolset = await place_toolset(db_session_factory, SETTINGS, place, _agent())
+    assert toolset.builtins == {"grep": False}, "bash is listed by the agent, grep is not"
+    await set_feature_value(
+        db_session,
+        tenant_id=tenant.id,
+        target=FeatureTarget("workspace"),
+        key="tool.bash",
+        value="off",
+        locked=True,
+        set_by=None,
+        surface="web",
+    )
+    await db_session.commit()
+    CACHE.clear()
+    toolset = await place_toolset(db_session_factory, SETTINGS, place, _agent())
+    assert toolset.builtins == {"bash": False, "grep": False}, "a lock beats the agent's entry"

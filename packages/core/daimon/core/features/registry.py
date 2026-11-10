@@ -7,6 +7,7 @@ in code is registered and every registered key is read.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Final, Literal, get_args
@@ -32,14 +33,13 @@ Requirement = Literal[
     "report_host",
     "gemini_key",
     "microsoft_accounts",
+    "repo_memory_setup",
+    "teams_public_url",
     "support_channel",
 ]
 """``platform_adapter``: the chat platform's adapter is set up in this deployment.
 ``support_channel``: the platform has an escalation channel and people have credits to ask.
 The rest name one integration's setup: its operator switch or host address, credentials and keys."""
-ENV_IMPORTED: Final = "env_imported"
-"""A workspace-tier row (not a feature) that marks the workspace's deprecated env maps as
-copied into rows by `daimon features import-env`."""
 DEFAULT: Final = "default"
 """The value a control writes to drop its own setting and inherit."""
 
@@ -120,7 +120,7 @@ class FeatureSpec:
     """A platform whose default differs from `default`, kept as it was before the registry."""
     env_map: str | None = None
     """The `Settings` field of a deprecated per-workspace map (workspace id to on/off) that
-    stands for the workspace tier until `daimon features import-env` copies it into rows."""
+    stands for the workspace tier; a stored workspace row always beats it."""
 
     def default_for(self, platform: str) -> str:
         return self.platform_defaults.get(platform, self.default)
@@ -145,9 +145,10 @@ class FeatureSpec:
             return True
         if self.effect == "limit" and tier == "deployment":
             try:
-                return float(value) >= 0 and float(value) == float(value)
+                number = float(value)
             except ValueError:
                 return False
+            return math.isfinite(number) and number >= 0
         return False
 
     def label(self, value: str) -> str:
@@ -161,6 +162,15 @@ class FeatureSpec:
             return self.tiers
         allowed = self.backend_tiers[backend]
         return tuple(tier for tier in self.tiers if tier in allowed)
+
+
+def limit_int(value: str) -> int:
+    """A whole-number limit as text (`12`, or `12.0` as a deployment variable may say it).
+    Raises ValueError for text `FeatureSpec.accepts` would refuse as not finite."""
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("a limit must be a finite number")
+    return int(number)
 
 
 def _builtin(tool: str) -> FeatureSpec:
@@ -231,7 +241,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         effect="model",
         values={"full": "Full", "origin": "Origin only", "minimal": "Minimal"},
         default="full",
-        tiers=("deployment", "workspace", "agent"),
+        tiers=TIERS,
         binds="turn",
         doc=(
             "Facts sent with each message: where it was sent, who is answering, and how "
@@ -280,7 +290,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         effect="model",
         values=_ON_OFF,
         default="on",
-        tiers=("agent",),
+        tiers=TIERS,
         binds="turn",
         doc=(
             "A short note in front of a message that did not come from chat: a routine, a "
@@ -297,7 +307,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         effect="model",
         values=_ON_OFF,
         default="on",
-        tiers=("agent",),
+        tiers=TIERS,
         binds="session_mutable",
         doc=(
             "The agent's saved keys as a .env file in its working files. Off leaves the file "
@@ -315,7 +325,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         effect="model",
         values=_ON_OFF,
         default="on",
-        tiers=("deployment", "workspace", "agent"),
+        tiers=TIERS,
         binds="turn",
         doc=(
             "When a long conversation starts over, the agent is first asked to save its "
@@ -339,7 +349,7 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         effect="model",
         values=_ON_OFF,
         default="on",
-        tiers=("deployment", "workspace", "agent"),
+        tiers=TIERS,
         binds="session_identity",
         doc=(
             "The agent's prompt is adjusted to the chat platform's words and formatting. "
@@ -356,7 +366,7 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         effect="model",
         values=_ON_OFF,
         default="on",
-        tiers=("deployment", "workspace", "agent", "channel"),
+        tiers=TIERS,
         binds="session_identity",
         doc=(
             "The skills Daimon adds for the chat platform, such as its formatting. "
@@ -373,7 +383,7 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         effect="model",
         values=_ON_OFF,
         default="on",
-        tiers=("deployment", "workspace", "agent", "channel"),
+        tiers=TIERS,
         binds="session_identity",
         doc=(
             "The skills listed on the agent. Off leaves them out of new conversations; "
@@ -390,7 +400,7 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         effect="model",
         values=_ON_OFF,
         default="on",
-        tiers=("workspace", "agent", "channel"),
+        tiers=TIERS,
         binds="session_identity",
         doc=(
             "The skills added to a channel. They need the read tool, so they are off "
@@ -408,7 +418,7 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         effect="capability",
         values=_ON_OFF,
         default="on",
-        tiers=("deployment", "workspace", "agent", "channel"),
+        tiers=TIERS,
         binds="session_identity",
         doc=(
             "Each person's own memory with the agent, in conversations only they can read. "
@@ -425,7 +435,7 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         effect="capability",
         values=_ON_OFF,
         default="on",
-        tiers=("deployment", "workspace", "agent", "channel"),
+        tiers=TIERS,
         binds="session_identity",
         doc=(
             "The agent's memory shared by everyone who talks to it. "
@@ -442,7 +452,7 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         effect="capability",
         values=_ON_OFF,
         default="on",
-        tiers=("workspace", "agent", "channel"),
+        tiers=TIERS,
         binds="session_identity",
         doc=(
             "The memory a restricted channel keeps for itself in place of the shared one. "
@@ -469,7 +479,7 @@ def _shown(
     name: str,
     doc: str,
     *,
-    tiers: tuple[Tier, ...] = _CHANNELS,
+    tiers: tuple[Tier, ...] = TIERS,
     default: str = "off",
     platforms: frozenset[str] = frozenset(CHAT_PLATFORMS),
     authority: Authority = _SETTINGS,
@@ -512,6 +522,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         "Typed mentions",
         'A message with "@" and the agent\'s name typed as plain text is answered like a real '
         "mention. Direct messages and bots are unchanged.",
+        tiers=_CHANNELS,
         authority=_ADMIN,
     ),
     _shown(
@@ -535,7 +546,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         "budget_notices",
         "Budget notices",
         "Admins are told in a direct message when a channel's budget is nearly used or spent.",
-        tiers=("deployment", "workspace"),
+        tiers=_CHANNELS,
         default="on",
         legacy_env=("DAIMON_BUDGET_NOTICES",),
         env_map="budget_notices",
@@ -552,7 +563,6 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         "Cost on hosted-model footers",
         "A finished answer from an OpenAI or Gemini agent shows what it cost, or that the "
         "cost is unknown or partial. Managed Agents footers are unchanged.",
-        tiers=("deployment", "workspace"),
         legacy_env=("DAIMON_TURN__NATIVE_FOOTER_COST",),
     ),
     _shown(
@@ -575,6 +585,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         "No-writers notice",
         "Says so when a channel's write access is set to no one and a message is skipped.",
         platforms=_DISCORD,
+        tiers=_CHANNELS,
         legacy_env=("DAIMON_DISCORD__WRITERS_NONE_NOTICE",),
     ),
     _shown(
@@ -591,15 +602,17 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         category="capabilities",
         effect="capability",
         values=_ON_OFF,
-        default="off",
+        default="on",
         tiers=("deployment",),
         binds="turn",
         doc=(
             "Every message in private and shared channels is read through Microsoft "
-            "Graph, not only the ones that mention the agent. Read once at startup, so only "
-            "the server operator sets it and a restart applies it."
+            "Graph, not only the ones that mention the agent. Needs the public address the "
+            "bot is reached at. Read once at startup, so only the server operator sets it "
+            "and a restart applies it."
         ),
         platforms=frozenset({"teams"}),
+        requires=("teams_public_url",),
         authority=_ADMIN,
         legacy_env=("DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED",),
     ),
@@ -658,7 +671,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         category="guardrails",
         effect="guardrail",
         values=_OFF_ON,
-        default="off",
+        default="on",
         tiers=("deployment",),
         binds="turn",
         doc=(
@@ -677,7 +690,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         effect="guardrail",
         values=_OFF_ON,
         default="on",
-        tiers=("deployment", "workspace", "agent", "channel"),
+        tiers=TIERS,
         binds="turn",
         doc=(
             "Before one reply posts in more places, opens more threads or tags more people "
@@ -733,20 +746,22 @@ def _capability(
     name: str,
     doc: str,
     *,
-    tiers: tuple[Tier, ...] = ("deployment", "workspace", "agent", "channel"),
+    tiers: tuple[Tier, ...] = TIERS,
     requires: tuple[Requirement, ...] = (),
     legacy_env: tuple[str, ...] = (),
     binds: Binding = "session_mutable",
+    default: Literal["on", "off"] = "on",
 ) -> FeatureSpec:
-    """A capability that is On unless a tier turns it Off; off, the session is not offered its
-    tools (`CAPABILITY_TOOLS`) and what it does in the background stops."""
+    """A capability that is On unless a tier turns it Off (Off until one turns it On, for
+    `default="off"`); off, the session is not offered its tools (`CAPABILITY_TOOLS`) and what
+    it does in the background stops."""
     return FeatureSpec(
         key=key,
         name=name,
         category="capabilities",
         effect="capability",
         values=_ON_OFF,
-        default="on",
+        default=default,
         tiers=tiers,
         binds=binds,
         doc=doc,
@@ -757,9 +772,6 @@ def _capability(
     )
 
 
-_OUTBOUND_TIERS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "agent", "channel")
-
-
 def _limit(
     key: str,
     name: str,
@@ -767,17 +779,18 @@ def _limit(
     steps: Mapping[str, str],
     *,
     tiers: tuple[Tier, ...],
+    default: str | None = None,
     legacy_env: tuple[str, ...] = (),
 ) -> FeatureSpec:
-    """A limit: the smallest tier setting wins. `steps` run from the built-in default, the
-    first, down to the strictest; a tier can only lower what the operator allows."""
+    """A limit: the smallest tier setting wins. `steps` run from the loosest down to the
+    strictest; the default is the first unless `default` names another step."""
     return FeatureSpec(
         key=key,
         name=name,
         category="limits",
         effect="limit",
         values=steps,
-        default=next(iter(steps)),
+        default=default or next(iter(steps)),
         tiers=tiers,
         binds="turn",
         doc=doc,
@@ -792,7 +805,8 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "watches",
         "Watches",
         "The agent can watch a page or feed and start a conversation when it changes. "
-        "Off removes the watch tools here and stops the watches made here.",
+        "Off removes the watch tools here and stops the watches made here. Watches fire "
+        "only once the operator enables them, whatever this says.",
         legacy_env=("DAIMON_WATCHES__ENABLED",),
     ),
     _capability(
@@ -805,17 +819,15 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "long_jobs",
         "Long jobs",
         "The agent can start a long job that keeps working after the chat moves on. Off "
-        "removes the long-job tools here.",
-        tiers=("deployment", "workspace", "agent"),
+        "until an admin turns it on; off removes the long-job tools here.",
+        default="off",
     ),
     _capability(
         "compute",
         "Cloud computers",
         "The agent can start a short-lived cloud computer to run code and keep files. Off "
         "removes the computer tools here.",
-        tiers=("deployment", "workspace", "agent"),
         requires=("compute_setup",),
-        legacy_env=("DAIMON_COMPUTE__ENABLED",),
     ),
     _capability(
         "notebooks",
@@ -841,7 +853,6 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "Microsoft 365",
         "People can connect a Microsoft account and the agent can search, read, write and "
         "send with it. Off removes the Microsoft tools here.",
-        tiers=("deployment", "workspace", "agent"),
         requires=("microsoft_accounts",),
     ),
     FeatureSpec(
@@ -889,22 +900,20 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "lead_intake",
         "Lead intake",
         "The agent can take in sales leads and look them up. Off removes the lead tools here.",
-        tiers=("deployment", "workspace", "agent"),
     ),
     _limit(
         "long_jobs_max_usd",
         "Long job dollar cap",
-        "The most one long job may spend. The smallest setting wins, and the team's "
-        "long-job policy still applies.",
+        "The most one long job may spend. The smallest setting wins.",
         {"20": "$20", "10": "$10", "5": "$5", "2": "$2", "1": "$1"},
+        default="5",
         tiers=("deployment", "workspace", "agent"),
         legacy_env=("DAIMON_LONG_JOBS__MAX_USD",),
     ),
     _limit(
         "long_jobs_max_deadline",
         "Long job time limit",
-        "The longest one long job may run. The smallest setting wins, and the team's "
-        "long-job policy still applies.",
+        "The longest one long job may run. The smallest setting wins.",
         {"70": "70 minutes", "60": "60 minutes", "30": "30 minutes", "15": "15 minutes"},
         tiers=("deployment", "workspace", "agent"),
         legacy_env=("DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES",),
@@ -922,7 +931,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "How many new threads or forum posts outside its own channel, or tagging someone "
         "else, one reply may open without approval. The smallest setting wins.",
         {"2": "2", "1": "1", "0": "None"},
-        tiers=_OUTBOUND_TIERS,
+        tiers=TIERS,
         legacy_env=("DAIMON_OUTBOUND__MAX_THREADS",),
     ),
     _limit(
@@ -931,7 +940,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "How many channels, threads and direct-message recipients outside its own "
         "conversation one reply may post into without approval. The smallest setting wins.",
         {"2": "2", "1": "1", "0": "None"},
-        tiers=_OUTBOUND_TIERS,
+        tiers=TIERS,
         legacy_env=("DAIMON_OUTBOUND__MAX_PLACES",),
     ),
     _limit(
@@ -939,7 +948,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "People tagged per reply",
         "How many different people one reply may tag without approval. The smallest setting wins.",
         {"5": "5", "3": "3", "1": "1", "0": "None"},
-        tiers=_OUTBOUND_TIERS,
+        tiers=TIERS,
         legacy_env=("DAIMON_OUTBOUND__MAX_PEOPLE",),
     ),
     _limit(
@@ -948,7 +957,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "The longest post, in characters, a reply may send outside its own conversation. "
         "The smallest setting wins.",
         {"1500": "1500", "1000": "1000", "500": "500", "250": "250"},
-        tiers=_OUTBOUND_TIERS,
+        tiers=TIERS,
         legacy_env=("DAIMON_OUTBOUND__MAX_LENGTH",),
     ),
     _limit(
@@ -1038,17 +1047,18 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         category="capabilities",
         effect="capability",
         values=_ON_OFF,
-        default="off",
+        default="on",
         tiers=("deployment", "workspace", "agent", "channel", "thread"),
         binds="turn",
         doc=(
             "Each message starts with the notes the agent keeps in its repository memory. "
-            "The operator turns it on, with the memory tools; below that it can only be "
-            "turned off, which also switches the memory tools off."
+            "Needs the operator's setup (an import of existing memory, then "
+            "`DAIMON_REPO_MEMORY__ENABLED`), which also adds the memory tools. Off hides "
+            "the tools and the notes here."
         ),
         platforms=EVERY_PLATFORM,
+        requires=("repo_memory_setup",),
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
-        legacy_env=("DAIMON_REPO_MEMORY__ENABLED",),
     ),
     FeatureSpec(
         key="context_provider",
@@ -1079,7 +1089,7 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
             "0": "None",
         },
         default="100",
-        tiers=("deployment", "workspace", "agent", "channel"),
+        tiers=TIERS,
         binds="turn",
         doc=(
             "How many earlier chat messages a new conversation reads, up to 100 from the "

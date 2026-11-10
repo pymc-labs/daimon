@@ -20,17 +20,17 @@ from anthropic.types.beta import (
 )
 from daimon.adapters.cli.commands.sessions import sessions_create
 from daimon.adapters.cli.runtime import CliRuntime
-from daimon.core.config import GithubAppSettings, Settings
+from daimon.core.config import AnthropicSettings, CLISettings, DatabaseSettings, Settings
 from daimon.core.defaults import apply_defaults
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import ScopeContext
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.tenants import list_all_tenant_ids
-from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.testing.ma_models import ma_environment
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma_models import EMPTY_SESSION_STATS, EMPTY_SESSION_USAGE
+from pydantic import PostgresDsn, SecretStr
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -71,21 +71,14 @@ def _session_body(
 
 
 def _build_settings(defaults_root: Path) -> Settings:
-    class _Cli:
-        local_user = "testuser"
-
-    class _Mcp:
-        jwt_secret = None
-        public_url = None
-
-    # Real defaults for every settings block; only what the command reads is replaced.
-    return Settings.model_construct(
-        tool_safety=ToolSafetyPolicy(),
-        cli=_Cli(),
-        mcp=_Mcp(),
-        github_app=GithubAppSettings(),
-        defaults_root=defaults_root,
-        features={},
+    """Validated settings with real defaults; only what the command reads is set."""
+    return Settings.model_validate(
+        {
+            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
+            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
+            "cli": CLISettings(local_user="testuser"),
+            "defaults_root": defaults_root,
+        }
     )
 
 

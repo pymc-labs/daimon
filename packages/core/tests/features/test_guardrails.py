@@ -78,7 +78,8 @@ def test_new_guardrails_keep_the_old_variables_as_deployment_values() -> None:
 
 
 def test_the_tool_safety_feature_sets_the_policy_every_reader_holds() -> None:
-    assert _settings().tool_safety.enabled is False
+    assert _settings().tool_safety.enabled is True, "On by default"
+    assert _settings(features={"tool_safety": "off"}).tool_safety.enabled is False
     assert _settings(features={"tool_safety": "on"}).tool_safety.enabled is True
     off = _settings(tool_safety=ToolSafetyPolicy(enabled=True), features={"TOOL_SAFETY": "off"})
     assert off.tool_safety.enabled is False, "the feature wins over the old variable"

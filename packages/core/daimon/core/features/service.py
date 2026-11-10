@@ -31,7 +31,6 @@ from daimon.core.errors import StaleChannelValue
 from daimon.core.features.registry import (
     BACKEND_NAMES,
     DEFAULT,
-    ENV_IMPORTED,
     FEATURES,
     LOCKABLE,
     FeatureSpec,
@@ -58,6 +57,7 @@ from daimon.core.stores.domain import CHAT_PLATFORMS, ChangeSurface, ChannelSett
 from daimon.core.stores.feature_values import (
     clear_feature_value,
     list_feature_values,
+    lock_tenant,
     place_values,
     replace_agent_values,
     set_feature_value,
@@ -78,8 +78,8 @@ class FeatureActor:
     """Who changes a feature. `native_user_id` is the chat identity checked live for
     approvals; `admin_for` answers for a delegated action as the surface decides it;
     `owns_agent` answers whether the actor owns an agent (the agent tier's authority).
-    `write_builtin` turns one of the place's agent's built-in tools on or off in the
-    agent's own config, the agent tier of `tool.*`, and returns what it was;
+    `write_builtin` turns one of the place's agent's built-in tools on or off (None: drops
+    its entry) in the agent's own config, the agent tier of `tool.*`, and returns what it was;
     `read_builtins` reads that config, so a write can check the caller's last read."""
 
     tenant_id: uuid.UUID
@@ -90,7 +90,7 @@ class FeatureActor:
     via_agent_key: bool = False
     on_write: WriteHook | None = None
     owns_agent: Callable[[str], Awaitable[bool]] | None = None
-    write_builtin: Callable[[str, bool], Awaitable[bool | None]] | None = None
+    write_builtin: Callable[[str, bool | None], Awaitable[bool | None]] | None = None
     read_builtins: Callable[[], Awaitable[Mapping[str, bool | None]]] | None = None
 
 
@@ -369,7 +369,7 @@ async def _values_at(
         agent_id=place.agent_id,
         channel_id=place.channel_id,
         thread_key=place.thread_key,
-        keys=(spec.key, ENV_IMPORTED),
+        keys=(spec.key,),
     )
     return tier_values(spec, settings, place, rows)
 
@@ -542,6 +542,7 @@ async def _write_in(
 ) -> TierSetting:
     """One tier's write in the caller's transaction: the lock check, the row, the record."""
     tier = after.tier
+    await lock_tenant(session, place.tenant_id)  # the `expected` check below is then atomic
     values = await _values_at(session, settings, spec, place)
     before = next((s for s in _own(spec, place, values) if s.tier == tier), TierSetting(tier))
     if expected is not None and expected.value != before.text:
@@ -614,22 +615,19 @@ async def set_workspace_feature(
 
 
 async def import_env(session: AsyncSession, settings: Settings) -> int:
-    """Copy each workspace's deprecated per-workspace env values into workspace-tier rows.
-    A workspace is imported once: its marker row ends the env map's say, and a value
-    already stored is kept. Returns how many workspaces were imported."""
+    """Write each deprecated per-workspace env value as a workspace-tier row. A value
+    already stored is kept. Returns how many rows were written."""
     workspace = FeatureTarget("workspace")
     specs = [spec for spec in FEATURES.values() if spec.env_map is not None]
     maps = {
         spec.key: cast("Mapping[uuid.UUID, bool]", getattr(settings, cast(str, spec.env_map)))
         for spec in specs
     }
-    imported = 0
+    written = 0
     for tenant_id in sorted({tenant for values in maps.values() for tenant in values}, key=str):
         stored = await list_feature_values(
-            session, tenant_id=tenant_id, keys=[ENV_IMPORTED, *maps], tier="workspace"
+            session, tenant_id=tenant_id, keys=list(maps), tier="workspace"
         )
-        if any(row.key == ENV_IMPORTED for row in stored):
-            continue
         have = {row.key for row in stored}
         for key, values in maps.items():
             if tenant_id in values and key not in have:
@@ -642,17 +640,8 @@ async def import_env(session: AsyncSession, settings: Settings) -> int:
                     set_by=None,
                     surface="cli",
                 )
-        await set_feature_value(
-            session,
-            tenant_id=tenant_id,
-            target=workspace,
-            key=ENV_IMPORTED,
-            value="done",
-            set_by=None,
-            surface="cli",
-        )
-        imported += 1
-    return imported
+                written += 1
+    return written
 
 
 async def _write_builtin(
@@ -670,8 +659,8 @@ async def _write_builtin(
         raise _refused(
             "An agent's built-in tools are changed where the agent is edited.", "agent_tools"
         )
-    if after.value == DEFAULT or after.locked:
-        raise _refused("An agent's built-in tool is either on or off.", "invalid_value")
+    if after.locked:
+        raise _refused("An agent's built-in tool can't be locked.", "invalid_value")
     tool = spec.key.removeprefix("tool.")
     if expected is not None:
         if actor.read_builtins is None:
@@ -692,9 +681,9 @@ async def _write_builtin(
             keys=(spec.key,),
         )
     above = resolve_above(spec, tier_values(spec, settings, place, rows), "agent")
-    if above.locked and after.value != above.value:
+    if above.locked and after.value not in (DEFAULT, above.value):
         raise _locked_above(spec, above, place, "agent")
-    was = await actor.write_builtin(tool, after.value == "on")
+    was = await actor.write_builtin(tool, None if after.value == DEFAULT else after.value == "on")
     return TierSetting("agent", DEFAULT if was is None else "on" if was else "off")
 
 

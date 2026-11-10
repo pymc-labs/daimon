@@ -28,14 +28,6 @@ from daimon.core.platform_words import Place, turn_words
 from daimon.core.privacy import PurgePreview, PurgePreviewRow, summary_line
 from daimon.core.routine_delivery import failure_notice_text, render_routine_controls
 from daimon.core.stores.domain import ChatPlatform, Role, RoutineRow, TurnOriginRow
-from daimon.core.thread_participation import (
-    ParticipationMode,
-    ParticipationScope,
-    ResolvedParticipation,
-    build_participation_explanation,
-    build_participation_note,
-    scope_label,
-)
 from daimon.core.turn import TerminationReason, render_termination_notice
 from daimon.core.turn.errors import AdmissionDenialReason
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
@@ -181,31 +173,6 @@ def test_the_privacy_summary_names_no_chat_platform() -> None:
     text = summary_line(_full_preview())
 
     assert [app for app in _APPS if app in text.lower()] == []
-
-
-@pytest.mark.parametrize("platform", _APPS)
-def test_participation_texts_name_the_platforms_own_word_for_the_workspace(
-    platform: ChatPlatform,
-) -> None:
-    """The workspace tier reads as the platform's own space: an organisation on Teams."""
-    space = {"discord": "server", "slack": "workspace", "teams": "organisation"}[platform]
-    effective = ResolvedParticipation(ParticipationMode.DISABLED, "workspace")
-    texts = [
-        build_participation_explanation(effective, thread_id=None, platform=platform),
-        build_participation_note(
-            scope=ParticipationScope.WORKSPACE,
-            scope_id=None,
-            requested=ParticipationMode.ON,
-            effective=effective,
-            platform=platform,
-        ),
-        scope_label(ParticipationScope.WORKSPACE, None, platform),
-    ]
-    for text in texts:
-        assert space in text, text
-        if platform != "slack":
-            assert "workspace" not in text, text
-        _assert_only_own(platform, text)
 
 
 # --- the source ---------------------------------------------------------------------

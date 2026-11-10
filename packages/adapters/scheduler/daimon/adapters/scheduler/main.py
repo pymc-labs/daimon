@@ -1984,6 +1984,7 @@ async def run(
         sm,
         ManagedLongJobPort(client, sm, settings),
         settings.long_jobs,
+        settings=settings,
         markup=settings.billing.markup,
     )
     stop_event = asyncio.Event()

@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from daimon.adapters.teams import settings as teams_settings
 from daimon.adapters.teams.card_actions import Actor
-from daimon.core.scope_settings import SettingsPlace
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.settings_panel import PanelOption, PanelScreen, PanelSelect
 
 CHANNEL = "19:abc@thread.tacv2"
@@ -48,7 +48,7 @@ async def test_the_card_is_for_the_post_it_was_typed_in(monkeypatch: pytest.Monk
     context, sent = _context("channel")
     await teams_settings.show_settings(context)
     assert load.await_args is not None
-    assert load.await_args.args[2:] == ("sender", SettingsPlace("teams", CHANNEL, THREAD))
+    assert load.await_args.args[2:] == ("sender", FeaturePlace.of(TENANT, "teams", CHANNEL, THREAD))
     card = sent[0].model_dump(by_alias=True, exclude_none=True)
     buttons = [
         a for block in card["body"] if block["type"] == "ActionSet" for a in block["actions"]
@@ -90,17 +90,17 @@ async def _on(ctx: MagicMock, monkeypatch: pytest.MonkeyPatch, *, admin: bool | 
 
 PRESSES = [
     # (case, press, clicker admin? (None: unverified), applied place or None)
-    ("channel card: place from the post, card data ignored", _press("progress_plans:thread:on", channel="19:other@thread.tacv2", thread="x"), False, SettingsPlace("teams", CHANNEL, THREAD)),
+    ("channel card: place from the post, card data ignored", _press("progress_plans:thread:on", channel="19:other@thread.tacv2", thread="x"), False, FeaturePlace.of(TENANT, "teams", CHANNEL, THREAD)),
     ("unverified clicker", _press("progress_plans:thread:on"), None, None),
     ("chat card thread from a member", _press("participation:thread:on", conversation="a:chat", kind="personal", channel=CHANNEL, thread=THREAD), False, None),
-    ("chat card thread from an admin", _press("participation:thread:on", conversation="a:chat", kind="personal", channel=CHANNEL, thread=THREAD), True, SettingsPlace("teams", CHANNEL, THREAD)),
+    ("chat card thread from an admin", _press("participation:thread:on", conversation="a:chat", kind="personal", channel=CHANNEL, thread=THREAD), True, FeaturePlace.of(TENANT, "teams", CHANNEL, THREAD)),
     ("chat card naming another channel's thread", _press("participation:thread:on", conversation="a:chat", kind="personal", channel=CHANNEL, thread="19:other@thread.tacv2;messageid=1"), True, None),
 ]  # fmt: skip
 
 
 @pytest.mark.parametrize(("case", "ctx", "admin", "place"), PRESSES, ids=[p[0] for p in PRESSES])
 async def test_where_a_press_applies(
-    monkeypatch: pytest.MonkeyPatch, change: AsyncMock, case: str, ctx: MagicMock, admin: bool | None, place: SettingsPlace | None
+    monkeypatch: pytest.MonkeyPatch, change: AsyncMock, case: str, ctx: MagicMock, admin: bool | None, place: FeaturePlace | None
 ) -> None:  # fmt: skip
     answer = await _on(ctx, monkeypatch, admin=admin)
     if place is None:

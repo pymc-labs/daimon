@@ -564,9 +564,10 @@ async def write_builtin_tool(
     actor: AgentActor,
     ma_agent_id: str,
     tool: BuiltinToolName,
-    enabled: bool,
+    enabled: bool | None,
 ) -> BetaManagedAgentsAgent:
-    """Turn one built-in on or off, keeping the rest of the toolset. The caller authorized it."""
+    """Turn one built-in on or off (None: drop its own entry), keeping the rest of the
+    toolset. The caller authorized it."""
 
     async def _apply(fresh: BetaManagedAgentsAgent) -> BetaManagedAgentsAgent:
         tools = with_builtin([ma_tool_to_param(t) for t in fresh.tools], tool, enabled)
@@ -592,10 +593,10 @@ async def write_builtin_tool(
 
 def builtin_writer(
     deps: AgentEditDeps, *, actor: AgentActor, ma_agent_id: str
-) -> Callable[[str, bool], Awaitable[bool | None]]:
+) -> Callable[[str, bool | None], Awaitable[bool | None]]:
     """`FeatureActor.write_builtin` for one agent: the authorized `write_builtin_tool`."""
 
-    async def write(tool: str, enabled: bool) -> bool | None:
+    async def write(tool: str, enabled: bool | None) -> bool | None:
         if tool not in BUILTIN_NAMES:
             raise AgentEditError(f"unknown built-in tool {tool!r}", kind="invalid")
         agent = await load_editable_agent(deps, actor=actor, ma_agent_id=ma_agent_id)
@@ -605,7 +606,7 @@ def builtin_writer(
         )
         if turned_on:
             raise AgentEditError(forbidden_builtins_message(turned_on), kind="forbidden")
-        was = builtin_enabled(tools, tool)
+        was = agent_builtins(tools)[tool]
         await write_builtin_tool(
             deps,
             actor=actor,

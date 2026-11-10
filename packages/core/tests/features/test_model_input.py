@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
 from daimon.core.features.model_input import (
     FULL_HISTORY,
     HistoryDepth,
@@ -11,7 +12,7 @@ from daimon.core.features.model_input import (
     guidance_applies,
     turn_controls,
 )
-from daimon.core.features.registry import FEATURES
+from daimon.core.features.registry import FEATURES, limit_int
 from daimon.core.features.resolver import ResolvedFeature, TierValue, resolve_feature
 from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot, resolve_one
 
@@ -47,8 +48,15 @@ def test_daimon_tools_lift_minimal_turn_controls_to_origin() -> None:
 
 
 def test_toolset_defaults_change_nothing() -> None:
-    """With nothing set the session keeps the agent's own tools."""
-    assert not SessionToolset.of(_snapshot(), {}).changes, "defaults must not change tools"
+    """With nothing set the session keeps the agent's own tools, minus default-Off capabilities."""
+    toolset = SessionToolset.of(_snapshot(), {})
+    assert toolset.off_capabilities == {"long_jobs"}, "only the default-Off capability is hidden"
+    assert (toolset.daimon_tools, toolset.builtins, toolset.repo_memory, toolset.env_file) == (
+        True,
+        {},
+        True,
+        True,
+    ), "defaults must not change anything else"
 
 
 def test_agent_tool_config_is_the_agent_tier() -> None:
@@ -86,3 +94,17 @@ def test_chat_history_takes_the_smallest_setting_and_caps_the_channel() -> None:
     assert (FULL_HISTORY.replay, FULL_HISTORY.backfill) == (100, 25), "the default reads 100"
     assert HistoryDepth.of(None) == FULL_HISTORY, "a hand-built admission keeps the default"
     assert all(int(value) >= 0 for value in spec.values), "limit values are counts"
+
+
+def test_a_limit_is_a_finite_number_read_the_same_way_everywhere() -> None:
+    spec = FEATURES["outbound_people"]
+    assert spec.accepts("12.0", "deployment") and spec.accepts("0", "deployment")
+    assert not any(spec.accepts(bad, "deployment") for bad in ("inf", "-inf", "nan", "1e999", "-1"))
+    assert limit_int("12.0") == 12 and limit_int("7") == 7
+    for bad in ("inf", "nan", "1e999"):
+        with pytest.raises(ValueError):
+            limit_int(bad)
+    assert (
+        HistoryDepth.of(_snapshot(ResolvedFeature("history_depth", "12.0", "deployment"))).replay
+        == 12
+    )

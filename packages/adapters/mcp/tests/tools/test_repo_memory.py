@@ -4,18 +4,28 @@ import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import repo_memory as tools
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.config import GithubAppSettings, RepoMemorySettings
+from daimon.core.config import (
+    AnthropicSettings,
+    DatabaseSettings,
+    DiscordSettings,
+    GithubAppSettings,
+    RepoMemorySettings,
+    Settings,
+)
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.domain import Role, TurnOriginRow
 from daimon.core.stores.github_access import AgentGrant, AuthorizedRepo
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from pydantic import PostgresDsn, SecretStr
 
 
 def setup_call(
@@ -182,19 +192,33 @@ async def test_unattended_foreign_and_unknown_origins_refuse(
         await tools.resolve_repo(runtime, auth, origin_context_id="forged", write=True)
 
 
-async def test_native_family_disabled_by_default() -> None:
-    runtime = SimpleNamespace(settings=SimpleNamespace(repo_memory=RepoMemorySettings()))
-    mcp = FastMCP()
-    tools.register_repo_memory_tools(mcp, runtime)
-    assert not await mcp.local_provider.list_tools()
-    runtime.settings.repo_memory = RepoMemorySettings(enabled=True)
-    tools.register_repo_memory_tools(mcp, runtime)
-    assert {t.name for t in await mcp.local_provider.list_tools()} == {
+def _settings(**extra: object) -> Settings:
+    return Settings.model_validate(
+        {
+            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
+            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
+            "discord": DiscordSettings(bot_token=SecretStr("test")),
+            **extra,
+        }
+    )
+
+
+async def test_native_family_needs_setup_and_a_feature_not_locked_off() -> None:
+    async def names(settings: Settings) -> set[str]:
+        mcp = FastMCP()
+        tools.register_repo_memory_tools(mcp, cast(McpRuntime, SimpleNamespace(settings=settings)))
+        return {t.name for t in await mcp.local_provider.list_tools()}
+
+    assert not await names(_settings()), "no setup, no tools"
+    setup = RepoMemorySettings(enabled=True)
+    assert await names(_settings(repo_memory=setup)) == {
         "repo_memory_list",
         "repo_memory_view",
         "repo_memory_save",
         "repo_memory_delete",
-    }
+    }, "set up is enough: the feature defaults On"
+    locked = _settings(repo_memory=setup, features={"repo_memory": "off:locked"})
+    assert not await names(locked), "the deployment locking it Off removes the tools"
 
 
 async def test_alternate_repo_requires_personal_access(monkeypatch: pytest.MonkeyPatch) -> None:

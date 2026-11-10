@@ -481,3 +481,21 @@ def test_the_card_reads_updates_then_plan_then_tool_lines() -> None:
     assert CARD_SECTIONS == ("updates", "plan", "tools"), "the latest updates lead the card"
     drawn = in_card_order({"tools": "T", "plan": None, "updates": "U"})
     assert drawn == ["U", "T"], "sections follow CARD_SECTIONS and an empty one drops out"
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("on", True), ("off", False)])
+def test_status_log_outside_a_turn_reads_the_feature_env(
+    monkeypatch: pytest.MonkeyPatch, raw: str, expected: bool
+) -> None:
+    from daimon.core.features import deployment
+    from daimon.core.turn import status_log
+
+    monkeypatch.setenv("DAIMON_FEATURES__STATUS_LOG", raw)
+    deployment.env_features.cache_clear()
+    status_log._configured.cache_clear()
+    try:
+        assert status_log._configured() is expected
+    finally:
+        monkeypatch.undo()
+        deployment.env_features.cache_clear()
+        status_log._configured.cache_clear()

@@ -21,10 +21,10 @@ from daimon.core.channel_settings import (
 from daimon.core.errors import StaleChannelValue
 from daimon.core.permissions import with_agent_rule, with_channel_rule
 from daimon.core.scope import DeploymentDefault
-from daimon.core.scope_cascade import CascadeMode, CascadeScope
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
-from daimon.core.stores.switch_modes import set_switch_mode
+from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -160,15 +160,14 @@ async def test_thread_overrides_list_under_their_channel_and_clear_one_by_one(
 ) -> None:
     actor = await _actor(db_session)
     tenant_id = actor.tenant_id
-    await set_switch_mode(
+    await set_feature_value(
         db_session,
-        "progress_plans",
         tenant_id=tenant_id,
-        platform="slack",
-        scope=CascadeScope.THREAD,
-        scope_id="C1:171.1",
-        mode=CascadeMode.ON,
-        parent_id="C1",
+        target=FeatureTarget("thread", channel_id="C1", thread_key="C1:171.1"),
+        key="progress_plans",
+        value="on",
+        set_by=None,
+        surface="web",
     )
     await set_access_policy(
         db_session,

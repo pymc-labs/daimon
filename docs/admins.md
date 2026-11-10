@@ -38,7 +38,7 @@ A granted admin may administer only these actions:
 
 Everything else stays with platform admins. That includes credentials, MCP
 connections, coding-tool access, turning DMs on and off, GitHub, provider
-allowlists, long-job policy and every money control. A granted admin gets no
+allowlists and every money control. A granted admin gets no
 hub access to other people's sessions or sealed transcripts.
 
 Granted admins change agents that platform admins use too. Their edits to

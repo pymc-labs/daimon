@@ -10,9 +10,9 @@ import pytest
 from daimon.adapters.web import channels as channels_module
 from daimon.core import routine_service
 from daimon.core.routine_service import RoutineRefused
-from daimon.core.scope_cascade import CascadeMode, CascadeScope
+from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.routines import create_routine
-from daimon.core.stores.switch_modes import set_switch_mode
 from daimon.testing.turn_router import AGENT_ID
 from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -74,15 +74,14 @@ async def test_a_thread_override_lists_and_clears(
 ) -> None:
     async with _channels(web_client, db_session_factory, tmp_path) as admin:
         async with db_session_factory.begin() as db:
-            await set_switch_mode(
+            await set_feature_value(
                 db,
-                "progress_plans",
                 tenant_id=admin.ws.tenant_id,
-                platform="discord",
-                scope=CascadeScope.THREAD,
-                scope_id="t1",
-                mode=CascadeMode.OFF,
-                parent_id="c1",
+                target=FeatureTarget("thread", channel_id="c1", thread_key="t1"),
+                key="progress_plans",
+                value="off",
+                set_by=None,
+                surface="web",
             )
         listed = (await admin.client.get("/api/channels/c1/settings")).json()["threads"]
         cleared = await admin.client.post(
