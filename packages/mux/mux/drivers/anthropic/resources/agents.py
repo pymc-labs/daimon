@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Protocol, cast
 
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, omit
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.agent_create_params import AgentCreateParams
 from anthropic.types.beta.agent_update_params import AgentUpdateParams
@@ -342,6 +342,30 @@ class AnthropicAgents:
         item = await provider_call(self._client.beta.agents.retrieve(ref.id, version=version))
         check_record(scope, item.id, item.metadata)
         return native_snapshot(item)
+
+    async def list_versions(
+        self, scope: Scope, ref: ResourceRef, *, page: PageRequest
+    ) -> Page[Agent]:
+        """Stored versions in the provider's order; only the default order is supported."""
+        authorize(self._authorization, scope, "agent", ref.id)
+        check_ref(scope, ref, self._account_scope_id, "agent")
+        if page.order is not None:
+            raise UnsupportedCapability(("agent_list_order",), "anthropic.managed_agents")
+        result = await provider_call(
+            self._client.beta.agents.versions.list(
+                ref.id,
+                limit=omit if page.limit is None else page.limit,
+                page=omit if page.cursor is None else page.cursor,
+            )
+        )
+        data = tuple(result.data or ())
+        for item in data:
+            check_record(scope, item.id, item.metadata)
+        return Page(
+            data=tuple(agent_record(item, self._account_scope_id, scope) for item in data),
+            next_cursor=result.next_page or None,
+            has_more=bool(result.next_page),
+        )
 
     async def list(self, scope: Scope, *, filters: AgentFilter, page: PageRequest) -> Page[Agent]:
         authorize(self._authorization, scope, "agent")
