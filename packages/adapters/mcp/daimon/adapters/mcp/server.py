@@ -730,6 +730,14 @@ def create_mcp_app(
             ),
             methods=GITHUB_ROUTER_METHODS,
         )
+    if effective_settings.mcp.public_url is not None:
+        from daimon.adapters.mcp.connector_relay import CONNECTOR_ROUTE, build_connector_relay
+
+        # Registered always; the deployment feature is read per request, so off is a 404.
+        relay = build_connector_relay(
+            runtime, effective_auth, str(effective_settings.mcp.public_url)
+        )
+        app.add_route(CONNECTOR_ROUTE, relay.handle, methods=["GET", "POST", "DELETE"])
     app.add_route("/readyz", _build_readyz(effective_sessionmaker), methods=["GET"])
     app.add_route(
         "/avatars/{token}/{sha12}.png",

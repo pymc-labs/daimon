@@ -29,7 +29,6 @@ if TYPE_CHECKING:
 __all__ = [
     "CACHE_TTL_S",
     "RELAY_PATH",
-    "ROUTE_CONNECTOR",
     "Connector",
     "ToolsCache",
     "connectors_of",
@@ -40,8 +39,6 @@ __all__ = [
 ]
 
 RELAY_PATH: Final = "/connectors"
-#: The card digest's route for a relayed call (Daimon's own tools use `daimon`).
-ROUTE_CONNECTOR: Final = "connector"
 CACHE_TTL_S: Final = 300.0
 CACHE_MAX_ENTRIES: Final = 512
 

@@ -33,6 +33,7 @@ log = structlog.get_logger()
 
 #: Daimon's own tools; connector routes arrive with the relay (G2).
 ROUTE_DAIMON: Final[str] = "daimon"
+ROUTE_CONNECTOR: Final[str] = "connector"
 
 #: A call card's buttons: ``hcc:<card id>:approve`` or ``…:deny``.
 CUSTOM_ID_PATTERN: Final[str] = r"hcc:(?P<card>[0-9a-f-]{36}):(?P<action>approve|deny)"
@@ -282,6 +283,8 @@ class ConfirmedCallRunner:
     executing_agent_id: uuid.UUID
     call_tool: CallTool
     clock: Callable[[], dt.datetime]
+    #: The relay's `CallTool` for one connector key (`daimon.core.connector_relay`).
+    call_connector: Callable[[str], CallTool] | None = None
 
 
 def confirmed_call_prefix(runner: ConfirmedCallRunner) -> Callable[[], Awaitable[str]]:
@@ -438,8 +441,17 @@ async def _run_one(
     args = dict(row.reference.get("args", {}))
     if "origin_context_id" in args:
         args["origin_context_id"] = str(turn.id)
+    call = runner.call_tool
+    if row.reference.get("route") == ROUTE_CONNECTOR:
+        key = row.reference.get("server_key")
+        # A connector card runs through its relay, never Daimon's own server.
+        call = (
+            runner.call_connector(key)
+            if runner.call_connector is not None and isinstance(key, str)
+            else _not_relayed
+        )
     try:
-        await runner.call_tool(token, row.tool_name, args)
+        await call(token, row.tool_name, args)
     except Exception:
         # The middleware records the tool's own outcome; this only covers a call that
         # never reached it (transport, refused credential).
@@ -454,6 +466,10 @@ async def _run_one(
     outcome = (final.outcome if final is not None else None) or NOT_RUN_TEXT
     log.info("host_call.executed", card_id=str(row.id), status=status)
     return _framed(row, status, outcome)
+
+
+async def _not_relayed(_token: str, _name: str, _args: Mapping[str, object]) -> object:
+    raise RuntimeError("connector relay unavailable")
 
 
 def _framed(row: HostCallCardRow, status: str, outcome: str) -> str:
@@ -484,6 +500,7 @@ def wake_prefix(
     target_ma_agent_id: str,
 ) -> Callable[[], Awaitable[str]] | None:
     """A `confirmed_call` wake's prefix hook: its thread's approved calls, in its own lease."""
+    from daimon.core.connector_relay import relay_url
     from daimon.core.ma_identity import derive_agent_uuid
 
     if mcp.public_url is None or mcp.jwt_secret is None:
@@ -501,5 +518,6 @@ def wake_prefix(
             ),
             call_tool=mcp_call_tool(str(mcp.public_url)),
             clock=lambda: dt.datetime.now(dt.UTC),
+            call_connector=lambda key: mcp_call_tool(relay_url(str(mcp.public_url), key)),
         )
     )
