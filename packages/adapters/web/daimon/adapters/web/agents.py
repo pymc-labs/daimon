@@ -43,7 +43,7 @@ from daimon.core.agent_view import (
     PersonRef,
     SkillDoc,
 )
-from daimon.core.channel_backend import make_backend_service
+from daimon.core.channel_backend import NO_CAPTURE, make_backend_service
 from daimon.core.constants import ALLOWED_MODEL_IDS, DEFAULT_AGENT_MODEL, MODEL_DISPLAY_NAMES
 from daimon.core.defaults.ma_index import list_agents_by_tenant, list_skills_lenient
 from daimon.core.ma_identity import derive_agent_uuid
@@ -168,8 +168,8 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter(prefix="/api/agents")
     nodes = build_nodes(runtime.settings)
 
-    def deps() -> AgentChangeDeps:
-        return change_deps(runtime)
+    def deps(caller: WebCaller | None = None) -> AgentChangeDeps:
+        return change_deps(runtime, caller)
 
     async def editors(tenant_id: uuid.UUID, agent_ids: list[str]) -> dict[str, uuid.UUID]:
         """Who wrote each agent's current recorded version, where the web app wrote it."""
@@ -262,7 +262,9 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
                 default=runtime.deployment_default,
                 now=runtime.now(),
             )
-        backends = make_backend_service(runtime.sessionmaker, runtime.settings.turn)
+        backends = make_backend_service(
+            runtime.sessionmaker, runtime.settings.turn, capture_source=NO_CAPTURE
+        )
         providers: tuple[Provider, ...] = (DEFAULT_BACKEND,)
         if backends.enabled:
             providers += (await backends.tenant_policy(tenant_id)).enabled_backends
@@ -295,7 +297,7 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
         chosen = next((t for t in runtime.agent_templates if t.name == body.template), None)
         if chosen is None and body.template != _BLANK.id:
             raise HTTPException(status_code=404, detail="No such template.")
-        d = deps()
+        d = deps(caller)
         # Another provider's model: the agent is made on the default model, then switched.
         elsewhere = next(
             (
@@ -425,7 +427,7 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
     async def apply(caller: Editor, agent_id: str, body: ApplyBody) -> AgentDetail:  # pyright: ignore[reportUnusedFunction]
         try:
             await agent_changes.apply_draft(
-                deps(), actor=actor_of(caller), ma_agent_id=agent_id, note=body.note
+                deps(caller), actor=actor_of(caller), ma_agent_id=agent_id, note=body.note
             )
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc
@@ -578,7 +580,7 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
     async def revert(caller: Editor, agent_id: str, body: RevertBody) -> AgentDetail:  # pyright: ignore[reportUnusedFunction]
         try:
             await agent_changes.revert(
-                deps(), actor=actor_of(caller), ma_agent_id=agent_id, version=body.version
+                deps(caller), actor=actor_of(caller), ma_agent_id=agent_id, version=body.version
             )
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc

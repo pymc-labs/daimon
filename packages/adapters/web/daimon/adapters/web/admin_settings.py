@@ -15,6 +15,7 @@ from daimon.core import workspace_settings as access_settings
 from daimon.core.agent_configuration import configuration_refusal
 from daimon.core.authz import Subject
 from daimon.core.channel_backend import (
+    NO_CAPTURE,
     AgentBackendRefused,
     AgentBackendService,
     BackendActor,
@@ -69,7 +70,9 @@ def settings_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter(prefix="/api/admin")
 
     def backends() -> AgentBackendService:
-        return make_backend_service(runtime.sessionmaker, runtime.settings.turn)
+        return make_backend_service(
+            runtime.sessionmaker, runtime.settings.turn, capture_source=NO_CAPTURE
+        )
 
     async def providers_json(tenant_id: uuid.UUID) -> dict[str, Any] | None:
         service = backends()

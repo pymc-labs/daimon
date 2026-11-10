@@ -11,7 +11,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core import agent_changes, agent_editing, agent_skill_files
 from daimon.core.agent_editing import AgentEditError
 from daimon.core.authz import build_subject
-from daimon.core.channel_backend import BackendActor, make_backend_service
+from daimon.core.channel_backend import NO_CAPTURE, BackendActor, make_backend_service
 from daimon.core.config import Settings, TurnSettings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef
@@ -370,7 +370,7 @@ async def _provider_choice(
         database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
         turn=TurnSettings(path="mux", channel_backends=True),
     )
-    service = make_backend_service(factory, settings.turn)
+    service = make_backend_service(factory, settings.turn, capture_source=NO_CAPTURE)
     policy = await service.tenant_policy(owner.tenant_id)
     await service.set_tenant_allowlist(
         owner.tenant_id,
