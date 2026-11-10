@@ -1,9 +1,8 @@
-"""`import_env` copies the deprecated per-workspace env maps once, and the marker ends their say."""
+"""A deprecated per-workspace env map is a workspace value that a stored row beats."""
 
 from __future__ import annotations
 
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
-from daimon.core.features.registry import ENV_IMPORTED
 from daimon.core.features.service import import_env
 from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.stores.domain import FeatureTarget
@@ -24,49 +23,45 @@ def _settings(**maps: dict[object, bool]) -> Settings:
     )
 
 
-async def test_the_env_map_applies_until_imported_then_the_row_does(
-    db_session: AsyncSession,
-) -> None:
-    """Before the import the env value reads as the workspace tier; after it only the rows do."""
+async def _set(db_session: AsyncSession, tenant_id: object, key: str, value: str) -> None:
+    await set_feature_value(
+        db_session,
+        tenant_id=tenant_id,  # pyright: ignore[reportArgumentType]
+        target=FeatureTarget("workspace"),
+        key=key,
+        value=value,
+        set_by=None,
+        surface="cli",
+    )
+
+
+async def test_a_workspace_row_beats_the_env_map(db_session: AsyncSession) -> None:
+    """The env map reads as the workspace value until a row is stored; then the row wins."""
     tenant = await make_tenant(db_session)
     settings = _settings(completion_pings={tenant.id: True})
     place = FeaturePlace(tenant.id, "discord")
     before = await feature_in(db_session, settings, place, "completion_pings")
-    assert (before.on, before.tier) == (True, "workspace"), "the env map is honoured at first"
+    assert (before.on, before.tier) == (True, "workspace"), "the env map is honoured"
 
-    assert await import_env(db_session, settings) == 1, "one workspace was imported"
-    rows = await list_feature_values(
-        db_session, tenant_id=tenant.id, keys=["completion_pings", ENV_IMPORTED], tier="workspace"
-    )
-    assert {row.key: row.value for row in rows} == {"completion_pings": "on", ENV_IMPORTED: "done"}
-
-    await set_feature_value(
-        db_session,
-        tenant_id=tenant.id,
-        target=FeatureTarget("workspace"),
-        key="completion_pings",
-        value="off",
-        set_by=None,
-        surface="cli",
-    )
+    await _set(db_session, tenant.id, "completion_pings", "off")
     after = await feature_in(db_session, settings, place, "completion_pings")
-    assert after.on is False, "a left-set variable no longer overrides the stored value"
+    assert after.on is False, "a left-set variable never overrides the stored value"
 
 
-async def test_importing_twice_keeps_what_was_changed_since(db_session: AsyncSession) -> None:
-    """A second run skips an imported workspace, so a later change is never reverted."""
+async def test_import_writes_only_the_missing_rows(db_session: AsyncSession) -> None:
+    """Importing fills the gaps and keeps a value stored since, however often it runs."""
     tenant = await make_tenant(db_session)
-    settings = _settings(table_rendering={tenant.id: False})
-    await import_env(db_session, settings)
-    await set_feature_value(
+    settings = _settings(completion_pings={tenant.id: True}, table_rendering={tenant.id: False})
+    await _set(db_session, tenant.id, "table_rendering", "on")
+    assert await import_env(db_session, settings) == 1, "only the missing row was written"
+    rows = await list_feature_values(
         db_session,
         tenant_id=tenant.id,
-        target=FeatureTarget("workspace"),
-        key="table_rendering",
-        value="on",
-        set_by=None,
-        surface="cli",
+        keys=["completion_pings", "table_rendering"],
+        tier="workspace",
     )
-    assert await import_env(db_session, settings) == 0, "nothing left to import"
-    place = FeaturePlace(tenant.id, "discord")
-    assert (await feature_in(db_session, settings, place, "table_rendering")).on is True
+    assert {row.key: row.value for row in rows} == {
+        "completion_pings": "on",
+        "table_rendering": "on",
+    }
+    assert await import_env(db_session, settings) == 0, "nothing left to write"

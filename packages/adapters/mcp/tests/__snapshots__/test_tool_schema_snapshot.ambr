@@ -946,25 +946,17 @@
         Change one setting where you are, after the person presses Approve.
         <blank line>
         ``key`` and ``value`` are one of ``get_settings``' keys and its values, or
-        ``inherit``. ``level`` is the ``server``, ``agent``, ``channel`` or ``thread`` of
-        this conversation; other places cannot be named. ``locked`` (an admin's, not at
-        the thread level) makes the value final below. Approvals need a live admin of
-        the chat platform; a thread's participation or progress plans are anyone's; the
-        rest an admin's. Read the returned ``note`` back.
+        ``default`` to clear the tier's own value. ``tier`` is the ``workspace``,
+        ``agent``, ``channel`` or ``thread`` of this conversation; other places cannot be
+        named. ``locked`` (an admin's, not at the thread tier) makes the value final
+        below. Approvals need a live admin of the chat platform; a thread's participation
+        or progress plans are anyone's; the rest an admin's. Read the returned ``note``
+        back.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
           'key': dict({
-            'type': 'string',
-          }),
-          'level': dict({
-            'enum': list([
-              'server',
-              'agent',
-              'channel',
-              'thread',
-            ]),
             'type': 'string',
           }),
           'locked': dict({
@@ -974,6 +966,15 @@
           'origin_context_id': dict({
             'type': 'string',
           }),
+          'tier': dict({
+            'enum': list([
+              'workspace',
+              'agent',
+              'channel',
+              'thread',
+            ]),
+            'type': 'string',
+          }),
           'value': dict({
             'type': 'string',
           }),
@@ -981,7 +982,7 @@
         'required': list([
           'origin_context_id',
           'key',
-          'level',
+          'tier',
           'value',
         ]),
         'type': 'object',
@@ -4406,10 +4407,11 @@
       'description': '''
         Report this conversation's settings (every registered feature).
         <blank line>
-        Each lists its own value at the server, agent, channel and thread level of where
-        you are, what is in effect, which level decided it and whether it is locked.
-        Anyone may read them; read each ``note`` back. People change them with
-        ``/settings``, the web app's Settings section or ``change_setting``.
+        Each lists its own value at the workspace, agent, channel and thread tiers of where
+        you are, what is in effect, which tier decided it (``source``: ``default``,
+        ``deployment``, ``workspace``, ``agent``, ``channel`` or ``thread``) and whether it
+        is locked. Anyone may read them; read each ``summary`` back. People change them
+        with ``/settings``, the web app's Settings section or ``change_setting``.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -9832,7 +9834,7 @@
         <blank line>
         Requires an attended owner turn and approval card. The parent thread goes idle;
         completion wakes it to read and report. Worker waits are bounded to 280 seconds.
-        Tenant/agent admin policy must enable jobs. Omitted limits use effective policy;
+        The long_jobs feature must be on here. Omitted limits use the feature limits;
         a deadline or dollar cap above its maximum is refused. No connectors, skills,
         shared memory or credentials are mounted. Jobs are billed to the owner.
       ''',

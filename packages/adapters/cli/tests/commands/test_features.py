@@ -81,8 +81,8 @@ def _fake_builtins(
 
     def writer(
         _deps: object, *, actor: object, ma_agent_id: str
-    ) -> Callable[[str, bool], Awaitable[bool | None]]:
-        async def write(tool: str, enabled: bool) -> bool | None:
+    ) -> Callable[[str, bool | None], Awaitable[bool | None]]:
+        async def write(tool: str, enabled: bool | None) -> bool | None:
             was = store.setdefault(ma_agent_id, {}).get(tool)
             store[ma_agent_id][tool] = enabled
             return was

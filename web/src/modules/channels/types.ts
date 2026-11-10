@@ -137,7 +137,7 @@ export type ChannelApprovals = {
   available: boolean
   own: ApprovalMode | null
   value: ApprovalMode
-  source: "default" | "server" | "channel" | "thread"
+  source: "default" | "deployment" | "workspace" | "agent" | "channel" | "thread"
   active: boolean
   editable: boolean
 }

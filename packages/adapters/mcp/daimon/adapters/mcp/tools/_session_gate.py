@@ -309,10 +309,8 @@ async def _recorded_as_gated(
                     confirmed_tools=confirmed_tools,
                     daimon_rule_tools=daimon_rule_tools,
                     toolset=session_toolset,
-                    legacy_memory_servers=(
-                        get_repo_memory_settings(runtime.settings).legacy_mcp_server_names
-                        if get_repo_memory_settings(runtime.settings).enabled
-                        else ()
+                    legacy_memory_servers=session_toolset.legacy_memory_servers(
+                        get_repo_memory_settings(runtime.settings).legacy_servers
                     ),
                 )
                 stripped = (

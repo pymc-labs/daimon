@@ -11,15 +11,9 @@ from collections.abc import Callable, Mapping
 from functools import cache
 
 import structlog
-from daimon.core.config import (
-    FeatureEnvSettings,
-    ProgressPlansSettings,
-    Settings,
-    ThreadParticipationSettings,
-    get_repo_memory_settings,
-)
-from daimon.core.features.registry import FEATURES, FeatureSpec, parse_deployment
-from daimon.core.features.resolver import TierValue, as_cascade, from_mode, resolve_feature
+from daimon.core.config import FeatureEnvSettings, Settings
+from daimon.core.features.registry import FeatureSpec, parse_deployment
+from daimon.core.features.resolver import TierValue
 from daimon.core.scope_cascade import CascadeMode
 
 log = structlog.get_logger(__name__)
@@ -56,7 +50,6 @@ _LEGACY_FLAG: Mapping[str, Callable[[Settings], bool | None]] = {
     "unmentioned_reply_hint": lambda s: _set(s.discord, "unmentioned_reply_hint"),
     "waiting_card": lambda s: _set(s.discord, "tenant_cap_waiting_card"),
     "watches": lambda s: _set(s.watches, "enabled"),
-    "compute": lambda s: _set(s.compute, "enabled"),
     "artifact_images": lambda s: _set(s.artifacts, "embed_images"),
     "tool_safety": lambda s: _set(s.tool_safety, "enabled"),
     "reach_budget": lambda s: _set(s.outbound, "reach_budget_enabled"),
@@ -85,15 +78,6 @@ _LEGACY_LIMIT: Mapping[str, Callable[[Settings], str | None]] = {
 """A limit's deprecated deployment-wide number, read nowhere but here."""
 
 
-def _repo_memory(settings: Settings) -> TierValue:
-    """Repository memory is the operator's to turn on, with its tools: Off is locked."""
-    if "enabled" in get_repo_memory_settings(settings).model_fields_set:
-        _warn_legacy("DAIMON_REPO_MEMORY__ENABLED", "repo_memory")
-    if get_repo_memory_settings(settings).enabled:
-        return TierValue("deployment", "on")
-    return TierValue("deployment", "off", True)
-
-
 @cache
 def env_features() -> Mapping[str, str]:
     """`DAIMON_FEATURES__*` read once, for writers handed no `Settings` (an agent edit)."""
@@ -110,8 +94,6 @@ def deployment_value(settings: Settings | None, spec: FeatureSpec) -> TierValue 
         return TierValue("deployment", value, locked)
     if settings is None:
         return None
-    if spec.key == "repo_memory":
-        return _repo_memory(settings)
     flag = _LEGACY_FLAG.get(spec.key)
     if flag is not None and (enabled := flag(settings)) is not None:
         for env in spec.legacy_env:
@@ -127,17 +109,7 @@ def deployment_value(settings: Settings | None, spec: FeatureSpec) -> TierValue 
         return None
     for env in spec.legacy_env:
         _warn_legacy(env, spec.key)
-    value, locked = from_mode(mode)
-    return TierValue("deployment", value, locked)
-
-
-def deployment_mode(settings: Settings, key: str) -> CascadeMode:
-    """The deployment tier (or the registry default) as an on/off/disabled cascade mode."""
-    spec = FEATURES[key]
-    found = deployment_value(settings, spec)
-    return as_cascade(resolve_feature(spec, [found] if found is not None else [])).mode
-
-
-def block_mode(block: ThreadParticipationSettings | ProgressPlansSettings) -> CascadeMode:
-    """A settings block's own deprecated mode, for callers handed only the block."""
-    return block.mode
+    # A deprecated `disabled` is Off + Locked.
+    if mode is CascadeMode.DISABLED:
+        return TierValue("deployment", "off", True)
+    return TierValue("deployment", mode.value)

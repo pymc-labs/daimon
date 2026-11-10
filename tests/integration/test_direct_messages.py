@@ -23,6 +23,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import McpSettings, TurnQueueSettings
 from daimon.core.direct_messages import cold_dm_text, reply_to_dm, start_dm
 from daimon.core.errors import DaimonError
+from daimon.core.features.service import set_workspace_feature
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
@@ -1136,6 +1137,19 @@ async def test_slack_real_turn_registers_destination_for_leak_guard_and_cleans_o
         assert channels == (frozenset({"COTHER"}) if concurrent_channel else frozenset())
 
 
+async def _dm_memory_read_only(session, tenant, value: str) -> None:
+    await set_workspace_feature(
+        session,
+        None,
+        tenant_id=tenant.id,
+        platform="discord",
+        key="dm_memory_read_only",
+        value=value,
+        account_id=None,
+        surface="web",
+    )
+
+
 @pytest.mark.parametrize("restricted", [False, True])
 async def test_dm_policy_controls_actual_memory_mount_after_sys019_merge(
     db_session, db_session_factory, restricted
@@ -1143,9 +1157,7 @@ async def test_dm_policy_controls_actual_memory_mount_after_sys019_merge(
     tenant, deps, admission, _, _, created = await _setup(db_session, db_session_factory)
     route = await _start(tenant, deps, admission)
     async with db_session_factory.begin() as session:
-        await set_access_policy(
-            session, tenant_id=tenant.id, policy=TenantAccessPolicy(dm_memory_read_only=restricted)
-        )
+        await _dm_memory_read_only(session, tenant, "on" if restricted else "off")
     await _reply(deps, route)
     mounts = [
         resource for resource in created[-1]["resources"] if resource["type"] == "memory_store"
@@ -1194,9 +1206,7 @@ async def test_dm_tightening_memory_policy_replaces_the_writable_session(
     route = await _start(tenant, deps, admission)
     await _reply(deps, route)
     async with db_session_factory.begin() as session:
-        await set_access_policy(
-            session, tenant_id=tenant.id, policy=TenantAccessPolicy(dm_memory_read_only=True)
-        )
+        await _dm_memory_read_only(session, tenant, "on")
     await _reply(deps, route, message_id="2")
     assert streams == ["ses_dm_1", "ses_dm_2"]
     modes = [

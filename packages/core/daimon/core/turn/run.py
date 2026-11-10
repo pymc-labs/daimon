@@ -1287,6 +1287,7 @@ async def _repo_memory_state(
     origin: TurnContext,
     unattended: bool,
 ) -> MemoryState:
+    # A turn with no settings cannot resolve the setup requirement, so it is checked here too.
     if not get_repo_memory_settings(deps).enabled or not prepared.admission.feature_on(
         "repo_memory"
     ):
@@ -1475,13 +1476,9 @@ async def run_prepared_turn_impl(
         fragments=prepared.admission.feature_on("origin_fragments"),
         system=prepared.admission.agent.system,
     )
-    plans = await progress_plans_prefix(
-        deps.sessionmaker,
-        deployment=deps.progress_plans,
-        tenant_id=tenant_id,
+    plans = progress_plans_prefix(
+        prepared.admission.resolved("progress_plans"),
         platform=platform,
-        channel_id=prepared.admission.origin_channel_id,
-        thread_id=thread_id,
         chat_rendered=origin in _CHAT_RENDERED_ORIGINS,
     )
     memory_state = await _repo_memory_state(

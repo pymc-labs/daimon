@@ -1296,7 +1296,9 @@ Read from `daimon.core.config.RepoMemorySettings`. Prefix `DAIMON_REPO_MEMORY__`
 
 `bool` · optional · default `False`
 
-Enable native repository memory tools and turn injection after a verified import.
+Set up native repository memory (its tools and the notes sent with each message) after a
+verified import. Once set up, the `repo_memory` feature turns it on or off
+(`DAIMON_FEATURES__REPO_MEMORY`).
 
 ### `DAIMON_REPO_MEMORY__LEGACY_MCP_SERVER_NAMES`
 

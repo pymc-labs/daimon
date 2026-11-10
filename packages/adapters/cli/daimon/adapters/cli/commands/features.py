@@ -417,10 +417,9 @@ def features_diff_command(
 
 @features_app.command("import-env")
 def features_import_env_command() -> None:
-    """Copy the deprecated per-workspace env maps into workspace settings, once.
+    """Write the deprecated per-workspace env maps as workspace settings.
 
-    Until a workspace is imported its env map still applies; afterwards the variable is
-    ignored and logged. Safe to re-run: imported workspaces and stored values are kept.
+    A stored workspace setting always beats the variable. Safe to re-run: stored values are kept.
     """
     console = Console(highlight=False)
 
@@ -428,6 +427,6 @@ def features_import_env_command() -> None:
         settings = load_settings()
         async with build_runtime(settings) as rt, rt.sessionmaker() as session, session.begin():
             count = await import_env(session, settings)
-        console.print(f"imported {count} workspace(s)")
+        console.print(f"wrote {count} setting(s)")
 
     run_cli(run(), console=console)

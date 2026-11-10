@@ -16,14 +16,14 @@ from daimon.core import platform_names
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.config import DiscordSettings, Settings
 from daimon.core.platform_names import ChannelSighting
-from daimon.core.scope_cascade import CascadeMode, CascadeScope
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.platform_names import (
     get_channel_statuses,
     mark_channel_status,
     upsert_channel_names,
 )
-from daimon.core.stores.switch_modes import set_switch_mode
 from daimon.core.stores.tenants import get_tenant
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -268,15 +268,14 @@ async def test_rows_carry_kind_path_and_agents_and_gone_rows_stay_out(
                 db, tenant_id=admin.ws.tenant_id, platform="discord", statuses={"9001": "gone"}
             )
         async with db_session_factory.begin() as db:
-            await set_switch_mode(
+            await set_feature_value(
                 db,
-                "progress_plans",
                 tenant_id=admin.ws.tenant_id,
-                platform="discord",
-                scope=CascadeScope.THREAD,
-                scope_id="t9",
-                mode=CascadeMode.OFF,
-                parent_id="c1",
+                target=FeatureTarget("thread", channel_id="c1", thread_key="t9"),
+                key="progress_plans",
+                value="off",
+                set_by=None,
+                surface="web",
             )
         listed = (await admin.client.get("/api/channels")).json()
         detail = (await admin.client.get("/api/channels/c1")).json()

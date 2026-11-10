@@ -115,10 +115,8 @@ async def sessions_create(
         agent_github_app=getattr(rt.settings, "github_app", None),
         requester_is_headless=True,
         tool_safety=rt.settings.tool_safety,
-        legacy_memory_servers=(
-            get_repo_memory_settings(rt.settings).legacy_mcp_server_names
-            if get_repo_memory_settings(rt.settings).enabled
-            else ()
+        legacy_memory_servers=toolset.legacy_memory_servers(
+            get_repo_memory_settings(rt.settings).legacy_servers
         ),
     )
 

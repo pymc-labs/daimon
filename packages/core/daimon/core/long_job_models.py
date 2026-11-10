@@ -1,4 +1,4 @@
-"""Public long-job records and bounded tenant policy."""
+"""Public long-job records and the limits they run under."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ LongJobState = Literal[
     "lost",
     "over_budget",
 ]
+DEFAULT_DEADLINE_MINUTES = 60
 ACTIVE_STATES = ("queued", "launching", "running")
 
 # Keep Decimal arithmetic internally and interoperable dollar strings on MCP.
@@ -30,7 +31,7 @@ class LongJobPolicy(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
     enabled: bool = False
-    default_deadline_minutes: int = Field(default=60, gt=0)
+    default_deadline_minutes: int = Field(default=DEFAULT_DEADLINE_MINUTES, gt=0)
     max_deadline_minutes: int = Field(default=70, gt=0)
     max_usd: Decimal = Field(default=Decimal("5"), gt=0, allow_inf_nan=False)
 

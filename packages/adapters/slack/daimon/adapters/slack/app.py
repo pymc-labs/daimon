@@ -241,6 +241,7 @@ from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.credential_requests import SLACK_ACTION_ID as SLACK_CREDENTIAL_ACTION_ID
 from daimon.core.defaults.provisioning import teardown_slack_install
 from daimon.core.errors import DaimonError, UserFacingError
+from daimon.core.features.registry import limit_int
 from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
@@ -3352,7 +3353,7 @@ class SlackApp:
         if not (attended and admission.feature_on("reach_budget")):
             return None
         found = admission.resolved("outbound_people")
-        return outbound.max_people if found is None else int(found.value)
+        return outbound.max_people if found is None else limit_int(found.value)
 
     async def _run_continuation_turn(
         self,

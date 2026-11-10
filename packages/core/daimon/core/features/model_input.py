@@ -9,7 +9,7 @@ from typing import Any, Final, Literal, cast
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.agent_create_params import Tool
 from daimon.core.capability_tools import CAPABILITY_KEYS, CAPABILITY_TOOLS
-from daimon.core.features.registry import BUILTIN_TOOLS
+from daimon.core.features.registry import BUILTIN_TOOLS, limit_int
 from daimon.core.features.snapshot import FeatureSnapshot
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
 
@@ -40,6 +40,7 @@ CHAT_KEYS: Final[tuple[str, ...]] = (
     "outbound_people",
     "reach_budget",
     "daily_model_cap",
+    "progress_plans",
 )
 """Chat display settings the adapters read from the turn's admission."""
 CHANNEL_BACKFILL: Final[int] = 25
@@ -76,7 +77,7 @@ class HistoryDepth:
     def of(cls, features: FeatureSnapshot | None) -> HistoryDepth:
         """From a snapshot; none, or one without the key (a hand-built admission), reads 100."""
         found = features.features.get("history_depth") if features is not None else None
-        return cls() if found is None else cls(int(found.value))
+        return cls() if found is None else cls(limit_int(found.value))
 
 
 FULL_HISTORY: Final[HistoryDepth] = HistoryDepth()
@@ -92,10 +93,13 @@ class SessionToolset:
     daimon_tools: bool = True
     builtins: Mapping[str, bool] = field(default_factory=dict[str, bool])
     repo_memory: bool = True
+    memory_on: bool = True
+    """Repository memory is on here, not off or missing its setup: legacy readers step aside."""
     env_file: bool = True
     """`agent_env_file`: the agent's keys are mounted as `.env`."""
     off_capabilities: frozenset[str] = frozenset()
-    """Capabilities a tier turned Off or whose setup is missing: their tools are not offered."""
+    """Capabilities that are Off (a tier or their default) or whose setup is missing: their tools
+    are not offered. Platform, backend and dependency gaps at the default tier hide nothing."""
 
     @classmethod
     def of(
@@ -120,7 +124,7 @@ class SessionToolset:
         found = features.features.get("daimon_tools")
         memory = features.features.get("repo_memory")
         env = features.features.get("agent_env_file")
-        # Off at the deployment registers no memory tools, so there is nothing to hide.
+        # Without the setup, or Off and locked at the deployment, no memory tools are registered.
         hides_memory = (
             memory is not None and not memory.on and memory.tier not in ("default", "deployment")
         )
@@ -128,13 +132,14 @@ class SessionToolset:
             daimon_tools=not isolated and (found is None or found.on),
             builtins=builtins,
             repo_memory=not hides_memory,
+            memory_on=memory is not None and memory.on,
             env_file=env is None or env.on,
             off_capabilities=frozenset(
                 key
                 for key in CAPABILITY_KEYS
                 if (cap := features.features.get(key)) is not None
                 and not cap.on
-                and (cap.tier != "default" or cap.unavailable == "requires")
+                and (cap.tier != "default" or cap.unavailable in (None, "requires"))
             ),
         )
 
@@ -147,6 +152,10 @@ class SessionToolset:
             or not self.env_file
             or bool(self.off_capabilities)
         )
+
+    def legacy_memory_servers(self, names: tuple[str, ...]) -> tuple[str, ...]:
+        """`names` (already limited to a set-up deployment) while native memory is on here."""
+        return names if self.memory_on else ()
 
     @property
     def hidden_daimon_tools(self) -> frozenset[str]:
@@ -175,8 +184,30 @@ def _with_policies(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def agent_builtins(tools: list[Tool]) -> dict[str, bool | None]:
-    """The agent tier of every `tool.*` key: the agent's own toolset config."""
-    return {tool: builtin_enabled(tools, tool) for tool in BUILTIN_TOOLS}
+    """The agent tier of every `tool.*` key: the tool's own config entry, or Off when the
+    agent's toolset is off by default and does not list it; None (Default) otherwise."""
+    return {tool: _own_builtin(tools, tool) for tool in BUILTIN_TOOLS}
+
+
+def _own_builtin(tools: list[Tool], tool: str) -> bool | None:
+    found: bool | None = None
+    for entry in tools:
+        if not str(entry.get("type", "")).startswith("agent_toolset"):
+            continue
+        raw = cast(dict[str, Any], entry)
+        default = cast(dict[str, Any], raw.get("default_config") or {}).get("enabled")
+        config = next((c for c in raw.get("configs") or () if c.get("name") == tool), None)
+        if config is None and default is not False:
+            continue
+        enabled = None if config is None else config.get("enabled")
+        on = bool(enabled) if enabled is not None else default is not False
+        found = on or bool(found)
+    return found
+
+
+def builtins_of(agent: BetaManagedAgentsAgent) -> dict[str, bool | None]:
+    """The agent tier of every `tool.*` key, from `agent`'s own tool config."""
+    return agent_builtins(cast(list[Tool], [tool.model_dump(mode="json") for tool in agent.tools]))
 
 
 def agent_toolset(
@@ -188,9 +219,8 @@ def agent_toolset(
 
     if features is None:
         return DEFAULT_TOOLSET
-    tools = cast(list[Tool], [tool.model_dump(mode="json") for tool in agent.tools])
     isolated = (agent.metadata or {}).get(MA_METADATA_KEY_ISOLATED) == "true"
-    return SessionToolset.of(features, agent_builtins(tools), isolated=isolated)
+    return SessionToolset.of(features, builtins_of(agent), isolated=isolated)
 
 
 DEFAULT_TOOLSET: Final = SessionToolset()
@@ -214,11 +244,14 @@ def builtin_enabled(tools: list[Tool], tool: str) -> bool | None:
     return found
 
 
-def with_builtin(tools: list[Tool], tool: str, enabled: bool) -> list[Tool]:
-    """`tools` with `tool` turned on or off; any permission policy it had is kept.
+def with_builtin(tools: list[Tool], tool: str, enabled: bool | None) -> list[Tool]:
+    """`tools` with `tool` turned on or off, or (None) its own entry removed; any
+    permission policy it had is kept.
 
     An agent with no toolset gains one holding only `tool`, never the defaults.
     """
+    if enabled is None:
+        return [_without(entry, tool) for entry in tools]
     if builtin_enabled(tools, tool) is None:
         only: Tool = cast(
             Tool,
@@ -245,3 +278,11 @@ def with_builtin(tools: list[Tool], tool: str, enabled: bool) -> list[Tool]:
         raw["configs"] = configs
         updated.append(cast(Tool, raw))
     return updated
+
+
+def _without(entry: Tool, tool: str) -> Tool:
+    if not str(entry.get("type", "")).startswith("agent_toolset"):
+        return entry
+    raw = dict(cast(dict[str, Any], entry))
+    raw["configs"] = [c for c in raw.get("configs") or () if c.get("name") != tool]
+    return cast(Tool, raw)

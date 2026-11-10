@@ -100,7 +100,7 @@ _ENV_MOUNT_SUFFIX = ".env"
 #: Session metadata key `create_session` stamps on a routed session. Recorded
 #: on the session itself, so every snapshot taken of it reads the same mode.
 MA_METADATA_KEY_GITHUB_TRANSPORT = "daimon_github_transport"
-_TOOLS: TypeAdapter[list[MaTool]] = TypeAdapter(list[MaTool])
+_TOOL: TypeAdapter[MaTool] = TypeAdapter(MaTool)
 _MCP_SERVERS: TypeAdapter[list[BetaManagedAgentsMCPServerURLDefinition]] = TypeAdapter(
     list[BetaManagedAgentsMCPServerURLDefinition]
 )
@@ -583,9 +583,31 @@ def _with_toolset(
     if not toolset.daimon_tools:
         hidden = hidden | {DAIMON_SERVER_NAME}
     if toolset.builtins:
-        tools = toolset.apply_builtins([tool.model_dump(mode="json") for tool in agent.tools])
-        agent = agent.model_copy(update={"tools": _TOOLS.validate_python(tools)})
+        dumped = _dumped(agent.tools)
+        tools = _retyped(agent.tools, dumped, toolset.apply_builtins(dumped))
+        agent = agent.model_copy(update={"tools": tools})
     return agent, hidden
+
+
+def _dumped(tools: Sequence[MaTool]) -> list[dict[str, Any]]:
+    # A read model's unset fields dump as None, which the param types refuse.
+    return [tool.model_dump(mode="json", exclude_none=True) for tool in tools]
+
+
+def _retyped(
+    tools: Sequence[MaTool], dumped: Sequence[dict[str, Any]], changed: Sequence[dict[str, Any]]
+) -> list[MaTool]:
+    """`changed` as tools: an entry equal to its dump stays the tool it came from, unvalidated.
+
+    Only an entry a rule changed is validated, so a tool the API answered in a short
+    form (a config without `enabled`) passes through as read.
+    """
+    return [
+        tools[index]
+        if index < len(dumped) and entry == dumped[index]
+        else _TOOL.validate_python(entry)
+        for index, entry in enumerate(changed)
+    ]
 
 
 def session_tools(
@@ -614,9 +636,10 @@ def session_tools(
     """
     agent, hidden_mcp_server_names = _with_toolset(agent, hidden_mcp_server_names, toolset)
     visible = visible_tools(agent, hidden_mcp_server_names)
+    dumped = _dumped(visible)
     gated = session_tools_for_policy(
         tool_safety,
-        [tool.model_dump(mode="json") for tool in visible],
+        dumped,
         trusted_servers=trusted_servers_for(
             public_url, {s.name: s.url for s in visible_mcp_servers(agent, hidden_mcp_server_names)}
         ),
@@ -624,15 +647,15 @@ def session_tools(
         confirmed_tools=confirmed_tools,
         daimon_rule_tools=daimon_rule_tools,
     )
-    payload = gated if gated is not None else [tool.model_dump(mode="json") for tool in visible]
+    payload = gated if gated is not None else dumped
     hidden_tools = frozenset[str]() if toolset is None else toolset.hidden_daimon_tools
     if not legacy_memory_servers and not hidden_tools:
-        return visible if gated is None else _TOOLS.validate_python(gated)
+        return visible if gated is None else _retyped(visible, dumped, gated)
     if legacy_memory_servers:
         payload = suppress_legacy_readers(payload, legacy_memory_servers)
     if hidden_tools:
         payload = disable_mcp_tools(payload, (DAIMON_SERVER_NAME,), hidden_tools)
-    return _TOOLS.validate_python(payload)
+    return _retyped(visible, dumped, payload)
 
 
 def session_mcp_servers(

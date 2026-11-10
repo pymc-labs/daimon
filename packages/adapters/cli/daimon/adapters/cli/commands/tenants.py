@@ -591,7 +591,6 @@ def _print_policy(
     console.print(f"  invoker_role_ids: {', '.join(policy.invoker_role_ids) or '-'}")
     console.print(f"  invoker_user_ids: {', '.join(policy.invoker_user_ids) or '-'}")
     console.print(f"  invoker_admin_bypass: {str(policy.invoker_admin_bypass).lower()}")
-    console.print(f"  dm_memory_read_only: {str(policy.dm_memory_read_only).lower()}")
     rules = len(policy.channel_rules) + len(policy.category_rules) + len(policy.agent_rules)
     console.print(f"  rules: {rules or '-'} (see access-policy rules)")
 
@@ -770,13 +769,6 @@ def tenants_access_policy_set_command(
             help="Allow server admins to bypass the invoker user/role lists.",
         ),
     ] = None,
-    dm_memory_read_only: Annotated[
-        bool | None,
-        typer.Option(
-            "--dm-memory-read-only/--no-dm-memory-read-only",
-            help="Give turns started from a DM read-only memory.",
-        ),
-    ] = None,
     drop_agent_rules: Annotated[
         bool,
         typer.Option(
@@ -820,7 +812,6 @@ def tenants_access_policy_set_command(
                 clear_internal_roles=clear_internal_roles,
                 clear_invoker_roles=clear_invoker_roles,
                 invoker_admin_bypass=invoker_admin_bypass,
-                dm_memory_read_only=dm_memory_read_only,
                 drop_agent_rules=drop_agent_rules,
                 clear=clear,
                 as_json=as_json,
@@ -850,7 +841,6 @@ async def tenants_access_policy_set(
     internal_role: list[str] | None = None,
     clear_internal_roles: bool = False,
     invoker_admin_bypass: bool | None = None,
-    dm_memory_read_only: bool | None = None,
     drop_agent_rules: bool = False,
     clear: bool = False,
     as_json: bool = False,
@@ -885,8 +875,6 @@ async def tenants_access_policy_set(
         changes["invoker_user_ids"] = _parse_invokers(invoker, platform=validated_platform)
     if invoker_admin_bypass is not None:
         changes["invoker_admin_bypass"] = invoker_admin_bypass
-    if dm_memory_read_only is not None:
-        changes["dm_memory_read_only"] = dm_memory_read_only
     if drop_agent_rules and not clear:
         raise typer.BadParameter("--drop-agent-rules only applies to --clear")
     if clear and changes:
@@ -1020,58 +1008,3 @@ async def tenants_dm_policy(
             "enabled": await dm_enabled(session, tenant_id=tenant_id),
             "dm_agent_name": await get_dm_agent_name(session, tenant_id=tenant_id),
         }
-
-
-@tenants_app.command("long-job-policy")
-def long_job_policy_command(
-    tenant: Annotated[uuid.UUID, typer.Argument(help="Tenant UUID.")],
-    actor_user: Annotated[
-        str, typer.Option("--actor-user", help="Current platform admin user ID.")
-    ],
-    agent: Annotated[
-        str | None, typer.Option("--agent", help="MA agent id; omit for tenant default.")
-    ] = None,
-    enabled: Annotated[bool | None, typer.Option("--enabled/--disabled")] = None,
-    default_deadline: Annotated[int, typer.Option("--default-deadline")] = 60,
-    max_deadline: Annotated[int, typer.Option("--max-deadline")] = 70,
-    max_usd: Annotated[str, typer.Option("--max-usd")] = "5",
-) -> None:
-    """Read effective policy or set a complete policy with --enabled/--disabled.
-
-    Uses a fresh platform admin attestation, like backend-policy. Every change
-    records the human account and before/after values. Omit --agent to set the
-    tenant default; an agent row replaces that default. Operator ceilings apply.
-    """
-    from daimon.core.long_job_models import LongJobPolicy
-    from daimon.core.stores import long_jobs
-
-    settings = load_settings()
-    console = Console()
-
-    async def run() -> None:
-        async with build_runtime(settings) as rt:
-            actor = await verify_backend_actor(
-                rt.sessionmaker, tenant_id=tenant, platform_user_id=actor_user, settings=settings
-            )
-            async with rt.sessionmaker.begin() as db:
-                if enabled is not None:
-                    await long_jobs.set_policy(
-                        db,
-                        tenant_id=tenant,
-                        agent_id=agent,
-                        policy=LongJobPolicy(
-                            enabled=enabled,
-                            default_deadline_minutes=default_deadline,
-                            max_deadline_minutes=max_deadline,
-                            max_usd=Decimal(max_usd),
-                        ),
-                        ceilings=settings.long_jobs,
-                        actor=actor.subject,
-                        set_by=str(actor.account_id),
-                    )
-                effective = await long_jobs.get_policy(
-                    db, tenant_id=tenant, agent_id=agent, ceilings=settings.long_jobs
-                )
-            console.print(effective.model_dump_json(indent=2))
-
-    run_cli(run(), console=console)

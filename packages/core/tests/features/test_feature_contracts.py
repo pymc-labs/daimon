@@ -30,6 +30,8 @@ from daimon.core.features.registry import (
 )
 from daimon.core.features.resolver import TierValue, resolve_feature
 from daimon.core.features.session_identity import IDENTITY_KEYS
+from daimon.core.features.snapshot import may_turn_on
+from daimon.core.long_job_models import LongJobPolicy
 from pydantic import PostgresDsn, SecretStr
 
 _ROOT = Path(__file__).resolve().parents[4]
@@ -41,7 +43,7 @@ _PRODUCT = [
 _WRITERS = {"set_feature_value", "clear_feature_value", "replace_agent_values"}
 _MAY_WRITE = {
     "core/stores/feature_values.py",
-    "core/stores/_scope_modes.py",
+    "core/channel_settings.py",
     "core/features/service.py",
 }
 _LEGACY_MODE = {"progress_plans", "thread_participation"}
@@ -65,6 +67,41 @@ def test_every_feature_is_well_formed(spec: FeatureSpec) -> None:
     tiers = spec.tiers
     assert list(tiers) == sorted(tiers, key=TIERS.index), "tiers broadest first"
     assert not spec.legacy_env or "deployment" in tiers
+
+
+_PRE_AGENT = "read before the turn's agent is chosen, so it stops at the channel"
+_NARROWED: dict[str, str] = {
+    "approvals": "set in the access policy; only a live native platform admin changes it",
+    "guidance": "provision: applied when an agent is saved or synced, with no channel or thread",
+    "participation": _PRE_AGENT,
+    "thread_naming": "read when a thread opens, before an agent or thread exists",
+    "plain_text_mentions": _PRE_AGENT,
+    "unmentioned_reply_hint": _PRE_AGENT,
+    "writers_none_notice": _PRE_AGENT,
+    "budget_notices": "read when a turn is refused for budget, before an agent or thread resolves",
+    "waiting_card": "read before the turn's place resolves, so workspace only",
+    "cost_footer": "read by the finished-turn footer, which has no deployment settings or agent",
+    "support_escalation": "the escalation button re-checks at the workspace when pressed",
+    "private_channel_messages": "operator-only: read once at startup",
+    "direct_messages": "a workspace policy for DMs, which have no agent or thread to choose",
+    "dm_memory_read_only": "a workspace policy for DMs, which have no agent or thread to choose",
+    "artifact_images": "read by the artifact tool at the workspace",
+    "tool_safety": "operator-only security switch",
+    "unattended_capabilities": "read for unattended runs, which have no channel or thread",
+    "require_routine_destination": "read when a routine is created, at the workspace",
+    "long_jobs_max_usd": "checked when a job starts, from its workspace and agent",
+    "long_jobs_max_deadline": "checked when a job starts, from its workspace and agent",
+    "daily_model_cap": "counts the team's spend, so a workspace or agent limit",
+    **{f"web.{module}": "workspace-only web app surface" for module in WEB_MODULES},
+}
+
+
+def test_every_feature_has_all_five_tiers_unless_narrowed_for_a_reason() -> None:
+    narrowed = {key for key, spec in FEATURES.items() if spec.tiers != TIERS}
+    assert narrowed == set(_NARROWED), (
+        f"narrowed without a reason: {sorted(narrowed - set(_NARROWED))}; "
+        f"listed but at every tier: {sorted(set(_NARROWED) - narrowed)}"
+    )
 
 
 def test_most_specific_wins_and_says_which_tier_decided() -> None:
@@ -145,7 +182,7 @@ def test_a_limit_defaults_are_the_built_in_values() -> None:
         "outbound_places": outbound.max_places,
         "outbound_people": outbound.max_people,
         "outbound_length": outbound.max_length,
-        "long_jobs_max_usd": jobs.max_usd,
+        "long_jobs_max_usd": LongJobPolicy().max_usd,
         "long_jobs_max_deadline": jobs.max_deadline_minutes,
     }
     for key, value in built_in.items():
@@ -280,7 +317,7 @@ def test_a_dotted_feature_has_an_env_name() -> None:
 _KEY_READERS = {
     "feature_on": 0,
     "feature": 0,
-    "switch_default": 1,
+    "may_turn_on": 1,
     "shown": 0,
     "_feature_on": 0,
     "place_feature": 3,
@@ -289,6 +326,7 @@ _KEY_READERS = {
     "place_feature_or_none": 3,
     "feature_in_or_none": 3,
     "_chosen": 2,
+    "deployment_on": 1,
 }
 """Calls that read a feature key, and the position of the key among their arguments."""
 _SNAPSHOT_READS = {"on", "value", "get"}
@@ -411,3 +449,33 @@ def test_config_grows_no_new_product_switch() -> None:
         "new on/off or mode setting: register a feature instead, or allow-list it with a reason"
     )
     assert set(_CONFIG_SWITCHES) - switches == set(), "allow-listed settings that no longer exist"
+
+
+def test_may_turn_on_is_false_only_when_nothing_narrower_could_turn_it_on() -> None:
+    assert may_turn_on(_settings(), "participation", "discord"), (
+        "default Off can still be turned on"
+    )
+    locked = _settings(features={"participation": "off:locked"})
+    assert not may_turn_on(locked, "participation", "discord"), "a deployment lock keeps it Off"
+    assert may_turn_on(
+        _settings(features={"participation": "on:locked"}), "participation", "discord"
+    ), "a lock On is not a bar"
+    assert not may_turn_on(_settings(), "participation", "slack"), "no adapter, no feature"
+
+
+def test_repo_memory_needs_the_setup_and_the_setting_does_not_read_the_feature() -> None:
+    import uuid
+
+    from daimon.core.config import RepoMemorySettings, get_repo_memory_settings
+    from daimon.core.features.snapshot import FeaturePlace, resolve_one
+
+    place = FeaturePlace(uuid.UUID(int=0), "discord")
+    spec = FEATURES["repo_memory"]
+    bare = _settings(features={"repo_memory": "on"})
+    assert resolve_one(spec, bare, place, ()).unavailable == "requires", "on without the setup"
+    assert not get_repo_memory_settings(bare).enabled, "the setup ignores the feature"
+    setup = _settings(repo_memory=RepoMemorySettings(enabled=True))
+    assert resolve_one(spec, setup, place, ()).on, "set up: on by default"
+    off = _settings(repo_memory=RepoMemorySettings(enabled=True), features={"repo_memory": "off"})
+    assert get_repo_memory_settings(off).enabled, "the feature does not undo the setup"
+    assert not resolve_one(spec, off, place, ()).on, "but turns the feature off"

@@ -17,10 +17,9 @@ from functools import cache
 from typing import Final, cast
 
 import structlog
-from daimon.core.config import Settings
+from daimon.core.config import Settings, get_repo_memory_settings
 from daimon.core.features.deployment import deployment_value
 from daimon.core.features.registry import (
-    ENV_IMPORTED,
     FEATURES,
     FeatureSpec,
     Requirement,
@@ -97,6 +96,8 @@ _SETUP: Final[Mapping[Requirement, Callable[[Settings], bool]]] = {
     ),
     "gemini_key": lambda s: s.gemini.api_key is not None,
     "microsoft_accounts": lambda s: s.microsoft_accounts_enabled and bool(s.crypto.keys),
+    "repo_memory_setup": lambda s: get_repo_memory_settings(s).enabled,
+    "teams_public_url": lambda s: s.teams is not None and s.teams.public_url is not None,
 }
 """One integration's setup, exactly the condition its tools need to run. Unmet, the session is not
 offered them, so a check here must never be stricter than the tools. Watches and GitHub have none:
@@ -139,8 +140,8 @@ def unavailable_reason(
 
 
 @cache
-def _warn_ignored(env: str, key: str) -> None:
-    log.warning("features.legacy_env_ignored", env=env, imported_to=key)
+def _warn_deprecated(env: str, key: str) -> None:
+    log.warning("features.legacy_env_deprecated", env=env, feature=key)
 
 
 def _env_map_value(
@@ -149,14 +150,14 @@ def _env_map_value(
     place: FeaturePlace,
     rows: Iterable[FeatureValueRow],
 ) -> TierValue | None:
-    """A deprecated per-workspace env map as the workspace tier, until it is imported."""
+    """A deprecated per-workspace env map as the workspace tier; a stored row beats it."""
     if spec.env_map is None or settings is None:
         return None
     raw = cast(Mapping[uuid.UUID, bool], getattr(settings, spec.env_map)).get(place.tenant_id)
     if raw is None:
         return None
-    if any(row.key == ENV_IMPORTED for row in rows):
-        _warn_ignored(spec.legacy_env[0], spec.key)
+    _warn_deprecated(spec.legacy_env[0], spec.key)
+    if any(row.key == spec.key and row.tier == "workspace" for row in rows):
         return None
     return TierValue("workspace", "on" if raw else "off")
 
@@ -208,6 +209,20 @@ def resolve_one(
     return resolve_feature(
         spec, values, unavailable=reason, fixed=fixed, default=spec.default_for(place.platform)
     )
+
+
+def may_turn_on(settings: Settings, key: str, platform: str) -> bool:
+    """Whether any narrower tier could still turn the feature on: false where it cannot
+    run (participation without its adapter) or the deployment locks it Off."""
+    place = FeaturePlace(uuid.UUID(int=0), platform)
+    resolved = resolve_one(FEATURES[key], settings, place, ())
+    return resolved.unavailable is None and (resolved.on or not resolved.locked)
+
+
+def deployment_on(settings: Settings, key: str, platform: str) -> bool:
+    """Whether a deployment-only feature is on for `platform`: its value and its setup."""
+    place = FeaturePlace(uuid.UUID(int=0), platform)
+    return resolve_one(FEATURES[key], settings, place, ()).on
 
 
 @dataclass(frozen=True)
@@ -291,8 +306,10 @@ async def resolve_features(
     *,
     keys: Collection[str] | None = None,
     cache: FeatureCache = CACHE,
+    agent_builtins: Mapping[str, bool | None] | None = None,
 ) -> FeatureSnapshot:
-    """Resolve `keys` (every registered feature by default) for `place` in one read.
+    """Resolve `keys` (every registered feature by default) for `place` in one read;
+    `agent_builtins` (`model_input.agent_builtins`) is the agent tier of each `tool.*`.
 
     Without `settings` the deployment tier is the registry default. A database failure
     raises; this reader never falls back to a default. Callers that must keep working
@@ -317,7 +334,8 @@ async def resolve_features(
             resolved["approvals"] = approvals_from_gate(gate.value, gate.scope)
     for key in wanted:
         if key != "approvals":
-            resolved[key] = resolve_one(FEATURES[key], settings, place, rows, resolved)
+            spec = FEATURES[key]
+            resolved[key] = resolve_one(spec, settings, place, rows, resolved, agent_builtins)
     return FeatureSnapshot(place, revision, resolved)
 
 
@@ -422,7 +440,7 @@ async def feature_in(
         agent_id=place.agent_id,
         channel_id=place.channel_id,
         thread_key=place.thread_key,
-        keys=(key, ENV_IMPORTED),
+        keys=(key,),
     )
     return resolve_one(FEATURES[key], settings, place, rows)
 

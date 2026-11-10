@@ -133,7 +133,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.errors import DaimonError, TurnError, UserFacingError
-from daimon.core.features.snapshot import FeaturePlace, place_feature
+from daimon.core.features.snapshot import FeaturePlace, may_turn_on, place_feature
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_request_expiry import run_request_expiry_poller
@@ -148,7 +148,6 @@ from daimon.core.permissions import channel_permissions
 from daimon.core.platform_words import words_for
 from daimon.core.posted_controls.lifecycle import drain_card_edits
 from daimon.core.routine_delivery import resolve_routine_identity, run_delivery_poller
-from daimon.core.scope_settings import switch_default
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.discord_message_admissions import (
@@ -205,7 +204,6 @@ from daimon.core.thread_naming import (
     naming_text,
     strip_mentions,
 )
-from daimon.core.thread_participation import ParticipationMode
 from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit, backend_facts
 from daimon.core.turn.bookkeeping import release_turn_markers
 from daimon.core.turn.ceiling import turn_deadline
@@ -2580,7 +2578,7 @@ class DaimonBot(commands.Bot):
         if self._participant is None:
             self._participant = ThreadParticipant(
                 settings=self.runtime.settings.thread_participation,
-                deployment=switch_default(self.runtime.settings, "participation", "discord"),
+                deployment=self.runtime.settings,
                 sessionmaker=self.runtime.sessionmaker,
                 anthropic=self.runtime.anthropic,
                 bot_user_id=bot_user_id,
@@ -2627,11 +2625,11 @@ class DaimonBot(commands.Bot):
             # Cascade first: it says `off` for almost every message, so the
             # tenant liveness read is only paid by threads actually followed.
             resolved = await responder.resolve(tenant_id=tenant_id, thread=thread)
-            if resolved.mode is not ParticipationMode.ON:
+            if not resolved.on:
                 log.debug(
                     "thread_participation.not_following",
                     thread_id=str(thread_id),
-                    mode=resolved.mode.value,
+                    value=resolved.value,
                     tier=resolved.tier,
                 )
                 return
@@ -2877,7 +2875,7 @@ class DaimonBot(commands.Bot):
                 bot_user_id=self.user.id, bot_display_name=discord_settings.bot_display_name
             )
             resolved = await responder.resolve(tenant_id=tenant_id, thread=thread)
-            if resolved.mode is ParticipationMode.ON:
+            if resolved.on:
                 self._unmentioned_hint_cooldown.release(thread_id)
                 return
             # A reaction is a post: where the agent may not write (or that
@@ -3200,7 +3198,7 @@ class DaimonBot(commands.Bot):
             # organic thread participation, which has its own gates.
             if not startup_replay and is_participation_candidate(
                 # No Discord settings block means no bot to follow anything.
-                deployment_mode=switch_default(self.runtime.settings, "participation", "discord"),
+                may_turn_on=may_turn_on(self.runtime.settings, "participation", "discord"),
                 author_is_bot=message.author.bot,
                 bot_mentioned=bot_mentioned,
                 in_thread=isinstance(message.channel, discord.Thread),

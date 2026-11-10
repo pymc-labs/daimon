@@ -51,38 +51,31 @@ from daimon.core.channel_settings import (
     set_tool_rule,
     set_workspace_default_agent,
 )
-from daimon.core.channel_switches import SWITCH_PLATFORMS, own_mode
 from daimon.core.credit_views import recent_start
 from daimon.core.defaults.loader import load_platform_skills
 from daimon.core.defaults.metadata import MA_METADATA_KEY_CHANNEL_COPY
 from daimon.core.errors import SkillsListTruncatedError
+from daimon.core.features.registry import DEFAULT, Tier
+from daimon.core.features.service import TierSetting, read_features
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.routine_service import RoutineCaller, RoutineRefused
-from daimon.core.scope_cascade import CascadeMode, CascadeScope, CascadeTier, resolve_modes
-from daimon.core.scope_settings import (
-    LEVELS,
-    SettingsPlace,
-    read_settings,
-    switch_default,
-)
 from daimon.core.stores import agent_tool_rules as tool_rules
 from daimon.core.stores.channel_changes import WORKSPACE_ID
 from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.platform_names import get_channel_names, get_user_names
-from daimon.core.stores.switch_modes import Switch, get_switch_modes
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.thread_models import model_label
 from fastapi import APIRouter, Depends, HTTPException
 from mux.contracts.config import ConfigRevision
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
 
 ChannelViewer = Annotated[WebCaller, Depends(requires("channels.view"))]
 ChannelAdmin = Annotated[WebCaller, Depends(requires("channels.manage"))]
 WorkspaceAdmin = Annotated[WebCaller, Depends(requires("workspace.manage"))]
 Mode = Literal["on", "off", "disabled"]
 ApprovalMode = Literal["on", "off"]
-Source = Literal["default", "server", "agent", "channel", "thread"]
+Source = Literal["default", "deployment", "workspace", "agent", "channel", "thread"]
 _SPEND_DAYS = 30
 _NO_WEB = "Web chat has no such setting."
 _NO_AGENT = "Pick an agent from this workspace."
@@ -93,7 +86,7 @@ class SwitchJson(BaseModel):
     own: Mode | None
     """The channel's (or workspace's) own mode; None while it inherits."""
     value: Mode
-    source: CascadeTier
+    source: Tier
 
 
 class ApprovalsJson(BaseModel):
@@ -277,8 +270,13 @@ def _pin(pin: ConfigRevision) -> PinJson:
     )
 
 
-def _mode(mode: CascadeMode | None) -> Mode | None:
-    return None if mode is None else mode.value
+def _mode(value: str, locked: bool) -> Mode:
+    """An on/off feature in the legacy words: `disabled` is Off + Locked."""
+    return "disabled" if locked and value == "off" else "on" if value == "on" else "off"
+
+
+def _own(own: TierSetting | None) -> Mode | None:
+    return None if own is None or own.value == DEFAULT else _mode(own.value, own.locked)
 
 
 def _approval(value: str | None) -> ApprovalMode:
@@ -289,31 +287,20 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter()
     settings = runtime.settings
 
-    def deployment(switch: Switch, platform: str) -> CascadeMode:
-        return switch_default(settings, switch, platform)
-
     async def switch_json(
-        db: AsyncSession,
-        switch: Switch,
-        tenant_id: uuid.UUID,
-        platform: str,
-        channel_id: str | None,
+        key: str, tenant_id: uuid.UUID, platform: str, channel_id: str | None
     ) -> SwitchJson:
-        modes = await get_switch_modes(
-            db,
-            switch,
-            tenant_id=tenant_id,
-            platform=platform,
-            channel_id=channel_id,
-            thread_id=None,
-        )
-        scope = CascadeScope.WORKSPACE if channel_id is None else CascadeScope.CHANNEL
-        effective = resolve_modes(deployment(switch, platform), modes)
+        """An on/off feature at the workspace or a channel, through the feature resolver."""
+        place = FeaturePlace(tenant_id, platform, channel_id)
+        (view,) = await read_features(runtime.sessionmaker, settings, place, keys=(key,))
+        resolved = view.resolved
         return SwitchJson(
-            available=platform in SWITCH_PLATFORMS[switch],
-            own=_mode(own_mode(modes, scope)),
-            value=effective.mode.value,
-            source=effective.tier,
+            available=resolved.unavailable != "platform",
+            own=_own(view.own("workspace" if channel_id is None else "channel")),
+            value="disabled"
+            if resolved.unavailable is not None
+            else _mode(resolved.value, resolved.locked),
+            source="deployment" if resolved.tier == "default" else resolved.tier,
         )
 
     async def native_user_id(caller: WebCaller, platform: str) -> str | None:
@@ -325,25 +312,22 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
     async def approvals_json(
         caller: WebCaller, tenant_id: uuid.UUID, platform: str, channel_id: str | None
     ) -> ApprovalsJson:
-        place = SettingsPlace(platform, channel_id)
-        (view,) = await read_settings(
+        (view,) = await read_features(
             runtime.sessionmaker,
-            tenant_id=tenant_id,
-            place=place,
-            settings=settings,
+            settings,
+            FeaturePlace(tenant_id, platform, channel_id),
             keys=("approvals",),
         )
-        own = view.own("channel" if channel_id is not None else "server")
+        own = view.own("channel" if channel_id is not None else "workspace")
+        available = view.spec.on_platform(platform)
         linked = await native_user_id(caller, platform)
         return ApprovalsJson(
-            available=view.available,
-            own=None if own in (None, "inherit") else _approval(own),
-            value=_approval(view.effective),
-            source=view.decided_by if view.decided_by in LEVELS else "default",
-            active=view.active,
-            editable=view.available
-            and "channels.manage" in caller.capabilities
-            and linked is not None,
+            available=available,
+            own=None if own is None or own.value == DEFAULT else _approval(own.value),
+            value=_approval(view.resolved.value),
+            source=view.resolved.tier,
+            active=settings.tool_safety.gate_overrides_active,
+            editable=available and "channels.manage" in caller.capabilities and linked is not None,
         )
 
     async def member_routines(
@@ -454,8 +438,8 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
                 if spend is not None
                 else {}
             )
-            participation = await switch_json(db, "participation", tenant_id, platform, channel_id)
-            plans = await switch_json(db, "progress_plans", tenant_id, platform, channel_id)
+        participation = await switch_json("participation", tenant_id, platform, channel_id)
+        plans = await switch_json("progress_plans", tenant_id, platform, channel_id)
         approvals = await approvals_json(caller, tenant_id, platform, channel_id)
         copy = next(
             (a for a in listed if a.metadata.get(MA_METADATA_KEY_CHANNEL_COPY) == channel_id),
@@ -695,14 +679,13 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
                 now=datetime.now(UTC),
                 markup=settings.billing.markup,
             )
-            participation = await switch_json(db, "participation", tenant_id, platform, None)
-            plans = await switch_json(db, "progress_plans", tenant_id, platform, None)
+        participation = await switch_json("participation", tenant_id, platform, None)
+        plans = await switch_json("progress_plans", tenant_id, platform, None)
         approvals = await approvals_json(caller, tenant_id, platform, None)
-        (footer,) = await read_settings(
+        (footer,) = await read_features(
             runtime.sessionmaker,
-            tenant_id=tenant_id,
-            place=SettingsPlace(platform, None),
-            settings=settings,
+            settings,
+            FeaturePlace(tenant_id, platform),
             keys=("cost_footer",),
         )
         return DefaultsJson(
@@ -717,7 +700,7 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
             progress_plans=plans,
             approvals=approvals,
             cost_footer=CostFooterJson(
-                shown=footer.effective == "shown",
+                shown=footer.resolved.value == "shown",
                 editable="workspace.manage" in caller.capabilities,
             ),
         )

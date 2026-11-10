@@ -307,10 +307,8 @@ async def capture_preparation_source(
         fernet=request.deps.fernet,
         channel_skills=request.admission.channel_skills,
         tool_safety=request.deps.tool_safety,
-        legacy_memory_servers=(
-            get_repo_memory_settings(request.deps).legacy_mcp_server_names
-            if get_repo_memory_settings(request.deps).enabled
-            else ()
+        legacy_memory_servers=request.admission.toolset.legacy_memory_servers(
+            get_repo_memory_settings(request.deps).legacy_servers
         ),
         asks_before_publishing=request.admission.asks_before_publishing,
         mcp_settings=request.deps.mcp,

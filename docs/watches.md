@@ -146,7 +146,8 @@ image as the others, after migrations.
    route. For MCP server watches it needs outbound HTTPS to the listed URLs.
 4. Put the sidecar behind a TLS proxy that exposes only the callback paths.
 5. Set [`DAIMON_WATCHES__ENABLED`](configuration.md#daimon_watches__enabled)
-   to `true`, then turn on the database `global` gate.
+   to `true`, then turn on the database `global` gate. Watches fire only once the
+   operator has done both, whatever the Watches feature says at any level.
 
 To run the executor outside Compose:
 

@@ -480,9 +480,10 @@ async def run_turn_impl(
     )
 
     fragments = True  # `origin_fragments` where the session is placed
+    memory_on = False  # `repo_memory` where the session is placed
 
     async def _assemble_session() -> BetaManagedAgentsSession:
-        nonlocal fragments
+        nonlocal fragments, memory_on
         scope = (
             resource_scope(
                 tenant_id=str(tenant_id),
@@ -531,6 +532,7 @@ async def run_turn_impl(
                 backend=MANAGED_AGENTS.provider,
             )
             toolset, identity = await place_session(session_factory, feature_settings, place, agent)
+            memory_on = toolset.memory_on
             fragments = (
                 await resolve_features(
                     session_factory, feature_settings, place, keys=("origin_fragments",)
@@ -555,10 +557,8 @@ async def run_turn_impl(
             github_app_private_key=github_app_private_key,
             agent_github_app=agent_github_app,
             github_mcp_router=github_mcp_router,
-            legacy_memory_servers=(
-                repo_memory.legacy_mcp_server_names
-                if repo_memory is not None and repo_memory.enabled
-                else ()
+            legacy_memory_servers=toolset.legacy_memory_servers(
+                repo_memory.legacy_servers if repo_memory is not None else ()
             ),
             requester_is_headless=True,
             billing_exempt=billing_exempt,
@@ -597,7 +597,8 @@ async def run_turn_impl(
         routine_memory = ""
         if (
             repo_memory is not None
-            and repo_memory.enabled
+            and repo_memory.enabled  # a caller without feature settings cannot see the setup
+            and memory_on
             and origin == "routine"
             and tenant_id is not None
             and session_factory is not None

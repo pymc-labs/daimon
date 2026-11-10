@@ -70,10 +70,12 @@ def test_tier_options_leave_out_what_is_already_set() -> None:
     )
 
 
-def test_a_builtin_tool_at_the_agent_tier_is_only_on_or_off() -> None:
+def test_a_builtin_tool_at_the_agent_tier_is_off_or_default_never_locked() -> None:
     spec = FEATURES["tool.bash"]
     offered = tier_options(spec, "agent", TierSetting("agent", "on"), can_lock=True, agent="a1")
-    assert [c for c, _ in offered] == [choice("tool.bash", "agent", "off", agent="a1")]
+    assert [c for c, _ in offered] == [
+        choice("tool.bash", "agent", value, agent="a1") for value in ("off", DEFAULT)
+    ]
 
 
 def test_native_authority_keys_are_never_lockable() -> None:

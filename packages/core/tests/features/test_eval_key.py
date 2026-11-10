@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+from daimon.core import turn_origin
 from daimon.core._models import ThreadSession
-from daimon.core.features.eval_key import EvalKey
+from daimon.core.features.eval_key import EvalKey, sample_controls
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot, resolve_one
@@ -44,6 +46,14 @@ def test_key_without_snapshot_or_features_still_names_the_prompts() -> None:
     assert key.identity is None and key.tools_sha256 is None, "no snapshot reads as unknown"
     assert key.features == {}, "no features recorded"
     assert len(key.safety_sha256) == len(key.turn_controls_sha256) == 64, "prompt hashes are set"
+
+
+def test_the_controls_hash_follows_the_rendered_wording(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hash is of the text a model reads at each level, not of the code that renders it."""
+    levels = sample_controls()
+    assert len(set(levels)) == 3, "full, origin and minimal read differently"
+    monkeypatch.setattr(turn_origin, "WEB_SENTENCE", " Other web wording.")
+    assert sample_controls() != levels, "a changed sentence changes what is hashed"
 
 
 async def test_key_is_written_to_the_session_row_and_the_turn_outcome(

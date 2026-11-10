@@ -45,8 +45,9 @@ access.
 3. Set
    [`DAIMON_REPO_MEMORY__LEGACY_MCP_SERVER_NAMES`](configuration.md#daimon_repo_memory__legacy_mcp_server_names)
    to the old memory servers' names, so their list and view tools are hidden.
-4. Turn on [`DAIMON_REPO_MEMORY__ENABLED`](configuration.md#daimon_repo_memory__enabled)
-   on every process.
+4. Set up memory with [`DAIMON_REPO_MEMORY__ENABLED`](configuration.md#daimon_repo_memory__enabled)
+   on every process. It is then on everywhere; turn it off for a workspace, agent, channel or
+   thread in [features](features.md#repository-memory), or for all with `DAIMON_FEATURES__REPO_MEMORY=off`.
 5. Retire existing conversations, then check the four tools show the imported
    entries.
 

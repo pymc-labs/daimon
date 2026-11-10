@@ -11,7 +11,7 @@ from decimal import Decimal
 from typing import Protocol
 
 import structlog
-from daimon.core.config import LongJobsSettings
+from daimon.core.config import LongJobsSettings, Settings
 from daimon.core.errors import StoreError
 from daimon.core.long_job_models import LongJob, LongJobManifest, LongJobState
 from daimon.core.spend_gate import SpendBlock, SpendCheck, SpendRequest, spend_gate
@@ -90,11 +90,12 @@ class LongJobExecutor:
         port: WorkerPort,
         ceilings: LongJobsSettings,
         *,
+        settings: Settings | None = None,
         clock: Callable[[], datetime] | None = None,
         heartbeat_s: float = 20,
         markup: Decimal = Decimal("1"),
     ) -> None:
-        self.sm, self.port, self.ceilings = sm, port, ceilings
+        self.sm, self.port, self.ceilings, self.settings = sm, port, ceilings, settings
         self.markup = markup
         self.clock = clock or (lambda: datetime.now(UTC))
         self.heartbeat_s = heartbeat_s
@@ -112,6 +113,7 @@ class LongJobExecutor:
                     owner=self.owner,
                     now=self.clock(),
                     ceilings=self.ceilings,
+                    settings=self.settings,
                 )
             for job in jobs:
                 if job.id in self.tasks and not self.tasks[job.id].done():
@@ -150,10 +152,7 @@ class LongJobExecutor:
                     await require_admission(self.sm, current, markup=self.markup)
                     async with self.sm.begin() as db:
                         policy = await store.get_policy(
-                            db,
-                            tenant_id=job.tenant_id,
-                            agent_id=job.agent_id,
-                            ceilings=self.ceilings,
+                            db, place=store.job_place(job), settings=self.settings
                         )
                     store.validate_limits(
                         policy, deadline_minutes=job.deadline_minutes, max_usd=job.max_usd

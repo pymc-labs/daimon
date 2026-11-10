@@ -11,25 +11,30 @@ from unittest.mock import AsyncMock
 import pytest
 from daimon.core._models import (
     LongJobCancelAuditRecord,
-    LongJobPolicyHistory,
     TaskContinuation,
     Tenant,
 )
-from daimon.core.authz import Subject
-from daimon.core.config import LongJobsSettings
+from daimon.core.config import DatabaseSettings, LongJobsSettings, Settings
 from daimon.core.errors import StoreError
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.long_job_models import LongJob, LongJobManifest, LongJobPolicy
 from daimon.core.long_jobs import LongJobExecutor, WorkerVanished, require_admission
 from daimon.core.long_jobs_ma import worker_prompt
 from daimon.core.stores import long_jobs as store
-from daimon.core.stores.domain import TaskContinuationRow
+from daimon.core.stores.domain import FeatureTarget, TaskContinuationRow
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 NOW = datetime(2026, 10, 23, 12, tzinfo=UTC)
 LIMITS = LongJobsSettings()
-ADMIN = Subject(is_admin=True, platform_user_id="admin")
+
+
+async def choose(db, tenant_id, target, key, value):
+    await set_feature_value(
+        db, tenant_id=tenant_id, target=target, key=key, value=value, set_by=None, surface="chat"
+    )
 
 
 async def pending_wakes(db, *, tenant_id, platform, thread_id):
@@ -61,15 +66,7 @@ async def seed(sm, *, policy=True):
             update(Tenant).where(Tenant.id == tenant.id).values(funding_mode="operator_funded")
         )
         if policy:
-            await store.set_policy(
-                db,
-                tenant_id=tenant.id,
-                agent_id=None,
-                policy=LongJobPolicy(enabled=True),
-                ceilings=LIMITS,
-                actor=ADMIN,
-                set_by="admin",
-            )
+            await choose(db, tenant.id, FeatureTarget("workspace"), "long_jobs", "on")
     return LongJob(
         id=uuid.uuid4(),
         tenant_id=tenant.id,
@@ -131,75 +128,43 @@ async def test_registration_is_frozen_and_idempotent_before_launch(db_engine, db
     assert registered.worker_session_id is None and registered.state == "queued"
 
 
-@pytest.mark.parametrize("actor", [Subject(), Subject(is_admin=True, via_agent_key=True)])
-async def test_policy_requires_human_admin(db_session, actor):
+async def test_limits_default_off_and_resolve_from_the_features(db_session):
     tenant = await make_tenant(db_session)
-    with pytest.raises(PermissionError):
-        await store.set_policy(
-            db_session,
-            tenant_id=tenant.id,
-            agent_id=None,
-            policy=LongJobPolicy(enabled=True),
-            ceilings=LIMITS,
-            actor=actor,
-            set_by="user",
-        )
-    assert await db_session.scalar(select(func.count()).select_from(LongJobPolicyHistory)) == 0
+    place = FeaturePlace(tenant.id, "discord", agent_id="agent_a")
+    other = FeaturePlace(tenant.id, "discord", agent_id="other")
+
+    async def policy(where):
+        return await store.get_policy(db_session, place=where, settings=None)
+
+    assert await policy(place) == LongJobPolicy()
+    workspace = FeatureTarget("workspace")
+    agent = FeatureTarget("agent", agent_id="agent_a")
+    await choose(db_session, tenant.id, workspace, "long_jobs", "on")
+    await choose(db_session, tenant.id, workspace, "long_jobs_max_usd", "10")
+    assert await policy(other) == LongJobPolicy(enabled=True, max_usd=Decimal("10"))
+    await choose(db_session, tenant.id, agent, "long_jobs", "off")
+    await choose(db_session, tenant.id, agent, "long_jobs_max_deadline", "30")
+    await choose(db_session, tenant.id, agent, "long_jobs_max_usd", "2")
+    assert await policy(place) == LongJobPolicy(
+        enabled=False, default_deadline_minutes=30, max_deadline_minutes=30, max_usd=Decimal("2")
+    )
+    assert await policy(other) == LongJobPolicy(enabled=True, max_usd=Decimal("10"))
 
 
-async def test_policy_defaults_override_audit_and_ceiling_clamp(db_session):
+async def test_the_deployment_settings_bound_the_limits(db_session):
     tenant = await make_tenant(db_session)
-    kw = dict(tenant_id=tenant.id, ceilings=LIMITS)
-    default = await store.get_policy(db_session, agent_id="agent_a", **kw)
-    assert default == LongJobPolicy()
-    tenant_policy = LongJobPolicy(enabled=True, max_usd=Decimal("10"))
-    for _ in range(2):
-        await store.set_policy(
-            db_session, agent_id=None, policy=tenant_policy, actor=ADMIN, set_by="admin", **kw
-        )
-    assert await db_session.scalar(select(func.count()).select_from(LongJobPolicyHistory)) == 1
-    agent_policy = LongJobPolicy(
-        enabled=False, default_deadline_minutes=20, max_deadline_minutes=30, max_usd=Decimal("2")
+    place = FeaturePlace(tenant.id, "discord")
+    settings = Settings(
+        database=DatabaseSettings(url="postgresql+asyncpg://unused/db"),
+        long_jobs=LongJobsSettings(max_deadline_minutes=15, max_usd=Decimal("1")),
+        _env_file=None,
     )
-    await store.set_policy(
-        db_session, agent_id="agent_a", policy=agent_policy, actor=ADMIN, set_by="admin", **kw
-    )
-    assert await store.get_policy(db_session, agent_id="agent_a", **kw) == agent_policy
-    assert await store.get_policy(db_session, agent_id="other", **kw) == tenant_policy
-    lowered = await store.get_policy(
-        db_session,
-        tenant_id=tenant.id,
-        agent_id="other",
-        ceilings=LongJobsSettings(max_deadline_minutes=25, max_usd=Decimal("1")),
-    )
+    lowered = await store.get_policy(db_session, place=place, settings=settings)
     assert (lowered.default_deadline_minutes, lowered.max_deadline_minutes, lowered.max_usd) == (
-        25,
-        25,
+        15,
+        15,
         Decimal("1"),
     )
-    assert await db_session.scalar(select(func.count()).select_from(LongJobPolicyHistory)) == 2
-
-
-@pytest.mark.parametrize(
-    "policy",
-    [
-        LongJobPolicy(enabled=True, max_deadline_minutes=71),
-        LongJobPolicy(enabled=True, max_usd=Decimal("21")),
-        LongJobPolicy(enabled=True, default_deadline_minutes=70, max_deadline_minutes=60),
-    ],
-)
-async def test_admin_cannot_exceed_ceiling_or_default_max(db_session, policy):
-    tenant = await make_tenant(db_session)
-    with pytest.raises(StoreError, match="ceiling"):
-        await store.set_policy(
-            db_session,
-            tenant_id=tenant.id,
-            agent_id=None,
-            policy=policy,
-            ceilings=LIMITS,
-            actor=ADMIN,
-            set_by="admin",
-        )
 
 
 @pytest.mark.parametrize(
@@ -1073,27 +1038,19 @@ async def test_account_purge_cascades_owned_jobs_and_cancel_audit(db_engine, db_
 
 
 async def test_a_workspace_and_an_agent_can_only_lower_the_long_job_limits(db_session):
-    from daimon.core.stores.domain import FeatureTarget
-    from daimon.core.stores.feature_values import set_feature_value
-
     tenant = await make_tenant(db_session)
-    kw = dict(tenant_id=tenant.id, ceilings=LIMITS)
+    workspace, agent = FeatureTarget("workspace"), FeatureTarget("agent", agent_id="a")
 
-    async def choose(target, key, value):
-        await set_feature_value(
-            db_session,
-            tenant_id=tenant.id,
-            target=target,
-            key=key,
-            value=value,
-            set_by=None,
-            surface="chat",
+    async def limits(agent_id):
+        got = await store.get_policy(
+            db_session, place=FeaturePlace(tenant.id, "discord", agent_id=agent_id), settings=None
         )
+        return got.max_usd, got.max_deadline_minutes
 
-    await choose(FeatureTarget("workspace"), "long_jobs_max_usd", "5")
-    await choose(FeatureTarget("workspace"), "long_jobs_max_deadline", "30")
-    workspace = await store.get_policy(db_session, agent_id="a", **kw)
-    assert (workspace.max_usd, workspace.max_deadline_minutes) == (Decimal("5"), 30)
-    await choose(FeatureTarget("agent", agent_id="a"), "long_jobs_max_usd", "1")
-    assert (await store.get_policy(db_session, agent_id="a", **kw)).max_usd == Decimal("1")
-    assert (await store.get_policy(db_session, agent_id="b", **kw)).max_usd == Decimal("5")
+    await choose(db_session, tenant.id, workspace, "long_jobs_max_usd", "20")
+    await choose(db_session, tenant.id, workspace, "long_jobs_max_deadline", "30")
+    assert await limits("a") == (Decimal("20"), 30)
+    await choose(db_session, tenant.id, agent, "long_jobs_max_usd", "10")
+    await choose(db_session, tenant.id, agent, "long_jobs_max_deadline", "60")
+    assert await limits("a") == (Decimal("10"), 30), "an agent cannot raise what the workspace set"
+    assert await limits("b") == (Decimal("20"), 30)

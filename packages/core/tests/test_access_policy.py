@@ -66,6 +66,15 @@ def test_unknown_fields_are_rejected() -> None:
         TenantAccessPolicy.model_validate({"invoker_user_ids": [], "typo_ids": []})
 
 
+def test_a_stored_policy_with_the_retired_dm_memory_key_still_loads() -> None:
+    """`dm_memory_read_only` is a feature now; an older row carrying it loads without it."""
+    policy = TenantAccessPolicy.model_validate(
+        {"invoker_user_ids": [], "dm_memory_read_only": True}
+    )
+    assert policy == OPEN_ACCESS_POLICY
+    assert "dm_memory_read_only" not in policy.model_dump()
+
+
 @pytest.mark.parametrize(
     ("readers", "writers"), [("any", "own"), ("inside", "own"), ("own", "any")]
 )

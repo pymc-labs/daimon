@@ -16,11 +16,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 from daimon.adapters.mcp.tools import scope_settings as tool
-from daimon.core import scope_settings as core
 from daimon.core.authz import Subject
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.features import service
-from daimon.core.features.registry import FEATURES
+from daimon.core.features.registry import FEATURES, Tier
+from daimon.core.features.surface import OVERRIDES_OFF
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.testing.factories import make_account, make_tenant
@@ -98,13 +98,13 @@ async def _changes(world: dict[str, Any]) -> list[Any]:
 async def _change(
     auth: Any,
     key: str = "approvals",
-    level: str = "channel",
+    tier: Tier = "channel",
     value: str = "off",
     *,
     runtime: Any = None,
 ) -> Any:
     return await tool._change_setting_impl(  # pyright: ignore[reportPrivateUsage]
-        runtime or _runtime(), auth, key=key, level=level, value=value, origin_context_id=str(uuid.uuid4())
+        runtime or _runtime(), auth, key=key, tier=tier, value=value, origin_context_id=str(uuid.uuid4())
     )  # fmt: skip
 
 
@@ -113,10 +113,10 @@ def _granted() -> Any:
     return replace(make_auth(admin=True), is_platform_admin=False)
 
 
-# (case, auth, change(key, level, value), world setup, refusal match, card shown?)
-BYPASSES: list[tuple[str, Any, tuple[str, str, str], dict[str, Any], str, bool]] = [
+# (case, auth, change(key, tier, value), world setup, refusal match, card shown?)
+BYPASSES: list[tuple[str, Any, tuple[str, Tier, str], dict[str, Any], str, bool]] = [
     ("agent_key", lambda: make_auth(agent_id=uuid.uuid4()), ("approvals", "channel", "off"), {}, "Nothing changed", False),
-    ("routine_with_admin_creator", lambda: make_auth(routine_id=uuid.uuid4()), ("participation", "server", "on"), {}, "Nothing changed", False),
+    ("routine_with_admin_creator", lambda: make_auth(routine_id=uuid.uuid4()), ("participation", "workspace", "on"), {}, "Nothing changed", False),
     ("execution", lambda: make_auth(execution_id=uuid.uuid4()), ("approvals", "channel", "off"), {}, "Nothing changed", False),
     ("no_card_surface", lambda: make_auth(no_confirmation_surface=True), ("approvals", "channel", "off"), {}, "Nothing changed", False),
     ("client", lambda: make_auth(foreign_home_id="other-org"), ("approvals", "channel", "off"), {}, "Nothing changed", False),
@@ -126,11 +126,11 @@ BYPASSES: list[tuple[str, Any, tuple[str, str, str], dict[str, Any], str, bool]]
     ("non_admin", lambda: make_auth(admin=False), ("approvals", "channel", "off"), {"admin": [MEMBER]}, "Only a server admin can change approvals", False),
     ("admin_lost_after_press", make_auth, ("approvals", "channel", "off"), {"admin": [ADMIN, MEMBER]}, "Only a server admin", True),
     ("daimon_admin_vs_approvals", _granted, ("approvals", "channel", "off"), {"admin": [MEMBER]}, "Only a server admin can change approvals", False),
-    ("approvals_at_agent", make_auth, ("approvals", "agent", "off"), {}, "can't be set for one agent", False),
-    ("guardrail_by_agent_key", lambda: make_auth(agent_id=uuid.uuid4()), ("unattended_capabilities", "server", "off"), {}, "Nothing changed", False),
-    ("guardrail_unattended", make_auth, ("require_routine_destination", "server", "on"), {"origin": SimpleNamespace(attended=False, platform="discord", parent_channel_id="C1", thread_id="T1")}, "Nothing changed", False),
+    ("approvals_at_agent", make_auth, ("approvals", "agent", "off"), {}, "can't be set for this agent here", False),
+    ("guardrail_by_agent_key", lambda: make_auth(agent_id=uuid.uuid4()), ("unattended_capabilities", "workspace", "off"), {}, "Nothing changed", False),
+    ("guardrail_unattended", make_auth, ("require_routine_destination", "workspace", "on"), {"origin": SimpleNamespace(attended=False, platform="discord", parent_channel_id="C1", thread_id="T1")}, "Nothing changed", False),
     ("guardrail_no_card", make_auth, ("reach_budget", "channel", "on"), {"card": AsyncMock(side_effect=ToolError("Confirm this in chat. Nothing changed."))}, "Nothing changed", True),
-    ("guardrail_looser_below", make_auth, ("reach_budget", "server", "off"), {}, "can only make it stricter", False),
+    ("guardrail_looser_below", make_auth, ("reach_budget", "workspace", "off"), {}, "can only make it stricter", False),
 ]  # fmt: skip
 
 
@@ -138,7 +138,7 @@ BYPASSES: list[tuple[str, Any, tuple[str, str, str], dict[str, Any], str, bool]]
     ("case", "auth", "change", "setup", "refused", "carded"), BYPASSES, ids=[b[0] for b in BYPASSES]
 )
 async def test_every_bypass_is_refused_and_writes_nothing(
-    world: dict[str, Any], case: str, auth: Any, change: tuple[str, str, str], setup: dict[str, Any], refused: str, carded: bool
+    world: dict[str, Any], case: str, auth: Any, change: tuple[str, Tier, str], setup: dict[str, Any], refused: str, carded: bool
 ) -> None:  # fmt: skip
     if "card" in setup:
         world["card"].side_effect = setup.pop("card").side_effect
@@ -157,16 +157,15 @@ async def test_every_bypass_is_refused_and_writes_nothing(
 async def test_allowed_changes_write_at_the_verified_origin(world: dict[str, Any]) -> None:
     approvals = await _change(_as(world, make_auth()))
     assert world["card"].await_args.kwargs["tool_name"] == "change_setting"
-    assert approvals.after == "off" and "Allow writes" in approvals.note
+    assert approvals.setting["value"] == "off" and "Allow writes" in approvals.note
     ignored = await _change(
         _as(world, make_auth()), "approvals", "channel", "on", runtime=_runtime(overrides=False)
     )
-    assert ignored.note.endswith(core.OVERRIDES_OFF)
-    assert (
-        await _change(_as(world, _granted()), "cost_footer", "server", "hidden")
-    ).after == "hidden"
+    assert ignored.note.endswith(OVERRIDES_OFF), ignored.note
+    footer = await _change(_as(world, _granted()), "cost_footer", "workspace", "hidden")
+    assert footer.setting["value"] == "hidden", footer.setting
     agent = await _change(_as(world, make_auth()), "progress_plans", "agent", "on")
-    assert agent.view.decided_by == "agent", "the agent is the origin's responder"
+    assert agent.setting["source"] == "agent", "the agent is the origin's responder"
     await _change(_as(world, make_auth(admin=False)), "participation", "thread", "on")
     changes = await _changes(world)
     recorded = {(c.setting, c.surface, str(c.after)) for c in changes}
@@ -177,7 +176,9 @@ async def test_allowed_changes_write_at_the_verified_origin(world: dict[str, Any
 
 async def test_a_guardrail_change_waits_for_the_card(world: dict[str, Any]) -> None:
     guard = await _change(_as(world, make_auth()), "unattended_capabilities", "agent", "off")
-    assert guard.after == "off" and world["card"].await_count == 1, "a guardrail asks on a card"
+    assert guard.setting["value"] == "off" and world["card"].await_count == 1, (
+        "a guardrail asks on a card"
+    )
     assert world["card"].await_args.kwargs["tool_name"] == "change_setting"
     assert "unattended_capabilities" in {c.setting for c in await _changes(world)}, "recorded"
 
@@ -186,16 +187,10 @@ async def test_get_settings_reads_the_origin_place_and_no_tool_names_a_place(
     world: dict[str, Any],
 ) -> None:
     result = await tool._get_settings_impl(_runtime(), _as(world, make_auth(admin=False)), "ctx")  # pyright: ignore[reportPrivateUsage]
-    assert [s.key for s in result.settings] == list(FEATURES), "every registered key"
-    by_key = {s.key: s for s in result.settings}
-    assert [lv.level for lv in by_key["approvals"].levels] == ["server", "channel", "thread"]
-    assert [lv.level for lv in by_key["participation"].levels] == ["server", "channel", "thread"]
-    assert [lv.level for lv in by_key["progress_plans"].levels] == [
-        "server",
-        "agent",
-        "channel",
-        "thread",
-    ]
+    assert [s["key"] for s in result.settings] == list(FEATURES), "every registered key"
+    by_key = {s["key"]: [t["tier"] for t in s["tiers"]] for s in result.settings}
+    assert by_key["approvals"] == ["workspace", "channel", "thread"]
+    assert by_key["progress_plans"] == ["deployment", "workspace", "agent", "channel", "thread"]
     world["origin"] = None
     with pytest.raises(ToolError):
         await tool._get_settings_impl(_runtime(), make_auth(), "ctx")  # pyright: ignore[reportPrivateUsage]
@@ -205,7 +200,7 @@ async def test_get_settings_reads_the_origin_place_and_no_tool_names_a_place(
     assert set(tools["change_setting"].parameters["properties"]) == {
         "origin_context_id",
         "key",
-        "level",
+        "tier",
         "value",
         "locked",
     }
