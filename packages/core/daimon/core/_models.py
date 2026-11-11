@@ -4708,8 +4708,13 @@ class AgentBackendRevisionRecord(Base):
         PrimaryKeyConstraint("tenant_id", "agent_id", "local"),
         CheckConstraint("local > 0", name="ck_agent_backend_local"),
         CheckConstraint(
-            "backend IS NULL OR backend IN ('anthropic', 'openai', 'gemini')",
+            "backend IS NULL OR backend IN ('anthropic', 'openai', 'gemini', 'selfhosted')",
             name="ck_agent_backend_provider",
+        ),
+        CheckConstraint(
+            "(environment IS NULL) = (backend IS DISTINCT FROM 'selfhosted')"
+            " AND (environment IS NULL OR left(environment, 7) = 'sh_env_')",
+            name="ck_agent_backend_environment",
         ),
         CheckConstraint(
             "thread_mode IS NULL OR thread_mode IN ('per_caller', 'shared')",
@@ -4741,6 +4746,8 @@ class AgentBackendRevisionRecord(Base):
     thread_mode: Mapped[str | None] = mapped_column(Text)
     # The agent's reasoning effort on its non-default provider; null keeps the model's own.
     effort: Mapped[str | None] = mapped_column(Text)
+    # The self-hosted environment record a self-hosted agent runs in (0202).
+    environment: Mapped[str | None] = mapped_column(Text)
 
 
 class AgentOwner(Base):

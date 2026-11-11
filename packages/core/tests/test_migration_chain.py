@@ -163,6 +163,7 @@ TAIL = (
     "0198_agent_backend_effort",
     "0199_self_helpers",
     "0200_skill_copies",
+    "0202_agent_backend_environment",
 )
 HEAD = TAIL[-1]
 
@@ -496,7 +497,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             return False
         if (
             kind == "column"
-            and name == "effort"
+            and name in {"effort", "environment"}
             and getattr(getattr(obj, "table", None), "name", None) == "agent_backend_revision"
             and expected != HEAD
         ):

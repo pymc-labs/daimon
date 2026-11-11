@@ -1536,6 +1536,7 @@ class AgentBackendRevision(_BackendConsentFacts):
     requires: dict[Capability, CapabilityRequirement] | None = None
     thread_mode: ThreadMode | None = None
     effort: Effort | None = None
+    environment: str | None = Field(default=None, pattern=r"^sh_env_")
     agent_name: str
     preview_digest: str
     digest: str
