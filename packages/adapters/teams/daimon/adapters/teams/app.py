@@ -97,6 +97,7 @@ from daimon.adapters.teams.restart_catch_up import RestartCatchUp
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import route_to_setup
 from daimon.adapters.teams.thread_handoff import hand_over_button
+from daimon.adapters.teams.thread_model import with_thread_reask_notifier
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.tool_confirmation import TeamsConfirmationCards
 from daimon.adapters.teams.turn_hooks import turn_hooks
@@ -422,7 +423,9 @@ class TeamsApp:
         teams = runtime.settings.teams
         if teams is None:
             raise ValueError("TeamsApp requires Teams settings")
-        self.runtime = runtime = with_budget_notifier(runtime, direct)
+        self.runtime = runtime = with_thread_reask_notifier(
+            with_budget_notifier(runtime, direct), direct
+        )
         self._teams = teams
         # Known before any read, so `_may_post` can gate every post.
         self._tenant_id = derive_tenant_uuid(platform="teams", workspace_id=teams.tenant_id)
