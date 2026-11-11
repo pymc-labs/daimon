@@ -408,6 +408,16 @@ class EnvironmentPick:
         return self.environment.metadata.get(MA_METADATA_KEY_NAME)
 
 
+async def _on_session_connection(
+    session: AsyncSession, records: async_sessionmaker[AsyncSession] | None
+) -> async_sessionmaker[AsyncSession] | None:
+    """`records` read on `session`'s own connection: a caller holding a pooled connection
+    never waits on a second one, which deadlocks once the pool is spent."""
+    if records is None:
+        return None
+    return async_sessionmaker(bind=await session.connection(), expire_on_commit=False)
+
+
 async def authorize_environment_pick(
     session: AsyncSession,
     client: AsyncAnthropic,
@@ -432,6 +442,7 @@ async def authorize_environment_pick(
     workspace default that moves a sealed channel or thread onto one.
     """
     policy = await load_access_policy(session, tenant_id=tenant_id)
+    records = await _on_session_connection(session, records)
     if (
         channel_id is not None
         and thread_id is None
@@ -666,6 +677,7 @@ async def archive_needs_confirm(
     onto an environment with an open network, or none, so a server admin confirms
     it first."""
     policy = await load_access_policy(session, tenant_id=tenant_id)
+    records = await _on_session_connection(session, records)
     moves = await _sealed_moves(
         session,
         policy,
