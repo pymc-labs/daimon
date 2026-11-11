@@ -10,6 +10,7 @@ from daimon.core import agent_convert, agent_lifecycle
 from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.agent_convert import convert_agent_to_daimon
 from daimon.core.authz import Subject
+from daimon.core.defaults.metadata import MA_METADATA_KEY_CONVERTED_FROM
 from daimon.core.errors import UserFacingError
 from daimon.core.mux_backend import resource_scope
 from daimon.core.provider_keys import DEFAULT_KEY_ENV
@@ -70,6 +71,9 @@ async def test_convert_keeps_rules_and_archives_the_twin_raw(
     )
     assert record.spec.model.provider == "openai", "the record runs on the keyed provider"
     assert record.spec.system == "Analyse.", "the definition carries over"
+    assert record.spec.metadata.get(MA_METADATA_KEY_CONVERTED_FROM) == "agent_ma1", (
+        "the record names its old id, so tokens signed for it keep working"
+    )
     assert archived == ["agent_ma1"], f"the MA twin is archived once: {archived}"
     db_session.expire_all()
     policy = await load_access_policy(db_session, tenant_id=tenant.id)

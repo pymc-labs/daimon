@@ -220,6 +220,53 @@ async def test_verifier_accepts_unrevoked_agent_token(
     )
 
 
+@pytest.mark.parametrize("marker", ["old", None, "other"])
+async def test_verifier_admits_a_token_signed_for_the_agents_pre_conversion_id(
+    sessionmaker: async_sessionmaker[AsyncSession], marker: str | None
+) -> None:
+    """A converted agent's token keeps working only through its own conversion marker."""
+    now = dt.datetime(2099, 1, 1, tzinfo=dt.UTC)
+    old_id, new_id = uuid.uuid4(), uuid.uuid4()
+    async with sessionmaker() as s, s.begin():
+        tenant_id, account_id = await seed_server_admin(s)
+        token = await mint_agent_mcp_token(
+            s,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            agent_id=old_id,
+            label="test",
+            secret=SECRET,
+            now=now,
+            ttl_days=90,
+        )
+        # The conversion rekeys the token row to the new id; the signed claim keeps the old.
+        await s.execute(
+            text("UPDATE mcp_tokens SET agent_id = :new WHERE agent_id = :old"),
+            {"new": str(new_id), "old": str(old_id)},
+        )
+    stored = {"old": str(old_id), "other": str(uuid.uuid4()), None: None}[marker]
+    seen: list[str] = []
+
+    async def converted_from(_tenant: uuid.UUID, agent_id: str) -> str | None:
+        seen.append(agent_id)
+        return stored
+
+    verifier = DaimonJWTVerifier(
+        legacy_token_cutoff=LEGACY_CUTOFF,
+        allow_legacy_tokens=True,
+        secret=SECRET,
+        sessionmaker=sessionmaker,
+        converted_from=converted_from,
+    )
+    result = await verifier.verify_token(token)
+    assert seen == [str(new_id)], "the marker is read for the row's current agent id"
+    if marker == "old":
+        assert result is not None, "a token for the id the agent was converted from verifies"
+        assert result.claims["agent_id"] == str(new_id), "it then acts as the current agent"
+    else:
+        assert result is None, f"marker {marker!r} must not admit a token for another id"
+
+
 async def test_verifier_accepts_no_jti_token_at_explicit_legacy_cutoff(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:

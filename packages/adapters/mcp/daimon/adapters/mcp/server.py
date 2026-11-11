@@ -21,7 +21,7 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from daimon.adapters.mcp.artifacts import build_artifact_store
-from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
+from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier, agent_converted_from
 from daimon.adapters.mcp.bundles import build_bundles_route
 from daimon.adapters.mcp.checkout import billing_cancel, billing_success, build_checkout_route
 from daimon.adapters.mcp.coding_key_claim import build_coding_key_claim_route
@@ -354,20 +354,6 @@ def create_mcp_app(
         else None
     )
 
-    effective_auth = auth
-    if effective_auth is None:
-        secret_value = effective_settings.mcp.jwt_secret
-        if secret_value is None:
-            # _validate_settings enforced this above; assert was stripped by
-            # `python -O`. Use an explicit raise so the failure mode is real.
-            raise BootstrapError("DAIMON_MCP__JWT_SECRET missing after validation")
-        effective_auth = DaimonJWTVerifier(
-            legacy_token_cutoff=effective_settings.mcp.legacy_token_cutoff,
-            allow_legacy_tokens=effective_settings.mcp.allow_legacy_tokens,
-            secret=secret_value.get_secret_value().encode(),
-            sessionmaker=effective_sessionmaker,
-        )
-
     effective_resolver = subject_resolver or production_subject_resolver
     effective_tenant_resolver = tenant_resolver or production_tenant_resolver
     effective_role_resolver = role_resolver or production_role_resolver
@@ -389,6 +375,21 @@ def create_mcp_app(
                     effective_settings.anthropic.skills_requests_per_minute
                 )
             ),
+        )
+
+    effective_auth = auth
+    if effective_auth is None:
+        secret_value = effective_settings.mcp.jwt_secret
+        if secret_value is None:
+            # _validate_settings enforced this above; assert was stripped by
+            # `python -O`. Use an explicit raise so the failure mode is real.
+            raise BootstrapError("DAIMON_MCP__JWT_SECRET missing after validation")
+        effective_auth = DaimonJWTVerifier(
+            legacy_token_cutoff=effective_settings.mcp.legacy_token_cutoff,
+            allow_legacy_tokens=effective_settings.mcp.allow_legacy_tokens,
+            secret=secret_value.get_secret_value().encode(),
+            sessionmaker=effective_sessionmaker,
+            converted_from=agent_converted_from(effective_anthropic, effective_sessionmaker),
         )
 
     effective_billing_config = billing_config

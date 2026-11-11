@@ -100,6 +100,8 @@ async def convert_agent_to_daimon(
                 "tools": None,
                 "skills": None,
                 "extensions": None,
+                # Lets a token signed for the old id keep working (see the MCP verifier).
+                "metadata": dict(spec.metadata or {}) | {MA_METADATA_KEY_CONVERTED_FROM: source.id},
             }
         )
         created = await create_owned_record(
