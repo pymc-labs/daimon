@@ -754,8 +754,9 @@
         <blank line>
         It works for the same person in this conversation, with its own tools, keys and
         rules; nothing it writes is posted. Asking the same helper again continues its
-        conversation in this thread. While `status` is `queued` or `running`, call
-        `wait_for_helpers` with the `ask_id`. Helpers stop when your turn ends, so wait
+        conversation in this thread. `self`, when listed, is a fresh copy of you each time:
+        ask it several times without waiting to work in parallel. While `status` is
+        `queued` or `running`, call `wait_for_helpers` with the `ask_id`. Helpers stop when your turn ends, so wait
         for their replies before you answer.
         <blank line>
         To pass it files: for each, call `create_file_upload_url`, PUT the file with the
