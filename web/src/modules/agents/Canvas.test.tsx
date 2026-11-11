@@ -1,8 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { ReactFlowProvider } from "@xyflow/react"
-import { render, screen } from "@testing-library/react"
+import { fireEvent, render, screen } from "@testing-library/react"
 import { MemoryRouter } from "react-router"
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { api } from "@/lib/api"
@@ -21,12 +21,12 @@ const github: AgentGithub = {
 const config = {
   name: "Analyst", purpose: "", avatar: "", model: { id: "claude-sonnet-5-5", effort: null }, system: "", skills: [], tools: [], mcp_servers: [], places: [], helpers: [],
 }
-const show = (details: boolean) => {
-  const agent = { ...config, id: "ag_w", can_view_details: details, nodes: [], owner: { id: "p_ada", name: "Ada" }, co_owners: [] } as unknown as Agent
+const show = (details: boolean, extra: object = {}, select = () => {}) => {
+  const agent = { ...config, ...extra, id: "ag_w", can_view_details: details, nodes: [], owner: { id: "p_ada", name: "Ada" }, co_owners: [] } as unknown as Agent
   render(
     <QueryClientProvider client={new QueryClient()}>
       <MemoryRouter><TooltipProvider><ReactFlowProvider>
-        <Canvas agent={agent} config={agent} changed={new Set()} changedNodes={new Set()} selected="" select={() => {}} ro={false} />
+        <Canvas agent={agent} config={agent} changed={new Set()} changedNodes={new Set()} selected="" select={select} ro={false} />
       </ReactFlowProvider></TooltipProvider></MemoryRouter>
     </QueryClientProvider>,
   )
@@ -60,5 +60,35 @@ describe("Canvas Access via MCP card", () => {
     show(true)
     expect(await screen.findByLabelText("Access via MCP")).toBeInTheDocument()
     expect(screen.queryByLabelText("Coding tools")).toBeNull()
+  })
+})
+
+describe("Canvas card fold", () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it("folds a long card behind Show more, and opening it selects nothing", async () => {
+    // jsdom has no layout: rows are 32px and stack, a card body is as tall as its rows, and card bodies
+    // (the only observed elements without a class; React Flow's own have one) are measured at once.
+    vi.stubGlobal("ResizeObserver", class {
+      cb: () => void
+      constructor(cb: () => void) { this.cb = cb }
+      observe(el: Element) { if (!el.className) this.cb() }
+      unobserve() {}
+      disconnect() {}
+    })
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+      return this.dataset.row ? 32 : this.querySelectorAll("[data-row]").length * 32
+    })
+    vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+      return this.dataset.row ? [...this.parentElement!.children].indexOf(this) * 32 : 0
+    })
+    const tools = Array.from({ length: 20 }, (_, i) => ({ name: `tool_${i}`, description: "", effect: "read", rule: "allow" }))
+    const select = vi.fn()
+    show(false, { mcp_servers: [{ key: "big", name: "Big", url: "https://mcp.example.com", auth: "token", credential: "connected", tools }] }, select)
+    // React Flow hides cards it has not measured, so find the button by its text.
+    fireEvent.click(await screen.findByText("Show 13 more"))
+    expect(await screen.findByText("Show less"), "the card opens").toBeInTheDocument()
+    expect(select, "the button is not a click on the card").not.toHaveBeenCalled()
+    expect(screen.queryByText(/^Show (\d+ )?more$/), "short cards never fold").toBeNull()
   })
 })

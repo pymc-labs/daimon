@@ -4,7 +4,7 @@ import {
   Background, BackgroundVariant, BaseEdge, type Edge, type EdgeProps, Handle, type Node, Position, ReactFlow, useEdgesState, useNodesState, useReactFlow,
   useStore,
 } from "@xyflow/react"
-import { Blocks, Brain, Cpu, KeyRound, Maximize, Minus, Plug, Plus, ScrollText, Sparkles, Users, Wrench } from "lucide-react"
+import { Blocks, Brain, ChevronDown, ChevronUp, Cpu, KeyRound, Maximize, Minus, Plug, Plus, ScrollText, Sparkles, Users, Wrench } from "lucide-react"
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react"
 
 import { BrandIcon } from "@/components/brand"
@@ -61,8 +61,47 @@ function Card({ id, icon, title, count, children, className, action }: {
         {changedNodes.has(id) && <Dot />}
         <span className="ml-auto flex items-center">{action}</span>
       </div>
-      {children}
+      {children && <Fold>{children}</Fold>}
     </div>
+  )
+}
+
+/** Card bodies taller than this fold behind Show more, so one long card does not shrink the whole canvas. */
+const FOLD = 240
+
+function Fold({ children }: { children: React.ReactNode }) {
+  const body = useRef<HTMLDivElement>(null)
+  const [tall, setTall] = useState(false)
+  const [more, setMore] = useState(0)
+  const [open, setOpen] = useState(false)
+  useEffect(() => {
+    const el = body.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      // Folding to hide a row or so would cost as much room as the button.
+      setTall(el.offsetHeight > FOLD + 48)
+      setMore([...el.querySelectorAll<HTMLElement>("[data-row]")].filter((r) => r.offsetTop - el.offsetTop + r.offsetHeight > FOLD).length)
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  const folded = tall && !open
+  return (
+    <>
+      <div className={cn(folded && "overflow-hidden")} style={folded ? { maxHeight: FOLD } : undefined}>
+        <div ref={body}>{children}</div>
+      </div>
+      {folded && <div className="pointer-events-none relative -mt-8 h-8 bg-gradient-to-t from-card" />}
+      {tall && (
+        <button
+          className="flex h-8 w-full items-center justify-center gap-1 rounded-b-xl border-t text-xs text-muted-foreground hover:bg-accent/70 hover:text-foreground [&_svg]:size-3.5"
+          onClick={(e) => { e.stopPropagation(); setOpen(!open) }}
+          onKeyDown={(e) => e.stopPropagation()}
+        >
+          {open ? <>Show less<ChevronUp /></> : <>{more ? `Show ${more} more` : "Show more"}<ChevronDown /></>}
+        </button>
+      )}
+    </>
   )
 }
 
