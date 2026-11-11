@@ -314,6 +314,45 @@ async def test_queued_jobs_that_are_off_do_not_starve_newer_ones(db_engine, db_c
     assert [row.id for row in rows] == [newer.id], "the Off jobs wait; the newer job launches"
 
 
+async def test_one_claim_reads_each_place_once_and_stops_at_a_full_tenant(
+    db_engine, db_clean, monkeypatch: pytest.MonkeyPatch
+):
+    """A full tenant stops the queue scan, and each place's feature is read once per claim."""
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    job = await seed(sm)
+    reads: list[FeaturePlace] = []
+    real = store.feature_in_or_none
+
+    async def counted(session, settings, place, key):
+        reads.append(place)
+        return await real(session, settings, place, key)
+
+    monkeypatch.setattr(store, "feature_in_or_none", counted)
+    ceilings = LongJobsSettings(per_tenant_running=2, per_owner_running=2)
+    async with sm.begin() as db:
+        for number in range(6):
+            await store.register(
+                db,
+                job.model_copy(
+                    update={
+                        "id": uuid.uuid4(),
+                        "tool_use_id": f"queued_{number}",
+                        "created_at": NOW - timedelta(minutes=number),
+                    }
+                ),
+                ceilings=LIMITS,
+            )
+    async with sm.begin() as db:
+        rows = await store.claim(db, tenant_id=job.tenant_id, owner="e", now=NOW, ceilings=ceilings)
+    assert len(rows) == 2, "the tenant cap admits two of the six queued jobs"
+    assert len(reads) == 1, f"one place is read once for the whole claim, not per job: {reads}"
+    async with sm.begin() as db:
+        again = await store.claim(
+            db, tenant_id=job.tenant_id, owner="e", now=NOW, ceilings=ceilings
+        )
+    assert again == [], "the running jobs hold their leases and the tenant is full"
+
+
 @pytest.mark.parametrize(
     ("key", "value"), [("long_jobs_max_usd", "0"), ("long_jobs_max_deadline", "0.5")]
 )
