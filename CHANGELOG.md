@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Reasoning effort on OpenAI and Gemini agents.** An agent on either provider
+  can carry a low, medium or high effort, kept with its model. Speed (Fast)
+  stays Claude-only.
+
+- **A spend limit now stops an OpenAI turn.** A turn that passes the limit set for
+  its agent is cancelled and the agent is told why. Cache writes are not metered
+  by OpenAI, so the count can fall slightly under the real bill.
+
+- **The image includes the Gemini SDK.** Running agents on Gemini no longer needs a
+  custom image.
+
 - **One conversation on another provider's model.** An MCP client's
   `set_thread_model` takes a model from `list_models`, such as an OpenAI or
   Gemini one. Off Claude it first returns what changes and the price, and keeps
