@@ -176,7 +176,6 @@ __all__ = [
     "ConfigRevision",
     "DEFAULT_BACKEND",
     "DEFAULT_PROFILES",
-    "Effort",
     "ResolvedBackend",
     "ThreadMode",
     "check_selection",
