@@ -184,6 +184,7 @@ async def _send_message_impl(  # pyright: ignore[reportUnusedFunction]
                             runtime.resolver_cache,
                             tenant_id=auth.tenant_id,
                             agent_id=actor_id,
+                            records=runtime.session_factory,
                         )
                         actor_name = actor.name if actor is not None else None
                         if actor_name is not None:

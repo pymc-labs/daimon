@@ -240,7 +240,11 @@ async def _agent_identity_kwargs(runtime: McpRuntime, auth: AuthIdentity) -> dic
         return None
     try:
         agent = await find_agent_by_derived_uuid_cached(
-            runtime.client, runtime.resolver_cache, tenant_id=auth.tenant_id, agent_id=agent_id
+            runtime.client,
+            runtime.resolver_cache,
+            tenant_id=auth.tenant_id,
+            agent_id=agent_id,
+            records=runtime.session_factory,
         )
         if agent is None:
             return None

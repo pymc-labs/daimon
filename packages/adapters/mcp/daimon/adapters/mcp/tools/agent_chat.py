@@ -522,7 +522,11 @@ async def _resolve_ma_agent(
     if auth.agent_id is None:
         raise ToolError("agent not found")
     agent = await find_agent_by_derived_uuid_cached(
-        runtime.client, runtime.resolver_cache, tenant_id=auth.tenant_id, agent_id=auth.agent_id
+        runtime.client,
+        runtime.resolver_cache,
+        tenant_id=auth.tenant_id,
+        agent_id=auth.agent_id,
+        records=runtime.session_factory,
     )
     if agent is None:
         raise ToolError("agent not found")

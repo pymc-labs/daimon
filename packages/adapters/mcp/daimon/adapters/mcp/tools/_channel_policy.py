@@ -262,7 +262,11 @@ async def _executing_agent(
             {**dict(record.spec.metadata or {}), MA_METADATA_KEY_NAME: record.spec.name},
         )
     agent = await find_agent_by_derived_uuid_cached(
-        runtime.client, runtime.resolver_cache, tenant_id=auth.tenant_id, agent_id=executing
+        runtime.client,
+        runtime.resolver_cache,
+        tenant_id=auth.tenant_id,
+        agent_id=executing,
+        records=runtime.session_factory,
     )
     if agent is None:
         return AgentRef.unresolved()
