@@ -95,6 +95,27 @@ def test_model_options_pass_only_when_the_profile_declares_them(
         _check(_spec(options={"effort": "high", "other": "x"}), profile, "routine", gated=True)
 
 
+@pytest.mark.parametrize("entry", ENTRY_POINTS)
+@pytest.mark.parametrize("profile", PROVIDER_PROFILES)
+def test_an_agent_with_effort_runs_unattended_because_effort_rides_the_revision(
+    profile: str, entry: UnattendedEntryPoint
+) -> None:
+    """Effort is stored on the backend revision, so the spec the check reads carries none."""
+    assert PROFILES[profile].effort_map, "this profile declares the effort levels it accepts"
+    spec = _spec()
+    assert not spec.model.options
+    sandbox = capability_policy(entry).allow_builtins
+    if PROFILES[profile].implicit_execution and not sandbox:
+        pytest.skip("a hosted shell needs the sandbox opt-in whatever the effort")
+    _check(spec, profile, entry, gated=True)
+    # A raw effort option is still refused where the profile does not declare it.
+    if "effort" not in PROFILES[profile].model_controls:
+        with pytest.raises(AdmissionDenied, match="cannot inspect"):
+            require_native_unattended_capabilities(
+                _spec(options={"effort": "high"}), profile_id=profile, gated=True, sandbox=True
+            )
+
+
 async def test_unattended_provider_origin_is_unattended_and_removed_after(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:

@@ -4,18 +4,23 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { cn } from "@/lib/utils"
 import { EFFORT_LABEL, PROVIDER } from "../lib"
 import { ModelPreviewPanel } from "../ModelPreviewPanel"
-import type { Effort } from "../types"
+import type { Backend, CatalogModel, Effort } from "../types"
 import { usePendingPreview } from "../usePendingPreview"
 import { Field, Section, type Props } from "./parts"
 
-const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"]
+const CLAUDE_EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"]
+
+/** The efforts a model carries: every level on Claude, the profile's own elsewhere. */
+const effortsOf = (x: CatalogModel | undefined, backend: Backend): Effort[] =>
+  backend === "anthropic" ? CLAUDE_EFFORTS : (x?.efforts ?? [])
 
 export function ModelEditor({ agent, config, catalog, ro, update }: Props) {
   const m = config.model
   const cur = catalog?.models.find((x) => x.id === m.id && x.backend === m.backend)
   const preview = usePendingPreview(agent, m).data
-  const noEffort = m.backend !== "anthropic" && `${PROVIDER[m.backend]} has no effort setting`
-  const noFast = !cur?.fast && "This model has no fast mode"
+  const efforts = effortsOf(cur, m.backend)
+  const noEffort = efforts.length === 0 && `${PROVIDER[m.backend]} has no effort setting`
+  const noFast = !cur?.fast && (m.backend === "anthropic" ? "This model has no fast mode" : "Fast mode is Claude only")
   return (
     <>
       <Section title="Model">
@@ -26,7 +31,12 @@ export function ModelEditor({ agent, config, catalog, ro, update }: Props) {
               <button
                 key={`${x.backend}:${x.id}`}
                 disabled={ro}
-                onClick={() => update((c) => { c.model = { ...c.model, id: x.id, backend: x.backend, speed: x.fast ? c.model.speed : "standard" } }, 0)}
+                onClick={() => update((c) => {
+                  const carried = effortsOf(x, x.backend)
+                  // A level the new model lacks falls to the middle one; none keeps the old value.
+                  const effort = carried.length === 0 || carried.includes(c.model.effort) ? c.model.effort : carried.includes("medium") ? "medium" : carried[0]!
+                  c.model = { ...c.model, id: x.id, backend: x.backend, speed: x.fast ? c.model.speed : "standard", effort }
+                }, 0)}
                 className={cn("flex min-h-12 w-full items-center gap-3 rounded-lg border px-3 py-2 text-left text-sm enabled:hover:bg-accent", on && "border-primary bg-accent")}
               >
                 <span className={cn("flex size-4 shrink-0 items-center justify-center rounded-full border", on && "border-primary")}>
@@ -46,7 +56,7 @@ export function ModelEditor({ agent, config, catalog, ro, update }: Props) {
           <Field label="Effort">
             <Reason reason={noEffort}>
               <ToggleGroup type="single" value={m.effort} disabled={ro || !!noEffort} onValueChange={(v) => v && update((c) => { c.model.effort = v as Effort }, 0)} variant="segmented" size="sm">
-                {EFFORTS.map((e) => <ToggleGroupItem key={e} value={e} className="px-2.5 text-xs">{EFFORT_LABEL[e]}</ToggleGroupItem>)}
+                {(efforts.length ? efforts : CLAUDE_EFFORTS).map((e) => <ToggleGroupItem key={e} value={e} className="px-2.5 text-xs">{EFFORT_LABEL[e]}</ToggleGroupItem>)}
               </ToggleGroup>
             </Reason>
           </Field>

@@ -625,6 +625,50 @@ async def test_chat_switch_to_a_named_model_previews_and_applies_that_model(acti
     assert not trace.violations
 
 
+async def test_a_switch_states_an_effort_and_a_later_settings_change_keeps_it(active_chat):
+    from daimon.core.channel_backend import load_backend_agent
+
+    runtime, auth, origin, service, _trace, payload, _, gate, agent, _ = active_chat
+    _without_own_tools(payload)
+    base = {
+        "agent_name": "Researcher",
+        "target_backend": "gemini",
+        "model": "gemini-4-argon",
+        "origin_context_id": str(origin.id),
+    }
+
+    async def confirm(**stated):
+        gate()
+        agent()
+        preview = await _request_agent_backend_switch_impl(runtime, auth, **base, **stated)
+        gate()
+        agent()
+        agent()
+        done = await _request_agent_backend_switch_impl(
+            runtime,
+            auth,
+            **base,
+            **stated,
+            expected_revision=preview.expected_revision,
+            preview_digest=preview.preview_digest,
+            accepted_drops=preview.declared_drops,
+        )
+        assert done.status == "changed"
+        agent()
+        source = await load_backend_agent(
+            runtime.client,
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            agent_name="Researcher",
+        )
+        return await service.current(source)
+
+    first = await confirm(effort="high")
+    assert first.effort == "high", "the call states the effort"
+    second = await confirm(thread_mode="per_caller")
+    assert second.effort == "high", "stating other settings keeps the effort the agent has"
+
+
 @pytest.mark.parametrize(("backend", "model"), [("gemini", "gemini-3.8-pro"), ("openai", "x")])
 async def test_an_unknown_model_names_the_choices_before_any_lookup(backend, model) -> None:
     from daimon.adapters.mcp.tools.agents import _require_selectable_model

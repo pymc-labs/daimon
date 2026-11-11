@@ -2,7 +2,7 @@
 import { http, HttpResponse } from "msw"
 
 import type {
-  Agent, AgentConfig, AgentSummary, AgentVersion, Backend, BuiltinTool, Catalog, CatalogModel, Change, Draft,
+  Agent, AgentConfig, AgentSummary, AgentVersion, Backend, BuiltinTool, Catalog, CatalogModel, Change, Draft, Effort,
   DataServerAgent, DataServerStatus, DataServerTools, Effect, McpServer, ModelChoice, ModelPreview, PersonRef, Place, Skill, Template,
 } from "@/modules/agents/types"
 import { notFound, unauthorized, wait } from "./util"
@@ -16,14 +16,15 @@ const clone = <T,>(x: T): T => structuredClone(x)
 // ---------- Catalog ----------
 
 // Ids, prices and order follow the core catalog.
+const LEVELS: Effort[] = ["low", "medium", "high"]
 const MODELS: CatalogModel[] = [
   { id: "claude-opus-5-5", label: "Opus 5.5", backend: "anthropic", in_usd: 4, out_usd: 20, fast: true },
   { id: "claude-sonnet-5-5", label: "Sonnet 5.5", backend: "anthropic", in_usd: 2, out_usd: 10 },
   { id: "claude-haiku-5-5", label: "Haiku 5.5", backend: "anthropic", in_usd: 0.1, out_usd: 0.5 },
-  { id: "gpt-6-luna", label: "GPT-6 Luna", backend: "openai", in_usd: 0.1, out_usd: 0.5 },
-  { id: "gpt-6-astra", label: "GPT-6 Astra", backend: "openai", in_usd: 10, out_usd: 50 },
-  { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", backend: "gemini", in_usd: 0.75, out_usd: 3.75 },
-  { id: "gemini-4-argon", label: "Gemini 4 Argon", backend: "gemini", in_usd: 2, out_usd: 10 },
+  { id: "gpt-6-luna", label: "GPT-6 Luna", backend: "openai", in_usd: 0.1, out_usd: 0.5, efforts: LEVELS },
+  { id: "gpt-6-astra", label: "GPT-6 Astra", backend: "openai", in_usd: 10, out_usd: 50, efforts: LEVELS },
+  { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", backend: "gemini", in_usd: 0.75, out_usd: 3.75, efforts: LEVELS },
+  { id: "gemini-4-argon", label: "Gemini 4 Argon", backend: "gemini", in_usd: 2, out_usd: 10, efforts: LEVELS },
 ]
 const modelLabel = (m: ModelChoice) => {
   const c = MODELS.find((x) => x.id === m.id)

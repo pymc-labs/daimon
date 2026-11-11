@@ -58,6 +58,7 @@ from daimon.adapters.mcp.tools.setup_target import (
 )
 from daimon.core import agent_editing, channel_backend
 from daimon.core.admin_actions import DelegatedAction
+from daimon.core.agent_catalog import provider_efforts
 from daimon.core.agent_changes import change_model
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_identity import queue_agent_face
@@ -97,7 +98,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.config import DEFAULT_BACKEND, ThreadMode
 from mux.contracts.ids import ModelRef, Provider
-from mux.contracts.profile import Capability
+from mux.contracts.profile import Capability, Effort
 from mux.profiles import selectable_models
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
 
@@ -2111,6 +2112,7 @@ async def _request_agent_backend_switch_impl(
     for_everyone: bool = False,
     unsaved_work: Literal["copy", "leave"] | None = None,
     handoff_summary: str | None = None,
+    effort: Effort | None = None,
 ) -> AgentBackendSwitchInfo:
     model = _resolve_agent_model(target_backend, model)
     _require_selectable_model(target_backend, model)
@@ -2226,7 +2228,25 @@ async def _request_agent_backend_switch_impl(
                 f"Sharing threads applies in every channel, so it needs "
                 f"{admin_noun(auth.platform)}. Nothing changed."
             )
-        settings = stated_settings(thread_mode, required_capabilities)
+        settings_stated = (
+            thread_mode is not None or required_capabilities is not None or effort is not None
+        )
+        profile: str | None = None
+        if settings_stated:
+            # Stating settings replaces the agent's own, so what the call leaves out stays
+            # as the agent has it: an effort set earlier survives a thread-mode change.
+            kept = channel_backend.AgentSettings.of(await service.current(agent))
+            if target_backend != DEFAULT_BACKEND:
+                effort = effort or kept.effort
+                profile = kept.profile
+                if effort is not None and effort not in provider_efforts(target_backend):
+                    raise ToolError(
+                        f"{effort} isn't an effort {target_backend} offers. Nothing changed."
+                    )
+            if thread_mode is None and required_capabilities is None:
+                thread_mode = kept.thread_mode
+                required_capabilities = tuple(kept.requires or ()) or None
+        settings = stated_settings(thread_mode, required_capabilities, effort, profile)
         preview = await service.preview(agent, target_backend, model, settings)
         if not preview.allowed:
             raise ToolError("That model provider isn't turned on here. Nothing changed.")
@@ -2253,6 +2273,8 @@ async def _request_agent_backend_switch_impl(
                     "accepted_drops": accepted_drops,
                     "thread_mode": thread_mode,
                     "required_capabilities": required_capabilities,
+                    "effort": effort,
+                    "profile": profile,
                     "unsaved_work": unsaved_work,
                     "handoff_summary": handoff_summary,
                     "for_everyone": for_everyone,
@@ -2782,6 +2804,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             for_everyone: bool = False,
             unsaved_work: Literal["copy", "leave"] | None = None,
             handoff_summary: Annotated[str | None, Field(max_length=2000)] = None,
+            effort: Effort | None = None,
         ) -> AgentBackendSwitchInfo:
             """Preview a requested agent backend switch, then Confirm in this chat.
 
@@ -2827,7 +2850,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             The same tool states the agent's own settings: ``thread_mode`` ("shared"
             to share threads where the channel allows it, admins only; or "per_caller") and
             ``required_capabilities`` (a channel that can't give one refuses the turn).
-            Pass both together; an omitted one returns to the default. To change only
+            Pass both together; an omitted one returns to the default. ``effort``
+            (low, medium or high) sets the reasoning effort on OpenAI and Gemini; the
+            agent keeps its own effort unless you pass one. To change only
             settings, pass the agent's current target_backend and model.
             """
             return await _request_agent_backend_switch_impl(
@@ -2845,4 +2870,5 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 for_everyone=for_everyone,
                 unsaved_work=unsaved_work,
                 handoff_summary=handoff_summary,
+                effort=effort,
             )

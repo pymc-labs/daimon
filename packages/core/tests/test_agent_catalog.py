@@ -48,3 +48,18 @@ def test_models_of_lists_offered_models_and_marks_fast_ones() -> None:
         ("openai", "gpt-6-astra", "GPT-6 Astra", False),
     ], "only offered models, each model once, named as people say it"
     assert (offered[1].in_usd, offered[1].out_usd) == (10.0, 50.0), "prices are numbers"
+
+
+def test_models_of_lists_the_efforts_each_profile_declares() -> None:
+    """A model on OpenAI or Gemini carries its profile's efforts; a Claude one lists none."""
+    entries = [
+        AgentModel(ModelRef(provider="anthropic", id="claude-opus-5-5"), "", 4.0, 20.0),
+        AgentModel(ModelRef(provider="openai", id="gpt-6-astra"), "", 10.0, 50.0),
+        AgentModel(ModelRef(provider="gemini", id="gemini-4-argon"), "", 2.0, 10.0),
+    ]
+    listed = models_of(entries, offered=[e.model for e in entries], priced=("claude-opus-5-5",))
+    assert [(m.backend, m.efforts) for m in listed] == [
+        ("anthropic", ()),
+        ("openai", ("low", "medium", "high")),
+        ("gemini", ("low", "medium", "high")),
+    ], "the profile declares the efforts; Claude keeps its own on the agent record"

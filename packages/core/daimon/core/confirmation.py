@@ -54,7 +54,7 @@ from daimon.core.tool_safety import (
 from daimon.core.tool_safety import backend_switch_tools as backend_switch_tools
 from mux.contracts.config import ThreadMode
 from mux.contracts.ids import ChannelRef, Provider
-from mux.contracts.profile import Capability
+from mux.contracts.profile import Capability, Effort
 from mux.contracts.resources import AgentSpec
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
@@ -129,6 +129,10 @@ class BackendSwitchReference(BaseModel):
     required_capabilities: tuple[Capability, ...] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    # The agent's reasoning effort and profile on the target provider, when settings are
+    # stated: what the agent runs with now unless the request changes it.
+    effort: Effort | None = Field(default=None, exclude_if=lambda value: value is None)
+    profile: str | None = Field(default=None, exclude_if=lambda value: value is None)
     # The person said the switch is for everyone: needed for the server's default agent.
     for_everyone: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
     # The person's answer to the uncommitted-work question, when the switch also hands
@@ -917,18 +921,23 @@ async def confirmed_tools_for_tenant(deps: TurnDeps, tenant_id: uuid.UUID) -> fr
 
 
 def stated_settings(
-    thread_mode: ThreadMode | None, required_capabilities: tuple[Capability, ...] | None
+    thread_mode: ThreadMode | None,
+    required_capabilities: tuple[Capability, ...] | None,
+    effort: Effort | None = None,
+    profile: str | None = None,
 ) -> AgentSettings | None:
     """The settings a request states, or None to keep the agent's own."""
     from daimon.core.channel_backend import AgentSettings
     from mux.contracts.config import CapabilityRequirement
 
-    if thread_mode is None and required_capabilities is None:
+    if thread_mode is None and required_capabilities is None and effort is None:
         return None
     required = CapabilityRequirement(level="required")
     return AgentSettings(
+        profile=profile,
         requires={cap: required for cap in required_capabilities or ()} or None,
         thread_mode=thread_mode,
+        effort=effort,
     )
 
 
@@ -946,7 +955,12 @@ def _switch_model(backend: object, model: object) -> object:
 
 
 def reference_settings(reference: BackendSwitchReference) -> AgentSettings | None:
-    return stated_settings(reference.thread_mode, reference.required_capabilities)
+    return stated_settings(
+        reference.thread_mode,
+        reference.required_capabilities,
+        reference.effort,
+        reference.profile,
+    )
 
 
 #: Plain words for a declared loss on a provider-switch card.

@@ -7558,7 +7558,9 @@
         The same tool states the agent's own settings: ``thread_mode`` ("shared"
         to share threads where the channel allows it, admins only; or "per_caller") and
         ``required_capabilities`` (a channel that can't give one refuses the turn).
-        Pass both together; an omitted one returns to the default. To change only
+        Pass both together; an omitted one returns to the default. ``effort``
+        (low, medium or high) sets the reasoning effort on OpenAI and Gemini; the
+        agent keeps its own effort unless you pass one. To change only
         settings, pass the agent's current target_backend and model.
       ''',
       'parameters': dict({
@@ -7580,6 +7582,22 @@
           }),
           'agent_name': dict({
             'type': 'string',
+          }),
+          'effort': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'low',
+                  'medium',
+                  'high',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'expected_revision': dict({
             'anyOf': list([

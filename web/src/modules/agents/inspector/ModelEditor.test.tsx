@@ -12,7 +12,8 @@ vi.mock("@/lib/api", () => ({ api: { get: vi.fn() } }))
 const catalog = {
   models: [
     { id: "claude-opus-5-5", label: "Opus 5.5", backend: "anthropic", in_usd: 4, out_usd: 20, fast: true },
-    { id: "gpt-6-luna", label: "GPT-6 Luna", backend: "openai", in_usd: 0.1, out_usd: 0.5 },
+    { id: "gpt-6-luna", label: "GPT-6 Luna", backend: "openai", in_usd: 0.1, out_usd: 0.5, efforts: ["low", "medium", "high"] },
+    { id: "gpt-6-plain", label: "GPT-6 Plain", backend: "selfhosted", in_usd: 0.1, out_usd: 0.5 },
   ],
 } as Catalog
 const agent = { id: "ag_1", model: { id: "claude-opus-5-5", backend: "anthropic" } } as Agent
@@ -45,9 +46,27 @@ describe("ModelEditor", () => {
     expect(c.model, "picked model").toMatchObject({ id: "gpt-6-luna", backend: "openai", speed: "standard" })
   })
 
-  it("disables effort on a provider without it and fast on a model without it", () => {
-    show({ id: "gpt-6-luna", backend: "openai", speed: "standard", effort: "medium" })
+  it("offers the profile's efforts where it declares them and keeps fast off", async () => {
+    const update = show({ id: "gpt-6-luna", backend: "openai", speed: "standard", effort: "medium" })
     expect(screen.getByRole("switch"), "fast off").toBeDisabled()
+    expect(screen.queryByRole("radio", { name: "Max" }), "claude-only level").toBeNull()
+    expect(screen.getByRole("radio", { name: "High" }), "effort on").toBeEnabled()
+    await userEvent.click(screen.getByRole("radio", { name: "High" }))
+    const c = { model: { effort: "medium" } } as AgentConfig
+    vi.mocked(update).mock.calls[0]![0](c)
+    expect(c.model.effort, "picked effort").toBe("high")
+  })
+
+  it("disables effort on a model whose profile declares none", () => {
+    show({ id: "gpt-6-plain", backend: "selfhosted", speed: "standard", effort: "medium" })
     expect(screen.getByRole("radio", { name: "High" }), "effort off").toBeDisabled()
+  })
+
+  it("moves an effort the new model lacks to medium when the model is picked", async () => {
+    const update = show({ id: "claude-opus-5-5", backend: "anthropic", speed: "standard", effort: "max" })
+    await userEvent.click(screen.getByRole("button", { name: /GPT-6 Luna/ }))
+    const c = { model: { id: "claude-opus-5-5", backend: "anthropic", speed: "standard", effort: "max" } } as AgentConfig
+    vi.mocked(update).mock.calls[0]![0](c)
+    expect(c.model.effort, "clamped").toBe("medium")
   })
 })
