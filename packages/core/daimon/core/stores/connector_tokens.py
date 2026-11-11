@@ -252,6 +252,12 @@ async def delete_connector_tokens_for_account(
     return cast(CursorResult[Any], await session.execute(stmt)).rowcount
 
 
+async def delete_connector_tokens_for_agent(session: AsyncSession, *, agent_id: uuid.UUID) -> int:
+    """A deleted agent's grants: no agents table cascades them."""
+    stmt = delete(ConnectorToken).where(ConnectorToken.agent_id == agent_id)
+    return cast(CursorResult[Any], await session.execute(stmt)).rowcount
+
+
 async def count_connector_tokens_for_account(
     session: AsyncSession, *, account_id: uuid.UUID
 ) -> int:

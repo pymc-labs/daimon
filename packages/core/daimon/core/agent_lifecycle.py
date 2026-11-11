@@ -20,7 +20,6 @@ import anthropic as anthropic_errors
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core._models import ConnectorToken, HostCallCard, ThreadModelConsent
 from daimon.core.agent_ownership import agent_name_lock, record_agent_creator
 from daimon.core.anthropic_guard import AnthropicDisabled
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
@@ -35,6 +34,7 @@ from daimon.core.memory_resource import archive_memory_store_for_agent
 from daimon.core.permissions import without_agent_rules
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import agent_mcp_credentials as mcp_credentials_store
+from daimon.core.stores import connector_tokens, host_call_cards, thread_models
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
     PolicyBusyError,
@@ -45,7 +45,6 @@ from daimon.core.stores.access_policy import (
 )
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from pydantic import ValidationError
-from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger()
@@ -283,9 +282,6 @@ async def _clear_references(
         await clear_agent_references(session, tenant_id=tenant_id, agent_name=each)
     # No agents table to cascade from: drop the rows keyed by the agent's id.
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
-    for stmt in (
-        delete(ConnectorToken).where(ConnectorToken.agent_id == agent_uuid),
-        delete(ThreadModelConsent).where(ThreadModelConsent.agent_id == agent_uuid),
-        delete(HostCallCard).where(HostCallCard.executing_agent_id == agent_uuid),
-    ):
-        await session.execute(stmt)
+    await connector_tokens.delete_connector_tokens_for_agent(session, agent_id=agent_uuid)
+    await thread_models.delete_consents_for_agent(session, agent_id=agent_uuid)
+    await host_call_cards.delete_for_agent(session, agent_id=agent_uuid)

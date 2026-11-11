@@ -147,3 +147,8 @@ async def clear_thread_model(
         )
     )
     await session.flush()
+
+
+async def delete_consents_for_agent(session: AsyncSession, *, agent_id: uuid.UUID) -> None:
+    """A deleted agent's thread consents: no agents table cascades them."""
+    await session.execute(delete(ThreadModelConsent).where(ThreadModelConsent.agent_id == agent_id))

@@ -318,6 +318,16 @@ async def delete_for_platform_user(
     return len(deleted.all())
 
 
+async def delete_for_agent(session: AsyncSession, *, agent_id: uuid.UUID) -> int:
+    """A deleted agent's cards: no agents table cascades them."""
+    deleted = await session.execute(
+        delete(HostCallCard)
+        .where(HostCallCard.executing_agent_id == agent_id)
+        .returning(HostCallCard.id)
+    )
+    return len(deleted.all())
+
+
 async def count_for_account(session: AsyncSession, *, account_id: uuid.UUID) -> int:
     """Cards the account asked for; they cascade when the account is erased."""
     count = await session.scalar(
