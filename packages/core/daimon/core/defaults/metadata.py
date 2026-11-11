@@ -9,6 +9,10 @@ import uuid
 from collections.abc import Iterable, Mapping
 from typing import Any, Final
 
+from daimon.core.ma_metadata_keys import MA_METADATA_KEY_ACCOUNT as MA_METADATA_KEY_ACCOUNT
+from daimon.core.ma_metadata_keys import MA_METADATA_KEY_NAME as MA_METADATA_KEY_NAME
+from daimon.core.ma_metadata_keys import MA_METADATA_KEY_TENANT as MA_METADATA_KEY_TENANT
+
 MA_METADATA_KEY_PRIVATE_DM = "daimon_private_dm"
 # A routine's session carries the private-DM stamp as "routine:<id>": as with a
 # DM, no admin reads it from the hub; its owner still does,
@@ -34,9 +38,6 @@ MA_METADATA_KEY_CHANNEL = "daimon_channel"
 MA_METADATA_KEY_THREAD = "daimon_thread"
 MA_METADATA_KEY_SEALED = "daimon_sealed"
 
-MA_METADATA_KEY_TENANT = "daimon_tenant"
-MA_METADATA_KEY_NAME = "daimon_name"
-MA_METADATA_KEY_ACCOUNT = "daimon_account"
 # Only agent-chat-created sessions can be driven by headless MCP/hub callers.
 MA_METADATA_KEY_AGENT_CHAT = "daimon_agent_chat"
 MA_METADATA_KEY_MANAGED = "daimon_managed"

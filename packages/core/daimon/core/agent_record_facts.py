@@ -13,7 +13,7 @@ from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from anthropic.types.beta.beta_managed_agents_agent_tool_config import (
     BetaManagedAgentsAgentToolConfig,
 )
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
+from daimon.core.ma_metadata_keys import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from mux.contracts.resources import Agent, Environment, ToolSpec
 from pydantic import JsonValue
 
