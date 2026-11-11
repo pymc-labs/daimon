@@ -6,15 +6,25 @@ Drives the real app: the live registry, the real identity middleware and `call_t
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
+from anthropic import AsyncAnthropic
+from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.middleware.capability_gate import CapabilityGateMiddleware, caller_places
+from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.capability_tools import CAPABILITY_TOOLS
 from daimon.core.features.tool_gate import STOP_TOOLS, server_gate_key
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
-from daimon.core.stores.domain import FeatureTarget
+from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.domain import FeatureTarget, Role
 from daimon.core.stores.feature_values import set_feature_value
-from daimon.testing.factories import make_tenant
+from daimon.core.stores.turn_origins import create_origin
+from daimon.testing.factories import make_account, make_tenant
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import FastMCPTransport
 from fastmcp.exceptions import ToolError
@@ -191,3 +201,109 @@ def test_server_gate_key_covers_every_gated_tool_but_the_stop_tools() -> None:
             expected = None if tool in STOP_TOOLS else key
             assert server_gate_key(tool) == expected, f"{tool} should be gated by {expected}"
     assert server_gate_key("search_tools") is None, "an ungated tool needs no feature read"
+
+
+async def _two_running_origins(
+    sessionmaker: async_sessionmaker[AsyncSession], channels: tuple[str, str]
+) -> tuple[uuid.UUID, AuthIdentity]:
+    """A session with one running turn in each of `channels` (same thread name)."""
+    ma_agent = "agent_gate"
+    now = datetime.now(UTC)
+    async with sessionmaker() as session, session.begin():
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+        for channel in channels:
+            await create_origin(
+                session,
+                tenant_id=tenant.id,
+                account_id=account.id,
+                platform="discord",
+                parent_channel_id=channel,
+                thread_id=channel,
+                responder_ma_agent_id=ma_agent,
+                responder_name="daimon",
+                configuration_target_ma_agent_id=None,
+                configuration_target_name=None,
+                role=Role.USER,
+                expires_at=now + timedelta(minutes=5),
+                now=now,
+                sender_foreign=False,
+                shared_channel=False,
+                chat_session_id="session-1",
+            )
+    auth = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=ma_agent),
+        chat_session_id="session-1",
+    )
+    return tenant.id, auth
+
+
+class _Context:
+    """The part of a middleware context the gate reads."""
+
+    def __init__(self, auth: AuthIdentity, tool: str) -> None:
+        self.message = SimpleNamespace(name=tool, arguments={})
+        self.fastmcp_context = SimpleNamespace(get_state=self._state)
+        self._auth = auth
+
+    async def _state(self, _name: str) -> AuthIdentity:
+        return self._auth
+
+
+async def _gate(
+    sessionmaker: async_sessionmaker[AsyncSession], auth: AuthIdentity, tool: str
+) -> str:
+    gate = CapabilityGateMiddleware(
+        McpRuntime(
+            session_factory=sessionmaker,
+            client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
+            settings=_fully_configured_settings(),
+            deployment_default=DeploymentDefault(),
+        )
+    )
+
+    async def ran(_context: object) -> str:
+        return "ran"
+
+    try:
+        return str(await gate.on_call_tool(_Context(auth, tool), ran))  # type: ignore[arg-type]
+    except ToolError as exc:
+        return str(exc)
+
+
+async def test_a_session_with_two_running_turns_is_refused_when_either_place_has_it_off(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Turns in different channels cannot be told apart, so a channel Off in either refuses."""
+    tenant_id, auth = await _two_running_origins(sessionmaker, ("chan-a", "chan-b"))
+    await _set(
+        sessionmaker, tenant_id, "routines", "off", FeatureTarget("channel", channel_id="chan-b")
+    )
+    refused = await _gate(sessionmaker, auth, "list_routines")
+    assert OFF in refused, f"one turn's channel is Off, yet the call ran: {refused!r}"
+    other = await _gate(sessionmaker, auth, "github_connect")
+    assert OFF not in other, f"a feature that is On in both places was refused: {other!r}"
+
+
+async def test_a_session_with_two_turns_in_one_place_reads_that_place(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, auth = await _two_running_origins(sessionmaker, ("chan-a", "chan-a"))
+    runtime = McpRuntime(
+        session_factory=sessionmaker,
+        client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
+        settings=_fully_configured_settings(),
+        deployment_default=DeploymentDefault(),
+    )
+    places = await caller_places(runtime, auth, None)
+    assert [(p.channel_id, p.thread_id) for p in places] == [("chan-a", None)], (
+        f"two turns in one channel and thread are one place: {places}"
+    )
+    await _set(
+        sessionmaker, tenant_id, "routines", "off", FeatureTarget("channel", channel_id="chan-a")
+    )
+    assert OFF in await _gate(sessionmaker, auth, "list_routines"), "that place's Off holds"
