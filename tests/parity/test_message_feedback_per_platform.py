@@ -32,7 +32,7 @@ def test_slack_bot_scopes_still_lack_the_reaction_feedback_scopes() -> None:
 def test_slack_feedback_surface_exists() -> None:
     assert callable(handle_feedback_vote) and callable(run_feedback_text_submission), (
         "the Slack button-based feedback path must exist alongside Discord's reaction path; "
-        "if it was removed on purpose, restore the Discord-only exemption this test replaced"
+        "if it was removed on purpose, restore the per-platform capture this test records"
     )
 
 
