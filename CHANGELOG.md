@@ -33,6 +33,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer loses the rest: Previous and Next buttons on Discord, Slack and Teams move
   between pages.
 
+- **Feature settings now reach the paths that ignored them.**
+  An Off watch no longer holds up the others in the poll queue. A routine retries when its
+  features cannot be read, and a required destination can no longer be cleared. Long job
+  limits of zero or below the minimum are refused, and Off jobs no longer block newer ones.
+  Turning cloud computers Off keeps a running session stoppable from chat. Posting to other
+  places stops when the posting rules cannot be read, a post length of 0 no longer lifts a
+  workspace limit, and the thread, place and people limits apply only while the reach check
+  is on. A Discord thread now takes its parent channel's setting for typed bot names. Vote
+  buttons can be switched off on Slack and Teams too. Platform and agent skills are off
+  wherever the read tool is, repository memory tools are hidden wherever it is Off, and
+  private channel messages now say they apply after a restart.
+
 - **A capability turned off is refused on every path, not only in Claude sessions.**
   The MCP server checks the feature where the call runs (its conversation, routine,
   agent key channel, or else the workspace) and refuses a tool whose capability is Off,
