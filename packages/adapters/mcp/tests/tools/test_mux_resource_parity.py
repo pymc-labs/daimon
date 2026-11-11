@@ -140,7 +140,7 @@ async def test_create_environment_callsite_preserves_omitted_and_empty_descripti
         payload["metadata"] = build_metadata(tenant_id=TENANT, name=spec.name)
         expected = await old.beta.environments.create(**payload)
         actual = await environments._create_environment_impl(
-            SimpleNamespace(client=new), AUTH, spec
+            SimpleNamespace(client=new, session_factory=None), AUTH, spec
         )
     assert actual == environments.EnvironmentInfo.from_ma(expected)
     assert_equal(before, after)
