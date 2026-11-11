@@ -76,6 +76,7 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.defaults.skills import resolve_custom_skill_titles, resolve_skill_names
 from daimon.core.errors import DaimonError, DefaultsError
+from daimon.core.features import model_input
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_attach import (
     McpServerReplaceRefusedError,
@@ -503,10 +504,10 @@ async def _get_agent_impl(
 
 
 BuiltinToolName = agent_editing.BuiltinToolName
-_builtin_enabled = agent_editing.builtin_enabled
+_builtin_enabled = model_input.builtin_enabled
 
 
-_with_builtin = agent_editing.with_builtin
+_with_builtin = model_input.with_builtin
 
 
 def _denied_builtins(runtime: McpRuntime) -> frozenset[str]:
