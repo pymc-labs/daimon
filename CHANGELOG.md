@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Admin > Workspace no longer repeats the feature switches.**
   Web modules, direct messages, read-only memory in direct messages and typed
   mentions are set on the feature list only.
+- **Chat `/settings` pages through long lists.**
+  A workspace with more than 25 agents, or a group with more than 25 settings, no
+  longer loses the rest: Previous and Next buttons on Discord, Slack and Teams move
+  between pages.
+
 - **Daimon tolerates its seeded agent being renamed in place to `default`.**
   Ahead of that rename, a workspace whose built-in agent is already called `default` keeps it: defaults sync no longer archives it or creates a second `daimon` beside it, and asking for `daimon` answers with it. Only the workspace's own built-in agent counts, never a user's agent named `default`.
 
