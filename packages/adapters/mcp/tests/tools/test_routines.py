@@ -1248,12 +1248,23 @@ async def test_update_routine_sets_and_clears_a_destination(
     set_ = await _update_routine_impl(
         runtime, auth, routine_id=created.id, destination_kind="channel", destination_id="55"
     )
+    assert (set_.destination_kind, set_.destination_id, set_.channel_id) == ("channel", "55", "55")
+    assert set_.trigger_message == "orig"
+    if require_destination:
+        with pytest.raises(ToolError, match="must post somewhere"):
+            await _update_routine_impl(
+                runtime, auth, routine_id=created.id, clear_destination=True
+            )
+        async with committing_sessionmaker() as session:
+            kept = await get_routine(session, created.id, tenant_id=tenant.id)
+        assert kept is not None and (kept.destination_kind, kept.destination_id) == (
+            "channel",
+            "55",
+        ), "a routine that must say where it posts keeps its destination"
+        return
     cleared = await _update_routine_impl(
         runtime, auth, routine_id=created.id, clear_destination=True
     )
-
-    assert (set_.destination_kind, set_.destination_id, set_.channel_id) == ("channel", "55", "55")
-    assert set_.trigger_message == "orig"
     assert (cleared.destination_kind, cleared.destination_id) == (None, None), "destination gone"
     assert cleared.channel_id == "55", "clearing the destination keeps the budget channel"
 

@@ -1378,6 +1378,32 @@ async def claim_due_fireable(
     return claimed_rows
 
 
+async def release_claimed_slot(session: AsyncSession, row: RoutineRow) -> bool:
+    """Give a slot claimed by `claim_due_fireable` back, so the next tick fires it.
+
+    For a fire that could not start through no fault of the routine (its feature could not
+    be read). Fenced on the claim: a routine that was edited, paused or claimed again since
+    keeps its schedule. Returns whether the slot was restored.
+    """
+    if row.last_fired_slot is None:
+        return False
+    result = await session.execute(
+        update(Routine)
+        .where(
+            Routine.id == row.id,
+            Routine.tenant_id == row.tenant_id,
+            Routine.enabled.is_(True),
+            Routine.last_fired_at == row.last_fired_at,
+            Routine.last_fired_slot == row.last_fired_slot,
+            or_(Routine.next_fire_at.is_(None), Routine.next_fire_at > row.last_fired_slot),
+        )
+        .values(next_fire_at=row.last_fired_slot)
+        .execution_options(synchronize_session=False)
+    )
+    await session.flush()
+    return result.rowcount == 1
+
+
 async def advance_stale(
     session: AsyncSession,
     *,
