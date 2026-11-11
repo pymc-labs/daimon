@@ -446,11 +446,17 @@ async def test_downgrade_prior_reader_accepts_real_nondefault_allowlist_write(ow
     assert owner_spec is not None and owner_spec.loader is not None
     owner_module = importlib.util.module_from_spec(owner_spec)
     owner_spec.loader.exec_module(owner_module)
+    effort_path = path.with_name("0196_agent_backend_effort.py")
+    effort_spec = importlib.util.spec_from_file_location("agent_effort_restore", effort_path)
+    assert effort_spec is not None and effort_spec.loader is not None
+    effort_module = importlib.util.module_from_spec(effort_spec)
+    effort_spec.loader.exec_module(effort_module)
     async with sessions.begin() as session:
         connection = await session.connection()
 
         def downgrade(sync):
             with Operations.context(MigrationContext.configure(sync)):
+                effort_module.downgrade()
                 owner_module.downgrade()
                 model_module.downgrade()
                 consent_module.downgrade()
@@ -474,6 +480,7 @@ async def test_downgrade_prior_reader_accepts_real_nondefault_allowlist_write(ow
                     consent_module.upgrade()
                     model_module.upgrade()
                     owner_module.upgrade()
+                    effort_module.upgrade()
 
             await connection.run_sync(upgrade)
     async with sessions() as session:

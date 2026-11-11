@@ -11,7 +11,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 
 import structlog
@@ -73,6 +73,7 @@ from daimon.core.stores.domain import (
 from daimon.core.turn.notices import provider_name
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import ModelRef, Provider
+from mux.contracts.profile import Effort
 from pydantic import BaseModel, ConfigDict, Field
 
 log = structlog.get_logger(__name__)
@@ -298,18 +299,20 @@ def diff_config(a: AgentConfigDoc, b: AgentConfigDoc) -> list[Change]:
     return out
 
 
+_PROVIDER_EFFORTS: dict[str, Effort] = {"low": "low", "medium": "medium", "high": "high"}
+
+
 def unsupported(changes: list[Change], *, a: AgentConfigDoc, b: AgentConfigDoc) -> str | None:
     """Why these changes cannot be applied from the web yet, or None. Pure."""
     for change in changes:
         head = change.key.split(":", 1)[0]
         if head in ("name", "avatar") or change.key.endswith("/auth"):
             return f"{change.label} can't be changed here yet. Nothing was saved."
-    if (
-        a.model.backend == b.model.backend != DEFAULT_BACKEND
-        and a.model.id == b.model.id
-        and a.model != b.model
-    ):
-        return "Effort and speed can't be changed for this model here yet. Nothing was saved."
+    if b.model.backend != DEFAULT_BACKEND:
+        if b.model.speed != "standard":
+            return "Fast isn't available for this model. Nothing was saved."
+        if b.model.effort not in _PROVIDER_EFFORTS:
+            return "That effort isn't available for this model. Nothing was saved."
     return None
 
 
@@ -323,13 +326,22 @@ class SwitchConsent:
     revision: int
 
 
+def _stated_effort(a: AgentConfigDoc, b: AgentConfigDoc) -> Effort | None:
+    """The effort ``b`` changes on its provider, or None when it leaves the agent's own. Pure."""
+    if b.model.backend == DEFAULT_BACKEND or a.model.effort == b.model.effort:
+        return None
+    return _PROVIDER_EFFORTS.get(b.model.effort)
+
+
 def provider_moved(a: AgentConfigDoc, b: AgentConfigDoc) -> bool:
     """Whether ``b`` runs on another provider, or another model off the default one. Pure.
 
-    That is the agent's provider setting, not its Managed Agents model.
+    That is the agent's provider setting, not its Managed Agents model; so is the effort it
+    runs there.
     """
     return a.model.backend != b.model.backend or (
-        b.model.backend != DEFAULT_BACKEND and a.model.id != b.model.id
+        b.model.backend != DEFAULT_BACKEND
+        and (a.model.id != b.model.id or a.model.effort != b.model.effort)
     )
 
 
@@ -615,6 +627,7 @@ class ProviderSwitch:
     preview: CompatibilityPreview
     expected_revision: int
     accepted_drops: tuple[str, ...] | None = None
+    settings: AgentSettings | None = None
 
 
 def _refused_switch(exc: Exception, *, agent_id: str, provider: Provider) -> AgentEditError:
@@ -636,6 +649,7 @@ async def check_provider_switch(
     accepted_drops: tuple[str, ...] | None = None,
     expected_preview_digest: str | None = None,
     new_agent: bool = False,
+    effort: Effort | None = None,
 ) -> ProviderSwitch:
     """Refuse now what pointing the agent at ``provider`` would refuse, writing nothing.
 
@@ -643,6 +657,7 @@ async def check_provider_switch(
     that moved since is stale. None takes the current one. A preview that declares drops
     needs them accepted exactly, as shown; ``expected_preview_digest`` is that preview's.
     A ``new_agent`` holds nothing a switch could drop, so it accepts what is declared.
+    ``effort`` states the agent's effort on ``provider``; None keeps its own.
     """
     if deps.backends is None or not deps.backends.enabled:
         raise _provider_refusal(AgentBackendRefused("feature_disabled"), provider)
@@ -661,7 +676,11 @@ async def check_provider_switch(
         )
         if not await deps.backends.may_edit(source, backend_actor):
             raise AgentBackendRefused("owner_or_admin_required")
-        preview = await deps.backends.preview(source, backend, model)
+        settings = None
+        if effort is not None and backend is not None:
+            kept = AgentSettings.of(await deps.backends.current(source)).for_backend(backend)
+            settings = replace(kept, effort=effort)
+        preview = await deps.backends.preview(source, backend, model, settings)
         if not preview.allowed:
             raise AgentBackendRefused("backend_not_allowed")
         if new_agent:
@@ -686,6 +705,7 @@ async def check_provider_switch(
         preview=preview,
         expected_revision=preview.setting_revision,
         accepted_drops=accepted_drops,
+        settings=settings,
     )
 
 
@@ -710,6 +730,7 @@ async def write_provider_switch(deps: AgentChangeDeps, switch: ProviderSwitch) -
                 expected_preview_digest=switch.preview.digest,
                 model=switch.model,
                 accepted_drops=switch.accepted_drops,
+                settings=switch.settings,
             )
     except (AgentBackendRefused, BackendUnsupported) as exc:
         raise _refused_switch(exc, agent_id=switch.agent_id, provider=switch.provider) from exc
@@ -1105,6 +1126,8 @@ async def _write(
             expected_revision=provider_revision if consent is None else consent.revision,
             accepted_drops=None if consent is None else consent.accepted_drops,
             expected_preview_digest=None if consent is None else consent.digest,
+            # Only an effort the draft changed is the person's; the rest stays the agent's.
+            effort=_stated_effort(base, target),
         )
         if provider_moved(base, target)
         else None

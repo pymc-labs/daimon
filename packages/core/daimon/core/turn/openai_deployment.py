@@ -570,6 +570,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             container_size="small" if deployment.profile == PROFILE else None,
             spend_limit_usd_cents=native_limit,
             mcp_enabled=False if shared else None,
+            reasoning_effort=revision.effort,
         ),
     )
 

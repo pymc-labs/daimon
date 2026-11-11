@@ -114,6 +114,7 @@ async def put_revision(
     profile: str | None = None,
     requires: JsonValue | None = None,
     thread_mode: str | None = None,
+    effort: str | None = None,
 ) -> AgentBackendRevision:
     row = AgentBackendRevisionRecord(
         tenant_id=tenant_id,
@@ -124,6 +125,7 @@ async def put_revision(
         profile=profile,
         requires=requires,
         thread_mode=thread_mode,
+        effort=effort,
         digest=digest,
         previous_local=previous_local,
         agent_name=agent_name,

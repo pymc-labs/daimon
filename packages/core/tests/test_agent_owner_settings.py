@@ -278,3 +278,37 @@ async def test_the_owner_edits_settings_and_backend_and_a_member_cannot(people) 
         actors["admin"].account_id,
         actors["owner"].account_id,
     }
+
+
+_PRE_EFFORT_DIGESTS = {
+    # Hashed by the formula in force before effort existed; they must never move.
+    (None, None): "a0b6c28348efa74b8d21b22f0eb77225de850ca18e04dcc484c5617c4b63b2a3",
+    ("gpt-6-luna", "shared"): "7a7fe59e42f07a9ce4aafef0479835eb408985c25987331c2b8041025d3ac5ca",
+}
+
+
+def test_effort_joins_a_revision_digest_only_once_set() -> None:
+    from daimon.core.channel_backend import _revision_digest
+
+    agent = BackendAgent(
+        tenant_id=uuid.UUID(int=1), agent_id=uuid.UUID(int=2), name="a", configuration_digest="d"
+    )
+    unset = _revision_digest(agent, "openai", None, None, AgentSettings())
+    assert unset == _PRE_EFFORT_DIGESTS[(None, None)]
+    shared = _revision_digest(
+        agent, "openai", None, "gpt-6-luna", AgentSettings(thread_mode="shared")
+    )
+    assert shared == _PRE_EFFORT_DIGESTS[("gpt-6-luna", "shared")]
+    effort = AgentSettings(effort="high")
+    assert effort.facts() == {"effort": "high"} and not effort.is_default()
+    assert _revision_digest(agent, "openai", None, None, effort) != unset
+
+
+def test_effort_belongs_to_the_agent_selection_and_not_the_default_backend() -> None:
+    chosen = agent_selection("openai", None, AgentSettings(effort="low"))
+    assert chosen.effort == "low"
+    assert agent_selection("openai", None, AgentSettings()).effort is None
+    assert AgentSettings(effort="low").for_backend("anthropic").effort is None
+    assert AgentSettings(effort="low").for_backend("gemini").effort == "low"
+    with pytest.raises(Exception, match="effort|selectable"):
+        agent_selection("anthropic", None, AgentSettings(effort="low"))

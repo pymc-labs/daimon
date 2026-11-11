@@ -4654,6 +4654,10 @@ class AgentBackendRevisionRecord(Base):
             "thread_mode IS NULL OR thread_mode IN ('per_caller', 'shared')",
             name="ck_agent_backend_thread_mode",
         ),
+        CheckConstraint(
+            "effort IS NULL OR effort IN ('low', 'medium', 'high')",
+            name="ck_agent_backend_effort",
+        ),
     )
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
     agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
@@ -4674,6 +4678,8 @@ class AgentBackendRevisionRecord(Base):
     profile: Mapped[str | None] = mapped_column(Text)
     requires: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     thread_mode: Mapped[str | None] = mapped_column(Text)
+    # The agent's reasoning effort on its non-default provider; null keeps the model's own.
+    effort: Mapped[str | None] = mapped_column(Text)
 
 
 class AgentOwner(Base):

@@ -74,7 +74,7 @@ from mux.drivers.gemini import (
     compile_environment,
 )
 from mux.errors import ContinuityLost, ProviderError, ScopeViolation, UnsupportedCapability
-from mux.profiles.gemini import ARGON_MODEL
+from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE
 from mux.state.store import StateStore
 from pydantic import JsonValue, TypeAdapter
 
@@ -198,10 +198,15 @@ def gemini_backend(
         or deployment.agent.model != ModelRef(provider="gemini", id=required_model)
     ):
         raise UnsupportedCapability(("gemini_pinned_deployment",), PROFILE)
+    thinking_level = None if config.effort is None else INLINE_REUSE.effort_map[config.effort]
     if deployment.max_output_tokens is not None:
         if deployment.native_agent is not None:
             raise UnsupportedCapability(("model_interaction_resources",), PROFILE)
-        compile_agent(deployment.agent, max_output_tokens=deployment.max_output_tokens)
+        compile_agent(
+            deployment.agent,
+            max_output_tokens=deployment.max_output_tokens,
+            thinking_level=thinking_level,
+        )
         compile_environment(deployment.environment, model_only=True)
     supplied = runtime.transport_factory(config, scope)
     if not isinstance(supplied, GeminiTransportRuntime):
@@ -222,6 +227,7 @@ def gemini_backend(
         resource_catalog_transport=supplied.catalog_transport,
         native_agent=deployment.native_agent,
         max_output_tokens=deployment.max_output_tokens,
+        thinking_level=thinking_level,
         mcp_secrets=supplied.mcp_secrets,
         gcs_secrets=supplied.gcs_secrets,
         skill_bundle_publisher=supplied.skill_bundle_publisher,

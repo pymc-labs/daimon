@@ -94,6 +94,7 @@ Effort = Literal["low", "medium", "high", "xhigh", "max"]
 PlaceKind = Literal["channel", "dm", "web"]
 
 _DEFAULT_EFFORT: Effort = "high"
+_PROVIDER_EFFORT: Effort = "medium"
 _EFFORTS: dict[str, Effort] = {e: e for e in ("low", "medium", "high", "xhigh", "max")}
 RunsIn = Literal["discord", "slack", "teams", "dm", "web"]
 _RUNS_IN: tuple[RunsIn, ...] = ("discord", "slack", "teams", "dm", "web")
@@ -291,7 +292,8 @@ def _model(agent: BetaManagedAgentsAgent, backend: AgentBackendRevision | None) 
             id=backend.model or backend_selection(backend.backend).model or "",
             backend=backend.backend,
             speed="standard",
-            effort=_DEFAULT_EFFORT,
+            # Unset runs the provider's own effort, which reads as medium.
+            effort=backend.effort or _PROVIDER_EFFORT,
         )
     choice = model_choice_id(agent.model)
     effort = (agent.model.model_extra or {}).get("effort")

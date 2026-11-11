@@ -16,7 +16,7 @@ from typing import Annotated, Any, Literal, cast
 from daimon.core.session_snapshot import SessionSnapshot
 from mux.contracts.config import CapabilityRequirement, ThreadMode
 from mux.contracts.ids import PROVIDERS, Provider, Scope
-from mux.contracts.profile import Capability
+from mux.contracts.profile import Capability, Effort
 from mux.contracts.resources import (
     Agent,
     AgentSpec,
@@ -1501,6 +1501,7 @@ class AgentBackendRevision(_BackendConsentFacts):
     profile: str | None = None
     requires: dict[Capability, CapabilityRequirement] | None = None
     thread_mode: ThreadMode | None = None
+    effort: Effort | None = None
     agent_name: str
     preview_digest: str
     digest: str

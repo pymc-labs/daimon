@@ -24,7 +24,7 @@ import json
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import Final, Literal, Protocol, cast, get_args
@@ -74,7 +74,7 @@ from mux.contracts.config import (
     resolve_default,
 )
 from mux.contracts.ids import PROVIDERS, ChannelRef, ModelRef, Provider, ThreadRef
-from mux.contracts.profile import SUPPORTED, Capability, Profile
+from mux.contracts.profile import SUPPORTED, Capability, Effort, Profile
 from mux.contracts.resources import AgentSpec
 from mux.errors import InvalidConfig, ScopeViolation, UnsupportedCapability
 from mux.profiles import (
@@ -365,15 +365,23 @@ class AgentSettings:
     profile: str | None = None
     requires: Mapping[Capability, CapabilityRequirement] | None = None
     thread_mode: ThreadMode | None = None
+    effort: Effort | None = None
 
     @classmethod
     def of(cls, revision: AgentBackendRevision | None) -> AgentSettings:
         if revision is None:
             return cls()
-        return cls(revision.profile, revision.requires or None, revision.thread_mode)
+        return cls(
+            revision.profile, revision.requires or None, revision.thread_mode, revision.effort
+        )
 
     def is_default(self) -> bool:
-        return self.profile is None and not self.requires and self.thread_mode is None
+        return (
+            self.profile is None
+            and not self.requires
+            and self.thread_mode is None
+            and self.effort is None
+        )
 
     def facts(self) -> dict[str, object]:
         """The set fields, as stored and hashed."""
@@ -386,13 +394,17 @@ class AgentSettings:
             }
         if self.thread_mode is not None:
             facts["thread_mode"] = self.thread_mode
+        if self.effort is not None:
+            facts["effort"] = self.effort
         return facts
 
     def for_backend(self, backend: Provider | None) -> AgentSettings:
-        """Keep what still applies on `backend`: a profile belongs to one backend only."""
-        if self.profile is None or self.profile.startswith(f"{backend or DEFAULT_BACKEND}."):
-            return self
-        return AgentSettings(None, self.requires, self.thread_mode)
+        """Keep what still applies on `backend`: a profile belongs to one backend only, and
+        the default one keeps its effort on the agent's own record."""
+        kept = self if backend not in (None, DEFAULT_BACKEND) else replace(self, effort=None)
+        if kept.profile is None or kept.profile.startswith(f"{backend or DEFAULT_BACKEND}."):
+            return kept
+        return AgentSettings(None, kept.requires, kept.thread_mode, kept.effort)
 
 
 @dataclass(frozen=True)
@@ -1188,7 +1200,9 @@ class AgentBackendService:
         selection = agent_selection(target, model, settings)
         try:
             proposed = preview_source_drops(
-                agent, ModelRef(provider=selection.backend, id=selection.model or agent.model or "")
+                agent,
+                ModelRef(provider=selection.backend, id=selection.model or agent.model or ""),
+                effort=selection.effort,
             )
         except UnsupportedCapability as error:
             raise AgentBackendRefused(
@@ -1285,6 +1299,7 @@ class AgentBackendService:
                 "profile": settings.profile,
                 "requires": settings.facts().get("requires"),
                 "thread_mode": settings.thread_mode,
+                "effort": settings.effort,
                 "agent_name": agent.name,
                 "preview_digest": preview.digest,
                 "digest": _revision_digest(agent, target, consent_json, picked, settings),
@@ -1448,6 +1463,7 @@ class AgentBackendService:
                     profile=settings.profile,
                     requires=cast(JsonValue, settings.facts().get("requires")),
                     thread_mode=settings.thread_mode,
+                    effort=settings.effort,
                 )
             except IntegrityError:
                 raise AgentBackendRefused("stale_revision") from None
@@ -1519,7 +1535,7 @@ class AgentBackendService:
         expected_preview_digest: str | None = None,
         accepted_drops: tuple[str, ...] | None = None,
     ) -> AgentBackendRevision:
-        """State the agent's profile, requirements and thread mode; provider and model stay.
+        """State the agent's profile, requirements, thread mode and effort; provider and model stay.
 
         On a provider that drops source features, `accepted_drops` must name them
         again, as for a provider switch.
@@ -1576,6 +1592,7 @@ class AgentBackendService:
             proposed = preview_source_drops(
                 changed,
                 ModelRef(provider=selection.backend, id=selection.model or changed.model or ""),
+                effort=selection.effort,
             )
         except UnsupportedCapability:
             return None
@@ -1646,6 +1663,7 @@ class AgentBackendService:
                     profile=settings.profile,
                     requires=cast(JsonValue, settings.facts().get("requires")),
                     thread_mode=settings.thread_mode,
+                    effort=settings.effort,
                 )
             except IntegrityError:
                 return None
@@ -2050,6 +2068,8 @@ def agent_selection(
         update["requires"] = dict(settings.requires)
     if settings.thread_mode is not None:
         update["thread_mode"] = settings.thread_mode
+    if settings.effort is not None:
+        update["effort"] = settings.effort
     try:
         return ResolvedBackend.model_validate({**dict(selection), **update})
     except (ValueError, InvalidConfig):

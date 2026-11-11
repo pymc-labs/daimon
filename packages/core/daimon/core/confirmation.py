@@ -990,6 +990,8 @@ def settings_line(settings: Mapping[str, object]) -> str:
     if isinstance(requires, Mapping) and requires:
         names = cast(Mapping[str, object], requires)
         parts.append("requires " + ", ".join(sorted(names)))
+    if settings.get("effort"):
+        parts.append(f"{settings['effort']} effort")
     if settings.get("profile"):
         parts.append(f"profile {settings['profile']}")
     return "; ".join(parts) or "the model provider's defaults"

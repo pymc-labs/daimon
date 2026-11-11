@@ -420,7 +420,13 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         deployment = plan.deployment(request)
     else:
         try:
-            compile_agent(agent, max_output_tokens=plan.max_output_tokens)
+            compile_agent(
+                agent,
+                max_output_tokens=plan.max_output_tokens,
+                thinking_level=None
+                if revision.effort is None
+                else INLINE_REUSE.effort_map[revision.effort],
+            )
             compile_environment(plan.environment, model_only=plan.max_output_tokens is not None)
         except UnsupportedCapability as error:
             if plan.max_output_tokens is None:
@@ -434,6 +440,9 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             plan.environment,
             max_output_tokens=plan.max_output_tokens,
         )
+    # A named catalog agent compiles its own configuration: no per-session level.
+    if revision.effort is not None and deployment.native_agent is not None:
+        raise AdmissionDenied(reason="backend_unsupported")
     namespace = json.dumps([scope.tenant_id, scope.account_id, plan.project], separators=(",", ":"))
     counterpart_verified = False
 

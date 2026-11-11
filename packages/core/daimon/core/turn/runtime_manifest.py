@@ -26,7 +26,7 @@ from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, ResourceRef, SkillRef
-from mux.contracts.profile import Capability
+from mux.contracts.profile import Capability, Effort
 from mux.contracts.resources import (
     AgentSpec,
     EnvironmentSpec,
@@ -977,6 +977,7 @@ def _source_extension_obligation(
     *,
     native_target: AgentSpec | None = None,
     foreign_target: bool = False,
+    target_effort: Effort | None = None,
 ) -> Literal["model_controls", "source_definition"] | None:
     if extension.version != 1:
         return "source_definition"
@@ -1001,6 +1002,15 @@ def _source_extension_obligation(
         model = extension.value.get("model")
         if isinstance(model, dict):
             if set(model) <= {"id", "speed"} and model.get("speed") is None:
+                return None
+            # The target carries effort and the agent states its own there; speed stays
+            # a loss on every other provider.
+            if (
+                foreign_target
+                and target_effort is not None
+                and set(model) <= {"id", "speed", "effort"}
+                and model.get("speed") is None
+            ):
                 return None
             if foreign_target:
                 return "model_controls"
@@ -1086,6 +1096,7 @@ def classify_source_obligations(
     resources: tuple[ResourceBinding, ...] = (),
     asks_before_publishing: bool = False,
     retained_agent: ResourceRef | None = None,
+    target_effort: Effort | None = None,
 ) -> frozenset[str]:
     """One source-preservation rule for pre-allocation normalization and preparation."""
     spec = source.effective_spec
@@ -1148,6 +1159,7 @@ def classify_source_obligations(
                 extension,
                 native_target=target if not foreign_target else None,
                 foreign_target=foreign_target,
+                target_effort=target_effort,
             )
             if obligation is not None and not (
                 obligation == "model_controls" and obligation in drops
@@ -1305,7 +1317,9 @@ def classify_source_obligations(
     return frozenset(missing)
 
 
-def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
+def preview_source_drops(
+    source: BackendAgent, model: ModelRef, *, effort: Effort | None = None
+) -> AgentSpec:
     """Derive explicit losses using the same complete source-preservation rule."""
     spec = source.effective_spec
     profile = backend_selection(model.provider).profile
@@ -1329,6 +1343,7 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
             resources=source.resource_requirements,
             retained_agent=source.source.ref,
             asks_before_publishing=source.asks_before_publishing,
+            target_effort=effort,
         )
         if missing:
             raise UnsupportedCapability(tuple(sorted(missing)), profile)
@@ -1357,6 +1372,7 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
         target,
         environment=environment,
         asks_before_publishing=source.asks_before_publishing,
+        target_effort=effort,
     )
     try:
         target = AgentSpec.model_validate(
@@ -1374,6 +1390,7 @@ def preview_source_drops(source: BackendAgent, model: ModelRef) -> AgentSpec:
         target,
         environment=environment,
         asks_before_publishing=source.asks_before_publishing,
+        target_effort=effort,
     )
     if missing:
         raise UnsupportedCapability(tuple(sorted(missing)), profile)
@@ -1561,7 +1578,9 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
     )
     if born_native:
         target = preview_source_drops(
-            source, ModelRef(provider=revision.backend, id=revision.model or spec.model.id)
+            source,
+            ModelRef(provider=revision.backend, id=revision.model or spec.model.id),
+            effort=revision.effort,
         )
     if setting is not None:
         consent = setting.drop_consent
@@ -1574,7 +1593,9 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         if not source_pin_matches(source, consent.source_pin):
             raise AgentBackendRefused("re_confirm", detail="source_pin")
         target = preview_source_drops(
-            source, ModelRef(provider=revision.backend, id=revision.model or spec.model.id)
+            source,
+            ModelRef(provider=revision.backend, id=revision.model or spec.model.id),
+            effort=revision.effort,
         )
         if not covers(
             consent,
@@ -1601,6 +1622,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         else None,
         resources=source.resource_requirements if retain_native else (),
         asks_before_publishing=request.admission.asks_before_publishing,
+        target_effort=revision.effort,
     )
     if missing:
         raise UnsupportedCapability(tuple(sorted(missing)), revision.profile)

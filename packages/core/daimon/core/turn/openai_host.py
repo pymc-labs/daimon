@@ -119,6 +119,7 @@ def runtime_for(runtime: TurnRuntime | None, revision: ConfigRevision | None) ->
         not runtime.account_scope_id.strip()
         or runtime.controls.model != revision.model
         or runtime.controls.multi_agent_enabled is not False
+        or runtime.controls.reasoning_effort != revision.effort
         or runtime.controls.container_size != ("small" if revision.profile == PROFILE else None)
         or not isinstance(runtime.journal, OpenAIRecoveryJournal)
         or not isinstance(runtime.usage_store, OpenAIUsageRevisions)
