@@ -167,5 +167,6 @@ guarantees are in the
   message, on the same harness session. A turn already running finishes on its
   old configuration, and a message sent meanwhile is told to wait. A different
   environment, account scope or archived agent needs a new session.
-- **Files.** The automatic output sweep does not run. Agents deliver files
-  through the MCP message tools.
+- **Files.** Files the agent saves in its `outputs` folder are attached to
+  its reply, then removed from the harness. Update the harness to 0.2.0 or
+  later to get this; an older harness attaches no files.

@@ -20,7 +20,7 @@ in one conversation.
 | Memory across turns | Yes | Through Daimon, needs an Anthropic key | Through Daimon, needs an Anthropic key | Not supported |
 | Web fetch | Yes | Through Daimon | Through Daimon | Through Daimon |
 | Web search | Yes | Not supported | Not supported | Not supported |
-| Output files | Yes | Yes | Yes | Through the MCP message tools |
+| Output files | Yes | Yes | Yes | Yes, from harness 0.2.0 |
 | Reasoning effort | Yes | Low, medium, high | Low, medium, high | Not supported |
 | Spend limit for one turn | Yes | Daimon stops the turn | Holds only, no stop mid-turn | Not supported |
 | Routines | Yes | Yes | Yes | Not supported |

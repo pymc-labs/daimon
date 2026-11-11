@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Self-hosted channels can share a thread.** Everyone in it works in one
   session, and each person's own sign-ins stay hidden from the others.
+- **Self-hosted agents attach the files they save.** Files a self-hosted
+  agent writes to its outputs folder are attached to its reply on Discord,
+  Slack and Teams, as on other providers. Operators must update their harness
+  to 0.2.0 to get this; an older harness attaches no files.
 - **Picking another provider's model switches the agent.** Every place that
   picks a model lists one catalog: Claude's models plus the OpenAI and Gemini
   models the workspace has enabled, each with its price and without unpriced or
