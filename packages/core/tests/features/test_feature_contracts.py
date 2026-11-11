@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import uuid
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -509,3 +510,27 @@ def test_repo_memory_needs_the_setup_and_the_setting_does_not_read_the_feature()
     off = _settings(repo_memory=RepoMemorySettings(enabled=True), features={"repo_memory": "off"})
     assert get_repo_memory_settings(off).enabled, "the feature does not undo the setup"
     assert not resolve_one(spec, off, place, ()).on, "but turns the feature off"
+
+
+def test_an_operators_zero_post_length_cannot_override_a_workspace_limit() -> None:
+    """The reader treats 0 as no limit while the resolver takes the smallest number, so a
+    0 at any tier would switch off the limits narrower tiers set."""
+    for tier in ("deployment", "workspace", "channel"):
+        assert not FEATURES["outbound_length"].accepts("0", tier), f"0 refused at {tier}"
+        assert FEATURES["outbound_length"].accepts("250", tier), f"a length is taken at {tier}"
+    with pytest.raises(ValueError, match="outbound_length"):
+        parse_deployment("outbound_length", "0")
+
+
+@pytest.mark.parametrize("key", ["outbound_threads", "outbound_places", "outbound_people"])
+def test_a_reach_limit_applies_only_while_the_reach_check_is_on(key: str) -> None:
+    """The limits are read only by the reach check, so with it Off they are unavailable."""
+    from daimon.core.features.resolver import ResolvedFeature
+    from daimon.core.features.snapshot import FeaturePlace, resolve_one
+
+    place = FeaturePlace(uuid.UUID(int=0), "discord")
+    spec = FEATURES[key]
+    for value, reason in (("on", None), ("off", "depends_on")):
+        check = {"reach_budget": ResolvedFeature("reach_budget", value, "workspace")}
+        found = resolve_one(spec, None, place, (), check)
+        assert found.unavailable == reason, f"{key} with the reach check {value}"

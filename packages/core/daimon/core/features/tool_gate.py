@@ -27,11 +27,12 @@ _FEATURE_OF: Final[dict[str, str]] = {tool: key for key, tools in _TOOLS.items()
 
 def hides_tools(found: ResolvedFeature) -> bool:
     """Off here hides the feature's tools. Platform, backend and dependency gaps at the
-    default tier hide nothing; memory Off at the deployment means its tools never registered."""
+    default tier hide nothing. Memory hides at every tier, bar a deployment lock: that Off
+    never registered its tools, while an unlocked Off leaves them registered and offered."""
     if found.on:
         return False
     if found.key == "repo_memory":
-        return found.tier not in ("default", "deployment")
+        return not (found.tier == "deployment" and found.locked)
     return found.tier != "default" or found.unavailable in (None, "requires")
 
 

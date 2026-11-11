@@ -176,15 +176,26 @@ def test_agent_env_file_off_leaves_the_keys_file_out() -> None:
     assert not toolset.env_file and toolset.changes
 
 
-def test_repo_memory_off_at_the_deployment_hides_nothing() -> None:
-    """Off at the deployment registers no memory tools, so the session's tools are unchanged."""
+def test_repo_memory_locked_off_at_the_deployment_hides_nothing() -> None:
+    """A locked Off registers no memory tools, so the session's tools are unchanged."""
     base = _snapshot()
-    features = {**base.features, "repo_memory": ResolvedFeature("repo_memory", "off", "deployment")}
-    snapshot = FeatureSnapshot(base.place, 1, features)
-    toolset = agent_toolset(snapshot, _agent())
+    locked = ResolvedFeature("repo_memory", "off", "deployment", True)
+    toolset = agent_toolset(
+        FeatureSnapshot(base.place, 1, {**base.features, "repo_memory": locked}), _agent()
+    )
     assert toolset == replace(DEFAULT_TOOLSET, memory_on=False), "nothing to hide"
     assert toolset.legacy_memory_servers(("old",)) == (), "legacy readers stay while memory is off"
     assert DEFAULT_TOOLSET.legacy_memory_servers(("old",)) == ("old",), "and step aside when on"
+
+
+def test_repo_memory_unlocked_off_at_the_deployment_hides_its_tools() -> None:
+    """An unlocked Off leaves the tools registered, so the session must not be offered them."""
+    base = _snapshot()
+    off = ResolvedFeature("repo_memory", "off", "deployment")
+    toolset = agent_toolset(
+        FeatureSnapshot(base.place, 1, {**base.features, "repo_memory": off}), _agent()
+    )
+    assert toolset.hidden_daimon_tools == REPO_MEMORY_TOOLS, "the memory tools are turned off"
 
 
 def test_capabilities_change_nothing_at_their_defaults() -> None:

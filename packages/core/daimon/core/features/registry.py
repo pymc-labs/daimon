@@ -21,10 +21,11 @@ TIERS: Final[tuple[Tier, ...]] = get_args(Tier)
 LOCKABLE: Final[frozenset[Tier]] = frozenset({"deployment", "workspace", "agent", "channel"})
 Effect = Literal["model", "display", "capability", "guardrail", "limit"]
 Combine = Literal["most_specific", "ceiling", "stricter", "minimum"]
-Binding = Literal["turn", "session_mutable", "session_identity", "provision"]
+Binding = Literal["turn", "session_mutable", "session_identity", "provision", "restart"]
 """When a change lands. ``session_mutable``: the live session's tools and servers are updated
 in place on the next message. ``session_identity``: held by the live session until ``/new`` or a
-replacement (system prompt, skills, memory). ``provision``: on the agent's next save or sync."""
+replacement (system prompt, skills, memory). ``provision``: on the agent's next save or sync.
+``restart``: read once when the process starts."""
 Category = Literal["model_input", "chat", "capabilities", "limits", "guardrails"]
 Requirement = Literal[
     "platform_adapter",
@@ -330,11 +331,13 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         tiers=TIERS,
         binds="session_identity",
         doc=(
-            "The skills Daimon adds for the chat app, such as its formatting. A conversation "
-            "keeps what it started with until /new. Claude agents only."
+            "The skills Daimon adds for the chat app, such as its formatting. They need the read "
+            "tool, so they are off wherever it is. A conversation keeps what it started with "
+            "until /new. Claude agents only."
         ),
         backend_tiers=_MANAGED_AGENTS_ONLY,
         platforms=EVERY_PLATFORM,
+        depends_on=("tool.read",),
         authority=Authority(DelegatedAction.SKILLS),
     ),
     FeatureSpec(
@@ -348,10 +351,12 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         binds="session_identity",
         doc=(
             "The skills listed on the agent. Off leaves them out of new conversations; "
-            f"the agent keeps its list. {_KEPT} Always on for Gemini and OpenAI agents."
+            "the agent keeps its list. Skills need the read tool, so they are off wherever it "
+            f"is. {_KEPT} Always on for Gemini and OpenAI agents."
         ),
         backend_fixed=_FIXED_ON,
         platforms=EVERY_PLATFORM,
+        depends_on=("tool.read",),
         authority=Authority(DelegatedAction.SKILLS),
     ),
     FeatureSpec(
@@ -416,8 +421,8 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         tiers=TIERS,
         binds="session_identity",
         doc=(
-            "The memory a restricted channel keeps for itself in place of the shared one. "
-            f"{_KEPT} Claude agents only."
+            "The memory a restricted channel keeps for itself in place of the shared one. Off "
+            f"leaves such a channel with no memory at all. {_KEPT} Claude agents only."
         ),
         backend_tiers=_MANAGED_AGENTS_ONLY,
         platforms=EVERY_PLATFORM,
@@ -519,7 +524,6 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         "Vote buttons",
         "Finished answers get thumbs up and down for feedback.",
         default="on",
-        platforms=_DISCORD,
     ),
     FeatureSpec(
         key="private_channel_messages",
@@ -529,7 +533,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         values=_ON_OFF,
         default="on",
         tiers=("deployment",),
-        binds="turn",
+        binds="restart",
         doc=(
             "Every message in private and shared channels is read through Microsoft Graph, not "
             "only the ones that mention the agent. Needs the public address the bot is reached "
@@ -708,6 +712,7 @@ def _limit(
     legacy_env: tuple[str, ...] = (),
     authority: Authority = _SETTINGS,
     minimum: float = 0,
+    depends_on: tuple[str, ...] = (),
 ) -> FeatureSpec:
     """A limit: the smallest tier setting wins. `steps` run from the loosest down to the
     strictest; the default is the first unless `default` names another step."""
@@ -725,6 +730,7 @@ def _limit(
         authority=authority,
         legacy_env=legacy_env,
         minimum=minimum,
+        depends_on=depends_on,
     )
 
 
@@ -851,6 +857,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "else, one reply may open without approval. The smallest setting wins.",
         {"2": "2 threads", "1": "1 thread", "0": "None"},
         tiers=TIERS,
+        depends_on=("reach_budget",),
         legacy_env=("DAIMON_OUTBOUND__MAX_THREADS",),
     ),
     _limit(
@@ -860,6 +867,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "conversation one reply may post into without approval. The smallest setting wins.",
         {"2": "2 places", "1": "1 place", "0": "None"},
         tiers=TIERS,
+        depends_on=("reach_budget",),
         legacy_env=("DAIMON_OUTBOUND__MAX_PLACES",),
     ),
     _limit(
@@ -868,6 +876,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "How many different people one reply may tag without approval. The smallest setting wins.",
         {"5": "5 people", "3": "3 people", "1": "1 person", "0": "None"},
         tiers=TIERS,
+        depends_on=("reach_budget",),
         legacy_env=("DAIMON_OUTBOUND__MAX_PEOPLE",),
     ),
     _limit(
@@ -882,6 +891,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
             "250": "250 characters",
         },
         tiers=TIERS,
+        minimum=1,
         legacy_env=("DAIMON_OUTBOUND__MAX_LENGTH",),
     ),
     _limit(

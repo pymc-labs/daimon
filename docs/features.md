@@ -45,7 +45,7 @@ Where each feature can be set, and its default.
 | Completion pings | `completion_pings` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Table images | `table_rendering` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ | Only Discord, Slack; Off by default on Slack |
 | Budget notices | `budget_notices` | Chat | On | ✓ | ✓ |  | ✓ |  |  |
-| Vote buttons | `message_feedback` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ | Only Discord |
+| Vote buttons | `message_feedback` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Repository memory | `repo_memory` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Context provider | `context_provider` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
 | Personal memory | `memory_personal` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always Off on Gemini, OpenAI |
@@ -364,7 +364,7 @@ The agent's prompt is adjusted to the chat platform's words and formatting. Off 
 
 ## Platform skills
 
-The skills Daimon adds for the chat app, such as its formatting. A conversation keeps what it started with until /new. Claude agents only.
+The skills Daimon adds for the chat app, such as its formatting. They need the read tool, so they are off wherever it is. A conversation keeps what it started with until /new. Claude agents only.
 
 | | |
 | --- | --- |
@@ -378,7 +378,7 @@ The skills Daimon adds for the chat app, such as its formatting. A conversation 
 
 ## Agent skills
 
-The skills listed on the agent. Off leaves them out of new conversations; the agent keeps its list. A conversation keeps what it started with until /new. Always on for Gemini and OpenAI agents.
+The skills listed on the agent. Off leaves them out of new conversations; the agent keeps its list. Skills need the read tool, so they are off wherever it is. A conversation keeps what it started with until /new. Always on for Gemini and OpenAI agents.
 
 | | |
 | --- | --- |
@@ -428,7 +428,7 @@ The agent's memory shared by everyone who talks to it. A conversation keeps what
 
 ## Channel memory
 
-The memory a restricted channel keeps for itself in place of the shared one. A conversation keeps what it started with until /new. Claude agents only.
+The memory a restricted channel keeps for itself in place of the shared one. Off leaves such a channel with no memory at all. A conversation keeps what it started with until /new. Claude agents only.
 
 | | |
 | --- | --- |
