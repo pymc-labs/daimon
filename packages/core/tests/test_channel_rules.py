@@ -345,7 +345,9 @@ async def test_own_readers_looks_agents_up_before_taking_the_policy_lock(
         await real_lock(session, tenant_id=tenant_id)
         locked = True
 
-    async def find(anthropic: AsyncAnthropic, *, tenant_id: uuid.UUID, name: str) -> Any:
+    async def find(
+        anthropic: AsyncAnthropic, *, tenant_id: uuid.UUID, name: str, records: object = None
+    ) -> Any:
         if locked:
             lookups_under_lock.append(name)
         return await real_find(anthropic, tenant_id=tenant_id, name=name)
