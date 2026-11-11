@@ -26,7 +26,7 @@ from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.gemini_deployment import GeminiPlan
-from daimon.core.turn.prepare import admitted_session_scope
+from daimon.core.turn.prepare import CONTINUED, admitted_session_scope
 from daimon.core.turn.runtime_manifest import read_preparation_counterpart
 from daimon.core.turn.runtimes import build_channel_runtime, scope_channel_runtimes
 from mux.contracts.config import ConfigRevision
@@ -756,6 +756,7 @@ async def test_a_second_cancel_cannot_abandon_credential_revocation(monkeypatch)
         model_by_session={},
     )
     prepared = SimpleNamespace(
+        continuity=CONTINUED,
         admission=SimpleNamespace(
             observation=observation,
             account_id=None,
@@ -827,6 +828,7 @@ async def test_a_second_cancel_during_revocation_still_restores_the_callers_log_
         model_by_session={},
     )
     prepared = SimpleNamespace(
+        continuity=CONTINUED,
         admission=SimpleNamespace(
             observation=observation,
             account_id=None,
@@ -896,6 +898,7 @@ async def test_a_failing_revocation_still_restores_the_callers_log_fields(
         model_by_session={},
     )
     prepared = SimpleNamespace(
+        continuity=CONTINUED,
         admission=SimpleNamespace(
             observation=observation,
             account_id=None,
@@ -969,6 +972,7 @@ async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_i
         model_by_session={},
     )
     prepared = SimpleNamespace(
+        continuity=CONTINUED,
         admission=SimpleNamespace(
             observation=observation,
             account_id=None,
