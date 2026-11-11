@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import pytest
@@ -16,7 +16,8 @@ from daimon.core.config import DatabaseSettings, Settings
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role, SandboxPin
 from daimon.core.stores.routines import set_sandbox_tools
-from daimon.testing.factories import make_routine, make_tenant
+from daimon.core.stores.turn_origins import create_origin
+from daimon.testing.factories import make_account, make_routine, make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import PostgresDsn
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -85,3 +86,50 @@ async def test_web_fetch_when_routine_then_follows_its_built_in_tools(
     else:
         with pytest.raises(ToolError, match="off for this routine"):
             await check_web_fetch_allowed(_runtime(sessionmaker), auth, None)
+
+
+@pytest.mark.parametrize("leave", [False, True])
+async def test_web_fetch_when_nobody_attends_then_needs_the_turns_signed_leave(
+    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession], leave: bool
+) -> None:
+    """Unattended, host web_fetch follows the entry point's built-in policy (A-M2)."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    now = datetime.now(UTC)
+    origin = await create_origin(
+        db_session,
+        tenant_id=tenant.id,
+        account_id=account.id,
+        platform="discord",
+        parent_channel_id="channel-1",
+        thread_id="thread-1",
+        responder_ma_agent_id="agent_x",
+        responder_name="Researcher",
+        configuration_target_ma_agent_id=None,
+        configuration_target_name=None,
+        role=Role.USER,
+        expires_at=now + timedelta(hours=1),
+        now=now,
+        sender_foreign=False,
+        shared_channel=False,
+        attended=False,
+        chat_session_id="chat-1",
+    )
+    await db_session.commit()
+    auth = AuthIdentity(
+        account_id=account.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        chat_session_id="chat-1",
+        no_confirmation_surface=True,
+        host_builtins=leave,
+    )
+    if leave:
+        try:
+            await check_web_fetch_allowed(_runtime(sessionmaker), auth, str(origin.id))
+        except ToolError as exc:  # The place's own switch may still be off.
+            assert "nobody" not in str(exc), f"signed leave must pass the gate: {exc}"
+    else:
+        with pytest.raises(ToolError, match="nobody is in the conversation"):
+            await check_web_fetch_allowed(_runtime(sessionmaker), auth, str(origin.id))

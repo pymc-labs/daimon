@@ -439,6 +439,7 @@ async def mint_agent_mcp_token(
     hold: TurnHold | None = None,
     slack_turn_context_id: uuid.UUID | None = None,
     seal_ids: Collection[str] = (),
+    host_builtins: bool = False,
 ) -> str:
     """Mint a long-lived, revocable, agent-scoped MCP JWT.
 
@@ -482,7 +483,9 @@ async def mint_agent_mcp_token(
     does (`mint_chat_mcp_token`): a ``hold`` binds the row to the held channel
     under the held label and signs `HOLD_CLAIM`, and ``slack_turn_context_id`` is
     signed as its own claim, and ``seal_ids`` as `SEAL_CLAIM`: the server reads
-    sealed sessions inside those ids only. Nothing else may carry any of them.
+    sealed sessions inside those ids only. ``host_builtins`` signs
+    `HOST_BUILTINS_CLAIM`: an unattended turn may use host built-ins only with it.
+    Nothing else may carry any of them.
     """
     # Registered chat execution retains the ordinary chat surface. External
     # agent keys keep their existing restricted agent-chat surface. The signed
@@ -500,7 +503,7 @@ async def mint_agent_mcp_token(
         raise ValueError("a chat-execution or provider-turn credential is internal")
     assert (platform is None) == (channel_id is None), "a channel binding needs both"
     if (
-        hold is not None or slack_turn_context_id is not None or seal_ids
+        hold is not None or slack_turn_context_id is not None or seal_ids or host_builtins
     ) and surface != "provider_turn":
         raise ValueError("only a provider-turn credential carries turn flags")
     jti = jti or uuid.uuid4()
@@ -528,7 +531,7 @@ async def mint_agent_mcp_token(
         purpose=purpose,
         client=client,
     )
-    claims: dict[str, str | int | dict[str, str | bool] | list[str]] = {
+    claims: dict[str, str | int | bool | dict[str, str | bool] | list[str]] = {
         "sub": str(account_id),
         "chat_agent_id" if chat_execution else "agent_id": str(agent_id),
         "jti": str(jti),
@@ -540,6 +543,8 @@ async def mint_agent_mcp_token(
         claims["slack_turn_context_id"] = str(slack_turn_context_id)
     if seal_ids:
         claims[SEAL_CLAIM] = seal_claim(seal_ids)
+    if host_builtins:
+        claims[HOST_BUILTINS_CLAIM] = True
     return pyjwt.encode(claims, secret, algorithm="HS256")
 
 
@@ -571,6 +576,10 @@ def provider_hold_refusal(row: McpTokenRow, claim: object) -> str | None:
     return None
 
 
+#: A provider turn's signed leave to run host built-ins (web_fetch, memory) unattended:
+#: only where `ENTRY_POINT_POLICY` allows built-ins (`turn.run`).
+HOST_BUILTINS_CLAIM = "host_builtins"
+
 #: Mirrors `host_calls.CONFIRMED_CALL_TTL_S`; the verifier's own bound.
 CONFIRMED_CALL_MAX_TTL_S = 120
 
@@ -601,6 +610,8 @@ def registered_agent_claims_match(
         # Its turn's seals; the identity reader refuses a malformed value.
         if SEAL_CLAIM in claims:
             expected.add(SEAL_CLAIM)
+        if claims.get(HOST_BUILTINS_CLAIM) is True:
+            expected.add(HOST_BUILTINS_CLAIM)
     if allow_session_grant and chat_execution and isinstance(claims.get("chat_session_id"), str):
         expected.add("chat_session_id")
         if isinstance(claims.get("requester_account_id"), str):

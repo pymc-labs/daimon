@@ -45,6 +45,7 @@ from daimon.core.channel_backend import is_selfhosted_channel
 from daimon.core.config import Settings
 from daimon.core.host_memory import HOST_MEMORY_TAG, HOST_MEMORY_TOOLS
 from daimon.core.host_web_fetch import HOST_WEB_FETCH_TAG
+from daimon.core.mcp_auth import HOST_BUILTINS_CLAIM
 from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.operator_tokens import scope_tag
@@ -458,6 +459,12 @@ class IdentityMiddleware(Middleware):
             ),
             no_confirmation_surface=(
                 _token is not None and _token.claims.get("no_confirmation_surface") is True
+            ),
+            host_builtins=(
+                _token is not None
+                and agent_id is None
+                and not internal_claim
+                and _token.claims.get(HOST_BUILTINS_CLAIM) is True
             ),
             confirmed_call_id=(
                 signed_uuid("confirmed_call") if agent_id is None and not internal_claim else None

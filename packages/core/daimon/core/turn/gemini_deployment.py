@@ -537,9 +537,9 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
                 now=request.now(),
                 memory_read_only=origin_read_only(admission),
             )
-            if needs_turn_credential(admission):
-                # The pinned file cannot carry this turn's hold, seals or Slack context:
-                # once it is proven, the turn runs on its own minted credential.
+            if needs_turn_credential(admission) or unattended_turn():
+                # The pinned file cannot carry this turn's hold, seals, Slack context or
+                # built-in leave: once proven, the turn runs on its own minted credential.
                 template_mcp.catalogue = frozenset(plan.source_capabilities.mcp_tools)
                 token = await template_mcp.mint(own, agent_id=plan.source_agent_id)
             await verify_storage()
@@ -554,6 +554,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         TemplateMCPCredential,
         needs_turn_credential,
         origin_read_only,
+        unattended_turn,
     )
 
     template_mcp = TemplateMCPCredential(request, scope, label=NO_CONFIRMATION_LABEL)
@@ -676,9 +677,8 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         transport_factory=transport,
         read_agent_counterpart=read,
         materialize_root=materialize_root if plan.root_materialization else None,
-        end_of_turn=template_mcp.finalize
-        if shared is None and (mcp_template or needs_turn_credential(request.admission))
-        else None,
+        # Revokes whatever the turn minted; nothing when it ran on the pinned file.
+        end_of_turn=template_mcp.finalize if shared is None else None,
         journal=GeminiJournal(
             records,
             request.deps.state_store,

@@ -93,8 +93,10 @@ class AuthIdentity:
     no_confirmation_surface: bool = False
     # The one press-approved call this credential may run (`daimon.core.host_calls`).
     confirmed_call_id: uuid.UUID | None = None
-    # Who asked, when the credential's owner is not them (a shared turn); signed.
+    # Who asked in a shared thread; signed only on a shared thread's credential.
     requester_account_id: uuid.UUID | None = None
+    # A provider turn's signed leave to run host built-ins when nobody attends.
+    host_builtins: bool = False
     # The daimon tools a chat agent enables by name (`stores.agent_daimon_tools`);
     # None when its toolset enables every tool.
     daimon_tools: frozenset[str] | None = None

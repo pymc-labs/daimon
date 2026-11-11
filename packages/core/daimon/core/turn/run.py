@@ -1681,6 +1681,8 @@ async def run_prepared_turn_impl(
         scope: Scope | None = None,
     ) -> AsyncIterator[ToolConfirmation]:
         origin_id = current_origin_id.get()
+        # Host built-ins follow `ENTRY_POINT_POLICY` when nobody attends; set below.
+        host_builtins = [not unattended]
 
         @contextlib.asynccontextmanager
         async def origin_grant(lease: Lease | None = None) -> AsyncIterator[None]:
@@ -1688,6 +1690,7 @@ async def run_prepared_turn_impl(
                 hold=admission.hold,
                 slack_turn_context_id=admission.slack_turn_context_id,
                 seal_ids=admission.origin_seal_ids,
+                host_builtins=host_builtins[0],
             )
             with execution_origin(origin_id, flags):
                 if origin_id is None:
@@ -1905,6 +1908,7 @@ async def run_prepared_turn_impl(
                                 if watch_row is not None
                                 else unattended_entry_point(origin)
                             )
+                            host_builtins[0] = capability_policy(native_entry).allow_builtins
                             native_profile = revision.profile if revision is not None else "unknown"
                             native_gated = deps.settings is not None and deployment_on(
                                 deps.settings, "host_call_gate", platform

@@ -40,6 +40,8 @@ async def check_web_fetch_allowed(
     if origin_context_id is None:
         raise ToolError("Opening web pages needs a conversation.")
     origin = await require_turn_origin(runtime, auth, origin_context_id)
+    if not origin.attended and not auth.host_builtins:
+        raise ToolError("Opening web pages is off when nobody is in the conversation.")
     features = await resolve_features(
         runtime.session_factory,
         runtime.settings,

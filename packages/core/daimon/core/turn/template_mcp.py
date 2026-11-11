@@ -43,6 +43,21 @@ def needs_turn_credential(admission: Admission) -> bool:
     )
 
 
+def host_builtins_allowed() -> bool:
+    """Whether this turn's policy lets host built-ins run (outside a turn: no)."""
+    from daimon.core.turn_origin import current_execution_flags
+
+    flags = current_execution_flags.get()
+    return flags is not None and flags.host_builtins
+
+
+def unattended_turn() -> bool:
+    """An unattended turn: its own minted credential says whether built-ins may run."""
+    from daimon.core.turn.mutation_gate import unattended_execution
+
+    return unattended_execution.get()
+
+
 def origin_read_only(admission: Admission) -> bool | None:
     """The origin stamp a sealed or read-only turn's credential binds; None keeps it."""
     return True if admission.memory_read_only or admission.source_sealed else None
@@ -157,6 +172,7 @@ class TemplateMCPCredential:
                 hold=admission.hold,
                 slack_turn_context_id=admission.slack_turn_context_id,
                 seal_ids=admission.origin_seal_ids,
+                host_builtins=host_builtins_allowed(),
             )
         self._minted = token, token_jti(token)
         try:

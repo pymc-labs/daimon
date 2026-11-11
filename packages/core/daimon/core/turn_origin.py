@@ -71,6 +71,8 @@ class ExecutionFlags:
     hold: TurnHold | None = None
     slack_turn_context_id: uuid.UUID | None = None
     seal_ids: frozenset[str] = frozenset()
+    # Whether host built-ins (web_fetch, memory) may run when nobody attends.
+    host_builtins: bool = False
 
 
 current_execution_flags: ContextVar[ExecutionFlags | None] = ContextVar(

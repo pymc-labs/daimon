@@ -43,6 +43,9 @@ async def open_host_memory(
     ):
         raise ToolError("Memory is not available for this agent.")
     origin = await require_turn_origin(runtime, auth, origin_context_id)
+    if not origin.attended and not auth.host_builtins:
+        # Memory is a built-in on Claude too: off unattended unless policy allows it.
+        raise ToolError("Memory is off when nobody is in the conversation.")
     features = await resolve_features(
         runtime.session_factory,
         runtime.settings,
