@@ -31,7 +31,8 @@ def test_channels_of_leaves_out_a_deleted_channel_and_labels_the_rest() -> None:
     )
 
 
-def test_models_of_lists_allowed_providers_and_marks_fast_ones() -> None:
+def test_models_of_lists_offered_models_and_marks_fast_ones() -> None:
+    """Only models the core catalog offers are listed, once each, fast ones marked."""
     entries = [
         AgentModel(ModelRef(provider="anthropic", id="claude-opus-5-5"), "", 4.0, 20.0),
         AgentModel(ModelRef(provider="openai", id="gpt-6-astra"), "", 10.0, 50.0),
@@ -39,11 +40,11 @@ def test_models_of_lists_allowed_providers_and_marks_fast_ones() -> None:
     ]
     offered = models_of(
         entries,
-        providers=("anthropic", "openai"),
+        offered=[entries[0].model, entries[1].model],
         priced=("claude-opus-5-5", "claude-opus-5-5-fast"),
     )
     assert [(m.backend, m.id, m.label, m.fast) for m in offered] == [
         ("anthropic", "claude-opus-5-5", "Opus 5.5", True),
         ("openai", "gpt-6-astra", "GPT-6 Astra", False),
-    ], "only allowed providers, each model once, named as people say it"
+    ], "only offered models, each model once, named as people say it"
     assert (offered[1].in_usd, offered[1].out_usd) == (10.0, 50.0), "prices are numbers"

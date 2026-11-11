@@ -16,7 +16,7 @@ from daimon.core.constants import MODEL_DISPLAY_NAMES
 from daimon.core.defaults.metadata import strip_tenant_prefix
 from daimon.core.platform_names import UNNAMED_CHANNEL
 from daimon.core.tenant_summary import ChannelSummary
-from mux.contracts.ids import Provider
+from mux.contracts.ids import ModelRef, Provider
 from pydantic import BaseModel
 
 _FAST = "-fast"
@@ -33,9 +33,12 @@ class CatalogModel(BaseModel):
 
 
 def models_of(
-    entries: Sequence[AgentModel], *, providers: Collection[Provider], priced: Collection[str]
+    entries: Sequence[AgentModel], *, offered: Collection[ModelRef], priced: Collection[str]
 ) -> list[CatalogModel]:
-    """Every runnable model on a provider the workspace may use, in catalog order.
+    """Every priced model the workspace may run, in catalog order.
+
+    `offered` is the core catalog (`list_model_choices`): the one list every surface shares,
+    so a model one surface offers is offered by all.
 
     `priced` is every metered Anthropic id: a model with a `<id>-fast` row there is marked
     fast instead of being listed twice.
@@ -50,7 +53,7 @@ def models_of(
             fast=entry.model.id + _FAST in priced,
         )
         for entry in entries
-        if entry.model.provider in providers and not entry.model.id.endswith(_FAST)
+        if entry.model in offered and not entry.model.id.endswith(_FAST)
     ]
 
 

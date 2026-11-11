@@ -17,7 +17,13 @@ if TYPE_CHECKING:
     from daimon.core.turn.deps import TurnDeps
 
 
-def for_agent(deps: TurnDeps | None, *, account_id: uuid.UUID, subject: Subject) -> CaptureSource:
+def for_agent(
+    deps: TurnDeps | None,
+    *,
+    account_id: uuid.UUID,
+    subject: Subject,
+    external_user_id: str | None = None,
+) -> CaptureSource:
     """Capture an agent's own source for `account_id`; refused without turn machinery.
 
     `deps` None (an app that runs no turns) cannot read a source, so a switch there is
@@ -29,6 +35,8 @@ def for_agent(deps: TurnDeps | None, *, account_id: uuid.UUID, subject: Subject)
             raise AgentBackendRefused("source_unavailable")
         from daimon.core.turn.admission import capture_agent_source
 
-        return await capture_agent_source(deps, source, account_id=account_id, subject=subject)
+        return await capture_agent_source(
+            deps, source, account_id=account_id, subject=subject, external_user_id=external_user_id
+        )
 
     return capture

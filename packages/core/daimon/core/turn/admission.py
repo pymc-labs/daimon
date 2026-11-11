@@ -2660,11 +2660,13 @@ async def capture_agent_source(
     *,
     account_id: uuid.UUID,
     subject: Subject,
+    external_user_id: str | None = None,
 ) -> BackendAgent:
     """Capture the named agent's own source: the requester's tenant and account, no channel.
 
     The agent-scoped form of `capture_backend_source`, for settings that belong to the
-    agent wherever it answers (provider and model).
+    agent wherever it answers (provider and model). `external_user_id` names a requester
+    whose account holds no principal on the tenant's own platform (a web person).
     """
     return await capture_backend_source(
         deps,
@@ -2675,6 +2677,7 @@ async def capture_agent_source(
         is_dm=False,
         slack_turn_context_id=None,
         private_dm_id=None,
+        external_user_id=external_user_id,
         explicit_target_name=source.name,
     )
 

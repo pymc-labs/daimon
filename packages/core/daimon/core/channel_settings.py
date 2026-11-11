@@ -17,8 +17,18 @@ from typing import Literal
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import OPEN_RULE, TenantAccessPolicy
+from daimon.core.agent_model_names import AmbiguousModel
 from daimon.core.authz import Action, Place, authorize
-from daimon.core.channel_backend import BackendActor, clear_channel_backend, current_backend
+from daimon.core.backend_refusals import refusal_card
+from daimon.core.channel_backend import (
+    AgentBackendRefused,
+    BackendActor,
+    BackendUnsupported,
+    agent_selection,
+    clear_channel_backend,
+    current_backend,
+    set_channel_backend,
+)
 from daimon.core.channel_changes import (
     NEEDS_ADMIN,
     ChannelActor,
@@ -38,6 +48,7 @@ from daimon.core.channel_environments import (
 )
 from daimon.core.channel_skills import REFUSALS, add_skill_to_channel, may_set_channel_skills
 from daimon.core.errors import StaleChannelValue
+from daimon.core.models_catalog import catalog_model
 from daimon.core.permissions import channel_rule, with_channel_rule
 from daimon.core.rule_views import binding_refusal
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
@@ -52,12 +63,13 @@ from daimon.core.stores.access_policy import (
 )
 from daimon.core.stores.channel_changes import WORKSPACE_ID, record_change, write_workspace_default
 from daimon.core.stores.channel_skills import list_channel_skills, remove_channel_skill
-from daimon.core.stores.domain import ChannelSkillRow, FeatureTarget
+from daimon.core.stores.domain import ChannelSkillRow, FeatureTarget, TenantBackendPolicy
 from daimon.core.stores.feature_values import clear_feature_value, list_feature_values
 from daimon.core.stores.platform_names import list_channel_names
 from daimon.core.stores.scoped_config_read import get_scope
-from mux.contracts.config import ConfigRevision
+from mux.contracts.config import DEFAULT_BACKEND, BackendConfig, ConfigRevision
 from mux.contracts.ids import ChannelRef
+from mux.errors import InvalidConfig
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _MISSING_ENVIRONMENT = "No environment by that name. Nothing changed."
@@ -360,6 +372,68 @@ async def clear_provider_pin(
         await after_write(session, actor, True)
 
 
+async def set_provider_pin(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    actor: ChannelActor,
+    *,
+    platform: str,
+    channel_id: str,
+    value: str,
+    policy: TenantBackendPolicy,
+    expected_local: int | None,
+) -> ConfigRevision:
+    """Pin the channel to the catalog model `value` (`provider:id`); `expected_local` is the
+    pin the actor read, None for none. Every agent answers here on it until it is cleared.
+    """
+    require_channel_admin(actor)
+    if actor.account_id is None:
+        raise ChannelChangeRefused(NEEDS_ADMIN, kind="forbidden")
+    try:
+        model = catalog_model(value, tenant=policy)
+        selection = agent_selection(model.provider, model.id)
+    except (AgentBackendRefused, AmbiguousModel) as exc:
+        line = (
+            refusal_card(exc)[0]
+            if isinstance(exc, AgentBackendRefused)
+            else "That name fits several models. Pick one from the list."
+        )
+        raise ChannelChangeRefused(f"{line} Nothing was changed.", kind="invalid") from exc
+    if model.provider == DEFAULT_BACKEND:
+        raise ChannelChangeRefused(
+            "A pin names a model on another provider. Nothing was changed.", kind="invalid"
+        )
+    ref = ChannelRef(tenant_id=str(actor.tenant_id), platform=platform, channel_id=channel_id)
+    async with sessionmaker.begin() as session:
+        before = await provider_pin(
+            session, tenant_id=actor.tenant_id, platform=platform, channel_id=channel_id
+        )
+        if (before.local if before is not None else None) != expected_local:
+            raise StaleChannelValue("provider_pin", before.local if before is not None else None)
+        try:
+            written = await set_channel_backend(
+                session,
+                ref,
+                BackendConfig(
+                    backend=selection.backend, profile=selection.profile, model=selection.model
+                ),
+            )
+        except (BackendUnsupported, InvalidConfig) as exc:
+            raise ChannelChangeRefused(
+                "That model can't be pinned here. Nothing was changed.", kind="invalid"
+            ) from exc
+        await _record(
+            session,
+            actor,
+            platform,
+            channel_id,
+            "provider_pin",
+            pin_json(before),
+            pin_json(written),
+        )
+        await after_write(session, actor, True)
+    return written
+
+
 # ---------- Channel copy ----------
 
 
@@ -586,6 +660,7 @@ __all__ = [
     "ValueChange",
     "add_skill",
     "clear_provider_pin",
+    "set_provider_pin",
     "clear_thread_override",
     "list_thread_overrides",
     "pin_json",

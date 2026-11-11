@@ -313,6 +313,16 @@ def unsupported(changes: list[Change], *, a: AgentConfigDoc, b: AgentConfigDoc) 
     return None
 
 
+@dataclass(frozen=True)
+class SwitchConsent:
+    """What a person confirmed on a provider preview: the drops they accepted and the
+    digest and setting revision of the preview they saw."""
+
+    accepted_drops: tuple[str, ...]
+    digest: str
+    revision: int
+
+
 def provider_moved(a: AgentConfigDoc, b: AgentConfigDoc) -> bool:
     """Whether ``b`` runs on another provider, or another model off the default one. Pure.
 
@@ -625,12 +635,14 @@ async def check_provider_switch(
     expected_revision: int | None = None,
     accepted_drops: tuple[str, ...] | None = None,
     expected_preview_digest: str | None = None,
+    new_agent: bool = False,
 ) -> ProviderSwitch:
     """Refuse now what pointing the agent at ``provider`` would refuse, writing nothing.
 
     ``expected_revision`` is the provider setting the change was made against; a setting
     that moved since is stale. None takes the current one. A preview that declares drops
     needs them accepted exactly, as shown; ``expected_preview_digest`` is that preview's.
+    A ``new_agent`` holds nothing a switch could drop, so it accepts what is declared.
     """
     if deps.backends is None or not deps.backends.enabled:
         raise _provider_refusal(AgentBackendRefused("feature_disabled"), provider)
@@ -652,6 +664,8 @@ async def check_provider_switch(
         preview = await deps.backends.preview(source, backend, model)
         if not preview.allowed:
             raise AgentBackendRefused("backend_not_allowed")
+        if new_agent:
+            accepted_drops = preview.declared_drops
         if preview.declared_drops and accepted_drops is None:
             raise AgentBackendRefused("drops_required")
         if accepted_drops is not None and tuple(accepted_drops) != preview.declared_drops:
@@ -708,6 +722,7 @@ async def switch_provider(
     agent: BetaManagedAgentsAgent,
     provider: Provider,
     model_id: str,
+    new_agent: bool = False,
 ) -> None:
     """Point the agent at ``provider`` and its ``model_id``, as the chat switch does.
 
@@ -715,7 +730,7 @@ async def switch_provider(
     applies to new conversations. Refused with `AgentEditError` in the editor's words.
     """
     switch = await check_provider_switch(
-        deps, actor=actor, agent=agent, provider=provider, model_id=model_id
+        deps, actor=actor, agent=agent, provider=provider, model_id=model_id, new_agent=new_agent
     )
     await write_provider_switch(deps, switch)
 
@@ -1058,6 +1073,7 @@ async def _write(
     target: AgentConfigDoc,
     note: str | None,
     provider_revision: int,
+    consent: SwitchConsent | None = None,
 ) -> BetaManagedAgentsAgent:
     target = keep_helpers(base, with_hidden_places(base, target, is_admin=actor.subject.is_admin))
     changes = diff_config(base, target)
@@ -1086,7 +1102,9 @@ async def _write(
             agent=agent,
             provider=target.model.backend,
             model_id=target.model.id,
-            expected_revision=provider_revision,
+            expected_revision=provider_revision if consent is None else consent.revision,
+            accepted_drops=None if consent is None else consent.accepted_drops,
+            expected_preview_digest=None if consent is None else consent.digest,
         )
         if provider_moved(base, target)
         else None
@@ -1147,9 +1165,16 @@ async def _write(
 
 
 async def apply_draft(
-    deps: AgentChangeDeps, *, actor: AgentActor, ma_agent_id: str, note: str | None
+    deps: AgentChangeDeps,
+    *,
+    actor: AgentActor,
+    ma_agent_id: str,
+    note: str | None,
+    consent: SwitchConsent | None = None,
 ) -> BetaManagedAgentsAgent:
     """Write the actor's draft as the agent's next version; refused if it went stale.
+
+    A draft that moves the provider needs ``consent``: the preview the person confirmed.
 
     A draft is stale when the provider's version moved, and also when places or tool
     rules did, which move without a new version.
@@ -1176,6 +1201,7 @@ async def apply_draft(
                 target=AgentConfigDoc.model_validate(row.config),
                 note=(note or "").strip() or None,
                 provider_revision=_provider_revision(facts),
+                consent=consent,
             )
             await _drop_draft(deps, actor=actor, agent_id=agent.id)
             return written

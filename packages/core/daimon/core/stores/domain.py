@@ -1861,6 +1861,8 @@ class WebRefusalCard(BaseModel):
     title: str
     body: str
     help: str
+    # The one button the card offers an admin; None for everyone else.
+    action: Literal["switch_back_to_claude"] | None = None
 
 
 class WebCredentialCard(BaseModel):
