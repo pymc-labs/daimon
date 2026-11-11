@@ -47,6 +47,8 @@ from pydantic import BaseModel, JsonValue, TypeAdapter
 _INPUTS = TypeAdapter(list[dict[str, JsonValue]])
 _PAGE_BOUND = 50
 _BUFFER_BOUND = 1000
+# Usage pages read, newest first, before the root turn counts as missing (500 turns).
+_USAGE_PAGE_SIZE, _USAGE_PAGES = 10, 50
 
 
 class OpenAIPersistence(Protocol):
@@ -360,8 +362,8 @@ class OpenAITurnIO:
             return
         try:
             over = await guard.exceeded(self.replay_usage)
-        except (ProviderError, TurnConnectionLost, TimeoutError):
-            return  # an unreadable meter never ends a turn; the daily cap still holds
+        except (ProviderError, TurnConnectionLost, TimeoutError) as error:
+            over = guard.unread(error)
         if not over:
             return
         await self.interrupt(timeout_s=30.0)
@@ -512,12 +514,14 @@ class OpenAITurnIO:
             values: list[UsageObservation] = []
             cursor: str | None = None
             seen: set[str] = set()
-            for _ in range(5):
+            # Newest first, stopping at the root's one observation: a poll costs a page or
+            # two however long the thread is, not a read of every turn it ever had.
+            for _ in range(_USAGE_PAGES):
                 page = await _edge(
                     self._backend.usage.list(
                         self._scope,
                         self._session,
-                        page=PageRequest(cursor=cursor, order="desc", limit=100),
+                        page=PageRequest(cursor=cursor, order="desc", limit=_USAGE_PAGE_SIZE),
                     )
                 )
                 for observation in page.data:
@@ -525,7 +529,7 @@ class OpenAITurnIO:
                         raise ScopeViolation(self._session.id, "foreign OpenAI usage")
                     if observation.turn_id == self._root and observation.thread_id is None:
                         values.append(observation)
-                if not page.has_more:
+                if values or not page.has_more:
                     return tuple(values)
                 cursor = page.next_cursor
                 if not cursor or cursor in seen:
