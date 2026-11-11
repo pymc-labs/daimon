@@ -403,9 +403,10 @@ async def _capture_source_capabilities(
     from daimon.core.turn.session_skills import (
         attaches_session_skills,
         carried_skills,
+        fitting_skills,
+        latest_version,
         measure_skills,
-        skill_drop,
-        skill_fits,
+        skill_losses,
     )
     from mux.contracts.resources import SkillUpload, SkillUploadFile
     from mux.drivers.anthropic import (
@@ -830,7 +831,7 @@ async def _capture_source_capabilities(
             )
             if {item.source.id for item in inputs.skills} != {s.id for s in portable}:
                 raise ValueError("skill representation is incomplete")
-            unresolved = tuple(s for s in (*portable, *carried) if s.version in (None, "latest"))
+            unresolved = tuple(s for s in portable if s.version in (None, "latest"))
             latest: dict[str, str] = {}
             if unresolved:
                 # Grant reads only for ids captured from this actual source.
@@ -897,30 +898,36 @@ async def _capture_source_capabilities(
             await asyncio.gather(*(verify_skill(item) for item in inputs.skills))
             session_skills: tuple[SkillRef, ...] = ()
             if carried:
+
+                async def carried_pin(attached: SkillRef) -> SkillRef:
+                    if attached.version not in (None, "latest"):
+                        return SkillRef(id=attached.id, version=attached.version)
+                    try:
+                        version = await latest_version(request.deps.anthropic, scope, attached)
+                    except (AnthropicError, DaimonError, MuxError, ValueError) as error:
+                        # Left unmeasured below: a named loss of that skill alone.
+                        log.warning(
+                            "source_capture.skill_unresolved",
+                            skill_id=attached.id,
+                            error=type(error).__name__,
+                        )
+                        return SkillRef(id=attached.id, version=attached.version)
+                    return SkillRef(id=attached.id, version=version)
+
                 # Measured here, uploaded by the turn: a preview never writes to the provider.
-                pins = tuple(
-                    SkillRef(id=s.id, version=latest.get(s.id, s.version)) for s in carried
-                )
+                pins = tuple(await asyncio.gather(*(carried_pin(s) for s in carried)))
                 sizes = await measure_skills(
                     request.deps.sessionmaker,
                     request.deps.anthropic,
                     scope=scope,
                     tenant_id=source.tenant_id,
-                    pins=((p.id, str(p.version)) for p in pins),
-                )
-                session_skills = tuple(
-                    p for p in pins if skill_fits(profile, sizes[(p.id, str(p.version))])
-                )
-                template_losses = (
-                    *template_losses,
-                    *sorted(
-                        {
-                            skill_drop(sizes[(p.id, str(p.version))])
-                            for p in pins
-                            if p not in session_skills
-                        }
+                    pins=(
+                        (p.id, str(p.version)) for p in pins if p.version not in (None, "latest")
                     ),
                 )
+                # Unmeasured or over the limits: that skill alone is a named loss.
+                session_skills = fitting_skills(profile, pins, sizes)
+                template_losses = (*template_losses, *skill_losses(pins, sizes, session_skills))
             target = AgentSpec(
                 name=spec.name,
                 description=spec.description,

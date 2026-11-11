@@ -15,11 +15,13 @@ from mux.state.operations import request_digest
 SWITCH = "mcp_tool:daimon-mcp:request_agent_backend_switch"
 PUBLISH = "mcp_tool:daimon-mcp:publish_report"
 CARDED = ("describe_agent", "publish_report")
+GEMINI = "gemini-3.8-flash"
 
 
 def copy_for(
     model: str = "gpt-6-luna",
     *,
+    provider: str = "openai",
     drops: tuple[str, ...] = ("memory",),
     url: str = "https://a.invalid/mcp",
     allowed: tuple[str, ...] = ("describe_agent",),
@@ -28,7 +30,7 @@ def copy_for(
 ) -> AgentSpec:
     return AgentSpec(
         name="copy",
-        model=ModelRef(provider="openai", id=model),
+        model=ModelRef(provider=provider, id=model),
         system="Source.\n\nUnavailable capabilities: " + ", ".join(drops) + ".",
         tools=(ToolSpec(name="bash", kind="builtin"),),
         mcp_servers=(
@@ -55,9 +57,14 @@ def consent_for(target: AgentSpec) -> _BackendDropConsent:
     )
 
 
-def holds(consent: _BackendDropConsent, target: AgentSpec | None, model: str | None = None) -> bool:
+def holds(
+    consent: _BackendDropConsent,
+    target: AgentSpec | None,
+    model: str | None = None,
+    backend: str = "openai",
+) -> bool:
     return covers(
-        consent, target, source_system="Source.", backend="openai", model=model, picked=model
+        consent, target, source_system="Source.", backend=backend, model=model, picked=model
     )
 
 
@@ -189,3 +196,12 @@ def test_covers_a_template_that_attaches_the_skills_it_lost_whole() -> None:
 def test_a_skill_loss_the_owner_never_accepted_asks_again() -> None:
     today = copy_for(drops=("memory", "skill:huge"))
     assert not holds(consent_for(copy_for()), today, "gpt-6-luna"), "a new loss asks again"
+
+
+def test_a_switched_gemini_agent_keeps_its_consent_when_skills_attach() -> None:
+    """A Gemini agent confirmed with its skills lost whole is not asked again."""
+    gemini = {"model": GEMINI, "provider": "gemini"}
+    then = copy_for(**gemini, drops=("memory", "skills"))
+    today = copy_for(**gemini, drops=("memory", "skill:huge"))
+    assert holds(consent_for(then), today, GEMINI, "gemini"), "one skill is less than all"
+    assert holds(consent_for(then), copy_for(**gemini), GEMINI, "gemini"), "every skill attaches"

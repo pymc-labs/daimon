@@ -112,6 +112,8 @@ class SkillLimits(Contract):
     file_bytes: int = Field(gt=0)
     files: int = Field(gt=0)
     text_only: bool = False
+    combined_bytes: int | None = Field(default=None, gt=0)
+    """The bytes all of a session's skills may take together; None: no shared cap."""
 
     def fits(self, *, total_bytes: int, largest_file_bytes: int, files: int, text: bool) -> bool:
         return (

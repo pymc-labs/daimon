@@ -215,7 +215,9 @@ def _connection(selected):
 async def test_consent_keeps_daimon_tools_and_drops_only_what_gemini_lacks(template):
     _, quote, *_ = template
     assert "mcp" not in quote.declared_drops
-    assert {"memory", "skills"} <= set(quote.declared_drops)
+    assert "memory" in quote.declared_drops
+    # Its custom skills attach per session; only one past Gemini's limits is a named loss.
+    assert "skills" not in quote.declared_drops, quote.declared_drops
     # J6b: its execution tools map to code_execution; web search and fetch
     # (grounding, off) are each a named loss, never all of its tools.
     assert "tools" not in quote.declared_drops
@@ -401,6 +403,12 @@ async def test_a_real_turn_revokes_its_credential_however_it_ends(template, monk
             for body in sent
             for t in body.get("tools", [])
         ), "the credential travels only in the MCP server entry"
+        mounted = {
+            source["target"].split("/")[2]
+            for source in sent[0]["environment"].get("sources", [])
+            if source["target"].startswith(".agents/skills/")
+        }
+        assert mounted, "the template's custom skills mount in its first interaction"
 
 
 GATED = (

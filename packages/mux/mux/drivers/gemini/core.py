@@ -169,7 +169,12 @@ class Base:
             thinking_level=self._thinking_level,
         )
         if self._max_output_tokens is not None:
-            if self._native_agent is not None or spec.environment is not None or spec.resources:
+            if (
+                self._native_agent is not None
+                or spec.environment is not None
+                or spec.resources
+                or spec.skills
+            ):
                 refuse("model_interaction_resources")
             return request
         if self._native_agent is not None:
@@ -185,7 +190,10 @@ class Base:
             environment = compile_environment(
                 env.spec, files=inline_files(records, scope, self._account, env.spec.sources)
             )
-        mounted = skill_sources(records, scope, self._account, agent.spec.skills)
+        # A session's own skills (a template's copies) mount beside the agent's.
+        mounted = skill_sources(
+            records, scope, self._account, (*(agent.spec.skills or ()), *spec.skills)
+        )
         if mounted:
             configuration = object_value(environment)
             sources = configuration.get("sources", [])
@@ -740,9 +748,6 @@ class GeminiSessions(Base):
         self._check(scope, spec.agent, "agent")
         if spec.resources or spec.state_mode != "continue" or initial is not None:
             refuse("session_resources", "initial_input_or_fresh_state")
-        if spec.skills:
-            # Its skills mount through the agent's environment sources.
-            refuse("session_skills")
         ext = spec.extensions.get("gemini.session")
         if set(spec.extensions) != {"gemini.session"} or ext is None:
             refuse("gemini.session")

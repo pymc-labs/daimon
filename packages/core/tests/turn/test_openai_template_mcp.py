@@ -617,14 +617,41 @@ async def test_a_channels_skill_is_carried_and_one_over_the_limit_is_a_named_los
     openai = [r for r in source.representations if r.target.model.provider == "openai"]
     assert openai, "one per model the template grants"
     for represented in source.representations:
-        if represented not in openai:
-            # Gemini's own template still loses its skills whole (not yet carried).
-            assert "skills" in represented.unavailable_capabilities
-            continue
         carried = {skill.id for skill in represented.session_skills}
-        assert carried == {f"source-{s['skill_id']}" for s in CUSTOM} | {"skill_team"}
-        assert "skills" not in represented.unavailable_capabilities
-        assert "skill:skill-huge" in represented.unavailable_capabilities
+        losses = [d for d in represented.unavailable_capabilities if d.startswith("skill:")]
+        assert "skills" not in represented.unavailable_capabilities, "never lost whole"
+        assert "skill:skill-huge" in losses, "over every provider's limit: a named loss"
+        assert "skill_team" in carried, f"{represented.target.model.id} carries the channel's"
+        if represented in openai:
+            assert carried == {f"source-{s['skill_id']}" for s in CUSTOM} | {"skill_team"}
+        else:
+            # Gemini's shared inline budget may leave one out, but always by name.
+            assert len(carried) + len(losses) == len(CUSTOM) + 2, (carried, losses)
     from daimon.core.confirmation import drop_words
 
     assert drop_words(("memory", "skill:skill-huge")) == "its memory and its skill-huge skill"
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_skill_that_cannot_be_read_is_its_own_named_loss(template, consent_request):
+    """A failed download costs that skill alone, never the whole capture."""
+    from anthropic.types.beta import BetaManagedAgentsCustomSkill
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+    request, *_ = template
+    router = consent_request[5]
+    router.add(
+        "GET",
+        r"/v1/skills/skill_gone/versions",
+        lambda *_: httpx.Response(
+            404, json={"type": "error", "error": {"type": "not_found_error"}}
+        ),
+    )
+    gone = BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_gone", version="3")
+    request = replace(request, admission=replace(request.admission, channel_skills=(gone,)))
+    source = await capture_preparation_source(request, capability_preview=True)
+    assert source.representations, "the capture still represents the agent"
+    for represented in source.representations:
+        assert "skill:skill_gone" in represented.unavailable_capabilities, "named by its id"
+        assert "skills" not in represented.unavailable_capabilities, "the others still carry"
+        assert represented.session_skills, "the readable skills still attach"

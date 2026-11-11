@@ -9,13 +9,14 @@ it.
 from __future__ import annotations
 
 from mux.contracts.extensions import ExtensionRef
-from mux.contracts.profile import AccountingMode, Effort, Profile
+from mux.contracts.profile import AccountingMode, Effort, Profile, SkillLimits
 
 # Opt-in model: one attempt, never the Flash fallback chain.
 ARGON_MODEL = "gemini-4-argon"
 
 # The agent's thinking level; the neutral names match.
 _EFFORT: dict[Effort, str] = {"low": "low", "medium": "medium", "high": "high"}
+MIB = 1024 * 1024
 
 INLINE_REUSE = Profile(
     provider="gemini",
@@ -30,6 +31,10 @@ INLINE_REUSE = Profile(
     execution_tool="code_execution",
     mcp_policy_keys=("allowed_tools",),
     skill_digest="version",
+    # Inline mounts: UTF-8 text, 1 MiB a file, 2 MiB across the session.
+    skill_limits=SkillLimits(
+        total_bytes=2 * MIB, file_bytes=MIB, files=256, text_only=True, combined_bytes=2 * MIB
+    ),
     catalog_readback="verify",
     support={
         "neutral_catalog": "emulated",

@@ -137,7 +137,7 @@ class GeminiPlan(BaseModel):
         default=False, strict=True, exclude_if=lambda value: not value
     )
     # A template's capability: "mcp" represents the source's Daimon MCP toolset
-    # (its live catalogue) with a per-turn caller credential; skills stay dropped.
+    # (its live catalogue) with a per-turn caller credential; skills attach per session.
     template_capabilities: Literal["mcp"] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )

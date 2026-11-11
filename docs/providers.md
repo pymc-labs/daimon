@@ -25,7 +25,7 @@ in one conversation.
 | Spend limit for one turn | Yes | Daimon stops the turn | Holds only, no stop mid-turn | Not supported |
 | Routines | Yes | Yes | Yes | Not supported |
 | Workspace export and import | Yes | Not supported | Not supported | Not supported |
-| Skills | Full | Custom and agent skills, up to 28 MiB each | Default skills only | Seeded defaults only |
+| Skills | Full | Custom and agent skills, up to 28 MiB each | Custom and channel skills, text only, 2 MiB in all | Seeded defaults only |
 
 A backend that cannot meet a channel's requirements refuses the turn. Daimon
 never runs it on Anthropic in its place.

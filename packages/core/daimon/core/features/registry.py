@@ -374,9 +374,8 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         binds="session_identity",
         doc=(
             "The skills added to a channel. They need the read tool, so they are off wherever it "
-            "is. A conversation keeps what it started with until /new. Not on Gemini agents."
+            "is. A conversation keeps what it started with until /new."
         ),
-        backend_tiers={_GEMINI: ()},
         platforms=EVERY_PLATFORM,
         depends_on=("tool.read",),
         authority=Authority(DelegatedAction.SKILLS),

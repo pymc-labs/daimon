@@ -14,10 +14,12 @@ import io
 import re
 import uuid
 import zipfile
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import PurePosixPath
+from typing import TYPE_CHECKING
 
-from anthropic import AsyncAnthropic
+import structlog
+from anthropic import AnthropicError, AsyncAnthropic
 from daimon.core.defaults.loader import parse_skill_markdown
 from daimon.core.defaults.ma_index import download_skill_version
 from daimon.core.errors import DaimonError
@@ -34,8 +36,14 @@ from mux.contracts.ids import Scope, SkillRef
 from mux.contracts.ports import Skills
 from mux.contracts.profile import Profile
 from mux.contracts.resources import AgentSpec, SkillUpload, SkillUploadFile
+from mux.errors import MuxError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+if TYPE_CHECKING:
+    from daimon.core.session_snapshot import MaSkill
+    from daimon.core.turn.prepare import ProviderPreparationRequest
+
+log = structlog.get_logger(__name__)
 _DROP_NAME = re.compile(r"[A-Za-z0-9_.-]+")
 _MANIFEST_BYTES = 1024 * 1024
 
@@ -53,6 +61,41 @@ def carried_skills(spec: AgentSpec) -> tuple[SkillRef, ...]:
 
 def skill_drop(row: SkillSizeRow) -> str:
     return f"skill:{row.name if _DROP_NAME.fullmatch(row.name) else row.skill_id}"
+
+
+def fitting_skills(
+    profile: Profile, pins: Sequence[SkillRef], sizes: Mapping[tuple[str, str], SkillSizeRow]
+) -> tuple[SkillRef, ...]:
+    """The measured pins the profile installs, in order, together within `combined_bytes`."""
+    combined = profile.skill_limits.combined_bytes if profile.skill_limits else None
+    kept: list[SkillRef] = []
+    used = 0
+    for pin in pins:
+        row = sizes.get((pin.id, str(pin.version)))
+        if row is None or not skill_fits(profile, row):
+            continue
+        if combined is not None and used + row.total_bytes > combined:
+            continue
+        used += row.total_bytes
+        kept.append(pin)
+    return tuple(kept)
+
+
+def skill_losses(
+    pins: Sequence[SkillRef],
+    sizes: Mapping[tuple[str, str], SkillSizeRow],
+    kept: Sequence[SkillRef],
+) -> tuple[str, ...]:
+    """A named `skill:` loss for each pin left out; one never measured is named by its id."""
+    return tuple(
+        sorted(
+            {
+                skill_drop(row) if (row := sizes.get((p.id, str(p.version)))) else f"skill:{p.id}"
+                for p in pins
+                if p not in kept
+            }
+        )
+    )
 
 
 def skill_fits(profile: Profile, row: SkillSizeRow) -> bool:
@@ -132,18 +175,27 @@ async def measure_skills(
     tenant_id: uuid.UUID,
     pins: Iterable[tuple[str, str]],
 ) -> dict[tuple[str, str], SkillSizeRow]:
-    """Each `(skill_id, version)`'s size, downloading only versions never measured."""
+    """Each `(skill_id, version)`'s size, downloading only versions never measured.
+
+    A version that can't be read is absent from the result, never cached: it costs
+    only its own skill, and the next capture tries it again.
+    """
     wanted = tuple(dict.fromkeys(pins))
     async with sessionmaker() as db:
         known = await get_skill_sizes(db, tenant_id=tenant_id, pins=wanted)
 
-    async def measure(skill_id: str, version: str) -> SkillSizeRow:
-        data = await download_skill_version(
-            anthropic, skill_id=skill_id, version=version, scope=scope
-        )
+    async def measure(skill_id: str, version: str) -> SkillSizeRow | None:
+        try:
+            data = await download_skill_version(
+                anthropic, skill_id=skill_id, version=version, scope=scope
+            )
+        except (AnthropicError, DaimonError, MuxError) as error:
+            log.warning("skill_size.measure_failed", skill_id=skill_id, error=type(error).__name__)
+            return None
         return measure_archive(tenant_id, skill_id, version, data)
 
-    fresh = await asyncio.gather(*(measure(*pin) for pin in wanted if pin not in known))
+    measured = await asyncio.gather(*(measure(*pin) for pin in wanted if pin not in known))
+    fresh = [row for row in measured if row is not None]
     if fresh:
         async with sessionmaker.begin() as db:
             for row in fresh:
@@ -210,4 +262,106 @@ async def copy_skills(
                 )
         return SkillRef(id=row.copy_id, version=row.copy_version)
 
-    return tuple(await asyncio.gather(*(copy(pin) for pin in pins)))
+    # One at a time: a provider's local record store may take a single writer.
+    return tuple([await copy(pin) for pin in pins])
+
+
+async def latest_version(anthropic: AsyncAnthropic, scope: Scope, attached: SkillRef) -> str:
+    """The concrete current version of a skill attached at `latest`."""
+    from daimon.core.mux_backend import managed_agents
+    from daimon.core.mux_compat import legacy_call
+
+    # Grant reads only for this id: a scoped catalogue walk hides custom skills.
+    backend = managed_agents(anthropic, scope=scope, resources=frozenset({("skill", attached.id)}))
+    record = await legacy_call(backend.skills.retrieve(scope, attached.id))
+    pin = record.latest_version
+    if (
+        record.id != attached.id
+        or record.source != attached.source
+        or pin is None
+        or pin.id != attached.id
+        or pin.version in (None, "latest")
+    ):
+        raise ValueError("source skill has no concrete current version")
+    assert pin.version is not None
+    return pin.version
+
+
+async def channel_session_skills(
+    request: ProviderPreparationRequest, profile: Profile, scope: Scope
+) -> tuple[SkillRef, ...]:
+    """The channel's custom skills a channel-origin template installs.
+
+    It has no capture, so they are measured here; one over the profile's limits,
+    or unreadable, is left out and logged.
+    """
+    deps, skills = request.deps, request.admission.channel_skills
+    custom = tuple(s for s in skills if s.type == "custom")
+    if not custom or not attaches_session_skills(profile):
+        return ()
+
+    async def pin(skill: MaSkill) -> SkillRef | None:
+        attached = SkillRef(id=skill.skill_id, version=skill.version, source="custom")
+        try:
+            version = (
+                await latest_version(deps.anthropic, scope, attached)
+                if skill.version in (None, "latest")
+                else skill.version
+            )
+        except (AnthropicError, DaimonError, MuxError, ValueError) as error:
+            log.warning(
+                "session_skills.unresolved", skill_id=skill.skill_id, error=type(error).__name__
+            )
+            return None
+        return SkillRef(id=skill.skill_id, version=version)
+
+    pins = tuple(p for p in await asyncio.gather(*(pin(s) for s in custom)) if p is not None)
+    sizes = await measure_skills(
+        deps.sessionmaker,
+        deps.anthropic,
+        scope=scope,
+        tenant_id=request.tenant_id,
+        pins=((p.id, str(p.version)) for p in pins),
+    )
+    kept = fitting_skills(profile, pins, sizes)
+    if left := skill_losses(pins, sizes, kept):
+        log.warning("session_skills.left_out", tenant_id=str(request.tenant_id), skills=list(left))
+    return kept
+
+
+async def turn_session_skills(
+    request: ProviderPreparationRequest,
+    skills: Callable[[], Skills],
+    *,
+    profile: Profile,
+    scope: Scope,
+    account_scope_id: str,
+) -> tuple[SkillRef, ...]:
+    """The provider's copies of the custom and channel skills a template's session carries.
+
+    An agent-origin template carries what its confirmed capture measured; a
+    channel-origin one, the channel's own skills measured now. `skills` is
+    called only when there is something to copy: no credential is read before.
+    """
+    from daimon.core.turn.runtime_manifest import represented_source
+
+    if request.admission.backend_revision_origin == "agent":
+        source = request.source
+        represented = (
+            represented_source(source, request.target_spec) if source is not None else None
+        )
+        pins = represented.session_skills if represented is not None else ()
+    else:
+        pins = await channel_session_skills(request, profile, scope)
+    if not pins:
+        return ()
+    return await copy_skills(
+        request.deps.sessionmaker,
+        request.deps.anthropic,
+        skills(),
+        scope=scope,
+        tenant_id=request.tenant_id,
+        provider=profile.provider,
+        account_scope_id=account_scope_id,
+        pins=pins,
+    )

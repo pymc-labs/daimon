@@ -37,6 +37,7 @@ from daimon.core.turn.replace_binding import (
     recorded_facts,
     replace_binding,
 )
+from daimon.core.turn.session_skills import turn_session_skills
 from daimon.core.usage_recording import record_provider_usage
 from mux.contracts.config import ConfigRevision
 from mux.contracts.extensions import ExtensionConfig
@@ -44,6 +45,7 @@ from mux.contracts.ids import ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding, SessionSpec
 from mux.contracts.usage import UsageObservation
 from mux.errors import BindingConflict, ScopeViolation, UnsupportedCapability
+from mux.profiles.gemini import INLINE_REUSE
 from mux.state.lease import Slot
 from mux.state.store import ERA_REF, StateStore, adopted_identity
 
@@ -87,13 +89,10 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     # Mounts and transfer require a separate complete deployment adapter. Never
     # silently drop those obligations in this slice. Seals ride the turn credential
     # (`template_mcp`); host memory reads the turn's read-only posture itself.
-    if (
-        admission.memory_read_only
-        and (
-            target is None
-            or ("memory" not in target.declared_drops and not host_memory_represented(target))
-        )
-    ) or (admission.channel_skills and (target is None or "skills" not in target.declared_drops)):
+    if admission.memory_read_only and (
+        target is None
+        or ("memory" not in target.declared_drops and not host_memory_represented(target))
+    ):
         raise UnsupportedCapability(("gemini_host_deployment_policy",), PROFILE)
     if not isinstance(runtime.journal, GeminiJournal) or not isinstance(
         runtime.usage_store, GeminiUsageRuntime
@@ -113,6 +112,8 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         cap=request.deps.gemini_daily_model_cap_usd,
     )
     deployment = journal.deployment
+    # A template's or a channel's own deployment installs channel skills per session.
+    installs_skills = admission.backend_revision_origin != "agent"
     if admission.backend_revision_origin == "agent":
         from daimon.core.turn.gemini_deployment import load_gemini_deployment
         from daimon.core.turn.runtime_manifest import root_counterpart_catalog_id
@@ -120,6 +121,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         if request.counterpart is None or request.source is None or target is None:
             raise AdmissionDenied(reason="backend_unsupported")
         plan = load_gemini_deployment(request)
+        installs_skills = plan.root_materialization
         expected = plan.deployment(request)
         checked, ref = request.counterpart, request.counterpart.agent.ref
         if (
@@ -160,6 +162,12 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         or request.deps.state_store is not journal.state_store
     ):
         raise UnsupportedCapability(("gemini_pinned_deployment",), PROFILE)
+    if admission.channel_skills and (
+        deployment.max_output_tokens is not None
+        if installs_skills
+        else target is None or "skills" not in target.declared_drops
+    ):
+        raise UnsupportedCapability(("gemini_host_deployment_policy",), PROFILE)
     thread = ThreadRef(channel=config.channel, thread_id=request.thread_id)
     slot = Slot(thread=thread, account_id=None if shared is not None else scope.account_id)
     store = journal.state_store
@@ -209,6 +217,18 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             if deployment.max_output_tokens is None
             else None
         )
+        skills = (
+            await turn_session_skills(
+                request,
+                lambda: backend.skills,
+                profile=INLINE_REUSE,
+                scope=scope,
+                # Copies belong to one account here, not to the whole project.
+                account_scope_id=f"{deployment.account_scope_id}:{scope.account_id}",
+            )
+            if installs_skills
+            else ()
+        )
         session = await backend.sessions.create(
             scope,
             SessionSpec(
@@ -216,6 +236,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
                 agent_revision=agent.revision,
                 environment=environment.ref if environment is not None else None,
                 config_revision=config.local,
+                skills=skills,
                 extensions={
                     "gemini.session": ExtensionConfig(
                         namespace="gemini.session",
