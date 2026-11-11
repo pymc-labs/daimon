@@ -867,8 +867,6 @@
   "packages/testing/tests/test_ma_transport.py": 18.48,
   "packages/testing/tests/test_mcp_fixture_server.py": 0.16,
   "packages/testing/tests/test_mux_leg_known.py": 2.82,
-  "packages/testing/tests/test_native_footer_cost.py": 6.12,
-  "packages/testing/tests/test_native_footer_cost_providers.py": 18.24,
   "packages/testing/tests/test_native_platform_footer.py": 19.93,
   "packages/testing/tests/test_native_platform_footer_providers.py": 2.44,
   "packages/testing/tests/test_native_skill_delete.py": 4.06,
@@ -1089,7 +1087,6 @@
   "packages/adapters/discord/tests/test_provider_event_tap.py": 0.04,
   "packages/adapters/discord/tests/test_provider_surface.py": 0.06,
   "packages/adapters/discord/tests/test_qa_auto_approve.py": 0.12,
-  "packages/adapters/discord/tests/test_queue_card.py": 0.0,
   "packages/adapters/discord/tests/test_require_manage_guild.py": 0.01,
   "packages/adapters/discord/tests/test_routine_delivery.py": 2.97,
   "packages/adapters/discord/tests/test_runtime.py": 0.0,
@@ -1114,7 +1111,6 @@
   "packages/adapters/discord/tests/test_tool_confirmation.py": 0.75,
   "packages/adapters/discord/tests/test_turn_card_recovery.py": 0.33,
   "packages/adapters/discord/tests/test_typed_stop.py": 0.18,
-  "packages/adapters/discord/tests/test_unmentioned_reply_hint.py": 0.23,
   "packages/adapters/discord/tests/test_views.py": 0.04,
   "packages/adapters/discord/tests/test_vision.py": 0.11,
   "packages/adapters/discord/tests/test_watch_access.py": 108.74,
@@ -1126,8 +1122,7 @@
   "packages/adapters/discord/tests/test_wizard.py": 0.52,
   "packages/adapters/discord/tests/test_wizard_render.py": 0.01,
   "packages/adapters/discord/tests/test_wizard_submit.py": 0.29,
-  "packages/adapters/discord/tests/test_worker_owner.py": 13.9,
-  "packages/adapters/discord/tests/test_writers_none_notice.py": 5.2
+  "packages/adapters/discord/tests/test_worker_owner.py": 13.9
  },
  "discord-mux": {
   "packages/adapters/discord/tests/agent_setup/test_add_skill.py": 2.53,
@@ -1261,7 +1256,6 @@
   "packages/adapters/discord/tests/test_provider_event_tap.py": 0.04,
   "packages/adapters/discord/tests/test_provider_surface.py": 0.07,
   "packages/adapters/discord/tests/test_qa_auto_approve.py": 0.11,
-  "packages/adapters/discord/tests/test_queue_card.py": 0.0,
   "packages/adapters/discord/tests/test_require_manage_guild.py": 0.01,
   "packages/adapters/discord/tests/test_routine_delivery.py": 3.42,
   "packages/adapters/discord/tests/test_runtime.py": 0.0,
@@ -1286,7 +1280,6 @@
   "packages/adapters/discord/tests/test_tool_confirmation.py": 0.8,
   "packages/adapters/discord/tests/test_turn_card_recovery.py": 0.37,
   "packages/adapters/discord/tests/test_typed_stop.py": 0.22,
-  "packages/adapters/discord/tests/test_unmentioned_reply_hint.py": 0.26,
   "packages/adapters/discord/tests/test_views.py": 0.04,
   "packages/adapters/discord/tests/test_vision.py": 0.11,
   "packages/adapters/discord/tests/test_watch_access.py": 143.22,
@@ -1298,8 +1291,7 @@
   "packages/adapters/discord/tests/test_wizard.py": 0.54,
   "packages/adapters/discord/tests/test_wizard_render.py": 0.01,
   "packages/adapters/discord/tests/test_wizard_submit.py": 0.33,
-  "packages/adapters/discord/tests/test_worker_owner.py": 16.54,
-  "packages/adapters/discord/tests/test_writers_none_notice.py": 4.64
+  "packages/adapters/discord/tests/test_worker_owner.py": 16.54
  },
  "mcp": {
   "packages/adapters/mcp/tests/artifacts/test_azure_blob.py": 0.01,

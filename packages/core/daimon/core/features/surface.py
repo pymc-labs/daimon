@@ -9,7 +9,7 @@ Lock, and ``@<agent>`` after the agent tier's choice (the agent it applies to).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, cast
 
@@ -44,6 +44,19 @@ _UNAVAILABLE: Final[Mapping[str, str]] = {
     "requires": "Not set up",
 }
 LOCK_FLAG: Final = "lock"
+PAGE_MARK: Final = "~"
+"""Splits a token from the pages its screen sat on: `~<list page>[~<agent picker page>]`."""
+
+
+def listed(views: Iterable[FeatureView]) -> tuple[FeatureView, ...]:
+    """The views a chat or agent listing shows: a feature that is not available here and has
+    no saved value at any tier is left out, as the web does (`Settings.tsx`), so nobody is
+    offered a row they cannot use. The one place that rule lives; every listing calls it."""
+    return tuple(
+        view
+        for view in views
+        if view.resolved.unavailable is None or any(t.value != DEFAULT for t in view.tiers)
+    )
 
 
 def value_text(spec: FeatureSpec, value: str, locked: bool = False) -> str:
@@ -75,16 +88,7 @@ def own_text(spec: FeatureSpec, own: TierSetting) -> str:
     return value_text(spec, own.value, own.locked)
 
 
-OVERRIDES_OFF: Final = "Saved, but it has no effect yet. Ask an admin to allow approval changes."
-
-
-def _ignored(spec: FeatureSpec, overrides_active: bool) -> str:
-    return f" {OVERRIDES_OFF}" if spec.key == "approvals" and not overrides_active else ""
-
-
-def change_note(
-    change: FeatureChange, platform: str | None, *, overrides_active: bool = True
-) -> str:
+def change_note(change: FeatureChange, platform: str | None) -> str:
     """What a change saved, and what is in effect when another tier still decides."""
     spec, after, resolved = change.view.spec, change.after, change.view.resolved
     where_ = where(change.tier, platform)
@@ -94,14 +98,37 @@ def change_note(
         note = f"{spec.name} is now {value_text(spec, after.value, after.locked)} for {where_}."
     if resolved.tier != change.tier:
         note += f" In effect: {source_text(spec, resolved, platform)}."
-    return note + _ignored(spec, overrides_active)
+    return note
+
+
+def with_pages(raw: str, page: int = 0, picker: int = 0) -> str:
+    """`raw` followed by the pages it was pressed on, none when both are the first."""
+    if picker:
+        return f"{raw}{PAGE_MARK}{page}{PAGE_MARK}{picker}"
+    return f"{raw}{PAGE_MARK}{page}" if page else raw
+
+
+def split_pages(raw: str) -> tuple[str, list[int]] | None:
+    """``(token, pages)`` with the pages as numbers, or None when a mark is malformed."""
+    base, *marks = raw.split(PAGE_MARK)
+    pages = [int(m) if m.isascii() and m.isdecimal() and len(m) <= 4 else None for m in marks]
+    if len(pages) > 2 or None in pages:
+        return None
+    return base, [n or 0 for n in pages]
 
 
 def choice(
-    key: str, tier: Tier, value: str, *, locked: bool = False, agent: str | None = None
+    key: str,
+    tier: Tier,
+    value: str,
+    *,
+    locked: bool = False,
+    agent: str | None = None,
+    page: int = 0,
+    picker: int = 0,
 ) -> str:
     raw = f"{key}:{tier}:{value}" + (f":{LOCK_FLAG}" if locked else "")
-    return f"{raw}@{agent}" if agent else raw
+    return with_pages(f"{raw}@{agent}" if agent else raw, page, picker)
 
 
 @dataclass(frozen=True)
@@ -111,12 +138,16 @@ class Choice:
     value: str
     locked: bool = False
     agent: str | None = None
+    page: int = 0
+    """The list page the choice was pressed on, so the screen after it keeps that place."""
+    picker: int = 0
 
 
 def parse_choice(raw: object) -> Choice | None:
     """A pressed choice, or None when it names no registered key, tier or value."""
-    if not isinstance(raw, str):
+    if not isinstance(raw, str) or (split := split_pages(raw)) is None:
         return None
+    raw, (page, picker) = split[0], (split[1] + [0, 0])[:2]
     body, _, agent = raw.partition("@")
     parts = body.split(":")
     if len(parts) not in (3, 4) or (agent == "" and "@" in raw):
@@ -131,11 +162,18 @@ def parse_choice(raw: object) -> Choice | None:
         return None
     if agent and tier != "agent":
         return None
-    return Choice(key, cast(Tier, tier), value, bool(flag), agent or None)
+    return Choice(key, cast(Tier, tier), value, bool(flag), agent or None, page, picker)
 
 
 def tier_options(
-    spec: FeatureSpec, tier: Tier, own: TierSetting, *, can_lock: bool, agent: str | None = None
+    spec: FeatureSpec,
+    tier: Tier,
+    own: TierSetting,
+    *,
+    can_lock: bool,
+    agent: str | None = None,
+    page: int = 0,
+    picker: int = 0,
 ) -> tuple[tuple[str, str], ...]:
     """``(choice, label)`` for each other value this tier can take: the values, Default, and
     an admin's Lock of each. The agent's own built-in tool is never locked."""
@@ -143,10 +181,18 @@ def tier_options(
     options: list[tuple[str, str]] = []
     for value in (*spec.values, DEFAULT):
         if (TierSetting(tier, value)).text != own.text:
-            options.append((choice(spec.key, tier, value, agent=agent), spec.label(value)))
+            options.append(
+                (
+                    choice(spec.key, tier, value, agent=agent, page=page, picker=picker),
+                    spec.label(value),
+                )
+            )
     if can_lock and not builtin and tier in LOCKABLE and not spec.authority.native:
         options += [
-            (choice(spec.key, tier, value, locked=True, agent=agent), value_text(spec, value, True))
+            (
+                choice(spec.key, tier, value, locked=True, agent=agent, page=page, picker=picker),
+                value_text(spec, value, True),
+            )
             for value in spec.values
             if TierSetting(tier, value, True).text != own.text
         ]
@@ -182,9 +228,7 @@ def feature_schema() -> list[dict[str, Any]]:
     ]
 
 
-def view_json(
-    view: FeatureView, platform: str | None, *, overrides_active: bool = True
-) -> dict[str, Any]:
+def view_json(view: FeatureView, platform: str | None) -> dict[str, Any]:
     """One feature at a place for a surface that draws its own controls: each tier's own
     value (with its `expected` text), what is in effect, where from, and why it cannot apply."""
     resolved = view.resolved
@@ -199,6 +243,5 @@ def view_json(
         "source": resolved.tier,
         "locked": resolved.locked,
         "unavailable": resolved.unavailable,
-        "summary": source_text(view.spec, resolved, platform)
-        + _ignored(view.spec, overrides_active),
+        "summary": source_text(view.spec, resolved, platform),
     }

@@ -27,7 +27,7 @@ from daimon.core.features.service import (
     read_features,
 )
 from daimon.core.features.snapshot import FeaturePlace
-from daimon.core.features.surface import change_note, view_json
+from daimon.core.features.surface import change_note, listed, view_json
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -97,10 +97,7 @@ async def _get_settings_impl(
 ) -> SettingsResult:
     place = await _place(runtime, auth, origin_context_id, change=False)
     views = await read_features(runtime.session_factory, runtime.settings, place)
-    active = runtime.settings.tool_safety.gate_overrides_active
-    return SettingsResult(
-        [view_json(view, place.platform, overrides_active=active) for view in views]
-    )
+    return SettingsResult([view_json(view, place.platform) for view in listed(views)])
 
 
 async def _change_setting_impl(
@@ -144,10 +141,8 @@ async def _change_setting_impl(
         )
     except (ChannelChangeRefused, StaleChannelValue) as exc:
         raise ToolError(str(exc)) from exc
-    active = runtime.settings.tool_safety.gate_overrides_active
     return SettingChanged(
-        view_json(change.view, place.platform, overrides_active=active),
-        change_note(change, place.platform, overrides_active=active),
+        view_json(change.view, place.platform), change_note(change, place.platform)
     )
 
 
@@ -156,7 +151,7 @@ def register_scope_settings_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def get_settings(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, origin_context_id: str
     ) -> SettingsResult:
-        """Report this conversation's settings (every registered feature).
+        """Report this conversation's settings (features set up here or with a saved value).
 
         Each lists its own value at the workspace, agent, channel and thread levels of where
         you are, what is in effect, which level decided it (``source``: ``default``,

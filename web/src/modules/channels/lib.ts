@@ -249,7 +249,6 @@ export const SETTING_NAMES = {
   approvals: "Approvals", participation: "Thread participation", progress_plans: "Progress plans", cost_footer: "Cost footer",
 } as const
 export const APPROVAL_VALUE: Record<ApprovalMode, string> = { on: "Ask", off: "Allow writes" }
-export const OVERRIDES_OFF = "Saved but ignored until the operator enables approval overrides."
 export const APPROVALS_NEED_CHAT_ADMIN = "Only a chat admin signed in with their chat account can change this."
 
 export const SWITCH_OPTIONS = (Object.keys(SWITCH_VALUE) as SwitchMode[]).map((value) => ({ value, label: SWITCH_VALUE[value] }))

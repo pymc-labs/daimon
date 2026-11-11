@@ -1939,11 +1939,7 @@ def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> Non
 def _approval_gate_for(
     deps: TurnDeps, policy: TenantAccessPolicy, grant: AdmissionGrant
 ) -> ApprovalGate | None:
-    if (
-        grant.is_dm
-        or grant.platform is None
-        or not (deps.tool_safety.enabled and deps.tool_safety.allow_gate_overrides)
-    ):
+    if grant.is_dm or grant.platform is None or not deps.tool_safety.enabled:
         return None
     gate = resolve_approval_gate(
         policy, platform=grant.platform, channel_id=grant.channel_id, thread_id=grant.thread_id
@@ -1954,12 +1950,7 @@ def _approval_gate_for(
 async def refresh_approval_gate(deps: TurnDeps, admission: Admission) -> ApprovalGate | None:
     """Read the effective gate for this admitted tenant and actual origin, uncached."""
     grant = admission.grant
-    if (
-        grant is None
-        or grant.platform is None
-        or grant.is_dm
-        or not (deps.tool_safety.enabled and deps.tool_safety.allow_gate_overrides)
-    ):
+    if grant is None or grant.platform is None or grant.is_dm or not deps.tool_safety.enabled:
         return None
     async with deps.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=grant.tenant_id)

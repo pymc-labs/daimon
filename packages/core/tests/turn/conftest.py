@@ -7,7 +7,6 @@ Only the shapes the reducer tests actually need.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -73,7 +72,6 @@ from anthropic.types.beta.sessions.beta_managed_agents_user_custom_tool_result_e
 from anthropic.types.beta.sessions.beta_managed_agents_user_tool_confirmation_event import (
     BetaManagedAgentsUserToolConfirmationEvent,
 )
-from daimon.core.turn.status_log import status_log_override
 
 _T = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -272,17 +270,3 @@ def make_overloaded_error(*, message: str = "overloaded") -> BetaManagedAgentsMo
 def native_budget():
     """Imported worker fixtures retain ordinary behavior unless explicitly budgeted."""
     return None
-
-
-@pytest.fixture(autouse=True)
-def _status_log_off() -> Iterator[None]:
-    """Pin `turn.status_log` off, so the environment cannot change what a test sees."""
-    with status_log_override(False):
-        yield
-
-
-@pytest.fixture
-def status_log_on(_status_log_off: None) -> Iterator[None]:
-    """Run a test with `turn.status_log` on; every other test runs with it off."""
-    with status_log_override(True):
-        yield

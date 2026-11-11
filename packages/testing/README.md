@@ -577,14 +577,13 @@ is PENDING; partial collector controls never certify C18 or a live provider.
 
 ## Opt-in product QA settings
 
-`QAProductProfile("opt-in-product").flags` declares exactly five settings: core
-`mcp.require_routine_destination`, `discord.credential_form_expiry`,
-`discord.writers_none_notice`, `discord.tenant_cap_waiting_card` and
-`turn.native_footer_cost`. Applying explicit copies combines settings in the same
-section without consulting credentials or constructing settings. Missing product
-declarations refuse with `ProductProfileUnavailable`; the report remains PENDING.
-The default profile keeps all five disabled. An application receipt supplies no
-source, native-send, card, accounting or user-visible outcome evidence.
+`QAProductProfile("opt-in-product").flags` declares exactly two settings: core
+`mcp.require_routine_destination` and `discord.credential_form_expiry`. Applying
+explicit copies combines settings in the same section without consulting credentials
+or constructing settings. Missing product declarations refuse with
+`ProductProfileUnavailable`; the report remains PENDING. The default profile keeps
+both disabled. An application receipt supplies no source, native-send, card,
+accounting or user-visible outcome evidence.
 
 The explicit `python -m daimon.testing.a7_anthropic --mode live` and
 `python -m daimon.testing.f2_anthropic --mode live` entries require exact signed
@@ -826,16 +825,11 @@ host accounting. These proofs report the observed native cost omission as FAIL,
 with no PASS promotion or claim about live rates, spend or source ingress.
 
 
-The opt-in product profile includes `turn.native_footer_cost`; default reports
-never include `PASS under opt-in profile` in default counts. Native footer tests
-record normalized usage during actual SDK/host execution, use the existing
-bounded final usage walk, capture real Discord/Slack/Teams posts and independently
+Native billing tests record normalized usage during actual SDK/host execution, use the
+existing bounded final usage walk, capture real Discord/Slack/Teams posts and independently
 query the owned ledger/outbox. Complete controlled usage and prices prove host
 arithmetic only; they do not certify live spend or source ingress. Missing
-inventory, rates, infrastructure or settlement remains pending in accounting;
-a complete posted capture without the frozen required dollar field is an
-executed failure. Other unavailable opt-in declarations still refuse the full
-product profile; a D11 component control does not certify those other factories.
+inventory, rates, infrastructure or settlement remains pending in accounting.
 
 Tests replaying signed financial envelopes or dated rate fixtures must pin the
 clock to the fixture's validity window. The Anthropic live-entry tests use a

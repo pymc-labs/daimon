@@ -1169,10 +1169,9 @@ async def test_busy_native_root_queues_then_continues_same_actual_session(
         await harness.close()
 
 
-@pytest.mark.parametrize("queue_card", [False, True], ids=["default", "opt-in"])
 @pytest.mark.parametrize("backend", ["anthropic", "openai", "gemini"])
 async def test_real_cap_admin_three_admissions_wait_then_release(
-    owned: OwnedIngress, backend: Provider, queue_card: bool
+    owned: OwnedIngress, backend: Provider
 ) -> None:
     from daimon.testing.admin_bindings import AdminBindings
     from daimon.testing.discord_ingress import DiscordConcurrentDriver
@@ -1181,7 +1180,6 @@ async def test_real_cap_admin_three_admissions_wait_then_release(
         pytest.skip("PENDING: explicit owned alternate-provider native capture binding")
     discord_settings = owned.runtime.settings.discord
     assert discord_settings is not None
-    discord_settings.tenant_cap_waiting_card = queue_card
     clock = InterleavingClock()
     harness = await start(owned, backend, utc_clock=clock.utc)
     wire = BusyWire(owned, ["C1", "C2", "C3"])
@@ -1243,9 +1241,7 @@ async def test_real_cap_admin_three_admissions_wait_then_release(
                 re.search(r"(?i)queued|in line|waiting for (a )?(free )?slot|busy", text)
                 is not None
             )
-            assert visible_queue is queue_card, (
-                "actual tenant-cap waiting card must match its profile"
-            )
+            assert not visible_queue, "the tenant-cap waiting card carries no queue wording"
             third_posts = [
                 p
                 for p in waiting.ingress.posts
@@ -1267,17 +1263,6 @@ async def test_real_cap_admin_three_admissions_wait_then_release(
             assert one.completed.is_set() and not two.completed.is_set()
             assert three.session_id not in {one.session_id, two.session_id}
             assert released.ingress.queue_depth == 0 and released.ingress.queue_in_flight == 2
-            if queue_card:
-                cleared = [
-                    e
-                    for e in released.ingress.posts
-                    if e.message.channel_id == messages[2]["id"] and e.operation == "edit"
-                ]
-                assert (
-                    cleared and cleared[0].message.message_id == third_posts[0].message.message_id
-                )
-                assert "Working on it…" in cleared[0].request_json
-                assert "Queued" not in cleared[0].request_json
             two.release.set()
             three.release.set()
             await asyncio.wait_for(harness.wait(), 30)
@@ -1296,14 +1281,9 @@ async def test_real_cap_admin_three_admissions_wait_then_release(
             + json.dumps(
                 {
                     "backend": backend,
-                    "profile_flag": {"core.discord.tenant_cap_waiting_card": queue_card},
-                    "queue_copy": "PASS under opt-in profile" if queue_card else "FAIL",
+                    "queue_copy": "FAIL",
                     "whole_cell": "PENDING",
-                    "reason": (
-                        "OPT_IN_ACTUAL_WAITING_CARD_QUEUE_COPY_NATIVE_RECIPE_UNBOUND"
-                        if queue_card
-                        else "ACTUAL_WAITING_CARD_HAS_NO_QUEUE_COPY"
-                    ),
+                    "reason": "ACTUAL_WAITING_CARD_HAS_NO_QUEUE_COPY",
                     "setup": setup.model_dump(mode="json"),
                     "roots": [
                         {
@@ -1330,16 +1310,6 @@ async def test_real_cap_admin_three_admissions_wait_then_release(
         )
         assert restore.status == "executed" and restore.observations["turn_cap"] is None
         await admin.close()
-
-
-async def test_real_cap_queue_render_witness_rejects_missing_product_hook(
-    owned: OwnedIngress, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(bot_module, "tenant_slot_waiter", lambda queue, tenant: lambda: False)
-    with pytest.raises(
-        AssertionError, match="actual tenant-cap waiting card must match its profile"
-    ):
-        await test_real_cap_admin_three_admissions_wait_then_release(owned, "anthropic", True)
 
 
 @pytest.mark.parametrize("mutation", ["thread_enqueue_dropped", "tenant_cap_ignored"])

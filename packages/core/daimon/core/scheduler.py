@@ -17,6 +17,7 @@ from daimon.core.stores.lead_intake import configured_routines, routine_executio
 from daimon.core.stores.routines import (
     advance_stale,
     claim_due_fireable,
+    release_claimed_slot,
     skip_slots_during_fire,
 )
 from daimon.core.turn.outcomes import TurnObservation
@@ -100,6 +101,15 @@ async def _record_fire_error(
         log.exception("record_result(error) failed", routine_id=str(row.id))
 
 
+async def _release_slot(sm: async_sessionmaker[AsyncSession], row: RoutineRow) -> None:
+    """Give the claimed slot back, so the next tick fires it (within the catch-up window)."""
+    try:
+        async with asyncio.timeout(1), sm() as s, s.begin():
+            await release_claimed_slot(s, row)
+    except Exception:
+        log.exception("release_claimed_slot failed", routine_id=str(row.id))
+
+
 async def run_one_tick(
     *,
     now: datetime,
@@ -172,6 +182,7 @@ async def run_one_tick(
         )
         rid = generate_request_id()
         structlog.contextvars.bind_contextvars(rid=rid, tenant_id=str(row.tenant_id))
+        unreadable = False
         try:
             async with sem:
                 try:
@@ -179,13 +190,19 @@ async def run_one_tick(
                     routines = await place_feature_or_none(sm, None, place, "routines")
                     if routines is None or not routines.on:
                         # Off here, or unreadable: the schedule does not run this tick.
-                        reason = "routines_turned_off" if routines else "feature_read_failed"
+                        # Unreadable is not Off: the owner sees why, and the slot is given
+                        # back below so the next tick tries again, as a watch's poll does.
+                        unreadable = routines is None
+                        reason = "feature_read_failed" if unreadable else "routines_turned_off"
                         await _record_fire_error(sm, row, reason, None)
                         return
                     if (row.tenant_id, row.id) in intake_bindings:
                         intake = await place_feature_or_none(sm, None, place, "lead_intake")
                         if intake is None or not intake.on:
-                            reason = "lead_intake_turned_off" if intake else "feature_read_failed"
+                            unreadable = intake is None
+                            reason = (
+                                "feature_read_failed" if unreadable else "lead_intake_turned_off"
+                            )
                             await _record_fire_error(sm, row, reason, None)
                             return
                     with observation.activate():
@@ -233,6 +250,9 @@ async def run_one_tick(
             except Exception:
                 log.exception("scheduler.completion_skip_failed", routine_id=str(row.id))
             finally:
+                if unreadable:
+                    # After the skip, which would otherwise pass over the restored slot.
+                    await _release_slot(sm, row)
                 structlog.contextvars.unbind_contextvars("rid", "tenant_id")
 
     # Pitfall 2: spawn each fire as its own task so asyncio.create_task copies the

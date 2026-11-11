@@ -32,7 +32,7 @@ from daimon.core.stores.domain import WebPersonRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.testing.turn_router import AGENT_ID, build_turn_router
 from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME
-from sqlalchemy import event, text
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .chat_support import (
@@ -73,8 +73,8 @@ _ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
     ("GET", "/api/admin/audit", None),
     ("GET", "/api/admin/feedback", None),
     ("GET", "/api/admin/settings", None),
-    ("PATCH", "/api/admin/settings", {"modules": {"agents": False}}),
-    ("PATCH", "/api/admin/settings", {"plain_text_mentions": True}),
+    ("PATCH", "/api/admin/settings", {"default_agent": AGENT_ID}),
+    ("PATCH", "/api/admin/settings", {"invokers": {"everyone": True}}),
     ("PATCH", "/api/admin/settings", {"providers": "default"}),
 ]
 
@@ -473,32 +473,49 @@ async def test_an_agent_kept_to_a_channel_cannot_be_opened_on_the_web(
     assert await admin.trail(db_session_factory) == []
 
 
-async def test_settings_are_read_and_changed_with_an_audit_row(
+async def test_settings_are_read_without_switches_that_are_features(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Web modules, direct messages, read-only DM memory and typed mentions are set on the
+    feature list only; the settings page neither lists nor accepts them."""
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+        before = (await admin.client.get("/api/admin/settings")).json()
+        refused = [
+            await admin.client.patch("/api/admin/settings", json=body)
+            for body in (
+                {"modules": {"agents": False}},
+                {"dm_enabled": True},
+                {"dm_memory_read_only": True},
+                {"plain_text_mentions": True},
+            )
+        ]
+        features = (await admin.client.get("/api/features")).json()["features"]
+
+    assert set(before) == {"default_agent", "access", "providers"}, before
+    assert set(before["access"]) == {"people", "others"}, before["access"]
+    assert before["default_agent"] == AGENT_ID, "the workspace default is offered"
+    assert [r.status_code for r in refused] == [422] * 4, "a removed field is refused, not ignored"
+    assert await admin.trail(db_session_factory) == [], "a stale switch changes nothing"
+    shown = {f["key"] for f in features}
+    assert {"web.agents", "dm_memory_read_only"} <= shown, "the feature list holds the switches"
+
+
+async def test_a_web_module_is_turned_off_on_the_feature_list(
     web_client: WebClientFactory,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
     async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
-        before = (await admin.client.get("/api/admin/settings")).json()
-        changed = await admin.client.patch(
-            "/api/admin/settings", json={"modules": {"agents": False}}
+        changed = await admin.client.put(
+            "/api/features", json={"key": "web.agents", "tier": "workspace", "value": "off"}
         )
         admin.as_member()
         me = (await admin.client.get("/api/me")).json()
 
-    assert set(before) == {"modules", "default_agent", "access", "providers"}, before
-    assert before["modules"] == {
-        "chat": True,
-        "agents": True,
-        "channels": True,
-        "routines": True,
-        "credits": True,
-        "integrations": True,
-    }
-    assert before["default_agent"] == AGENT_ID, "the workspace default is offered"
-    assert changed.json()["modules"]["agents"] is False, changed.text
+    assert changed.status_code == 200, changed.text
     assert "agents" not in me["modules"], "a module turned off is gone for the workspace"
-    assert await admin.trail(db_session_factory) == [("Changed setting", "Modules", "Agents off")]
 
 
 async def test_access_settings_start_open_and_name_what_the_workspace_has(
@@ -509,44 +526,26 @@ async def test_access_settings_start_open_and_name_what_the_workspace_has(
     async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         got = (await admin.client.get("/api/admin/settings")).json()
 
-    assert got["access"] == {
-        "people": None,
-        "others": 0,
-        "dm_enabled": False,
-        "dm_memory_read_only": False,
-        "plain_text_mentions": False,
-    }
+    assert got["access"] == {"people": None, "others": 0}
     assert "anthropic" in got["providers"]["allowed"]
     assert {"id": "anthropic", "label": "Anthropic"} in got["providers"]["offered"]
 
 
-async def test_access_settings_change_one_by_one_and_leave_an_audit_row_each(
+async def test_who_can_use_the_agents_changes_with_an_audit_row_each(
     web_client: WebClientFactory,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
     async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         url = "/api/admin/settings"
-        await admin.client.patch(url, json={"dm_enabled": True})
-        await admin.client.patch(url, json={"dm_memory_read_only": True})
-        await admin.client.patch(url, json={"plain_text_mentions": True})
         limited = await admin.client.patch(
             url, json={"invokers": {"people": [str(admin.member.id)]}}
         )
         opened = await admin.client.patch(url, json={"invokers": {"everyone": True}})
 
     assert limited.json()["access"]["people"] == [{"id": str(admin.member.id), "name": "Mia"}]
-    assert opened.json()["access"] == {
-        "people": None,
-        "others": 0,
-        "dm_enabled": True,
-        "dm_memory_read_only": True,
-        "plain_text_mentions": True,
-    }
+    assert opened.json()["access"] == {"people": None, "others": 0}
     assert await admin.trail(db_session_factory) == [
-        ("Changed setting", "Direct messages", "On"),
-        ("Changed setting", "Read-only memory in direct messages", "On"),
-        ("Changed setting", "Typed mentions", "On"),
         ("Changed setting", "Who can use the agents", "1 people"),
         ("Changed setting", "Who can use the agents", "Everyone"),
     ]
@@ -559,35 +558,14 @@ async def test_a_bad_access_change_is_refused_whole(
 ) -> None:
     async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         url = "/api/admin/settings"
-        nobody = await admin.client.patch(
-            url, json={"dm_enabled": True, "invokers": {"people": []}}
-        )
+        nobody = await admin.client.patch(url, json={"invokers": {"people": []}})
         stranger = await admin.client.patch(url, json={"invokers": {"people": [str(uuid.uuid4())]}})
         after = (await admin.client.get(url)).json()
 
     assert (nobody.status_code, stranger.status_code) == (422, 422)
     assert "at least one" in nobody.json()["detail"]
-    assert after["access"]["dm_enabled"] is False, "nothing in a refused change is kept"
+    assert after["access"]["people"] is None, "nothing in a refused change is kept"
     assert await admin.trail(db_session_factory) == []
-
-
-async def test_settings_a_chat_platform_lacks_are_hidden_and_refused(
-    web_client: WebClientFactory,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    tmp_path: Path,
-) -> None:
-    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
-        async with db_session_factory.begin() as db:
-            await db.execute(
-                text("UPDATE tenants SET platform = 'teams' WHERE id = :id"),
-                {"id": admin.ws.tenant_id},
-            )
-        got = (await admin.client.get("/api/admin/settings")).json()["access"]
-        refused = await admin.client.patch("/api/admin/settings", json={"dm_enabled": True})
-
-    assert (got["dm_enabled"], got["dm_memory_read_only"]) == (None, None)
-    assert got["plain_text_mentions"] is False, "typed mentions work on Teams"
-    assert refused.status_code == 422
 
 
 async def test_providers_are_set_through_the_allowlist_service_and_audited_twice(

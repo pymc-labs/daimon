@@ -19,13 +19,16 @@ from cryptography.fernet import Fernet
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.config import (
     AnthropicSettings,
+    ComputeSettings,
     CryptoSettings,
     DatabaseSettings,
     DiscordSettings,
     GeminiSettings,
     GithubAppSettings,
     McpSettings,
+    MicrosoftAccountsSettings,
     NotebookSettings,
+    ReportHostSettings,
     Settings,
     SlackSettings,
 )
@@ -188,10 +191,26 @@ def _make_app(
             discord=DiscordSettings(bot_token=SecretStr("test-bot-token")),
             slack=SlackSettings(signing_secret=SecretStr("test"), app_token=SecretStr("xapp-test")),
             github_app=GithubAppSettings(app_slug="test-app"),
-            crypto=CryptoSettings(keys=crypto_keys),
+            crypto=CryptoSettings(keys=crypto_keys or (SecretStr(Fernet.generate_key().decode()),)),
             gemini=GeminiSettings(api_key=SecretStr("gemini-test")),
             notebook=NotebookSettings(
                 host_url=HttpUrl("http://notebook.test:8001"), admin_secret=SecretStr("test")
+            ),
+            # Search ranks only the tools a deployment offers, so set up every integration:
+            # a ranking case then measures the whole catalogue, not a thinner one.
+            report_host=ReportHostSettings(
+                host_url=HttpUrl("http://report.test:8002"), admin_secret=SecretStr("test")
+            ),
+            compute=ComputeSettings(
+                enabled=True,
+                deployment_id="search-test",
+                api_token=SecretStr("fly-test"),
+                org_slug="search-test",
+            ),
+            microsoft_accounts=MicrosoftAccountsSettings(
+                client_id="app-1",
+                client_secret=SecretStr("app-secret"),
+                tenant_id="00000000-0000-4000-8000-0000000000aa",
             ),
         ),
         sessionmaker=sessionmaker,

@@ -26,7 +26,7 @@ from daimon.core.turn.posture import PolicyApproval
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-ON = ToolSafetyPolicy(enabled=True, allow_gate_overrides=True)
+ON = ToolSafetyPolicy(enabled=True)
 OFF = ApprovalGate("off", "thread:123", "admin-1")
 TRUSTED = frozenset({"daimon-mcp"})
 WRITE = ToolCall(tool_use_id="t1", server_name="third-party", tool_name="create_issue")
@@ -141,20 +141,6 @@ async def test_only_off_bypasses_card(value: Approvals) -> None:
             requester_platform_user_id="requester",
             confirm=card,
             approval_gate_for=AsyncMock(return_value=ApprovalGate(value, "server", "admin")),
-            server_urls={"third-party": "https://third.example/mcp"},
-        )(WRITE)
-    ).allow
-    card.assert_awaited_once()
-
-
-async def test_operator_disabled_ignores_stored_off() -> None:
-    card = AsyncMock(return_value="denied")
-    assert not (
-        await interactive_decider(
-            ToolSafetyPolicy(enabled=True),
-            requester_platform_user_id="requester",
-            confirm=card,
-            approval_gate_for=AsyncMock(return_value=OFF),
             server_urls={"third-party": "https://third.example/mcp"},
         )(WRITE)
     ).allow

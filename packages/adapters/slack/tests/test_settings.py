@@ -22,6 +22,15 @@ SCREEN = PanelScreen(
 )  # fmt: skip
 
 
+PAGED = PanelScreen(
+    "Progress plans",
+    ("In effect: On.",),
+    (PanelSelect("Change for an agent, page 2 of 3", (PanelOption("open:chat:progress_plans@a1~1", "Alpha"),)),),
+    PanelOption("open:chat", "Back"),
+    (PanelOption("open:chat:progress_plans", "Previous"), PanelOption("open:chat:progress_plans~2", "Next")),
+)  # fmt: skip
+
+
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     client = MagicMock()
@@ -55,6 +64,21 @@ def test_a_screen_is_a_select_per_control_and_a_back_button() -> None:
     refused = PanelScreen("X", ("a",), notice="Ask a workspace admin.", ok=False)
     (card,) = module.screen_fields(refused)["attachments"]
     assert card["color"] == ERROR_COLOR
+
+
+def test_a_long_list_adds_previous_and_next_with_their_own_ids() -> None:
+    """Buttons in one block need distinct action ids; each is still a settings press."""
+    blocks = module.build_settings_blocks(PAGED)
+    (row,) = [b for b in blocks if b.get("block_id") == "settings_back"]
+    buttons = row["elements"]
+    assert [b["text"]["text"] for b in buttons] == ["Back", "Previous", "Next"]
+    assert [b["value"] for b in buttons] == [
+        "open:chat", "open:chat:progress_plans", "open:chat:progress_plans~2",
+    ]  # fmt: skip
+    ids = [b["action_id"] for b in buttons]
+    assert len(set(ids)) == len(ids), "ids are unique in a block"
+    assert all(module.is_settings_action(i) for i in ids)
+    assert not module.is_settings_action("settings_changed") and not module.is_settings_action("x")
 
 
 async def test_the_panel_is_ephemeral_at_the_channel_with_no_thread_level(

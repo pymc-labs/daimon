@@ -49,7 +49,6 @@ from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.cost_footer import cost_footer_shown
-from daimon.core.native_footer_cost import native_footer_text
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.outbound.opt_out import tag_opt_outs
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
@@ -66,7 +65,6 @@ from daimon.core.turn.state import (
     final_answer_texts,
     join_messages,
 )
-from daimon.core.turn.status_log import status_log_enabled
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.usage_totals import ProviderUsageTotals
 from mux.contracts.events import Event
@@ -401,7 +399,6 @@ class DiscordTurnLifecycle(OutputGate):
         budget_channel_id: str | None = None,
         on_initial_progress: Callable[[InitialProgressReceipt], None] | None = None,
         alert_webhook_url: SecretStr | None = None,
-        waiting_for_tenant_slot: Callable[[], bool] | None = None,
         thread_stopped: Callable[[], bool] | None = None,
     ) -> None:
         # Once the turn's thread is gone or closed, nothing more is written:
@@ -425,8 +422,6 @@ class DiscordTurnLifecycle(OutputGate):
         self._budget_channel_id = budget_channel_id
         self._on_initial_progress = on_initial_progress
         self._alert_webhook_url = alert_webhook_url
-        self._waiting_for_tenant_slot = waiting_for_tenant_slot
-        self._queue_card_shown = False
         self._edit = self.guarded_output(edit)
         self._urgent_edit = self.guarded_output(urgent_edit) if urgent_edit is not None else None
         self._delete = delete
@@ -588,24 +583,6 @@ class DiscordTurnLifecycle(OutputGate):
         if self._unprompted:
             return
         await self._maybe_flush(initial=True)
-
-    async def on_slot_started(self) -> None:
-        """Clear opted-in queue wording on the existing card after the real wait."""
-        if not self._queue_card_shown or self._terminal or self._message_ref is None:
-            return
-        self._waiting_for_tenant_slot = None
-        now = self._clock()
-        try:
-            await self._edit_message(
-                self._message_ref, embeds=self._build_embeds(now), view=self._cancel_view
-            )
-        except Exception:
-            # Cosmetic wording must not prevent an admitted turn from running.
-            # The ordinary render/terminal path will try this same card again.
-            log.info("turn.queue_card_clear_failed", exc_info=True)
-            return
-        self._last_flush = now
-        self._queue_card_shown = False
 
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
         # Cheap local tap per the hardened TurnLifecycle contract:
@@ -953,9 +930,6 @@ class DiscordTurnLifecycle(OutputGate):
     def _build_embeds(self, now: float) -> list[discord.Embed]:
         """Render the one status embed: headline, the last few draft lines, plan and tool lines."""
         embed = build_discord_embed(to_embed_data(self._state, now=now))
-        if self._waiting_for_tenant_slot is not None and self._waiting_for_tenant_slot():
-            embed.title = "Queued — waiting for a free slot…"
-            self._queue_card_shown = True
         return [embed]
 
     async def _maybe_flush(self, *, initial: bool = False) -> None:
@@ -1098,9 +1072,8 @@ class DiscordTurnLifecycle(OutputGate):
         """
         t = state.usage_totals
         if self._provider_draft is not None or isinstance(t, ProviderUsageTotals):
-            # Only an opted-in, authorized host attempt supplies a complete
-            # native cost. Compatibility counters never become an MA meter.
-            self._state = dataclasses.replace(self._state, cost_str=native_footer_text(t))
+            # Compatibility counters never become an MA meter: no cost shown.
+            self._state = dataclasses.replace(self._state, cost_str=None)
             return
         cost = cost_of_totals(
             state.usage_totals,
@@ -1239,14 +1212,7 @@ class DiscordTurnLifecycle(OutputGate):
 
     def _final_response(self, state: TurnState) -> str:
         messages = final_answer_texts(state.content)
-        if status_log_enabled():
-            # Compare like with like: the final messages joined, against the
-            # last sealed run, which was joined the same way.
-            text = join_messages(_without_adjacent_repeats(messages, None))
-            if text.strip() == self._last_sealed_text:
-                text = ""
-        else:
-            text = join_messages(_without_adjacent_repeats(messages, self._last_sealed_text))
+        text = join_messages(_without_adjacent_repeats(messages, self._last_sealed_text))
         if _pure_tool_markup(text):
             log.warning("turn.final_tool_markup_suppressed", turn_id=str(self._turn_id))
             self._tool_markup_only = not self._unprompted

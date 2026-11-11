@@ -291,17 +291,22 @@ def vote_actions() -> list[Action]:
     ]
 
 
-def controls_card(summary: str | None, *, ask_human: bool) -> MessageActivityInput:
+def controls_card(
+    summary: str | None, *, ask_human: bool, votes: bool = True
+) -> MessageActivityInput | None:
     """Posted just below the answer: its summary line, 👍/👎 and Ask a human.
 
     A click names this message (`replyToId`), so a vote or request links to
     it, the answer's next message, and a request is made once per answer.
-    With the footer hidden (`summary` None) only the buttons are left.
+    With the footer hidden (`summary` None) only the buttons are left; with `votes` off
+    (`message_feedback`) and nothing else to show there is no card.
     """
-    actions = [*vote_actions(), *([ask_human_action()] if ask_human else [])]
-    elements: list[CardElement] = [ActionSet(actions=actions)]
+    actions = [*(vote_actions() if votes else []), *([ask_human_action()] if ask_human else [])]
+    elements: list[CardElement] = [ActionSet(actions=actions)] if actions else []
     if summary:
         elements.insert(0, _summary_line(summary))
+    if not elements:
+        return None
     return _card(elements, fallback=summary or CONTROLS_FALLBACK)
 
 

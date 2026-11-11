@@ -276,6 +276,109 @@ async def test_a_queued_job_waits_while_long_jobs_is_off_for_its_workspace(db_en
     assert len(rows) == 1
 
 
+async def test_queued_jobs_that_are_off_do_not_starve_newer_ones(db_engine, db_clean):
+    """More Off jobs than one claim holds must not keep a newer job from launching."""
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    job = await seed(sm)
+    async with sm.begin() as db:
+        for number in range(25):
+            await store.register(
+                db,
+                job.model_copy(
+                    update={
+                        "id": uuid.uuid4(),
+                        "tool_use_id": f"off_{number}",
+                        "created_at": NOW - timedelta(hours=2, minutes=number),
+                    }
+                ),
+                ceilings=LIMITS,
+            )
+        newer = await store.register(
+            db,
+            job.model_copy(
+                update={"id": uuid.uuid4(), "agent_id": "agent_b", "tool_use_id": "newer"}
+            ),
+            ceilings=LIMITS,
+        )
+        await set_feature_value(
+            db,
+            tenant_id=job.tenant_id,
+            target=FeatureTarget("agent", agent_id="agent_a"),
+            key="long_jobs",
+            value="off",
+            set_by=None,
+            surface="chat",
+        )
+    async with sm.begin() as db:
+        rows = await store.claim(db, tenant_id=job.tenant_id, owner="e", now=NOW, ceilings=LIMITS)
+    assert [row.id for row in rows] == [newer.id], "the Off jobs wait; the newer job launches"
+
+
+async def test_one_claim_reads_each_place_once_and_stops_at_a_full_tenant(
+    db_engine, db_clean, monkeypatch: pytest.MonkeyPatch
+):
+    """A full tenant stops the queue scan, and each place's feature is read once per claim."""
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    job = await seed(sm)
+    reads: list[FeaturePlace] = []
+    real = store.feature_in_or_none
+
+    async def counted(session, settings, place, key):
+        reads.append(place)
+        return await real(session, settings, place, key)
+
+    monkeypatch.setattr(store, "feature_in_or_none", counted)
+    ceilings = LongJobsSettings(per_tenant_running=2, per_owner_running=2)
+    async with sm.begin() as db:
+        for number in range(6):
+            await store.register(
+                db,
+                job.model_copy(
+                    update={
+                        "id": uuid.uuid4(),
+                        "tool_use_id": f"queued_{number}",
+                        "created_at": NOW - timedelta(minutes=number),
+                    }
+                ),
+                ceilings=LIMITS,
+            )
+    async with sm.begin() as db:
+        rows = await store.claim(db, tenant_id=job.tenant_id, owner="e", now=NOW, ceilings=ceilings)
+    assert len(rows) == 2, "the tenant cap admits two of the six queued jobs"
+    assert len(reads) == 1, f"one place is read once for the whole claim, not per job: {reads}"
+    async with sm.begin() as db:
+        again = await store.claim(
+            db, tenant_id=job.tenant_id, owner="e", now=NOW, ceilings=ceilings
+        )
+    assert again == [], "the running jobs hold their leases and the tenant is full"
+
+
+@pytest.mark.parametrize(
+    ("key", "value"), [("long_jobs_max_usd", "0"), ("long_jobs_max_deadline", "0.5")]
+)
+async def test_a_limit_that_cannot_be_used_is_refused_up_front_and_fails_a_job_cleanly(
+    db_session, monkeypatch: pytest.MonkeyPatch, key: str, value: str
+):
+    from types import SimpleNamespace
+
+    from daimon.core.features.registry import FEATURES, parse_deployment
+
+    with pytest.raises(ValueError, match=key):
+        parse_deployment(key, value)
+    assert not FEATURES[key].accepts("-1", "deployment"), "negative stays refused"
+    tenant = await make_tenant(db_session)
+    real = store.feature_in
+
+    async def unusable(session, settings, place, asked):
+        if asked == key:
+            return SimpleNamespace(value=value, on=True)
+        return await real(session, settings, place, asked)
+
+    monkeypatch.setattr(store, "feature_in", unusable)
+    with pytest.raises(StoreError, match="cannot be used"):
+        await store.get_policy(db_session, place=FeaturePlace(tenant.id, "discord"), settings=None)
+
+
 async def test_a_queued_job_waits_while_long_jobs_cannot_be_read(
     db_engine, db_clean, monkeypatch: pytest.MonkeyPatch
 ):

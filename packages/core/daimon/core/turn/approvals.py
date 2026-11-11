@@ -648,7 +648,6 @@ def interactive_decider(
         protected_name = gate_protected_tool(call.tool_name)
         if (
             policy.enabled
-            and policy.allow_gate_overrides
             and not protected_name
             and approval_gate_for is not None
             and call.server_name in (server_urls or {})

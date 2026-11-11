@@ -74,9 +74,13 @@ def settings_card(screen: PanelScreen, place: FeaturePlace) -> AdaptiveCard:
         ]
         for start in range(0, len(buttons), _BUTTONS_PER_ROW):
             body.append(ActionSet(actions=buttons[start : start + _BUTTONS_PER_ROW]))
-    if screen.back is not None:
-        back = button(VERB, screen.back.label, screen.back.value, channel=channel, thread=thread)
-        body.append(ActionSet(actions=[back]))
+    options = [*([screen.back] if screen.back else []), *screen.paging]
+    if options:
+        nav: list[Action] = [
+            button(VERB, option.label, option.value, channel=channel, thread=thread)
+            for option in options
+        ]
+        body.append(ActionSet(actions=nav))
     return AdaptiveCard(body=body, fallback_text=screen.title)
 
 

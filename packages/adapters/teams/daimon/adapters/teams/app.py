@@ -1566,6 +1566,7 @@ class TeamsApp:
                     default_name=self.runtime.deployment_default.agent_name,
                 ),
                 ask_human=self._ask_human and admission.feature_on("support_escalation"),
+                vote_buttons=admission.shown("message_feedback", "teams"),
                 direct_chat=inbound.kind == "dm",
                 foreign=inbound.is_foreign,
                 agent_name=admission.agent.name,

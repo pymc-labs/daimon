@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 from daimon.core.features.registry import FEATURES, deployment_key, parse_deployment
+from daimon.core.features.removed import without_removed_features, without_removed_fields
 from daimon.core.mcp_server_url import ascii_mcp_url, canonical_mcp_url
 from daimon.core.outbound.reach import DEFAULT_MAX_PEOPLE
 from daimon.core.scope_cascade import CascadeMode
@@ -740,15 +741,6 @@ class DiscordSettings(BaseModel):
             "Current message gates and durable admissions prevent duplicate turns."
         ),
     )
-    writers_none_notice: bool = Field(
-        default=False,
-        description=(
-            "Opt in to one stop reaction on an explicit bot mention refused by a confirmed "
-            "writers=none rule. Only the posting owner reacts, with per-requester, channel "
-            "and bot-wide cooldowns. No text, DM or agent turn is sent. Unknown protection "
-            "stays silent. Limits are process-local and reset on restart."
-        ),
-    )
     credential_form_expiry: bool = Field(
         default=False,
         description=(
@@ -769,26 +761,6 @@ class DiscordSettings(BaseModel):
             "finishes; a failed creation is answered with a visible error reply."
         ),
     )
-    unmentioned_reply_hint: bool = Field(
-        default=False,
-        description=(
-            "React with 🔔 to a person's reply that does not @mention the bot in a thread the "
-            "bot opened, as a hint that only mentions start a turn. The message itself is "
-            "never answered. At most once per thread per unmentioned_reply_hint_cooldown_h, "
-            "never on a message that mentions someone else, never to any bot, never where the "
-            "agent may not post, and never while the thread is followed (thread "
-            "participation on). Off by default: the cooldown is kept in memory, so each "
-            "restart allows one more hint per thread."
-        ),
-    )
-    unmentioned_reply_hint_cooldown_h: float = Field(
-        default=24.0,
-        gt=0,
-        description=(
-            "Hours before the unmentioned-reply hint may be shown again in the same thread. "
-            "Kept in memory, so a restart allows one more."
-        ),
-    )
     protected_channel_notice_cooldown_min: float = Field(
         default=10.0,
         gt=0,
@@ -806,15 +778,6 @@ class DiscordSettings(BaseModel):
             "Maximum number of agent turns a single tenant (Discord guild) may "
             "have in flight at once. Caps one noisy guild from starving others "
             "on the shared Anthropic key."
-        ),
-    )
-    tenant_cap_waiting_card: bool = Field(
-        default=False,
-        description=(
-            "Opt in to queue wording on the existing initial Discord mention card while "
-            "its admitted turn waits behind the tenant concurrency cap. The same card "
-            "returns to ordinary progress when the turn starts. Admission, Stop and queue "
-            "limits are unchanged; no other tenant information is displayed."
         ),
     )
     max_concurrent_turns: int | None = Field(
@@ -2025,16 +1988,6 @@ class TurnSettings(BaseModel):
         ),
     )
 
-    native_footer_cost: bool = Field(
-        default=False,
-        description=(
-            "Display settled native OpenAI/Gemini turn cost on platform footers. "
-            "Requires complete normalized usage, verified rates and root accounting. "
-            "Incomplete totals display Cost unknown or Cost partial, never an estimate. "
-            "Off by default; Anthropic footers are unchanged with either value."
-        ),
-    )
-
     channel_backends: bool = Field(
         default=True,
         description=(
@@ -2055,18 +2008,6 @@ class TurnSettings(BaseModel):
             "readback alone never authorizes execution. Requires mux and "
             "channel_backends; on by default. Emergency stop only: false refuses "
             "agent-selected native backends."
-        ),
-    )
-
-    status_log: bool = Field(
-        default=False,
-        description=(
-            "Keep each message the agent writes apart in its answer. Off by default: "
-            "consecutive messages from the agent are joined into one block of text. On: an "
-            "answer made of several messages keeps every one, set apart by a blank line "
-            'instead of being run together. Either way the "Working on it…" card shows the '
-            "last three messages the agent wrote, oldest first, one line each (cut at 120 "
-            "characters)."
         ),
     )
 
@@ -2268,13 +2209,6 @@ class ArtifactsSettings(BaseModel):
         gt=0,
         le=86_400,
         description="Lifetime of each presigned artifact GET URL; defaults to ten minutes.",
-    )
-    embed_images: bool = Field(
-        default=True,
-        description=(
-            "Also return bounded MCP image blocks for model vision. Disable independently "
-            "when a hosted client cannot accept image content."
-        ),
     )
 
     @model_validator(mode="after")
@@ -3059,6 +2993,16 @@ class Settings(BaseSettings):
     def _features_are_registered(cls, value: dict[str, str]) -> dict[str, str]:
         return _registered_features(value)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_removed_fields(cls, values: object) -> object:
+        """A removed field left in the environment is ignored with a warning, not fatal."""
+        return (
+            without_removed_fields(cast("dict[str, object]", values))
+            if isinstance(values, dict)
+            else values
+        )
+
     @model_validator(mode="after")
     def _tool_safety_feature(self) -> Settings:
         """`DAIMON_FEATURES__TOOL_SAFETY` sets the policy every tool-safety reader holds."""
@@ -3101,7 +3045,7 @@ def load_settings(*, _env_file: str | None = ".env") -> Settings:
 
 
 def _registered_features(value: dict[str, str]) -> dict[str, str]:
-    features = {deployment_key(key): raw for key, raw in value.items()}
+    features = {deployment_key(key): raw for key, raw in without_removed_features(value).items()}
     for key, raw in features.items():
         parse_deployment(key, raw)
     return features

@@ -12,9 +12,9 @@ from daimon.core.authz import Subject
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.features import service
 from daimon.core.features.registry import FEATURES
-from daimon.core.features.service import FeatureActor
+from daimon.core.features.service import FeatureActor, read_features
 from daimon.core.features.snapshot import FeaturePlace
-from daimon.core.features.surface import choice
+from daimon.core.features.surface import choice, listed
 from daimon.testing.factories import make_tenant
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -73,8 +73,31 @@ async def test_the_root_picks_a_group_and_each_group_lists_its_features(
         screen = await panel.show(db_session_factory, _settings(), actor, _place(actor), op)
         assert screen is not None and screen.back is not None
         seen |= {o.value.split(":")[2] for o in screen.selects[0].options}
-    discord = {k for k, s in FEATURES.items() if s.on_platform("discord")}
-    assert seen == discord
+    place = _place(actor)
+    views = await read_features(db_session_factory, _settings(), place)
+    discord = {v.spec.key for v in listed(views) if v.spec.on_platform("discord")}
+    assert seen == discord, "the groups list exactly the features that are set up or set"
+
+
+async def test_a_feature_that_is_not_set_up_and_not_set_is_not_listed(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    """Unavailable here with no saved value: out of every group, as the web hides it."""
+    actor = _actor(await _tenant(db_session), True)
+    views = await read_features(db_session_factory, _settings(), _place(actor))
+    hidden = {
+        v.spec.key
+        for v in views
+        if v.spec.on_platform("discord") and v.resolved.unavailable is not None
+    } - {v.spec.key for v in listed(views)}
+    assert hidden, "the test deployment must have a feature that is not set up"
+    root = await panel.open_panel(db_session_factory, _settings(), actor, _place(actor))
+    shown: set[str] = set()
+    for group in (o.value for o in root.selects[0].options):
+        screen = await panel.show(db_session_factory, _settings(), actor, _place(actor), group)
+        assert screen is not None, f"group {group} opens"
+        shown |= {o.value.split(":")[2] for o in screen.selects[0].options}
+    assert not hidden & shown, f"hidden features must not be offered: {hidden & shown}"
 
 
 async def test_every_feature_opens_with_a_control_for_an_admin(
@@ -176,7 +199,7 @@ async def test_a_builtin_tool_is_not_offered_per_agent_in_chat(
 async def test_no_select_is_cut_by_the_platform_option_limit(
     db_session: AsyncSession, db_session_factory: Sessions
 ) -> None:
-    """Discord allows 25 options a select: a group lists every feature on the platform within
+    """Discord allows 25 options a select: a group lists every shown feature on the platform within
     it, and an agent picker never offers more, so nothing is silently dropped."""
     actor = _actor(await _tenant(db_session), True)
     many = [panel.AgentChoice(f"a{i}", f"Agent {i}") for i in range(40)]
@@ -186,22 +209,268 @@ async def test_no_select_is_cut_by_the_platform_option_limit(
 
     for platform in ("discord", "slack", "teams"):
         place = FeaturePlace.of(actor.tenant_id, platform, "C1")
+        shown = {
+            v.spec.key for v in listed(await read_features(db_session_factory, _settings(), place))
+        }
         for category in {spec.category for spec in FEATURES.values()}:
             screen = await panel.show(
                 db_session_factory, _settings(), actor, place, panel.open_op(category)
             )
             assert screen is not None
-            listed = len(screen.selects[0].options)
+            offered = len(screen.selects[0].options)
             wanted = sum(
-                1 for s in FEATURES.values() if s.category == category and s.on_platform(platform)
+                1
+                for s in FEATURES.values()
+                if s.category == category and s.on_platform(platform) and s.key in shown
             )
-            assert listed == wanted <= panel.SELECT_LIMIT, f"{platform} {category} is cut"
+            assert offered == wanted <= panel.SELECT_LIMIT, f"{platform} {category} is cut"
     op = panel.open_op("chat", "progress_plans")
     screen = await panel.show(
         db_session_factory, _settings(), actor, _place(actor), op, agents=agents
     )
     assert screen is not None
     assert all(len(s.options) <= panel.SELECT_LIMIT for s in screen.selects), "picker is capped"
+
+
+async def _walk(
+    db_session_factory: Sessions, actor: FeatureActor, op: str, agents: panel.AgentLoader | None
+) -> list[panel.PanelScreen]:
+    """The screens reached from `op` by pressing Next until there is none."""
+    screens: list[panel.PanelScreen] = []
+    while True:
+        screen = await panel.show(
+            db_session_factory, _settings(), actor, _place(actor), op, agents=agents
+        )
+        assert screen is not None, op
+        screens.append(screen)
+        nxt = [o for o in screen.paging if o.label == panel.NEXT]
+        if not nxt:
+            return screens
+        op = nxt[0].value
+
+
+async def test_a_long_agent_list_pages_and_every_agent_is_reachable(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    """40 agents make two pages of the picker; Next and Previous lead between them, and the
+    two pages together offer every agent once."""
+    actor = _actor(await _tenant(db_session), True)
+    many = [panel.AgentChoice(f"a{i}", f"Agent {i:02d}") for i in range(40)]
+
+    async def agents() -> list[panel.AgentChoice]:
+        return many
+
+    first, second = await _walk(
+        db_session_factory, actor, panel.open_op("chat", "progress_plans"), agents
+    )
+    pickers = [s.selects[-1] for s in (first, second)]
+    assert [p.placeholder for p in pickers] == [
+        "Change for an agent, page 1 of 2",
+        "Change for an agent, page 2 of 2",
+    ]
+    offered = [o.label for p in pickers for o in p.options]
+    assert offered == [a.name for a in many], "every agent once, in order"
+    assert [o.label for o in first.paging] == [panel.NEXT]
+    assert [o.label for o in second.paging] == [panel.PREVIOUS]
+    back = await panel.show(
+        db_session_factory, _settings(), actor, _place(actor), second.paging[0].value, agents=agents
+    )
+    assert back is not None and back.selects[-1] == pickers[0], "Previous returns to page 1"
+    chosen = await panel.show(
+        db_session_factory, _settings(), actor, _place(actor), pickers[1].options[0].value,
+        agents=agents,
+    )  # fmt: skip
+    assert chosen is not None and chosen.back is not None
+    assert chosen.back.value == panel.open_op("chat", "progress_plans", page=0, picker=1), (
+        "Back from an agent returns to its picker page"
+    )
+
+
+async def test_back_from_a_setting_returns_to_the_group_page_it_was_picked_from(
+    db_session: AsyncSession, db_session_factory: Sessions, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The group's page rides in the op, also through the agent picker's own paging."""
+    actor = _actor(await _tenant(db_session), True)
+    monkeypatch.setattr(panel, "SELECT_LIMIT", 2)
+    many = [panel.AgentChoice(f"a{i}", f"Agent {i:02d}") for i in range(5)]
+    key = "completion_pings"
+
+    async def agents() -> list[panel.AgentChoice]:
+        return many
+
+    async def show(op: str) -> panel.PanelScreen:
+        found = await panel.show(
+            db_session_factory, _settings(), actor, _place(actor), op, agents=agents
+        )
+        assert found is not None, op
+        return found
+
+    groups = await _walk(db_session_factory, actor, panel.open_op("chat"), None)
+    page = next(
+        n
+        for n, g in enumerate(groups)
+        if any(o.value.startswith(f"open:chat:{key}") for o in g.selects[0].options)
+    )
+    assert page > 0, "the setting sits past the first page"
+    picked = await show(
+        next(o for o in groups[page].selects[0].options if f":{key}" in o.value).value
+    )
+    assert picked.back is not None
+    assert picked.back.value == panel.open_op("chat", page=page), "Back returns to its group page"
+    assert (await show(picked.back.value)).lines == groups[page].lines, "and shows that page"
+
+    next_agents = await show(next(o for o in picked.paging if o.label == panel.NEXT).value)
+    assert next_agents.back is not None
+    assert next_agents.back.value == panel.open_op("chat", page=page), "paging the picker keeps it"
+    agent_screen = await show(next_agents.selects[-1].options[0].value)
+    assert agent_screen.back is not None
+    assert agent_screen.back.value == panel.open_op("chat", key, page=page, picker=1), (
+        "Back from an agent returns to the setting, on its group page and picker page"
+    )
+
+
+async def test_back_after_a_change_returns_to_the_page_the_setting_was_changed_from(
+    db_session: AsyncSession, db_session_factory: Sessions, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    actor = _actor(await _tenant(db_session), True)
+    monkeypatch.setattr(panel, "SELECT_LIMIT", 2)
+    many = [panel.AgentChoice(f"a{i}", f"Agent {i:02d}") for i in range(5)]
+    key = "completion_pings"
+
+    async def agents() -> list[panel.AgentChoice]:
+        return many
+
+    async def show(op: str) -> panel.PanelScreen:
+        found = await panel.show(
+            db_session_factory, _settings(), actor, _place(actor), op, agents=agents
+        )
+        assert found is not None, op
+        return found
+
+    groups = await _walk(db_session_factory, actor, panel.open_op("chat"), None)
+    page = next(
+        n
+        for n, g in enumerate(groups)
+        if any(o.value.startswith(f"open:chat:{key}") for o in g.selects[0].options)
+    )
+    assert page > 0, "the setting sits past the first page"
+    picked = await show(
+        next(o for o in groups[page].selects[0].options if f":{key}" in o.value).value
+    )
+    change = picked.selects[0].options[0].value
+    changed = await panel.press(
+        db_session_factory, _settings(), actor, change, _place(actor), agents=agents
+    )
+    assert changed is not None and changed.ok, "the change was applied"
+    assert changed.back is not None
+    assert changed.back.value == panel.open_op("chat", page=page), (
+        "Back after a change returns to the group page, not the first"
+    )
+
+    next_agents = await show(next(o for o in picked.paging if o.label == panel.NEXT).value)
+    agent_screen = await show(next_agents.selects[-1].options[0].value)
+    agent_change = agent_screen.selects[0].options[0].value
+    after_agent = await panel.press(
+        db_session_factory, _settings(), actor, agent_change, _place(actor), agents=agents
+    )
+    assert after_agent is not None and after_agent.back is not None
+    assert after_agent.back.value == panel.open_op("chat", key, page=page, picker=1), (
+        "Back after an agent change returns to the setting, on its group page and picker page"
+    )
+
+
+async def test_an_agent_id_that_cannot_ride_in_an_op_is_not_offered(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    """Discord caps a select value at 100 characters and an id with a mark in it would split
+    the op; such an agent is left out, and every value left fits."""
+    actor = _actor(await _tenant(db_session), True)
+    agents_ = [
+        panel.AgentChoice("a1", "Fine"),
+        panel.AgentChoice("a" * 80, "Too long"),
+        panel.AgentChoice("a~1", "Tilde"),
+        panel.AgentChoice("a:b@c", "Separators"),
+    ]
+
+    async def agents() -> list[panel.AgentChoice]:
+        return agents_
+
+    screen = await panel.show(
+        db_session_factory, _settings(), actor, _place(actor),
+        panel.open_op("chat", "progress_plans"), agents=agents,
+    )  # fmt: skip
+    assert screen is not None
+    picker = screen.selects[-1]
+    assert [o.label for o in picker.options] == ["Fine"], "only the safe id is offered"
+    longest = max(len(o.value) for s in screen.selects for o in s.options)
+    assert longest <= 100, "every select value fits Discord's limit"
+
+
+async def test_a_short_agent_list_has_no_paging(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    actor = _actor(await _tenant(db_session), True)
+    screen = await panel.show(
+        db_session_factory, _settings(), actor, _place(actor), panel.open_op("chat", "progress_plans"),
+        agents=_agents,
+    )  # fmt: skip
+    assert screen is not None and screen.paging == ()
+    assert screen.selects[-1].placeholder == "Change for an agent"
+
+
+async def test_a_long_group_pages_and_every_setting_is_reachable(
+    db_session: AsyncSession, db_session_factory: Sessions, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a small page, a group's settings spread over pages that together list each once."""
+    actor = _actor(await _tenant(db_session), True)
+    monkeypatch.setattr(panel, "SELECT_LIMIT", 2)
+    whole = await panel.show(
+        db_session_factory, _settings(), actor, _place(actor), panel.open_op("chat")
+    )
+    assert whole is not None and len(whole.selects[0].options) == 2
+    pages = await _walk(db_session_factory, actor, panel.open_op("chat"), None)
+    keys = [o.value for p in pages for o in p.selects[0].options]
+    shown = {
+        v.spec.key
+        for v in listed(await read_features(db_session_factory, _settings(), _place(actor)))
+        if v.spec.category == "chat" and v.spec.on_platform("discord")
+    }
+    assert len(pages) > 1, "the group needs more than one page"
+    assert sorted(k.split(":")[2].split("~")[0] for k in keys) == sorted(shown), "each setting once"
+    assert all(len(p.selects[0].options) <= 2 for p in pages)
+    assert len({tuple(p.lines) for p in pages}) == len(pages), "a page lists its own settings"
+
+
+def test_a_page_is_part_of_the_op_and_a_forged_one_names_nothing() -> None:
+    """`~<page>[~<picker>]` follows the group, the setting or the agent; anything else is refused."""
+    assert panel.parse_open(panel.open_op("chat", page=2)) == panel.OpenOp("chat", page=2)
+    assert panel.parse_open(panel.open_op("chat", "progress_plans", "a1", 3, 4)) == panel.OpenOp(
+        "chat", "progress_plans", "a1", 3, 4
+    )
+    assert panel.parse_open(panel.open_op("chat", "progress_plans", page=0, picker=2)) == (
+        panel.OpenOp("chat", "progress_plans", None, 0, 2)
+    )
+    assert panel.parse_open(panel.open_op("chat")) == panel.OpenOp("chat")
+    forged_ops = (
+        "open:chat~x", "open:chat~-1", "open:chat~", "open:chat~99999", "open~1~2",
+        "open:chat~1~2", "open:chat:progress_plans~1~2~3", "open:chat:progress_plans@a~b",
+        "open:chat:progress_plans@" + "a" * 41, "open:chat:progress_plans@a:b",
+    )  # fmt: skip
+    for forged in forged_ops:
+        assert panel.parse_open(forged) is None, forged
+
+
+async def test_a_stale_page_shows_the_last_one(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    """A page past the end of a list that has shrunk shows the last page, not an empty one."""
+    actor = _actor(await _tenant(db_session), True)
+    op = panel.open_op("chat", "progress_plans", page=7)
+    screen = await panel.show(
+        db_session_factory, _settings(), actor, _place(actor), op, agents=_agents
+    )
+    assert screen is not None and screen.paging == ()
+    assert [o.label for o in screen.selects[-1].options] == ["Alpha", "Beta"]
 
 
 async def test_a_level_overridden_above_says_what_decides(

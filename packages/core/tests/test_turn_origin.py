@@ -728,36 +728,6 @@ def _features(**values: str) -> FeatureSnapshot:
     return FeatureSnapshot(place, 1, found)
 
 
-def test_origin_only_controls_keep_the_ids_and_drop_words_and_web() -> None:
-    """Origin only keeps what Daimon tools need and the honesty facts, nothing else."""
-    rendered = render_turn_origin(
-        _origin(),
-        effective_is_admin=False,
-        running_on={"provider": "anthropic", "model": "m"},
-        web=_web(),
-        features=_features(turn_controls="origin"),
-    )
-    controls = _controls(rendered)
-    assert controls["origin_context_id"] == "11111111-1111-1111-1111-111111111111", "ids stay"
-    assert "words" not in controls and "web" not in controls, "words and web links go"
-    assert controls["running_on"] == {"provider": "anthropic", "model": "m"}, "honesty stays"
-    assert "configuration_target." not in rendered, "the target prose goes"
-
-
-def test_minimal_controls_keep_only_the_honesty_facts() -> None:
-    """Minimal (with Daimon tools Off) sends only what keeps the agent honest."""
-    rendered = render_turn_origin(
-        _origin(),
-        effective_is_admin=True,
-        running_on={"provider": "anthropic", "model": "m"},
-        features=_features(turn_controls="minimal", daimon_tools="off"),
-    )
-    assert _controls(rendered) == {"running_on": {"provider": "anthropic", "model": "m"}}, (
-        "only running_on is left when nothing else is supplied"
-    )
-    assert "answer what model you are" in rendered, "the running_on rule stays"
-
-
 def test_web_awareness_off_drops_the_web_links() -> None:
     """Web app links leave the controls when the feature is Off."""
     rendered = render_turn_origin(

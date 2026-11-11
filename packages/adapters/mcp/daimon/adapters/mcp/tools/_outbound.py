@@ -122,8 +122,8 @@ _OUTBOUND_KEYS = (
 async def outbound_rules(
     runtime: McpRuntime, auth: AuthIdentity, scope: TurnScope
 ) -> OutboundRules:
-    """What the turn's workspace, agent and channel allow. A failed read keeps the config,
-    with the reach budget on."""
+    """What the turn's workspace, agent and channel allow. A failed read keeps the config's
+    limits, with the reach budget on and posting to others off: it fails closed."""
     config = runtime.settings.outbound
     try:
         origin = scope.origin
@@ -151,7 +151,7 @@ async def outbound_rules(
     except Exception:  # named boundary: the posts keep the operator's limits
         log.warning("outbound.rules_read_failed", exc_info=True)
         return OutboundRules(
-            True,
+            False,
             config.max_threads,
             config.max_places,
             config.max_people,

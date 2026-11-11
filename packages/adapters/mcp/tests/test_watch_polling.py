@@ -206,6 +206,36 @@ async def test_a_poll_whose_feature_cannot_be_read_keeps_the_watch_and_frees_the
     assert kept.lease_owner is None, "the lease is freed so the next claim retries"
 
 
+async def test_an_off_watch_gives_up_its_place_in_the_claim_queue(runtime_watch):
+    """Four Off watches re-claimed every cycle would starve every other watch's polls."""
+    from daimon.core.stores.domain import FeatureTarget
+    from daimon.core.stores.feature_values import set_feature_value
+
+    runtime, watch, _ = runtime_watch
+    async with runtime.session_factory.begin() as db:
+        await set_feature_value(
+            db,
+            tenant_id=watch.tenant_id,
+            target=FeatureTarget("workspace"),
+            key="watches",
+            value="off",
+            set_by=None,
+            surface="chat",
+        )
+    token = await lease(runtime, watch)
+    with patch("daimon.adapters.mcp.watch_polling._read_thread_impl", AsyncMock()) as source:
+        assert not await run_poll(runtime, watch.id, token)
+        source.assert_not_called()
+    async with runtime.session_factory() as db:
+        kept = await watches.get_watch(db, watch.id)
+        assert kept is not None and kept.status == "active", "Off is not a stop"
+        assert kept.lease_owner is None, "the lease is freed"
+        assert kept.next_check_at > datetime.now(UTC) + timedelta(minutes=5), (
+            "an Off watch waits behind the due ones instead of being claimed again at once"
+        )
+        assert await watches.claim_poll_watches(db) == [], "it is not due again this cycle"
+
+
 async def test_polls_recheck_live_owner_before_every_read_and_cancel_revoked_wakes(runtime_watch):
     runtime, watch, _ = runtime_watch
     source = AsyncMock(

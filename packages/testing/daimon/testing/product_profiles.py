@@ -17,9 +17,6 @@ OPT_IN_PASS: Final = "PASS under opt-in profile"
 _FLAGS = (
     ("core", "mcp.require_routine_destination", "daimon.core.config", "McpSettings"),
     ("core", "discord.credential_form_expiry", "daimon.core.config", "DiscordSettings"),
-    ("core", "discord.writers_none_notice", "daimon.core.config", "DiscordSettings"),
-    ("core", "discord.tenant_cap_waiting_card", "daimon.core.config", "DiscordSettings"),
-    ("core", "turn.native_footer_cost", "daimon.core.config", "TurnSettings"),
 )
 
 
@@ -53,7 +50,7 @@ class QAProductProfile:
 
     @property
     def flags(self) -> dict[str, bool]:
-        """Exactly the five granted switches; no table/tools/backend overrides."""
+        """Exactly the granted switches; no table/tools/backend overrides."""
         return {
             f"{service}.{field}": self.name == "opt-in-product" for service, field, *_ in _FLAGS
         }

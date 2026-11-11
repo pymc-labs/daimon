@@ -230,6 +230,7 @@ def _make_lifecycle(
     tenant_id: uuid.UUID | None = None,
     budget_channel_id: str | None = None,
     ask_human: bool = False,
+    vote_buttons: bool = True,
     identity: AgentIdentity | None = None,
     ma_agent_id: str | None = None,
     intent_id: uuid.UUID | None = None,
@@ -256,6 +257,7 @@ def _make_lifecycle(
 
     lc = SlackTurnLifecycle(
         ask_human=ask_human,
+        vote_buttons=vote_buttons,
         notify_on_completion=notify_on_completion,
         trigger_ts=trigger_ts,
         render_tables=render_tables,
@@ -1806,6 +1808,39 @@ async def test_ask_human_button_rides_with_the_vote_buttons_when_enabled(
     ids = _action_ids(_last_update_blocks(fake_slack_web_client))
     assert ids[-3:] == ["feedback_vote:up", "feedback_vote:down", "support_escalate"], (
         "Ask a human sits after the two votes on the final answer"
+    )
+
+
+async def test_vote_buttons_off_drops_the_votes_and_keeps_ask_a_human(
+    fake_slack_web_client: Any,
+) -> None:
+    """`message_feedback` Off removes 👍/👎 from the final answer; Ask a human is its own switch."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client, vote_buttons=False, ask_human=True)
+    await lc.post_initial()
+    await lc.on_sse_event(_thinking_event())
+
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="42.")]))
+
+    ids = _action_ids(_last_update_blocks(fake_slack_web_client))
+    assert "feedback_vote:up" not in ids and "feedback_vote:down" not in ids, (
+        "votes off must leave no vote buttons"
+    )
+    assert "support_escalate" in ids, "Ask a human stays while support is on"
+
+
+async def test_vote_buttons_off_without_ask_a_human_leaves_no_actions_block(
+    fake_slack_web_client: Any,
+) -> None:
+    """With nothing to offer there is no empty actions block (Slack refuses one)."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client, vote_buttons=False)
+    await lc.post_initial()
+    await lc.on_sse_event(_thinking_event())
+
+    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="42.")]))
+
+    blocks = _last_update_blocks(fake_slack_web_client)
+    assert not [b for b in blocks if b.get("block_id") == "feedback_vote"], (
+        "no feedback actions block when it would be empty"
     )
 
 

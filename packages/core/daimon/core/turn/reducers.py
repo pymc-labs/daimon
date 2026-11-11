@@ -71,7 +71,6 @@ from daimon.core.turn.state import (
     TurnState,
     UsageTotals,
 )
-from daimon.core.turn.status_log import status_log_enabled
 from daimon.core.turn.termination import TerminationReason
 from mux.contracts.usage import UsageObservation
 from pydantic import BaseModel
@@ -204,18 +203,14 @@ def _apply_agent_message(
 ) -> TurnState:
     """Fold the message into the turn's text.
 
-    With `turn.status_log` on, the message is its own `TextBlock`: an
-    `agent.message` event is a whole message (Managed Agents streams its deltas
-    as separate previews that never reach this reducer), so consecutive messages
-    stay apart and a short status line written just before the answer is not
-    glued to the answer's first word. Off, the text is concatenated onto the last
-    `TextBlock`, or opens a new one if the last block is a tool use.
+    The text is concatenated onto the last `TextBlock`, or opens a new one if the
+    last block is a tool use.
     """
     incoming = "".join(part.text for part in event.content)
     if not incoming:
         return dataclasses.replace(state, seen_event_ids=seen)
 
-    if not status_log_enabled() and state.content and isinstance(state.content[-1], TextBlock):
+    if state.content and isinstance(state.content[-1], TextBlock):
         last = state.content[-1]
         grown = TextBlock(kind="text", text=last.text + incoming)
         new_content: list[ContentBlock] = [*state.content[:-1], grown]

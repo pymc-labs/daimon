@@ -240,24 +240,6 @@ def test_artifacts_settings_parse_nested_env_with_defaults(
     assert artifacts.bucket == "private-artifacts"
     assert artifacts.region == "auto"
     assert artifacts.url_ttl_seconds == 600
-    assert artifacts.embed_images is True
-
-
-def test_artifacts_image_embedding_can_be_disabled_independently(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
-    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
-    monkeypatch.setenv("DAIMON_ARTIFACTS__ENDPOINT_URL", "https://bucket.example.test")
-    monkeypatch.setenv("DAIMON_ARTIFACTS__BUCKET", "private-artifacts")
-    monkeypatch.setenv("DAIMON_ARTIFACTS__ACCESS_KEY_ID", "access-key")
-    monkeypatch.setenv("DAIMON_ARTIFACTS__SECRET_ACCESS_KEY", "secret-key")
-    monkeypatch.setenv("DAIMON_ARTIFACTS__EMBED_IMAGES", "false")
-
-    artifacts = load_settings(_env_file=None).artifacts
-
-    assert artifacts is not None
-    assert artifacts.embed_images is False
 
 
 @pytest.mark.parametrize("ttl", [0, 86_401])

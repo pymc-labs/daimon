@@ -188,8 +188,11 @@ from daimon.adapters.slack.runtime import (
     responder_account,
     responder_handle,
 )
-from daimon.adapters.slack.settings import ACTION_ID as SETTINGS_ACTION_ID
-from daimon.adapters.slack.settings import handle_settings_change, handle_settings_command
+from daimon.adapters.slack.settings import (
+    handle_settings_change,
+    handle_settings_command,
+    is_settings_action,
+)
 from daimon.adapters.slack.setup_conversations import handle_setup_lifecycle
 from daimon.adapters.slack.shared_channel import (
     ENVELOPE_EXT_SHARED_KEY,
@@ -1535,7 +1538,7 @@ class SlackApp:
             or action_id == "routines_create"
         ):
             self._spawn(handle_routine_action(self.runtime, payload))
-        elif action_id == SETTINGS_ACTION_ID:
+        elif is_settings_action(action_id):
             self._spawn(handle_settings_change(self.runtime, payload))
         elif action_id == "billing_topup":
             self._spawn(handle_topup_select(self.runtime, payload))
@@ -2633,6 +2636,7 @@ class SlackApp:
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             ask_human=slack_support_enabled(self.runtime.settings.support)
             and admission.feature_on("support_escalation"),
+            vote_buttons=admission.shown("message_feedback", "slack"),
             tenant_id=tenant_id,
             budget_channel_id=admission.budget_channel_id,
             render_tables=admission.shown("table_rendering", "slack"),
@@ -3094,6 +3098,7 @@ class SlackApp:
                     alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                     ask_human=slack_support_enabled(self.runtime.settings.support)
                     and admission.feature_on("support_escalation"),
+                    vote_buttons=admission.shown("message_feedback", "slack"),
                     tenant_id=tenant_id,
                     budget_channel_id=admission.budget_channel_id,
                     render_tables=admission.shown("table_rendering", "slack"),
@@ -3553,6 +3558,7 @@ class SlackApp:
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             ask_human=slack_support_enabled(self.runtime.settings.support)
             and follow_admission.feature_on("support_escalation"),
+            vote_buttons=follow_admission.shown("message_feedback", "slack"),
             tenant_id=tenant_id,
             budget_channel_id=follow_admission.budget_channel_id,
             render_tables=follow_admission.shown("table_rendering", "slack"),
@@ -3655,6 +3661,7 @@ class SlackApp:
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 ask_human=slack_support_enabled(self.runtime.settings.support)
                 and follow_admission.feature_on("support_escalation"),
+                vote_buttons=follow_admission.shown("message_feedback", "slack"),
                 tenant_id=tenant_id,
                 budget_channel_id=follow_admission.budget_channel_id,
                 render_tables=follow_admission.shown("table_rendering", "slack"),

@@ -1,19 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Lock } from "lucide-react"
 import { toast } from "sonner"
 import { AgentAvatar } from "@/components/common"
 import { SettingsList } from "@/components/settings"
 import { QueryState } from "@/components/QueryState"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Switch } from "@/components/ui/switch"
 import { api } from "@/lib/api"
 import { useChatAgents } from "@/lib/hooks"
 import { Access, Providers } from "./Access"
 import type { SettingsPatch, WorkspaceSettings } from "./types"
 
 // Workspace
-
-const MODULE_LABEL = { chat: "Chat", agents: "Agents", channels: "Channels", routines: "Routines", credits: "Credits", integrations: "Integrations" }
 
 export function Workspace() {
   const q = useQuery({ queryKey: KEY, queryFn: () => api.get<WorkspaceSettings>("/api/admin/settings") })
@@ -25,14 +21,7 @@ const KEY = ["admin", "settings"]
 /** What a patch changes in the cached settings, so a switch moves before the server answers. */
 const applied = (s: WorkspaceSettings, b: SettingsPatch): WorkspaceSettings => ({
   ...s,
-  modules: b.modules ?? s.modules,
   default_agent: b.default_agent ?? s.default_agent,
-  access: {
-    ...s.access,
-    ...(b.dm_enabled !== undefined && { dm_enabled: b.dm_enabled }),
-    ...(b.dm_memory_read_only !== undefined && { dm_memory_read_only: b.dm_memory_read_only }),
-    ...(b.plain_text_mentions !== undefined && { plain_text_mentions: b.plain_text_mentions }),
-  },
 })
 
 function Settings({ s }: { s: WorkspaceSettings }) {
@@ -55,13 +44,6 @@ function Settings({ s }: { s: WorkspaceSettings }) {
   })
   return (
     <div className="mx-auto max-w-3xl space-y-8">
-      <SettingsList title="Modules" rows={[
-        ...(Object.keys(MODULE_LABEL) as (keyof typeof MODULE_LABEL)[]).map((k) => ({
-          key: k, label: MODULE_LABEL[k],
-          control: <Switch aria-label={MODULE_LABEL[k]} checked={s.modules[k]} onCheckedChange={(v) => save.mutate({ modules: { ...s.modules, [k]: v } })} />,
-        })),
-        { key: "admin", label: "Admin", control: <Lock className="size-4 text-faint" aria-label="Always on" /> },
-      ]} />
       <SettingsList title="Web chat" rows={[{
         label: "Web chat agent",
         control: (

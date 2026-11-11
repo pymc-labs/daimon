@@ -96,7 +96,7 @@ const curve = (total: number, days: number): { key: string; name: null; usd: num
   return weights.map((w, i) => ({ key: ago((days - 1 - i) * 24).slice(0, 10), name: null, usd: +((w / sum) * total).toFixed(2) }))
 }
 const ap = (value: ChannelApprovals["value"], source: ChannelApprovals["source"], own: ChannelApprovals["own"] = null): ChannelApprovals =>
-  ({ available: true, own, value, source, active: false, editable: true })
+  ({ available: true, own, value, source, editable: true })
 const settingsOf = (c: Stored): ChannelSettings => ({
   participation: sw("off", "deployment"),
   progress_plans: sw("on", "workspace"),

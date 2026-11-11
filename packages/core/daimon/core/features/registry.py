@@ -8,7 +8,7 @@ in code is registered and every registered key is read.
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from typing import Final, Literal, get_args
 
@@ -21,10 +21,11 @@ TIERS: Final[tuple[Tier, ...]] = get_args(Tier)
 LOCKABLE: Final[frozenset[Tier]] = frozenset({"deployment", "workspace", "agent", "channel"})
 Effect = Literal["model", "display", "capability", "guardrail", "limit"]
 Combine = Literal["most_specific", "ceiling", "stricter", "minimum"]
-Binding = Literal["turn", "session_mutable", "session_identity", "provision"]
+Binding = Literal["turn", "session_mutable", "session_identity", "provision", "restart"]
 """When a change lands. ``session_mutable``: the live session's tools and servers are updated
 in place on the next message. ``session_identity``: held by the live session until ``/new`` or a
-replacement (system prompt, skills, memory). ``provision``: on the agent's next save or sync."""
+replacement (system prompt, skills, memory). ``provision``: on the agent's next save or sync.
+``restart``: read once when the process starts."""
 Category = Literal["model_input", "chat", "capabilities", "limits", "guardrails"]
 Requirement = Literal[
     "platform_adapter",
@@ -124,6 +125,12 @@ class FeatureSpec:
     env_map: str | None = None
     """The `Settings` field of a deprecated per-workspace map (workspace id to on/off) that
     stands for the workspace tier; a stored workspace row always beats it."""
+    minimum: float = 0
+    """The smallest number a limit's deployment tier takes. 0 where no limit is a real setting;
+    above 0 where 0 would be an unusable limit, not an off switch."""
+    zero_unlimited: bool = False
+    """A limit whose deployment 0 means no limit, as its legacy variable did: when settings
+    combine, 0 is the loosest value, never the smallest."""
 
     def default_for(self, platform: str) -> str:
         return self.platform_defaults.get(platform, self.default)
@@ -142,7 +149,7 @@ class FeatureSpec:
 
     def accepts(self, value: str, tier: Tier) -> bool:
         """Whether `value` may be stored at `tier`. A limit's deployment tier also takes any
-        non-negative number, so an operator's variable keeps its exact value; lower tiers
+        number from its `minimum`, so an operator's variable keeps its exact value; lower tiers
         choose from the listed steps."""
         if value in self.values:
             return True
@@ -151,7 +158,7 @@ class FeatureSpec:
                 number = float(value)
             except ValueError:
                 return False
-            return math.isfinite(number) and number >= 0
+            return math.isfinite(number) and number >= self.minimum
         return False
 
     def label(self, value: str) -> str:
@@ -228,42 +235,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
-    FeatureSpec(
-        key="daimon_tools",
-        name="Daimon tools",
-        category="model_input",
-        effect="model",
-        values=_ON_OFF,
-        default="on",
-        tiers=("deployment", "workspace", "agent", "channel", "thread"),
-        binds="session_mutable",
-        doc=(
-            "Daimon's own tools: chat, settings, routines, memory and the rest. An agent kept "
-            "apart from the team's data never has them, and Gemini and OpenAI agents always do. "
-            "Applies from the next message in a conversation."
-        ),
-        backend_fixed={_GEMINI: "on", _OPENAI: "on"},
-        platforms=EVERY_PLATFORM,
-        authority=Authority(DelegatedAction.AGENT_SETTINGS),
-    ),
     *(_builtin(tool) for tool in BUILTIN_TOOLS),
-    FeatureSpec(
-        key="turn_controls",
-        name="Message controls",
-        category="model_input",
-        effect="model",
-        values={"full": "Full", "origin": "Where and who", "minimal": "Basics"},
-        default="full",
-        tiers=TIERS,
-        binds="turn",
-        doc=(
-            "What each message tells the agent: where it was sent, who is answering and how to "
-            "act on that. Where and who drops the how-to; Basics keeps only the model and the "
-            "conversation. Daimon tools need Where and who or more."
-        ),
-        platforms=EVERY_PLATFORM,
-        authority=Authority(DelegatedAction.AGENT_SETTINGS),
-    ),
     FeatureSpec(
         key="web_awareness",
         name="Web app links",
@@ -329,24 +301,6 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
-    FeatureSpec(
-        key="checkpoint_prompt",
-        name="Carry working files",
-        category="model_input",
-        effect="model",
-        values=_ON_OFF,
-        default="on",
-        tiers=TIERS,
-        binds="turn",
-        doc=(
-            "When a long conversation starts over, the agent is first asked to save its working "
-            "files to carry across. Off carries only the conversation and skips that extra paid "
-            "step. Claude agents only."
-        ),
-        backend_tiers=_MANAGED_AGENTS_ONLY,
-        platforms=EVERY_PLATFORM,
-        authority=Authority(DelegatedAction.AGENT_SETTINGS),
-    ),
 )
 
 
@@ -380,11 +334,13 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         tiers=TIERS,
         binds="session_identity",
         doc=(
-            "The skills Daimon adds for the chat app, such as its formatting. A conversation "
-            "keeps what it started with until /new. Claude agents only."
+            "The skills Daimon adds for the chat app, such as its formatting. They need the read "
+            "tool, so they are off wherever it is. A conversation keeps what it started with "
+            "until /new. Claude agents only."
         ),
         backend_tiers=_MANAGED_AGENTS_ONLY,
         platforms=EVERY_PLATFORM,
+        depends_on=("tool.read",),
         authority=Authority(DelegatedAction.SKILLS),
     ),
     FeatureSpec(
@@ -398,10 +354,12 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         binds="session_identity",
         doc=(
             "The skills listed on the agent. Off leaves them out of new conversations; "
-            f"the agent keeps its list. {_KEPT} Always on for Gemini and OpenAI agents."
+            "the agent keeps its list. Skills need the read tool, so they are off wherever it "
+            f"is. {_KEPT} Always on for Gemini and OpenAI agents."
         ),
         backend_fixed=_FIXED_ON,
         platforms=EVERY_PLATFORM,
+        depends_on=("tool.read",),
         authority=Authority(DelegatedAction.SKILLS),
     ),
     FeatureSpec(
@@ -466,8 +424,8 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         tiers=TIERS,
         binds="session_identity",
         doc=(
-            "The memory a restricted channel keeps for itself in place of the shared one. "
-            f"{_KEPT} Claude agents only."
+            "The memory a restricted channel keeps for itself in place of the shared one. Off "
+            f"leaves such a channel with no memory at all. {_KEPT} Claude agents only."
         ),
         backend_tiers=_MANAGED_AGENTS_ONLY,
         platforms=EVERY_PLATFORM,
@@ -565,53 +523,10 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         env_map="budget_notices",
     ),
     _shown(
-        "status_log",
-        "Separate agent messages",
-        (
-            "An answer made of several agent messages keeps each one, set apart by a blank line, "
-            "instead of joining them into one block."
-        ),
-        legacy_env=("DAIMON_TURN__STATUS_LOG",),
-    ),
-    _shown(
-        "native_footer_cost",
-        "Cost on Gemini and OpenAI footers",
-        (
-            "A finished answer from a Gemini or OpenAI agent shows what it cost, or that the "
-            "cost is unknown or partial. Claude agent footers are unchanged."
-        ),
-        legacy_env=("DAIMON_TURN__NATIVE_FOOTER_COST",),
-    ),
-    _shown(
         "message_feedback",
         "Vote buttons",
         "Finished answers get thumbs up and down for feedback.",
         default="on",
-        platforms=_DISCORD,
-    ),
-    _shown(
-        "unmentioned_reply_hint",
-        "Reply hint",
-        "A short reminder that a reply needs a mention, where an unmentioned message is skipped.",
-        platforms=_DISCORD,
-        tiers=_CHANNELS,
-        legacy_env=("DAIMON_DISCORD__UNMENTIONED_REPLY_HINT",),
-    ),
-    _shown(
-        "writers_none_notice",
-        "No-writers notice",
-        "Says so when a channel's write access is set to no one and a message is skipped.",
-        platforms=_DISCORD,
-        tiers=_CHANNELS,
-        legacy_env=("DAIMON_DISCORD__WRITERS_NONE_NOTICE",),
-    ),
-    _shown(
-        "waiting_card",
-        "Waiting card",
-        "A card shows in a channel whose reply is waiting on the team's limit on replies at once.",
-        platforms=_DISCORD,
-        tiers=("deployment", "workspace"),
-        legacy_env=("DAIMON_DISCORD__TENANT_CAP_WAITING_CARD",),
     ),
     FeatureSpec(
         key="private_channel_messages",
@@ -621,7 +536,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         values=_ON_OFF,
         default="on",
         tiers=("deployment",),
-        binds="turn",
+        binds="restart",
         doc=(
             "Every message in private and shared channels is read through Microsoft Graph, not "
             "only the ones that mention the agent. Needs the public address the bot is reached "
@@ -799,6 +714,9 @@ def _limit(
     default: str | None = None,
     legacy_env: tuple[str, ...] = (),
     authority: Authority = _SETTINGS,
+    minimum: float = 0,
+    zero_unlimited: bool = False,
+    depends_on: tuple[str, ...] = (),
 ) -> FeatureSpec:
     """A limit: the smallest tier setting wins. `steps` run from the loosest down to the
     strictest; the default is the first unless `default` names another step."""
@@ -815,6 +733,9 @@ def _limit(
         platforms=EVERY_PLATFORM,
         authority=authority,
         legacy_env=legacy_env,
+        minimum=minimum,
+        zero_unlimited=zero_unlimited,
+        depends_on=depends_on,
     )
 
 
@@ -879,24 +800,6 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         requires=("microsoft_accounts",),
     ),
     FeatureSpec(
-        key="artifact_images",
-        name="Chart images in answers",
-        category="capabilities",
-        effect="capability",
-        values=_ON_OFF,
-        default="on",
-        tiers=("deployment", "workspace"),
-        binds="turn",
-        doc=(
-            "Charts the agent makes come back inside its answer to a connected app as "
-            "pictures the app can see. Off sends the links only, for an app that cannot "
-            "take pictures."
-        ),
-        platforms=EVERY_PLATFORM,
-        authority=_SETTINGS,
-        legacy_env=("DAIMON_ARTIFACTS__EMBED_IMAGES",),
-    ),
-    FeatureSpec(
         key="support_escalation",
         name="Ask a person",
         category="capabilities",
@@ -933,6 +836,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent"),
         legacy_env=("DAIMON_LONG_JOBS__MAX_USD",),
         authority=_SERVER_ADMIN,
+        minimum=0.01,
     ),
     _limit(
         "long_jobs_max_deadline",
@@ -942,6 +846,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent"),
         legacy_env=("DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES",),
         authority=_SERVER_ADMIN,
+        minimum=1,
     ),
     _capability(
         "outbound_reach",
@@ -957,6 +862,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "else, one reply may open without approval. The smallest setting wins.",
         {"2": "2 threads", "1": "1 thread", "0": "None"},
         tiers=TIERS,
+        depends_on=("reach_budget",),
         legacy_env=("DAIMON_OUTBOUND__MAX_THREADS",),
     ),
     _limit(
@@ -966,6 +872,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "conversation one reply may post into without approval. The smallest setting wins.",
         {"2": "2 places", "1": "1 place", "0": "None"},
         tiers=TIERS,
+        depends_on=("reach_budget",),
         legacy_env=("DAIMON_OUTBOUND__MAX_PLACES",),
     ),
     _limit(
@@ -974,6 +881,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "How many different people one reply may tag without approval. The smallest setting wins.",
         {"5": "5 people", "3": "3 people", "1": "1 person", "0": "None"},
         tiers=TIERS,
+        depends_on=("reach_budget",),
         legacy_env=("DAIMON_OUTBOUND__MAX_PEOPLE",),
     ),
     _limit(
@@ -988,6 +896,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
             "250": "250 characters",
         },
         tiers=TIERS,
+        zero_unlimited=True,
         legacy_env=("DAIMON_OUTBOUND__MAX_LENGTH",),
     ),
     _limit(
@@ -1015,8 +924,9 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         tiers=("workspace", "channel", "thread"),
         binds="turn",
         doc=(
-            "Ask before an agent writes to an outside service. Only an admin of the chat app can "
-            "change it, once whoever runs Daimon allows approval changes."
+            "Ask before an agent writes to an outside service in a chat reply. Allow writes "
+            "covers chat replies only: routines and watches follow the unattended rule whoever "
+            "runs Daimon set. Only an admin of the chat app can change it."
         ),
         authority=Authority(native=True),
         combine_override="most_specific",
@@ -1141,6 +1051,27 @@ def feature(key: str) -> FeatureSpec | None:
     return FEATURES.get(key)
 
 
+def resolution_order(keys: Collection[str] | None = None) -> list[FeatureSpec]:
+    """`keys` (every feature by default) plus what they depend on, each after its
+    dependencies and otherwise in registry order, so a reader that resolves one by one
+    always has a feature's `depends_on` answered before it."""
+    ordered: dict[str, FeatureSpec] = {}
+
+    def visit(key: str, path: tuple[str, ...]) -> None:
+        if key in ordered:
+            return
+        if key in path:
+            raise ValueError(f"feature dependency cycle: {' -> '.join((*path, key))}")
+        for dep in FEATURES[key].depends_on:
+            visit(dep, (*path, key))
+        ordered[key] = FEATURES[key]
+
+    for key in FEATURES:
+        if keys is None or key in keys:
+            visit(key, ())
+    return list(ordered.values())
+
+
 def deployment_key(name: str) -> str:
     """A `DAIMON_FEATURES__<NAME>` suffix as its feature key (`TOOL_BASH` is `tool.bash`)."""
     name = name.lower()
@@ -1158,6 +1089,8 @@ def parse_deployment(key: str, raw: str) -> tuple[str, bool]:
     if value == "disabled" and spec.off is not None and not flag:
         return spec.off, True
     if not spec.accepts(value, "deployment") or flag not in ("", "locked"):
-        takes = ", ".join(spec.values) + (" or a number" if spec.effect == "limit" else "")
+        takes = ", ".join(spec.values) + (
+            f" or a number of at least {spec.minimum:g}" if spec.effect == "limit" else ""
+        )
         raise ValueError(f"feature {key!r} takes {takes}, optionally ':locked'")
     return value, flag == "locked"
