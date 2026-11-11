@@ -78,4 +78,12 @@ describe("ModelEditor", () => {
     vi.mocked(update).mock.calls[0]![0](c)
     expect(c.model.effort, "still the model default").toBeNull()
   })
+
+  it("drops a level when the picked model has no effort setting", async () => {
+    const update = show({ id: "claude-opus-5-5", backend: "anthropic", speed: "standard", effort: "high" })
+    await userEvent.click(screen.getByRole("button", { name: /GPT-6 Plain/ }))
+    const c = { model: { id: "claude-opus-5-5", backend: "anthropic", speed: "standard", effort: "high" } } as AgentConfig
+    vi.mocked(update).mock.calls[0]![0](c)
+    expect(c.model.effort, "no level shown on a model without one").toBeNull()
+  })
 })

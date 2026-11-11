@@ -15,12 +15,14 @@ const effortsOf = (x: CatalogModel | undefined, backend: Backend): Effort[] =>
   backend === "anthropic" ? CLAUDE_EFFORTS : (x?.efforts ?? [])
 
 /**
- * The effort a model pick keeps. Unset stays unset off Claude; Claude's top levels
- * become the provider's highest; another missing level falls to the middle one.
+ * The effort a model pick keeps. Unset stays unset off Claude, and so does any level on a
+ * model with none; Claude's top levels become the provider's highest; another missing
+ * level falls to the middle one.
  */
 const carriedEffort = (effort: Effort | null, carried: Effort[], backend: Backend): Effort | null => {
   if (effort === null) return backend === "anthropic" ? "high" : null
-  if (carried.length === 0 || carried.includes(effort)) return effort
+  if (carried.length === 0) return null
+  if (carried.includes(effort)) return effort
   if (effort === "xhigh" || effort === "max") return carried.at(-1)!
   return carried.includes("medium") ? "medium" : carried[0]!
 }
