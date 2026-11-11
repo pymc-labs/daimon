@@ -19,7 +19,7 @@ from daimon.core.config import (
     ReportHostSettings,
     Settings,
 )
-from daimon.core.features.registry import FEATURES
+from daimon.core.features.registry import FEATURES, Tier
 from daimon.core.features.service import (
     FeatureActor,
     change_feature,
@@ -142,6 +142,30 @@ async def test_a_channel_cannot_raise_a_limit_above_the_workspace(
     )  # fmt: skip
     found = await feature_in(db_session, settings, place, "history_depth")
     assert (found.value, found.tier) == ("10", "channel"), "a lower step is allowed"
+
+
+async def test_a_deployment_without_a_post_limit_does_not_refuse_a_workspace_or_channel_limit(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    base = _settings()
+    settings = Settings.model_validate({**base.model_dump(), "features": {"outbound_length": "0"}})
+    actor = FeatureActor(tenant.id, None, "web", None, _admin)
+    place = FeaturePlace(tenant.id, "discord", "C1")
+    steps: list[tuple[Tier, str]] = [("workspace", "1500"), ("channel", "500")]
+    for tier, value in steps:
+        early = await change_refusal(
+            db_session_factory, settings, actor, key="outbound_length", tier=tier, place=place,
+            value=value,
+        )  # fmt: skip
+        assert early is None, f"0 is no limit, so {value} at {tier} is a step down"
+        await change_feature(
+            db_session_factory, settings, actor, key="outbound_length", tier=tier, value=value,
+            place=place,
+        )  # fmt: skip
+    found = await feature_in(db_session, settings, place, "outbound_length")
+    assert (found.value, found.tier) == ("500", "channel"), "both limits were saved"
 
 
 @pytest.mark.parametrize("key", _history_keys())

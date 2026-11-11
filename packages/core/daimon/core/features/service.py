@@ -40,6 +40,7 @@ from daimon.core.features.registry import (
 from daimon.core.features.resolver import (
     ResolvedFeature,
     TierValue,
+    extent,
     resolve_above,
     stricter_than,
 )
@@ -515,7 +516,7 @@ def _loosens(spec: FeatureSpec, after: TierSetting, above: ResolvedFeature) -> b
         case "ceiling":
             return above.tier != "default" and above.value == spec.off and after.value != spec.off
         case "minimum":
-            return above.tier != "default" and float(after.value) > float(above.value)
+            return above.tier != "default" and extent(spec, after.value) > extent(spec, above.value)
         case "most_specific":
             return False
 

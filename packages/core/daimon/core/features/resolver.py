@@ -50,7 +50,7 @@ def stricter_than(spec: FeatureSpec, candidate: str, current: str) -> int:
     return order.index(candidate) - order.index(current)
 
 
-def _extent(spec: FeatureSpec, value: str) -> float:
+def extent(spec: FeatureSpec, value: str) -> float:
     """A limit's size for comparing; 0 is no limit where the spec says so."""
     number = float(value)
     return math.inf if spec.zero_unlimited and number == 0 else number
@@ -71,7 +71,7 @@ def _wins(spec: FeatureSpec, current: ResolvedFeature, candidate: str, tier: Tie
         case "stricter":
             return stricter_than(spec, candidate, current.value) > 0
         case "minimum":
-            return _extent(spec, candidate) < _extent(spec, current.value)
+            return extent(spec, candidate) < extent(spec, current.value)
 
 
 def resolve_feature(
