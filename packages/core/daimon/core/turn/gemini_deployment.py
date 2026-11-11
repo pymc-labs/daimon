@@ -75,7 +75,7 @@ from mux.drivers.gemini import (
 )
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.profiles import selectable_models
-from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE
+from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE, InlineReuseId
 from mux.state.lease import Slot
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
@@ -104,7 +104,7 @@ def _private_storage_credential(
 class GeminiPlan(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    profile: Literal["gemini.inline_reuse"]
+    profile: InlineReuseId
     tenant_id: Nonblank
     platform: Nonblank
     channel_id: Nonblank
@@ -414,7 +414,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         raise AdmissionDenied(reason="backend_unsupported")
     agent = AgentSpec(
         name=plan.agent_name,
-        model=ModelRef(provider="gemini", id=revision.model),
+        model=ModelRef(provider=INLINE_REUSE.provider, id=revision.model),
         system=plan.system,
         tools=plan.tools,
     )
@@ -692,13 +692,15 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
 def _side_call_completions() -> Completions:
     from mux.drivers.gemini import configured_completions
 
-    return configured_completions(api_key=os.environ.get(DEFAULT_KEY_ENV["gemini"]) or "")
+    return configured_completions(
+        api_key=os.environ.get(DEFAULT_KEY_ENV[INLINE_REUSE.provider]) or ""
+    )
 
 
 def register_runtime() -> None:
     """Install the provider's host callbacks without transports or credential access."""
-    if provider_key_present("gemini"):
-        register_completions("gemini", _side_call_completions)
+    if provider_key_present(INLINE_REUSE.provider):
+        register_completions(INLINE_REUSE.provider, _side_call_completions)
     from daimon.core.turn.carry_over import register_session_reader
     from daimon.core.turn.runtimes import register_channel_runtime
 

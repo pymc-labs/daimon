@@ -24,6 +24,7 @@ import structlog
 from daimon.core.pricing import ProviderPrice, provider_cost_of
 from mux.contracts.ids import ModelRef, Provider
 from mux.contracts.usage import UsageObservation
+from mux.profiles.openai import PERSISTENT_WORKSPACE
 
 __all__ = ["HOST_SPEND_CAP_NOTICE", "SpendGuard", "priced_cents"]
 
@@ -36,7 +37,9 @@ POLL_INTERVAL_S = 5.0
 
 
 def priced_cents(
-    observations: Iterable[UsageObservation], price: ProviderPrice, provider: Provider = "openai"
+    observations: Iterable[UsageObservation],
+    price: ProviderPrice,
+    provider: Provider = PERSISTENT_WORKSPACE.provider,
 ) -> Decimal | None:
     """The usage so far in US cents, newest revision of each observation; None if unpriceable.
 

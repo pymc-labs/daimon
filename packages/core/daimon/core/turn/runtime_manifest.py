@@ -38,11 +38,20 @@ from mux.contracts.resources import (
 )
 from mux.errors import InvalidConfig, MuxError, UnsupportedCapability
 from mux.profiles import (
+    DAIMON_RECORD_PROVIDERS,
     PROFILES,
     backend_selection,
     get_profile,
     native_agent_tools,
 )
+from mux.profiles.anthropic import (
+    AGENT_CREATE_NULLS_NAMESPACE,
+    MODEL_CONFIG_NAMESPACE,
+    MULTIAGENT_NAMESPACE,
+    SESSION_RESOURCE_CREATE_NAMESPACE,
+)
+from mux.profiles.gemini import INLINE_REUSE
+from mux.profiles.openai import PERSISTENT_WORKSPACE
 from mux.state.operations import request_digest
 from pydantic import (
     AfterValidator,
@@ -368,7 +377,7 @@ def relayed_connectors(
     if not relay_on:
         return ()
     names = sorted(n for n in connectors_of(source) if _CONNECTOR_NAME.fullmatch(n))
-    if provider == "gemini":
+    if provider == INLINE_REUSE.provider:
         natives = [native_server_name(n) for n in (DAIMON_SERVER_NAME, *names)]
         names = [n for n in names if natives.count(native_server_name(n)) == 1]
     relayed: list[MCPConnection] = []
@@ -376,7 +385,9 @@ def relayed_connectors(
         connection = MCPConnection(
             name=name, url=relay_url(public_url, name), credential_ref=daimon.credential_ref
         )
-        if provider == "openai" and not fits_shared_credential((daimon, *relayed, connection)):
+        if provider == PERSISTENT_WORKSPACE.provider and not fits_shared_credential(
+            (daimon, *relayed, connection)
+        ):
             break
         relayed.append(connection)
     return tuple(relayed)
@@ -707,7 +718,7 @@ async def _capture_source_capabilities(
             host_fetch = permissions.get(WEB_FETCH_TOOL) == "auto"
             unavailable_builtin_tools = (
                 ("builtin_tool:web_fetch",)
-                if profile.provider == "openai"
+                if profile.provider == PERSISTENT_WORKSPACE.provider
                 and not host_fetch
                 and any(tool.kind == "builtin" and tool.name == "web_fetch" for tool in tools)
                 else ()
@@ -1035,7 +1046,7 @@ def _source_extension_obligation(
 ) -> Literal["model_controls", "source_definition"] | None:
     if extension.version != 1:
         return "source_definition"
-    if extension.namespace == "anthropic.model_config":
+    if extension.namespace == MODEL_CONFIG_NAMESPACE:
         from mux.drivers.anthropic import AgentModelConfig
 
         try:
@@ -1070,9 +1081,9 @@ def _source_extension_obligation(
                 return "model_controls"
         return "source_definition"
     if (
-        extension.namespace == "anthropic.multiagent"
+        extension.namespace == MULTIAGENT_NAMESPACE
         and extension.value == {"clear": True}
-        or extension.namespace == "anthropic.agent_create_nulls"
+        or extension.namespace == AGENT_CREATE_NULLS_NAMESPACE
     ):
         return None
     return "source_definition"
@@ -1153,7 +1164,7 @@ def memory_mount_retained(source: BackendAgent, resources: tuple[ResourceBinding
         and (ref.tenant_id, ref.account_id)
         == (source.resource_scope.tenant_id, source.resource_scope.account_id)
         and native is not None
-        and (native.namespace, native.version) == ("anthropic.session_resource_create", 1)
+        and (native.namespace, native.version) == (SESSION_RESOURCE_CREATE_NAMESPACE, 1)
         and native.value
         in (
             {"resource": memory_mount(source.memory_store_id, read_only=True)},
@@ -1168,7 +1179,7 @@ def host_memory_represented(target: AgentSpec | None) -> bool:
     turns never call Anthropic, so their memory stays a declared drop."""
     from daimon.core.host_memory import HOST_MEMORY_TOOLS
 
-    if target is None or target.model.provider not in ("openai", "gemini"):
+    if target is None or target.model.provider not in DAIMON_RECORD_PROVIDERS:
         return False
     allowed = next(
         (

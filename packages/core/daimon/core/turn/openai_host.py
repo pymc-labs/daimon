@@ -73,7 +73,7 @@ from mux.drivers.openai import (
     Transport,
 )
 from mux.errors import ContinuityLost, ProviderError, ScopeViolation, UnsupportedCapability
-from mux.profiles.openai import NATIVE_MODELS
+from mux.profiles.openai import NATIVE_MODELS, PERSISTENT_WORKSPACE
 from mux.state.lease import Lease, Slot
 from mux.state.operations import request_digest
 from mux.state.store import ERA_REF, StateStore, adopted_identity
@@ -81,7 +81,7 @@ from mux.state.store import ERA_REF, StateStore, adopted_identity
 #: HTTP answers that reject a session create outright: no session exists afterwards.
 #: A 409 or 429 may follow an accepted create, so those stay `outcome_unknown`.
 # Profiles whose sessions mount uploaded files, so a replacement can carry them.
-_MOUNTING_PROFILES = frozenset({"openai.persistent_workspace"})
+_MOUNTING_PROFILES = frozenset({PROFILE})
 _DEFINITE_REJECTIONS = frozenset({"400", "401", "403", "404", "422"})
 
 
@@ -118,7 +118,7 @@ def runtime_for(runtime: TurnRuntime | None, revision: ConfigRevision | None) ->
         raise UnsupportedCapability(("openai_host_runtime",), PROFILE)
     if (
         revision.profile not in PROFILES
-        or revision.backend != "openai"
+        or revision.backend != PERSISTENT_WORKSPACE.provider
         or revision.model not in NATIVE_MODELS
     ):
         raise UnsupportedCapability(("openai_host_model",), PROFILE)
@@ -133,7 +133,8 @@ def runtime_for(runtime: TurnRuntime | None, revision: ConfigRevision | None) ->
     ):
         raise UnsupportedCapability(("openai_host_controls_and_durable_state",), PROFILE)
     if runtime.price is not None and (
-        runtime.price.provider != "openai" or runtime.price.model != revision.model
+        runtime.price.provider != PERSISTENT_WORKSPACE.provider
+        or runtime.price.model != revision.model
     ):
         raise ValueError("OpenAI host price differs from admitted model")
     return runtime
@@ -218,7 +219,7 @@ def _check_spec(
         raise ScopeViolation("preparation", "OpenAI plan differs from admitted revision")
     for ref in refs:
         if (
-            ref.provider != "openai"
+            ref.provider != PERSISTENT_WORKSPACE.provider
             or ref.account_scope_id != runtime.account_scope_id
             or ref.tenant_id != scope.tenant_id
             or ref.account_id != scope.account_id
@@ -485,7 +486,7 @@ async def _prepare_with_runtime(
         verifying = driver(runtime, revision, request.scope, native.binding)
         native = await verifying.sessions.retrieve(request.scope, native.ref)
         if (
-            native.ref.provider != "openai"
+            native.ref.provider != PERSISTENT_WORKSPACE.provider
             or native.ref.account_scope_id != runtime.account_scope_id
             or native.ref.tenant_id != request.scope.tenant_id
             or native.ref.account_id != request.scope.account_id
@@ -497,7 +498,7 @@ async def _prepare_with_runtime(
         return native, ProviderBinding(
             id=binding_id,
             thread=slot.thread,
-            provider="openai",
+            provider=PERSISTENT_WORKSPACE.provider,
             profile=revision.profile,
             native_refs={
                 **native.binding.native_refs,
@@ -521,7 +522,7 @@ async def _prepare_with_runtime(
         return ResourceRef(
             id=bound.native_refs["session"],
             kind="session",
-            provider="openai",
+            provider=PERSISTENT_WORKSPACE.provider,
             account_scope_id=account_scope_id,
             tenant_id=request.scope.tenant_id,
             account_id=request.scope.account_id,
@@ -529,7 +530,7 @@ async def _prepare_with_runtime(
 
     desired = BindingFacts(
         profile=revision.profile,
-        provider="openai",
+        provider=PERSISTENT_WORKSPACE.provider,
         config_revision=revision.local,
         agent=spec.agent.id,
         account_scope=runtime.account_scope_id,
@@ -549,7 +550,7 @@ async def _prepare_with_runtime(
         old = binding
         # A session of another provider or account scope is not read with this one's driver.
         readable = (
-            old.provider == "openai"
+            old.provider == PERSISTENT_WORKSPACE.provider
             and "session" in old.native_refs
             and old.native_refs.get("account_scope") == runtime.account_scope_id
         )
@@ -692,7 +693,7 @@ def _old_session(
     ref = ResourceRef(
         id=binding.native_refs["session"],
         kind="session",
-        provider="openai",
+        provider=PERSISTENT_WORKSPACE.provider,
         account_scope_id=host.account_scope_id,
         tenant_id=scope.tenant_id,
         account_id=scope.account_id,

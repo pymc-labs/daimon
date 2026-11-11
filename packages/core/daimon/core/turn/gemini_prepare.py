@@ -45,7 +45,7 @@ from mux.contracts.ids import ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding, SessionSpec
 from mux.contracts.usage import UsageObservation
 from mux.errors import BindingConflict, ScopeViolation, UnsupportedCapability
-from mux.profiles.gemini import INLINE_REUSE
+from mux.profiles.gemini import INLINE_REUSE, SESSION_NAMESPACE
 from mux.state.lease import Slot
 from mux.state.store import ERA_REF, StateStore, adopted_identity
 
@@ -141,7 +141,13 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
                 )
             )
             or (ref.provider, ref.kind, ref.tenant_id, ref.account_id, ref.account_scope_id)
-            != ("gemini", "agent", request.scope.tenant_id, request.scope.account_id, plan.project)
+            != (
+                INLINE_REUSE.provider,
+                "agent",
+                request.scope.tenant_id,
+                request.scope.account_id,
+                plan.project,
+            )
         ):
             raise AdmissionDenied(reason="backend_unsupported")
         if request.verified_counterpart != checked:
@@ -157,7 +163,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         deployment is None
         or deployment.config_digest != config.digest
         or deployment.config_revision != config.local
-        or deployment.agent.model.provider != "gemini"
+        or deployment.agent.model.provider != INLINE_REUSE.provider
         or deployment.agent.model.id != config.model
         or request.deps.state_store is not journal.state_store
     ):
@@ -175,7 +181,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     derived_id = (
         str(shared)
         if shared is not None
-        else str(uuid5(NAMESPACE_URL, f"gemini.host:{slot.model_dump_json()}"))
+        else str(uuid5(NAMESPACE_URL, f"{INLINE_REUSE.provider}.host:{slot.model_dump_json()}"))
     )
     # A released slot keeps its id; its era suffix keeps earlier creations from
     # replaying. Only a binding this host adopted (it carries its era) may differ
@@ -193,7 +199,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         return ResourceRef(
             id=bound.native_refs["session"],
             kind="session",
-            provider="gemini",
+            provider=INLINE_REUSE.provider,
             account_scope_id=deployment.account_scope_id,
             tenant_id=scope.tenant_id,
             account_id=scope.account_id,
@@ -238,8 +244,8 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
                 config_revision=config.local,
                 skills=skills,
                 extensions={
-                    "gemini.session": ExtensionConfig(
-                        namespace="gemini.session",
+                    SESSION_NAMESPACE: ExtensionConfig(
+                        namespace=SESSION_NAMESPACE,
                         version=1,
                         value={"binding_id": binding_id, "thread": thread.model_dump(mode="json")},
                     )
@@ -262,7 +268,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             # Gemini records no model, plan or scope ref: those follow config_revision.
             BindingFacts(
                 profile=PROFILE,
-                provider="gemini",
+                provider=INLINE_REUSE.provider,
                 config_revision=config.local,
                 agent=(
                     deployment.native_agent.ref.id
@@ -311,7 +317,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
                 store,
                 prior,
                 OldSession(binding=prior, ref=ref_of(prior), backend=backend)
-                if prior.provider == "gemini" and "session" in prior.native_refs
+                if prior.provider == INLINE_REUSE.provider and "session" in prior.native_refs
                 else None,
             ),
             reasons=decision.reasons,
@@ -467,7 +473,7 @@ def old_gemini_session(
     ref = ResourceRef(
         id=binding.native_refs["session"],
         kind="session",
-        provider="gemini",
+        provider=INLINE_REUSE.provider,
         account_scope_id=deployment.account_scope_id,
         tenant_id=scope.tenant_id,
         account_id=scope.account_id,
