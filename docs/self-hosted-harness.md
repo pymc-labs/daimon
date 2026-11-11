@@ -5,12 +5,12 @@ Anthropic, OpenAI or Gemini. See [model providers](providers.md) for how it
 compares and how a channel selects it.
 
 The `selfhosted.loop` backend gives each caller a separate persistent session.
-It does not support steering, shared sessions, workers, session transfer,
+It does not support steering, workers, session transfer,
 memory stores or workspace export and import.
 
 The `selfhosted.loop` backend runs turns through a separate `daimon-harness/0`
 service that you operate. Each caller gets a separate persistent session. The
-backend does not support steering, shared sessions, workers, session transfer,
+backend does not support steering, workers, session transfer,
 memory stores or workspace export and import.
 
 ## Create the resource records
@@ -151,8 +151,8 @@ guarantees are in the
 
 ## Know the limits
 
-- **Where it applies.** A channel pin only, never an agent's model. It needs
-  one session per caller, so shared threads are refused. `ask` rules and
+- **Where it applies.** A channel pin only, never an agent's model. A shared
+  thread is one session for everyone, without each person's own sign-ins. `ask` rules and
   publishing confirmations pause for Daimon's Approve card.
 - **No memory, effort or spend limit.** A turn is bounded by the
   row's `max_tool_calls` and `deadline_s`. Routines do not run on it.

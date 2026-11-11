@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Self-hosted channels can share a thread.** Everyone in it works in one
+  session, and each person's own sign-ins stay hidden from the others.
 - **Picking another provider's model switches the agent.** Every place that
   picks a model lists one catalog: Claude's models plus the OpenAI and Gemini
   models the workspace has enabled, each with its price and without unpriced or

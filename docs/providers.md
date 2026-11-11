@@ -12,7 +12,7 @@ in one conversation.
 | Needs | Anthropic API key | OpenAI key and project | Gemini key | Your own harness service and Azure OpenAI |
 | Models | The agent's own model | `gpt-6-luna`, `gpt-6-astra` | `gemini-3.8-flash`, `gemini-4-argon` (priced through 2026-11-30, then refused) | The deployment you name (default `gpt-6.1-sol`) |
 | Set as an agent's model or a thread's | Yes | Yes | Yes | No, only as a channel pin |
-| Shared threads | Yes | Yes, without Daimon's tools | Yes, without Daimon's tools | Not supported |
+| Shared threads | Yes | Yes, without Daimon's tools | Yes, without Daimon's tools | Yes |
 | Tools that need a confirmation | Yes | Daimon's Approve card | Daimon's Approve card | Daimon's Approve card |
 | The agent's own MCP connectors | Yes | Through Daimon | Through Daimon | Through Daimon |
 | Sealed channels and Slack DM context | Yes | Yes | Yes | Yes |
@@ -35,7 +35,7 @@ never runs it on Anthropic in its place.
 - **Gemini:** custom and channel skills, web search, and stopping a turn at a
   spend limit.
 - **OpenAI:** web search, which it neither prices nor counts.
-- **Self-hosted:** memory, shared threads, routines, effort and a
+- **Self-hosted:** memory, routines, effort and a
   spend limit, workspace export and import. It cannot be an agent's model.
   It needs a channel pin.
 - **OpenAI and Gemini:** an agent with an `ask` rule or a
