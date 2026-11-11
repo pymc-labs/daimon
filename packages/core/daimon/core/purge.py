@@ -91,6 +91,9 @@ Deliberate carve-outs:
   erasure only nulls its `added_by_account_id`, through ON DELETE SET NULL.
 - A skill mirrored from a skills server stays with the tenant; erasure nulls its
   `added_by_account_id` (ON DELETE SET NULL) and the mirror stops updating.
+- A conversation's chosen model (`thread_model_settings`) and each agent's consent to it
+  (`thread_model_consents`) belong to the tenant. They name no person, only the thread and
+  agent, so account erasure leaves them and they go when the install does (ON DELETE CASCADE).
 - `workspace_members` rows are kept: they mirror who the chat platform lists as a
   member (platform user id and admin flag, no content), and the next reload would
   restore a deleted row. They go when the install ends.

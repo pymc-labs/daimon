@@ -28,7 +28,10 @@ from daimon.core._models import (
     PrincipalLink,
     PrivacySessionDelete,
     Routine,
+    Tenant,
     TenantConfig,
+    ThreadModelConsent,
+    ThreadModelSetting,
     UserConfig,
 )
 from daimon.core.credential_requests import mint_request_token
@@ -284,6 +287,49 @@ async def test_purge_account_respects_fk_order(
     assert (
         await db_session.execute(select(UserConfig).where(UserConfig.account_id == account.id))
     ).scalar_one_or_none() is None, "user_config gone"
+
+
+async def test_purge_account_keeps_a_conversations_model_choice_and_consent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Thread model rows are tenant configuration: no person to erase, gone with the tenant."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    db_session.add_all(
+        [
+            ThreadModelSetting(
+                tenant_id=tenant.id,
+                platform="discord",
+                thread_id="t1",
+                model="gpt-5",
+                provider="openai",
+            ),
+            ThreadModelConsent(
+                tenant_id=tenant.id,
+                platform="discord",
+                thread_id="t1",
+                agent_id=uuid.uuid4(),
+                revision={},
+                digest="0" * 64,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    await purge_account(sm=db_session_factory, account_id=account.id)
+
+    for table in (ThreadModelSetting, ThreadModelConsent):
+        kept = await db_session.scalar(
+            select(func.count()).select_from(table).where(table.tenant_id == tenant.id)
+        )
+        assert kept == 1, f"{table.__tablename__} is tenant configuration and survives an erasure"
+
+    await db_session.execute(Tenant.__table__.delete().where(Tenant.id == tenant.id))
+    await db_session.commit()
+    for table in (ThreadModelSetting, ThreadModelConsent):
+        left = await db_session.scalar(select(func.count()).select_from(table))
+        assert left == 0, f"{table.__tablename__} goes with its tenant"
 
 
 async def test_purge_account_with_linked_principals(
