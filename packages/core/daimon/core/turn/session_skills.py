@@ -39,7 +39,7 @@ from mux.contracts.ids import Scope, SkillRef
 from mux.contracts.ports import Skills
 from mux.contracts.profile import Profile
 from mux.contracts.resources import AgentSpec, SkillUpload, SkillUploadFile
-from mux.errors import MuxError
+from mux.errors import MuxError, ProviderError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -225,7 +225,8 @@ async def copy_skills(
     """The provider's copy of each source skill version, uploading a version only once.
 
     Also returns a named `skill:<id>` loss for each pin that could not be copied:
-    one bad archive or refused upload costs that skill alone, never the reply.
+    one bad archive or refused upload costs that skill alone, never the reply. A
+    retryable provider error propagates so the reply is retried.
     """
 
     async def copy(pin: SkillRef) -> SkillRef:
@@ -281,6 +282,10 @@ async def copy_skills(
         try:
             copies.append(await copy(pin))
         except (AnthropicError, DaimonError, MuxError, ValueError) as error:
+            # A transient failure retries with the reply; only a permanent one is a loss,
+            # because the session is created once with whatever copied.
+            if isinstance(error, ProviderError) and error.retryable:
+                raise
             log.warning("session_skills.copy_failed", skill_id=pin.id, error=type(error).__name__)
             losses.append(f"skill:{pin.id}")
     return tuple(copies), tuple(losses)

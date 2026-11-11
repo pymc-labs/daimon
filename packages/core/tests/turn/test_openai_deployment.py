@@ -582,3 +582,52 @@ async def test_copy_skills_when_one_archive_is_bad_then_copies_the_rest_and_name
     )
     assert copies == (SkillRef(id="copy-team", version="1"),), "the readable skill still copies"
     assert losses == ("skill:skill_bad",), "the bad one is named, not raised"
+
+
+@pytest.mark.parametrize(
+    ("retryable", "outcome"), [(True, "retried"), (False, "named")], ids=["retryable", "permanent"]
+)
+async def test_copy_skills_when_an_upload_fails_then_only_a_permanent_error_is_a_loss(
+    application: ProviderPreparationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    retryable: bool,
+    outcome: str,
+) -> None:
+    """A transient upload error retries with the reply; a permanent one names the skill."""
+    import io
+    import zipfile
+
+    from daimon.core.turn import session_skills
+    from mux.contracts.ids import SkillRef
+    from mux.errors import ProviderError
+
+    async with application.deps.sessionmaker() as db, db.begin():
+        await make_tenant(db, id=TENANT)
+    archive_bytes = io.BytesIO()
+    with zipfile.ZipFile(archive_bytes, "w") as archive:
+        archive.writestr("SKILL.md", "---\nname: team\ndescription: d\n---\nbody")
+
+    async def download(*_: object, **__: object) -> bytes:
+        return archive_bytes.getvalue()
+
+    class Skills:
+        async def create(self, *_: object, **__: object) -> object:
+            raise ProviderError("overloaded", retryable=retryable, native_code="503")
+
+    monkeypatch.setattr(session_skills, "download_skill_version", download)
+    call = session_skills.copy_skills(
+        application.deps.sessionmaker,
+        application.deps.anthropic,
+        cast(Any, Skills()),
+        scope=SCOPE,
+        tenant_id=TENANT,
+        provider="openai",
+        account_scope_id="project",
+        pins=(SkillRef(id="skill_team", version="7"),),
+    )
+    if outcome == "retried":
+        with pytest.raises(ProviderError):
+            await call
+        return
+    copies, losses = await call
+    assert (copies, losses) == ((), ("skill:skill_team",)), "a permanent refusal is a named loss"
