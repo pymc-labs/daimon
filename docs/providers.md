@@ -17,7 +17,7 @@ Read this if you self-host and do not want every turn on Anthropic.
 | Multi-agent delegation | Yes | Copies of itself | Copies of itself | Copies of itself |
 | Memory across turns | Yes | No | Not documented | No |
 | Workspace export and import | Yes | No | Not documented | No |
-| Skills | Full | Default set | Not documented | Seeded defaults only |
+| Skills | Full | Custom and channel skills, up to 28 MiB each | Not documented | Seeded defaults only |
 
 Everything else works the same on every backend: chat platforms, routines and
 the default skill set. A backend that cannot meet a channel's requirements

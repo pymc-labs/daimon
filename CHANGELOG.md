@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **OpenAI agents keep their custom and channel skills.** An agent switched to
+  OpenAI attaches its own skills and its channel's, each uploaded once per
+  version. A skill over OpenAI's size limit is named on the switch card as the
+  one thing it loses. An agent confirmed while it lost every skill is not asked
+  again.
+
 - **Agents ask copies of themselves on any provider.** An agent set up to work
   with copies of itself runs that way on OpenAI and Gemini too: it asks
   `self` through the helper tools, and each ask starts a fresh copy with its
