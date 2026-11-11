@@ -7,6 +7,7 @@ import uuid
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from daimon.core.capability_tools import CAPABILITY_KEYS
@@ -26,7 +27,10 @@ from daimon.core.features.registry import (
     TIERS,
     WEB_MODULES,
     FeatureSpec,
+    Requirement,
+    Tier,
     parse_deployment,
+    resolution_order,
 )
 from daimon.core.features.resolver import TierValue, resolve_feature
 from daimon.core.features.session_identity import IDENTITY_KEYS
@@ -408,6 +412,7 @@ def test_every_feature_key_read_is_registered_and_every_registered_key_is_read()
             if (
                 path.name != "registry.py"
                 and isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
                 and node.value in FEATURES
             ):
                 constants.add(node.value)
@@ -525,7 +530,8 @@ def test_a_zero_post_length_means_no_limit_and_never_overrides_a_narrower_tier()
         assert not spec.accepts("0", tier), f"a step, not 0, at {tier}"
     alone = resolve_feature(spec, [TierValue("deployment", "0")])
     assert (alone.value, alone.tier) == ("0", "deployment"), "0 alone stays no limit"
-    for narrower, tier in (("500", "workspace"), ("250", "channel")):
+    narrowing: list[tuple[str, Tier]] = [("500", "workspace"), ("250", "channel")]
+    for narrower, tier in narrowing:
         got = resolve_feature(spec, [TierValue("deployment", "0"), TierValue(tier, narrower)])
         assert (got.value, got.tier) == (narrower, tier), f"0 does not override {tier}"
     both = resolve_feature(spec, [TierValue("deployment", "1000"), TierValue("workspace", "500")])
@@ -564,8 +570,6 @@ def test_a_reach_limit_applies_only_while_the_reach_check_is_on(key: str) -> Non
 
 def test_resolution_order_puts_every_dependency_before_its_dependents() -> None:
     """The readers resolve in this order; a dependency read later would never apply."""
-    from daimon.core.features.registry import resolution_order
-
     for spec in FEATURES.values():
         assert all(dep in FEATURES for dep in spec.depends_on), f"{spec.key} names a real feature"
     every = [spec.key for spec in resolution_order()]
@@ -575,3 +579,39 @@ def test_resolution_order_puts_every_dependency_before_its_dependents() -> None:
             assert every.index(dep) < every.index(spec.key), f"{dep} before {spec.key}"
     alone = [spec.key for spec in resolution_order(["outbound_threads"])]
     assert alone == ["reach_budget", "outbound_threads"], "a read of one pulls in its dependency"
+
+
+def test_every_dependency_and_requirement_names_something_real() -> None:
+    known = set(get_args(Requirement))
+    for spec in FEATURES.values():
+        for dep in spec.depends_on:
+            assert dep in FEATURES, f"{spec.key} depends on {dep}, which is no feature"
+            assert dep != spec.key, f"{spec.key} depends on itself"
+        for need in spec.requires:
+            assert need in known, f"{spec.key} requires {need}, which is no known requirement"
+    used = {need for spec in FEATURES.values() for need in spec.requires}
+    assert used <= known, "every requirement in use is declared"
+
+
+def test_the_dependency_graph_has_no_cycle(monkeypatch: pytest.MonkeyPatch) -> None:
+    state: dict[str, str] = {}
+
+    def visit(key: str, path: tuple[str, ...]) -> None:
+        assert state.get(key) != "open", f"cycle: {' -> '.join((*path, key))}"
+        if state.get(key) == "done":
+            return
+        state[key] = "open"
+        for dep in FEATURES[key].depends_on:
+            visit(dep, (*path, key))
+        state[key] = "done"
+
+    for key in FEATURES:
+        visit(key, ())
+    spec = FEATURES["reach_budget"]
+    monkeypatch.setitem(
+        FEATURES,  # type: ignore[arg-type]
+        "reach_budget",
+        replace(spec, depends_on=("outbound_threads",)),
+    )
+    with pytest.raises(ValueError, match="dependency cycle"):
+        resolution_order()
