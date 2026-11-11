@@ -14,7 +14,7 @@ in one conversation.
 | Set as an agent's model or a thread's | Yes | Yes | Yes | An agent's, once the operator grants it; not a thread's |
 | Shared threads | Yes | Yes, without Daimon's tools | Yes, without Daimon's tools | Yes |
 | Tools that need a confirmation | Yes | Daimon's Approve card | Daimon's Approve card | Daimon's Approve card |
-| The agent's own MCP connectors | Yes | Through Daimon | Through Daimon | Through Daimon |
+| The agent's own connectors | Yes | Through Daimon | Through Daimon | Through Daimon |
 | Sealed channels and Slack DM context | Yes | Yes | Yes | Yes |
 | Multi-agent delegation | Yes | Copies of itself | Copies of itself | Copies of itself |
 | Memory across turns | Yes | Through Daimon, needs an Anthropic key | Through Daimon, needs an Anthropic key | Not supported |
@@ -125,8 +125,8 @@ Memory settings show as needing setup.
 - **Web fetch.** Daimon opens public https pages for the agent, checks every
   redirect and cuts long text. The place's web page setting decides. Self-hosted
   agents get it too.
-- **Connectors.** The agent's own MCP connectors run through Daimon with the
-  turn's credential, and the provider never sees a sign-in. Each tool keeps the
+- **Connectors.** The agent's own connectors run through Daimon with a
+  credential for that reply only, and the provider never sees a sign-in. Each tool keeps the
   agent's permission. Personal connectors need one Reconnect after a switch.
   Self-hosted agents get it too, and their harness asks before an `ask` tool.
   Turn it off with the `mcp_connector_relay` feature.

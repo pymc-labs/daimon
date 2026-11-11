@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   expired ones. Discord has `/model`, Slack the Model message shortcut, Teams
   the `model` command, and the web has the agent editor and the chat header; the
   Discord, Slack and Teams agent panels have one model select, and the separate
-  provider step is gone. MCP `update_agent` and `daimon agents create|update
+  provider step is gone. The `update_agent` tool and `daimon agents create|update
   --model provider:id` (for example `openai:gpt-6-luna`, with `--yes` and
   `--accept-drops`) do the same. Admins can pin a channel to such a model from
   its web page or by asking in chat, and an OpenAI agent can carry a low,
@@ -63,7 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Daimon runs with only an OpenAI or Gemini key.** With no Anthropic key,
   setup seeds the default agents on the keyed provider at its default model, and
-  agents you create live there too, pinned, so no turn falls back to Anthropic.
+  agents you create live there too, pinned, so no reply falls back to Anthropic.
   Lookups of routines, rules, rosters, agent details, skills, MCP connections,
   forks and reports use Daimon's own agent records as well as Claude's. Thread
   titles and participation checks use a small model from the active provider,
@@ -76,23 +76,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **OpenAI and Gemini agents keep more of what a Claude agent has.** OpenAI
   and Gemini agents attach their custom and channel skills, also on a
-  channel-set deployment, uploaded once per version; a skill over its size
-  limit or that cannot be read is named on the switch card. Gemini skills are
+  channel-set deployment, uploaded once per version. A skill over its size
+  limit, or one that cannot be read or uploaded, is left out and named: on the
+  switch card for an agent's own skills, and to the agent itself otherwise. Gemini skills are
   text only, 2 MiB in all. An OpenAI conversation that gains skills moves once
   to a new session, keeping its recent messages and, where the workspace
   persists, its saved files. Both providers read and write shared, personal
   and channel memory through Daimon's tools, which needs an Anthropic key.
-  They ask copies of themselves through `ask_helper`, with all copies of one
-  message stopping at $10 together; a refused copy says why, such as a model
+  They ask copies of themselves through `ask_helper`, sharing $10 per
+  message: the first copy runs alone, and later ones start only while their
+  share still fits. A refused copy says why, such as a model
   with no known price. OpenAI, Gemini and self-hosted agents open public https
   pages through Daimon's page reader, under the place's web page setting.
   Files an agent produces are posted on Discord, Slack, Teams and the web on
-  OpenAI and Gemini, each once. A spend limit now stops an OpenAI turn; cache
+  OpenAI and Gemini, each once. A spend limit now stops an OpenAI reply; cache
   writes are not metered, so the count can fall slightly under the bill.
 
-- **An agent's own MCP connectors and confirmations work on OpenAI and
-  Gemini.** The provider calls connectors through Daimon with the turn's own
-  credential, and Daimon calls the connector with the person's sign-in, which the
+- **An agent's own connectors and confirmations work on OpenAI and
+  Gemini.** The provider calls connectors through Daimon with a credential for
+  that reply only, and Daimon calls the connector with the person's sign-in, which the
   provider never sees. Daimon keeps and renews those sign-ins; personal
   connectors need one Reconnect after a switch. A tool that needs a
   confirmation posts an Approve and Deny card that only the asker answers, and
@@ -105,7 +107,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agents answer in shared threads, without Daimon's tools or any caller's
   personal stores, and in Slack Connect and other held channels with only that
   channel's memory. Sealed channels and Slack DM context also run on
-  self-hosted harnesses, and sessions a sealed turn starts stay sealed.
+  self-hosted harnesses, and sessions a sealed reply starts stay sealed.
   Self-hosted harnesses still refuse shared threads.
 
 - **`daimon selfhosted init` sets up the whole grant.** Beyond the agent and
