@@ -112,6 +112,25 @@ export type Change = {
   text?: boolean
 }
 
+/** What picking a model changes: `drops` is every loss the person accepts by confirming. */
+export type ModelPreview = {
+  moves: boolean
+  allowed: boolean
+  skills: string[]
+  servers: string[]
+  capabilities: string[]
+  shared_limits: string[]
+  drops: string[]
+  cost: string
+  threads: string
+  digest: string
+  revision: number
+  refusal: { line: string; action: string | null } | null
+}
+
+/** The consent an apply carries: the drops, digest and revision the person was shown. */
+export type Consent = { accepted_drops: string[]; preview_digest: string; preview_revision: number }
+
 export type Draft = { base_version: number; config: AgentConfig; changes: Change[]; stale: boolean }
 
 export type AgentVersion = { version: number; at: string; by: PersonRef; note: string | null; changes: Change[] }

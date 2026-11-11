@@ -75,13 +75,17 @@ const audit: AuditEntry[] = ([
   { id: "a9", source: "web", at: ago(98), who: "Jonas Weber", action: "Changed setting", target: "Web chat agent", detail: "Daimon" },
 ] satisfies Raw[]).map(entry)
 
+// Providers the deployment holds a key for: a workspace that never chose follows them.
+const KEYED = [{ id: "anthropic", label: "Anthropic" }, { id: "openai", label: "OpenAI" }, { id: "gemini", label: "Google" }]
+const keyedIds = KEYED.map((p) => p.id)
+
 const settings: WorkspaceSettings = {
   modules: { chat: true, agents: true, channels: true, routines: true, credits: true, integrations: true },
   default_agent: "ag_daimon",
   access: { people: null, others: 0, dm_enabled: false, dm_memory_read_only: false, plain_text_mentions: false },
   providers: {
-    offered: [{ id: "anthropic", label: "Anthropic" }, { id: "openai", label: "OpenAI" }, { id: "gemini", label: "Google" }],
-    allowed: ["anthropic"],
+    offered: KEYED,
+    allowed: keyedIds,
     followed: true,
   },
 }
@@ -211,7 +215,7 @@ export const adminHandlers: HttpHandler[] = [
     }
     if (b.providers && settings.providers) {
       settings.providers.followed = b.providers === "default"
-      settings.providers.allowed = b.providers === "default" ? ["anthropic"] : b.providers
+      settings.providers.allowed = b.providers === "default" ? keyedIds : b.providers
       log("Changed setting", "Providers")
     }
     return HttpResponse.json(settings)

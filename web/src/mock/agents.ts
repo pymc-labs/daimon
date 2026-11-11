@@ -3,7 +3,7 @@ import { http, HttpResponse } from "msw"
 
 import type {
   Agent, AgentConfig, AgentSummary, AgentVersion, Backend, BuiltinTool, Catalog, CatalogModel, Change, Draft,
-  DataServerAgent, DataServerStatus, DataServerTools, Effect, McpServer, ModelChoice, PersonRef, Place, Skill, Template,
+  DataServerAgent, DataServerStatus, DataServerTools, Effect, McpServer, ModelChoice, ModelPreview, PersonRef, Place, Skill, Template,
 } from "@/modules/agents/types"
 import { notFound, unauthorized, wait } from "./util"
 import { me, PEOPLE } from "./world"
@@ -15,13 +15,15 @@ const clone = <T,>(x: T): T => structuredClone(x)
 
 // ---------- Catalog ----------
 
+// Ids, prices and order follow the core catalog.
 const MODELS: CatalogModel[] = [
-  { id: "claude-opus-5-5", label: "Opus 5.5", backend: "anthropic", in_usd: 5, out_usd: 25, fast: true },
-  { id: "claude-sonnet-5-5", label: "Sonnet 5.5", backend: "anthropic", in_usd: 3, out_usd: 15 },
-  { id: "claude-haiku-5-5", label: "Haiku 5.5", backend: "anthropic", in_usd: 1, out_usd: 5 },
-  { id: "gpt-5.5", label: "GPT-5.5", backend: "openai", in_usd: 2.5, out_usd: 15 },
-  { id: "gpt-5.5-mini", label: "GPT-5.5 mini", backend: "openai", in_usd: 0.4, out_usd: 2 },
-  { id: "gemini-3-pro", label: "Gemini 3 Pro", backend: "gemini", in_usd: 2, out_usd: 12 },
+  { id: "claude-opus-5-5", label: "Opus 5.5", backend: "anthropic", in_usd: 4, out_usd: 20, fast: true },
+  { id: "claude-sonnet-5-5", label: "Sonnet 5.5", backend: "anthropic", in_usd: 2, out_usd: 10 },
+  { id: "claude-haiku-5-5", label: "Haiku 5.5", backend: "anthropic", in_usd: 0.1, out_usd: 0.5 },
+  { id: "gpt-6-luna", label: "GPT-6 Luna", backend: "openai", in_usd: 0.1, out_usd: 0.5 },
+  { id: "gpt-6-astra", label: "GPT-6 Astra", backend: "openai", in_usd: 10, out_usd: 50 },
+  { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", backend: "gemini", in_usd: 0.75, out_usd: 3.75 },
+  { id: "gemini-4-argon", label: "Gemini 4 Argon", backend: "gemini", in_usd: 2, out_usd: 10 },
 ]
 const modelLabel = (m: ModelChoice) => {
   const c = MODELS.find((x) => x.id === m.id)
@@ -333,7 +335,7 @@ function seed(): Rec[] {
     places: [place("sales", { default: true }), clone(DM), clone(WEB)],
   }, "p_maya", 900, [[120, "p_maya", null, (c) => { c.skills.push(skill("docx")) }]])
   const support = history({
-    name: "Support Triage", purpose: "Labels and routes support tickets", avatar: face(39), model: m("gpt-5.5", "medium"),
+    name: "Support Triage", purpose: "Labels and routes support tickets", avatar: face(39), model: m("gpt-6-luna", "medium"),
     system: "# Support Triage\n\nLabel every new ticket in #support, set a priority, and file it in the owning team's Linear project.",
     skills: [skill("triage")], tools: toolset("read"), mcp_servers: [server("linear")], places: [place("support", { default: true })],
   }, "p_jonas", 500, [[30, "p_jonas", "Comments need approval", (c) => { c.mcp_servers[0]!.tools[3]!.rule = "ask" }]])
@@ -433,8 +435,8 @@ const TEMPLATES: (Template & { config: () => Omit<AgentConfig, "name" | "avatar"
     config: () => ({ purpose: "Client briefs from the CRM", model: m("claude-haiku-5-5", "low"),
       system: "# Account briefs\n\nOne-page briefs from HubSpot and Almanac. No speculation.", skills: [skill("account-brief"), skill("docx")],
       tools: toolset("read", "write"), mcp_servers: [server("almanac"), server("hubspot")], places: [] }) },
-  { id: "triage", name: "Support triage", purpose: "Labels and routes tickets", icon: "inbox", skills: 1, servers: 1, model: "GPT-5.5",
-    config: () => ({ purpose: "Labels and routes tickets", model: m("gpt-5.5", "medium"),
+  { id: "triage", name: "Support triage", purpose: "Labels and routes tickets", icon: "inbox", skills: 1, servers: 1, model: "GPT-6 Luna",
+    config: () => ({ purpose: "Labels and routes tickets", model: m("gpt-6-luna", "medium"),
       system: "# Support triage\n\nLabel, prioritise and route every new ticket.", skills: [skill("triage")], tools: toolset("read"),
       mcp_servers: [server("linear")], places: [] }) },
 ]
@@ -500,6 +502,22 @@ const dataStatus = (id: string): DataServerStatus => ({
 })
 const DATA = "/api/agents/:id/nodes/data_server"
 
+const PREVIEW_BASE: ModelPreview = {
+  moves: false, allowed: true, skills: [], servers: [], capabilities: [], shared_limits: [], drops: [], cost: "", threads: "", digest: "", revision: 0, refusal: null,
+}
+const REFUSED = "gemini:gemini-4-argon"
+
+/** The preview of a pick: no change within a provider, a refusal for one model, drops for the rest. */
+function previewOf(from: Backend, value: string): ModelPreview {
+  const to = value.split(":")[0] as Backend
+  if (to === from) return PREVIEW_BASE
+  if (value === REFUSED) return { ...PREVIEW_BASE, moves: true, allowed: false, refusal: { line: "Gemini 4 Argon can't run this agent here. Ask an admin.", action: null } }
+  return {
+    ...PREVIEW_BASE, moves: true, drops: ["memory", "sandbox"], skills: ["Pricing playbook"], shared_limits: ["Shared threads keep the thread's first model"],
+    cost: "Costs about the same per message", threads: "Threads switch on their next message.", digest: "d".repeat(64), revision: 4,
+  }
+}
+
 export const agentsHandlers = [
   http.get("/api/agents", async () => {
     await wait()
@@ -509,6 +527,13 @@ export const agentsHandlers = [
   http.get("/api/agents/catalog", async () => {
     await wait(120)
     return HttpResponse.json(CATALOG)
+  }),
+  http.get("/api/agents/:id/model-preview", async ({ params, request }) => {
+    await wait(200)
+    const v = viewer(), r = find(String(params.id))
+    if (!v) return unauthorized()
+    if (!r) return notFound()
+    return HttpResponse.json(previewOf(current(r).config.model.backend, new URL(request.url).searchParams.get("value") ?? ""))
   }),
   http.get("/api/agents/templates", async () => {
     await wait(120)
@@ -521,7 +546,7 @@ export const agentsHandlers = [
     const { name, template, model } = (await request.json()) as { name: string; template: string; model?: string }
     const t = TEMPLATES.find((x) => x.id === template) ?? TEMPLATES[0]!
     const config: AgentConfig = { ...t.config(), name, avatar: face(FACES[DB.length % FACES.length]!) }
-    if (model) config.model = m(model, config.model.effort)
+    if (model) config.model = m(model.split(":").at(-1)!, config.model.effort)
     const id = `ag_${name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "")}_${Date.now().toString(36).slice(-4)}`
     DB.push({
       id, owner: v.id, co_owners: [], last_used_at: null, spend_usd: 0, drafts: {},
@@ -570,8 +595,10 @@ export const agentsHandlers = [
     if (!v) return unauthorized()
     if (!r) return notFound()
     const d = r.drafts[v.id]
-    const { note } = (await request.json()) as { note?: string }
+    const { note, preview_digest } = (await request.json()) as { note?: string; preview_digest?: string }
     if (!d) return HttpResponse.json({ detail: "Nothing to apply" }, { status: 409 })
+    const was = current(r).config.model.backend
+    if (d.config.model.backend !== was && !preview_digest) return HttpResponse.json({ detail: "Confirm what the switch drops first." }, { status: 422 })
     if (d.base_version !== current(r).version) {
       return HttpResponse.json({ detail: `Changed to v${current(r).version} since your draft began` }, { status: 409 })
     }

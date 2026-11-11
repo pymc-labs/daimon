@@ -1,66 +1,76 @@
 import { Switch } from "@/components/ui/switch"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
-import { EffectTag } from "../bits"
-import { EFFORT_LABEL } from "../lib"
+import { EFFORT_LABEL, PROVIDER } from "../lib"
+import { ModelPreviewPanel } from "../ModelPreviewPanel"
 import type { Effort } from "../types"
+import { usePendingPreview } from "../usePendingPreview"
 import { Field, Section, type Props } from "./parts"
 
 const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"]
-const PROVIDERS = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Google", selfhosted: "Self-hosted" }
 
 export function ModelEditor({ agent, config, catalog, ro, update }: Props) {
   const m = config.model
-  const groups = Object.entries(PROVIDERS).map(([b, label]) => ({ b, label, models: catalog?.models.filter((x) => x.backend === b) ?? [] })).filter((g) => g.models.length)
   const cur = catalog?.models.find((x) => x.id === m.id && x.backend === m.backend)
+  const preview = usePendingPreview(agent, m).data
+  const noEffort = m.backend !== "anthropic" && `${PROVIDER[m.backend]} has no effort setting`
+  const noFast = !cur?.fast && "This model has no fast mode"
   return (
     <>
       <Section title="Model">
-        <div className="space-y-4">
-          {groups.map((g) => (
-            <div key={g.b}>
-              <div className="mb-1.5 flex items-center gap-2 text-xs text-muted-foreground">
-                {g.label}{g.b !== agent.model.backend && <EffectTag effect="threads" />}
-              </div>
-              <div className="overflow-hidden rounded-lg border">
-                {g.models.map((x) => (
-                  <button
-                    key={x.id}
-                    disabled={ro}
-                    onClick={() => update((c) => { c.model = { ...c.model, id: x.id, backend: x.backend, speed: x.fast ? c.model.speed : "standard" } }, 0)}
-                    className={cn("flex h-10 w-full items-center gap-3 border-b px-3 text-left text-sm last:border-b-0 enabled:hover:bg-accent", m.id === x.id && m.backend === x.backend && "bg-accent")}
-                  >
-                    <span className={cn("flex size-4 items-center justify-center rounded-full border", m.id === x.id && "border-primary")}>
-                      {m.id === x.id && <span className="size-2 rounded-full bg-primary" />}
-                    </span>
-                    <span className="font-medium">{x.label}</span>
-                    <span className="ml-auto text-xs text-muted-foreground tabular">${x.in_usd} / ${x.out_usd} per M</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          ))}
+        <div className="space-y-2">
+          {catalog?.models.map((x) => {
+            const on = m.id === x.id && m.backend === x.backend
+            return (
+              <button
+                key={`${x.backend}:${x.id}`}
+                disabled={ro}
+                onClick={() => update((c) => { c.model = { ...c.model, id: x.id, backend: x.backend, speed: x.fast ? c.model.speed : "standard" } }, 0)}
+                className={cn("flex min-h-12 w-full items-center gap-3 rounded-lg border px-3 py-2 text-left text-sm enabled:hover:bg-accent", on && "border-primary bg-accent")}
+              >
+                <span className={cn("flex size-4 shrink-0 items-center justify-center rounded-full border", on && "border-primary")}>
+                  {on && <span className="size-2 rounded-full bg-primary" />}
+                </span>
+                <span className="font-medium">{x.label}</span>
+                <span className="inline-flex h-5 items-center rounded bg-muted px-1.5 text-[11px] font-medium text-muted-foreground">{PROVIDER[x.backend]}</span>
+                <span className="ml-auto text-xs text-muted-foreground tabular">${x.in_usd} / ${x.out_usd} per M</span>
+              </button>
+            )
+          })}
         </div>
+        {preview && <ModelPreviewPanel preview={preview} className="mt-3" />}
       </Section>
       <Section title="Settings">
         <div className="space-y-3">
-          {m.backend === "anthropic" && (
-            <Field label="Effort">
-              <ToggleGroup type="single" value={m.effort} disabled={ro} onValueChange={(v) => v && update((c) => { c.model.effort = v as Effort }, 0)} variant="segmented" size="sm">
+          <Field label="Effort">
+            <Reason reason={noEffort}>
+              <ToggleGroup type="single" value={m.effort} disabled={ro || !!noEffort} onValueChange={(v) => v && update((c) => { c.model.effort = v as Effort }, 0)} variant="segmented" size="sm">
                 {EFFORTS.map((e) => <ToggleGroupItem key={e} value={e} className="px-2.5 text-xs">{EFFORT_LABEL[e]}</ToggleGroupItem>)}
               </ToggleGroup>
-            </Field>
-          )}
-          {cur?.fast && (
-            <Field label="Fast mode">
+            </Reason>
+          </Field>
+          <Field label="Fast mode">
+            <Reason reason={noFast}>
               <span className="flex items-center gap-3">
-                <Switch checked={m.speed === "fast"} disabled={ro} onCheckedChange={(v) => update((c) => { c.model.speed = v ? "fast" : "standard" }, 0)} />
-                <span className="text-xs text-muted-foreground">6x price</span>
+                <Switch checked={m.speed === "fast"} disabled={ro || !!noFast} onCheckedChange={(v) => update((c) => { c.model.speed = v ? "fast" : "standard" }, 0)} />
+                {!noFast && <span className="text-xs text-muted-foreground">6x price</span>}
               </span>
-            </Field>
-          )}
+            </Reason>
+          </Field>
         </div>
       </Section>
     </>
+  )
+}
+
+/** Wraps a disabled control so hovering it says why. */
+function Reason({ reason, children }: { reason: string | false; children: React.ReactNode }) {
+  if (!reason) return <>{children}</>
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild><span className="inline-flex w-fit opacity-60">{children}</span></TooltipTrigger>
+      <TooltipContent>{reason}</TooltipContent>
+    </Tooltip>
   )
 }

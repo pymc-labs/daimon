@@ -26,6 +26,11 @@ export function Pill({ children, className }: { children: React.ReactNode; class
   return <span className={cn(pill, "border bg-background text-muted-foreground", className)}>{children}</span>
 }
 
+/** Marks an item the picked model's provider can't run. */
+export function NotSupported({ className }: { className?: string }) {
+  return <span className={cn(pill, "bg-warning/10 text-warning", className)}>Not supported</span>
+}
+
 export function PlaceIcon({ place, className }: { place: Pick<Place, "kind" | "platform">; className?: string }) {
   if (place.kind === "web") return <Globe className={cn("size-3.5 shrink-0 text-muted-foreground", className)} />
   if (place.kind === "dm") return <MessageCircle className={cn("size-3.5 shrink-0 text-muted-foreground", className)} />
