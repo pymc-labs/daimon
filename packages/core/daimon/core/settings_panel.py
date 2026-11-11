@@ -49,7 +49,9 @@ from daimon.core.features.surface import (
     own_text,
     parse_choice,
     source_text,
+    split_pages,
     tier_options,
+    with_pages,
 )
 from daimon.core.stores.identity import find_platform_principal
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -59,7 +61,6 @@ TITLE: Final = "Settings"
 OPEN: Final = "open"
 SELECT_LIMIT: Final = 25
 """The most options a select offers on every platform that has one."""
-PAGE_MARK: Final = "~"
 AGENT_ID_PATTERN: Final = re.compile(r"[A-Za-z0-9_.-]{1,40}")
 """What an agent id may look like to ride in an op: the longest op stays under 100 characters
 (Discord's limit on a select value) and holds none of the marks that split it."""
@@ -182,25 +183,17 @@ def open_op(
     if category is None:
         return OPEN
     raw = f"{OPEN}:{category}" + (f":{key}" if key else "")
-    raw = f"{raw}@{agent}" if agent else raw
-    if picker:
-        return f"{raw}{PAGE_MARK}{page}{PAGE_MARK}{picker}"
-    return f"{raw}{PAGE_MARK}{page}" if page else raw
-
-
-def _page_number(raw: str) -> int | None:
-    return int(raw) if raw.isascii() and raw.isdecimal() and len(raw) <= 4 else None
+    return with_pages(f"{raw}@{agent}" if agent else raw, page, picker)
 
 
 def parse_open(raw: object) -> OpenOp | None:
     """The `open` op `raw` names, or None when it names none of the registry's."""
     if not isinstance(raw, str):
         return None
-    base, *marks = raw.split(PAGE_MARK)
-    pages = [_page_number(mark) for mark in marks]
-    if len(pages) > 2 or None in pages:
+    if (split := split_pages(raw)) is None:
         return None
-    page, picker = ([n or 0 for n in pages] + [0, 0])[:2]
+    base, pages = split
+    page, picker = (pages + [0, 0])[:2]
     body, _, agent = base.partition("@")
     head, *rest = body.split(":")
     if head != OPEN or len(rest) > 2 or (agent and len(rest) != 2):
@@ -208,7 +201,7 @@ def parse_open(raw: object) -> OpenOp | None:
     if agent and not AGENT_ID_PATTERN.fullmatch(agent):
         return None
     if not rest:
-        return OpenOp() if len(marks) <= 1 else None
+        return OpenOp() if len(pages) <= 1 else None
     category: Category | None = next((c for c in CATEGORIES if c == rest[0]), None)
     key = rest[1] if len(rest) == 2 else None
     if key is None and picker:
@@ -342,7 +335,13 @@ async def _feature(
         if await feature_refusal(sessions, settings, actor, key=key, tier=own.tier, place=place):
             continue
         options = tier_options(
-            spec, own.tier, own, can_lock=can_lock and own.tier in LOCKABLE, agent=agent
+            spec,
+            own.tier,
+            own,
+            can_lock=can_lock and own.tier in LOCKABLE,
+            agent=agent,
+            page=page,
+            picker=picker_page,
         )
         if options:
             choices = tuple(PanelOption(value, label) for value, label in options)
@@ -456,7 +455,17 @@ async def press(
     done = await apply_choice(sessions, settings, actor, raw, place)
     if done is None:
         return None
-    screen = await _feature(sessions, settings, actor, place, choice.key, choice.agent, agents)
+    screen = await _feature(
+        sessions,
+        settings,
+        actor,
+        place,
+        choice.key,
+        choice.agent,
+        agents,
+        choice.page,
+        choice.picker,
+    )
     return replace(screen, notice=done[1], ok=done[0])
 
 

@@ -44,6 +44,8 @@ _UNAVAILABLE: Final[Mapping[str, str]] = {
     "requires": "Not set up",
 }
 LOCK_FLAG: Final = "lock"
+PAGE_MARK: Final = "~"
+"""Splits a token from the pages its screen sat on: `~<list page>[~<agent picker page>]`."""
 
 
 def listed(views: Iterable[FeatureView]) -> tuple[FeatureView, ...]:
@@ -99,11 +101,34 @@ def change_note(change: FeatureChange, platform: str | None) -> str:
     return note
 
 
+def with_pages(raw: str, page: int = 0, picker: int = 0) -> str:
+    """`raw` followed by the pages it was pressed on, none when both are the first."""
+    if picker:
+        return f"{raw}{PAGE_MARK}{page}{PAGE_MARK}{picker}"
+    return f"{raw}{PAGE_MARK}{page}" if page else raw
+
+
+def split_pages(raw: str) -> tuple[str, list[int]] | None:
+    """``(token, pages)`` with the pages as numbers, or None when a mark is malformed."""
+    base, *marks = raw.split(PAGE_MARK)
+    pages = [int(m) if m.isascii() and m.isdecimal() and len(m) <= 4 else None for m in marks]
+    if len(pages) > 2 or None in pages:
+        return None
+    return base, [n or 0 for n in pages]
+
+
 def choice(
-    key: str, tier: Tier, value: str, *, locked: bool = False, agent: str | None = None
+    key: str,
+    tier: Tier,
+    value: str,
+    *,
+    locked: bool = False,
+    agent: str | None = None,
+    page: int = 0,
+    picker: int = 0,
 ) -> str:
     raw = f"{key}:{tier}:{value}" + (f":{LOCK_FLAG}" if locked else "")
-    return f"{raw}@{agent}" if agent else raw
+    return with_pages(f"{raw}@{agent}" if agent else raw, page, picker)
 
 
 @dataclass(frozen=True)
@@ -113,12 +138,16 @@ class Choice:
     value: str
     locked: bool = False
     agent: str | None = None
+    page: int = 0
+    """The list page the choice was pressed on, so the screen after it keeps that place."""
+    picker: int = 0
 
 
 def parse_choice(raw: object) -> Choice | None:
     """A pressed choice, or None when it names no registered key, tier or value."""
-    if not isinstance(raw, str):
+    if not isinstance(raw, str) or (split := split_pages(raw)) is None:
         return None
+    raw, (page, picker) = split[0], (split[1] + [0, 0])[:2]
     body, _, agent = raw.partition("@")
     parts = body.split(":")
     if len(parts) not in (3, 4) or (agent == "" and "@" in raw):
@@ -133,11 +162,18 @@ def parse_choice(raw: object) -> Choice | None:
         return None
     if agent and tier != "agent":
         return None
-    return Choice(key, cast(Tier, tier), value, bool(flag), agent or None)
+    return Choice(key, cast(Tier, tier), value, bool(flag), agent or None, page, picker)
 
 
 def tier_options(
-    spec: FeatureSpec, tier: Tier, own: TierSetting, *, can_lock: bool, agent: str | None = None
+    spec: FeatureSpec,
+    tier: Tier,
+    own: TierSetting,
+    *,
+    can_lock: bool,
+    agent: str | None = None,
+    page: int = 0,
+    picker: int = 0,
 ) -> tuple[tuple[str, str], ...]:
     """``(choice, label)`` for each other value this tier can take: the values, Default, and
     an admin's Lock of each. The agent's own built-in tool is never locked."""
@@ -145,10 +181,18 @@ def tier_options(
     options: list[tuple[str, str]] = []
     for value in (*spec.values, DEFAULT):
         if (TierSetting(tier, value)).text != own.text:
-            options.append((choice(spec.key, tier, value, agent=agent), spec.label(value)))
+            options.append(
+                (
+                    choice(spec.key, tier, value, agent=agent, page=page, picker=picker),
+                    spec.label(value),
+                )
+            )
     if can_lock and not builtin and tier in LOCKABLE and not spec.authority.native:
         options += [
-            (choice(spec.key, tier, value, locked=True, agent=agent), value_text(spec, value, True))
+            (
+                choice(spec.key, tier, value, locked=True, agent=agent, page=page, picker=picker),
+                value_text(spec, value, True),
+            )
             for value in spec.values
             if TierSetting(tier, value, True).text != own.text
         ]

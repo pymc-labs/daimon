@@ -329,6 +329,56 @@ async def test_back_from_a_setting_returns_to_the_group_page_it_was_picked_from(
     )
 
 
+async def test_back_after_a_change_returns_to_the_page_the_setting_was_changed_from(
+    db_session: AsyncSession, db_session_factory: Sessions, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    actor = _actor(await _tenant(db_session), True)
+    monkeypatch.setattr(panel, "SELECT_LIMIT", 2)
+    many = [panel.AgentChoice(f"a{i}", f"Agent {i:02d}") for i in range(5)]
+    key = "completion_pings"
+
+    async def agents() -> list[panel.AgentChoice]:
+        return many
+
+    async def show(op: str) -> panel.PanelScreen:
+        found = await panel.show(
+            db_session_factory, _settings(), actor, _place(actor), op, agents=agents
+        )
+        assert found is not None, op
+        return found
+
+    groups = await _walk(db_session_factory, actor, panel.open_op("chat"), None)
+    page = next(
+        n
+        for n, g in enumerate(groups)
+        if any(o.value.startswith(f"open:chat:{key}") for o in g.selects[0].options)
+    )
+    assert page > 0, "the setting sits past the first page"
+    picked = await show(
+        next(o for o in groups[page].selects[0].options if f":{key}" in o.value).value
+    )
+    change = picked.selects[0].options[0].value
+    changed = await panel.press(
+        db_session_factory, _settings(), actor, change, _place(actor), agents=agents
+    )
+    assert changed is not None and changed.ok, "the change was applied"
+    assert changed.back is not None
+    assert changed.back.value == panel.open_op("chat", page=page), (
+        "Back after a change returns to the group page, not the first"
+    )
+
+    next_agents = await show(next(o for o in picked.paging if o.label == panel.NEXT).value)
+    agent_screen = await show(next_agents.selects[-1].options[0].value)
+    agent_change = agent_screen.selects[0].options[0].value
+    after_agent = await panel.press(
+        db_session_factory, _settings(), actor, agent_change, _place(actor), agents=agents
+    )
+    assert after_agent is not None and after_agent.back is not None
+    assert after_agent.back.value == panel.open_op("chat", key, page=page, picker=1), (
+        "Back after an agent change returns to the setting, on its group page and picker page"
+    )
+
+
 async def test_an_agent_id_that_cannot_ride_in_an_op_is_not_offered(
     db_session: AsyncSession, db_session_factory: Sessions
 ) -> None:
