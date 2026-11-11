@@ -270,6 +270,10 @@ async def _recorded_as_gated(
         {"request_channel_backend_switch"} if selection else set[str]()
     )
     before_pin_clear = confirmed - {"request_channel_pin_clear"}
+    candidates = (confirmed, legacy, before_config, before_config_legacy, before_pin_clear)
+    # A bind from before the thread-model confirm asked proves any other card.
+    if tool_name != "set_thread_model":
+        candidates += tuple(candidate - {"set_thread_model"} for candidate in candidates)
     lead_tools = await confirmation_tools(runtime.session_factory, auth.tenant_id)
     # A bind made before the carded tools or the reach card holds neither gated, and
     # the two vary independently. Such a template proves only a call to some other
@@ -287,7 +291,7 @@ async def _recorded_as_gated(
             pre_carded,
             pre_skills,
         )
-        for candidate in (confirmed, legacy, before_config, before_config_legacy, before_pin_clear)
+        for candidate in candidates
         for pre_carded in (False, True)
         if pre_carded_ok or not pre_carded
         for pre_skills in (False, True)

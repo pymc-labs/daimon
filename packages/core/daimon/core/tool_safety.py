@@ -208,6 +208,8 @@ CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     "request_agent_backend_switch": "preview_digest",
     "request_provider_allowlist": "preview_digest",
     "request_channel_pin_clear": "preview_digest",
+    # A pick on another provider asks; a same-provider pick has no digest and runs.
+    "set_thread_model": "digest",
     # The card itself is the point: every call asks.
     "approve_reach": "threads",
     # Every call names its action, so every call asks.
@@ -253,6 +255,11 @@ def self_carded_tools() -> frozenset[str]:
     return frozenset({"request_agent_backend_switch"})
 
 
+def host_call_previews(name: str, args: Mapping[str, object]) -> bool:
+    """A provider turn's call that only previews its gated write, so runs uncarded."""
+    return name == "set_thread_model" and args.get(CONFIRMED_DAIMON_TOOLS[name]) is None
+
+
 def host_call_carded_tools() -> frozenset[str]:
     """Gated tools the host call gate cards on a turn with no card of its own.
 
@@ -269,6 +276,7 @@ def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
                 "request_agent_backend_switch",
                 "request_provider_allowlist",
                 "request_channel_pin_clear",
+                "set_thread_model",
             }
         )
         if enabled

@@ -93,7 +93,10 @@ class Rig:
         def list_agents() -> str:
             return self._record("list_agents", {})
 
-        for fn in (delete_allowance, revoke_web_link, approve_reach, list_agents):
+        def set_thread_model(model: str, digest: str | None = None) -> str:
+            return self._record("set_thread_model", {"model": model, "digest": digest})
+
+        for fn in (delete_allowance, revoke_web_link, approve_reach, list_agents, set_thread_model):
             server.tool(fn)
         # The stock proxy: it re-enters the middleware with the inner tool's name.
         server.add_transform(BM25SearchTransform(max_results=5))
@@ -359,6 +362,27 @@ async def test_dispatch_runs_an_ungated_tool_through_the_proxy(rig: Rig) -> None
 
     assert [name for name, _, _ in rig.ran] == ["list_agents"], "the read ran"
     assert await _cards(rig) == [], "a read records no card"
+
+
+@pytest.mark.parametrize("digest", [None, "d1"], ids=["preview", "confirm"])
+async def test_a_thread_model_pick_cards_only_its_cross_provider_confirm(
+    rig: Rig, digest: str | None
+) -> None:
+    """The model's own preview runs; its confirm waits for the person's press (A-M1)."""
+    _attach(rig)
+    args: dict[str, Any] = {"model": "openai:gpt-5"}
+    if digest is not None:
+        args["digest"] = digest
+
+    await _call(rig, rig.identity(), "set_thread_model", args)
+
+    cards = await _cards(rig)
+    if digest is None:
+        assert [name for name, _, _ in rig.ran] == ["set_thread_model"], "the preview ran"
+        assert cards == [], "a preview records no card"
+    else:
+        assert rig.ran == [], "the confirm does not run before the press"
+        assert [card.tool_name for card in cards] == ["set_thread_model"], "the confirm cards"
 
 
 # --- the one-shot credential runs only its own call --------------------------------
