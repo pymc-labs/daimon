@@ -202,6 +202,7 @@ class SlackTurnLifecycle(OutputGate):
         on_initial_progress: Callable[[InitialProgressReceipt], None] | None = None,
         alert_webhook_url: SecretStr | None = None,
         ask_human: bool = False,
+        vote_buttons: bool = True,
         identity: AgentIdentity | None = None,
         ma_agent_id: str | None = None,
         reply_people_cap: int | None = DEFAULT_MAX_PEOPLE,
@@ -213,6 +214,8 @@ class SlackTurnLifecycle(OutputGate):
         # Whether the final answer offers Ask a human beside the vote buttons
         # (`support_escalation.slack_support_enabled`).
         self._ask_human = ask_human
+        # `message_feedback` at this place: the 👍/👎 buttons under a final answer.
+        self._vote_buttons = vote_buttons
         self._notify_on_completion = notify_on_completion
         self._answer_ts: str | None = None
         self._render_tables = render_tables
@@ -692,19 +695,21 @@ class SlackTurnLifecycle(OutputGate):
                 answer_visible=answer_visible,
             )
         )
-        if feedback:
-            blocks.append(self._feedback_block())
+        if feedback and (controls := self._feedback_block()) is not None:
+            blocks.append(controls)
         fallback = "Something went wrong. Mention me to try again."
         if self._state.phase is TurnPhase.DONE:
             fallback = "Done."
         await self._post_or_update(blocks, fallback_text or fallback)
 
-    def _feedback_block(self) -> dict[str, Any]:
-        """👍/👎, plus Ask a human when this deployment offers it."""
+    def _feedback_block(self) -> dict[str, Any] | None:
+        """👍/👎 while `message_feedback` is on, plus Ask a human when offered; None for neither."""
         block = build_feedback_actions_block(requested_by=self._author_id)
+        if not self._vote_buttons:
+            block["elements"] = []
         if self._ask_human and not self._requester_foreign:
             block["elements"].append(build_ask_human_button())
-        return block
+        return block if block["elements"] else None
 
     async def _flush_cancelled(self) -> None:
         """Replace the status message with a plain 'Turn cancelled.' notice.
@@ -858,8 +863,8 @@ class SlackTurnLifecycle(OutputGate):
                 if index == len(deliveries) - 1:
                     # The summary line closes the answer, under its last chunk.
                     blocks.extend(to_blocks(self._state, now=self._clock(), answer_visible=True))
-                    if not cancelled:
-                        blocks.append(self._feedback_block())
+                    if not cancelled and (controls := self._feedback_block()) is not None:
+                        blocks.append(controls)
                 try:
                     if index == 0 and not notify_on_completion:
                         await self._post_or_update(blocks, _notification_text(notification_chunk))

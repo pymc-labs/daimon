@@ -63,3 +63,15 @@ def test_teams_feedback_uses_card_buttons() -> None:
         "if that changed on purpose, update this record and the core docstring"
     )
     assert message.channel_data is None or message.channel_data.feedback_loop is None
+
+
+def test_teams_controls_card_drops_the_votes_with_the_feature_off() -> None:
+    """`message_feedback` is a setting on every platform: Off removes the buttons, and a card
+    with nothing left to show is not posted."""
+    with_summary = card.controls_card("Ada  12s", ask_human=False, votes=False)
+    assert with_summary is not None, "the summary line still shows"
+    rendered = with_summary.model_dump_json(by_alias=True)
+    assert card.VOTE_UP_DIALOG not in rendered, "votes off must leave no vote buttons"
+    assert card.controls_card(None, ask_human=False, votes=False) is None, (
+        "nothing to show means no card"
+    )

@@ -187,6 +187,7 @@ class TeamsTurnLifecycle(OutputGate):
         requester_user_id: str | None = None,
         agent_name_prefix: str | None = None,
         ask_human: bool = False,
+        vote_buttons: bool = True,
         direct_chat: bool = False,
         foreign: bool = False,
         agent_name: str | None = None,
@@ -219,6 +220,8 @@ class TeamsTurnLifecycle(OutputGate):
         self._answered = False
         # Support is on: the controls below the answer offer Ask a human.
         self._ask_human = ask_human
+        # `message_feedback` at this place: the 👍/👎 buttons under a final answer.
+        self._vote_buttons = vote_buttons
         # The summary line's agent, price and money left.
         self._agent_name = agent_name
         self._model_id = model_id
@@ -640,7 +643,7 @@ class TeamsTurnLifecycle(OutputGate):
                 text = card.TOOLS_DONE_NOTICE if tool_only else card.CANCELLED_NOTICE
                 # As on Slack: a cancelled turn carries no controls, a tool-only one does.
                 # A tool-only turn's result is an answer too: it can be voted on.
-                actions = (*card.vote_actions(),) if tool_only else ()
+                actions = (*card.vote_actions(),) if tool_only and self._vote_buttons else ()
                 if tool_only and self._ask_human:
                     actions = (*actions, card.ask_human_action())
                 summary = await self._summary(state)
@@ -719,8 +722,10 @@ class TeamsTurnLifecycle(OutputGate):
         controls = (
             card.notice_card(card.CANCELLED_NOTICE, summary=summary)
             if cancelled
-            else card.controls_card(summary, ask_human=self._ask_human)
+            else card.controls_card(summary, ask_human=self._ask_human, votes=self._vote_buttons)
         )
+        if controls is None:
+            return
         if hold:
             self._held_controls = controls
         else:

@@ -2636,6 +2636,7 @@ class SlackApp:
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             ask_human=slack_support_enabled(self.runtime.settings.support)
             and admission.feature_on("support_escalation"),
+            vote_buttons=admission.shown("message_feedback", "slack"),
             tenant_id=tenant_id,
             budget_channel_id=admission.budget_channel_id,
             render_tables=admission.shown("table_rendering", "slack"),
@@ -3097,6 +3098,7 @@ class SlackApp:
                     alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                     ask_human=slack_support_enabled(self.runtime.settings.support)
                     and admission.feature_on("support_escalation"),
+                    vote_buttons=admission.shown("message_feedback", "slack"),
                     tenant_id=tenant_id,
                     budget_channel_id=admission.budget_channel_id,
                     render_tables=admission.shown("table_rendering", "slack"),
@@ -3556,6 +3558,7 @@ class SlackApp:
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
             ask_human=slack_support_enabled(self.runtime.settings.support)
             and follow_admission.feature_on("support_escalation"),
+            vote_buttons=follow_admission.shown("message_feedback", "slack"),
             tenant_id=tenant_id,
             budget_channel_id=follow_admission.budget_channel_id,
             render_tables=follow_admission.shown("table_rendering", "slack"),
@@ -3658,6 +3661,7 @@ class SlackApp:
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 ask_human=slack_support_enabled(self.runtime.settings.support)
                 and follow_admission.feature_on("support_escalation"),
+                vote_buttons=follow_admission.shown("message_feedback", "slack"),
                 tenant_id=tenant_id,
                 budget_channel_id=follow_admission.budget_channel_id,
                 render_tables=follow_admission.shown("table_rendering", "slack"),
