@@ -5222,6 +5222,7 @@ class DaimonBot(commands.Bot):
                                 max_input_chars=naming.max_input_chars,
                                 timeout_seconds=naming.timeout_seconds,
                                 channel_id=admission.budget_channel_id,
+                                agent_id=agent.id,
                                 provider=(
                                     admission.backend_revision.backend
                                     if admission.backend_revision is not None

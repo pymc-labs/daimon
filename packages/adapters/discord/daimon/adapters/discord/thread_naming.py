@@ -45,6 +45,7 @@ async def generate_thread_name(
     timeout_seconds: float,
     channel_id: str | None = None,
     provider: Provider | None = None,
+    agent_id: str | None = None,
 ) -> str:
     """Title from ``message_text``; ``fallback`` on failure, timeout, or a blank or generic answer.
 
@@ -90,6 +91,7 @@ async def generate_thread_name(
         event_id="title",
         markup=markup,
         channel_id=channel_id,
+        agent_id=agent_id,
     )
 
     if suggestion.name is None:
