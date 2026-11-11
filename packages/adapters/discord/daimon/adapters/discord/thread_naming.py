@@ -24,6 +24,7 @@ from daimon.core.thread_naming import (
     suggest_thread_name,
 )
 from daimon.core.usage_recording import record_auxiliary_usage
+from mux.contracts.ids import Provider
 from mux.errors import ProviderError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -43,6 +44,7 @@ async def generate_thread_name(
     max_input_chars: int,
     timeout_seconds: float,
     channel_id: str | None = None,
+    provider: Provider | None = None,
 ) -> str:
     """Title from ``message_text``; ``fallback`` on failure, timeout, or a blank or generic answer.
 
@@ -60,7 +62,10 @@ async def generate_thread_name(
     try:
         async with asyncio.timeout(timeout_seconds):
             suggestion = await suggest_thread_name(
-                anthropic, message_text=message_text, max_input_chars=max_input_chars
+                anthropic,
+                message_text=message_text,
+                max_input_chars=max_input_chars,
+                provider=provider,
             )
     except TimeoutError:
         log.warning(

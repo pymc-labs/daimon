@@ -367,7 +367,7 @@ async def test_routine_rule_and_roster_on_an_owned_agent(
         db_session,
         client,
         tenant_id=tenant.id,
-        platform=tenant.platform,
+        platform="discord",
         channel_id=None,
         thread_id=None,
         default=default,

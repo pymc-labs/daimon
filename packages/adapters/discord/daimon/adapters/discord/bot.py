@@ -5433,6 +5433,11 @@ class DaimonBot(commands.Bot):
                                 max_input_chars=naming.max_input_chars,
                                 timeout_seconds=naming.timeout_seconds,
                                 channel_id=admission.budget_channel_id,
+                                provider=(
+                                    admission.backend_revision.backend
+                                    if admission.backend_revision is not None
+                                    else None
+                                ),
                             )
                     opened = await message.create_thread(
                         name=thread_name, auto_archive_duration=10080
