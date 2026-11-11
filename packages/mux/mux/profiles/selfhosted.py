@@ -26,6 +26,7 @@ LOOP = Profile(
         "reconcile": "native",
         "native_event_replay": "native",
         "event_previews": "native",
+        "artifacts": "native",
         "tool_confirmation": "native",
         "steer": "unsupported",
         "multiagent": "unsupported",
