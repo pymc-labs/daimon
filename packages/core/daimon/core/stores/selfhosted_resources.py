@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.core import agent_record_facts
 from daimon.core._models import (
     Account,
     NeutralSkillVersion,
@@ -24,7 +25,6 @@ from daimon.core._models import (
     SelfHostedResourceOperation,
     Tenant,
 )
-from daimon.core.agent_record_facts import agent_facts
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.privacy_session_deletes import lock_account
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope
@@ -85,7 +85,7 @@ async def list_live_agent_facts(
         "tenant_id": str(tenant_id),
     }
     return [
-        agent_facts(
+        agent_record_facts.agent_facts(
             Agent.model_validate(
                 {
                     "ref": {**ref, "id": row.id},

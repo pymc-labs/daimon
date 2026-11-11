@@ -193,7 +193,9 @@ def source_agent_record(item: BetaManagedAgentsAgent, scope: Scope) -> Agent | N
     # A Daimon record's projection is Managed Agents shaped; its facts carry the provider.
     carried = (item.model.model_extra or {}).get("provider")
     provider: Provider = carried if carried in ("openai", "gemini") else "anthropic"
-    model = record.spec.model.model_copy(update={"provider": provider})
+    # The carried field is routing, not a model option the provider receives.
+    options = {k: v for k, v in record.spec.model.options.items() if k != "provider"}
+    model = record.spec.model.model_copy(update={"provider": provider, "options": options})
     return record.model_copy(
         update={
             "ref": record.ref.model_copy(update={"provider": provider}),
