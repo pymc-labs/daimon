@@ -101,7 +101,7 @@ class OpenAIDeployment(BaseModel):
     counterpart_catalog_id: Nonblank | None = None
     counterpart_catalog_revision: Annotated[int, Field(gt=0, strict=True)] | None = None
     # A template's capability: "mcp" represents the source's Daimon MCP toolset
-    # (its live catalogue) with a per-turn caller credential; skills stay dropped.
+    # (its live catalogue) with a per-turn caller credential; skills attach per session.
     template_capabilities: Literal["mcp"] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -387,7 +387,13 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             agent = checked.agent.ref
         return SessionSpec(
             agent=agent,
-            skills=await template_skills(preparation) if deployment.root_materialization else (),
+            # A template's carried skills; on a channel's own deployment, its channel skills.
+            skills=(
+                await template_skills(preparation)
+                if deployment.root_materialization
+                or preparation.admission.backend_revision_origin != "agent"
+                else ()
+            ),
             agent_revision=Revision(local=0),
             environment=(
                 ref(deployment.environment_id, "environment")
@@ -398,27 +404,18 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         )
 
     async def template_skills(preparation: ProviderPreparationRequest) -> tuple[SkillRef, ...]:
-        """The provider's copies of the custom and channel skills the capture carried."""
+        """The provider's copies of the custom and channel skills the session carries."""
         nonlocal copying
-        source = preparation.source
-        represented = (
-            represented_source(source, preparation.target_spec) if source is not None else None
-        )
-        if represented is None or not represented.session_skills:
-            return ()
-        from daimon.core.turn.session_skills import copy_skills
+        from daimon.core.turn.session_skills import turn_session_skills
 
         copying = True
         try:
-            copies = await copy_skills(
-                preparation.deps.sessionmaker,
-                preparation.deps.anthropic,
-                driver(runtime, revision, scope).skills,
+            copies = await turn_session_skills(
+                preparation,
+                lambda: driver(runtime, revision, scope).skills,
+                profile=get_profile(deployment.profile),
                 scope=scope,
-                tenant_id=preparation.tenant_id,
-                provider="openai",
                 account_scope_id=deployment.project,
-                pins=represented.session_skills,
             )
         finally:
             copying = False

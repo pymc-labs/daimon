@@ -476,3 +476,53 @@ async def test_a_shared_turn_runs_without_any_caller_mcp_credential(
     assert runtime.mcp_secrets is None and runtime.end_of_turn is None
     assert runtime.controls.mcp_enabled is False
     assert build_openai_runtime(application).controls.mcp_enabled is None
+
+
+async def test_a_channels_own_deployment_attaches_its_channel_skills(
+    application: ProviderPreparationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A channel-origin plan carries the channel's custom skills; one over the limit stays out."""
+    from anthropic.types.beta import BetaManagedAgentsCustomSkill
+    from daimon.core.stores.domain import SkillSizeRow
+    from daimon.core.stores.skill_copies import put_skill_size
+    from daimon.core.turn import session_skills
+    from mux.contracts.ids import SkillRef
+
+    manifest(monkeypatch, tmp_path / "runtime.json", [entry()])
+    monkeypatch.setenv("N4_OFFLINE_OPENAI_KEY", "offline-only")
+    async with application.deps.sessionmaker() as db, db.begin():
+        await make_tenant(db, id=TENANT)
+        for skill_id, size in (("skill_team", 10), ("skill_huge", 29 * 1024 * 1024)):
+            # Measured before: no download needed.
+            await put_skill_size(
+                db,
+                SkillSizeRow(
+                    tenant_id=TENANT,
+                    skill_id=skill_id,
+                    version="7",
+                    name=skill_id,
+                    total_bytes=size,
+                    largest_file_bytes=size,
+                    file_count=1,
+                    text_only=True,
+                ),
+            )
+    copied: list[tuple[SkillRef, ...]] = []
+
+    async def copy(*_: object, pins: tuple[SkillRef, ...], **__: object) -> tuple[SkillRef, ...]:
+        copied.append(pins)
+        return tuple(SkillRef(id=f"copy-{pin.id}", version="1") for pin in pins)
+
+    monkeypatch.setattr(session_skills, "copy_skills", copy)
+    channel = tuple(
+        BetaManagedAgentsCustomSkill(type="custom", skill_id=skill_id, version="7")
+        for skill_id in ("skill_team", "skill_huge")
+    )
+    request = replace(application, admission=replace(application.admission, channel_skills=channel))
+    runtime = build_channel_runtime(request)
+    assert isinstance(runtime, OpenAIHostRuntime), "the channel's OpenAI deployment"
+    plan = await runtime.session_plan(request)
+    assert copied == [(SkillRef(id="skill_team", version="7"),)], "only the one that fits"
+    assert plan.skills == (SkillRef(id="copy-skill_team", version="1"),), "attached per session"

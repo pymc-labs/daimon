@@ -66,17 +66,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deployment reset-id` makes a new one.
 
 - **OpenAI and Gemini agents keep more of what a Claude agent has.** OpenAI
-  agents attach their custom and channel skills, uploaded once per version; a
-  skill over its size limit is named on the switch card. Both providers read and
-  write shared, personal and channel memory through Daimon's tools, which needs
-  an Anthropic key. They ask copies of themselves through `ask_helper`, with all
-  copies of one message stopping at $10 together; a refused copy says why,
-  such as a model with no known price. OpenAI, Gemini and self-hosted agents
-  open public https pages through Daimon's page reader, under the place's web
-  page setting. Files an agent produces are posted on Discord, Slack, Teams and
-  the web on OpenAI and Gemini, each once. A spend limit now stops an OpenAI
-  turn; cache writes are not metered, so the count can fall slightly under the
-  bill.
+  and Gemini agents attach their custom and channel skills, also on a
+  channel-set deployment, uploaded once per version; a skill over its size
+  limit or that cannot be read is named on the switch card. Gemini skills are
+  text only, 2 MiB in all. An OpenAI conversation that gains skills moves once
+  to a new session, keeping its recent messages and, where the workspace
+  persists, its saved files. Both providers read and write shared, personal
+  and channel memory through Daimon's tools, which needs an Anthropic key.
+  They ask copies of themselves through `ask_helper`, with all copies of one
+  message stopping at $10 together; a refused copy says why, such as a model
+  with no known price. OpenAI, Gemini and self-hosted agents open public https
+  pages through Daimon's page reader, under the place's web page setting.
+  Files an agent produces are posted on Discord, Slack, Teams and the web on
+  OpenAI and Gemini, each once. A spend limit now stops an OpenAI turn; cache
+  writes are not metered, so the count can fall slightly under the bill.
 
 - **An agent's own MCP connectors and confirmations work on OpenAI and
   Gemini.** The provider calls connectors through Daimon with the turn's own
