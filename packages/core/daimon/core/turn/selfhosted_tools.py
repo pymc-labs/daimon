@@ -362,6 +362,7 @@ async def mint_turn_mcp_authorization(
     seal_ids: Collection[str] = (),
     memory_read_only: bool | None = None,
     bind_session: bool = False,
+    requester_account_id: uuid.UUID | None = None,
 ) -> MintedMcpAuthorization:
     """Register a live agent's token; the host revokes jti in its turn-finally path.
 
@@ -369,7 +370,8 @@ async def mint_turn_mcp_authorization(
     then lists only the held allowlist. `seal_ids` signs the turn's seals.
     `memory_read_only` binds the token to the
     executing turn's origin, so the server reads that turn's memory as read-only;
-    `bind_session` binds it alone, as the connector relay needs."""
+    `bind_session` binds it alone, as the connector relay needs. `requester_account_id`
+    marks a shared thread's credential, so the relay hides personal sign-ins."""
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.mcp_auth import CHAT_TOKEN_TTL, bind_execution_session, mint_chat_mcp_token
     from daimon.core.stores.accounts import get_account_with_tenant
@@ -424,7 +426,7 @@ async def mint_turn_mcp_authorization(
             hold=hold,
             seal_ids=seal_ids,
         )
-    if memory_read_only or bind_session:
+    if memory_read_only or bind_session or requester_account_id is not None:
         token = await bind_execution_session(
             sessions,
             token=token,
@@ -433,6 +435,7 @@ async def mint_turn_mcp_authorization(
             agent_id=agent_id,
             now=now,
             memory_read_only=True if memory_read_only else None,
+            requester_account_id=requester_account_id,
         )
     return MintedMcpAuthorization(SecretStr(f"Bearer {token}"), jti, expires_at)
 

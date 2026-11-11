@@ -221,6 +221,11 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
     settings = load_settings()
     billing = settings.billing.selfhosted
     price = require_selfhosted_price(billing, revision.model)
+    from daimon.core.mux_backend import owner_turn_scope
+
+    # A shared thread's session is the thread owner's; its grant and credential stay the caller's.
+    shared = request.admission.shared_owner
+    turn_scope = owner_turn_scope(scope, str(shared) if shared is not None else None)
     agents, environments = (
         SelfHostedAgents(request.deps.sessionmaker),
         SelfHostedEnvironments(request.deps.sessionmaker),
@@ -267,7 +272,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         raise ValueError("self-hosted MCP token requires a positive remaining turn deadline")
 
     def check(configured: ConfigRevision, authorized: Scope) -> None:
-        if configured != revision or authorized != scope:
+        if configured != revision or authorized not in (scope, turn_scope):
             raise ScopeViolation(
                 request.thread_id, "self-hosted runtime differs from admitted turn"
             )
@@ -455,9 +460,9 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                     provider="selfhosted",
                     account_scope_id=scope.tenant_id,
                     tenant_id=scope.tenant_id,
-                    account_id=scope.account_id,
+                    account_id=turn_scope.account_id,
                 )
-                active.check_session(scope, ref)
+                active.check_session(turn_scope, ref)
                 await admit_selfhosted_usage(
                     sessionmaker=request.deps.sessionmaker,
                     tenant_id=request.tenant_id,
@@ -486,6 +491,9 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                         seal_ids=request.admission.origin_seal_ids,
                         memory_read_only=origin_read_only(request.admission),
                         bind_session=bool(prepared_tools and prepared_tools.relayed),
+                        requester_account_id=request.admission.account_id
+                        if shared is not None
+                        else None,
                     )
 
             async def token_provider() -> str:
@@ -573,7 +581,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             binding = await store.get_binding(
                 Slot(
                     thread=ThreadRef(channel=revision.channel, thread_id=request.thread_id),
-                    account_id=scope.account_id,
+                    account_id=None if shared is not None else scope.account_id,
                 )
             )
             if binding is None or binding.native_refs.get("session") != session_id:
@@ -636,7 +644,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             provider="selfhosted",
             account_scope_id=scope.tenant_id,
             tenant_id=scope.tenant_id,
-            account_id=scope.account_id,
+            account_id=turn_scope.account_id,
         )
         receipts: dict[str, UsageObservation] = {}
         events = wire.EventsResponse.model_validate(raw).events
@@ -672,7 +680,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         return ConfiguredTransport()
 
     def authorize(authorized: Scope, kind: str, id_: str | None) -> bool:
-        return authorized == scope and (
+        return authorized in (scope, turn_scope) and (
             kind == "session"
             or (kind, id_)
             in {
@@ -682,7 +690,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         )
 
     async def tools(authorized: Scope, spec: AgentSpec) -> TurnTools:
-        if authorized != scope or prepared_tools is None or spec != prepared_spec:
+        if authorized not in (scope, turn_scope) or prepared_tools is None or spec != prepared_spec:
             raise ScopeViolation(agent_ref.id, "self-hosted tools differ from admitted agent")
         return prepared_tools
 

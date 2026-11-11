@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -11,7 +12,9 @@ from typing import cast
 
 import httpx
 import pytest
+from daimon.core.mux_backend import owner_turn_scope
 from daimon.core.pricing import ProviderPrice
+from daimon.core.shared_threads import shared_owner
 from daimon.core.turn import selfhosted_host
 from daimon.core.turn.prepare import ProviderPreparationRequest, bind_session_impl
 from daimon.core.turn.run import run_prepared_turn
@@ -20,10 +23,12 @@ from daimon.core.turn_hold import TurnHold
 from daimon.testing.turn_fakes import RecordingLifecycle, deps_for
 from daimon.testing.turn_leg import MUX_LEG
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
-from mux.contracts.ids import ModelRef, ResourceRef, Revision
+from mux.contracts.ids import ModelRef, ResourceRef, Revision, ThreadRef
 from mux.contracts.ports import Agents, Environments
 from mux.contracts.resources import Agent, AgentSpec, Environment, EnvironmentSpec, SessionSpec
 from mux.drivers.selfhosted.transport import DirectTransport
+from mux.errors import ScopeViolation
+from mux.state.lease import Slot
 from mux.state.memory import MemoryStateStore
 
 from .conformance_support import ACCOUNT, TENANT, admission
@@ -36,6 +41,18 @@ REVISION = ConfigRevision.create(
     1,
     resolve_default(BackendConfig(backend="selfhosted", profile=PROFILE, model="gpt-6-luna")),
 )
+SHARED = ConfigRevision.create(
+    BASE.channel,
+    2,
+    resolve_default(
+        BackendConfig(
+            backend="selfhosted", profile=PROFILE, model="gpt-6-luna", thread_mode="shared"
+        )
+    ),
+)
+OWNER = shared_owner(Slot(thread=ThreadRef(channel=BASE.channel, thread_id="thread")))
+OWNER_SCOPE = owner_turn_scope(SCOPE, str(OWNER))
+BOB = uuid.UUID(int=4406)
 
 
 class Wire:
@@ -140,7 +157,7 @@ class Resources:
         self.known.setdefault(value.ref, value)
 
     async def retrieve(self, scope, ref):
-        assert scope == SCOPE and ref in self.known
+        assert scope in (SCOPE, OWNER_SCOPE) and ref in self.known
         return self.value if ref == self.value.ref else self.known[ref]
 
 
@@ -211,7 +228,7 @@ async def composed(request, db_committing_engine, db_clean, monkeypatch, pinned_
             agent=ref("agent"),
             agent_revision=Revision(local=1),
             environment=ref("environment"),
-            config_revision=REVISION.local,
+            config_revision=preparation.admission.backend_revision.local,
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(wire.handle)) as client:
@@ -223,7 +240,7 @@ async def composed(request, db_committing_engine, db_clean, monkeypatch, pinned_
             usage_store=None,
             account_scope_id=str(TENANT),
             session_plan=plan,
-            authorization=lambda scope, kind, id_: scope == SCOPE,
+            authorization=lambda scope, kind, id_: scope in (SCOPE, OWNER_SCOPE),
             model="gpt-6-luna",
             price=ProviderPrice(
                 provider="selfhosted",
@@ -282,6 +299,95 @@ async def test_publishing_and_rule_asks_prepare_for_host_approval(composed, gate
 
     assert prepared.session_ref is not None
     assert wire.posts == 0
+
+
+def shared_request(request, account):
+    """`request` from `account` in the shared thread, which runs as the thread's owner."""
+    asker = SCOPE.model_copy(update={"account_id": str(account)})
+    shared = replace(
+        request.admission, backend_revision=SHARED, account_id=account, shared_owner=OWNER
+    )
+    return replace(request, admission=shared, scope=asker, session_account_id=OWNER)
+
+
+async def test_a_shared_thread_serves_a_second_person_from_the_owner_session(composed):
+    request, wire, store, _ = composed
+    first = await prepare_selfhosted(shared_request(request, ACCOUNT))
+    second = await prepare_selfhosted(shared_request(request, BOB))
+
+    assert first.session_ref == second.session_ref and second.reused
+    assert first.session_ref.account_id == str(OWNER), "the session is the thread's own"
+    assert second._scope == OWNER_SCOPE  # pyright: ignore[reportPrivateUsage]
+    binding = await store.get_binding(
+        Slot(thread=ThreadRef(channel=BASE.channel, thread_id="thread"))
+    )
+    assert binding is not None and binding.id == str(OWNER)
+    assert binding.legacy_account_id is None
+    assert wire.posts == 0
+
+
+async def test_a_second_person_runs_a_real_turn_in_the_shared_thread(composed):
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    request, wire, _, _ = composed
+    for index, (account, user) in enumerate(((ACCOUNT, "alice"), (BOB, "bob"))):
+        asked = shared_request(request, account)
+        prepared = await bind_session_impl(
+            asked.deps,
+            asked.admission,
+            tenant_id=TENANT,
+            platform="slack",
+            external_user_id=user,
+            thread_id="thread",
+            session_account_id=OWNER,
+            reuse_existing=True,
+        )
+        assert prepared.session_ref.account_id == str(OWNER)
+
+        async def reseed():
+            return "question"
+
+        outcome = await run_prepared_turn(
+            asked.deps,
+            prepared,
+            tenant_id=TENANT,
+            platform="slack",
+            thread_id="thread",
+            external_user_id=user,
+            user_message=f"question {index}",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=reseed,
+            recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+            render_interval_s=0.01,
+            operation_key=f"shared-{index}",
+        )
+        await drain_outcomes()
+        assert outcome.state.error is None, outcome.state.error
+    assert wire.posts == 2 and len({t["session_id"] for t in wire.turns.values()}) == 1
+
+
+async def test_a_non_owner_cannot_reach_the_owners_session_or_its_checkpoint(composed):
+    """The harness keys checkpoints by session: no other scope reads or restores it."""
+    request, _, store, _ = composed
+    own = await prepare_selfhosted(request)
+    shared = await prepare_selfhosted(shared_request(request, BOB))
+    assert shared.session_ref != own.session_ref, "a shared thread never adopts a private session"
+
+    slot = Slot(
+        thread=ThreadRef(channel=BASE.channel, thread_id="thread"), account_id=SCOPE.account_id
+    )
+    binding = await store.get_binding(slot)
+    runtime = request.deps.turn_runtimes[PROFILE]
+    bob = SCOPE.model_copy(update={"account_id": str(BOB)})
+    for scope in (bob, OWNER_SCOPE):
+        backend = selfhosted_host.driver(runtime, REVISION, scope, binding, store=store)
+        for ref in (
+            own.session_ref,
+            own.session_ref.model_copy(update={"account_id": scope.account_id}),
+        ):
+            with pytest.raises(ScopeViolation):
+                await backend.sessions.retrieve(scope, ref)
 
 
 async def test_prepare_reuses_same_tenant_bound_session_without_a_turn(composed):

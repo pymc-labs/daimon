@@ -255,5 +255,14 @@ def resource_scope(
     )
 
 
+def owner_turn_scope(scope: Scope, shared_owner: str | None) -> Scope:
+    """A shared thread's provider state runs as the thread's own owner, not the caller."""
+    if shared_owner is None:
+        return scope
+    return resource_scope(
+        tenant_id=scope.tenant_id, account_id=shared_owner, authorization_id=scope.authorization_id
+    )
+
+
 def platform_scope(reason: str, *, authorization_id: str = "platform-resource") -> Scope:
     return Scope.platform(reason=reason, authorization_id=authorization_id)

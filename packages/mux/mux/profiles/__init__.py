@@ -201,7 +201,7 @@ _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
     ),
     "selfhosted": BackendSelection(
         BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6.1-sol"),
-        ("per_caller",),
+        ("per_caller", "shared"),
     ),
     "gemini": BackendSelection(
         BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"),

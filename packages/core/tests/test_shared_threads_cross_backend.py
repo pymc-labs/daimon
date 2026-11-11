@@ -30,7 +30,6 @@ from typing import Any
 import pytest
 from daimon.core import shared_threads
 from daimon.core.channel_backend import (
-    BackendUnsupported,
     channel_ref,
     check_backend,
     set_channel_backend,
@@ -404,8 +403,8 @@ async def test_an_unconfigured_channel_never_reaches_a_provider_or_the_shared_sl
         assert await mux_state.get_binding(s, _slot(world)) is None
 
 
-# The real release policy: the self-hosted host does not share, so a shared revision is
-# refused before dispatch and its registered preparer never sees a shared owner.
+# The real release policy: the self-hosted host shares, so a shared revision reaches
+# its registered preparer with the thread's owner, for every caller.
 
 SELFHOSTED = "selfhosted.loop"
 RELEASED = BackendConfig(
@@ -413,12 +412,12 @@ RELEASED = BackendConfig(
 )
 
 
-async def test_a_backend_that_does_not_share_never_sees_a_shared_owner(
+async def test_a_shared_selfhosted_thread_reaches_its_host_as_the_thread_owner(
     monkeypatch: pytest.MonkeyPatch,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A shared self-hosted revision is refused before dispatch, with no binding."""
+    """Both callers of a shared self-hosted thread reach its host as the thread's owner."""
     from daimon.core.turn.runtimes import ensure_channel_runtime
 
     assert ensure_channel_runtime(SELFHOSTED)
@@ -427,19 +426,22 @@ async def test_a_backend_that_does_not_share_never_sees_a_shared_owner(
 
     async def spy(request: ProviderPreparationRequest) -> PreparedTurn:
         seen.append(request)
-        raise AssertionError("a refused shared thread reached the host preparer")
+        raise AdmissionDenied(reason="backend_unsupported")
 
     monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, SELFHOSTED, spy)  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", "true")
     world = await _world(db_session)
     revision = await set_channel_backend(
         db_session, channel_ref(world.tenant.id, "slack", "chan-x"), RELEASED
     )
     await db_session.commit()
-    with pytest.raises(AdmissionDenied) as raised:
-        await _bind(_deps(db_session_factory), world, world.alice, revision, user="alice")
-    assert raised.value.reason == "backend_unsupported"
-    assert seen == []
-    with pytest.raises(BackendUnsupported):
-        check_backend(revision)
-    async with db_session_factory() as s:
-        assert await mux_state.get_binding(s, _slot(world)) is None
+    check_backend(revision)
+    for account, user in ((world.alice, "alice"), (world.bob, "bob")):
+        with pytest.raises(AdmissionDenied):
+            await _bind(_deps(db_session_factory), world, account, revision, user=user)
+    owner = shared_owner(_slot(world))
+    assert [(r.admission.account_id, r.session_account_id) for r in seen] == [
+        (world.alice, owner),
+        (world.bob, owner),
+    ]
+    assert all(r.admission.shared_owner == owner for r in seen)

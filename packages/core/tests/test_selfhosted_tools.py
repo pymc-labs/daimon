@@ -564,6 +564,32 @@ async def test_minted_token_is_registered_expiring_redacted_and_tenant_bound(
         options={"verify_exp": False},
     )
     assert claims["chat_session_id"] == str(origin.id), "the relay credential names its origin"
+    assert "requester_account_id" not in claims, "a per-caller credential names no asker"
+    reset = current_execution_origin_id.set(origin.id)
+    try:
+        shared = await mint_turn_mcp_authorization(
+            db_session_factory,
+            scope=scope,
+            agent=agent,
+            agents=agents,
+            deadline_s=300,
+            secret=b"t" * 32,
+            now=NOW,
+            requester_account_id=principal.account_id,
+        )
+    finally:
+        current_execution_origin_id.reset(reset)
+    marked = jwt.decode(
+        shared.header.get_secret_value().removeprefix("Bearer "),
+        b"t" * 32,
+        algorithms=["HS256"],
+        options={"verify_exp": False},
+    )
+    # The relay reads this claim and hides personal sign-ins (`test_connector_relay_parity`).
+    assert marked["requester_account_id"] == str(principal.account_id), (
+        "a shared thread's credential names its asker"
+    )
+    assert marked["chat_session_id"] == str(origin.id)
 
 
 def test_skill_count_cap_and_identical_reference_deduplication() -> None:
