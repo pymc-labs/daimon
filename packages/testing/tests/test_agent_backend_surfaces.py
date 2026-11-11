@@ -45,6 +45,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.model_switch import (
+    ModelPicker,
     SwitchRefusal,
     confirm_or_refusal,
     panel_actor,
@@ -1088,7 +1089,6 @@ async def test_panel_switch_confirms_with_the_shown_losses_accepted(persisted):
 
 
 def _picker():
-    from daimon.core.model_switch import ModelPicker
     from daimon.core.models_catalog import list_model_choices
 
     current = ModelRef(provider="anthropic", id="claude-opus-5-5")
@@ -1117,6 +1117,49 @@ def test_each_panel_shows_one_model_select_with_the_current_pick(seam):
         details(), here="chat", page=0, coding_tools=False, is_admin=True, model_picker=picker
     ).model_dump_json()
     assert card.count('"id":"model_pick"') == 1, "one select on the Teams card"
+
+
+def test_each_panel_offers_an_effort_select_only_where_the_provider_has_levels(seam):
+    picker = _picker()
+    assert picker.efforts == (), "Claude keeps its effort on the agent record"
+    openai = ModelPicker(
+        choices=picker.choices,
+        current=ModelRef(provider="openai", id="gpt-6-astra"),
+        efforts=("low", "medium", "high"),
+        effort="medium",
+    )
+
+    def discord_selects(shown: ModelPicker) -> list[str]:
+        view = discord_view(seam, picker=shown)
+        return [
+            str(s.placeholder) for s in view.walk_children() if isinstance(s, discord.ui.Select)
+        ]
+
+    def slack_view(shown: ModelPicker) -> str:
+        return json.dumps(
+            sv.build_details_view(
+                details(),
+                meta=slack_meta(),
+                is_admin=True,
+                coding_tools_available=False,
+                channel_id="C1",
+                attribution=None,
+                model_picker=shown,
+            )
+        )
+
+    def teams_card(shown: ModelPicker) -> str:
+        return tc.details_card(
+            details(), here="chat", page=0, coding_tools=False, is_admin=True, model_picker=shown
+        ).model_dump_json()
+
+    assert discord_selects(picker) == ["Model"]
+    assert discord_selects(openai) == ["Model", "Effort"]
+    assert sv.ACTION_EFFORT_SELECT not in slack_view(picker)
+    assert slack_view(openai).count(sv.ACTION_EFFORT_SELECT) == 1
+    assert '"id":"effort_pick"' not in teams_card(picker)
+    card = teams_card(openai)
+    assert card.count('"id":"effort_pick"') == 1 and '"effort_set"' in card
 
 
 @pytest.mark.parametrize(

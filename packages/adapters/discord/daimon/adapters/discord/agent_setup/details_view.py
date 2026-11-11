@@ -67,6 +67,7 @@ from daimon.core.model_switch import (
     panel_actor,
     panel_edit_deps,
     preview_or_refusal,
+    set_effort,
     switch_fact_lines,
 )
 from daimon.core.panel_audit import PanelOutcome, record_panel_write
@@ -489,6 +490,23 @@ class DetailsView(PanelViewBase):
             model_row.add_item(select)
             container.add_item(discord.ui.TextDisplay("**Model**"))
             container.add_item(model_row)
+            if picker.efforts:
+                effort_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
+                effort_select: discord.ui.Select[discord.ui.LayoutView] = discord.ui.Select(
+                    placeholder="Effort",
+                    options=[
+                        discord.SelectOption(
+                            label=level.capitalize(), value=level, default=level == picker.effort
+                        )
+                        for level in picker.efforts
+                    ],
+                )
+                effort_select.callback = functools.partial(  # type: ignore[method-assign]
+                    self._on_effort_select, select=effort_select
+                )
+                effort_row.add_item(effort_select)
+                container.add_item(discord.ui.TextDisplay("**Effort**"))
+                container.add_item(effort_row)
 
         nav_row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
         back_button: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
@@ -634,6 +652,31 @@ class DetailsView(PanelViewBase):
             return
         await interaction.response.defer()
         await self._preview_pick(interaction, select.values[0])
+
+    async def _on_effort_select(
+        self,
+        interaction: discord.Interaction,
+        *,
+        select: discord.ui.Select[discord.ui.LayoutView],
+    ) -> None:
+        if not await self._model_allowed(interaction):
+            return
+        await interaction.response.defer()
+        service, edit, actor, admin = await self._model_deps(interaction)
+        done = await set_effort(
+            service,
+            edit,
+            actor=actor,
+            agent_name=self.details.name,
+            effort=select.values[0],
+            admin=admin,
+        )
+        if isinstance(done, SwitchRefusal):
+            await self._backend_audit(interaction, outcome="denied", reason=done.reason)
+            await self.swap_to(interaction, self._details_view(refusal=done))
+            return
+        await self._backend_audit(interaction, outcome="allowed", reason="effort_set")
+        await self._reload_after_switch(interaction)
 
     async def _on_review_again(self, interaction: discord.Interaction) -> None:
         if not await self._model_allowed(interaction) or self.switch_value is None:

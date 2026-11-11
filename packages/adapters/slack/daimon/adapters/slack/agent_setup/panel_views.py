@@ -220,6 +220,8 @@ SLACK_SELECT_LIMIT: Final = 100
 
 ACTION_BACKEND_SELECT: Final = "agent_setup__backend_select"
 ACTION_BACKEND_CONFIRM: Final = "agent_setup__backend_confirm"
+ACTION_EFFORT_SELECT: Final = "agent_setup__effort_select"
+"""The effort select on Details: states the level on the agent's provider at once."""
 ACTION_BACKEND_CANCEL: Final = "agent_setup__backend_cancel"
 ACTION_BACKEND_BACK: Final = "agent_setup__backend_back"
 """The refusal's "Switch back to Claude" button."""
@@ -618,6 +620,21 @@ def build_details_view(
         if current is not None:
             picker["initial_option"] = current
         blocks.append(_section("*Model*", accessory=picker))
+        if model_picker.efforts:
+            levels = [
+                {"text": {"type": "plain_text", "text": level.capitalize()}, "value": level}
+                for level in model_picker.efforts
+            ]
+            effort_select: dict[str, Any] = {
+                "type": "static_select",
+                "action_id": ACTION_EFFORT_SELECT,
+                "placeholder": {"type": "plain_text", "text": "Effort"},
+                "options": levels,
+            }
+            chosen = next((o for o in levels if o["value"] == model_picker.effort), None)
+            if chosen is not None:
+                effort_select["initial_option"] = chosen
+            blocks.append(_section("*Effort*", accessory=effort_select))
     actions: list[dict[str, Any]] = []
     if is_platform_admin or viewer_owns:
         actions.append(

@@ -95,6 +95,7 @@ Op = Literal[
     "backend_cancel",
     "backend_back",
     "backend_again",
+    "effort_set",
 ]
 
 
@@ -293,6 +294,21 @@ def details_card(
                 ActionSet(actions=[_button("Preview", "backend_preview", agent=details.name)]),
             ]
         )
+        if model_picker.efforts:
+            body.extend(
+                [
+                    ChoiceSetInput(
+                        id="effort_pick",
+                        label="Effort",
+                        value=model_picker.effort,
+                        choices=[
+                            Choice(title=level.capitalize(), value=level)
+                            for level in model_picker.efforts
+                        ],
+                    ),
+                    ActionSet(actions=[_button("Set effort", "effort_set", agent=details.name)]),
+                ]
+            )
     actions: list[Action] = []
     if (is_admin or owned) and not details.daimon_managed:
         add = OpenDialogData(SKILL_DIALOG, {"agent": details.name})

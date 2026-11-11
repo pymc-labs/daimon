@@ -152,6 +152,7 @@ from daimon.core.model_switch import (
     panel_edit_deps,
     preview_or_refusal,
     read_picker,
+    set_effort,
     switch_fact_lines,
 )
 from daimon.core.models_catalog import claude_model_choices
@@ -459,6 +460,7 @@ PANEL_ACTION_IDS: frozenset[str] = frozenset(
         coding_keys.ACTION_BACK,
         panel_views.ACTION_ADD_SKILL,
         panel_views.ACTION_BACKEND_SELECT,
+        panel_views.ACTION_EFFORT_SELECT,
         panel_views.ACTION_BACKEND_CONFIRM,
         panel_views.ACTION_BACKEND_CANCEL,
         panel_views.ACTION_REVOKE_TOKEN,
@@ -903,6 +905,23 @@ async def _model_action(
         await show_details()
         return
 
+    if action_id == panel_views.ACTION_EFFORT_SELECT:
+        option = cast("Mapping[str, object]", action.get("selected_option") or {})
+        done = await set_effort(
+            service,
+            edit,
+            actor=actor,
+            agent_name=name,
+            effort=str(option.get("value") or ""),
+            admin=is_admin,
+        )
+        if isinstance(done, SwitchRefusal):
+            await refuse(done, None)
+            return
+        await audit("allowed", "effort_set")
+        await show_details()
+        return
+
     if action_id in (panel_views.ACTION_BACKEND_SELECT, panel_views.ACTION_BACKEND_AGAIN):
         if action_id == panel_views.ACTION_BACKEND_SELECT:
             option = cast("Mapping[str, object]", action.get("selected_option") or {})
@@ -1057,6 +1076,7 @@ async def _dispatch_panel_action(
 
     if action_id in {
         panel_views.ACTION_BACKEND_SELECT,
+        panel_views.ACTION_EFFORT_SELECT,
         panel_views.ACTION_BACKEND_CONFIRM,
         panel_views.ACTION_BACKEND_CANCEL,
         panel_views.ACTION_BACKEND_BACK,

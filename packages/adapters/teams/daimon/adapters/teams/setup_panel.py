@@ -83,6 +83,7 @@ from daimon.core.model_switch import (
     panel_edit_deps,
     preview_or_refusal,
     read_picker,
+    set_effort,
     switch_fact_lines,
 )
 from daimon.core.models_catalog import (
@@ -170,7 +171,14 @@ def _models() -> tuple[ModelChoice, ...]:
 
 
 _MODEL_OPS = frozenset(
-    {"backend_preview", "backend_confirm", "backend_cancel", "backend_back", "backend_again"}
+    {
+        "backend_preview",
+        "backend_confirm",
+        "backend_cancel",
+        "backend_back",
+        "backend_again",
+        "effort_set",
+    }
 )
 
 
@@ -707,6 +715,20 @@ class SetupPanel:
                 await audit("denied", done.reason)
                 return refused(done)
             await audit("allowed", "switched_back")
+            return await details()
+        if op == "effort_set":
+            done = await set_effort(
+                service,
+                edit,
+                actor=who,
+                agent_name=name,
+                effort=str(data.get("effort_pick") or ""),
+                admin=admin,
+            )
+            if isinstance(done, SwitchRefusal):
+                await audit("denied", done.reason)
+                return refused(done)
+            await audit("allowed", "effort_set")
             return await details()
         if op == "backend_confirm":
             local, digest = data.get("revision"), data.get("digest")

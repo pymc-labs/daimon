@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final
 
+from daimon.core.agent_catalog import provider_efforts
 from daimon.core.agent_changes import ModelChanged, change_model
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
 from daimon.core.agent_model_names import model_name
@@ -21,6 +22,7 @@ from daimon.core.backend_refusals import RefusalAction, refusal_card, switch_bac
 from daimon.core.channel_backend import (
     AgentBackendRefused,
     AgentBackendService,
+    AgentSettings,
     BackendActor,
     BackendUnsupported,
     load_backend_agent,
@@ -30,6 +32,7 @@ from daimon.core.models_catalog import ModelChoice, catalog_model, list_model_ch
 from daimon.core.turn.notices import conversations_follow_line, provider_name
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import ModelRef, Provider
+from mux.contracts.profile import Effort
 from mux.profiles import backend_selection
 
 if TYPE_CHECKING:
@@ -54,6 +57,10 @@ class ModelPicker:
 
     choices: tuple[ModelChoice, ...]
     current: ModelRef
+    #: The effort levels the current provider takes, empty on Claude (its own setting).
+    efforts: tuple[Effort, ...] = ()
+    #: The effort the agent states now, None for the provider's default.
+    effort: Effort | None = None
 
     def limited(self, limit: int = SELECT_LIMIT) -> tuple[ModelChoice, ...]:
         """At most `limit` choices, the current model always among them."""
@@ -143,7 +150,12 @@ async def read_picker(
         revision.model if revision is not None else None,
     )
     policy = await service.tenant_policy(tenant_id) if service.enabled else None
-    return ModelPicker(choices=list_model_choices(tenant=policy, default=current), current=current)
+    return ModelPicker(
+        choices=list_model_choices(tenant=policy, default=current),
+        current=current,
+        efforts=provider_efforts(current.provider) if service.enabled else (),
+        effort=revision.effort if revision is not None else None,
+    )
 
 
 async def preview_model_switch(
@@ -267,6 +279,48 @@ async def preview_or_refusal(
         )
     except (AgentBackendRefused, BackendUnsupported, AgentEditError) as error:
         return refusal_of(error, admin=admin)
+
+
+async def set_effort(
+    service: AgentBackendService,
+    edit: AgentEditDeps,
+    *,
+    actor: AgentActor,
+    agent_name: str,
+    effort: str,
+    admin: bool,
+) -> Effort | SwitchRefusal:
+    """The effort select's one write: state `effort` on the agent's provider, or say why not.
+
+    The provider and model stay, so nothing new is lost; the losses the agent already
+    accepted are accepted again from the fresh preview, whose digest and revision guard
+    the write.
+    """
+    try:
+        agent, backend = await _load(service, edit, actor, agent_name)
+        if not await service.may_edit(agent, backend):
+            raise AgentBackendRefused("owner_or_admin_required")
+        revision = await service.current(agent)
+        provider = revision.backend if revision is not None else None
+        offered: dict[str, Effort] = {e: e for e in provider_efforts(provider or DEFAULT_BACKEND)}
+        level = offered.get(effort)
+        if level is None:
+            raise AgentEditError("That effort isn't available for this model.", kind="invalid")
+        settings = replace(AgentSettings.of(revision), effort=level)
+        preview = await service.preview_settings(agent, settings)
+        if not preview.allowed:
+            raise AgentBackendRefused("backend_not_allowed", provider=provider)
+        await service.set_settings(
+            agent,
+            settings,
+            preview.setting_revision,
+            backend,
+            expected_preview_digest=preview.digest,
+            accepted_drops=preview.declared_drops,
+        )
+    except (AgentBackendRefused, BackendUnsupported, AgentEditError) as error:
+        return refusal_of(error, admin=admin)
+    return level
 
 
 async def back_to_claude(
