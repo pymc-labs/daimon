@@ -120,7 +120,9 @@ def click(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         yield MagicMock()
 
     interaction = MagicMock()
-    interaction.channel = MagicMock(spec=discord.Thread, id=THREAD)
+    channel = MagicMock(spec=discord.Thread)
+    channel.id = THREAD
+    interaction.channel = channel
     interaction.client.runtime.sessionmaker = session
     interaction.response.is_done.return_value = True
     interaction.response.defer = AsyncMock()
