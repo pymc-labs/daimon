@@ -811,14 +811,14 @@ def test_disabled_cli_retains_exact_legacy_command_tree_and_help(tmp_path, path,
     assert actual["exit"] == actual["root_exit"] == 0
     assert actual["groups"] == ["rule", "owner", "tool-rules"]
     # This checks that enabling the backend feature does not alter the
-    # pre-existing CLI surface. The tool-rules and owner commands are
+    # pre-existing CLI surface. The tool-rules, owner and convert commands are
     # independently added.
     added_lines = [
         line
         for line in actual["help"].splitlines(keepends=True)
-        if "│ tool-rules " in line or "│ owner " in line
+        if any(f"│ {name} " in line for name in ("tool-rules", "owner", "convert"))
     ]
-    assert len(added_lines) == 2
+    assert len(added_lines) == 3, f"one help line per added command: {added_lines}"
     assert (
         "".join(
             line for line in actual["help"].splitlines(keepends=True) if line not in added_lines

@@ -10,6 +10,8 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, Final, Literal
 
+from daimon.core.agent_record_ports import DAIMON_ID_PREFIXES
+from daimon.core.anthropic_guard import anthropic_configured
 from daimon.core.channel_backend import (
     REFUSAL_DETAILS,
     AgentBackendRefused,
@@ -20,6 +22,7 @@ from daimon.core.channel_backend import (
     current_backend,
 )
 from daimon.core.constants import DEFAULT_AGENT_MODEL
+from daimon.core.errors import UserFacingError
 from daimon.core.stores import mux_state
 from daimon.core.turn.notices import provider_name
 from mux.contracts.config import DEFAULT_BACKEND
@@ -158,7 +161,11 @@ async def switch_back_to_claude(
     edit: AgentEditDeps,
     backends: AgentBackendService | None,
 ) -> str:
-    """The way back: clear this channel's pin when it has one, else move the agent to Claude."""
+    """The way back: clear this channel's pin when it has one, else move the agent to Claude.
+
+    A Daimon-owned record has no Claude twin to switch to, so on a keyed install an
+    admin's press converts it back to a Managed Agents agent under the same name.
+    """
     from daimon.core.agent_changes import change_model
 
     channel = channel_ref(tenant_id, platform, channel_id)
@@ -169,6 +176,8 @@ async def switch_back_to_claude(
         ):
             await clear_channel_backend(session, channel, actor=backend_actor, expected=pin)
             return "Cleared this channel's provider pin."
+    if agent.source is not None and agent.source.ref.id.startswith(DAIMON_ID_PREFIXES):
+        return await _convert_record_to_claude(sessionmaker, agent, actor=actor, edit=edit)
     await change_model(
         agent,
         ModelRef(provider=DEFAULT_BACKEND, id=DEFAULT_AGENT_MODEL),
@@ -177,3 +186,33 @@ async def switch_back_to_claude(
         backends=backends,
     )
     return f"Switched back to {provider_name(DEFAULT_BACKEND)}."
+
+
+async def _convert_record_to_claude(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    agent: BackendAgent,
+    *,
+    actor: AgentActor,
+    edit: AgentEditDeps,
+) -> str:
+    from daimon.core.agent_convert import convert_agent_to_anthropic
+    from daimon.core.agent_editing import AgentEditError
+
+    if not anthropic_configured(edit.client):
+        raise AgentEditError(
+            "This install has no Claude key. Ask an admin to add one.", kind="unavailable"
+        )
+    if not actor.subject.is_admin:
+        raise AgentEditError("Only an admin can move this agent to Claude.", kind="forbidden")
+    try:
+        await convert_agent_to_anthropic(
+            edit.client,
+            sessionmaker,
+            tenant_id=agent.tenant_id,
+            name=agent.name,
+            subject=actor.subject,
+            public_url=edit.public_url,
+        )
+    except UserFacingError as error:
+        raise AgentEditError(str(error), kind="conflict") from error
+    return f"Moved {agent.name} to {provider_name(DEFAULT_BACKEND)}."

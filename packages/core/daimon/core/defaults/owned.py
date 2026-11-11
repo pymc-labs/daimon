@@ -151,13 +151,17 @@ async def create_owned_record(
     *,
     scope: Scope,
     tenant_id: uuid.UUID,
+    key: str | None = None,
 ) -> BetaManagedAgentsAgent:
-    """Create a Daimon record with the first backend revision naming its provider."""
+    """Create a Daimon record with the first backend revision naming its provider.
+
+    The same `key` replays the first create, so a re-run never makes a second record.
+    """
     # Imported here: `channel_backend` reaches `authz`, which imports `defaults`.
     from daimon.core.channel_backend import record_born_backend
 
     provider = record.model.provider
-    created = await create_owned_agent(None, record, scope=scope, records=sessions)
+    created = await create_owned_agent(None, record, scope=scope, records=sessions, key=key)
     async with sessions() as session, session.begin():
         await record_born_backend(
             session,

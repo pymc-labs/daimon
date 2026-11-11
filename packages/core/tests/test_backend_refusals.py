@@ -5,10 +5,12 @@ from __future__ import annotations
 import ast
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from daimon.core import agent_changes, backend_refusals
+from daimon.core import agent_changes, agent_convert, backend_refusals
+from daimon.core.agent_editing import AgentEditError
 from daimon.core.authz import build_subject
 from daimon.core.backend_refusals import (
     DETAIL_LINES,
@@ -232,7 +234,7 @@ async def test_switch_back_moves_an_unpinned_agent_to_the_default_claude_model(
     monkeypatch.setattr(agent_changes, "change_model", fake_change_model)
     said = await switch_back_to_claude(
         db_session_factory,
-        object(),  # type: ignore[arg-type]
+        SimpleNamespace(source=None),  # type: ignore[arg-type]
         tenant_id=tenant.id,
         platform="discord",
         channel_id="chan-2",
@@ -245,3 +247,60 @@ async def test_switch_back_moves_an_unpinned_agent_to_the_default_claude_model(
     ((model, kwargs),) = calls
     assert (model.provider, model.id) == ("anthropic", backend_refusals.DEFAULT_AGENT_MODEL)
     assert kwargs["actor"] == "actor" and kwargs["edit"] == "edit"
+
+
+def _record_agent(tenant_id: uuid.UUID) -> Any:
+    return SimpleNamespace(
+        tenant_id=tenant_id,
+        name="analyst",
+        source=SimpleNamespace(ref=SimpleNamespace(id="dm_agent_x")),
+    )
+
+
+async def test_switch_back_converts_a_daimon_record_on_a_keyed_install(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Daimon record has no Claude twin: an admin's press converts it instead."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    names: list[str] = []
+
+    async def fake_convert(*_args: object, name: str, **_kwargs: object) -> None:
+        names.append(name)
+
+    monkeypatch.setattr(agent_convert, "convert_agent_to_anthropic", fake_convert)
+    said = await switch_back_to_claude(
+        db_session_factory,
+        _record_agent(tenant.id),
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id="chan-3",
+        actor=SimpleNamespace(subject=build_subject(is_admin=True, platform_user_id="a")),  # type: ignore[arg-type]
+        backend_actor=_actor(tenant.id),
+        edit=SimpleNamespace(client=object(), public_url=None),  # type: ignore[arg-type]
+        backends=None,
+    )
+    assert said == "Moved analyst to Anthropic.", f"the press converts: {said}"
+    assert names == ["analyst"], "the record is converted once"
+
+
+async def test_switch_back_refuses_a_daimon_record_without_a_key(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """No Claude key: the press is refused with who can help."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    with pytest.raises(AgentEditError, match="Ask an admin"):
+        await switch_back_to_claude(
+            db_session_factory,
+            _record_agent(tenant.id),
+            tenant_id=tenant.id,
+            platform="discord",
+            channel_id="chan-4",
+            actor=SimpleNamespace(subject=build_subject(is_admin=True, platform_user_id="a")),  # type: ignore[arg-type]
+            backend_actor=_actor(tenant.id),
+            edit=SimpleNamespace(client=None, public_url=None),  # type: ignore[arg-type]
+            backends=None,
+        )

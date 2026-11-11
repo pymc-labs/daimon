@@ -63,6 +63,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same way. An admin runs it and confirms first. Skills that exist only on
   Claude are left off, and the command names each one.
 
+- **Move an agent back to Claude with `daimon agents convert --to anthropic`.**
+  An agent Daimon keeps on OpenAI or Gemini becomes a Claude agent again under
+  the same name, and "Switch back to Claude" does the same for an admin when the
+  install has a Claude key. Either way the agent keeps its owner, threads,
+  routines, memory, settings and grants, and both directions are safe to re-run
+  after a failure without making a second agent. The move is refused while the
+  agent has queued wakes, pending approvals or running jobs, and the command
+  lists the skills it left off.
+
 - **An agent on OpenAI or Gemini is found everywhere on a keyless install.**
   Routines, channel and agent rules, the roster and "who answers here" cards,
   agent details, skills, MCP connections, forks, reports and setup

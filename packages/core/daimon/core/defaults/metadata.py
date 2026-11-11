@@ -57,6 +57,9 @@ MA_METADATA_KEY_CHANNEL_COPY = "daimon_isolation_copy"
 # can tell "unchanged source, reuse the variant" from "source moved, update
 # it" without re-deriving the whole spec first.
 MA_METADATA_KEY_READER_OF = "daimon_reader_of"
+# Stamped on a Managed Agents agent converted from a Daimon record, with the
+# record's id, so a re-run after a crash adopts it instead of making another.
+MA_METADATA_KEY_CONVERTED_FROM = "daimon_converted_from"
 # A copy fork_agent made from a chat conversation names the agent it was copied from
 # (its MA id) and that conversation (platform, channel, thread). Switching such a copy off its
 # source's provider from that conversation hands the conversation to it, in one step
