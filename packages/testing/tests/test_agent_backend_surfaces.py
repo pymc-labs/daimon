@@ -54,7 +54,7 @@ from daimon.core.model_switch import (
 )
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import security_audit
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import Role, TenantBackendPolicy
 from daimon.testing.db import DatabasePreflight, require_owned_sessionmaker
 from daimon.testing.factories import (
     make_account,
@@ -159,7 +159,9 @@ def seam(monkeypatch):
     # The owner-or-admin read; this fake has no owners, so admins only.
     service.may_edit = AsyncMock(side_effect=lambda actual, actor: actor.subject.is_admin)
     service.tenant_policy = AsyncMock(
-        return_value=SimpleNamespace(enabled_backends=("anthropic", "openai", "gemini"))
+        return_value=TenantBackendPolicy(
+            tenant_id=TENANT, revision="1", enabled_backends=("anthropic", "openai", "gemini")
+        )
     )
     service.read_selection = cb.AgentBackendService.read_selection.__get__(service)
     service.refused = None
