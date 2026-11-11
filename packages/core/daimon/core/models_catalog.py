@@ -108,6 +108,10 @@ def list_model_choices(
     # The turn package imports thread_models, which imports this module.
     from daimon.core.turn.notices import provider_name
 
+    entries = agent_catalog()
+    if tenant is not None:
+        listed = {(e.model.provider, e.model.id) for e in entries}
+        entries += _granted_entries(str(tenant.tenant_id), listed)
     return tuple(
         ModelChoice(
             id=entry.model.id,
@@ -117,8 +121,24 @@ def list_model_choices(
             provider=entry.model.provider,
             price=entry.price,
         )
-        for entry in agent_catalog()
+        for entry in entries
         if _runnable(entry, tenant)
+    )
+
+
+def _granted_entries(tenant_id: str, listed: set[tuple[str, str]]) -> tuple[AgentModel, ...]:
+    """Models an operator grants this tenant's agents, beyond the public catalog."""
+    from daimon.core.turn.runtimes import agent_granted_prices
+
+    return tuple(
+        AgentModel(
+            ModelRef.model_validate({"provider": rate.provider, "id": rate.model}),
+            f"~${rate.input} input / ${rate.output} output per million tokens",
+            float(rate.input),
+            float(rate.output),
+        )
+        for rate in agent_granted_prices(tenant_id).values()
+        if (rate.provider, rate.model) not in listed
     )
 
 

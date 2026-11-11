@@ -170,3 +170,50 @@ def test_catalog_model_refuses_what_the_tenant_cannot_run(value: str) -> None:
     with pytest.raises(AgentBackendRefused) as refused:
         catalog_model(value, tenant=None)
     assert refused.value.reason == "model_not_selectable", f"{value} is refused as not selectable"
+
+
+def test_catalog_lists_a_selfhosted_model_once_an_agent_is_granted(monkeypatch, tmp_path) -> None:
+    import json
+
+    from daimon.core.config import SelfhostedBillingSettings, SelfhostedModelPrice
+
+    tenant = _tenant("selfhosted")
+    billing = SelfhostedBillingSettings(
+        models={
+            "gpt-6.1-sol": [
+                SelfhostedModelPrice(
+                    effective_from=date(2026, 1, 1), input="2", output="10", cache_read="1"
+                )
+            ]
+        }
+    )
+    monkeypatch.setenv("DAIMON_BILLING__SELFHOSTED", billing.model_dump_json())
+    monkeypatch.setenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", "true")
+    path = tmp_path / "runtime.json"
+    path.write_text("[]")
+    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
+
+    def selfhosted() -> set[str]:
+        choices = list_model_choices(tenant=tenant, default=None)
+        return {c.id for c in choices if c.provider == "selfhosted"}
+
+    assert selfhosted() == set(), "no agent grant: nothing to pick"
+    row = dict(
+        profile="selfhosted.loop",
+        tenant_id=str(tenant.tenant_id),
+        platform="*",
+        channel_id="*",
+        account_id="*",
+        config_digest="d",
+        agent_id="sh_agent_x",
+        environment_id="sh_env_x",
+        infrastructure_usd="0",
+        source_agent_id=str(uuid.uuid4()),
+    )
+    path.write_text(json.dumps([row]))
+    assert selfhosted() == {"gpt-6.1-sol"}
+    assert catalog_model("selfhosted:gpt-6.1-sol", tenant=tenant).provider == "selfhosted"
+    foreign = _tenant("selfhosted")
+    assert not any(
+        c.provider == "selfhosted" for c in list_model_choices(tenant=foreign, default=None)
+    )

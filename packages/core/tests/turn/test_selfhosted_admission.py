@@ -209,7 +209,10 @@ async def test_agent_selected_selfhosted_is_refused_before_anthropic(
 
     # Model an invalid legacy row inside this test's isolated DDL schema.
     await db_session.execute(
-        text("ALTER TABLE agent_backend_revision DROP CONSTRAINT ck_agent_backend_provider")
+        text(
+            "ALTER TABLE agent_backend_revision DROP CONSTRAINT ck_agent_backend_provider,"
+            " DROP CONSTRAINT ck_agent_backend_environment"
+        )
     )
     await preferences.put_revision(
         db_session,

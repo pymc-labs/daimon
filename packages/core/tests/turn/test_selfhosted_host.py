@@ -1911,3 +1911,40 @@ async def test_live_and_replayed_approval_permissions_match(composed, explicit, 
         assert decide_tool_call(ToolSafetyPolicy(enabled=False), call, attended=False).outcome == (
             "deny" if expected_ask else "allow"
         )
+
+
+async def test_an_agent_saved_on_a_selfhosted_model_runs_a_reply(composed):
+    """The agent's own choice prepares and replies like a channel pin; shared stays refused."""
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn.outcomes import drain_outcomes
+
+    request, wire, _, _ = composed
+    own = replace(request, admission=replace(request.admission, backend_revision_origin="agent"))
+    prepared = await prepare_selfhosted(own)
+
+    async def reseed():
+        return "question"
+
+    outcome = await run_prepared_turn(
+        own.deps,
+        prepared,
+        tenant_id=TENANT,
+        platform="slack",
+        thread_id="thread",
+        external_user_id="caller",
+        user_message="question",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=reseed,
+        recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+        render_interval_s=0.01,
+        operation_key="agent-origin",
+    )
+    await drain_outcomes()
+    assert outcome.state.error is None, outcome.state.error
+    assert wire.posts == 1
+
+    shared = shared_request(request, ACCOUNT)
+    shared = replace(shared, admission=replace(shared.admission, backend_revision_origin="agent"))
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await prepare_selfhosted(shared)

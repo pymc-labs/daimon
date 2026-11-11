@@ -1185,9 +1185,9 @@ async def _admit_gates(
             environment_name_tier=config.environment_name_tier,
         )
 
-    # A legacy agent preference must be refused before resolving its source
-    # through Anthropic. The name lookup can only deny; it never selects a
-    # backend or grants authority to another resource with the same name.
+    # A self-hosted agent preference without its operator grant is refused before
+    # resolving its source through Anthropic. The name lookup can only deny; it never
+    # selects a backend or grants authority to another resource with the same name.
     if (
         selection_enabled
         and channel is not None
@@ -1203,9 +1203,17 @@ async def _admit_gates(
                         tenant_id=tenant_id, ma_agent_id=config.responder_ma_agent_id
                     ),
                 )
-                refused = preference is not None and preference.backend == LOOP.provider
+                refused = (
+                    preference is not None
+                    and preference.backend == LOOP.provider
+                    and not channel_backend.agent_grant_holds(tenant_id, preference)
+                )
             else:
-                refused = await agent_backends.has_backend_preference_by_name(
+                from daimon.core.turn.runtimes import has_agent_grants
+
+                refused = not has_agent_grants(
+                    LOOP.profile_id, str(tenant_id)
+                ) and await agent_backends.has_backend_preference_by_name(
                     session,
                     tenant_id=tenant_id,
                     agent_name=config.agent_name,
@@ -1236,7 +1244,12 @@ async def _admit_gates(
             policy.enabled_backends if selection_enabled else None,
         ) from err
 
-    selfhosted = backend_revision is not None and backend_revision.backend == LOOP.provider
+    # A channel's self-hosted pin runs a harness record; an agent's own choice runs its source.
+    selfhosted = (
+        backend_revision is not None
+        and backend_revision.backend == LOOP.provider
+        and backend_revision_origin == "channel"
+    )
     keyed = anthropic_configured(deps.anthropic)
     responder = config.responder_ma_agent_id
     # A Daimon record: self-hosted, a `dm_` responder, a name a record holds, or any

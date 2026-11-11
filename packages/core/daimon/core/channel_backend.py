@@ -365,19 +365,26 @@ class AgentSettings:
     capabilities the agent needs (a channel pin may refuse a turn over them but
     never drops one), and `thread_mode="shared"` is the agent's intent to share
     threads, which a channel pin that keeps them per caller overrides.
+    `environment` is the operator-granted one a grant-gated profile runs in
+    (`granted_settings`), never stated by a person.
     """
 
     profile: str | None = None
     requires: Mapping[Capability, CapabilityRequirement] | None = None
     thread_mode: ThreadMode | None = None
     effort: Effort | None = None
+    environment: str | None = None
 
     @classmethod
     def of(cls, revision: AgentBackendRevision | None) -> AgentSettings:
         if revision is None:
             return cls()
         return cls(
-            revision.profile, revision.requires or None, revision.thread_mode, revision.effort
+            revision.profile,
+            revision.requires or None,
+            revision.thread_mode,
+            revision.effort,
+            revision.environment,
         )
 
     def is_default(self) -> bool:
@@ -386,6 +393,7 @@ class AgentSettings:
             and not self.requires
             and self.thread_mode is None
             and self.effort is None
+            and self.environment is None
         )
 
     def facts(self) -> dict[str, object]:
@@ -401,16 +409,71 @@ class AgentSettings:
             facts["thread_mode"] = self.thread_mode
         if self.effort is not None:
             facts["effort"] = self.effort
+        if self.environment is not None:
+            facts["environment"] = self.environment
         return facts
 
     def for_backend(self, backend: Provider | None) -> AgentSettings:
         """Keep what still applies on `backend`: a profile belongs to one backend only, and
         the default one keeps its effort on the agent's own record, and a named agent takes none."""
         drops_effort = backend in (None, DEFAULT_BACKEND, *NAMED_AGENT_BACKENDS)
-        kept = replace(self, effort=None) if drops_effort else self
+        # The environment is the operator's grant: `granted_settings` finds it anew.
+        kept = replace(self, environment=None)
+        kept = replace(kept, effort=None) if drops_effort else kept
         if kept.profile is None or kept.profile.startswith(f"{backend or DEFAULT_BACKEND}."):
             return kept
         return AgentSettings(None, kept.requires, kept.thread_mode, kept.effort)
+
+
+def granted_settings(
+    agent: BackendAgent, target: Provider, model: str | None, settings: AgentSettings
+) -> AgentSettings:
+    """`settings` with the environment an operator granted this agent's configuration.
+
+    A profile that takes per-agent grants (self-hosted) is refused without one;
+    every other profile runs in no granted environment.
+    """
+    from daimon.core.turn.runtimes import granted_agent_environments
+
+    selection = agent_selection(target, model, settings)
+    granted = granted_agent_environments(
+        selection.profile, str(agent.tenant_id), agent.agent_id, selection.content_digest()
+    )
+    if granted is None:
+        return replace(settings, environment=None)
+    if settings.environment in granted:
+        return settings
+    if settings.environment is None and len(granted) == 1:
+        return replace(settings, environment=granted[0])
+    raise AgentBackendRefused("selfhosted_requires_channel_configuration")
+
+
+def require_agent_grant(
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    selection: ResolvedBackend,
+    setting: AgentBackendRevision | None,
+) -> None:
+    """An agent's own grant-gated choice still runs in an environment the operator grants."""
+    from daimon.core.turn.runtimes import granted_agent_environments
+
+    granted = granted_agent_environments(
+        selection.profile, str(tenant_id), agent_id, selection.content_digest()
+    )
+    if granted is not None and (setting is None or setting.environment not in granted):
+        raise AgentBackendRefused("selfhosted_requires_channel_configuration")
+
+
+def agent_grant_holds(tenant_id: uuid.UUID, setting: AgentBackendRevision) -> bool:
+    """Whether the operator still grants this agent's stored choice (or it needs none)."""
+    selection = revision_selection(setting)
+    if selection is None:
+        return True
+    try:
+        require_agent_grant(tenant_id, setting.agent_id, selection, setting)
+    except AgentBackendRefused:
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -984,8 +1047,6 @@ def compatibility_preview(
     """Pure preview from host-resolved agent facts and declared profile metadata."""
     if agent.tenant_id != tenant.tenant_id:
         raise AgentBackendRefused("tenant_mismatch")
-    if target_backend == "selfhosted":
-        raise AgentBackendRefused("selfhosted_requires_channel_configuration")
     # Refused at save: such an agent would otherwise fail every message it is sent.
     if (
         settings is not None
@@ -1192,8 +1253,7 @@ class AgentBackendService:
             # A provider change keeps the agent's settings that still apply.
             settings = AgentSettings.of(current).for_backend(target)
         target = target or DEFAULT_BACKEND
-        if target == "selfhosted":
-            raise AgentBackendRefused("selfhosted_requires_channel_configuration")
+        settings = granted_settings(agent, target, model, settings)
         original = agent
         if capture is not None:
             agent = captured if captured is not None else await capture(agent)
@@ -1295,6 +1355,7 @@ class AgentBackendService:
         async with self._sessions() as session:
             current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
             settings = AgentSettings.of(current).for_backend(target)
+            settings = granted_settings(agent, target or DEFAULT_BACKEND, picked, settings)
             preview = await self._preview(session, agent, target, picked, settings)
         if not preview.allowed:
             raise AgentBackendRefused("backend_not_allowed", provider=target_backend)
@@ -1318,6 +1379,7 @@ class AgentBackendService:
                 "requires": settings.facts().get("requires"),
                 "thread_mode": settings.thread_mode,
                 "effort": settings.effort,
+                "environment": settings.environment,
                 "agent_name": agent.name,
                 "preview_digest": preview.digest,
                 "digest": _revision_digest(agent, target, consent_json, picked, settings),
@@ -1338,8 +1400,6 @@ class AgentBackendService:
     ) -> BackendSelectionState | None:
         """Read an optional panel selection, preserving strict mutation refusals."""
         if not self.enabled:
-            return None
-        if target_backend == "selfhosted":
             return None
         try:
             agent = await load_backend_agent(
@@ -1421,6 +1481,7 @@ class AgentBackendService:
                 # it stays an admin's call until a destination can consent to it.
                 # TODO: a per-channel setting allowing shared threads, then owners too.
                 raise AgentBackendRefused("admin_required_for_shared_threads")
+            settings = granted_settings(agent, backend or DEFAULT_BACKEND, model, settings)
             preview = await self._preview(session, agent, backend, model, settings)
             if not preview.allowed:
                 raise AgentBackendRefused("backend_not_allowed")
@@ -1482,6 +1543,7 @@ class AgentBackendService:
                     requires=cast(JsonValue, settings.facts().get("requires")),
                     thread_mode=settings.thread_mode,
                     effort=settings.effort,
+                    environment=settings.environment,
                 )
             except IntegrityError:
                 raise AgentBackendRefused("stale_revision") from None
@@ -1682,6 +1744,7 @@ class AgentBackendService:
                     requires=cast(JsonValue, settings.facts().get("requires")),
                     thread_mode=settings.thread_mode,
                     effort=settings.effort,
+                    environment=settings.environment,
                 )
             except IntegrityError:
                 return None
@@ -1861,8 +1924,6 @@ async def resolve_turn_backend(
         source: Literal["channel", "agent"] = (
             "agent" if origin in ("agent", "thread") else "channel"
         )
-        if source == "agent" and retained.backend == "selfhosted":
-            raise AgentBackendRefused("selfhosted_requires_channel_configuration")
         return retained, retained.thread_mode == "shared", source
     if not isinstance(agent, BackendAgent):
         raise AgentBackendRefused("agent_identity_required")
@@ -1890,8 +1951,7 @@ async def resolve_turn_backend(
     if agent_choice is None:
         return None, ever_shared, "default"
     selection = agent_choice
-    if selection.backend == "selfhosted":
-        raise AgentBackendRefused("selfhosted_requires_channel_configuration")
+    require_agent_grant(tenant_id, agent.agent_id, selection, setting)
     consent_revision = setting if setting is not None and setting.drop_consent is not None else None
     if thread is not None and consent_revision is None:
         raise AgentBackendRefused("re_confirm", detail="no_consent")

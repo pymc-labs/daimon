@@ -1738,7 +1738,7 @@ def _backend_switch_refusal(
             "profile_not_selectable": f"That model isn't available on {provider}. Pick another.",
             "effort_not_offered": f"Models on {provider} have no effort setting here.",
             "selfhosted_requires_channel_configuration": (
-                f"A self-hosted model is set per channel, not per agent. Ask {admin}."
+                f"This agent can't use that self-hosted model yet. Ask {admin} to allow it."
             ),
             "stale_preview": f"'{agent_name}' changed since the preview. Ask me to preview again.",
             "stale_revision": switched_meanwhile_text(agent_name, current, target),

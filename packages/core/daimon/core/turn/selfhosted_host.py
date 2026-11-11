@@ -357,11 +357,14 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
     runtime = runtime_for(request.deps.turn_runtimes.get(PROFILE), revision)
     # A shared thread binds the account-less slot and its session runs as the
     # thread's own owner; the caller's relay credential hides personal sign-ins.
+    # An agent's own choice (an operator's per-agent grant) runs per caller only.
     shared = request.admission.shared_owner
+    origin = request.admission.backend_revision_origin
     if (
         not request.deps.channel_backends
         or request.deps.turn_path != "mux"
-        or request.admission.backend_revision_origin != "channel"
+        or origin not in ("channel", "agent")
+        or (origin == "agent" and shared is not None)
         or revision.thread_mode != ("shared" if shared is not None else "per_caller")
     ):
         raise AdmissionDenied(reason="backend_unsupported")

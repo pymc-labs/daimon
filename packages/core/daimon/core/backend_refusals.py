@@ -59,7 +59,7 @@ _LINES: Final[dict[str, tuple[str, RefusalAction | None]]] = {
     "profile_not_selectable": ("That model isn't available. Pick another.", "pick_another_model"),
     "effort_not_offered": ("That model has no effort setting. Leave it on the default.", None),
     "selfhosted_requires_channel_configuration": (
-        "A self-hosted model is set per channel, not per agent.",
+        "This agent can't use that self-hosted model until an operator turns it on for it.",
         None,
     ),
     "channel_pin_lacks_capability": (
