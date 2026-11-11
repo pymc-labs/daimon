@@ -5,15 +5,16 @@ An agent switched to OpenAI or Gemini runs that record under the owner's drop
 consent: its consent is renewed only when the declared drops stay identical, else
 the agent is held as "Needs re-confirm". Those providers get no custom skills
 unless an operator representation pins the exact source, and a repin always
-outdates that pin, so such an agent is held too. Self-hosted runs a deployment
-spec with its own catalog and refuses agent-level selection, so no web agent
-follows on it. Change this record with the behaviour, never delete it.
+outdates that pin, so such an agent is held too. Self-hosted runs a web agent
+only in an environment an operator granted that agent, so an agent without a
+grant cannot follow on it. Change this record with the behaviour, never delete it.
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -22,13 +23,13 @@ import pytest
 from cryptography.fernet import Fernet
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.adapters.web.server_skills import sync_deps
-from daimon.core.channel_backend import AgentBackendRefused, compatibility_preview
+from daimon.core.channel_backend import AgentBackendRefused, AgentSettings, granted_settings
 from daimon.core.config import Settings, WebSettings
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.server_skills.anthropic import ManagedAgentsTarget
 from daimon.core.server_skills.consent import ConsentKeeper, with_skill_version
 from daimon.core.server_skills.node import SkillsNode
-from daimon.core.stores.domain import BackendAgent, SourceRepresentation, TenantBackendPolicy
+from daimon.core.stores.domain import BackendAgent, SourceRepresentation
 from daimon.core.turn.runtime_manifest import preview_source_drops, source_preservation_pin
 from mux.contracts.ids import ModelRef, ResourceRef, Revision, Scope, SkillRef
 from mux.contracts.resources import Agent, AgentSpec, Environment, EnvironmentSpec
@@ -125,11 +126,11 @@ def test_an_operator_representation_is_outdated_by_any_repin(provider: str) -> N
         preview_source_drops(with_skill_version(held, "skill_1", "2"), model)
 
 
-def test_self_hosted_refuses_agent_selection_so_no_web_agent_follows_there() -> None:
-    """Self-hosted runs its deployment spec; an agent can't be moved onto it."""
-    source = _source()
-    policy = TenantBackendPolicy(
-        tenant_id=source.tenant_id, revision="1", enabled_backends=("anthropic", "selfhosted")
-    )
+def test_self_hosted_refuses_a_web_agent_without_the_operators_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Self-hosted is an agent model only where an operator granted the agent an environment."""
+    monkeypatch.setenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", "true")
+    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(tmp_path / "runtime.json"))
     with pytest.raises(AgentBackendRefused, match="selfhosted requires channel configuration"):
-        compatibility_preview(source, "selfhosted", policy)
+        granted_settings(_source(), "selfhosted", None, AgentSettings())
