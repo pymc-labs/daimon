@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,7 @@ def _base_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
 
 
-def _variables_warned(logs: list[dict[str, object]]) -> list[object]:
+def _variables_warned(logs: Sequence[Mapping[str, object]]) -> list[object]:
     return [
         entry["variable"] for entry in logs if entry["event"] == "settings.removed_variable_ignored"
     ]

@@ -177,8 +177,10 @@ class AgentSpec(BaseModel):
         spec = cast("dict[str, object]", data)
         found = spec.get("features")
         if not isinstance(found, dict):
-            return data
-        return {**spec, "features": without_removed_spec_features(cast("dict[str, object]", found))}
+            return spec
+        kept = without_removed_spec_features(cast("dict[str, object]", found))
+        cleaned: dict[str, object] = {**spec, "features": kept}
+        return cleaned
 
     @model_validator(mode="after")
     def _features_have_an_agent_level(self) -> AgentSpec:
