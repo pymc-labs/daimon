@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **One conversation on another provider's model.** An MCP client's
+  `set_thread_model` takes a model from `list_models`, such as an OpenAI or
+  Gemini one. Off Claude it first returns what changes and the price, and keeps
+  the pick only when called again after the person agrees. The agent stays on
+  its own model everywhere else. The `thread_providers` feature lets anyone who
+  can change a conversation's model do this; off, only the agent's owner or an
+  admin can.
+
 - **One model select on the Discord, Slack and Teams agent panels.** The panel
   lists every model the organisation can run with its price. Picking a model on
   another provider shows what would be lost and what it costs, then asks for one

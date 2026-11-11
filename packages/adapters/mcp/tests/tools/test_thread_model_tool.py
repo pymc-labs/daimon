@@ -16,7 +16,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.thread_model import (
     _set_thread_model_impl,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
+from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings, TurnSettings
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.thread_models import get_thread_model
@@ -30,13 +30,14 @@ _RESPONDER_ID = "agt_daimon"
 _CHAT_SESSION = "chat-session-1"
 
 
-def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> McpRuntime:
+def _runtime(sessionmaker: async_sessionmaker[AsyncSession], *, mux: bool = False) -> McpRuntime:
     return McpRuntime(
         session_factory=sessionmaker,
         client=AsyncAnthropic(api_key="test"),
         settings=Settings(
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://test/test")),
             anthropic=AnthropicSettings(api_key=SecretStr("test")),
+            turn=TurnSettings(path="mux", channel_backends=True) if mux else TurnSettings(),
         ),
         deployment_default=DeploymentDefault(agent_name="daimon"),
     )
@@ -227,4 +228,121 @@ async def test_a_model_this_deployment_does_not_offer_is_refused(
                 model="fable",
             )
 
+    assert await _stored(committing_sessionmaker, tenant.id, "T_THREAD") is None
+
+
+async def _openai_pick(monkeypatch, sessionmaker, tenant_id, account_id, *, admin: bool):
+    """The conversation's agent on Claude, OpenAI allowed; the agent lookup is local."""
+    from daimon.adapters.mcp.tools import thread_model
+    from daimon.core.authz import Subject
+    from daimon.core.channel_backend import AgentBackendService, BackendActor, BackendAgent
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.thread_model_switch import ThreadPick
+
+    service = AgentBackendService(sessionmaker, enabled=True)
+    owner = BackendActor(tenant_id, account_id, Subject(is_admin=True))
+    policy = await service.tenant_policy(tenant_id)
+    await service.set_tenant_allowlist(tenant_id, ("anthropic", "openai"), policy.revision, owner)
+    agent = BackendAgent(
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=_RESPONDER_ID),
+        name="daimon",
+        configuration_digest="config",
+    )
+    actor = BackendActor(tenant_id, account_id, Subject(is_admin=admin))
+    pick = ThreadPick(service, sessionmaker, None, agent, actor, _RESPONDER_ID, "discord", "42")
+
+    async def local_pick(runtime, auth, origin):
+        return pick
+
+    monkeypatch.setattr(thread_model, "_pick", local_pick)
+    return thread_model
+
+
+async def test_another_providers_model_waits_for_the_persons_yes(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker, mux=True)
+    tool = await _openai_pick(
+        monkeypatch, committing_sessionmaker, tenant.id, caller.id, admin=True
+    )
+    confirmed: list[tuple[str, str, str, int]] = []
+
+    async def confirm(pick, value, *, thread_id, digest, revision):
+        from daimon.core.thread_models import ThreadModelChange
+
+        confirmed.append((value, thread_id, digest, revision))
+        return ThreadModelChange(model_id="gpt-6-luna", note="kept")
+
+    monkeypatch.setattr(tool, "confirm_thread_model", confirm)
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_PARENT",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.USER,
+        chat_session_id=_CHAT_SESSION,
+        sender_foreign=False,
+        shared_channel=False,
+    ) as origin:
+        auth, where = _auth(tenant.id, caller.id), str(origin.id)
+        shown = await _set_thread_model_impl(
+            runtime, auth, origin_context_id=where, model="openai:gpt-6-luna"
+        )
+        assert shown.model == "openai:gpt-6-luna" and shown.digest is not None
+        assert "Applies to: this conversation" in shown.changes
+        assert confirmed == [], "nothing is kept before the person agrees"
+        assert await _stored(committing_sessionmaker, tenant.id, "T_THREAD") is None
+        kept = await _set_thread_model_impl(
+            runtime,
+            auth,
+            origin_context_id=where,
+            model="openai:gpt-6-luna",
+            digest=shown.digest,
+            revision=shown.revision,
+        )
+    assert kept.note == "kept"
+    assert confirmed == [("openai:gpt-6-luna", "T_THREAD", shown.digest, shown.revision)]
+
+
+async def test_another_providers_model_needs_the_owner_without_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker, mux=True)
+    await _openai_pick(monkeypatch, committing_sessionmaker, tenant.id, caller.id, admin=False)
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_PARENT",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.USER,
+        chat_session_id=_CHAT_SESSION,
+        sender_foreign=False,
+        shared_channel=False,
+    ) as origin:
+        with pytest.raises(ToolError, match="owner or an admin can do that. Nothing changed."):
+            await _set_thread_model_impl(
+                runtime,
+                _auth(tenant.id, caller.id),
+                origin_context_id=str(origin.id),
+                model="openai:gpt-6-luna",
+            )
     assert await _stored(committing_sessionmaker, tenant.id, "T_THREAD") is None

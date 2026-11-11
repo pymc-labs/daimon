@@ -9664,14 +9664,19 @@
     }),
     'set_thread_model': dict({
       'description': '''
-        Run this conversation on another model when the person asks in words: "use opus here", "think harder".
+        Run this conversation on another model when the person asks in words: "use opus here", "use GPT-5 here".
         <blank line>
         Only on the person's direct instruction in this conversation, never on
-        your own judgement or because a model is mentioned. "Think harder" or
-        "think as hard as you can" means ``opus``; ``default`` goes back to the
-        agent's own model. There is no effort setting. The conversation keeps
-        the choice for every later reply until someone changes it; the reply
-        in progress keeps its model. Other conversations are unaffected.
+        your own judgement or because a model is mentioned. ``model`` is
+        ``haiku``, ``sonnet``, ``opus``, ``default`` (the agent's own model) or
+        a model from ``list_models`` as ``provider:id``. "Think harder" means
+        ``opus``. There is no effort setting. The conversation keeps the choice
+        for every later reply until someone changes it; the reply in progress
+        keeps its model. Other conversations are unaffected.
+        <blank line>
+        A model on another provider returns ``changes`` and does nothing yet:
+        read them to the person, and only after they agree in a later message
+        call again with the same ``model``, ``digest`` and ``revision``.
         <blank line>
         ``origin_context_id`` must name this execution's attended origin;
         routines and other unattended runs are refused. Read the returned
@@ -9680,17 +9685,33 @@
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
-          'model': dict({
-            'enum': list([
-              'haiku',
-              'sonnet',
-              'opus',
-              'default',
+          'digest': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
             ]),
+            'default': None,
+          }),
+          'model': dict({
             'type': 'string',
           }),
           'origin_context_id': dict({
             'type': 'string',
+          }),
+          'revision': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
         }),
         'required': list([
@@ -10001,7 +10022,8 @@
       'description': '''
         Change an agent's instructions (system prompt), switch its model, or add existing
         skills such as build-models. Scalar ``model``, ``description`` and ``system`` fields
-        replace.
+        replace. Outside chat ``model`` may be any ``list_models`` model, another
+        provider's too; in chat move providers with ``request_agent_backend_switch``.
         <blank line>
         Prefer current-generation ``claude-sonnet-5-5`` for Sonnet,
         ``claude-opus-5-5`` for Opus and ``claude-haiku-5-5`` for the cheapest
