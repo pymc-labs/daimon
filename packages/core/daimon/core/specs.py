@@ -34,6 +34,7 @@ from anthropic.types.beta.beta_packages_params import BetaPackagesParams
 from daimon.core.context_prompt import ContextFragment, TurnContext, encode_fragments
 from daimon.core.errors import SpecError
 from daimon.core.features.registry import FEATURES
+from daimon.core.features.removed import without_removed_spec_features
 from daimon.core.model_presets import ModelSelection, resolve_model
 from daimon.core.stores.domain import ChatPlatform
 from daimon.core.tool_safety import get_mcp_server_name_rejection
@@ -166,6 +167,18 @@ class AgentSpec(BaseModel):
     isolated: bool = Field(default=False, exclude=True)
     template: bool = Field(default=False, exclude=True)
     features: dict[str, str] = Field(default_factory=dict[str, str], exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_removed_features(cls, data: object) -> object:
+        """A removed feature in `features:` is dropped with a warning; an older spec still loads."""
+        if not isinstance(data, dict):
+            return data
+        spec = cast("dict[str, object]", data)
+        found = spec.get("features")
+        if not isinstance(found, dict):
+            return data
+        return {**spec, "features": without_removed_spec_features(cast("dict[str, object]", found))}
 
     @model_validator(mode="after")
     def _features_have_an_agent_level(self) -> AgentSpec:

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from daimon.core.config import FeatureEnvSettings, load_settings
+from daimon.core.defaults.loader import load_agent_specs
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.removed import REMOVED_FEATURE_KEYS
+from daimon.core.specs import AgentSpec
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
@@ -58,6 +62,70 @@ def test_removed_approvals_switch_starts_with_a_warning_naming_it(
         settings = load_settings(_env_file=None)
     assert settings.tool_safety.trusted_annotations == ("linear",), "other fields still apply"
     assert _variables_warned(logs) == ["DAIMON_TOOL_SAFETY__ALLOW_GATE_OVERRIDES"], logs
+
+
+_BLOCK_REQUIRED = {
+    "DAIMON_DISCORD": {"DAIMON_DISCORD__BOT_TOKEN": "t"},
+    "DAIMON_ARTIFACTS": {
+        "DAIMON_ARTIFACTS__ENDPOINT_URL": "https://s3.example.com",
+        "DAIMON_ARTIFACTS__BUCKET": "b",
+        "DAIMON_ARTIFACTS__ACCESS_KEY_ID": "k",
+        "DAIMON_ARTIFACTS__SECRET_ACCESS_KEY": "s",
+    },
+}
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "DAIMON_TURN__STATUS_LOG",
+        "DAIMON_TURN__NATIVE_FOOTER_COST",
+        "DAIMON_DISCORD__WRITERS_NONE_NOTICE",
+        "DAIMON_DISCORD__UNMENTIONED_REPLY_HINT",
+        "DAIMON_DISCORD__TENANT_CAP_WAITING_CARD",
+        "DAIMON_ARTIFACTS__EMBED_IMAGES",
+    ],
+)
+def test_removed_field_of_a_lenient_block_starts_with_a_warning_naming_it(
+    variable: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """These blocks ignore unknown fields, so without the list the variable would vanish silently."""
+    for name, value in _BLOCK_REQUIRED.get(variable.split("__")[0], {}).items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv(variable, "true")
+    with capture_logs() as logs:
+        load_settings(_env_file=None)
+    assert variable in _variables_warned(logs), logs
+
+
+def test_agent_spec_drops_a_removed_feature_with_a_warning() -> None:
+    with capture_logs() as logs:
+        spec = AgentSpec.model_validate(
+            {
+                "name": "a",
+                "model": "claude-sonnet-4-6",
+                "features": {"status_log": "off", "progress_plans": "on"},
+            }
+        )
+    assert spec.features == {"progress_plans": "on"}, "only the registered key stays"
+    assert _variables_warned(logs) == ["features.status_log"], logs
+
+
+def test_seeded_agent_yaml_with_a_removed_feature_still_loads(tmp_path: Path) -> None:
+    (tmp_path / "a.yaml").write_text(
+        "name: a\nmodel: claude-sonnet-4-6\nfeatures:\n  daimon_tools: off\n"
+    )
+    with capture_logs() as logs:
+        (spec,) = load_agent_specs(tmp_path)
+    assert spec.features == {}, "the removed key is dropped"
+    assert _variables_warned(logs) == ["features.daimon_tools"], logs
+
+
+def test_agent_spec_with_an_unknown_feature_still_fails() -> None:
+    with pytest.raises(ValidationError, match="cannot be set on an agent"):
+        AgentSpec.model_validate(
+            {"name": "a", "model": "claude-sonnet-4-6", "features": {"not_a_feature": "on"}}
+        )
 
 
 def test_unknown_feature_still_fails(monkeypatch: pytest.MonkeyPatch) -> None:

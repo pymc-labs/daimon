@@ -29,8 +29,28 @@ REMOVED_FEATURE_KEYS: Final[frozenset[str]] = frozenset(
 
 REMOVED_FIELDS: Final[Mapping[str, frozenset[str]]] = {
     "tool_safety": frozenset({"allow_gate_overrides"}),
+    "turn": frozenset({"status_log", "native_footer_cost"}),
+    "discord": frozenset(
+        {"writers_none_notice", "unmentioned_reply_hint", "tenant_cap_waiting_card"}
+    ),
+    "artifacts": frozenset({"embed_images"}),
 }
-"""Fields dropped from a strict settings block, by block name; the block rejects extras."""
+"""Fields dropped from a settings block, by block name.
+
+Listed even for a block that would ignore extras, so each one is logged at boot instead of
+vanishing without a trace.
+"""
+
+
+def without_removed_spec_features(features: Mapping[str, object]) -> dict[str, object]:
+    """An agent spec's `features:` minus removed keys, each one logged."""
+    kept: dict[str, object] = {}
+    for key, raw in features.items():
+        if key in REMOVED_FEATURE_KEYS:
+            log.warning("settings.removed_variable_ignored", variable=f"features.{key}")
+        else:
+            kept[key] = raw
+    return kept
 
 
 def without_removed_features(features: Mapping[str, str]) -> dict[str, str]:
@@ -47,7 +67,7 @@ def without_removed_features(features: Mapping[str, str]) -> dict[str, str]:
 
 
 def without_removed_fields(values: Mapping[str, object]) -> dict[str, object]:
-    """Raw settings input minus removed fields of strict blocks, each one logged by its variable."""
+    """Raw settings input minus removed block fields, each one logged by its variable."""
     cleaned = dict(values)
     for block, names in REMOVED_FIELDS.items():
         found = cleaned.get(block)
