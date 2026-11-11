@@ -15,6 +15,8 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import JsonValue
 
+from mux.contracts.completions import CompletionEffort, CompletionResult, Completions
+from mux.contracts.ids import Scope
 from mux.drivers import isolated_ssl_context
 from mux.drivers.gemini.catalog_transport import AgentCatalogTransport, SDKAgentCatalogTransport
 from mux.drivers.gemini.mcp_auth import RedactedCredential
@@ -204,6 +206,30 @@ class _ConfiguredCatalogTransport(_ConfiguredTransport):
     async def get_agent(self, id_: str) -> Object:
         async with self._client() as client:
             return await SDKAgentCatalogTransport(client).get_agent(id_)
+
+
+class _ConfiguredCompletions(_ConfiguredTransport):
+    async def complete(
+        self,
+        scope: Scope,
+        model: str,
+        system: str,
+        prompt: str,
+        max_tokens: int,
+        effort: CompletionEffort | None = None,
+    ) -> CompletionResult:
+        from mux.drivers.gemini.completions import GeminiCompletions
+
+        async with self._client() as client:
+            completions = GeminiCompletions(client)
+            return await completions.complete(scope, model, system, prompt, max_tokens, effort)
+
+
+def configured_completions(*, api_key: str) -> Completions:
+    """Side-call completions on a deployment key; each call owns its client."""
+    if not api_key.strip():
+        raise ValueError("explicit Gemini credential is required")
+    return _ConfiguredCompletions(api_key)
 
 
 def configured_catalog_transport(*, api_key: str) -> AgentCatalogTransport:

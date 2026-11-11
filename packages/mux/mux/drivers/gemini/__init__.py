@@ -24,6 +24,7 @@ from mux.drivers.gemini.core import (
 )
 from mux.drivers.gemini.deployment import (
     configured_catalog_transport,
+    configured_completions,
     configured_transport,
     downscoped_storage_token,
 )
@@ -191,6 +192,7 @@ __all__ = [
     "compile_agent",
     "compile_environment",
     "configured_catalog_transport",
+    "configured_completions",
     "configured_transport",
     "downscoped_storage_token",
     "native_server_name",
