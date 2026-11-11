@@ -859,6 +859,9 @@ dependencies = [
 billing = [
     { name = "daimon-adapter-mcp", extra = ["billing"] },
 ]
+gemini = [
+    { name = "daimon-mux", extra = ["gemini"] },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -898,9 +901,10 @@ requires-dist = [
     { name = "daimon-adapter-teams", editable = "packages/adapters/teams" },
     { name = "daimon-adapter-web", editable = "packages/adapters/web" },
     { name = "daimon-core", editable = "packages/core" },
+    { name = "daimon-mux", extras = ["gemini"], marker = "extra == 'gemini'", editable = "packages/mux" },
     { name = "daimon-mux", extras = ["openai"], editable = "packages/mux" },
 ]
-provides-extras = ["billing"]
+provides-extras = ["billing", "gemini"]
 
 [package.metadata.requires-dev]
 dev = [

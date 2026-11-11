@@ -159,8 +159,8 @@ runtimes so ambient headers cannot replace the channel's key or project.
 
 ## Run on Gemini
 
-Gemini has no provisioning command. It needs the `daimon-mux[gemini]` extra,
-which the published image does not include, so build an image that adds it.
+Gemini has no provisioning command. The published image includes the
+`daimon-mux[gemini]` extra.
 With `DAIMON_CHANNEL_GEMINI_KEY` set, Gemini runs with no runtime file row.
 Add a row to the runtime file, which can hold both providers, only to override
 project, spend holds or storage:

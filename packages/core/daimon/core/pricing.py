@@ -708,6 +708,17 @@ def provider_prices(profile: str) -> Mapping[tuple[str, str], ProviderPrice]:
     return MappingProxyType(_current_price(_PROVIDER_PRICING.get(profile, ()), on))
 
 
+def price_expiries() -> tuple[tuple[str, str, date], ...]:
+    """Every dated tariff that lapses: (profile, model, valid_before), soonest first."""
+    found = [
+        (profile, price.model, price.valid_before)
+        for profile, prices in _PROVIDER_PRICING.items()
+        for price in prices
+        if price.valid_before is not None
+    ]
+    return tuple(sorted(found, key=lambda each: each[2]))
+
+
 def provider_price_on(model: str, on: date) -> ProviderPrice | None:
     """The tariff usage of `model` on day `on` settled at, from any profile; None when none.
 
