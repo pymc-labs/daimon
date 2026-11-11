@@ -7932,6 +7932,65 @@
         'type': 'object',
       }),
     }),
+    'request_channel_pin': dict({
+      'description': '''
+        Pin THIS channel to another provider's model, with admin confirmation. Admin-only.
+        <blank line>
+        Use when an admin asks to run every agent in this channel on one model, such as
+        "pin this channel to GPT-6". model is one from list_models on another provider
+        (`provider:id`). A pin makes every agent answer here on that model until it is
+        cleared with request_channel_pin_clear. First call without preview_digest and show
+        what the pin changes. Then call again with the returned model, expected_revision and
+        preview_digest: the requesting admin must Confirm on the card. Only this chat's
+        channel can be pinned. Pass this turn's origin_context_id. A stale preview changes
+        nothing.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'expected_revision': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'model': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'preview_digest': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'model',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'request_channel_pin_clear': dict({
       'description': '''
         Show or clear THIS channel's model-provider pin, with admin confirmation. Admin-only.

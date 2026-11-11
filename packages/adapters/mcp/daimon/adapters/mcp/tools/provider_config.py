@@ -50,7 +50,7 @@ class ProviderAllowlistInfo(BaseModel):
 async def _require_chat(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None, tool: str
 ) -> None:
-    if tool in ("request_provider_allowlist", "request_channel_pin_clear"):
+    if tool in ("request_provider_allowlist", "request_channel_pin", "request_channel_pin_clear"):
         _require_admin(auth)  # pyright: ignore[reportPrivateUsage]
     if auth.agent_id is not None or auth.platform_user_id is None:
         raise ToolError("Request this change from your active chat conversation.")
@@ -127,6 +127,80 @@ async def _request_provider_allowlist_impl(
         raise ToolError(
             "This preview is incomplete. Preview and confirm again. Nothing changed."
         ) from exc
+
+
+async def _request_channel_pin_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    model: str,
+    expected_revision: int | None = None,
+    preview_digest: str | None = None,
+    origin_context_id: str | None = None,
+) -> ChannelPinInfo:
+    """Pin this chat's channel to a catalog model once the admin confirms."""
+    from daimon.adapters.mcp.tools._authz_facts import chat_actor
+    from daimon.core.channel_changes import ChannelChangeRefused
+    from daimon.core.channel_settings import preview_provider_pin, set_provider_pin
+    from daimon.core.errors import StaleChannelValue
+
+    await _require_chat(runtime, auth, origin_context_id, "request_channel_pin")
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
+    assert origin is not None
+    service = make_backend_service(
+        runtime.session_factory, runtime.settings.turn, capture_source=NO_CAPTURE
+    )
+    if not service.enabled:
+        raise ToolError(configuration_refusal("feature_disabled") + " Nothing changed.")
+    stale = "This channel's pin changed. Preview and confirm again. Nothing changed."
+    try:
+        policy = await service.tenant_policy(auth.tenant_id)
+        async with runtime.session_factory() as session:
+            shown = await preview_provider_pin(
+                session,
+                tenant_id=origin.tenant_id,
+                platform=origin.platform,
+                channel_id=origin.parent_channel_id,
+                value=model,
+                policy=policy,
+            )
+        revision = shown.expected_local or 0
+        if preview_digest is None:
+            return ChannelPinInfo(
+                status="preview",
+                pinned=shown.named,
+                expected_revision=revision,
+                preview_digest=shown.digest,
+                summary=f"Pinning makes every agent answer here on {shown.named} until the "
+                f"pin is cleared. Call request_channel_pin again with model {shown.value!r}, "
+                "this expected_revision and preview_digest; the requesting admin must Confirm "
+                "on the card. Nothing changed yet.",
+            )
+        if expected_revision != revision or preview_digest != shown.digest:
+            raise ToolError(stale)
+        await set_provider_pin(
+            runtime.session_factory,
+            chat_actor(auth),
+            platform=origin.platform,
+            channel_id=origin.parent_channel_id,
+            value=shown.value,
+            policy=policy,
+            expected_local=shown.expected_local,
+        )
+    except StaleChannelValue as exc:
+        raise ToolError(stale) from exc
+    except ChannelChangeRefused as exc:
+        raise ToolError(str(exc)) from exc
+    except AgentBackendRefused as exc:
+        raise ToolError(configuration_refusal(exc.reason) + " Nothing changed.") from exc
+    return ChannelPinInfo(
+        status="pinned",
+        pinned=shown.named,
+        expected_revision=revision,
+        preview_digest=shown.digest,
+        summary=f"Pinned this channel to {shown.named}. Every agent answers here on it until "
+        "an admin clears the pin.",
+    )
 
 
 async def _request_channel_pin_clear_impl(
@@ -219,6 +293,34 @@ def register_provider_config_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             runtime,
             await _auth(ctx),
             providers=providers,
+            expected_revision=expected_revision,
+            preview_digest=preview_digest,
+            origin_context_id=origin_context_id,
+        )
+
+    @mcp.tool(tags={"admin"})
+    async def request_channel_pin(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context,
+        model: str,
+        expected_revision: int | None = None,
+        preview_digest: str | None = None,
+        origin_context_id: str | None = None,
+    ) -> ChannelPinInfo:
+        """Pin THIS channel to another provider's model, with admin confirmation. Admin-only.
+
+        Use when an admin asks to run every agent in this channel on one model, such as
+        "pin this channel to GPT-6". model is one from list_models on another provider
+        (`provider:id`). A pin makes every agent answer here on that model until it is
+        cleared with request_channel_pin_clear. First call without preview_digest and show
+        what the pin changes. Then call again with the returned model, expected_revision and
+        preview_digest: the requesting admin must Confirm on the card. Only this chat's
+        channel can be pinned. Pass this turn's origin_context_id. A stale preview changes
+        nothing.
+        """
+        return await _request_channel_pin_impl(
+            runtime,
+            await _auth(ctx),
+            model=model,
             expected_revision=expected_revision,
             preview_digest=preview_digest,
             origin_context_id=origin_context_id,

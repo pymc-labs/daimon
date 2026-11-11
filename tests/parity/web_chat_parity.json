@@ -175,6 +175,9 @@
   "POST /api/channels/{channel_id}/kept-agents": {
    "tool": "set_agent_rule"
   },
+  "POST /api/channels/{channel_id}/provider-pin": {
+   "tool": "request_channel_pin"
+  },
   "POST /api/channels/{channel_id}/provider-pin/clear": {
    "tool": "request_channel_pin_clear"
   },

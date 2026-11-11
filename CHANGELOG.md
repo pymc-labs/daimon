@@ -25,8 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider step is gone. MCP `update_agent` and `daimon agents create|update
   --model provider:id` (for example `openai:gpt-6-luna`, with `--yes` and
   `--accept-drops`) do the same. Admins can pin a channel to such a model from
-  its web page, and an OpenAI agent can carry a low, medium or high reasoning
-  effort; Gemini agents take none. An unset effort shows as the model's
+  its web page or by asking in chat, and an OpenAI agent can carry a low,
+  medium or high reasoning effort; Gemini agents take none. An unset effort shows as the model's
   default, and Claude's max or extra-high effort becomes the new provider's
   highest level on a switch.
 

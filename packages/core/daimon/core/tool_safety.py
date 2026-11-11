@@ -207,6 +207,7 @@ CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     "lead_intake_resolve": "resolution",
     "request_agent_backend_switch": "preview_digest",
     "request_provider_allowlist": "preview_digest",
+    "request_channel_pin": "preview_digest",
     "request_channel_pin_clear": "preview_digest",
     # A pick on another provider asks; a same-provider pick has no digest and runs.
     "set_thread_model": "digest",
@@ -279,6 +280,7 @@ def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
             {
                 "request_agent_backend_switch",
                 "request_provider_allowlist",
+                "request_channel_pin",
                 "request_channel_pin_clear",
                 "set_thread_model",
             }

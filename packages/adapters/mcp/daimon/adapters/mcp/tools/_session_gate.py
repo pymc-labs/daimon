@@ -264,13 +264,22 @@ async def _recorded_as_gated(
     legacy = confirmed | ({"request_channel_backend_switch"} if selection else set[str]())
     before_config = confirmed - {
         "request_provider_allowlist",
+        "request_channel_pin",
         "request_channel_pin_clear",
     }
     before_config_legacy = before_config | (
         {"request_channel_backend_switch"} if selection else set[str]()
     )
-    before_pin_clear = confirmed - {"request_channel_pin_clear"}
-    candidates = (confirmed, legacy, before_config, before_config_legacy, before_pin_clear)
+    before_pin_set = confirmed - {"request_channel_pin"}
+    before_pin_clear = before_pin_set - {"request_channel_pin_clear"}
+    candidates = (
+        confirmed,
+        legacy,
+        before_config,
+        before_config_legacy,
+        before_pin_set,
+        before_pin_clear,
+    )
     # A bind from before the thread-model confirm asked proves any other card.
     if tool_name != "set_thread_model":
         candidates += tuple(candidate - {"set_thread_model"} for candidate in candidates)

@@ -630,6 +630,22 @@ def prompt_for_tool_call(
             admin=True,
             configuration=reference,
         )
+    if call.tool_name == "request_channel_pin" and own_server:
+        reference = ConfigurationReference.model_validate(
+            {
+                "operation": "channel_pin",
+                "model": data.get("model"),
+                "expected_revision": data.get("expected_revision"),
+                "preview_digest": data.get("preview_digest"),
+            }
+        )
+        return ConfirmationPrompt(
+            title="Pin this channel to a model?",
+            requester_platform_user_id=requester_platform_user_id,
+            expires_at=now + timeout,
+            admin=True,
+            configuration=reference,
+        )
     if call.tool_name == "request_channel_pin_clear" and own_server:
         reference = ConfigurationReference.model_validate(
             {
@@ -1192,7 +1208,36 @@ def backend_switch_callbacks(
             raise ValueError("This change needs a current workspace admin.")
         actor = BackendActor(tenant_id=tenant_id, account_id=account_id, subject=subject)
         try:
-            if reference.operation == "channel_pin_clear":
+            if reference.operation == "channel_pin":
+                # Only the chat this card is posted in: the reference names no channel.
+                if pin_channel is None or pin_channel.tenant_id != str(tenant_id):
+                    raise ValueError("This confirmation is unavailable. Preview again.")
+                from daimon.core.channel_changes import ChannelChangeRefused
+                from daimon.core.channel_settings import preview_provider_pin
+
+                assert reference.model is not None
+                if not service.enabled:
+                    raise ValueError(configuration_refusal("feature_disabled"))
+                policy = await service.tenant_policy(tenant_id)
+                try:
+                    async with sessionmaker() as session:
+                        shown = await preview_provider_pin(
+                            session,
+                            tenant_id=tenant_id,
+                            platform=pin_channel.platform,
+                            channel_id=pin_channel.channel_id,
+                            value=reference.model,
+                            policy=policy,
+                        )
+                except ChannelChangeRefused as exc:
+                    raise ValueError(str(exc)) from exc
+                if (
+                    shown.expected_local or 0
+                ) != reference.expected_revision or shown.digest != reference.preview_digest:
+                    raise StalePreview(STALE_SETTING_TEXT)
+                action = "Pin this channel to a model"
+                details = (f"Every agent answers here on {shown.named} until the pin is cleared.",)
+            elif reference.operation == "channel_pin_clear":
                 # Only the chat this card is posted in: the reference names no channel.
                 if pin_channel is None or pin_channel.tenant_id != str(tenant_id):
                     raise ValueError("This confirmation is unavailable. Preview again.")

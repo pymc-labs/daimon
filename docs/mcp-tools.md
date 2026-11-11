@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 221 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 222 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -481,6 +481,7 @@ Provider and channel-pin configuration over the service owners.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
+| `request_channel_pin` | admin only | Pin THIS channel to another provider's model, with admin confirmation. |
 | `request_channel_pin_clear` | admin only | Show or clear THIS channel's model-provider pin, with admin confirmation. |
 | `request_provider_allowlist` | admin only | Preview and confirm the server's allowed model providers. |
 

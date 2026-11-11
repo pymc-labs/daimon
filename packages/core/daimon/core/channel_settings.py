@@ -68,7 +68,7 @@ from daimon.core.stores.feature_values import clear_feature_value, list_feature_
 from daimon.core.stores.platform_names import list_channel_names
 from daimon.core.stores.scoped_config_read import get_scope
 from mux.contracts.config import DEFAULT_BACKEND, BackendConfig, ConfigRevision
-from mux.contracts.ids import ChannelRef
+from mux.contracts.ids import ChannelRef, ModelRef
 from mux.errors import InvalidConfig
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -345,6 +345,65 @@ def pin_json(pin: ConfigRevision | None) -> dict[str, object] | None:
     return {"backend": pin.backend, "model": pin.model, "local": pin.local}
 
 
+def pin_target(value: str, policy: TenantBackendPolicy) -> ModelRef:
+    """The catalog model a pin names: one on another provider this workspace allows."""
+    try:
+        model = catalog_model(value, tenant=policy)
+        agent_selection(model.provider, model.id)
+    except (AgentBackendRefused, AmbiguousModel) as exc:
+        line = (
+            refusal_card(exc)[0]
+            if isinstance(exc, AgentBackendRefused)
+            else "That name fits several models. Pick one from the list."
+        )
+        raise ChannelChangeRefused(f"{line} Nothing was changed.", kind="invalid") from exc
+    if model.provider == DEFAULT_BACKEND:
+        raise ChannelChangeRefused(
+            "A pin names a model on another provider. Nothing was changed.", kind="invalid"
+        )
+    return model
+
+
+@dataclass(frozen=True)
+class PinPreview:
+    """What pinning a channel to a model changes, bound to the pin it read."""
+
+    value: str
+    """The catalog model, `provider:id`."""
+    named: str
+    expected_local: int | None
+    """The pin read, None for none: `set_provider_pin`'s `expected_local`."""
+    digest: str
+
+
+async def preview_provider_pin(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    value: str,
+    policy: TenantBackendPolicy,
+) -> PinPreview:
+    """The one preview a chat pin and its card both read; refused as `set_provider_pin` is."""
+    from daimon.core.agent_configuration import channel_pin_set_digest
+    from daimon.core.turn.notices import provider_name
+
+    model = pin_target(value, policy)
+    before = await provider_pin(
+        session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+    )
+    ref = ChannelRef(tenant_id=str(tenant_id), platform=platform, channel_id=channel_id)
+    canonical = f"{model.provider}:{model.id}"
+    local = before.local if before is not None else None
+    return PinPreview(
+        value=canonical,
+        named=f"{provider_name(model.provider)} ({model.id})",
+        expected_local=local,
+        digest=channel_pin_set_digest(ref, local or 0, canonical),
+    )
+
+
 async def clear_provider_pin(
     sessionmaker: async_sessionmaker[AsyncSession],
     actor: ChannelActor,
@@ -390,20 +449,8 @@ async def set_provider_pin(
     require_channel_admin(actor)
     if actor.account_id is None:
         raise ChannelChangeRefused(NEEDS_ADMIN, kind="forbidden")
-    try:
-        model = catalog_model(value, tenant=policy)
-        selection = agent_selection(model.provider, model.id)
-    except (AgentBackendRefused, AmbiguousModel) as exc:
-        line = (
-            refusal_card(exc)[0]
-            if isinstance(exc, AgentBackendRefused)
-            else "That name fits several models. Pick one from the list."
-        )
-        raise ChannelChangeRefused(f"{line} Nothing was changed.", kind="invalid") from exc
-    if model.provider == DEFAULT_BACKEND:
-        raise ChannelChangeRefused(
-            "A pin names a model on another provider. Nothing was changed.", kind="invalid"
-        )
+    model = pin_target(value, policy)
+    selection = agent_selection(model.provider, model.id)
     ref = ChannelRef(tenant_id=str(actor.tenant_id), platform=platform, channel_id=channel_id)
     async with sessionmaker.begin() as session:
         before = await provider_pin(
@@ -662,9 +709,12 @@ __all__ = [
     "ValueChange",
     "add_skill",
     "clear_provider_pin",
+    "pin_target",
+    "preview_provider_pin",
     "set_provider_pin",
     "clear_thread_override",
     "list_thread_overrides",
+    "PinPreview",
     "pin_json",
     "provider_pin",
     "remove_skill",
