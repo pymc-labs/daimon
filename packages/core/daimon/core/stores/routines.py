@@ -1401,7 +1401,7 @@ async def release_claimed_slot(session: AsyncSession, row: RoutineRow) -> bool:
         .execution_options(synchronize_session=False)
     )
     await session.flush()
-    return result.rowcount == 1
+    return cast(CursorResult[Any], result).rowcount == 1
 
 
 async def advance_stale(
