@@ -2922,6 +2922,13 @@ class TurnOrigin(Base):
     serves_helpers: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
+    # The agent may ask copies of itself: its `[self]` roster on a provider without
+    # native multiagent (`daimon.core.self_helpers`).
+    self_helpers: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    # A helper turn's own session key, when the helper's agent id does not give it.
+    helper_key: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class AgentHelper(Base):

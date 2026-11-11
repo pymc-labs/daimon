@@ -159,6 +159,7 @@ TAIL = (
     "0194_connector_tokens",
     "0195_thread_model_consents",
     "0196_agent_backend_effort",
+    "0197_self_helpers",
 )
 HEAD = TAIL[-1]
 
@@ -494,6 +495,13 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             kind == "column"
             and name == "effort"
             and getattr(getattr(obj, "table", None), "name", None) == "agent_backend_revision"
+            and expected != HEAD
+        ):
+            return False
+        if (
+            kind == "column"
+            and name in {"self_helpers", "helper_key"}
+            and getattr(getattr(obj, "table", None), "name", None) == "turn_origins"
             and expected != HEAD
         ):
             return False

@@ -175,6 +175,7 @@ async def turn_origin(
     platform_channel_id: str | None = None,
     platform_message_id: str | None = None,
     helper_of: uuid.UUID | None = None,
+    helper_key: str | None = None,
 ) -> AsyncIterator[TurnOriginRow]:
     """Commit a distinct origin for this execution and remove it after execution.
 
@@ -192,6 +193,7 @@ async def turn_origin(
     where the turn's message can be read and the message itself, exactly as its API
     takes them; signed MCP caller identities name them. None when unknown.
     `helper_of` is the asking turn's origin when this turn is a helper's.
+    `helper_key` is a helper turn's own session key, when its agent id does not give it.
     """
     now = datetime.now(UTC)
     async with sessionmaker.begin() as session:
@@ -217,6 +219,7 @@ async def turn_origin(
             platform_channel_id=platform_channel_id,
             platform_message_id=platform_message_id,
             helper_of=helper_of,
+            helper_key=helper_key,
         )
         if message_text is not None:
             if not queued_message:

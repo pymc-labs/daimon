@@ -14,7 +14,7 @@ Read this if you self-host and do not want every turn on Anthropic.
 | Tools that need a confirmation | Yes | Daimon's own card in chat | Daimon's own card in chat | Not documented |
 | The agent's own MCP connectors | Yes | Through Daimon | Through Daimon | No |
 | Sealed channels and Slack DM context | Yes | Yes | Yes | Yes |
-| Multi-agent delegation | Yes | No | Not documented | Not documented |
+| Multi-agent delegation | Yes | Copies of itself | Copies of itself | Copies of itself |
 | Memory across turns | Yes | No | Not documented | No |
 | Workspace export and import | Yes | No | Not documented | No |
 | Skills | Full | Default set | Not documented | Seeded defaults only |

@@ -19,6 +19,7 @@ from daimon.core.config import get_repo_memory_settings
 from daimon.core.connector_relay import relay_key
 from daimon.core.errors import DaimonError
 from daimon.core.host_web_fetch import WEB_FETCH_TOOL
+from daimon.core.self_helpers import MULTIAGENT, self_roster_extension, translates_self_roster
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import remaining_s, turn_deadline
@@ -1030,6 +1031,26 @@ def _source_extension_obligation(
     return "source_definition"
 
 
+def source_translations(source: BackendAgent, profile_id: str) -> tuple[Capability, ...]:
+    """What the host runs for `source` on `profile_id` in place of a native feature.
+
+    A `[self]` roster on a provider without multiagent runs as self-helpers
+    (`daimon.core.self_helpers`): recorded as translated, never as a loss.
+    """
+    spec = source.effective_spec
+    if (
+        spec is None
+        or source.source is None
+        or profile_id == backend_selection(spec.model.provider).profile
+        or not translates_self_roster(profile_id)
+    ):
+        return ()
+    own_id = source.source.ref.id
+    if any(self_roster_extension(item, own_id) for item in spec.extensions or ()):
+        return (MULTIAGENT,)
+    return ()
+
+
 def _mcp_credential_servers(source: BackendAgent, binding: ResourceBinding) -> frozenset[str]:
     """Pair only owner-projected credentials with their MCP capability."""
     if (
@@ -1161,6 +1182,13 @@ def classify_source_obligations(
     source_tools = tuple(spec.tools or ())
     from mux.drivers.anthropic import AGENT_TOOLS_NAMESPACE, agent_tools
 
+    translated = (
+        source_translations(source, backend_selection(target.model.provider).profile)
+        if target is not None
+        else ()
+    )
+    own_id = source.source.ref.id if source.source is not None else None
+
     for extension in spec.extensions or ():
         if extension.version != 1:
             missing.add("source_definition")
@@ -1178,6 +1206,8 @@ def classify_source_obligations(
                         source_tools = tuple(target.tools or ())
                     elif not represented and native.has_unrepresented_toolset():
                         missing.add("tools")
+        elif translated and self_roster_extension(extension, own_id):
+            continue
         else:
             foreign_target = target is not None and target.model.provider != spec.model.provider
             obligation = _source_extension_obligation(

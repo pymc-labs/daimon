@@ -981,7 +981,9 @@ def compatibility_preview(
         raise AgentBackendRefused("selfhosted_requires_channel_configuration")
     selection = agent_selection(target_backend, model, settings)
     profile = get_profile(selection.profile)
+    from daimon.core.turn.runtime_manifest import source_translations
 
+    translated = source_translations(agent, selection.profile)
     preview = CompatibilityPreview(
         digest="",
         tenant_id=agent.tenant_id,
@@ -1000,7 +1002,8 @@ def compatibility_preview(
         unsupported_capabilities=tuple(
             sorted(
                 c
-                for c in set(agent.required_capabilities) | set(_required(settings))
+                for c in (set(agent.required_capabilities) - set(translated))
+                | set(_required(settings))
                 if compatibility_missing(
                     CompatibilityItem(name=c, requires=(c,)), target_backend, profile
                 )
@@ -1013,6 +1016,7 @@ def compatibility_preview(
         else (),
         cost_line=cost_line,
         allowed=backend_is_enabled(target_backend, tenant.enabled_backends),
+        translated_capabilities=translated,
         target_model=model if model != backend_selection(target_backend).model else None,
         target_settings=cast(dict[str, JsonValue], settings.facts())
         if settings is not None and not settings.is_default()

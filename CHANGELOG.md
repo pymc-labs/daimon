@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Agents ask copies of themselves on any provider.** An agent set up to work
+  with copies of itself runs that way on OpenAI and Gemini too: it asks
+  `self` through the helper tools, and each ask starts a fresh copy with its
+  own conversation, so several run at once. Each copy is admitted under the
+  person's daily limit, and all copies of one message stop at $10 of spend
+  together. Copies share no files with the agent; files move by link.
+  Switching such an agent to another provider records its copies as carried
+  over, not as a loss.
+
 - **OpenAI and Gemini agents keep memory.** They read and write the same
   shared, personal and channel memory a Claude agent uses, through Daimon's own
   memory tools, with the same rules: a shared conversation has no personal

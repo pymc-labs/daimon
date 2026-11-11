@@ -18,7 +18,7 @@ from decimal import Decimal
 
 import structlog
 from daimon.core.pricing import ProviderPrice, provider_cost_of
-from mux.contracts.ids import ModelRef
+from mux.contracts.ids import ModelRef, Provider
 from mux.contracts.usage import UsageObservation
 
 __all__ = ["HOST_SPEND_CAP_NOTICE", "SpendGuard", "priced_cents"]
@@ -31,11 +31,14 @@ HOST_SPEND_CAP_NOTICE = (
 POLL_INTERVAL_S = 5.0
 
 
-def priced_cents(observations: Iterable[UsageObservation], price: ProviderPrice) -> Decimal | None:
+def priced_cents(
+    observations: Iterable[UsageObservation], price: ProviderPrice, provider: Provider = "openai"
+) -> Decimal | None:
     """The usage so far in US cents, newest revision of each observation; None if unpriceable.
 
     A running snapshot is a lower bound, so a partial one counts as measured: the cap only
-    needs what has provably been spent. An unknown one cannot be priced.
+    needs what has provably been spent. An unknown one cannot be priced. The meter
+    names no model: `provider` and the price's model stand for the admitted one.
     """
     latest: dict[str, UsageObservation] = {}
     for each in observations:
@@ -49,7 +52,7 @@ def priced_cents(observations: Iterable[UsageObservation], price: ProviderPrice)
         # The meter names no model; the admitted one is the model of the turn.
         counted = each.model_copy(
             update={
-                "model": ModelRef(provider="openai", id=price.model),
+                "model": ModelRef(provider=provider, id=price.model),
                 **({"completeness": "measured"} if each.completeness == "partial" else {}),
             }
         )

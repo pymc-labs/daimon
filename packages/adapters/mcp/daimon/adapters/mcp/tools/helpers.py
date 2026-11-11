@@ -22,6 +22,7 @@ from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.helpers import MAX_ASKS
+from daimon.core.self_helpers import SELF
 from daimon.core.stores import helper_asks
 from daimon.core.stores.agent_helpers import list_helper_ids
 from daimon.core.stores.domain import HelperAskRow, HelperAskStatus, TurnOriginRow
@@ -37,6 +38,9 @@ _POLL_S = 1.0
 #: A longer reply is cut, so one helper cannot fill the asking agent's context.
 MAX_REPLY_CHARS = 20_000
 MAX_MESSAGE_CHARS = 20_000
+#: How a copy of the asking agent is named in its replies and refusals.
+COPY_NAME = "Your copy"
+COPY_PURPOSE = "A fresh copy of you for part of the work. It shares no files with you."
 
 
 class HelperAgent(BaseModel):
@@ -90,13 +94,21 @@ def _answer(ask: HelperAskRow, app_root: str | None) -> HelperAnswer:
 async def _roster(
     runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow
 ) -> list[HelperAgent]:
-    """The answering agent's helpers that are live and may be used where it runs."""
+    """The answering agent's helpers that are live and may be used where it runs.
+
+    An agent that may ask copies of itself (`origin.self_helpers`) has `self` first.
+    """
+    copy = (
+        [HelperAgent(agent_id=origin.responder_ma_agent_id, name=SELF, purpose=COPY_PURPOSE)]
+        if origin.self_helpers
+        else []
+    )
     async with runtime.session_factory() as session:
         ids = await list_helper_ids(
             session, tenant_id=auth.tenant_id, agent_id=origin.responder_ma_agent_id
         )
     if not ids:
-        return []
+        return copy
     if auth.anthropic_disabled or anthropic_disabled():
         # A self-hosted conversation: its agents are the tenant's own records.
         async with runtime.session_factory() as session:
@@ -109,7 +121,7 @@ async def _roster(
         runtime, auth, agents=agents, location_channel_id=origin.parent_channel_id
     )
     live = {agent.id: agent for agent in agents if agent.archived_at is None}
-    roster: list[HelperAgent] = []
+    roster = copy
     for helper_id in ids:
         agent = live.get(helper_id)
         name = agent.metadata.get(MA_METADATA_KEY_NAME) if agent is not None else None
@@ -186,7 +198,7 @@ async def _ask_helper_impl(
             tenant_id=auth.tenant_id,
             origin_id=origin.id,
             helper_agent_id=chosen.agent_id,
-            helper_name=chosen.name,
+            helper_name=COPY_NAME if chosen.name == SELF and origin.self_helpers else chosen.name,
             message=message,
             now=datetime.now(UTC),
             files=landed,
@@ -249,8 +261,9 @@ def register_helper_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         It works for the same person in this conversation, with its own tools, keys and
         rules; nothing it writes is posted. Asking the same helper again continues its
-        conversation in this thread. While `status` is `queued` or `running`, call
-        `wait_for_helpers` with the `ask_id`. Helpers stop when your turn ends, so wait
+        conversation in this thread. `self`, when listed, is a fresh copy of you each time:
+        ask it several times without waiting to work in parallel. While `status` is
+        `queued` or `running`, call `wait_for_helpers` with the `ask_id`. Helpers stop when your turn ends, so wait
         for their replies before you answer.
 
         To pass it files: for each, call `create_file_upload_url`, PUT the file with the

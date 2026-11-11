@@ -1363,13 +1363,15 @@ class TurnOriginRow(BaseModel):
     platform_message_id: str | None = None
     helper_of: uuid.UUID | None = None
     serves_helpers: bool = False
+    self_helpers: bool = False
+    helper_key: str | None = None
 
     @property
     def session_thread_id(self) -> str:
         """The thread key of this turn's session: a helper's own (`helper_thread_key`)."""
         if self.helper_of is None:
             return self.thread_id
-        return helper_thread_key(self.thread_id, self.responder_ma_agent_id)
+        return self.helper_key or helper_thread_key(self.thread_id, self.responder_ma_agent_id)
 
 
 HelperAskStatus = Literal["queued", "running", "done", "failed", "stopped"]
@@ -1522,6 +1524,8 @@ class CompatibilityPreview(_BackendConsentFacts):
     cost_line: str
     allowed: bool
     digest: str
+    # Run by the host in place of the native feature, never lost (`source_translations`).
+    translated_capabilities: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     # Set only when an admin picked a model other than the provider default.
     target_model: str | None = Field(default=None, exclude_if=lambda value: value is None)
     # The agent's own profile, requirements and thread mode, only when any is set.

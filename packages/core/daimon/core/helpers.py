@@ -9,6 +9,8 @@ per thread (`helper_thread_key`), posts nothing, and its last message is the rep
 Files go both ways by link (`helper_message`): the helper downloads the ask's files
 and uploads its own with curl, so any backend whose sandbox reaches Daimon works.
 Everything stops when the asking turn ends; a helper's turn asks no helpers.
+An agent whose roster is `[self]` on a provider without native multiagent asks
+copies of itself the same way (`daimon.core.self_helpers`), each under its own key.
 """
 
 from __future__ import annotations
@@ -16,19 +18,28 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import shlex
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import structlog
 from daimon.core.anthropic_guard import anthropic_disabled, without_anthropic
+from daimon.core.billing_panel import spend_over_cap
 from daimon.core.confirmation import ConfirmationHook
 from daimon.core.context_prompt import TurnContext
 from daimon.core.errors import UserFacingError
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.media.filenames import sanitize_title
+from daimon.core.pricing import provider_prices
 from daimon.core.scope import HelperTarget
+from daimon.core.self_helpers import (
+    TURN_BUDGET_USD,
+    is_self_roster,
+    self_helper_thread_key,
+    translates_self_roster,
+)
 from daimon.core.stores import agent_helpers, helper_asks
 from daimon.core.stores.domain import (
     HelperAskRow,
@@ -41,6 +52,7 @@ from daimon.core.turn.admission import Admission, AdmitRequest, HelperCall
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied, MissingTurnConfigError
+from daimon.core.turn.host_spend_cap import priced_cents
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.provider_actions import (
     NativeActionResponse,
@@ -49,6 +61,8 @@ from daimon.core.turn.provider_actions import (
 )
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn_origin import current_origin_id
+from daimon.core.usage_totals import ProviderUsageTotals
+from mux.profiles import get_profile
 
 log = structlog.get_logger(__name__)
 
@@ -75,6 +89,13 @@ _REFUSALS = {
     "client_requester": "it can't run for someone from another organisation here",
     "provider_setup_pending": "its model provider is still being set up, so ask again shortly",
 }
+SELF_BUDGET_SPENT = "Your copies used up their spending limit for this message. Answer now."
+
+#: An ask's outcome: its status, its reply, and what its turn cost in US dollars
+#: (None when it could not be priced).
+Answered = tuple[HelperAskStatus, str, Decimal | None]
+#: Runs one ask as a turn; `lane` is a copy's own key, None for another agent.
+Runner = Callable[[HelperAskRow, asyncio.Event, str | None], Awaitable[Answered]]
 
 
 def refusal_words(error: Exception, helper_name: str) -> str:
@@ -102,12 +123,20 @@ class _Quiet(TurnLifecycle):
         return None
 
 
-def helper_message(asker: str, ask: HelperAskRow, app_root: str | None) -> str:
+def helper_message(
+    asker: str, ask: HelperAskRow, app_root: str | None, *, copy: bool = False
+) -> str:
     """What a helper reads for one ask: the message, its files and how to send files back.
 
-    Without a public URL there are no links, and `ask_helper` takes no files.
+    Without a public URL there are no links, and `ask_helper` takes no files. A
+    `copy` of the asking agent is told it shares no files with it.
     """
     text = f"{asker} asks:\n{ask.message}"
+    if copy:
+        text = (
+            f"You are a copy of {asker}, asked for help. You share no files with it: "
+            f"files move only by link.\n\n{text}"
+        )
     if app_root is None or ask.files_token is None:
         return text
     base = f"{app_root}/helper-files/{ask.files_token}"
@@ -123,6 +152,16 @@ def helper_message(asker: str, ask: HelperAskRow, app_root: str | None) -> str:
     )
 
 
+def turn_spend(state: TurnState, profile: str, model: str) -> Decimal | None:
+    """What a finished helper turn cost at list price, in US dollars; None when unpriceable."""
+    provider = get_profile(profile).provider
+    price = provider_prices(profile).get((provider, model))
+    if price is None or not isinstance(state.usage_totals, ProviderUsageTotals):
+        return None
+    cents = priced_cents(state.usage_totals.selected, price, provider)
+    return None if cents is None else cents / 100
+
+
 @dataclass
 class _Desk:
     """One asking turn's helpers: what they run on and what is running now."""
@@ -136,8 +175,20 @@ class _Desk:
     provider_action: ProviderActionHook | None
     # The asking run's self-hosted guard, which a helper's fresh context would drop.
     no_anthropic: bool
+    # The asking agent's id when it may ask copies of itself.
+    self_id: str | None = None
+    # Runs an ask; `_run` unless a test hands in its own.
+    runner: Runner | None = None
+    # Keyed by conversation: a helper's agent id, or a copy's own key.
     running: dict[str, asyncio.Task[None]] = field(default_factory=dict[str, asyncio.Task[None]])
     stops: dict[str, list[asyncio.Event]] = field(default_factory=dict[str, list[asyncio.Event]])
+    copies: int = 0
+    # What the copies cost so far; an unpriced one counts as over the limit.
+    copies_spent: Decimal = Decimal(0)
+    copies_unpriced: bool = False
+
+    def copies_over_budget(self) -> bool:
+        return self.copies_unpriced or spend_over_cap(float(self.copies_spent), TURN_BUDGET_USD)
 
     async def serve(self) -> None:
         while True:
@@ -152,18 +203,27 @@ class _Desk:
                         origin_id=self.origin.id,
                         skip_helpers=self.running.keys(),
                         limit=MAX_RUNNING - len(self.running),
+                        parallel_helper=self.self_id,
                     )
             # One failed poll is retried on the next; it must not end serving.
             except Exception as error:
                 log.warning("helpers.poll_failed", err_type=type(error).__name__, exc_info=error)
                 claimed = []
             for ask in claimed:
+                lane = None
+                if ask.helper_agent_id == self.self_id:
+                    if self.copies_over_budget():
+                        await self._finish(ask, "failed", SELF_BUDGET_SPENT)
+                        continue
+                    self.copies += 1
+                    lane = self_helper_thread_key(self.origin.thread_id, self.copies)
+                key = lane or ask.helper_agent_id
                 cancel = asyncio.Event()
-                self.stops[ask.helper_agent_id] = [cancel]
+                self.stops[key] = [cancel]
                 # A fresh context: the helper's turn records its own outcome and logs,
                 # never into the asking turn's.
-                self.running[ask.helper_agent_id] = asyncio.create_task(
-                    self._answer(ask, cancel), context=contextvars.Context()
+                self.running[key] = asyncio.create_task(
+                    self._answer(ask, cancel, lane), context=contextvars.Context()
                 )
             await asyncio.sleep(POLL_S)
 
@@ -182,28 +242,38 @@ class _Desk:
                 session, origin_id=self.origin.id, now=datetime.now(UTC)
             )
 
-    async def _answer(self, ask: HelperAskRow, cancel: asyncio.Event) -> None:
+    async def _answer(self, ask: HelperAskRow, cancel: asyncio.Event, lane: str | None) -> None:
         structlog.contextvars.bind_contextvars(
             helper_ask_id=str(ask.id), helper_of=str(self.origin.id)
         )
         status: HelperAskStatus
+        spent: Decimal | None = None
         try:
             with without_anthropic() if self.no_anthropic else nullcontext():
-                status, reply = await self._run(ask, cancel)
+                status, reply, spent = await (self.runner or self._run)(ask, cancel, lane)
         # A helper's turn is a named boundary: whatever stops it is the asking
         # agent's to hear about, and must never end the asking turn.
         except Exception as error:
             log.warning("helpers.ask_failed", err_type=type(error).__name__, exc_info=error)
             status, reply = "failed", refusal_words(error, ask.helper_name)
+        if lane is not None:
+            # A copy that may have spent without a price fails closed: no more copies.
+            if spent is None:
+                self.copies_unpriced = True
+            else:
+                self.copies_spent += spent
+        await self._finish(ask, status, reply)
+
+    async def _finish(self, ask: HelperAskRow, status: HelperAskStatus, reply: str) -> None:
         async with self.deps.sessionmaker.begin() as session:
             await helper_asks.finish_ask(
                 session, ask_id=ask.id, status=status, reply=reply, now=datetime.now(UTC)
             )
 
-    async def _run(self, ask: HelperAskRow, cancel: asyncio.Event) -> tuple[HelperAskStatus, str]:
+    async def _run(self, ask: HelperAskRow, cancel: asyncio.Event, lane: str | None) -> Answered:
         """One ask as a turn of the helper. It runs in the asking turn's slot, which
         waits meanwhile; taking a slot of its own could wait on the asking turn."""
-        from daimon.core.turn.admission import admit_helper, backend_facts
+        from daimon.core.turn.admission import admit_helper, backend_facts, running_on
         from daimon.core.turn.prepare import bind_session
         from daimon.core.turn.run import run_prepared_turn
         from daimon.core.turn_origin import render_turn_origin, turn_origin
@@ -211,7 +281,7 @@ class _Desk:
         deps, request, asking = self.deps, self.request, self.origin
         call = HelperCall(
             target=HelperTarget(ma_agent_id=ask.helper_agent_id, name=ask.helper_name),
-            thread_key=helper_thread_key(asking.thread_id, ask.helper_agent_id),
+            thread_key=lane or helper_thread_key(asking.thread_id, ask.helper_agent_id),
         )
         admission = await admit_helper(deps, request, call, now=datetime.now(UTC))
         prepared = await bind_session(
@@ -222,7 +292,8 @@ class _Desk:
             external_user_id=request.external_user_id,
             thread_id=call.thread_key,
             session_account_id=admission.account_id,
-            reuse_existing=True,
+            # Each copy starts fresh; another helper keeps its conversation in the thread.
+            reuse_existing=lane is None,
             deadline=self.deadline,
         )
         async with turn_origin(
@@ -239,6 +310,7 @@ class _Desk:
             shared_channel=admission.shared_channel,
             platform_channel_id=asking.platform_channel_id,
             helper_of=asking.id,
+            helper_key=lane,
         ) as origin:
             continued = prepared.continuity.state == "continued"
             controls = render_turn_origin(
@@ -247,7 +319,9 @@ class _Desk:
                 session_state=None if continued else prepared.continuity.session_state(),
                 effective_is_admin=admission.is_admin,
             )
-            asks = helper_message(self.asker_name, ask, deps.mcp.app_root_url)
+            asks = helper_message(
+                self.asker_name, ask, deps.mcp.app_root_url, copy=lane is not None
+            )
             message = f"{controls}\n\n{asks}"
 
             async def reseed() -> str:
@@ -255,7 +329,7 @@ class _Desk:
 
             def recovered(fresh: asyncio.Event) -> TurnLifecycle:
                 # A replaced session's stop switch follows it.
-                self.stops.setdefault(ask.helper_agent_id, []).append(fresh)
+                self.stops.setdefault(lane or ask.helper_agent_id, []).append(fresh)
                 if cancel.is_set():
                     fresh.set()
                 return lifecycle
@@ -279,13 +353,23 @@ class _Desk:
                 confirm_write=self.confirm_write,
                 provider_action=_in_thread(self.provider_action, asking.thread_id),
             )
+        revision = admission.backend_revision
+        spent = (
+            turn_spend(outcome.state, revision.profile, running_on(admission)["model"])
+            if revision is not None
+            else None
+        )
         if cancel.is_set():
-            return "stopped", f"{ask.helper_name} was stopped before it finished."
+            return "stopped", f"{ask.helper_name} was stopped before it finished.", spent
         if outcome.state.error is not None:
             log.warning("helpers.turn_errored", kind=outcome.state.error.kind)
-            return "failed", f"{ask.helper_name} stopped with an error before it answered."
+            return (
+                "failed",
+                f"{ask.helper_name} stopped with an error before it answered.",
+                spent,
+            )
         reply = extract_final_response(outcome.state.content).strip()
-        return "done", reply or f"{ask.helper_name} finished without a reply."
+        return "done", reply or f"{ask.helper_name} finished without a reply.", spent
 
 
 def _in_thread(hook: ProviderActionHook | None, thread_id: str) -> ProviderActionHook | None:
@@ -299,6 +383,19 @@ def _in_thread(hook: ProviderActionHook | None, thread_id: str) -> ProviderActio
         return await hook(replace(prompt, context=replace(prompt.context, requester=requester)))
 
     return placed
+
+
+def asks_copies(admission: Admission) -> bool:
+    """Whether the turn's agent asks copies of itself: its roster is `[self]` and its
+    provider has no native multiagent, which would run the roster itself."""
+    revision = admission.backend_revision
+    roster = admission.agent.multiagent
+    return (
+        revision is not None
+        and roster is not None
+        and translates_self_roster(revision.profile)
+        and is_self_roster(roster.agents, admission.agent.id)
+    )
 
 
 async def _wind_down(serving: asyncio.Task[None], desk: _Desk) -> None:
@@ -332,8 +429,9 @@ async def serve_helpers(
     ):
         yield
         return
+    copies = asks_copies(admission)
     async with deps.sessionmaker() as session:
-        helpers = await agent_helpers.list_helper_ids(
+        helpers = copies or await agent_helpers.list_helper_ids(
             session, tenant_id=admission.request.tenant_id, agent_id=admission.agent.id
         )
         asking = (
@@ -360,9 +458,10 @@ async def serve_helpers(
         confirm_write=confirm_write,
         provider_action=provider_action,
         no_anthropic=anthropic_disabled(),
+        self_id=admission.agent.id if copies else None,
     )
     async with deps.sessionmaker.begin() as session:
-        await mark_serving_helpers(session, origin_id=asking.id)
+        await mark_serving_helpers(session, origin_id=asking.id, self_helpers=copies)
     serving = asyncio.create_task(desk.serve())
     try:
         yield
