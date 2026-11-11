@@ -40,8 +40,9 @@ HTTPS is required outside loopback.
 | --- | --- |
 | `--tenant-id`, `--harness-url` | Required. The tenant, and the harness origin. |
 | `--database-url` | Required unless `DAIMON_DATABASE__URL` is set. |
-| `--channel platform:channel-id` | Required, repeatable. Each channel gets a runtime file row. |
-| `--account-id` | Required. The account the rows cover. |
+| `--channel platform:channel-id` | Repeatable. Each channel gets a runtime file row. |
+| `--account-id` | Required with `--channel`. The account the rows cover. |
+| `--agent <agent-id>` | Repeatable. That agent may pick the model itself, in any channel. Pass it or `--channel`. |
 | `--input-usd`, `--output-usd` | Required. Verified prices in USD per million tokens, with no defaults. |
 | `--cache-read-usd` | Follows the input price when unset. |
 | `--infrastructure-usd` | Your audited cost per request. Default `0`. |
@@ -151,7 +152,9 @@ guarantees are in the
 
 ## Know the limits
 
-- **Where it applies.** A channel pin only, never an agent's model. A shared
+- **Where it applies.** A channel pin, or an agent's model once `--agent`
+  grants it; a channel pin outranks the agent's. Never a shared thread's agent
+  choice. A shared
   thread is one session for everyone, without each person's own sign-ins. `ask` rules and
   publishing confirmations pause for Daimon's Approve card.
 - **No memory, effort or spend limit.** A turn is bounded by the

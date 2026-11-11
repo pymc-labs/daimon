@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **An agent can run on a self-hosted model.** Once an operator grants the
+  agent, its model picker lists the self-hosted model, and one preview and
+  confirm switches it. A channel pin still wins.
 - **Self-hosted channels can share a thread.** Everyone in it works in one
   session, and each person's own sign-ins stay hidden from the others.
 - **Self-hosted agents attach the files they save.** Files a self-hosted

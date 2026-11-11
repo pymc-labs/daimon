@@ -11,7 +11,7 @@ in one conversation.
 | --- | --- | --- | --- | --- |
 | Needs | Anthropic API key | OpenAI key and project | Gemini key | Your own harness service and Azure OpenAI |
 | Models | The agent's own model | `gpt-6-luna`, `gpt-6-astra` | `gemini-3.8-flash`, `gemini-4-argon` (priced through 2026-11-30, then refused) | The deployment you name (default `gpt-6.1-sol`) |
-| Set as an agent's model or a thread's | Yes | Yes | Yes | No, only as a channel pin |
+| Set as an agent's model or a thread's | Yes | Yes | Yes | An agent's, once the operator grants it; not a thread's |
 | Shared threads | Yes | Yes, without Daimon's tools | Yes, without Daimon's tools | Yes |
 | Tools that need a confirmation | Yes | Daimon's Approve card | Daimon's Approve card | Daimon's Approve card |
 | The agent's own MCP connectors | Yes | Through Daimon | Through Daimon | Through Daimon |
@@ -36,8 +36,8 @@ never runs it on Anthropic in its place.
   spend limit.
 - **OpenAI:** web search, which it neither prices nor counts.
 - **Self-hosted:** memory, routines, effort and a
-  spend limit, workspace export and import. It cannot be an agent's model.
-  It needs a channel pin.
+  spend limit, workspace export and import. An agent can pick it only with
+  its own runtime file row (`daimon selfhosted init --agent`).
 - **OpenAI and Gemini:** an agent with an `ask` rule or a
   channel-scoped `deny` on a Daimon tool is refused, and so is workspace export
   and import. A connector that OpenAI's size limit cannot hold, or whose tool
@@ -58,7 +58,7 @@ This sends every channel that uses the agent to OpenAI. To route single
 channels instead, use `daimon channels rule set` and scope the runtime file row
 with `--platform`, `--channel-id` and `--account-id` on `daimon openai init`.
 An admin can also pin a channel from its page on the web. A self-hosted
-backend is only ever a channel pin.
+model is a channel pin, or an agent's model where the operator granted it.
 
 A channel's own pin outranks the agent's provider there. An admin can clear it
 from chat by asking Daimon to clear the channel's pin and confirming the card.
