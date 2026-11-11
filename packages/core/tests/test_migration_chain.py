@@ -490,6 +490,13 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             and expected not in TOP
         ):
             return False
+        if (
+            kind == "column"
+            and name == "effort"
+            and getattr(getattr(obj, "table", None), "name", None) == "agent_backend_revision"
+            and expected != HEAD
+        ):
+            return False
         if kind == "column" and expected not in (
             SANDBOX_HEAD,
             RECRUITMENT_HEAD,
