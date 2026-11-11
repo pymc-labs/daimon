@@ -8,6 +8,7 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.core import agent_convert
+from daimon.core._models import ThreadLease
 from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.agent_convert import convert_agent_to_anthropic, convert_agent_to_daimon
 from daimon.core.agent_ownership import record_agent_creator
@@ -20,7 +21,13 @@ from daimon.core.mux_backend import resource_scope
 from daimon.core.provider_keys import DEFAULT_KEY_ENV
 from daimon.core.stores import agent_owners, routines, thread_sessions
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
-from daimon.core.stores.agent_rekey import KEPT, REKEYED, agent_id_columns, rekey_agent
+from daimon.core.stores.agent_rekey import (
+    KEPT,
+    REKEYED,
+    agent_id_columns,
+    open_agent_work,
+    rekey_agent,
+)
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from daimon.testing.factories import (
     make_account,
@@ -267,6 +274,39 @@ async def test_pending_wake_blocks_the_move(
             public_url=None,
         )
     assert fake.creates == 0, "nothing is created while work is open"
+
+
+@pytest.mark.parametrize("held", [False, True])
+async def test_a_running_reply_blocks_the_move(db_session: AsyncSession, held: bool) -> None:
+    """A held, unexpired lease on the agent's live thread is open work (B-LB1)."""
+    import datetime as dt
+
+    tenant = await make_tenant(db_session)
+    thread = await make_thread_session(db_session, tenant=tenant, ma_agent_id="agent_old")
+    now = dt.datetime.now(dt.UTC)
+    lease = {
+        "slot": {"tenant_id": str(tenant.id), "thread_id": thread.thread_id},
+        "holder": "worker-1",
+        "turn_id": "turn-1",
+        "fence": 1,
+        "acquired_at": now.isoformat(),
+        "expires_at": (now + dt.timedelta(minutes=5 if held else -5)).isoformat(),
+    }
+    db_session.add(
+        ThreadLease(
+            tenant_id=tenant.id,
+            platform=thread.platform,
+            channel_id="c1",
+            thread_id=thread.thread_id,
+            last_fence=1,
+            active=lease,
+        )
+    )
+    await db_session.flush()
+
+    open_work = await open_agent_work(db_session, tenant_id=tenant.id, agent_id="agent_old")
+
+    assert open_work == (1 if held else 0), f"only a live lease is open work: {open_work}"
 
 
 async def test_keyless_install_refuses_the_move(

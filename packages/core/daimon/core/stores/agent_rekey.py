@@ -13,7 +13,7 @@ from typing import Final
 
 from daimon.core._models import Base
 from daimon.core.ma_identity import derive_agent_uuid
-from sqlalchemy import Column, Table, and_, case, func, or_, select, update
+from sqlalchemy import Column, DateTime, Table, and_, case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 REKEYED: Final[frozenset[tuple[str, str]]] = frozenset(
@@ -141,6 +141,8 @@ async def rekey_agent(
         else:
             match = column.in_((old_id, str(old_uuid)))
             value = case((column == old_id, new_id), else_=str(new_uuid))
+        # Invariant: a table without tenant_id is matched by agent id alone. Safe
+        # because both ids are tenant-derived uuids or globally unique record ids.
         if "tenant_id" in table.c:
             match = and_(match, table.c.tenant_id == tenant_id)
         result = await session.execute(update(table).where(match).values({column_name: value}))
@@ -149,15 +151,20 @@ async def rekey_agent(
 
 
 async def open_agent_work(session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: str) -> int:
-    """Wakes, host-call cards, helper asks and long jobs still in flight for the agent."""
+    """Wakes, host-call cards, helper asks, long jobs and running replies for the agent.
+
+    A running reply is a held, unexpired thread lease on one of the agent's live sessions.
+    """
     agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent_id)
     spellings = (agent_id, str(agent_uuid))
     tables = Base.metadata.tables
-    wakes, cards, asks, jobs = (
+    wakes, cards, asks, jobs, leases, sessions = (
         tables["task_continuations"],
         tables["host_call_cards"],
         tables["helper_asks"],
         tables["long_job"],
+        tables["thread_lease"],
+        tables["thread_sessions"],
     )
     checks = (
         select(func.count())
@@ -190,6 +197,23 @@ async def open_agent_work(session: AsyncSession, *, tenant_id: uuid.UUID, agent_
             jobs.c.tenant_id == tenant_id,
             jobs.c.agent_id.in_(spellings),
             jobs.c.state.in_(("queued", "launching", "running")),
+        ),
+        select(func.count())
+        .select_from(leases)
+        .join(
+            sessions,
+            and_(
+                sessions.c.tenant_id == leases.c.tenant_id,
+                sessions.c.platform == leases.c.platform,
+                sessions.c.thread_id == leases.c.thread_id,
+            ),
+        )
+        .where(
+            leases.c.tenant_id == tenant_id,
+            leases.c.active.is_not(None),
+            leases.c.active["expires_at"].astext.cast(DateTime(timezone=True)) > func.now(),
+            sessions.c.ma_agent_id.in_(spellings),
+            sessions.c.status == "live",
         ),
     )
     total = 0

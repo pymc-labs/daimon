@@ -6,7 +6,7 @@ wake turn once the requester approves. Also allows the `confirmed_call` wake rea
 Additive only; downgrading drops the table, and unanswered cards then do nothing
 when pressed. NOT VALID keeps any `confirmed_call` wake rows on downgrade.
 
-downgrade: safe
+downgrade: destructive
 """
 
 from __future__ import annotations
