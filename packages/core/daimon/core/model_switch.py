@@ -364,7 +364,7 @@ async def _load(
 
 async def _resolve(service: AgentBackendService, agent: BackendAgent, value: str) -> ModelRef:
     policy = await service.tenant_policy(agent.tenant_id) if service.enabled else None
-    return catalog_model(value, tenant=policy)
+    return catalog_model(value, tenant=policy, agent_id=agent.agent_id)
 
 
 def switch_fact_lines(

@@ -152,13 +152,17 @@ def _granted_entries(
     )
 
 
-def catalog_model(value: str, *, tenant: TenantBackendPolicy | None) -> ModelRef:
+def catalog_model(
+    value: str, *, tenant: TenantBackendPolicy | None, agent_id: uuid.UUID | None = None
+) -> ModelRef:
     """The catalog model `value` names (`provider:id`, an id or a name).
 
     Raises `AgentBackendRefused("model_not_selectable")` for anything else, or
-    `AmbiguousModel` when a name matches several.
+    `AmbiguousModel` when a name matches several. With `agent_id`, a grant-gated
+    model that agent does not hold is not in the catalog (see `list_model_choices`).
     """
-    available = [choice.model for choice in list_model_choices(tenant=tenant, default=None)]
+    choices = list_model_choices(tenant=tenant, default=None, agent_id=agent_id)
+    available = [choice.model for choice in choices]
     provider, sep, model_id = value.strip().partition(":")
     if sep:
         ref = next((m for m in available if (m.provider, m.id) == (provider, model_id)), None)

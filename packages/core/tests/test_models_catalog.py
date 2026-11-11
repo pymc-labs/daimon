@@ -215,6 +215,11 @@ def test_catalog_lists_a_selfhosted_model_once_an_agent_is_granted(monkeypatch, 
     assert selfhosted(granted) == {"gpt-6.1-sol"}, "the granted agent can pick it"
     assert selfhosted(uuid.uuid4()) == set(), "an agent without a grant is not offered it"
     assert catalog_model("selfhosted:gpt-6.1-sol", tenant=tenant).provider == "selfhosted"
+    assert catalog_model("selfhosted:gpt-6.1-sol", tenant=tenant, agent_id=granted).id == (
+        "gpt-6.1-sol"
+    ), "the granted agent resolves it"
+    with pytest.raises(AgentBackendRefused):
+        catalog_model("selfhosted:gpt-6.1-sol", tenant=tenant, agent_id=uuid.uuid4())
     foreign = _tenant("selfhosted")
     assert not any(
         c.provider == "selfhosted" for c in list_model_choices(tenant=foreign, default=None)

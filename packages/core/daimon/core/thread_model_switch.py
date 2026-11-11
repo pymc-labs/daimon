@@ -177,7 +177,7 @@ async def preview_thread_model(pick: ThreadPick, value: str) -> ModelSwitchPrevi
     """
     service = pick.service
     policy = await service.tenant_policy(pick.agent.tenant_id) if service.enabled else None
-    model = catalog_model(value, tenant=policy)
+    model = catalog_model(value, tenant=policy, agent_id=pick.agent.agent_id)
     revision = await service.current(pick.agent)
     before = revision.backend if revision is not None and revision.backend else DEFAULT_BACKEND
     claude = model.provider == DEFAULT_BACKEND
