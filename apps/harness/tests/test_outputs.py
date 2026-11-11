@@ -4,9 +4,11 @@ import base64
 import hashlib
 import os
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
+from daimon_harness import output_exec
 from mux.drivers.selfhosted.wire import OutputsResponse, output_id
 
 from .conftest import FakeModelAdapter, turn
@@ -155,3 +157,30 @@ async def test_outputs_when_unauthenticated_then_rejected(harness: Harness) -> N
     client, _, _ = harness
     response = await client.get(BASE, headers={"Authorization": "Bearer wrong"})
     assert response.status_code == 401, response.text
+
+
+def test_output_delete_when_name_swapped_after_pinning_then_changed_and_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rename swap after the file is pinned never unlinks the swapped-in file."""
+    outputs = tmp_path / "work" / "outputs"
+    outputs.mkdir(parents=True)
+    (outputs / "draft.txt").write_text("one")
+    (outputs / "other.txt").write_text("keep")
+    expected = output_exec.version(os.stat(outputs / "draft.txt"))
+    real_stat = os.stat
+
+    def swapping_stat(*args: Any, **kwargs: Any) -> os.stat_result:
+        os.replace(outputs / "other.txt", outputs / "draft.txt")
+        return real_stat(*args, **kwargs)
+
+    root = output_exec.open_outputs(tmp_path)
+    assert root is not None, "outputs directory opens"
+    monkeypatch.setattr(output_exec.os, "stat", swapping_stat)
+    try:
+        with pytest.raises(output_exec.Refused) as refused:
+            output_exec.delete(root, "draft.txt", expected)
+    finally:
+        os.close(root)
+    assert refused.value.code == "changed", "a swapped name refuses the delete"
+    assert (outputs / "draft.txt").read_text() == "keep", "the swapped-in file survives"

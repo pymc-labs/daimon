@@ -149,14 +149,29 @@ def delete(root: int, path: str, expected: str) -> dict[str, object]:
     parent, name = open_parent(root, path)
     try:
         try:
-            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
         except FileNotFoundError:
             raise Refused("not_found") from None
-        if not deliverable(info, device):
-            raise Refused("refused")
-        if version(info) != expected:
-            raise Refused("changed")
-        os.unlink(name, dir_fd=parent)
+        except OSError:
+            raise Refused("refused") from None
+        try:
+            info = os.fstat(descriptor)
+            if not deliverable(info, device):
+                raise Refused("refused")
+            if version(info) != expected:
+                raise Refused("changed")
+            # Linux has no unlink by descriptor: re-check the name still holds the
+            # pinned file just before unlinking. A rename swap between this check and
+            # the unlink can still remove another file in the same outputs tree.
+            try:
+                current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                raise Refused("not_found") from None
+            if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+                raise Refused("changed")
+            os.unlink(name, dir_fd=parent)
+        finally:
+            os.close(descriptor)
         return {"deleted": True}
     finally:
         os.close(parent)
