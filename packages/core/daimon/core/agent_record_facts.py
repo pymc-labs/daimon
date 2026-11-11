@@ -15,6 +15,7 @@ from anthropic.types.beta.beta_managed_agents_agent_tool_config import (
 )
 from daimon.core.ma_metadata_keys import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from mux.contracts.resources import Agent, Environment, ToolSpec
+from mux.profiles.anthropic import BUILTIN_SKILL_SOURCE
 from pydantic import JsonValue
 
 # Toolset entries outside the SDK's closed name set have no MA-shaped equivalent.
@@ -90,7 +91,9 @@ def agent_facts(agent: Agent, *, tenant_id: str) -> BetaManagedAgentsAgent:
             ],
             "skills": [
                 {
-                    "type": "anthropic" if skill.source == "anthropic" else "custom",
+                    "type": BUILTIN_SKILL_SOURCE
+                    if skill.source == BUILTIN_SKILL_SOURCE
+                    else "custom",
                     "skill_id": skill.id,
                     "version": skill.version or "latest",
                 }

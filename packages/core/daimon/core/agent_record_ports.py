@@ -51,12 +51,13 @@ from mux.drivers.anthropic import (
     SecretResolver,
 )
 from mux.errors import ProviderError, ScopeViolation
+from mux.profiles.anthropic import ENVIRONMENT_READS_NAMESPACE, RESOURCE_WALK_NAMESPACE
 from mux.profiles.selfhosted import LOOP
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 DAIMON_ID_PREFIXES = ("sh_agent_", "sh_env_", "dm_agent_", "dm_env_")
 _DAIMON_CURSOR = "dm:"
-_WALK = (ResourceWalk, "anthropic.resource_walk", 1)
+_WALK = (ResourceWalk, RESOURCE_WALK_NAMESPACE, 1)
 _RECORD_PORTS: frozenset[type[object]] = frozenset({AgentVersions, EnvironmentReads, ResourceWalk})
 
 
@@ -440,7 +441,7 @@ class RecordRoutedManagedAgents(AnthropicManagedAgents):
             self.routed_agents, self.routed_environments, ma_walk, client
         )
         self._extensions[(AgentVersions, AGENT_VERSIONS_NAMESPACE, 1)] = self.routed_agents
-        self._extensions[(EnvironmentReads, "anthropic.environment_reads", 1)] = (
+        self._extensions[(EnvironmentReads, ENVIRONMENT_READS_NAMESPACE, 1)] = (
             self.routed_environments
         )
         self._guard_session_admin = True

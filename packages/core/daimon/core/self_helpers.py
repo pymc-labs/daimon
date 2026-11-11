@@ -17,6 +17,7 @@ from typing import cast
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.profile import SUPPORTED, Capability
 from mux.profiles import get_profile
+from mux.profiles.anthropic import MULTIAGENT_NAMESPACE
 
 #: The roster name the asking agent uses for a copy of itself.
 SELF = "self"
@@ -25,7 +26,7 @@ MULTIAGENT: Capability = "multiagent"
 #: Spend of one asking turn's self-helpers together, at list price: the native
 #: coordinator's per-turn budget default, so both paths stop at the same amount.
 TURN_BUDGET_USD = Decimal("10")
-_NAMESPACE = "anthropic.multiagent"
+_NAMESPACE = MULTIAGENT_NAMESPACE
 
 
 def is_self_roster(agents: Sequence[object], own_id: str) -> bool:

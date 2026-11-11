@@ -78,6 +78,7 @@ from mux.contracts.profile import SUPPORTED, Capability, Effort, Profile
 from mux.contracts.resources import AgentSpec
 from mux.errors import InvalidConfig, ScopeViolation, UnsupportedCapability
 from mux.profiles import (
+    INLINE_REUSE,
     MANAGED_AGENTS,
     PROFILES,
     RUNNABLE_PROFILES,
@@ -88,6 +89,7 @@ from mux.profiles import (
     shared_threads_available,
     tariff_gated,
 )
+from mux.profiles.anthropic import MULTIAGENT_NAMESPACE
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
 from mux.state.store import ConfigRevisionConflict
@@ -354,7 +356,7 @@ class BackendActor:
 
 #: Providers that run an agent as a named agent of their own, which takes no
 #: per-conversation effort; the agent's effort stays unset there.
-NAMED_AGENT_BACKENDS: Final = frozenset({"gemini"})
+NAMED_AGENT_BACKENDS: Final = frozenset({INLINE_REUSE.provider})
 
 
 @dataclass(frozen=True)
@@ -2236,7 +2238,7 @@ def _native_agent_requirements(spec: AgentSpec) -> tuple[Capability, ...]:
     required: list[Capability] = []
     if any(tool.permission == "ask" for tool in spec.tools or ()):
         required.append("tool_confirmation")
-    if "anthropic.multiagent" in (spec.extensions or {}):
+    if MULTIAGENT_NAMESPACE in (spec.extensions or {}):
         required.append("multiagent")
     return tuple(required)
 

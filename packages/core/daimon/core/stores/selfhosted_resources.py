@@ -41,6 +41,7 @@ from mux.contracts.resources import (
 )
 from mux.drivers.selfhosted import validate_resource_spec
 from mux.errors import OperationConflict, ProviderError, ScopeViolation
+from mux.profiles import DAIMON_RECORD_PROVIDERS
 from mux.profiles.selfhosted import LOOP
 from mux.state.operations import request_digest
 from pydantic import JsonValue, TypeAdapter, ValidationError
@@ -52,7 +53,7 @@ from ulid import ULID
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 Row = SelfHostedAgentRecord | SelfHostedEnvironmentRecord
 # Model providers whose agent definitions Daimon stores and serves itself.
-OWNED_PROVIDERS: frozenset[str] = frozenset({LOOP.provider, "openai", "gemini"})
+OWNED_PROVIDERS: frozenset[str] = frozenset({LOOP.provider, *DAIMON_RECORD_PROVIDERS})
 # Ids never fall back to names, so names may not look like ids.
 _ID_PREFIXES = ("sh_", "dm_agent_", "dm_env_")
 

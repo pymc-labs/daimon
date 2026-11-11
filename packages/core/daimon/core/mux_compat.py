@@ -27,6 +27,7 @@ from anthropic.types.beta.memory_stores.beta_managed_agents_memory_list_item imp
 from anthropic.types.beta.skills import VersionCreateResponse, VersionListResponse
 from daimon.core.model_presets import ModelSelection, resolve_model
 from daimon.core.mux_backend import managed_agents, resource_ref
+from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Provider, Revision, Scope, SkillRef
 from mux.contracts.ports import SkillVersions
 from mux.contracts.resources import (
@@ -42,6 +43,7 @@ from mux.contracts.resources import (
     SkillUploadFile,
 )
 from mux.drivers.anthropic import (
+    AGENT_TOOLS_NAMESPACE,
     AGENT_VERSIONS_NAMESPACE,
     AgentVersions,
     CredentialFileUpload,
@@ -57,6 +59,19 @@ from mux.drivers.anthropic import (
 )
 from mux.drivers.anthropic import update_agent_ignored as native_update_agent_ignored
 from mux.errors import ProviderError
+from mux.profiles import DAIMON_RECORD_PROVIDERS, selectable_models
+from mux.profiles.anthropic import (
+    AGENT_CREATE_NULLS_NAMESPACE,
+    ARTIFACTS_NAMESPACE,
+    ENVIRONMENT_CONFIG_NAMESPACE,
+    ENVIRONMENT_READS_NAMESPACE,
+    MEMORY_STORES_NAMESPACE,
+    MODEL_CONFIG_NAMESPACE,
+    MULTIAGENT_NAMESPACE,
+    RESOURCE_WALK_NAMESPACE,
+    SKILLS_VERSIONS_NAMESPACE,
+    VAULTS_NAMESPACE,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -107,12 +122,10 @@ def _list(value: object) -> list[object]:
 
 def _model_provider(model_id: str) -> Provider:
     """The provider serving `model_id`: a Daimon record's OpenAI or Gemini model, else Claude."""
-    from mux.profiles import selectable_models
-
-    for provider in ("openai", "gemini"):
+    for provider in DAIMON_RECORD_PROVIDERS:
         if model_id in selectable_models(provider):
             return provider
-    return "anthropic"
+    return DEFAULT_BACKEND
 
 
 def _agent_values(payload: Mapping[str, object]) -> dict[str, object]:
@@ -125,23 +138,23 @@ def _agent_values(payload: Mapping[str, object]) -> dict[str, object]:
         result["model"] = {"provider": provider, "id": model_id}
         # A record's model object carries its provider; Claude's model config never does,
         # and an OpenAI or Gemini model has no Claude config to keep.
-        if not isinstance(model, str) and provider == "anthropic":
+        if not isinstance(model, str) and provider == DEFAULT_BACKEND:
             config = {k: v for k, v in _mapping(model).items() if k != "provider"}
-            extensions["anthropic.model_config"] = {
-                "namespace": "anthropic.model_config",
+            extensions[MODEL_CONFIG_NAMESPACE] = {
+                "namespace": MODEL_CONFIG_NAMESPACE,
                 "version": 1,
                 "value": {"model": config},
             }
     if "tools" in result and result["tools"] is not None:
-        extensions["anthropic.agent_tools"] = {
-            "namespace": "anthropic.agent_tools",
+        extensions[AGENT_TOOLS_NAMESPACE] = {
+            "namespace": AGENT_TOOLS_NAMESPACE,
             "version": 1,
             "value": {"tools": result.pop("tools")},
         }
     if "multiagent" in result:
         value = result.pop("multiagent")
-        extensions["anthropic.multiagent"] = {
-            "namespace": "anthropic.multiagent",
+        extensions[MULTIAGENT_NAMESPACE] = {
+            "namespace": MULTIAGENT_NAMESPACE,
             "version": 1,
             "value": value if value is not None else {"clear": True},
         }
@@ -174,7 +187,7 @@ def agent_spec(payload: Mapping[str, object]) -> AgentSpec:
     ]
     if nulls:
         extensions.append(
-            {"namespace": "anthropic.agent_create_nulls", "version": 1, "value": {"fields": nulls}}
+            {"namespace": AGENT_CREATE_NULLS_NAMESPACE, "version": 1, "value": {"fields": nulls}}
         )
     if extensions:
         values["extensions"] = tuple(extensions)
@@ -192,7 +205,7 @@ def source_agent_record(item: BetaManagedAgentsAgent, scope: Scope) -> Agent | N
         return record
     # A Daimon record's projection is Managed Agents shaped; its facts carry the provider.
     carried = (item.model.model_extra or {}).get("provider")
-    provider: Provider = carried if carried in ("openai", "gemini") else "anthropic"
+    provider: Provider = carried if carried in DAIMON_RECORD_PROVIDERS else DEFAULT_BACKEND
     # The carried field is routing, not a model option the provider receives.
     options = {k: v for k, v in record.spec.model.options.items() if k != "provider"}
     model = record.spec.model.model_copy(update={"provider": provider, "options": options})
@@ -238,7 +251,7 @@ def _environment_values(payload: Mapping[str, object]) -> dict[str, object]:
     if "config" in result:
         config = result.pop("config")
         result["native_config"] = {
-            "namespace": "anthropic.environment_config",
+            "namespace": ENVIRONMENT_CONFIG_NAMESPACE,
             "version": 1,
             "value": {"config": config},
         }
@@ -252,7 +265,7 @@ def environment_spec(payload: Mapping[str, object]) -> EnvironmentSpec:
         native_values = dict(_mapping(native.get("value", {})))
         native_values["create_nulls"] = ["description"]
         values["native_config"] = {
-            "namespace": "anthropic.environment_config",
+            "namespace": ENVIRONMENT_CONFIG_NAMESPACE,
             "version": 1,
             "value": native_values,
         }
@@ -327,7 +340,7 @@ async def list_agents(
     records: async_sessionmaker[AsyncSession] | None = None,
 ) -> AsyncIterator[BetaManagedAgentsAgent]:
     backend = managed_agents(client, records=records, scope=scope)
-    port = backend.extension(ResourceWalk, namespace="anthropic.resource_walk", version=1)
+    port = backend.extension(ResourceWalk, namespace=RESOURCE_WALK_NAMESPACE, version=1)
     async for record in legacy_iter(
         port.agents(scope, filters=AgentFilter(include_archived=include_archived))
     ):
@@ -342,7 +355,7 @@ async def list_environments(
     records: async_sessionmaker[AsyncSession] | None = None,
 ) -> AsyncIterator[BetaEnvironment]:
     backend = managed_agents(client, records=records, scope=scope)
-    port = backend.extension(ResourceWalk, namespace="anthropic.resource_walk", version=1)
+    port = backend.extension(ResourceWalk, namespace=RESOURCE_WALK_NAMESPACE, version=1)
     async for record in legacy_iter(
         port.environments(scope, filters=EnvironmentFilter(include_archived=include_archived))
     ):
@@ -595,7 +608,7 @@ async def collect_skills(
     client: AsyncAnthropic, *, limit: int, scope: Scope
 ) -> tuple[list[SkillListResponse], bool]:
     backend = managed_agents(client, scope=scope)
-    port = backend.extension(ResourceWalk, namespace="anthropic.resource_walk", version=1)
+    port = backend.extension(ResourceWalk, namespace=RESOURCE_WALK_NAMESPACE, version=1)
     rows: list[SkillListResponse] = []
     truncated = False
     async for page in legacy_iter(port.skill_pages(scope, limit=limit)):
@@ -658,7 +671,7 @@ async def list_skill_versions(
     client: AsyncAnthropic, skill_id: str, *, limit: int | None = None, scope: Scope
 ) -> AsyncIterator[VersionListResponse]:
     backend = managed_agents(client, scope=scope, resources=frozenset({("skill", skill_id)}))
-    port = backend.extension(ResourceWalk, namespace="anthropic.resource_walk", version=1)
+    port = backend.extension(ResourceWalk, namespace=RESOURCE_WALK_NAMESPACE, version=1)
     async for record in legacy_iter(port.skill_versions(scope, skill_id, limit=limit)):
         yield sdk_skill_version(record)
 
@@ -667,7 +680,7 @@ async def download_skill_version(
     client: AsyncAnthropic, skill_id: str, version: str, *, scope: Scope
 ) -> bytes:
     backend = managed_agents(client, scope=scope, resources=frozenset({("skill", skill_id)}))
-    port = backend.extension(SkillVersions, namespace="anthropic.skills_versions", version=1)
+    port = backend.extension(SkillVersions, namespace=SKILLS_VERSIONS_NAMESPACE, version=1)
     return b"".join(
         [
             chunk
@@ -684,7 +697,7 @@ async def list_native_skill_versions(
     from mux.drivers.anthropic import NativeSkillVersions
 
     backend = managed_agents(client, scope=scope, resources=frozenset({("skill", skill_id)}))
-    port = backend.extension(NativeSkillVersions, namespace="anthropic.skills_versions", version=1)
+    port = backend.extension(NativeSkillVersions, namespace=SKILLS_VERSIONS_NAMESPACE, version=1)
     async for row in legacy_iter(port.walk_native(scope, skill_id)):
         yield VersionListResponse.model_construct(_fields_set=None, **row)
 
@@ -695,7 +708,7 @@ async def download_skill_version_id(
     from mux.drivers.anthropic import NativeSkillVersions
 
     backend = managed_agents(client, scope=scope, resources=frozenset({("skill", skill_id)}))
-    port = backend.extension(NativeSkillVersions, namespace="anthropic.skills_versions", version=1)
+    port = backend.extension(NativeSkillVersions, namespace=SKILLS_VERSIONS_NAMESPACE, version=1)
     return b"".join(
         [chunk async for chunk in legacy_iter(port.download_by_id(scope, skill_id, version_id))]
     )
@@ -705,7 +718,7 @@ async def delete_skill_version(
     client: AsyncAnthropic, skill_id: str, version: str, *, scope: Scope
 ) -> None:
     backend = managed_agents(client, scope=scope, resources=frozenset({("skill", skill_id)}))
-    port = backend.extension(SkillVersions, namespace="anthropic.skills_versions", version=1)
+    port = backend.extension(SkillVersions, namespace=SKILLS_VERSIONS_NAMESPACE, version=1)
     await legacy_call(
         port.delete_version(
             scope,
@@ -767,7 +780,7 @@ def _vault_port(
         resources=frozenset({("vault", vault_id)}) if vault_id is not None else frozenset(),
         secrets=(lambda _scope, reference: secrets[reference]) if secrets is not None else None,
     )
-    return backend, backend.extension(Vaults, namespace="anthropic.vaults", version=1)
+    return backend, backend.extension(Vaults, namespace=VAULTS_NAMESPACE, version=1)
 
 
 async def list_vaults(
@@ -939,7 +952,7 @@ async def upload_credential_file(
         backend = managed_agents(
             client, scope=scope, secrets=lambda _scope, reference: secrets[reference]
         )
-        port = backend.extension(NativeArtifacts, namespace="anthropic.artifacts", version=1)
+        port = backend.extension(NativeArtifacts, namespace=ARTIFACTS_NAMESPACE, version=1)
         config = CredentialFileUpload(
             filename=filename,
             media_type=media_type,
@@ -1001,7 +1014,7 @@ def _memory_port(
         resources=frozenset({("memory_store", store_id)}) if store_id is not None else frozenset(),
     )
     return backend, backend.extension(
-        NativeMemoryStores, namespace="anthropic.memory_stores", version=1
+        NativeMemoryStores, namespace=MEMORY_STORES_NAMESPACE, version=1
     )
 
 
@@ -1181,7 +1194,7 @@ async def retrieve_environment(
     backend = managed_agents(
         client, records=records, scope=scope, resources=frozenset({("environment", environment_id)})
     )
-    port = backend.extension(EnvironmentReads, namespace="anthropic.environment_reads", version=1)
+    port = backend.extension(EnvironmentReads, namespace=ENVIRONMENT_READS_NAMESPACE, version=1)
     record = await legacy_call(
         port.retrieve_native(
             scope, resource_ref(backend, "environment", environment_id, scope=scope)

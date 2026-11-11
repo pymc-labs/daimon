@@ -65,8 +65,8 @@ from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.tenants import list_tenants_by_platform
 from daimon.core.turn.notices import conversations_follow_line
 from mux.contracts.config import DEFAULT_BACKEND
-from mux.contracts.ids import ModelRef, Provider
-from mux.profiles import selectable_models
+from mux.contracts.ids import ModelRef
+from mux.profiles import DAIMON_RECORD_PROVIDERS, selectable_models
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -453,7 +453,9 @@ async def _hosted_agent(
     from mux.contracts.ids import Scope
 
     catalog = PostgresNeutralCatalog(
-        rt.sessionmaker, provider="openai", account_scope_id=factory.account_scope_id
+        rt.sessionmaker,
+        provider=PERSISTENT_WORKSPACE.provider,
+        account_scope_id=factory.account_scope_id,
     )
     for account in accounts:
         scope = Scope(
@@ -1306,14 +1308,14 @@ async def agents_convert(
     selector: TenantSelector | None = None,
 ) -> None:
     """Convert an agent between Managed Agents and a Daimon record (`agent_convert`)."""
-    if to not in (None, "anthropic", "openai", "gemini"):
+    if to not in (None, DEFAULT_BACKEND, *DAIMON_RECORD_PROVIDERS):
         raise StoreError("--to takes anthropic, openai or gemini.")
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
         tenant_id = await discover_tenant(session, override=override)
         tenant_label = await resolve_tenant_display(session, tenant_id)
         confirm_or_abort(console, f"convert agent {name!r} in {tenant_label}?", yes=yes)
-    if to == "anthropic":
+    if to == DEFAULT_BACKEND:
         public_url = (
             str(rt.settings.mcp.public_url) if rt.settings.mcp.public_url is not None else None
         )
@@ -1332,7 +1334,7 @@ async def agents_convert(
             tenant_id=tenant_id,
             name=name,
             subject=Subject(is_admin=True),
-            provider=cast("Provider | None", to),
+            provider=to,
         )
     console.print(f"[green]✓ converted agent {name!r} ({converted.agent.id})[/green]")
     if converted.dropped_skills:

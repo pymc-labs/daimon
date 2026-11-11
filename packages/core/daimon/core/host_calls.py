@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING, Final, Literal, cast
 
 import structlog
 from daimon.core.untrusted import render_untrusted
+from mux.profiles import MANAGED_AGENTS
+from mux.profiles.selfhosted import LOOP
 
 if TYPE_CHECKING:
     from daimon.core.config import McpSettings
@@ -44,7 +46,10 @@ CallAction = Literal["approve", "deny"]
 #: How a profile's gated calls are confirmed. `native`: the provider's own card;
 #: `in_process`: Daimon's in-process loop asks; `press_applies`: this module.
 GatePath = Literal["native", "in_process", "press_applies"]
-_OWN_GATES: Final[dict[str, GatePath]] = {"anthropic": "native", "selfhosted": "in_process"}
+_OWN_GATES: Final[dict[str, GatePath]] = {
+    MANAGED_AGENTS.provider: "native",
+    LOOP.provider: "in_process",
+}
 
 #: Rewritten to the running turn at execution, so the asking turn's id (gone by the
 #: press) is not part of what was approved.
