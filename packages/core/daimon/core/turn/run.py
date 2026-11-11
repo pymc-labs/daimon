@@ -1016,6 +1016,22 @@ async def _with_handoff_summary(
     return seeded, taken
 
 
+def _with_carry_over(
+    prepared: PreparedTurn, seeded: tuple[str, str] | None
+) -> tuple[str, str] | None:
+    """What a turn that never sends puts back: the hand-off summary it took, plus a
+    replacement's carry-over framing, which is otherwise held only in memory and lost
+    once the successor is bound."""
+    continuity = prepared.continuity
+    prefix = continuity.user_prefix if continuity.state == "replaced" else ""
+    if not prefix:
+        return seeded
+    if seeded is None:
+        return prepared.admission.agent.name, prefix
+    from_name, summary = seeded
+    return from_name, f"{summary}\n\n{prefix}"
+
+
 async def _restore_handoff_summary(
     deps: TurnDeps,
     prepared: PreparedTurn,
@@ -1188,6 +1204,7 @@ async def run_prepared_turn(
             thread_id=thread_id,
             user_message=user_message,
         )
+        seeded = _with_carry_over(prepared, seeded)
         user_message, reseed_user_message, taken_notices = await _with_agent_notices(
             deps,
             prepared,
