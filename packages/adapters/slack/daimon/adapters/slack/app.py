@@ -210,6 +210,17 @@ from daimon.adapters.slack.thread_handoff import (
     build_hand_over_blocks,
     handle_hand_over_click,
 )
+from daimon.adapters.slack.thread_model import (
+    SHORTCUT_CALLBACK_ID as THREAD_MODEL_SHORTCUT_ID,
+)
+from daimon.adapters.slack.thread_model import (
+    THREAD_MODEL_ACTION_IDS,
+    handle_thread_model_cancel,
+    handle_thread_model_confirm,
+    handle_thread_model_pick,
+    handle_thread_model_shortcut,
+    with_thread_reask_notifier,
+)
 from daimon.adapters.slack.tool_confirmation import (
     CONFIRMATION_CUSTOM_ID_PREFIX,
     SlackConfirmationCards,
@@ -458,7 +469,7 @@ class SlackApp:
     def __init__(
         self, *, runtime: SlackRuntime, member_sync: SlackMemberSync | None = None
     ) -> None:
-        self.runtime = with_budget_notifier(runtime)
+        self.runtime = with_thread_reask_notifier(with_budget_notifier(runtime))
         # Keeps workspace member lists for web access; None leaves them alone.
         self.member_sync = member_sync
         # Slack timestamps are unique only within a workspace conversation.
@@ -1406,6 +1417,12 @@ class SlackApp:
                     # Slack did not say whose workspace the clicker is in:
                     # users.info decides before anything runs.
                     self._spawn(self._verify_then_route_block_action(payload, action_id))
+            elif (
+                payload.get("type") == "message_action"
+                and payload.get("callback_id") == THREAD_MODEL_SHORTCUT_ID
+            ):
+                # A shortcut is the host's, like every control but the allowlisted ones.
+                self._spawn(self._gated_shortcut(payload))
         else:
             # Log unrecognised envelope types so the envelope key can be
             # confirmed or corrected from staging logs.
@@ -1544,6 +1561,12 @@ class SlackApp:
             self._spawn(handle_routine_action(self.runtime, payload))
         elif action_id == SETTINGS_ACTION_ID:
             self._spawn(handle_settings_change(self.runtime, payload))
+        elif action_id in THREAD_MODEL_ACTION_IDS:
+            handler = {
+                "thread_model_pick": handle_thread_model_pick,
+                "thread_model_confirm": handle_thread_model_confirm,
+            }.get(action_id, handle_thread_model_cancel)
+            self._spawn(handler(self.runtime, payload))
         elif action_id == "billing_topup":
             self._spawn(handle_topup_select(self.runtime, payload))
         elif action_id == REDEEM_OPEN_ACTION_ID:
@@ -1653,6 +1676,17 @@ class SlackApp:
             self._route_block_action(payload, action_id)
             return
         log.info("slack.on_request.unverified_block_action_refused", check=check)
+        await self._refuse_external_click(
+            payload, text=TRY_AGAIN_NOTICE if check == "unavailable" else None
+        )
+
+    async def _gated_shortcut(self, payload: dict[str, Any]) -> None:
+        """Run the thread model shortcut for a verified host member; anyone else is refused."""
+        check = await self._submitter_check(payload)
+        if check == "member":
+            await handle_thread_model_shortcut(self.runtime, payload)
+            return
+        log.info("slack.on_request.unverified_shortcut_refused", check=check)
         await self._refuse_external_click(
             payload, text=TRY_AGAIN_NOTICE if check == "unavailable" else None
         )
