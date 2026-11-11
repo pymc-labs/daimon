@@ -13,6 +13,7 @@ from daimon.core.channel_backend import (
     ThreadBackend,
     resolve_turn_backend,
 )
+from daimon.core.model_switch import SwitchRefusal
 from daimon.core.stores import mux_state, security_audit
 from daimon.core.stores.domain import FeatureTarget
 from daimon.core.stores.feature_values import set_feature_value
@@ -25,7 +26,10 @@ from daimon.core.stores.thread_models import (
 from daimon.core.thread_model_switch import (
     ThreadPick,
     confirm_thread_model,
+    confirm_thread_or_refusal,
+    pick_value,
     preview_thread_model,
+    preview_thread_or_refusal,
 )
 from daimon.core.thread_models import thread_backend
 from mux.contracts.ids import ChannelRef, ModelRef
@@ -181,3 +185,34 @@ async def test_a_consent_without_its_losses_is_confirmed_again(switching):
             False,
             "default",
         )
+
+
+def test_a_typed_word_names_its_catalog_value():
+    assert pick_value(" Sonnet ") == "anthropic:claude-sonnet-5-5"
+    assert pick_value(LUNA) == LUNA
+
+
+async def test_refusals_come_back_as_the_words_a_chat_shows(switching):
+    service, agent, _, sessions, _, _ = switching
+    stranger = BackendActor(agent.tenant_id, uuid.uuid4(), Subject())
+    pick = _pick(service, agent, stranger, sessions)
+
+    refused = await preview_thread_or_refusal(pick, LUNA, admin=False)
+    assert isinstance(refused, SwitchRefusal)
+    assert refused.reason == "owner_or_admin_required"
+
+    stale = await confirm_thread_or_refusal(
+        _pick(service, agent, actor_of(switching), sessions),
+        LUNA,
+        thread_id="thread",
+        digest="old",
+        revision=0,
+        admin=False,
+    )
+    assert isinstance(stale, SwitchRefusal)
+    assert stale.reason == "stale_preview"
+    assert await _thread(sessions, agent) is None
+
+
+def actor_of(switching):
+    return switching[2]

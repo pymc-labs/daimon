@@ -3,21 +3,26 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import pytest
+from daimon.adapters.discord.commands import model as model_command
 from daimon.adapters.discord.commands.model import ModelCog
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.model_switch import ModelSwitchPreview, SwitchRefusal
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.thread_models import get_thread_model
+from daimon.core.thread_models import ThreadModelChange
 from daimon.testing.factories import make_tenant
 from daimon.testing.turn_fakes import deps_for
-from discord import app_commands
+from mux.contracts.ids import ModelRef
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _PARENT_ID = 555
@@ -78,8 +83,7 @@ async def _registered_guild(
 
 async def _run(interaction: MagicMock, choice: str | None) -> str:
     cog = ModelCog(MagicMock())
-    picked = None if choice is None else app_commands.Choice(name=choice, value=choice)
-    await cog.model.callback(cog, interaction, picked)  # pyright: ignore[reportArgumentType, reportCallIssue]
+    await cog.model.callback(cog, interaction, choice)  # pyright: ignore[reportArgumentType, reportCallIssue]
     interaction.edit_original_response.assert_awaited_once()
     return interaction.edit_original_response.call_args.kwargs["content"]
 
@@ -140,4 +144,83 @@ async def test_outside_a_thread_it_points_at_one(
     content = await _run(_interaction(runtime, guild_id=guild_id, in_thread=False), "opus")
 
     assert "Use /model inside a conversation thread." in content
+    assert await _stored(db_session_factory, guild_id) is None
+
+
+def _cross_provider_preview() -> ModelSwitchPreview:
+    facts = SimpleNamespace(
+        digest="d1",
+        setting_revision=3,
+        allowed=True,
+        unsupported_skills=("Research",),
+        unsupported_mcps=(),
+        unsupported_capabilities=(),
+        shared_thread_limits=(),
+        cost_line="About 2x the cost.",
+        declared_drops=("Research",),
+    )
+    return ModelSwitchPreview(
+        model=ModelRef(provider="openai", id="gpt-5"),
+        label="GPT-5",
+        before="anthropic",
+        preview=facts,  # pyright: ignore[reportArgumentType]
+    )
+
+
+def _with_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(model_command.channel_backend, "backend_selection_enabled", lambda _t: True)
+    monkeypatch.setattr(ModelCog, "_thread_pick", AsyncMock(return_value=MagicMock()))
+
+
+async def test_a_cross_provider_pick_shows_what_changes_then_confirms_once(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guild_id = 720000004
+    await _registered_guild(db_session_factory, guild_id)
+    runtime = _runtime(db_session_factory)
+    _with_selection(monkeypatch)
+    shown = _cross_provider_preview()
+    monkeypatch.setattr(model_command, "preview_thread_or_refusal", AsyncMock(return_value=shown))
+    confirmed = AsyncMock(return_value=ThreadModelChange(model_id="gpt-5", note="Now on GPT-5."))
+    monkeypatch.setattr(model_command, "confirm_thread_or_refusal", confirmed)
+    interaction = _interaction(runtime, guild_id=guild_id)
+
+    cog = ModelCog(MagicMock())
+    await cog.model.callback(cog, interaction, "openai:gpt-5")  # pyright: ignore[reportArgumentType, reportCallIssue]
+
+    sent = interaction.edit_original_response.call_args.kwargs
+    assert "Model: GPT-5" in sent["content"]
+    assert "Unsupported skills: Research" in sent["content"]
+    assert "Applies to: this conversation" in sent["content"]
+    confirmed.assert_not_awaited()
+    view = sent["view"]
+    assert view.confirm.disabled is False
+
+    click = MagicMock()
+    click.response.defer = AsyncMock()
+    click.edit_original_response = AsyncMock()
+    await view.confirm.callback(click)
+
+    kwargs = confirmed.call_args.kwargs
+    assert (kwargs["digest"], kwargs["revision"]) == ("d1", 3)
+    assert click.edit_original_response.call_args.kwargs["content"] == "Now on GPT-5."
+
+
+async def test_a_refused_pick_says_why_and_offers_no_confirm(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guild_id = 720000005
+    await _registered_guild(db_session_factory, guild_id)
+    runtime = _runtime(db_session_factory)
+    _with_selection(monkeypatch)
+    refusal = SwitchRefusal("Ask the agent's owner or an admin to move it.", None, "owner")
+    monkeypatch.setattr(model_command, "preview_thread_or_refusal", AsyncMock(return_value=refusal))
+    interaction = _interaction(runtime, guild_id=guild_id)
+
+    cog = ModelCog(MagicMock())
+    await cog.model.callback(cog, interaction, "openai:gpt-5")  # pyright: ignore[reportArgumentType, reportCallIssue]
+
+    sent = interaction.edit_original_response.call_args.kwargs
+    assert sent["content"] == "Ask the agent's owner or an admin to move it. Nothing changed."
+    assert sent["view"] is None
     assert await _stored(db_session_factory, guild_id) is None

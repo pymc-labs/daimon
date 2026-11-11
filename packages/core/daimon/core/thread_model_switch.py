@@ -13,19 +13,36 @@ import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
-from daimon.core.agent_model_names import model_name
-from daimon.core.channel_backend import AgentBackendRefused, AgentBackendService, BackendActor
+from daimon.core.agent_editing import AgentEditError
+from daimon.core.agent_model_names import AmbiguousModel, model_name
+from daimon.core.channel_backend import (
+    AgentBackendRefused,
+    AgentBackendService,
+    BackendActor,
+    BackendUnsupported,
+    load_backend_agent,
+)
 from daimon.core.features.snapshot import FeaturePlace, feature_in
-from daimon.core.model_switch import ModelPicker, ModelSwitchPreview, current_model
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.model_switch import (
+    ModelPicker,
+    ModelSwitchPreview,
+    SwitchRefusal,
+    current_model,
+    refusal_of,
+)
 from daimon.core.models_catalog import catalog_model, list_model_choices
+from daimon.core.roster import load_roster
 from daimon.core.stores import security_audit
 from daimon.core.stores.thread_models import put_thread_consent, set_thread_model
-from daimon.core.thread_models import ThreadModelChange
+from daimon.core.thread_models import THREAD_MODEL_CHOICES, ThreadModelChange
 from mux.contracts.config import DEFAULT_BACKEND
 
 if TYPE_CHECKING:
+    from anthropic import AsyncAnthropic
     from daimon.core.config import Settings
-    from daimon.core.stores.domain import BackendAgent
+    from daimon.core.scope import DeploymentDefault
+    from daimon.core.stores.domain import BackendAgent, Platform
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 #: The preview's scope line: a conversation's pick changes nothing else.
@@ -45,6 +62,89 @@ class ThreadPick:
     ma_agent_id: str
     platform: str
     platform_user_id: str | None = None
+
+
+async def thread_pick_for(
+    *,
+    service: AgentBackendService,
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    settings: Settings | None,
+    default: DeploymentDefault,
+    actor: BackendActor,
+    platform: Platform,
+    channel_id: str,
+    thread_id: str,
+    platform_user_id: str | None = None,
+) -> ThreadPick | None:
+    """The pick for the agent answering in this conversation; None when none answers.
+
+    Chat platforms have no turn origin to read it from, so it comes from the same
+    routing a reply uses.
+    """
+    async with sessionmaker() as session:
+        roster = await load_roster(
+            session,
+            anthropic,
+            tenant_id=actor.tenant_id,
+            platform=platform,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            default=default,
+        )
+    answering = roster.answering
+    if answering is None:
+        return None
+    agent = await load_backend_agent(
+        anthropic, sessionmaker, tenant_id=actor.tenant_id, agent_name=answering.name
+    )
+    if agent.agent_id != derive_agent_uuid(
+        tenant_id=actor.tenant_id, ma_agent_id=answering.ma_agent_id
+    ):
+        raise AgentBackendRefused("agent_not_found")
+    return ThreadPick(
+        service=service,
+        sessionmaker=sessionmaker,
+        settings=settings,
+        agent=agent,
+        actor=actor,
+        ma_agent_id=answering.ma_agent_id,
+        platform=platform,
+        platform_user_id=platform_user_id,
+    )
+
+
+def pick_value(choice: str) -> str:
+    """The catalog value a typed word names (`sonnet`); a `provider:id` value stays as it is."""
+    word = choice.strip().lower()
+    model_id = THREAD_MODEL_CHOICES.get(word)
+    return f"{DEFAULT_BACKEND}:{model_id}" if model_id is not None else choice.strip()
+
+
+async def preview_thread_or_refusal(
+    pick: ThreadPick, value: str, *, admin: bool
+) -> ModelSwitchPreview | SwitchRefusal:
+    """`preview_thread_model`, with a refusal returned as the words a chat shows."""
+    try:
+        return await preview_thread_model(pick, value)
+    except (AgentBackendRefused, BackendUnsupported, AgentEditError) as error:
+        return refusal_of(error, admin=admin)
+    except AmbiguousModel:
+        return SwitchRefusal(
+            f"{value} could mean more than one model. Pick one from the list.", None, "ambiguous"
+        )
+
+
+async def confirm_thread_or_refusal(
+    pick: ThreadPick, value: str, *, thread_id: str, digest: str, revision: int, admin: bool
+) -> ThreadModelChange | SwitchRefusal:
+    """`confirm_thread_model`, with a refusal returned as the words a chat shows."""
+    try:
+        return await confirm_thread_model(
+            pick, value, thread_id=thread_id, digest=digest, revision=revision
+        )
+    except (AgentBackendRefused, BackendUnsupported, AgentEditError) as error:
+        return refusal_of(error, admin=admin)
 
 
 async def thread_model_picker(pick: ThreadPick) -> ModelPicker:
