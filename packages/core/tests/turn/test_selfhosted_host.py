@@ -951,7 +951,8 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                     sessionmaker=request.deps.sessionmaker,
                     anthropic=ForbiddenAnthropic(),
                 )
-                refused = await mcp_session(
+                # Agent listings serve the tenant's Daimon records without Anthropic.
+                listed = await mcp_session(
                     app,
                     token=token,
                     method="tools/call",
@@ -960,8 +961,24 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                         "arguments": {"name": "list_agents", "arguments": {}},
                     },
                 )
-                assert refused["result"]["isError"] is True
-                assert "unavailable during a self-hosted turn" in json.dumps(refused)
+                assert listed["result"].get("isError", False) is False, (
+                    "a self-hosted turn lists Daimon-owned agents without Managed Agents"
+                )
+                refused = await mcp_session(
+                    app,
+                    token=token,
+                    method="tools/call",
+                    params={
+                        "name": "call_tool",
+                        "arguments": {"name": "list_skills", "arguments": {}},
+                    },
+                )
+                assert refused["result"]["isError"] is True, (
+                    "a Managed Agents read stays refused during a self-hosted turn"
+                )
+                assert "unavailable during a self-hosted turn" in json.dumps(refused), (
+                    "the refusal names the self-hosted turn"
+                )
                 neutral = await mcp_session(
                     app,
                     token=token,

@@ -37,7 +37,7 @@ from mux.errors import ScopeViolation
 from ..test_agent_backend import owned as owned
 from .test_declared_drop_preparation import consent_request as consent_request
 from .test_gemini_codec import interaction
-from .test_gemini_full_source import PARAMS
+from .test_gemini_full_source import PARAMS, default_skill_bundles, serve_source_skill
 from .test_gemini_full_source import source_mcp as source_mcp
 from .test_gemini_runtime_transport import clients_for
 
@@ -56,6 +56,9 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
     request, service, source, actor, accepted, router, *_ = consent_request
     sessions = request.deps.sessionmaker
     router.add_environment_list(request.admission.environment)
+    # The OpenAI code-default template sizes the source's custom skills at capture.
+    for name, _bundle, _version, data in default_skill_bundles():
+        serve_source_skill(router, name, data)
     scope = admitted_session_scope(
         request.admission, tenant_id=request.tenant_id, session_id="preparation"
     )

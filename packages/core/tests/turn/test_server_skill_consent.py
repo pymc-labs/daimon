@@ -125,8 +125,8 @@ async def test_different_drops_hold_the_agent_untouched(consented, monkeypatch):
     keeper, service, agent, _, _, revision = consented
     real = runtime_manifest.preview_source_drops
 
-    def drops_memory_at_v2(source, model):
-        spec = real(source, model)
+    def drops_memory_at_v2(source, model, *, effort=None):
+        spec = real(source, model, effort=effort)
         if any(s.version == "2" for s in source.effective_spec.skills or ()):
             return spec.model_copy(update={"declared_drops": (*spec.declared_drops, "memory")})
         return spec
@@ -156,7 +156,9 @@ async def test_drops_that_change_during_the_repin_refuse_the_renewal(consented, 
     monkeypatch.setattr(
         runtime_manifest,
         "preview_source_drops",
-        lambda s, m: real(s, m).model_copy(update={"declared_drops": ("memory",)}),
+        lambda s, m, *, effort=None: real(s, m, effort=effort).model_copy(
+            update={"declared_drops": ("memory",)}
+        ),
     )
     _repin(captured)
     with pytest.raises(NeedsReconfirm):

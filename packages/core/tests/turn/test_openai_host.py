@@ -1340,7 +1340,9 @@ async def prechange_controls(composed, request):
         "container_size": "small",
         "spend_limit_usd_cents": cap,
     }
-    digest = request_digest({"spec": spec.model_dump(mode="json"), "controls": controls})
+    # The spec as persisted then, too: per-session `skills` came later as an additive field.
+    persisted_spec = spec.model_dump(mode="json", exclude={"skills"})
+    digest = request_digest({"spec": persisted_spec, "controls": controls})
     key = "openai:prepare:" + str(uuid5(NAMESPACE_URL, slot.model_dump_json()))
     await store.put_config_revision(REVISION)
     return application, wire, store, runtime, spec, slot, digest, key

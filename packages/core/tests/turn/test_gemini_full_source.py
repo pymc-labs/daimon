@@ -57,6 +57,7 @@ from mux.drivers.gemini.skill_deployment import (
     file_manifest,
 )
 from mux.errors import ScopeViolation, UnsupportedCapability
+from mux.testing.drivers.anthropic.ma import MARouter
 
 from ..test_agent_backend import owned as owned
 from .test_declared_drop_preparation import consent_request as consent_request
@@ -180,6 +181,23 @@ def default_skill_bundles() -> tuple[tuple[str, SkillUpload, str, bytes], ...]:
     return tuple(bundles)
 
 
+def serve_source_skill(router: MARouter, name: str, data: bytes) -> None:
+    """Serve one source custom skill's version listing and archive bytes."""
+    skill_id = f"source-{name}"
+    router.add(
+        "GET",
+        rf"/v1/skills/{skill_id}/versions",
+        lambda *_: httpx.Response(
+            200, json={"data": [{"id": f"version-{skill_id}", "version": "1"}], "has_more": False}
+        ),
+    )
+    router.add(
+        "GET",
+        rf"/v1/skills/{skill_id}/versions/version-{skill_id}/content",
+        lambda *_: httpx.Response(200, content=data),
+    )
+
+
 @pytest.fixture
 async def source_mcp(consent_request):
     """Actual verifier, identity narrowing and search collapse at the HTTP edge."""
@@ -265,19 +283,7 @@ async def full(consent_request, source_mcp, monkeypatch, tmp_path, request):
         path = tmp_path / f"{name}.zip"
         path.write_bytes(data)
         archives.append(path)
-        skill_id = f"source-{name}"
-        router.add(
-            "GET",
-            rf"/v1/skills/{skill_id}/versions",
-            lambda *_, sid=skill_id: httpx.Response(
-                200, json={"data": [{"id": f"version-{sid}", "version": "1"}], "has_more": False}
-            ),
-        )
-        router.add(
-            "GET",
-            rf"/v1/skills/{skill_id}/versions/version-{skill_id}/content",
-            lambda *_, body=data: httpx.Response(200, content=body),
-        )
+        serve_source_skill(router, name, data)
         deployments.append(
             GCSBundleDeployment(
                 scope.tenant_id,
