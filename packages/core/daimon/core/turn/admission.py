@@ -1239,13 +1239,24 @@ async def _admit_gates(
     selfhosted = backend_revision is not None and backend_revision.backend == LOOP.provider
     keyed = anthropic_configured(deps.anthropic)
     responder = config.responder_ma_agent_id
-    # A Daimon record: self-hosted, a `dm_` responder, or any agent on a keyless
-    # install. Everything else is a Managed Agents agent, which needs the key.
+    # A Daimon record: self-hosted, a `dm_` responder, a name a record holds, or any
+    # agent on a keyless install. Everything else is a Managed Agents agent, which needs the key.
+    record_scope = Scope(
+        tenant_id=str(tenant_id),
+        account_id=str(principal.account_id),
+        principal_id=external_user_id,
+        authorization_id="turn-admission",
+    )
     daimon_record = (
         selfhosted
         or (responder is not None and responder.startswith(DAIMON_ID_PREFIXES))
         or (not keyed and responder is None)
     )
+    if not daimon_record and responder is None:
+        from daimon.core.turn.selfhosted_records import names_a_record
+
+        # A name a convert moved to a Daimon record means the record, not the archived copy.
+        daimon_record = await names_a_record(deps.sessionmaker, record_scope, config.agent_name)
     if not daimon_record and not keyed:
         raise AdmissionDenied(
             reason="backend_unsupported",
@@ -1255,12 +1266,6 @@ async def _admit_gates(
     if daimon_record:
         from daimon.core.turn.selfhosted_records import resolve_records
 
-        record_scope = Scope(
-            tenant_id=str(tenant_id),
-            account_id=str(principal.account_id),
-            principal_id=external_user_id,
-            authorization_id="turn-admission",
-        )
         resolve = partial(
             resolve_records,
             deps.sessionmaker,
@@ -1386,12 +1391,6 @@ async def _admit_gates(
 
             deps.resolver_cache.pop((tenant_id, "agent", config.agent_name), None)
             deps.resolver_cache.agents.pop((tenant_id, agent_id), None)
-            record_scope = Scope(
-                tenant_id=str(tenant_id),
-                account_id=str(principal.account_id),
-                principal_id=external_user_id,
-                authorization_id="turn-admission",
-            )
             # A convert archives the Managed Agents copy: the name's references are the record's.
             if not await names_a_record(deps.sessionmaker, record_scope, config.agent_name):
                 async with deps.sessionmaker() as session, session.begin():

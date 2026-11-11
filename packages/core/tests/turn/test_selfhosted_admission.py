@@ -266,3 +266,51 @@ async def test_invalid_local_records_become_admission_denials(db_session, db_ses
             environment_name="default",
             responder_id=None,
         )
+
+
+async def test_keyed_name_only_config_resolves_the_record_holding_the_name(
+    db_session, db_session_factory, monkeypatch
+):
+    """A keyed install whose channel names a converted agent takes the record path.
+
+    The record has no backend of its own here, so admission ends at the refusal that
+    a record never runs on Managed Agents: reached only once the name meant the record.
+    """
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await set_funding_mode(db_session, tenant_id=tenant.id, funding_mode="operator_funded")
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(enabled_backends=("anthropic", LOOP.provider)),
+    )
+    await db_session.commit()
+    authorized = scope(str(tenant.id), str(account.id))
+    await SelfHostedAgents(db_session_factory).create(authorized, agent_spec(), key="agent")
+    await SelfHostedEnvironments(db_session_factory).create(
+        authorized, environment_spec(), key="env"
+    )
+    monkeypatch.setenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", "true")
+    deps = replace(
+        deps_for_pinned_mux(ForbiddenAnthropic(), db_session_factory),
+        channel_backends=True,
+        agent_backends=True,
+    )
+
+    with pytest.raises(AdmissionDenied) as denied:
+        await admit(
+            deps,
+            origin="chat",
+            tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
+            platform="discord",
+            external_user_id="caller",
+            channel_id="channel",
+            now=datetime.now(UTC),
+        )
+
+    assert denied.value.cause == "agent_backend", f"the record path refuses: {denied.value!r}"
+    await drain_outcomes()
