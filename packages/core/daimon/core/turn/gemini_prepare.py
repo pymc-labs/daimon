@@ -33,6 +33,7 @@ from daimon.core.turn.replace_binding import (
     BindingFacts,
     OldSession,
     binding_decision,
+    end_session,
     recorded_facts,
     replace_binding,
 )
@@ -287,6 +288,10 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             reasons=decision.reasons,
             create=lambda era, _mounts, _lease: created(era),
             now=datetime.now(UTC),
+            clock=lambda: datetime.now(UTC),
+            abandon=lambda lost: end_session(
+                scope, backend, ref_of(lost), key=f"binding-abandon:{lost.id}"
+            ),
             model_id=config.model or "",
             agent_name=admission.agent.name,
         )

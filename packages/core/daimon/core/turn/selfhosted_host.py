@@ -40,6 +40,7 @@ from daimon.core.turn.replace_binding import (
     OldSession,
     Replacement,
     binding_decision,
+    end_session,
     recorded_facts,
     replace_binding,
 )
@@ -476,6 +477,13 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
             now=request.now(),
             model_id=runtime.model,
             agent_name=current.agent.name,
+            clock=request.now,
+            abandon=lambda lost: end_session(
+                request.scope,
+                driver(runtime, revision, request.scope, lost, store=store),
+                successors[-1].ref,
+                key=f"binding-abandon:{lost.id}",
+            ),
         )
 
     decision = (

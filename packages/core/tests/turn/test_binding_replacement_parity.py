@@ -226,6 +226,47 @@ async def test_unreadable_old_session_gets_the_lost_workspace_framing() -> None:
     assert "was lost" in replaced.continuity.user_prefix
 
 
+async def test_replacement_when_binding_lost_during_create_then_ends_the_new_session() -> None:
+    """A successor that lost the binding race is ended, not orphaned, and the turn waits."""
+    from daimon.core.turn.errors import SessionBusyError
+
+    store = MemoryStateStore()
+    await store.put_binding(_binding(_facts("openai.persistent_workspace")), expected_generation=0)
+    stored = await store.get_binding(SLOT)
+    assert stored is not None
+    abandoned: list[str] = []
+    dated: list[str] = []
+
+    async def create(era: str, mounts: object, lease: object) -> ProviderBinding:
+        # Another writer moves the binding on while the slow create runs.
+        await store.put_binding(stored.model_copy(update={"generation": 2}), expected_generation=1)
+        return stored.model_copy(update={"native_refs": {"session": "new"}})
+
+    async def abandon(lost: ProviderBinding) -> None:
+        abandoned.append(lost.native_refs["session"])
+
+    def clock() -> datetime:
+        dated.append("renewed")
+        return datetime.now(UTC)
+
+    with pytest.raises(SessionBusyError):
+        await replace_binding(
+            store=store,
+            slot=SLOT,
+            scope=SCOPE,
+            old=OldSession(binding=stored, ref=None, backend=None),
+            reasons=("environment",),
+            create=create,
+            now=datetime.now(UTC),
+            model_id="gpt-5",
+            agent_name="Daimon",
+            clock=clock,
+            abandon=abandon,
+        )
+    assert abandoned == ["new"], f"the losing session was not ended: {abandoned}"
+    assert dated == ["renewed"], "the renewal must be dated after the create"
+
+
 # Each `raise ContinuityLost` left in core, and why it is not a binding mismatch.
 CONTINUITY_LOST_ALLOWED = {
     ("turn/openai_host.py", "OpenAI session terminated during creation"): "provider ended it",

@@ -55,6 +55,7 @@ from daimon.core.turn.replace_binding import (
     BindingFacts,
     OldSession,
     binding_decision,
+    end_session,
     recorded_facts,
     replace_binding,
 )
@@ -594,6 +595,10 @@ async def _prepare_with_runtime(
             model_id=revision.model or "",
             agent_name=current.agent.name,
             target_artifacts=target.artifacts if revision.profile in _MOUNTING_PROFILES else None,
+            clock=request.now,
+            abandon=lambda lost: end_session(
+                request.scope, target, successors[-1].ref, key=f"binding-abandon:{lost.id}"
+            ),
         )
         binding, continuity, native = replaced.binding, replaced.continuity, successors[-1]
         backend = driver(runtime, revision, request.scope, binding)

@@ -43,7 +43,7 @@ from mux.contracts.events import AgentMessagePayload, UserMessagePayload
 from mux.contracts.ids import PageRequest, ResourceRef, Scope
 from mux.contracts.ports import Artifacts, ManagedAgents
 from mux.contracts.resources import ProviderBinding, ResourceBinding
-from mux.errors import MuxError, UnsupportedCapability
+from mux.errors import BindingConflict, MuxError, UnsupportedCapability
 from mux.state.lease import Lease, LeaseBusy, Slot, StaleFence
 from mux.state.store import ERA_REF, StateStore
 
@@ -278,21 +278,28 @@ async def carry_files(
     return tuple(mounts), tuple(mount.target_path or "" for mount in mounts)
 
 
-async def _terminate(scope: Scope, old: OldSession, key: str) -> bool:
-    """End the replaced session through the Sessions port: archive, else delete."""
-    if old.backend is None or old.ref is None:
+async def end_session(
+    scope: Scope, backend: ManagedAgents | None, ref: ResourceRef | None, *, key: str
+) -> bool:
+    """End a session through the Sessions port: archive, else delete."""
+    if backend is None or ref is None:
         return False
-    for end in (old.backend.sessions.archive, old.backend.sessions.delete):
+    for end in (backend.sessions.archive, backend.sessions.delete):
         try:
-            await end(scope, old.ref, key=key)
+            await end(scope, ref, key=key)
         except UnsupportedCapability:
             continue
         except MuxError as error:
-            # The successor is already published; a session left open costs only storage.
-            log.warning("binding.old_session_kept", binding_id=old.binding.id, error=str(error))
+            # A session left open costs only storage.
+            log.warning("binding.session_kept", session_id=ref.id, error=str(error))
             return False
         return True
     return False
+
+
+async def _terminate(scope: Scope, old: OldSession, key: str) -> bool:
+    """End the replaced session: the successor is already published."""
+    return await end_session(scope, old.backend, old.ref, key=key)
 
 
 def carry_framing(
@@ -332,8 +339,14 @@ async def replace_binding(
     model_id: str,
     agent_name: str,
     target_artifacts: Artifacts | None = None,
+    clock: Callable[[], datetime] | None = None,
+    abandon: Callable[[ProviderBinding], Awaitable[object]] | None = None,
 ) -> Replacement:
-    """Replace `old` with a new session on the same binding, carrying its conversation."""
+    """Replace `old` with a new session on the same binding, carrying its conversation.
+
+    `clock` dates the lease renewal after the slow create. When the binding is lost
+    meanwhile, `abandon` ends the session just created and the turn is told busy.
+    """
     expected = old.binding
     async with hold_slot(store, slot, now) as lease:
         current = await store.get_binding(slot)
@@ -365,8 +378,15 @@ async def replace_binding(
                 "native_refs": {**created.native_refs, ERA_REF: era},
             }
         )
-        await store.renew_lease(lease, now=now, ttl=REPLACEMENT_LEASE_TTL)
-        binding = await store.put_binding(successor, expected_generation=expected.generation)
+        renewed_at = clock() if clock is not None else now
+        try:
+            await store.renew_lease(lease, now=renewed_at, ttl=REPLACEMENT_LEASE_TTL)
+            binding = await store.put_binding(successor, expected_generation=expected.generation)
+        except (StaleFence, BindingConflict) as error:
+            log.warning("binding.successor_abandoned", binding_id=expected.id, error=str(error))
+            if abandon is not None:
+                await abandon(successor)
+            raise _busy(renewed_at, "binding_changed") from error
         terminated = await _terminate(old.scope or scope, old, key + ":terminate")
     framing, state = carry_framing(
         turns=turns,
