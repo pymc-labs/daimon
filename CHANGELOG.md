@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   see the channel can change it on the thread's page, not only a channel admin. Locks and
   every other setting stay with admins.
 
+- **Admin > Workspace no longer repeats the feature switches.**
+  Web modules, direct messages, read-only memory in direct messages and typed
+  mentions are set on the feature list only.
 - **Daimon tolerates its seeded agent being renamed in place to `default`.**
   Ahead of that rename, a workspace whose built-in agent is already called `default` keeps it: defaults sync no longer archives it or creates a second `daimon` beside it, and asking for `daimon` answers with it. Only the workspace's own built-in agent counts, never a user's agent named `default`.
 

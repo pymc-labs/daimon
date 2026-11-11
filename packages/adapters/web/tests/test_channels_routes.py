@@ -202,7 +202,9 @@ async def test_the_member_list_needs_the_module(
     tmp_path: Path,
 ) -> None:
     async with _channels(web_client, db_session_factory, tmp_path) as admin:
-        off = await admin.client.patch("/api/admin/settings", json={"modules": {"channels": False}})
+        off = await admin.client.put(
+            "/api/features", json={"key": "web.channels", "tier": "workspace", "value": "off"}
+        )
         admin.as_member()
         listed = await admin.client.get("/api/channels")
 
