@@ -14,7 +14,7 @@ from daimon.core.stores.agent_notices import record_agent_notices
 from daimon.core.turn import run as run_module
 from daimon.core.turn.agent_notices import LOST_WORKSPACE_NOTICE, stale_switch_notice
 from daimon.core.turn.driver import SEND_ATTEMPTED
-from daimon.core.turn.prepare import ContinuityOutcome
+from daimon.core.turn.prepare import CONTINUED, ContinuityOutcome
 from daimon.core.turn.state import McpServerFailure, TurnState
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -170,6 +170,7 @@ async def _run(monkeypatch: pytest.MonkeyPatch, outcome: Any, *, sent: bool) -> 
         ma_session_id="sess",
         snapshot=None,
         _finalize=None,
+        continuity=CONTINUED,
     )
     deps = SimpleNamespace(
         running_turns=SimpleNamespace(track=contextlib.nullcontext),
