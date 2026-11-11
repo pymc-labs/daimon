@@ -20,7 +20,11 @@ from daimon.core.pricing import ProviderPrice
 from daimon.core.session_compat import ChangeReason, ReplaceSession, UpdateInPlace
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import reauthorize
-from daimon.core.turn.carry_over import carry_on_adoption, register_session_reader
+from daimon.core.turn.carry_over import (
+    carry_on_adoption,
+    register_session_reader,
+    replaced_session,
+)
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
 from daimon.core.turn.io import TurnCodecRequest, TurnIO, register_turn_codec
 from daimon.core.turn.persistence import current_persistence
@@ -455,10 +459,15 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
             store=store,
             slot=slot,
             scope=request.scope,
-            old=OldSession(
-                binding=old,
-                ref=session_ref(old) if readable else None,
-                backend=driver(runtime, revision, request.scope, old, store=store)
+            old=await replaced_session(
+                request,
+                store,
+                old,
+                OldSession(
+                    binding=old,
+                    ref=session_ref(old),
+                    backend=driver(runtime, revision, request.scope, old, store=store),
+                )
                 if readable
                 else None,
             ),

@@ -29,7 +29,11 @@ from daimon.core.session_compat import ReplaceSession
 from daimon.core.stores import mux_state
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import reauthorize
-from daimon.core.turn.carry_over import carry_on_adoption, register_session_reader
+from daimon.core.turn.carry_over import (
+    carry_on_adoption,
+    register_session_reader,
+    replaced_session,
+)
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.host_spend_cap import SpendGuard
 from daimon.core.turn.io import TurnCodecRequest, TurnIO, register_turn_codec
@@ -572,10 +576,17 @@ async def _prepare_with_runtime(
             store=store,
             slot=slot,
             scope=request.scope,
-            old=OldSession(
-                binding=old,
-                ref=session_ref(old, runtime.account_scope_id) if readable else None,
-                backend=driver(runtime, revision, request.scope, old) if readable else None,
+            old=await replaced_session(
+                request,
+                store,
+                old,
+                OldSession(
+                    binding=old,
+                    ref=session_ref(old, runtime.account_scope_id),
+                    backend=driver(runtime, revision, request.scope, old),
+                )
+                if readable
+                else None,
             ),
             reasons=decision.reasons,
             create=successor,

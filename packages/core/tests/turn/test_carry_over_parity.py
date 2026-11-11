@@ -311,3 +311,25 @@ async def test_claude_default_target_when_files_carried_then_mounts_them_on_the_
     )
     assert result is not None and result.mounts == (mount,), f"mounts lost: {result}"
     assert added == [("m1", frozenset({("session", "new-session"), ("file", "file-1")}))], added
+
+
+async def test_replacement_when_host_cannot_read_old_session_then_uses_its_provider_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An old session of another provider or account is read by its own reader, so its
+    conversation carries and it can be archived; a readable one is used as is."""
+    old = _old_binding("gemini.inline_reuse", 1, {"session": "old-session"})
+    read = OldSession(binding=old, ref=_ref(old), backend=_Backend())  # pyright: ignore[reportArgumentType]
+    calls: list[str] = []
+
+    async def reader(request: object, store: object, binding: ProviderBinding) -> OldSession:
+        calls.append(binding.id)
+        return read
+
+    monkeypatch.setattr(carry_over, "_old_session", reader)
+    request = cast(ProviderPreparationRequest, SimpleNamespace())
+    store = MemoryStateStore()
+    assert await carry_over.replaced_session(request, store, old, None) is read, "not read"
+    own = OldSession(binding=old, ref=None, backend=None)
+    assert await carry_over.replaced_session(request, store, old, own) is own, "own replaced"
+    assert calls == ["binding-1"], calls

@@ -155,6 +155,18 @@ def _runtime(request: ProviderPreparationRequest, revision: ConfigRevision) -> T
     )
 
 
+async def replaced_session(
+    request: ProviderPreparationRequest,
+    store: StateStore,
+    binding: ProviderBinding,
+    own: OldSession | None,
+) -> OldSession:
+    """The session a host replacement ends: `own` when the host's driver reads it, else
+    read through its provider's reader, so its conversation carries and it is archived.
+    Unread, the successor starts with the lost framing and the person is told."""
+    return own if own is not None else await _old_session(request, store, binding)
+
+
 async def _old_session(
     request: ProviderPreparationRequest, store: StateStore, binding: ProviderBinding
 ) -> OldSession:
