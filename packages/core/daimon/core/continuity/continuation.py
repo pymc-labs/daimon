@@ -512,7 +512,10 @@ async def decide_continuation(
         try:
             require_anthropic_allowed()
             await get_setup_agent(
-                anthropic, tenant_id=request.tenant_id, ma_agent_id=request.target_ma_agent_id
+                anthropic,
+                tenant_id=request.tenant_id,
+                ma_agent_id=request.target_ma_agent_id,
+                records=sessionmaker,
             )
         except AnthropicDisabled:
             # A provider prohibition says nothing about whether the target exists.

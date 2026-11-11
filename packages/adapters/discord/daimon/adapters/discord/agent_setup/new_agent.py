@@ -160,6 +160,7 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
                     thread_id=self.state.thread_id,
                     default=self.state.deployment_default,
                     viewer=(viewer := await panel_viewer(session, self.runtime, state=self.state)),
+                    records=self.runtime.sessionmaker,
                 )
             if self._panel_render_seq != self.state.render_seq:
                 await interaction.followup.send(

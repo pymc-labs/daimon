@@ -440,6 +440,7 @@ class SetupPanel:
                     is_admin=is_admin,
                     platform="teams",
                     default=self._runtime.deployment_default,
+                    records=self._runtime.sessionmaker,
                 )
             )
             return await load_roster(
@@ -451,6 +452,7 @@ class SetupPanel:
                 thread_id=None,
                 default=self._runtime.deployment_default,
                 viewer=viewer,
+                records=self._runtime.sessionmaker,
             )
 
     async def _agents(
@@ -487,6 +489,7 @@ class SetupPanel:
                     is_admin=viewer.is_admin,
                     platform="teams",
                     default=self._runtime.deployment_default,
+                    records=self._runtime.sessionmaker,
                 ),
             )
 
@@ -530,6 +533,7 @@ class SetupPanel:
             is_admin=actor.is_admin,
             platform="teams",
             default=self._runtime.deployment_default,
+            records=self._runtime.sessionmaker,
         )
         if viewer is None:
             return details
@@ -579,6 +583,7 @@ class SetupPanel:
                     admin=actor.admin_for(DelegatedAction.AGENT_SETTINGS),
                     foreign=actor.foreign,
                 ),
+                records=self._runtime.sessionmaker,
             )
             details = await self._without_hidden_places(session, actor, details)
             # Only a member's ownership adds anything: an admin already gets every control.

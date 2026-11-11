@@ -108,6 +108,7 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
                     channel_id=channel_id,
                     thread_id=None,
                     default=runtime.deployment_default,
+                    records=runtime.sessionmaker,
                 )
             if roster.answering is None:
                 await reply("Choose an agent: /github connect [agent].", error=False)

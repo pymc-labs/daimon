@@ -213,7 +213,7 @@ async def complete_mcp_oauth_flow(
     # Do not advertise a completed grant until the spec mutation is authorized:
     # grant records also determine which servers other people's sessions hide.
     agent = await find_agent_by_derived_uuid(
-        anthropic, tenant_id=flow.tenant_id, agent_id=flow.agent_id
+        anthropic, tenant_id=flow.tenant_id, agent_id=flow.agent_id, records=session_factory
     )
     if agent is None:
         async with session_factory() as session, session.begin():
@@ -274,6 +274,7 @@ async def complete_mcp_oauth_flow(
                     replace_allowed=decision.replace_allowed,
                     before_update=still_allowed,
                     scope=grant_scope,
+                    records=session_factory,
                 )
             except (McpOAuthWriteRefusedError, McpServerReplaceRefusedError):
                 await withdraw()

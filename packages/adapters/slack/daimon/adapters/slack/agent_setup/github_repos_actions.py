@@ -79,6 +79,7 @@ async def handle(
             thread_id=None,
             default=runtime.deployment_default,
             is_admin=is_admin,
+            records=runtime.sessionmaker,
         )
         agent = next((row for row in roster.rows if row.name == name), None)
         if agent is None:

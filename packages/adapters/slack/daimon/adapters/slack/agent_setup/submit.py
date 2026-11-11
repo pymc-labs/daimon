@@ -330,6 +330,7 @@ async def run_new_agent_submission(
                 thread_id=None,
                 default=runtime.deployment_default,
                 is_admin=is_admin,
+                records=runtime.sessionmaker,
             )
             details = await load_panel_details(
                 session,
@@ -361,6 +362,7 @@ async def run_new_agent_submission(
                     platform="slack",
                     thread_id=None,
                     default=runtime.deployment_default,
+                    records=runtime.sessionmaker,
                 )
             )
 

@@ -1340,10 +1340,12 @@ async def _admit_gates(
         # a thread whose task was handed to another agent answers as that agent,
         # which is an ordinary tenant-and-archive-checked retrieve.
         if config.thread_binding_kind in ("handoff", "owner", "web", "helper"):
-            agent = await get_setup_agent(deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id)
+            agent = await get_setup_agent(
+                deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id, records=deps.sessionmaker
+            )
         elif config.thread_binding_id is not None:
             agent = await get_setup_responder(
-                deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id
+                deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id, records=deps.sessionmaker
             )
         else:
             try:
@@ -2554,6 +2556,7 @@ async def capture_backend_source(
                 deps.anthropic,
                 tenant_id=context.tenant_id,
                 name=config.environment_name,
+                records=deps.sessionmaker,
             )
             if environment is None or environment.archived_at is not None:
                 raise channel_backend.AgentBackendRefused(

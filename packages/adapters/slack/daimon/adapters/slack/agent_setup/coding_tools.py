@@ -186,6 +186,7 @@ async def handle_coding_tools_click(
             thread_id=None,
             default=runtime.deployment_default,
             is_admin=True,
+            records=runtime.sessionmaker,
         )
     target = next((row for row in roster.rows if row.name == agent_name), None)
     if target is None:

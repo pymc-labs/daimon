@@ -192,6 +192,7 @@ async def add_skill(
             actor_account_id=actor.account_id,
             platform_skills=platform_skills,
             surface=actor.surface,
+            records=sessionmaker,
         )
         if isinstance(added, str):
             raise ChannelChangeRefused(REFUSALS[added], kind="invalid", reason=added)

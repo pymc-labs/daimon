@@ -332,7 +332,9 @@ async def load_roster_state(
                 platform="discord",
                 thread_id=thread_id,
                 default=runtime.deployment_default,
+                records=runtime.sessionmaker,
             ),
+            records=runtime.sessionmaker,
         )
         cascade = await list_guild_propagations(session, tenant_id=tenant_id)
         overwrite_guild = _overwrite_check_guild(runtime, interaction, is_admin=is_admin)
@@ -424,6 +426,7 @@ async def load_details_for(
             is_admin=state.is_admin,
             channel_label=_channel_label(state),
             web=panel_links(runtime.settings.web, _tenant_id(state), admin=state.is_admin),
+            records=runtime.sessionmaker,
         )
         state.avatar_urls[agent.name] = None
         if not state.is_admin:
@@ -512,6 +515,7 @@ async def panel_viewer(
         platform="discord",
         thread_id=str(state.thread_id) if state.thread_id else None,
         default=runtime.deployment_default,
+        records=runtime.sessionmaker,
     )
 
 

@@ -63,7 +63,10 @@ async def open_setup_conversation(
     """
     tenant_id, chat = actor.tenant_id, actor.conversation_id
     responder, target = await resolve_setup_agents(
-        runtime.anthropic, tenant_id=tenant_id, target_ma_agent_id=target_ma_agent_id
+        runtime.anthropic,
+        tenant_id=tenant_id,
+        target_ma_agent_id=target_ma_agent_id,
+        records=runtime.sessionmaker,
     )
     target_name = str(target.metadata.get(MA_METADATA_KEY_NAME) or target.name) if target else None
     thread_id = new_setup_thread_id(chat)

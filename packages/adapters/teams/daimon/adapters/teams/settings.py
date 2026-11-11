@@ -111,7 +111,9 @@ async def show_settings(context: CommandContext) -> None:
             runtime.settings,
             actor,
             place,
-            agents=tenant_agents(runtime.anthropic, context.tenant_id),
+            agents=tenant_agents(
+                runtime.anthropic, context.tenant_id, records=runtime.sessionmaker
+            ),
         )
     except (DaimonError, SQLAlchemyError) as exc:
         log.warning("teams.settings.failed", exc_info=exc)
@@ -165,7 +167,9 @@ class SettingsActions:
                 await _actor(self.runtime, actor.tenant_id, actor.user_id, actor.admin_for),
                 raw,
                 place,
-                agents=tenant_agents(self.runtime.anthropic, actor.tenant_id),
+                agents=tenant_agents(
+                    self.runtime.anthropic, actor.tenant_id, records=self.runtime.sessionmaker
+                ),
             )
         except (DaimonError, SQLAlchemyError) as exc:
             log.warning("teams.settings.change_failed", exc_info=exc)

@@ -244,6 +244,7 @@ async def _load(
             thread_id=None,
             default=runtime.deployment_default,
             is_admin=is_admin,
+            records=runtime.sessionmaker,
         )
         visible = frozenset(
             derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=row.ma_agent_id)

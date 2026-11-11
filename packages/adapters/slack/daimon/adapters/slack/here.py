@@ -241,6 +241,7 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
                 visible_channel_ids=visible_ids,
                 bot_can_view=bot_view,
                 caller_can_view=caller_view,
+                records=runtime.sessionmaker,
             )
         card = card.model_copy(
             update={

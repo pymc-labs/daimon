@@ -135,7 +135,9 @@ def environment_doc(env: BetaEnvironment) -> EnvironmentDoc:
 
 
 async def _all(deps: AgentEditDeps, actor: AgentActor) -> list[BetaEnvironment]:
-    return await list_environments_by_tenant(deps.client, tenant_id=actor.tenant_id)
+    return await list_environments_by_tenant(
+        deps.client, tenant_id=actor.tenant_id, records=deps.session_factory
+    )
 
 
 async def _find(deps: AgentEditDeps, actor: AgentActor, environment_id: str) -> BetaEnvironment:
@@ -170,7 +172,7 @@ async def create(
     """A new environment. Nothing runs in it until a channel or the workspace picks it."""
     require_admin(actor, "Environments")
     if await find_environments_by_daimon_tag(
-        deps.client, tenant_id=actor.tenant_id, name=spec.name
+        deps.client, tenant_id=actor.tenant_id, name=spec.name, records=deps.session_factory
     ):
         raise AgentEditError(f"environment '{spec.name}' already exists", kind="taken")
     made = await create_environment(
@@ -182,6 +184,7 @@ async def create(
             "metadata": build_metadata(tenant_id=actor.tenant_id, name=spec.name),
         },
         scope=actor.scope(),
+        records=deps.session_factory,
     )
     if audited is not None:
         async with deps.session_factory() as session, session.begin():
@@ -231,6 +234,7 @@ async def update(
         env.id,
         {"config": config, "description": spec.description},
         scope=actor.scope(),
+        records=deps.session_factory,
     )
     if audited is not None:
         async with deps.session_factory() as session, session.begin():
@@ -262,7 +266,9 @@ async def archive(
             )
         if needed:
             raise EnvironmentNeedsConfirm(build_limited_channels_confirm(environment_name=None))
-    await archive_environment(deps.client, env.id, scope=actor.scope())
+    await archive_environment(
+        deps.client, env.id, scope=actor.scope(), records=deps.session_factory
+    )
     async with deps.session_factory() as session, session.begin():
         cleared = await clear_environment_references(
             session, tenant_id=actor.tenant_id, environment_name=name

@@ -99,6 +99,7 @@ async def _load(context: CommandContext) -> HereCard:
             web=web_links(
                 runtime, context.tenant_id, admin=context.is_admin, foreign=asked.is_foreign
             ),
+            records=runtime.sessionmaker,
         )
     # Someone from another organisation has no 1:1 chat to send `setup` in.
     return for_foreign_sender(card) if asked.is_foreign else card

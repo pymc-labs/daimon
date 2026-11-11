@@ -1310,6 +1310,7 @@ async def _attach_mcp_server_impl(
                 server_name=server_name,
                 url=url,
                 replace_allowed=replace_allowed,
+                records=runtime.session_factory,
             )
     except McpServerReplaceRefusedError as exc:
         raise ToolError(str(exc)) from exc

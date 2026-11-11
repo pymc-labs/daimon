@@ -121,6 +121,7 @@ async def send_coding_tools_access(
                 runtime.anthropic,
                 tenant_id=tenant_id,
                 ma_agent_id=card_agent.ma_agent_id,
+                records=runtime.sessionmaker,
             )
         except DaimonError:
             await interaction.response.send_message(

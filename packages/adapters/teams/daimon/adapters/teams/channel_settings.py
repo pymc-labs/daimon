@@ -456,6 +456,7 @@ class ChannelSettingsDialog:
                     actor_account_id=account_id,
                     platform_skills=self._runtime.turn_deps.platform_skills,
                     surface="panel",
+                    records=self._runtime.sessionmaker,
                 )
         except (SkillsListTruncatedError, anthropic.APIError):
             await self._audit(actor, "channel_skills", outcome="error", reason="skills_unreadable")

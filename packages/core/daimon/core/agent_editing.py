@@ -872,7 +872,9 @@ async def reject_name_taken(deps: AgentEditDeps, *, tenant_id: uuid.UUID, name: 
     """
     if not anthropic_configured(deps.client):
         return  # Daimon records: the create-only reconcile refuses a taken name.
-    if await find_agents_by_daimon_tag(deps.client, tenant_id=tenant_id, name=name):
+    if await find_agents_by_daimon_tag(
+        deps.client, tenant_id=tenant_id, name=name, records=deps.session_factory
+    ):
         raise AgentNameTakenError(name)
 
 

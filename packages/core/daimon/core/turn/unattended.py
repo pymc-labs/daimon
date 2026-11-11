@@ -237,7 +237,9 @@ async def gate_session_snapshot(
         async with session_factory() as db:
             access = await load_access_policy(db, tenant_id=tenant_id)
         if any(rule.invoker_role_ids for rule in access.agent_rules.values()):
-            target = await retrieve_agent(client, session.agent.id, scope=scope)
+            target = await retrieve_agent(
+                client, session.agent.id, scope=scope, records=session_factory
+            )
             ref = build_agent_ref(target.name, target.metadata, session.agent.name)
             if agent_invoker_roles(access, ref.names):
                 raise AdmissionDenied(reason="invoker_not_allowed")

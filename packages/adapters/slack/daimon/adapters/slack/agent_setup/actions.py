@@ -242,6 +242,7 @@ async def github_home_view(
             thread_id=None,
             default=runtime.deployment_default,
             is_admin=is_admin,
+            records=runtime.sessionmaker,
         )
         repos = await agent_repo_summary(session, tenant_id=tenant_id)
         principal = await get_or_create_platform_principal(
@@ -335,6 +336,7 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
                 thread_id=thread_id,
                 default=runtime.deployment_default,
                 is_admin=is_admin,
+                records=runtime.sessionmaker,
             )
             answering_map = await load_panel_answering_map(
                 session,
@@ -343,6 +345,7 @@ async def handle_agent_setup_command(runtime: SlackRuntime, payload: dict[str, A
                 default=runtime.deployment_default,
                 channel_id=channel_id or None,
                 is_admin=is_admin,
+                records=runtime.sessionmaker,
             )
             attributions = await resolve_attributions(
                 session,
@@ -554,6 +557,7 @@ async def load_agents_view(
             thread_id=None,
             default=runtime.deployment_default,
             is_admin=is_admin,
+            records=runtime.sessionmaker,
         )
         answering_map = await load_panel_answering_map(
             session,
@@ -562,6 +566,7 @@ async def load_agents_view(
             default=runtime.deployment_default,
             channel_id=meta.channel_id or None,
             is_admin=is_admin,
+            records=runtime.sessionmaker,
         )
         attributions = await resolve_attributions(
             session, tenant_id=tenant_id, account_ids=_roster_account_ids(roster)
@@ -604,6 +609,7 @@ async def load_routing_view(
             default=runtime.deployment_default,
             channel_id=meta.channel_id or None,
             is_admin=is_admin,
+            records=runtime.sessionmaker,
         )
         operator_tokens = (
             await list_panel_operator_tokens(session, tenant_id=tenant_id, now=datetime.now(UTC))
@@ -632,6 +638,7 @@ async def load_routing_view(
             thread_id=None,
             default=runtime.deployment_default,
             is_admin=is_admin,
+            records=runtime.sessionmaker,
         )
     setup_links = [
         f"<{setup_link(meta.team_id, ref.parent_channel_id, ref.thread_id)}|"
@@ -708,6 +715,7 @@ async def load_details_view(
             thread_id=None,
             default=runtime.deployment_default,
             is_admin=is_admin,
+            records=runtime.sessionmaker,
         )
         details = await load_panel_details(
             session,

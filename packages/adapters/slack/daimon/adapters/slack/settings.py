@@ -104,7 +104,7 @@ async def handle_settings_command(runtime: SlackRuntime, payload: dict[str, Any]
             runtime.settings,
             actor,
             FeaturePlace.of(actor.tenant_id, "slack", channel_id, None),
-            agents=tenant_agents(runtime.anthropic, actor.tenant_id),
+            agents=tenant_agents(runtime.anthropic, actor.tenant_id, records=runtime.sessionmaker),
         )
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
             channel=channel_id,
@@ -151,7 +151,7 @@ async def handle_settings_change(runtime: SlackRuntime, payload: dict[str, Any])
         actor,
         raw,
         FeaturePlace.of(actor.tenant_id, "slack", channel_id, None),
-        agents=tenant_agents(runtime.anthropic, actor.tenant_id),
+        agents=tenant_agents(runtime.anthropic, actor.tenant_id, records=runtime.sessionmaker),
     )
     if screen is not None:
         await AsyncWebhookClient(response_url).send_dict(

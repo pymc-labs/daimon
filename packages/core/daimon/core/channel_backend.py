@@ -2022,7 +2022,9 @@ async def load_backend_agent(
         if metadata.get(MA_METADATA_KEY_NAME) != agent_name or actual.archived_at is not None:
             raise AgentBackendRefused("agent_not_found")
     else:
-        actual = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=agent_name)
+        actual = await find_agent_by_daimon_tag(
+            anthropic, tenant_id=tenant_id, name=agent_name, records=sessionmaker
+        )
     if actual is None:
         raise AgentBackendRefused("agent_not_found")
     # Native SDK projection is hashed only; neither credentials nor URLs leave this edge.

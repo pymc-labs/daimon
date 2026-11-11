@@ -124,7 +124,9 @@ async def _split_scoped_skills(
     upload_by_id = {row.anthropic_id: row for row in uploads if row.anthropic_id}
     agent_names = [
         agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name
-        for agent in await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+        for agent in await list_agents_by_tenant(
+            anthropic, tenant_id=tenant_id, records=sessionmaker
+        )
     ]
     attached: list[AttachedSkillOwnership] = []
     for skill in skills:
@@ -195,7 +197,10 @@ async def _copy_own_skills(
                 sessionmaker,
                 tenant_id=tenant_id,
                 agent=await retrieve_agent(
-                    anthropic, copy.id, scope=resource_scope(tenant_id=str(tenant_id))
+                    anthropic,
+                    copy.id,
+                    scope=resource_scope(tenant_id=str(tenant_id)),
+                    records=sessionmaker,
                 ),
                 agent_name=new_name,
                 bundle=bundle_from_upload(data, filename="SKILL.zip"),

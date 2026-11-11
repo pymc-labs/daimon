@@ -52,7 +52,7 @@ from daimon.core.stores.selfhosted_resources import list_live_agent_facts
 from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.core.web_links import TenantLinks
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 class CredentialStatus(BaseModel):
@@ -492,6 +492,7 @@ async def load_here_card(
     caller_can_read_history: bool | None = None,
     category_channels_bot_can_view: Sequence[tuple[str, str]] = (),
     web: TenantLinks | None = None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> HereCard:
     """Load the current routing and credential names for one caller's place."""
     policy = await load_access_policy(session, tenant_id=tenant_id)
@@ -504,6 +505,7 @@ async def load_here_card(
         platform=platform,
         thread_id=thread_id,
         default=default,
+        records=records,
     )
     roster = await load_roster(
         session,
@@ -514,6 +516,7 @@ async def load_here_card(
         thread_id=thread_id,
         default=default,
         viewer=viewer,
+        records=records,
     )
     resolved = await scoped_config_read.resolve(
         session,
@@ -546,7 +549,10 @@ async def load_here_card(
             )
             if anthropic_disabled()
             else await get_setup_agent(
-                anthropic, tenant_id=tenant_id, ma_agent_id=roster.answering.ma_agent_id
+                anthropic,
+                tenant_id=tenant_id,
+                ma_agent_id=roster.answering.ma_agent_id,
+                records=records,
             )
         )
         details = await load_agent_details(
@@ -563,6 +569,7 @@ async def load_here_card(
             is_admin=is_admin,
             channel_label=channel_id,
             preloaded_agent=ma_agent,
+            records=records,
         )
         # Keep aliases local to this card; get_agent's response stays unchanged.
         rule_names = agent_pin_names(ma_agent.name, ma_agent.metadata)

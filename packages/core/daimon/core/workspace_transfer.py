@@ -525,7 +525,9 @@ async def transfer_workspace(
         access = await load_access_policy(db, tenant_id=tenant_id)
     if any(rule.invoker_role_ids for rule in access.agent_rules.values()):
         try:
-            predecessor = await retrieve_agent(client, old_snapshot.ma_agent_id, scope=scope)
+            predecessor = await retrieve_agent(
+                client, old_snapshot.ma_agent_id, scope=scope, records=sessionmaker
+            )
         except anthropic.APIStatusError as err:
             if not _is_not_found(err):
                 raise

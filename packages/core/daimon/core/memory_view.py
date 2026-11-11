@@ -139,7 +139,9 @@ async def resolve_channel_agent(
         )
     if config.agent_name is None:
         return None
-    agent = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=config.agent_name)
+    agent = await find_agent_by_daimon_tag(
+        anthropic, tenant_id=tenant_id, name=config.agent_name, records=sessionmaker
+    )
     if agent is None:
         raise DaimonError(f"Configured agent '{config.agent_name}' not found.")
     names = (config.agent_name, *agent_pin_names(agent.name, agent.metadata))

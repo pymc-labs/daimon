@@ -93,7 +93,7 @@ async def current_pin(
     """
     scope = resource_scope(tenant_id=str(row.tenant_id))
     try:
-        agent = await retrieve_agent(client, row.agent_id, scope=scope)
+        agent = await retrieve_agent(client, row.agent_id, scope=scope, records=session_factory)
         async with session_factory() as session:
             scoped = await resolve(
                 session,
@@ -104,7 +104,10 @@ async def current_pin(
                 default=default,
             )
         environment = await find_environment_by_daimon_tag(
-            client, tenant_id=row.tenant_id, name=scoped.environment_name or "default"
+            client,
+            tenant_id=row.tenant_id,
+            name=scoped.environment_name or "default",
+            records=session_factory,
         )
     except Exception as exc:  # any read failure refuses the opt-in
         raise SandboxPinUnavailable(str(exc)) from exc
