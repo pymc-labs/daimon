@@ -123,11 +123,15 @@ def channel_rows(
     model: str,
     agent_id: str,
     environment_id: str,
-    account_id: str,
+    account_id: str | None,
     channels: list[tuple[str, str]],
     infrastructure_usd: Decimal,
+    agents: list[UUID] | None = None,
 ) -> list[dict[str, object]]:
-    """One runtime-file row per channel, bound to the channel's default config digest."""
+    """One runtime-file row per channel or agent, bound to the default config digest.
+
+    An agent row grants that agent's own choice of this model, in any channel.
+    """
     digest = ResolvedBackend(
         backend=LOOP.provider, profile=LOOP.profile_id, model=model
     ).content_digest()
@@ -136,21 +140,25 @@ def channel_rows(
             tenant_id=str(tenant_id),
             platform=platform,
             channel_id=channel_id,
-            account_id=account_id,
+            account_id=account,
             config_digest=digest,
             agent_id=agent_id,
             environment_id=environment_id,
             infrastructure_usd=infrastructure_usd,
+            source_agent_id=source,
         ).model_dump(mode="json")
-        for platform, channel_id in channels
+        for platform, channel_id, account, source in [
+            *((platform, channel_id, account_id or "", None) for platform, channel_id in channels),
+            *(("*", "*", "*", source) for source in agents or ()),
+        ]
     ]
 
 
 def merge_rows(
     existing: list[dict[str, object]], rows: list[dict[str, object]]
 ) -> list[dict[str, object]]:
-    """Replace rows that name the same tenant, channel and account; keep the rest."""
-    keys = ("profile", "tenant_id", "platform", "channel_id", "account_id")
+    """Replace rows that name the same tenant, channel, account and agent; keep the rest."""
+    keys = ("profile", "tenant_id", "platform", "channel_id", "account_id", "source_agent_id")
     replaced = {tuple(row[key] for key in keys) for row in rows}
     kept = [row for row in existing if tuple(row.get(key) for key in keys) not in replaced]
     return [*kept, *rows]
@@ -232,13 +240,6 @@ def selfhosted_init_command(
             help="Postgres connection URL.",
         ),
     ],
-    channel: Annotated[
-        list[str],
-        typer.Option("--channel", help="platform:channel-id to grant; repeat for more."),
-    ],
-    account_id: Annotated[
-        str, typer.Option("--account-id", help="Account the channels belong to.")
-    ],
     input_usd: Annotated[
         str, typer.Option("--input-usd", help="Verified input price, USD per million tokens.")
     ],
@@ -287,8 +288,19 @@ def selfhosted_init_command(
         Path | None,
         typer.Option("--manifest", help=f"Runtime file path; defaults to ${_MANIFEST_ENV}."),
     ] = None,
+    channel: Annotated[
+        list[str] | None,
+        typer.Option("--channel", help="platform:channel-id to grant; repeat for more."),
+    ] = None,
+    account_id: Annotated[
+        str | None, typer.Option("--account-id", help="Account the channels belong to.")
+    ] = None,
+    agent: Annotated[
+        list[UUID] | None,
+        typer.Option("--agent", help="Agent ID that may pick this model itself; repeat for more."),
+    ] = None,
 ) -> None:
-    """Create or reuse one agent and environment, grant the channels, print the settings.
+    """Create or reuse one agent and environment, grant channels or agents, print the settings.
 
     Stdout is the agent ID, the environment ID, then `NAME=value` settings lines.
     """
@@ -306,7 +318,11 @@ def selfhosted_init_command(
         else input_price
     )
     infrastructure = _price(infrastructure_usd, "--infrastructure-usd", allow_zero=True)
-    channels = [_channel(value) for value in channel]
+    channels = [_channel(value) for value in channel or ()]
+    if not channels and not agent:
+        raise typer.BadParameter("Pass --channel or --agent.", param_hint="--channel")
+    if channels and not account_id:
+        raise typer.BadParameter("--channel needs --account-id.", param_hint="--account-id")
     try:
         harness = HarnessConfig.model_validate(
             {
@@ -375,6 +391,7 @@ def selfhosted_init_command(
                 account_id=account_id,
                 channels=channels,
                 infrastructure_usd=infrastructure,
+                agents=agent,
             ),
         ),
     )

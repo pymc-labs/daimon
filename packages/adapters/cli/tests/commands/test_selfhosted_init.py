@@ -458,3 +458,25 @@ def test_channel_rows_bind_the_default_config_digest_and_replace_repeats():
             backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna"
         ).content_digest()
     ), "the row matches what a channel on this model resolves to"
+
+
+def test_agent_rows_grant_the_agent_anywhere_and_replace_only_themselves():
+    import uuid
+    from decimal import Decimal
+
+    tenant, agent = uuid.uuid4(), uuid.uuid4()
+    common = dict(
+        tenant_id=tenant,
+        model="gpt-6-luna",
+        agent_id="sh_agent_x",
+        environment_id="sh_env_x",
+        infrastructure_usd=Decimal(0),
+    )
+    channel = selfhosted.channel_rows(**common, account_id="acct-1", channels=[("slack", "C1")])
+    granted = selfhosted.channel_rows(**common, account_id=None, channels=[], agents=[agent])
+    assert [(r["platform"], r["channel_id"], r["account_id"]) for r in granted] == [("*", "*", "*")]
+    assert granted[0]["source_agent_id"] == str(agent) and channel[0]["source_agent_id"] is None
+    assert granted[0]["config_digest"] == channel[0]["config_digest"]
+    merged = selfhosted.merge_rows(channel, granted)
+    assert merged == [*channel, *granted], "an agent row never replaces a channel row"
+    assert selfhosted.merge_rows(merged, granted) == merged
