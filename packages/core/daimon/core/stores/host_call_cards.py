@@ -232,8 +232,9 @@ async def list_approved(
     platform: str,
     thread_id: str,
     executing_agent_id: uuid.UUID,
+    requester_account_id: uuid.UUID,
 ) -> list[HostCallCardRow]:
-    """Approved calls one wake turn runs, oldest first."""
+    """Approved calls one person's wake turn runs, oldest first; others' wait for theirs."""
     records = await session.scalars(
         select(HostCallCard)
         .where(
@@ -241,6 +242,7 @@ async def list_approved(
             HostCallCard.platform == platform,
             HostCallCard.thread_id == thread_id,
             HostCallCard.executing_agent_id == executing_agent_id,
+            HostCallCard.requester_account_id == requester_account_id,
             HostCallCard.status == "approved",
         )
         .order_by(HostCallCard.created_at)
@@ -255,9 +257,10 @@ async def consume(
     tool_name: str,
     args_digest: str,
     executing_agent_id: uuid.UUID,
+    requester_account_id: uuid.UUID,
     now: datetime,
 ) -> HostCallCardRow | None:
-    """Take an approved call to run it; None unless tool, args and agent all match."""
+    """Take an approved call to run it; None unless tool, args, agent and person all match."""
     record = await session.scalar(
         update(HostCallCard)
         .where(
@@ -266,6 +269,7 @@ async def consume(
             HostCallCard.tool_name == tool_name,
             HostCallCard.args_digest == args_digest,
             HostCallCard.executing_agent_id == executing_agent_id,
+            HostCallCard.requester_account_id == requester_account_id,
         )
         .values(status="executing", executing_at=now)
         .returning(HostCallCard)

@@ -122,6 +122,13 @@ def parse_custom_id(custom_id: str) -> tuple[uuid.UUID, CallAction] | None:
         return None
 
 
+def json_block(text: str) -> str:
+    """A code block no backtick run inside `text` can close early."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}json\n{text}\n{fence}"
+
+
 def requested_call_card(row: HostCallCardRow) -> PostedCard:
     """The card as posted: the exact call it approves, and Approve / Deny for its requester."""
     from daimon.core.posted_controls import CardButton, PostedCard
@@ -131,7 +138,7 @@ def requested_call_card(row: HostCallCardRow) -> PostedCard:
         kind="call",
         state="requested",
         headline=f"🔧 {row.agent_name} wants to run {row.tool_name}",
-        facts=(f"```json\n{args}\n```",),
+        facts=(json_block(args),),
         buttons=(
             CardButton(
                 label="Approve", style="primary", custom_id=card_custom_id(row.id, "approve")
@@ -329,12 +336,13 @@ async def has_approved_calls(
     platform: str,
     thread_id: str,
     executing_agent_id: uuid.UUID,
+    requester_account_id: uuid.UUID,
     now: dt.datetime,
 ) -> bool:
     """Whether a `confirmed_call` wake has anything to run; stale calls are closed first.
 
-    An earlier wake runs every approved call for the thread, so a later one for the
-    same thread finds none and must not spend a turn.
+    An earlier wake runs every approved call of its person for the thread, so a later
+    one for the same person finds none and must not spend a turn.
     """
     from daimon.core.stores import host_call_cards as cards
 
@@ -346,16 +354,27 @@ async def has_approved_calls(
             platform=platform,
             thread_id=thread_id,
             executing_agent_id=executing_agent_id,
+            requester_account_id=requester_account_id,
         )
     return bool(rows)
 
 
 async def run_confirmed_calls(runner: ConfirmedCallRunner) -> str:
-    """Run every approved call for this thread and agent; their results, framed as untrusted."""
+    """Run this person's approved calls for the thread and agent, framed as untrusted.
+
+    Only the wake turn's own person's cards are touched: another person's approved card
+    stays approved for their own wake.
+    """
     from daimon.core.stores import host_call_cards as cards
     from daimon.core.turn_origin import current_execution_origin_id
 
     await sweep_stale_calls(runner.sessionmaker, now=runner.clock())
+    origin_id = current_execution_origin_id.get()
+    # Outside a lease-held turn there is no person or credential: run nothing, and leave
+    # the cards for the sweep rather than guess whose they are.
+    origin = None if origin_id is None else await _session_origin(runner, origin_id)
+    if origin is None:
+        return ""
     async with runner.sessionmaker() as session:
         rows = await cards.list_approved(
             session,
@@ -363,35 +382,25 @@ async def run_confirmed_calls(runner: ConfirmedCallRunner) -> str:
             platform=runner.platform,
             thread_id=runner.thread_id,
             executing_agent_id=runner.executing_agent_id,
+            requester_account_id=origin[0].account_id,
         )
     if not rows:
         return ""
-    origin_id = current_execution_origin_id.get()
-    origin = None if origin_id is None else await _session_origin(runner, origin_id, rows[0])
-    results: list[str] = []
-    for row in rows:
-        if origin is None:
-            # Outside a lease-held turn there is no credential to run under: fail closed.
-            async with runner.sessionmaker.begin() as session:
-                await cards.fail_approved(session, card_id=row.id, outcome=NOT_RUN_TEXT)
-            results.append(_framed(row, "failed", NOT_RUN_TEXT))
-            continue
-        results.append(await _run_one(runner, row, origin))
+    results = [await _run_one(runner, row, origin) for row in rows]
     return "\n\n".join(("Calls the person approved on a card ran before this message:", *results))
 
 
 async def _session_origin(
-    runner: ConfirmedCallRunner, origin_id: uuid.UUID, first: HostCallCardRow
+    runner: ConfirmedCallRunner, origin_id: uuid.UUID
 ) -> tuple[TurnOriginRow, str] | None:
     """This turn's origin and its session grant, binding the grant if none is bound yet."""
-    from daimon.core.stores.turn_origins import bind_origin_session, get_active_origin
+    from daimon.core.stores.turn_origins import bind_origin_session, get_live_origin
 
     async with runner.sessionmaker.begin() as session:
-        origin = await get_active_origin(
+        origin = await get_live_origin(
             session,
             origin_id=origin_id,
             tenant_id=runner.tenant_id,
-            account_id=first.requester_account_id,
             platform=runner.platform,
             now=runner.clock(),
         )
@@ -413,8 +422,11 @@ async def _run_one(
     from daimon.core.mcp_auth import internal_token_label, mint_agent_mcp_token
     from daimon.core.stores import host_call_cards as cards
     from daimon.core.stores.mcp_tokens import revoke_mcp_token
+    from daimon.core.turn_origin import ExecutionFlags, current_execution_flags
 
     turn, grant = origin
+    # The confirmed call is as held, sealed and Slack-bound as the turn that runs it.
+    flags = current_execution_flags.get() or ExecutionFlags()
     jti = uuid.uuid4()
     async with runner.sessionmaker.begin() as session:
         minted = await mint_agent_mcp_token(
@@ -429,6 +441,9 @@ async def _run_one(
             chat_execution=True,
             surface="provider_turn",
             jti=jti,
+            hold=flags.hold,
+            slack_turn_context_id=flags.slack_turn_context_id,
+            seal_ids=flags.seal_ids,
         )
     claims = pyjwt.decode(
         minted, runner.secret, algorithms=["HS256"], options={"verify_exp": False}

@@ -560,6 +560,7 @@ async def decide_continuation(
             executing_agent_id=derive_agent_uuid(
                 tenant_id=request.tenant_id, ma_agent_id=request.target_ma_agent_id
             ),
+            requester_account_id=request.requester_account_id,
             now=now,
         ):
             return ContinuationDecision(action="skip_superseded")

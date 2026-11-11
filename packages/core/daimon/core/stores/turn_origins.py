@@ -92,6 +92,26 @@ async def get_active_origin(
     return TurnOriginRow.model_validate(origin) if origin is not None else None
 
 
+async def get_live_origin(
+    session: AsyncSession,
+    *,
+    origin_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    platform: str,
+    now: datetime,
+) -> TurnOriginRow | None:
+    """A live origin by its server-side id alone; callers take the account from the row."""
+    origin = await session.scalar(
+        select(TurnOrigin).where(
+            TurnOrigin.id == origin_id,
+            TurnOrigin.tenant_id == tenant_id,
+            TurnOrigin.platform == platform,
+            TurnOrigin.expires_at > now,
+        )
+    )
+    return TurnOriginRow.model_validate(origin) if origin is not None else None
+
+
 async def get_session_origin(
     session: AsyncSession,
     *,

@@ -90,8 +90,8 @@ class RelayTurn:
 
     @property
     def shared(self) -> bool:
-        """Someone other than the credential's owner asked: only agent-wide sign-ins apply."""
-        return self.requester_account_id not in (None, self.account_id)
+        """A shared thread's turn (it alone signs a requester): only agent-wide sign-ins apply."""
+        return self.requester_account_id is not None
 
 
 LoadConnectors = Callable[["RelayTurn", "TurnOriginRow"], Awaitable[Mapping[str, Connector]]]
@@ -418,6 +418,7 @@ class ConnectorRelay:
                 tool_name=name,
                 args_digest=self._digest(turn, connector, name, args),
                 executing_agent_id=turn.agent_id,
+                requester_account_id=turn.account_id,
                 now=now,
             )
             if row is not None and turn.token_jti is not None:

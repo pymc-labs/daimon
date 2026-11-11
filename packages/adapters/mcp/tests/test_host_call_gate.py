@@ -24,11 +24,12 @@ from daimon.core import host_calls
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.host_calls import ConfirmedCallRunner, confirmed_call_prefix, run_confirmed_calls
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.session_seal import SEAL_CLAIM
 from daimon.core.stores.domain import Role
 from daimon.core.stores.host_call_cards import HostCallCardRow, list_cards
 from daimon.core.stores.mcp_tokens import create_mcp_token_row, get_mcp_token
 from daimon.core.stores.turn_origins import create_origin, get_session_origin
-from daimon.core.turn_origin import current_execution_origin_id
+from daimon.core.turn_origin import ExecutionFlags, current_execution_origin_id, execution_origin
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
@@ -559,15 +560,35 @@ async def test_run_confirmed_calls_says_not_run_when_the_call_never_reaches_the_
     assert await _token_revoked(rig, jtis[0]), "the unused credential is revoked"
 
 
+async def test_a_confirmed_call_carries_its_turns_seal_and_slack_context(rig: Rig) -> None:
+    """The one-shot credential is as sealed and Slack-bound as the wake turn running it."""
+    await _approved(rig)
+    seen: list[dict[str, Any]] = []
+    slack = uuid.uuid4()
+
+    async def capture(token: str, name: str, args: Mapping[str, object]) -> object:
+        seen.append(
+            pyjwt.decode(token, _SECRET, algorithms=["HS256"], options={"verify_exp": False})
+        )
+        raise ConnectionError("captured only")
+
+    flags = ExecutionFlags(slack_turn_context_id=slack, seal_ids=frozenset({"seal-1"}))
+    with execution_origin(await _origin_id(rig), flags):
+        await run_confirmed_calls(_runner(rig, call_tool=capture))
+
+    [claims] = seen
+    assert claims.get(SEAL_CLAIM) == ["seal-1"], f"the turn's seal travels: {claims}"
+    assert claims.get("slack_turn_context_id") == str(slack), f"and its Slack context: {claims}"
+
+
 async def test_run_confirmed_calls_fails_closed_outside_a_live_turn(rig: Rig) -> None:
-    """With no turn origin there is no credential to run under: the call does not run."""
+    """With no turn origin there is no person or credential: nothing runs or is spent."""
     await _approved(rig)
     jtis: list[uuid.UUID] = []
 
     with _in_turn(None):
-        await run_confirmed_calls(_runner(rig, call_tool=_through_server(rig, jtis)))
+        text = await run_confirmed_calls(_runner(rig, call_tool=_through_server(rig, jtis)))
 
     card = await _card(rig)
-    assert card.status == "failed", f"record failed: {card.status}"
-    assert card.outcome == host_calls.NOT_RUN_TEXT, f"says it didn't run: {card.outcome}"
-    assert rig.ran == [] and jtis == [], "no credential was minted and nothing ran"
+    assert card.status == "approved", f"left for its own wake or the sweep: {card.status}"
+    assert text == "" and rig.ran == [] and jtis == [], "no credential was minted, nothing ran"

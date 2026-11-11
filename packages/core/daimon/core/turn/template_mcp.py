@@ -39,6 +39,7 @@ def needs_turn_credential(admission: Admission) -> bool:
         admission.hold is not None
         or admission.slack_turn_context_id is not None
         or bool(admission.origin_seal_ids)
+        or admission.shared_owner is not None
     )
 
 
@@ -181,6 +182,11 @@ class TemplateMCPCredential:
                 agent_id=agent_id,
                 now=now,
                 memory_read_only=origin_read_only(admission),
+                # A shared thread's credential names its asker: the relay then
+                # hides personal sign-ins, as MA's `hide_personal_for` does.
+                requester_account_id=(
+                    admission.account_id if admission.shared_owner is not None else None
+                ),
             )
             self._minted = token, self._minted[1]
         except (OSError, ValueError):

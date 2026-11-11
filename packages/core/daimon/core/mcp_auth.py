@@ -167,11 +167,13 @@ async def bind_execution_session(
     agent_id: uuid.UUID,
     now: dt.datetime,
     memory_read_only: bool | None = None,
+    requester_account_id: uuid.UUID | None = None,
 ) -> str:
     """Add the executing turn's origin as `chat_session_id`; unchanged outside a turn.
 
     `memory_read_only` restamps the origin as MA's own grant does (`turn.run`), so
     the MCP server reads a sealed or read-only provider turn's memory as read-only.
+    `requester_account_id` marks a shared thread's turn (signed only with the grant).
     """
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.stores.accounts import get_account_with_tenant
@@ -214,9 +216,10 @@ async def bind_execution_session(
                 memory_read_only=memory_read_only,
             )
         claims = pyjwt.decode(token, secret, algorithms=["HS256"], options={"verify_exp": False})
-        token = pyjwt.encode(
-            {**claims, "chat_session_id": str(origin_id)}, secret, algorithm="HS256"
-        )
+        claims["chat_session_id"] = str(origin_id)
+        if requester_account_id is not None:
+            claims["requester_account_id"] = str(requester_account_id)
+        token = pyjwt.encode(claims, secret, algorithm="HS256")
     return token
 
 

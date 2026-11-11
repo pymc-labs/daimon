@@ -8,6 +8,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 
@@ -30,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
     from daimon.core.features.snapshot import FeatureSnapshot
+    from daimon.core.turn_hold import TurnHold
 
 #: A continuation is the person's own words and is untrusted text. It is JSON
 #: encoded into the controls and bounded, so a long paste cannot crowd out the
@@ -62,13 +64,31 @@ current_execution_origin_id: ContextVar[uuid.UUID | None] = ContextVar(
 )
 
 
+@dataclass(frozen=True)
+class ExecutionFlags:
+    """The turn's own credential restrictions; a credential minted inside it carries them."""
+
+    hold: TurnHold | None = None
+    slack_turn_context_id: uuid.UUID | None = None
+    seal_ids: frozenset[str] = frozenset()
+
+
+current_execution_flags: ContextVar[ExecutionFlags | None] = ContextVar(
+    "execution_flags", default=None
+)
+
+
 @contextmanager
-def execution_origin(origin_id: uuid.UUID | None) -> Iterator[None]:
+def execution_origin(
+    origin_id: uuid.UUID | None, flags: ExecutionFlags | None = None
+) -> Iterator[None]:
     """Authorize origin credential derivation only inside this prepared execution."""
     token = current_execution_origin_id.set(origin_id)
+    flags_token = current_execution_flags.set(flags)
     try:
         yield
     finally:
+        current_execution_flags.reset(flags_token)
         current_execution_origin_id.reset(token)
 
 

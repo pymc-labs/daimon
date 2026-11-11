@@ -73,3 +73,10 @@ def test_host_calls_never_waits_on_listen_notify_or_sleep() -> None:
             assert "LISTEN " not in upper and "NOTIFY " not in upper, (
                 f"line {node.lineno}: no LISTEN/NOTIFY in host_calls"
             )
+
+
+def test_card_args_fence_outlasts_any_backtick_run_inside() -> None:
+    """Arguments holding a fence of their own cannot close the card's block early."""
+    block = host_calls.json_block('{"text": "````x"}')
+    assert block.startswith("`````json\n") and block.endswith("\n`````"), f"five: {block}"
+    assert host_calls.json_block("{}").startswith("```json\n"), "plain args keep three"

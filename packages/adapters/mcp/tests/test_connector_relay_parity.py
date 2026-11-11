@@ -29,6 +29,7 @@ from daimon.adapters.mcp.connector_relay import (
     ConnectorRelay,
     RelayTurn,
     relay_token,
+    relay_turn,
 )
 from daimon.core import host_calls
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
@@ -476,6 +477,37 @@ async def test_an_approved_card_runs_once_under_its_one_shot_credential(rig: Rig
     assert row is not None and row.revoked_at is not None, "the one-shot credential is revoked"
 
 
+async def test_an_approved_card_never_runs_under_another_persons_credential(rig: Rig) -> None:
+    """A confirmed credential of someone else leaves the card approved for its own person."""
+    args = {"text": "hi"}
+    await rig.send("tools/call", {"name": "write", "arguments": args})
+    [card] = await _cards(rig)
+
+    async def admin(_: str) -> bool:
+        return True
+
+    pressed = await host_calls.press_host_call(
+        sessionmaker=rig.sessions,
+        enabled=True,
+        tenant_id=rig.tenant_id,
+        card_id=card.id,
+        action="approve",
+        clicker=_USER,
+        message_id=_MESSAGE,
+        current_admin=admin,
+        now=dt.datetime.now(dt.UTC),
+        queue_wake=False,
+    )
+    assert pressed is not None and pressed.approved, f"the requester approves: {pressed}"
+    async with rig.sessions.begin() as session:
+        guest = await make_account(session, tenant=rig.tenant)
+    confirmed = rig.claims(sub=str(guest.id), confirmed_call=str(card.id))
+    refused = await rig.send("tools/call", {"name": "write", "arguments": args}, claims=confirmed)
+    assert refused.status_code == 403 and rig.upstream.calls == [], f"refused: {refused}"
+    [after] = await _cards(rig)
+    assert after.status == "approved", f"the card still waits for its own wake: {after.status}"
+
+
 async def test_always_ask_on_an_unattended_turn_is_refused(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -595,6 +627,18 @@ async def test_a_shared_thread_sees_only_agent_wide_credentials(rig: Rig) -> Non
     )
     own = await relay_token(rig.sessions, fernet, _turn(rig, None), connector)
     assert own == "owner-at", f"the owner's own turn uses their personal sign-in: {own}"
+
+
+async def test_a_shared_threads_credential_hides_even_the_askers_personal_sign_in(
+    rig: Rig,
+) -> None:
+    """A shared thread's provider credential signs its asker, so personal sign-ins stay hidden."""
+    fernet = make_fernet()
+    await _seed_token(rig, fernet, account_id=rig.account_id, access="owner-at")
+    turn = relay_turn(rig.claims(requester_account_id=str(rig.account_id)))
+    assert turn is not None and turn.shared, f"the signed asker marks a shared thread: {turn}"
+    token = await relay_token(rig.sessions, fernet, turn, rig.connectors[_KEY])
+    assert token is None, f"no personal sign-in reaches a shared thread: {token}"
 
 
 async def test_concurrent_relay_calls_refresh_the_token_once(rig: Rig) -> None:

@@ -169,7 +169,7 @@ from daimon.core.turn.unattended_capabilities import (
     send_capabilities,
     unattended_entry_point,
 )
-from daimon.core.turn_origin import current_origin_id, execution_origin
+from daimon.core.turn_origin import ExecutionFlags, current_origin_id, execution_origin
 from daimon.core.usage_billing import ObservationBilled, ObservationRecorder
 from daimon.core.usage_sweep import SETTLE_BUDGET_S, settle_session
 from mux.contracts.events import Event
@@ -1684,7 +1684,12 @@ async def run_prepared_turn_impl(
 
         @contextlib.asynccontextmanager
         async def origin_grant(lease: Lease | None = None) -> AsyncIterator[None]:
-            with execution_origin(origin_id):
+            flags = ExecutionFlags(
+                hold=admission.hold,
+                slack_turn_context_id=admission.slack_turn_context_id,
+                seal_ids=admission.origin_seal_ids,
+            )
+            with execution_origin(origin_id, flags):
                 if origin_id is None:
                     yield
                     return

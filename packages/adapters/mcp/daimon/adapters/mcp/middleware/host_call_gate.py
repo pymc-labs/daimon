@@ -106,6 +106,7 @@ class HostCallGate:
                 tool_name=name,
                 args_digest=self._digest(name, args, identity.chat_agent_id),
                 executing_agent_id=identity.chat_agent_id,
+                requester_account_id=identity.account_id,
                 now=now,
             )
             if row is not None and identity.token_jti is not None:

@@ -17,6 +17,7 @@ from daimon.core.host_calls import (
     press_host_call,
 )
 from daimon.core.stores import host_call_cards as cards
+from daimon.core.stores.domain import TenantRow
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy import func, select
@@ -30,6 +31,7 @@ class Lane:
     sessions: async_sessionmaker[AsyncSession]
     tenant_id: uuid.UUID
     account_id: uuid.UUID
+    tenant: TenantRow
 
 
 @pytest.fixture
@@ -42,13 +44,14 @@ async def lane(db_preflight: object, db_committing_engine: AsyncEngine) -> Async
     async with sessions.begin() as session:
         tenant = await make_tenant(session)
         account = await make_account(session, tenant=tenant)
-    yield Lane(sessions, tenant.id, account.id)
+    yield Lane(sessions, tenant.id, account.id, tenant)
 
 
 async def _card(
     lane: Lane,
     *,
     origin_id: uuid.UUID | None = None,
+    requester: uuid.UUID | None = None,
     digest: str = "d1",
     thread_id: str = "t1",
     expires_in: timedelta = timedelta(minutes=10),
@@ -59,7 +62,7 @@ async def _card(
             session,
             tenant_id=lane.tenant_id,
             origin_id=origin_id or uuid.uuid4(),
-            requester_account_id=lane.account_id,
+            requester_account_id=requester or lane.account_id,
             requester_platform_user_id="requester",
             platform="discord",
             channel_id="c1",
@@ -108,7 +111,9 @@ async def _wakes(lane: Lane, thread_id: str = "t1") -> int:
     return count or 0
 
 
-async def _consume(lane: Lane, card_id: uuid.UUID, digest: str = "d1"):
+async def _consume(
+    lane: Lane, card_id: uuid.UUID, digest: str = "d1", requester: uuid.UUID | None = None
+):
     async with lane.sessions.begin() as session:
         return await cards.consume(
             session,
@@ -116,6 +121,7 @@ async def _consume(lane: Lane, card_id: uuid.UUID, digest: str = "d1"):
             tool_name="send_message",
             args_digest=digest,
             executing_agent_id=_AGENT,
+            requester_account_id=requester or lane.account_id,
             now=datetime.now(UTC),
         )
 
@@ -171,6 +177,7 @@ async def test_press_after_the_provider_gave_up_still_runs_once_via_the_wake(lan
             platform="discord",
             thread_id="t1",
             executing_agent_id=_AGENT,
+            requester_account_id=lane.account_id,
         )
     assert [r.id for r in approved] == [created.row.id], "the wake finds the approved call"
     assert await _consume(lane, created.row.id) is not None, "the wake's call runs it"
@@ -193,8 +200,37 @@ async def test_n_parallel_calls_are_n_cards_run_by_the_first_wake(lane: Lane) ->
             platform="discord",
             thread_id="t1",
             executing_agent_id=_AGENT,
+            requester_account_id=lane.account_id,
         )
     assert {r.id for r in approved} == ids, "the first wake lists every approved call"
+
+
+async def test_a_wake_lists_and_runs_only_its_own_persons_approved_calls(lane: Lane) -> None:
+    """Another person's approved card is neither listed nor spent by this person's wake."""
+    async with lane.sessions.begin() as session:
+        other = await make_account(session, tenant=lane.tenant)
+    mine = await _card(lane, digest="m")
+    theirs = await _card(lane, digest="t", requester=other.id)
+    assert mine is not None and theirs is not None, "both cards recorded"
+    now = datetime.now(UTC)
+    await _press(lane, mine.row.id, now=now)
+    await _press(lane, theirs.row.id, now=now)
+    async with lane.sessions() as session:
+        approved = await cards.list_approved(
+            session,
+            tenant_id=lane.tenant_id,
+            platform="discord",
+            thread_id="t1",
+            executing_agent_id=_AGENT,
+            requester_account_id=lane.account_id,
+        )
+    assert [r.id for r in approved] == [mine.row.id], f"only my approved call: {approved}"
+    assert await _consume(lane, theirs.row.id, digest="t") is None, "not spent by my wake"
+    async with lane.sessions() as session:
+        kept = await cards.get_card(session, tenant_id=lane.tenant_id, card_id=theirs.row.id)
+    assert kept is not None and kept.status == "approved", f"theirs waits: {kept}"
+    taken = await _consume(lane, theirs.row.id, digest="t", requester=other.id)
+    assert taken is not None, "their own wake runs it"
 
 
 async def test_sweep_expires_unanswered_and_fails_stuck_executing(lane: Lane) -> None:
