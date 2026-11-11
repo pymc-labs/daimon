@@ -334,6 +334,18 @@ def check_backend(
 
 
 @dataclass(frozen=True)
+class ThreadBackend:
+    """A conversation's own model choice, between a channel pin and its agent.
+
+    `consent` is the agent's consent to run this conversation on another
+    provider (`thread_model_consents`); None runs it on Claude, the agent's source.
+    """
+
+    thread_id: str
+    consent: AgentBackendRevision | None
+
+
+@dataclass(frozen=True)
 class BackendActor:
     tenant_id: uuid.UUID
     account_id: uuid.UUID
@@ -1229,6 +1241,59 @@ class AgentBackendService:
                 settings,
             )
 
+    async def thread_consent(
+        self,
+        agent: BackendAgent,
+        target_backend: Provider | None,
+        model: str | None,
+        *,
+        expected_preview_digest: str,
+        accepted_drops: tuple[str, ...],
+    ) -> AgentBackendRevision:
+        """One conversation's consent to run this agent on `target_backend`; not stored here.
+
+        Checked as an agent change is, against the preview the person was shown. The
+        caller decides who may pick and stores the result with the conversation.
+        """
+        self._require_enabled()
+        if self._read_only:
+            raise AgentBackendRefused("source_unavailable")
+        target = None if target_backend == DEFAULT_BACKEND else target_backend
+        picked = picked_model(target, model)
+        async with self._sessions() as session:
+            current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
+            settings = AgentSettings.of(current).for_backend(target)
+            preview = await self._preview(session, agent, target, picked, settings)
+        if not preview.allowed:
+            raise AgentBackendRefused("backend_not_allowed", provider=target_backend)
+        consent = preview.drop_consent
+        if consent is None and target is not None:
+            # Claude runs the agent's own source; another provider needs its losses accepted.
+            raise AgentBackendRefused("source_unavailable", provider=target_backend)
+        if preview.digest != expected_preview_digest:
+            raise AgentBackendRefused("stale_preview", provider=target_backend)
+        if tuple(accepted_drops) != (consent.declared_drops if consent else ()):
+            raise AgentBackendRefused("drops_mismatch", provider=target_backend)
+        consent_json = consent.model_dump(mode="json") if consent is not None else None
+        return AgentBackendRevision.model_validate(
+            {
+                "tenant_id": agent.tenant_id,
+                "agent_id": agent.agent_id,
+                "local": current.local if current else 1,
+                "backend": target,
+                "model": picked,
+                "profile": settings.profile,
+                "requires": settings.facts().get("requires"),
+                "thread_mode": settings.thread_mode,
+                "agent_name": agent.name,
+                "preview_digest": preview.digest,
+                "digest": _revision_digest(agent, target, consent_json, picked, settings),
+                "previous_local": None,
+                "created_at": datetime.now(UTC),
+                **({"drop_consent": consent_json} if consent_json is not None else {}),
+            }
+        )
+
     async def read_selection(
         self,
         client: AsyncAnthropic,
@@ -1743,16 +1808,23 @@ async def resolve_turn_backend(
         Awaitable[None] | None,
     ]
     | None = None,
+    thread: ThreadBackend | None = None,
 ) -> tuple[ConfigRevision | None, bool, Literal["channel", "agent", "default"]]:
-    """Resolve and retain through the existing immutable channel revision namespace."""
+    """Resolve and retain through the existing immutable channel revision namespace.
+
+    Channel pin > `thread` (a conversation's model choice) > agent. A thread's
+    revision is stored with origin `thread` and runs as the agent's own ("agent").
+    """
     if not enabled or retained_revision == 0:
         return None, False, "default"
     if retained_revision is not None:
         retained = await mux_state.get_config_revision(session, channel, retained_revision)
         origin = await mux_state.config_origin(session, channel, retained_revision)
-        if retained is None or origin not in ("channel", "channel_clear", "agent"):
+        if retained is None or origin not in ("channel", "channel_clear", "agent", "thread"):
             raise AgentBackendRefused("stale_revision")
-        source: Literal["channel", "agent"] = "agent" if origin == "agent" else "channel"
+        source: Literal["channel", "agent"] = (
+            "agent" if origin in ("agent", "thread") else "channel"
+        )
         if source == "agent" and retained.backend == "selfhosted":
             raise AgentBackendRefused("selfhosted_requires_channel_configuration")
         return retained, retained.thread_mode == "shared", source
@@ -1771,6 +1843,13 @@ async def resolve_turn_backend(
     ):
         require_pin_meets_agent(override, setting)
         return override, ever_shared, "channel"
+    stored_origin, thread_id = "agent", None
+    if thread is not None:
+        if thread.consent is None:
+            return None, ever_shared, "default"
+        if (thread.consent.tenant_id, thread.consent.agent_id) != (tenant_id, agent.agent_id):
+            raise AgentBackendRefused("tenant_mismatch")
+        setting, stored_origin, thread_id = thread.consent, "thread", thread.thread_id
     agent_choice = revision_selection(setting)
     if agent_choice is None:
         return None, ever_shared, "default"
@@ -1778,6 +1857,8 @@ async def resolve_turn_backend(
     if selection.backend == "selfhosted":
         raise AgentBackendRefused("selfhosted_requires_channel_configuration")
     consent_revision = setting if setting is not None and setting.drop_consent is not None else None
+    if thread is not None and consent_revision is None:
+        raise AgentBackendRefused("re_confirm", detail="no_consent")
     if consent_revision is not None:
         if validate_origin is None:
             raise AgentBackendRefused("source_unavailable")
@@ -1798,7 +1879,7 @@ async def resolve_turn_backend(
         retained = await mux_state.get_config_revision(session, channel, retained_revision)
         if (
             retained is None
-            or await mux_state.config_origin(session, channel, retained_revision) != "agent"
+            or await mux_state.config_origin(session, channel, retained_revision) != stored_origin
             or retained.content_digest() != selection.content_digest()
         ):
             raise AgentBackendRefused("stale_revision")
@@ -1809,7 +1890,12 @@ async def resolve_turn_backend(
         return retained, ever_shared, "agent"
     for _ in range(3):
         effective = await mux_state.effective_revision(
-            session, channel, selection.content_digest(), "agent", agent_revision=consent_revision
+            session,
+            channel,
+            selection.content_digest(),
+            stored_origin,
+            agent_revision=consent_revision,
+            thread_id=thread_id,
         )
         if effective is not None:
             if validate_origin is not None:
@@ -1826,7 +1912,11 @@ async def resolve_turn_backend(
                 await checking
         try:
             await mux_state.put_config_revision(
-                session, effective, origin="agent", agent_revision=consent_revision
+                session,
+                effective,
+                origin=stored_origin,
+                agent_revision=consent_revision,
+                thread_id=thread_id,
             )
         except ConfigRevisionConflict:
             continue

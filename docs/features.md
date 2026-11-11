@@ -76,6 +76,7 @@ Where each feature can be set, and its default.
 | Video transcripts | `media` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Microsoft 365 | `microsoft_365` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Chart images in answers | `artifact_images` | Capability | On | ✓ | ✓ |  |  |  |  |
+| Other providers per conversation | `thread_providers` | Capability | Off | ✓ | ✓ | ✓ |  |  |  |
 | Ask a person | `support_escalation` | Capability | On | ✓ | ✓ |  |  |  | Needs setup by whoever runs Daimon |
 | GitHub access | `github` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Lead intake | `lead_intake` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
@@ -848,6 +849,18 @@ Charts the agent makes come back inside its answer to a connected app as picture
 | Levels | Deployment, Workspace |
 | Combines | Off above is a ceiling |
 | Deprecated | `DAIMON_ARTIFACTS__EMBED_IMAGES` |
+
+## Other providers per conversation
+
+Anyone who can change a conversation's model may pick an OpenAI or Gemini model for it. Off, only the agent's owner or an admin can.
+
+| | |
+| --- | --- |
+| Key | `thread_providers` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace, Agent |
+| Combines | Off above is a ceiling |
 
 ## Ask a person
 

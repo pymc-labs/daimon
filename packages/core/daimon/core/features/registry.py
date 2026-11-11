@@ -930,6 +930,22 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         legacy_env=("DAIMON_ARTIFACTS__EMBED_IMAGES",),
     ),
     FeatureSpec(
+        key="thread_providers",
+        name="Other providers per conversation",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("deployment", "workspace", "agent"),
+        binds="turn",
+        doc=(
+            "Anyone who can change a conversation's model may pick an OpenAI or Gemini model "
+            "for it. Off, only the agent's owner or an admin can."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_SETTINGS,
+    ),
+    FeatureSpec(
         key="support_escalation",
         name="Ask a person",
         category="capabilities",

@@ -7,10 +7,11 @@ model. Admission applies it (`apply_thread_model`), so the session check sees
 a different desired model and replaces the session the way it does when an
 agent's model is edited, carrying the work over.
 
-Only the Anthropic backend can take it: a Managed Agents session override names
-a model (and speed), never an effort, so there is no effort choice. A choice
-that is no longer allowed, or a channel that runs another backend, falls back
-to the agent's own model and the turn says so (`MODEL_FALLBACK_NOTICE`).
+A Claude pick is a Managed Agents session override: it names a model (and speed),
+never an effort. A pick on another provider, or Claude for an agent that runs
+elsewhere, runs through `thread_backend` with the consent `thread_model_switch`
+stored. A choice that is no longer allowed falls back to the agent's own model
+and the turn says so (`MODEL_FALLBACK_NOTICE`).
 """
 
 from __future__ import annotations
@@ -22,7 +23,9 @@ from typing import Final
 
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsModelConfig
 from daimon.core.admin_actions import DelegatedAction
+from daimon.core.agent_model_names import model_name
 from daimon.core.authz import Action, authorize, build_subject, build_turn_place
+from daimon.core.channel_backend import ThreadBackend
 from daimon.core.constants import MODEL_DISPLAY_NAMES
 from daimon.core.errors import UserFacingError
 from daimon.core.membership import MembershipResolver
@@ -31,9 +34,13 @@ from daimon.core.models_catalog import is_priced_claude_model
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.thread_models import (
     clear_thread_model,
-    get_thread_model,
+    get_thread_choice,
+    get_thread_consent,
     set_thread_model,
 )
+from mux.contracts.config import DEFAULT_BACKEND
+from mux.contracts.ids import ModelRef
+from mux.profiles import backend_selection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # What someone can pick, by the word they would use. "default" is the agent's own.
@@ -126,12 +133,19 @@ async def describe_thread_model(
     thread_id: str,
 ) -> str:
     async with sessionmaker() as session:
-        model_id = await get_thread_model(
+        choice = await get_thread_choice(
             session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
         )
-    if model_id is None:
+    if choice is None:
         return "This conversation runs on the agent's own model."
-    return f"This conversation runs on {model_label(model_id)}."
+    return f"This conversation runs on {chosen_label(choice)}."
+
+
+def chosen_label(choice: ModelRef) -> str:
+    """A chosen model's name; another provider's model names its provider too."""
+    if choice.provider == DEFAULT_BACKEND:
+        return model_label(choice.id)
+    return model_name(choice)
 
 
 async def may_choose_thread_model(
@@ -191,6 +205,51 @@ class AppliedThreadModel:
     """A choice was kept but can't run here, so the agent's own model does."""
 
 
+def _consented(model: ModelRef, provider: str | None, picked: str | None) -> bool:
+    return model.provider == provider and model.id == (
+        picked or backend_selection(model.provider).model
+    )
+
+
+async def thread_backend(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    conversation_id: str | None,
+    agent_id: uuid.UUID,
+    daimon_record: bool,
+) -> ThreadBackend | None:
+    """This conversation's choice as `resolve_turn_backend`'s thread tier, if it has one.
+
+    A pick off the agent's provider runs only with this agent's consent for it, so a
+    Claude pick moves a non-Claude agent only when one was confirmed. Without one the
+    turn runs the agent's own provider and says so.
+    """
+    if conversation_id is None:
+        return None
+    choice = await get_thread_choice(
+        session, tenant_id=tenant_id, platform=platform, thread_id=conversation_id
+    )
+    if choice is None:
+        return None
+    consent = await get_thread_consent(
+        session,
+        tenant_id=tenant_id,
+        platform=platform,
+        thread_id=conversation_id,
+        agent_id=agent_id,
+    )
+    if consent is None:
+        return None
+    if choice.provider == DEFAULT_BACKEND:
+        claude = consent.backend in (None, DEFAULT_BACKEND) and not daimon_record
+        return ThreadBackend(conversation_id, None) if claude else None
+    if not _consented(choice, consent.backend, consent.model):
+        return None
+    return ThreadBackend(conversation_id, consent)
+
+
 async def apply_thread_model(
     session: AsyncSession,
     *,
@@ -199,16 +258,24 @@ async def apply_thread_model(
     platform: str,
     conversation_id: str | None,
     anthropic_backend: bool,
+    thread_applied: bool = False,
 ) -> AppliedThreadModel:
-    """The agent a turn in this conversation runs, read fresh for every turn."""
+    """The agent a turn in this conversation runs, read fresh for every turn.
+
+    `thread_applied` says the turn already runs another provider's pick through
+    `thread_backend`; such a pick is never a session override.
+    """
     unchanged = AppliedThreadModel(agent=agent, model_override=None, fell_back=False)
     if conversation_id is None:
         return unchanged
-    model_id = await get_thread_model(
+    choice = await get_thread_choice(
         session, tenant_id=tenant_id, platform=platform, thread_id=conversation_id
     )
-    if model_id is None:
+    if choice is None:
         return unchanged
+    if choice.provider != DEFAULT_BACKEND:
+        return AppliedThreadModel(agent=agent, model_override=None, fell_back=not thread_applied)
+    model_id = choice.id
     if not anthropic_backend or not is_priced_claude_model(model_id):
         return AppliedThreadModel(agent=agent, model_override=None, fell_back=True)
     return AppliedThreadModel(

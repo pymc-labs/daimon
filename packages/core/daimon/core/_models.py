@@ -2725,6 +2725,36 @@ class ThreadModelSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # The model's provider; null is a Claude model chosen before providers could be (0195).
+    provider: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ThreadModelConsent(Base):
+    """An agent's consent to run one conversation on its chosen model's provider.
+
+    One row per (tenant, platform, thread, agent): `revision` is the agent's
+    backend revision with the thread's provider, model and loss consent, and
+    `digest` pins it for the channel revisions that reference it (0195).
+    """
+
+    __tablename__ = "thread_model_consents"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "tenant_id", "platform", "thread_id", "agent_id", name="pk_thread_model_consents"
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    platform: Mapped[str] = mapped_column(Text)
+    thread_id: Mapped[str] = mapped_column(Text)
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    revision: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    digest: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class ThreadAutoResponse(Base):

@@ -1490,7 +1490,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
     )
     setting = None
-    from daimon.core.stores import agent_backends, mux_state
+    from daimon.core.stores import agent_backends, mux_state, thread_models
 
     async with asyncio.timeout(
         remaining_s(request.deadline, now=request.now(), refuse_expired=True)
@@ -1510,8 +1510,19 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
                         )
                         is None
                     ):
-                        setting = await agent_backends.current(
-                            session, request.tenant_id, agent_id, persisted=True
+                        thread_id = request.admission.backend_thread_id
+                        setting = (
+                            await thread_models.get_thread_consent(
+                                session,
+                                tenant_id=request.tenant_id,
+                                platform=request.platform,
+                                thread_id=thread_id,
+                                agent_id=agent_id,
+                            )
+                            if thread_id is not None
+                            else await agent_backends.current(
+                                session, request.tenant_id, agent_id, persisted=True
+                            )
                         )
                     if setting != provisional or setting is None or setting.drop_consent is None:
                         raise AgentBackendRefused("re_confirm", detail="provisional_mismatch")

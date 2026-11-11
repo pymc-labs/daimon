@@ -157,6 +157,7 @@ TAIL = (
     "0192_host_call_cards",
     "0193_agent_record_versions",
     "0194_connector_tokens",
+    "0195_thread_model_consents",
 )
 HEAD = TAIL[-1]
 
@@ -207,6 +208,7 @@ AFTER_MERGE_COLUMNS = {
     ("turn_origins", "helper_of"),
     ("turn_origins", "serves_helpers"),
     ("mcp_tokens", "client"),
+    ("thread_model_settings", "provider"),
 }
 
 

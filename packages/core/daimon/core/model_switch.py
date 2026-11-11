@@ -117,7 +117,8 @@ def panel_actor(*, tenant_id: uuid.UUID, account_id: uuid.UUID, subject: Subject
     )
 
 
-def _current(agent: BackendAgent, backend: Provider | None, model: str | None) -> ModelRef:
+def current_model(agent: BackendAgent, backend: Provider | None, model: str | None) -> ModelRef:
+    """The model an agent runs on, from its backend revision's provider and model."""
     if backend in (None, DEFAULT_BACKEND):
         return ModelRef(provider=DEFAULT_BACKEND, id=agent.model or DEFAULT_AGENT_MODEL)
     picked = model or backend_selection(backend).model
@@ -136,7 +137,7 @@ async def read_picker(
     except AgentBackendRefused:
         return None
     revision = await service.current(agent)
-    current = _current(
+    current = current_model(
         agent,
         revision.backend if revision is not None else None,
         revision.model if revision is not None else None,
@@ -317,10 +318,12 @@ def switch_fact_lines(
     *,
     agent_name: str | None,
     escape: Callable[[str], str] = str,
+    applies_to: str | None = None,
 ) -> tuple[str, ...]:
     """The preview as lines every panel shows; `escape` makes names safe for its markup.
 
     A pick on the same provider has no losses to list, so it shows its price only.
+    `applies_to` replaces the line on which conversations follow, for a narrower pick.
     """
     lines = [f"Model: {escape(switch.label)}"]
     preview = switch.preview
@@ -340,7 +343,9 @@ def switch_fact_lines(
         lines.append(f"{label}: {shown}")
     lines.append(escape(preview.cost_line))
     lines.append(
-        conversations_follow_line(agent_name, switch.model.provider, before=switch.before)
+        f"Applies to: {applies_to}"
+        if applies_to is not None
+        else conversations_follow_line(agent_name, switch.model.provider, before=switch.before)
         + " Channel settings still apply."
     )
     if not preview.allowed:

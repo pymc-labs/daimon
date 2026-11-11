@@ -125,7 +125,7 @@ from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.shared_channels import is_channel_shared, mark_channel_shared
 from daimon.core.stores.thread_sessions import get_thread_session_at
-from daimon.core.thread_models import apply_thread_model, conversation_key
+from daimon.core.thread_models import apply_thread_model, conversation_key, thread_backend
 from daimon.core.thread_release import apply_thread_release, release_due, release_now
 from daimon.core.turn.approvals import daimon_rule_set_for
 from daimon.core.turn.deps import TurnDeps
@@ -243,6 +243,8 @@ async def _thread_follow(
     bound_model: str | None,
     shared: bool,
     enabled_backends: tuple[Provider, ...],
+    thread: channel_backend.ThreadBackend | None = None,
+    retained_local: int | None = None,
 ) -> ThreadFollow | None:
     """Whether this conversation must follow its agent's switch (M03).
 
@@ -255,12 +257,19 @@ async def _thread_follow(
     here, the slot moves on this message. `agent_ma_id` is the Anthropic source
     agent admission resolved, never a provider's own agent id. A shared
     conversation never moves ("stays"). Nothing is written here.
+
+    `thread`, the conversation's own model choice, stands in for the agent's.
+    A slot bound by an earlier choice (`retained_local`) that no longer holds
+    (cleared, changed, or its consent replaced) moves even to the same model.
     """
     from daimon.core.ma_identity import derive_agent_uuid
     from mux.profiles import backend_selection
 
-    preference = await channel_backend.current_agent_backend(
-        session, tenant_id, derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent_ma_id)
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent_ma_id)
+    preference = (
+        thread.consent
+        if thread is not None
+        else await channel_backend.current_agent_backend(session, tenant_id, agent_id)
     )
     provider: Provider = (
         preference.backend
@@ -270,9 +279,23 @@ async def _thread_follow(
     if provider == LOOP.provider:
         return None
     model = _effective_model(provider, preference.model if preference is not None else None)
-    if bound_provider == provider and (
-        provider == MANAGED_AGENTS.provider
-        or _effective_model(bound_provider, bound_model) == model
+    pin = (
+        await mux_state.config_thread_pin(session, channel, retained_local)
+        if retained_local
+        else None
+    )
+    still_chosen = pin is None or (
+        thread is not None
+        and thread.consent is not None
+        and pin == (thread.thread_id, thread.consent.digest)
+    )
+    if (
+        still_chosen
+        and bound_provider == provider
+        and (
+            provider == MANAGED_AGENTS.provider
+            or _effective_model(bound_provider, bound_model) == model
+        )
     ):
         return None
     # Only toward a provider that can run here: an unavailable preference never
@@ -416,6 +439,9 @@ class Admission:
     backend_agent_revision: AgentBackendRevision | None = field(
         default=None, compare=False, repr=False
     )
+    # The conversation whose own model choice selected `backend_revision`; its
+    # consent is `backend_agent_revision`. None when the agent's own choice did.
+    backend_thread_id: str | None = field(default=None, compare=False, repr=False)
     # The model this conversation's people chose (`daimon.core.thread_models`),
     # already in `agent`; the session is created with it. None runs the agent's own.
     model_override: str | None = None
@@ -1437,6 +1463,16 @@ async def _admit_gates(
     stale_switch: Provider | None = None
     backend_switch_stale: Provider | None = None
 
+    # This conversation's own model choice, as the thread tier (`resolve_preference`).
+    thread_choice: channel_backend.ThreadBackend | None = None
+
+    def _thread_of(agent_revision: AgentBackendRevision | None) -> str | None:
+        """The conversation whose consent `agent_revision` is, if the thread tier's."""
+        chosen = thread_choice
+        if chosen is None or chosen.consent is None or agent_revision is not chosen.consent:
+            return None
+        return chosen.thread_id
+
     async def verify_origin(
         selection: ResolvedBackend,
         origin: Literal["channel", "agent"],
@@ -1478,6 +1514,7 @@ async def _admit_gates(
             backend_revision=revision,
             backend_revision_origin=origin,
             backend_agent_revision=agent_revision,
+            backend_thread_id=_thread_of(agent_revision),
         )
         request = ProviderPreparationRequest(
             deps=deps,
@@ -1526,10 +1563,22 @@ async def _admit_gates(
     async def resolve_preference() -> None:
         nonlocal backend_revision, backend_ever_shared, backend, backend_revision_origin
         nonlocal backend_footer_profile, source_agent, backend_switch_stale
-        nonlocal retained_revision, backend_follow, follow_generation
+        nonlocal retained_revision, backend_follow, follow_generation, thread_choice
         if selfhosted:
             return
         bound_before = retained_revision if backend_revision is None else None
+        if selection_enabled and channel is not None and not configured_channel:
+            async with deps.sessionmaker() as thread_session:
+                thread_choice = await thread_backend(
+                    thread_session,
+                    tenant_id=tenant_id,
+                    platform=platform,
+                    conversation_id=conversation_key(
+                        channel_id=channel_id, thread_id=thread_id, is_dm=is_dm
+                    ),
+                    agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id),
+                    daimon_record=daimon_record,
+                )
         if follow_eligible and channel is not None and retained_revision is not None:
             # M03: the conversation follows its (Anthropic source) agent's switch.
             async with deps.sessionmaker() as follow_session:
@@ -1546,6 +1595,8 @@ async def _admit_gates(
                     bound_model=backend_revision.model if backend_revision is not None else None,
                     shared=retained_shared,
                     enabled_backends=tuple(policy.enabled_backends),
+                    thread=thread_choice,
+                    retained_local=retained_revision,
                 )
             if backend_follow is not None and backend_follow.kind == "moved":
                 # Select as released now; the release is written only once this
@@ -1592,6 +1643,7 @@ async def _admit_gates(
                             validate_origin=(
                                 verify_origin if deps.agent_backends else _require_backend_origin
                             ),
+                            thread=thread_choice,
                         )
                         # Preparation uses another transaction. Publish the immutable
                         # effective revision and its origin before that transaction.
@@ -1771,6 +1823,15 @@ async def _admit_gates(
     channel_skills = (*platform_skills, *channel_skills)
 
     # The model this conversation's people chose, read fresh for every turn.
+    backend_thread_id = _thread_of(backend_agent_revision) if backend_revision else None
+    chosen = thread_choice.consent if thread_choice is not None else None
+    thread_applied = (
+        chosen is not None
+        and backend_revision is not None
+        and backend_revision.backend == chosen.backend
+        and _effective_model(backend_revision.backend, backend_revision.model)
+        == _effective_model(backend_revision.backend, chosen.model)
+    )
     async with deps.sessionmaker() as session:
         thread_model = await apply_thread_model(
             session,
@@ -1781,6 +1842,7 @@ async def _admit_gates(
                 channel_id=channel_id, thread_id=thread_id, is_dm=is_dm
             ),
             anthropic_backend=backend_revision is None or backend_revision.model is None,
+            thread_applied=thread_applied,
         )
     agent = thread_model.agent
     mark("thread_model")
@@ -1792,6 +1854,7 @@ async def _admit_gates(
         backend_revision_origin=backend_revision_origin,
         backend_counterpart=backend_counterpart,
         backend_agent_revision=backend_agent_revision,
+        backend_thread_id=backend_thread_id,
         backend_footer_profile=backend_footer_profile,
         backend_follow=backend_follow,
         backend_ever_shared=backend_ever_shared,

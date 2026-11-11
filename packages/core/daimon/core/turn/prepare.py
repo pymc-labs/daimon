@@ -818,9 +818,9 @@ async def bind_session(
                         persisted_origin = await mux_state.config_origin(
                             session, shared.revision.channel, shared.revision.local
                         )
-                    if persisted_origin not in ("channel", "channel_clear", "agent"):
+                    if persisted_origin not in ("channel", "channel_clear", "agent", "thread"):
                         raise AdmissionDenied(reason="backend_unsupported")
-                    origin = "agent" if persisted_origin == "agent" else "channel"
+                    origin = "agent" if persisted_origin in ("agent", "thread") else "channel"
                 admission = replace(
                     admission,
                     shared_owner=shared.owner,
