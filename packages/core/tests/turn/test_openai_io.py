@@ -5,10 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from datetime import date
+from decimal import Decimal
 from uuid import uuid4
 
 import httpx
 import pytest
+from daimon.core.pricing import ProviderPrice
+from daimon.core.turn.host_spend_cap import SpendGuard, priced_cents
 from daimon.core.turn.io import TurnConnectionLost
 from daimon.core.turn.openai_io import OpenAITurnIO
 from daimon.core.turn.reducers import apply
@@ -464,3 +468,95 @@ async def test_eof_without_explicit_root_outcome_checkpoints_gap_and_reconnects(
         await source.__anext__()
     assert persistence.gaps == 1 and wire.sources[-1].closed
     assert not persistence.records
+
+
+def _price(*, cache_write: Decimal | None = Decimal(10)) -> ProviderPrice:
+    return ProviderPrice(
+        "openai",
+        "gpt-6-luna",
+        date(2020, 1, 1),
+        Decimal(1000),
+        Decimal(1000),
+        Decimal(1),
+        cache_write,
+    )
+
+
+async def _capped(host, *, limit_cents: int, clock=lambda: 0.0):
+    _, backend, wire, persistence = host
+    told: list[str] = []
+
+    async def notify() -> None:
+        told.append("notified")
+
+    guard = SpendGuard(limit_cents=limit_cents, price=_price(), notify=notify, clock=clock)
+    io = OpenAITurnIO(
+        backend, SCOPE, SESSION, persistence=persistence, root_turn_id="root", spend_guard=guard
+    )
+    wire.turns.append(turn("root", "in_progress"))
+    wire.running = True
+    wire.live = [
+        wire.event(
+            "turn.item.done",
+            "answer-event",
+            turn_id="root",
+            item=message("answer", "root", "current answer"),
+        )
+    ]
+    return io, wire, persistence, told
+
+
+@pytest.mark.asyncio
+async def test_a_turn_over_the_spend_limit_is_cancelled_and_told(host):
+    from daimon.core.turn.driver import InterruptedDuringRecovery
+
+    io, wire, persistence, told = await _capped(host, limit_cents=1)
+    # 100 input and 20 output tokens at $1000/M is $0.12 = 12 cents.
+    source = await io.open_stream(read_timeout_s=2)
+    with pytest.raises(InterruptedDuringRecovery):
+        await source.__anext__()
+    assert told == ["notified"]
+    assert persistence.operations[-1][0] == "cancel"
+    assert persistence.records[-1].payload["outcome"] == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_a_turn_under_the_spend_limit_runs_on(host):
+    io, wire, persistence, told = await _capped(host, limit_cents=100)
+    source = await io.open_stream(read_timeout_s=2)
+    await source.__anext__()
+    await source.close()
+    assert told == [] and not persistence.operations
+
+
+@pytest.mark.asyncio
+async def test_the_guard_polls_the_meter_at_most_once_an_interval():
+    now, reads = [0.0], []
+
+    async def read():
+        reads.append(now[0])
+        return ()
+
+    async def notify() -> None: ...
+
+    guard = SpendGuard(limit_cents=1, price=_price(), notify=notify, clock=lambda: now[0])
+    for now[0] in (0.0, 1.0, 4.9, 5.0, 9.0):
+        assert await guard.exceeded(read) is False
+    assert reads == [0.0, 5.0]
+    with pytest.raises(ValueError):
+        SpendGuard(limit_cents=0, price=_price(), notify=notify)
+
+
+@pytest.mark.asyncio
+async def test_usage_is_priced_without_cache_writes_and_the_latest_revision_wins(host):
+    io, _, wire, persistence = host
+    io = OpenAITurnIO(io._backend, SCOPE, SESSION, persistence=persistence, root_turn_id="root")
+    wire.turns.append(turn("root"))
+    observed = await io.replay_usage()
+    assert observed[0].input_cache_write_tokens is None
+    spent = priced_cents(observed, _price())
+    assert spent == priced_cents(observed, _price(cache_write=None))
+    assert spent == priced_cents([*observed, observed[0]], _price())
+    assert (
+        priced_cents([observed[0].model_copy(update={"completeness": "unknown"})], _price()) is None
+    )

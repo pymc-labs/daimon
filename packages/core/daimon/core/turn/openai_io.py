@@ -22,6 +22,7 @@ from anthropic.types.beta.sessions import (
 )
 from daimon.core.errors import TurnError
 from daimon.core.ma import REPLAY_TIMEOUT_S
+from daimon.core.turn.host_spend_cap import SpendGuard
 from daimon.core.turn.io import TurnConnectionLost, TurnEvent, TurnStream
 from daimon.core.turn.openai_codec import PROFILE, PROFILES, display_batch
 from daimon.core.turn.openai_state import journal_source
@@ -204,6 +205,7 @@ class OpenAITurnIO:
             [ResourceRef, tuple[str, ...]], Awaitable[tuple[tuple[str, ...], bool]]
         ]
         | None = None,
+        spend_guard: SpendGuard | None = None,
     ) -> None:
         if (
             backend.capabilities().profile_id not in PROFILES
@@ -218,6 +220,7 @@ class OpenAITurnIO:
         self._backend, self._scope, self._session = backend, scope, session
         self._persistence = persistence
         self._baseline_loader = baseline_loader
+        self._spend_guard = spend_guard
         self._resuming = False
         self._root = root_turn_id
         self._prior_roots: set[str] | None = None
@@ -340,7 +343,32 @@ class OpenAITurnIO:
             self._buffered.append(event)
             return []
         pending, self._buffered = self._buffered, []
-        return [frame for value in (*pending, event) for frame in self._frames(value)]
+        frames = [frame for value in (*pending, event) for frame in self._frames(value)]
+        await self._enforce_spend_limit(event)
+        return frames
+
+    async def _enforce_spend_limit(self, event: Event) -> None:
+        """Cancel the root once its priced usage passes the row's limit (host-side cap)."""
+        guard = self._spend_guard
+        if (
+            guard is None
+            or self._root is None
+            or self._terminal is not None
+            or event.turn_id != self._root
+            or event.type == "session.turn_ended"
+        ):
+            return
+        try:
+            over = await guard.exceeded(self.replay_usage)
+        except (ProviderError, TurnConnectionLost, TimeoutError):
+            return  # an unreadable meter never ends a turn; the daily cap still holds
+        if not over:
+            return
+        await self.interrupt(timeout_s=30.0)
+        await guard.notify()
+        from daimon.core.turn.driver import InterruptedDuringRecovery
+
+        raise InterruptedDuringRecovery(phase="replay")
 
     async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
         inputs = _inputs(events)

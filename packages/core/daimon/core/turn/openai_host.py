@@ -32,6 +32,7 @@ from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import reauthorize
 from daimon.core.turn.carry_over import carry_on_adoption, register_session_reader
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.host_spend_cap import SpendGuard
 from daimon.core.turn.io import TurnCodecRequest, TurnIO, register_turn_codec
 from daimon.core.turn.openai_codec import PROFILE, PROFILES
 from daimon.core.turn.openai_io import OpenAITurnIO
@@ -103,6 +104,8 @@ class OpenAIHostRuntime(TurnRuntime):
     mcp_secrets: MCPSecretResolver | None = field(default=None, kw_only=True)
     price: ProviderPrice | None = None
     infrastructure: Callable[[UsageObservation], Awaitable[Decimal | None]] = unknown_infrastructure
+    #: Enforces the row's spend limit host-side; set when the profile has no native cap.
+    spend_guard: SpendGuard | None = field(default=None, kw_only=True)
 
 
 def runtime_for(runtime: TurnRuntime | None, revision: ConfigRevision | None) -> OpenAIHostRuntime:
@@ -188,7 +191,7 @@ def _backend(request: TurnBackendRequest) -> TurnBackend:
 
 
 def _codec(request: TurnCodecRequest) -> TurnIO:
-    runtime_for(request.runtime, request.config)
+    runtime = runtime_for(request.runtime, request.config)
     active = request.persistence
     if active is None or current_persistence.get() is not active:
         raise ScopeViolation(request.session.id, "OpenAI codec requires an active persisted turn")
@@ -199,6 +202,7 @@ def _codec(request: TurnCodecRequest) -> TurnIO:
         request.session,
         persistence=active,
         baseline_loader=invocation_baseline,
+        spend_guard=runtime.spend_guard,
     )
 
 
@@ -348,7 +352,7 @@ async def prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
 async def _check_daily_model_cap(
     request: ProviderPreparationRequest, runtime: OpenAIHostRuntime, revision: ConfigRevision
 ) -> None:
-    """OpenAI sessions carry no native spend limit on this project: the daily model cap."""
+    """The daily model cap, checked as a turn starts; a row's own limit is enforced mid-turn."""
     from daimon.core.turn.daily_model_cap import check_daily_model_cap
 
     await check_daily_model_cap(

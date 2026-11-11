@@ -26,6 +26,7 @@ from daimon.core.provider_keys import DEFAULT_KEY_ENV, provider_key_present
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.host_spend_cap import HOST_SPEND_CAP_NOTICE, SpendGuard
 from daimon.core.turn.openai_codec import PROFILE, PROFILES
 from daimon.core.turn.openai_environment import EnvironmentPort
 from daimon.core.turn.openai_host import OpenAIHostRuntime, driver, register_host
@@ -537,9 +538,27 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         return row
 
     # A row's limit compiles to `spend_control` only where the project honours it. Without
-    # it, a turn is bounded by admission (balance, user and channel caps), the per-model
-    # daily cap (`openai_host._check_daily_model_cap`) and its deadline. Astra included.
+    # it, the host enforces the limit while the turn streams (`host_spend_cap`); admission,
+    # the per-model daily cap and the deadline bound it too. Astra included.
     native_limit = spend_limit if native_cap else None
+    price = provider_prices(deployment.profile).get((revision.backend, revision.model))
+
+    async def notify_spend_cap() -> None:
+        from daimon.core.stores.agent_notices import record_agent_notices
+
+        async with request.deps.sessionmaker.begin() as db:
+            await record_agent_notices(
+                db,
+                tenant_id=request.tenant_id,
+                platform=request.platform,
+                thread_id=request.thread_id,
+                agent_id=request.admission.agent.id,
+                texts=(HOST_SPEND_CAP_NOTICE,),
+            )
+
+    guard = None
+    if spend_limit is not None and not native_cap and price is not None:
+        guard = SpendGuard(limit_cents=spend_limit, price=price, notify=notify_spend_cap)
     shared = request.admission.shared_owner is not None
     runtime = OpenAIHostRuntime(
         transport_factory=transport,
@@ -548,7 +567,8 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         journal=OpenAIRecoveryJournal(),
         usage_store=OpenAIUsageRevisions(),
         account_scope_id=deployment.project,
-        price=provider_prices(deployment.profile).get((revision.backend, revision.model)),
+        price=price,
+        spend_guard=guard,
         # A conversation-only session runs no container: its usage settles at $0
         # infrastructure. A persistent workspace's container cost stays unknown.
         session_plan=plan,
