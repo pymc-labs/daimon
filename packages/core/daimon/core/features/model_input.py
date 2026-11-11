@@ -8,10 +8,10 @@ from typing import Any, Final, cast
 
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.agent_create_params import Tool
-from daimon.core.capability_tools import CAPABILITY_KEYS, CAPABILITY_TOOLS
+from daimon.core.capability_tools import CAPABILITY_KEYS
 from daimon.core.features.registry import BUILTIN_TOOLS, limit_int
 from daimon.core.features.snapshot import FeatureSnapshot
-from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
+from daimon.core.features.tool_gate import gated_tools, hides_tools
 
 TOOL_KEYS: Final[tuple[str, ...]] = tuple(f"tool.{tool}" for tool in BUILTIN_TOOLS)
 SESSION_KEYS: Final[tuple[str, ...]] = (
@@ -111,22 +111,16 @@ class SessionToolset:
             builtins[tool] = found.on
         memory = features.features.get("repo_memory")
         env = features.features.get("agent_env_file")
-        # Without the setup, or Off and locked at the deployment, no memory tools are registered.
-        hides_memory = (
-            memory is not None and not memory.on and memory.tier not in ("default", "deployment")
-        )
         return cls(
             daimon_tools=not isolated,
             builtins=builtins,
-            repo_memory=not hides_memory,
+            repo_memory=memory is None or not hides_tools(memory),
             memory_on=memory is not None and memory.on,
             env_file=env is None or env.on,
             off_capabilities=frozenset(
                 key
                 for key in CAPABILITY_KEYS
-                if (cap := features.features.get(key)) is not None
-                and not cap.on
-                and (cap.tier != "default" or cap.unavailable in (None, "requires"))
+                if (cap := features.features.get(key)) is not None and hides_tools(cap)
             ),
         )
 
@@ -147,8 +141,8 @@ class SessionToolset:
     @property
     def hidden_daimon_tools(self) -> frozenset[str]:
         """Daimon tools this place turns off on the session's `daimon-mcp` toolset."""
-        hidden: frozenset[str] = frozenset() if self.repo_memory else REPO_MEMORY_TOOLS
-        return hidden.union(*(CAPABILITY_TOOLS[key] for key in self.off_capabilities))
+        memory = () if self.repo_memory else ("repo_memory",)
+        return gated_tools((*self.off_capabilities, *memory))
 
     def apply_builtins(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """`tools` with the overrides applied; turning off a tool the agent lacks adds nothing."""
