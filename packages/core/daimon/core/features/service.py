@@ -492,6 +492,15 @@ def _locked_above(
     )
 
 
+def _locked_here(spec: FeatureSpec, place: FeaturePlace, tier: Tier) -> ChannelChangeRefused:
+    return _refused(
+        f"{spec.name} is locked for {where(tier, place.platform)}. "
+        f"Only {admin_word(place.platform)} can change it.",
+        "locked_here",
+        "forbidden",
+    )
+
+
 def _loosens(spec: FeatureSpec, after: TierSetting, above: ResolvedFeature) -> bool:
     """A write that resolution would override: the stricter of a guardrail, an Off capability
     turned back on, a limit raised above the one in force above it. Defaults decide nothing."""
@@ -585,14 +594,24 @@ async def _write_in(
     after: TierSetting,
     place: FeaturePlace,
     expected: Expected[str] | None,
+    *,
+    check_own_lock: bool = True,
 ) -> TierSetting:
-    """One tier's write in the caller's transaction: the lock check, the row, the record."""
+    """One tier's write in the caller's transaction: the lock checks, the row, the record.
+    A row already locked at this tier is only changed by someone who may lock; callers that
+    have checked their admin themselves pass `check_own_lock=False`."""
     tier = after.tier
     await lock_tenant(session, place.tenant_id)  # the `expected` check below is then atomic
     values = await _values_at(session, settings, spec, place)
     before = next((s for s in _own(spec, place, values) if s.tier == tier), TierSetting(tier))
     if expected is not None and expected.value != before.text:
         raise StaleChannelValue(spec.key, before.text)
+    if (
+        check_own_lock
+        and before.locked
+        and not await may_change(actor, spec, tier, locked=True, agent_id=place.agent_id)
+    ):
+        raise _locked_here(spec, place, tier)
     above = resolve_above(spec, values, tier)
     if above.locked and after.value not in (DEFAULT, above.value):
         raise _locked_above(spec, above, place, tier)
@@ -656,7 +675,14 @@ async def set_workspace_feature(
 
     actor = FeatureActor(tenant_id, account_id, surface, None, _nobody)
     return await _write_in(
-        session, settings, actor, FEATURES[key], TierSetting("workspace", value), place, None
+        session,
+        settings,
+        actor,
+        FEATURES[key],
+        TierSetting("workspace", value),
+        place,
+        None,
+        check_own_lock=False,
     )
 
 
