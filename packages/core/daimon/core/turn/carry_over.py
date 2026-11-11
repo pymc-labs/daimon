@@ -7,19 +7,25 @@ port, and starts with the framing a binding replacement uses. Managed Agents
 turns write no slot binding, so their conversation is found by thread session
 row. A session that cannot be read, or a slot released before refs were kept,
 gets the lost-workspace framing. Old sessions are left as they are.
+
+A move to Managed Agents carries files too: they are uploaded before, and
+mounted on, the session that was just created (`carry_into_managed_agents`).
 """
 
 from __future__ import annotations
 
 import contextlib
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 
 import structlog
+from daimon.core.channel_backend import channel_ref
 from daimon.core.errors import DaimonError
 from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref
 from daimon.core.stores.thread_sessions import get_thread_session_at
+from daimon.core.turn.admission import Admission
 from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.prepare import ContinuityOutcome, ProviderPreparationRequest
 from daimon.core.turn.replace_binding import (
@@ -30,7 +36,7 @@ from daimon.core.turn.replace_binding import (
     read_turns,
 )
 from mux.contracts.config import ConfigRevision
-from mux.contracts.ids import Scope
+from mux.contracts.ids import ChannelRef, Scope
 from mux.contracts.ports import Artifacts
 from mux.contracts.resources import ProviderBinding, ResourceBinding
 from mux.errors import MuxError
@@ -53,6 +59,17 @@ def register_session_reader(profile: str, reader: SessionReader, *, fallback: bo
     if fallback and profile in _READERS:
         return
     _READERS[profile] = reader
+
+
+def carry_over_channel(
+    admission: Admission, *, tenant_id: uuid.UUID, platform: str
+) -> ChannelRef | None:
+    """The channel a Managed Agents turn's slot hangs off; Claude default has no revision."""
+    if admission.backend_revision is not None:
+        return admission.backend_revision.channel
+    if admission.origin_channel_id is None:
+        return None
+    return channel_ref(tenant_id, platform, admission.origin_channel_id)
 
 
 @dataclass(frozen=True)
@@ -239,3 +256,49 @@ async def carry_on_adoption(
         agent_name=agent_name,
         target_artifacts=target_artifacts,
     )
+
+
+async def carry_into_managed_agents(
+    request: ProviderPreparationRequest,
+    *,
+    store: StateStore,
+    slot: Slot,
+    session_id: str,
+    model_id: str,
+    agent_name: str,
+) -> CarriedOver | None:
+    """`carry_on_adoption` for a just-created Managed Agents session, files mounted on it."""
+    client = request.deps.anthropic
+    target = managed_agents(
+        client, scope=request.scope, resources=frozenset({("session", session_id)})
+    )
+    carried = await carry_on_adoption(
+        request,
+        store=store,
+        slot=slot,
+        model_id=model_id,
+        agent_name=agent_name,
+        target_artifacts=target.artifacts,
+    )
+    if carried is None or not carried.mounts:
+        return carried
+    files = frozenset(
+        ("file", mount.resource.id) for mount in carried.mounts if mount.resource is not None
+    )
+    mounting = managed_agents(
+        client,
+        scope=request.scope,
+        resources=frozenset({("session", session_id), *files}),
+    )
+    session = resource_ref(mounting, "session", session_id, scope=request.scope)
+    mounted: list[ResourceBinding] = []
+    for mount in carried.mounts:
+        try:
+            await mounting.session_admin.add_file(
+                request.scope, session, mount, key=f"carry-over:{session_id}:{mount.id}"
+            )
+        except MuxError as error:
+            log.warning("carry_over.file_not_mounted", mount_id=mount.id, error=str(error))
+            continue
+        mounted.append(mount)
+    return replace(carried, mounts=tuple(mounted))

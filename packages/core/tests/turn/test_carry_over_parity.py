@@ -17,14 +17,16 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from daimon.core.channel_backend import channel_ref
 from daimon.core.turn import carry_over
 from daimon.core.turn import prepare as preparation
+from daimon.core.turn.admission import Admission
 from daimon.core.turn.carry_over import CarriedOver, carry_on_adoption
-from daimon.core.turn.prepare import ProviderPreparationRequest
+from daimon.core.turn.prepare import ContinuityOutcome, ProviderPreparationRequest
 from daimon.core.turn.replace_binding import OldSession
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ResourceRef
-from mux.contracts.resources import ProviderBinding
+from mux.contracts.resources import ProviderBinding, ResourceBinding
 from mux.profiles import MANAGED_AGENTS, backend_selection
 from mux.state.memory import MemoryStateStore
 from mux.state.store import RELEASED_REF, released_successor
@@ -245,6 +247,67 @@ def test_every_move_path_when_scanned_then_calls_the_core_helper() -> None:
             for node in ast.walk(tree)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
         }
-        assert "carry_on_adoption" in called, f"{path.name} does not carry over"
+        helpers = {"carry_on_adoption", "carry_into_managed_agents"}
+        assert called & helpers, f"{path.name} does not carry over"
     readers = set(carry_over._READERS)  # pyright: ignore[reportPrivateUsage]
     assert set(HOSTS) <= readers, f"no session reader for {set(HOSTS) - readers}"
+
+
+def test_claude_default_target_when_slot_resolved_then_uses_the_thread_channel() -> None:
+    """Claude default has no revision; its slot must still be found, or nothing carries."""
+    tenant = uuid.uuid4()
+    admission = SimpleNamespace(backend_revision=None, origin_channel_id="C1")
+    channel = carry_over.carry_over_channel(
+        cast(Admission, admission), tenant_id=tenant, platform="slack"
+    )
+    assert channel == channel_ref(tenant, "slack", "C1"), f"wrong channel: {channel}"
+    revision = _revision("openai.persistent_workspace", 1)
+    admission = SimpleNamespace(backend_revision=revision, origin_channel_id="C1")
+    channel = carry_over.carry_over_channel(
+        cast(Admission, admission), tenant_id=tenant, platform="slack"
+    )
+    assert channel == revision.channel, "a revision's own channel wins"
+
+
+async def test_claude_default_target_when_files_carried_then_mounts_them_on_the_new_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A move back to Claude mounts the carried files on the session just created."""
+    store = MemoryStateStore()
+    await _released(store, "openai.persistent_workspace")
+    mount = ResourceBinding(
+        id="m1",
+        kind="artifact",
+        target_path="carried/a.txt",
+        resource=ResourceRef(id="file-1", kind="file", provider="anthropic", account_scope_id="s"),
+    )
+    added: list[tuple[str, frozenset[tuple[str, str]]]] = []
+
+    async def carried(*_: object, **kwargs: object) -> CarriedOver:
+        assert kwargs["target_artifacts"] is not None, "Claude target must take files"
+        return CarriedOver(continuity=cast(ContinuityOutcome, None), mounts=(mount,))
+
+    class _Admin:
+        def __init__(self, resources: frozenset[tuple[str, str]]) -> None:
+            self.resources = resources
+
+        async def add_file(self, scope: object, session: object, binding: object, **_: object):
+            added.append((cast(ResourceBinding, binding).id, self.resources))
+
+    def ma_backend(*_: object, resources: frozenset[tuple[str, str]], **__: object) -> object:
+        return SimpleNamespace(artifacts=object(), session_admin=_Admin(resources))
+
+    monkeypatch.setattr(carry_over, "carry_on_adoption", carried)
+    monkeypatch.setattr(carry_over, "managed_agents", ma_backend)
+    monkeypatch.setattr(carry_over, "resource_ref", lambda *_, **__: None)
+    request = SimpleNamespace(deps=SimpleNamespace(anthropic=object()), scope=SCOPE)
+    result = await carry_over.carry_into_managed_agents(
+        cast(ProviderPreparationRequest, request),
+        store=store,
+        slot=SLOT,
+        session_id="new-session",
+        model_id="m",
+        agent_name="Daimon",
+    )
+    assert result is not None and result.mounts == (mount,), f"mounts lost: {result}"
+    assert added == [("m1", frozenset({("session", "new-session"), ("file", "file-1")}))], added

@@ -1265,23 +1265,24 @@ async def bind_session_impl(
             turn_path=deps.turn_path,
         )
 
-        async def seed_carry_over() -> ContinuityOutcome | None:
+        async def seed_carry_over(session_id: str) -> ContinuityOutcome | None:
             # A thread moved here from another provider starts with its conversation.
             from daimon.core.stores.mux_state import PostgresStateStore
-            from daimon.core.turn.carry_over import carry_on_adoption
+            from daimon.core.turn.carry_over import carry_into_managed_agents, carry_over_channel
             from mux.contracts.ids import ThreadRef
             from mux.state.lease import Slot
 
-            revision = current.backend_revision
-            if revision is None or not deps.channel_backends:
+            channel = carry_over_channel(current, tenant_id=tenant_id, platform=platform)
+            if channel is None or not deps.channel_backends:
                 return None
-            carried = await carry_on_adoption(
+            carried = await carry_into_managed_agents(
                 replace(request, admission=current),
                 store=deps.state_store or PostgresStateStore(deps.sessionmaker),
                 slot=Slot(
-                    thread=ThreadRef(channel=revision.channel, thread_id=thread_id),
+                    thread=ThreadRef(channel=channel, thread_id=thread_id),
                     account_id=str(session_account_id),
                 ),
+                session_id=session_id,
                 model_id=current.agent.model.id,
                 agent_name=current.agent.name,
             )
