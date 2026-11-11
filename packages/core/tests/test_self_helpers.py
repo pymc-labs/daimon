@@ -257,36 +257,44 @@ def fast_poll(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.usefixtures("fast_poll")
-async def test_a_fan_out_of_two_copies_runs_in_parallel_with_distinct_keys(
+async def test_a_fan_out_when_no_copy_has_cost_anything_then_runs_one_copy_first(
     db_committing_engine: AsyncEngine,
 ) -> None:
+    """Until a copy's cost is known, nothing bounds the next: the first runs alone."""
     sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     origin = await _desk_origin(sm)
-    await _ask_self(sm, origin, "first half")
-    await _ask_self(sm, origin, "second half")
-    lanes: list[str | None] = []
+    for text in ("first", "second", "third"):
+        await _ask_self(sm, origin, text)
+    started: list[str] = []
+    alone: dict[str, int] = {}
     both = asyncio.Event()
+    desk: _Desk
 
     async def runner(ask: HelperAskRow, cancel: asyncio.Event, lane: str | None):
-        lanes.append(lane)
-        if len(lanes) == 2:
+        started.append(ask.message)
+        alone[ask.message] = len(desk.lanes)
+        if ask.message == "first":
+            await asyncio.sleep(0.1)
+            return "done", "ok", Decimal("0.5")
+        if len(started) == 3:
             both.set()
-        # Neither copy answers until both have started: they run at once.
+        # The later two answer only once both have started: they run at once.
         await asyncio.wait_for(both.wait(), timeout=5)
         return "done", f"answer to {ask.message}", Decimal("0.5")
 
     desk = _desk(sm, origin, runner)
     serving = asyncio.create_task(desk.serve())
     try:
-        finished = await _settled(sm, origin, 2)
+        finished = await _settled(sm, origin, 3)
     finally:
         serving.cancel()
         await asyncio.gather(serving, return_exceptions=True)
         await desk.stop()
 
-    assert sorted(lanes, key=str) == ["1.2~helper~self~1", "1.2~helper~self~2"]
-    assert [ask.status for ask in finished] == ["done", "done"]
-    assert desk.copies_spent == Decimal("1.0")
+    assert started[0] == "first" and alone["first"] == 1, "the first copy runs alone"
+    assert sorted(started[1:]) == ["second", "third"], started
+    assert [ask.status for ask in finished] == ["done"] * 3, "every copy answers"
+    assert desk.copies_spent == Decimal("1.5"), "each copy's cost is counted"
 
 
 @pytest.mark.parametrize(
@@ -328,11 +336,14 @@ async def test_a_copy_over_the_budget_stops_the_copies_still_running(
     """Parallel copies cannot jointly run past the budget: the rest stop once it is spent."""
     sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     origin = await _desk_origin(sm)
+    await _ask_self(sm, origin, "cheap")
     await _ask_self(sm, origin, "dear")
     await _ask_self(sm, origin, "slow")
     started = asyncio.Event()
 
     async def runner(ask: HelperAskRow, cancel: asyncio.Event, lane: str | None):
+        if ask.message == "cheap":
+            return "done", "ok", Decimal(1)
         if ask.message == "dear":
             await asyncio.wait_for(started.wait(), timeout=5)
             return "done", "ok", TURN_BUDGET_USD + 1
@@ -343,14 +354,14 @@ async def test_a_copy_over_the_budget_stops_the_copies_still_running(
     desk = _desk(sm, origin, runner)
     serving = asyncio.create_task(desk.serve())
     try:
-        finished = await _settled(sm, origin, 2)
+        finished = await _settled(sm, origin, 3)
     finally:
         serving.cancel()
         await asyncio.gather(serving, return_exceptions=True)
         await desk.stop()
 
     statuses = {ask.message: ask.status for ask in finished}
-    assert statuses == {"dear": "done", "slow": "stopped"}, statuses
+    assert statuses == {"cheap": "done", "dear": "done", "slow": "stopped"}, statuses
 
 
 def test_running_copies_hold_budget_before_another_starts() -> None:

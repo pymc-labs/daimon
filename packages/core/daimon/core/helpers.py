@@ -192,8 +192,9 @@ class _Desk:
     # The keys of copies running now.
     lanes: set[str] = field(default_factory=set[str])
     # What the copies cost so far, and the dearest one: each running copy holds that much
-    # of the budget, so a fan-out cannot start past it. A copy whose cost could not be
-    # counted stops further copies.
+    # of the budget, so a fan-out cannot start past it. Until a copy has cost something,
+    # nothing bounds the next, so copies run one at a time. A copy whose cost could not
+    # be counted stops further copies.
     copies_spent: Decimal = Decimal(0)
     copy_high: Decimal = Decimal(0)
     copies_unpriced: bool = False
@@ -212,14 +213,18 @@ class _Desk:
                     del self.running[helper_id]
                     self.stops.pop(helper_id, None)
                     self.lanes.discard(helper_id)
+            fan_out = self.copy_high > 0
+            skip = set(self.running.keys())
+            if self.lanes and not fan_out and self.self_id is not None:
+                skip.add(self.self_id)
             try:
                 async with self.deps.sessionmaker.begin() as session:
                     claimed = await helper_asks.claim_queued(
                         session,
                         origin_id=self.origin.id,
-                        skip_helpers=self.running.keys(),
+                        skip_helpers=skip,
                         limit=MAX_RUNNING - len(self.running),
-                        parallel_helper=self.self_id,
+                        parallel_helper=self.self_id if fan_out else None,
                     )
             # One failed poll is retried on the next; it must not end serving.
             except Exception as error:
