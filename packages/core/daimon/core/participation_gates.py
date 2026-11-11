@@ -200,6 +200,7 @@ class ParticipationGates:
             candidates=list(candidates),
         )
         if outcome.usage is not None:
+            # No agent_id: the answering agent is resolved only at admission, after this call.
             await record_auxiliary_usage(
                 purpose="classifier",
                 provider=outcome.provider,
