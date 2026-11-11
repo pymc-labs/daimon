@@ -1098,9 +1098,12 @@ async def test_mention_turn_backend_switch_card_captures_through_its_own_admissi
     )
 
 
-def test_selfhosted_tool_turn_skips_output_sweep(
+def test_selfhosted_tool_turn_when_outputs_then_schedules_sweep(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """A self-hosted tool turn with an outputs runtime sweeps its files like any provider."""
+    from collections.abc import Coroutine
+
     from daimon.core.turn.state import ToolUseBlock
 
     app = _make_app(db_session_factory, tenant_id_str=str(uuid.uuid4()))
@@ -1115,8 +1118,16 @@ def test_selfhosted_tool_turn_skips_output_sweep(
         "sh_session_test",
         None,
         False,
+        outputs=MagicMock(session_id="sh_session_test"),
     )
-    with patch.object(app, "_spawn", side_effect=AssertionError("no Anthropic output sweep")):
+    spawned: list[str] = []
+
+    def spawn(work: Coroutine[object, object, None]) -> MagicMock:
+        spawned.append(work.cr_code.co_name)
+        work.close()
+        return MagicMock()
+
+    with patch.object(app, "_spawn", side_effect=spawn):
         app._schedule_output_sweep(  # pyright: ignore[reportPrivateUsage]
             outcome,
             MagicMock(),
@@ -1124,8 +1135,8 @@ def test_selfhosted_tool_turn_skips_output_sweep(
             thread_id="1.2",
             team_id="T_TEST",
             requester_user_id="U_TEST",
-            selfhosted=True,
         )
+    assert spawned == ["_sweep_session_outputs"], spawned
 
 
 async def test_output_sweep_when_opt_out_lookup_fails_then_files_still_go_out_unpinged(

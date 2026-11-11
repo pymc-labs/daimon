@@ -1200,8 +1200,10 @@ async def test_overlapping_turns_attach_each_file_to_its_own_answer() -> None:
     ]
 
 
-def test_selfhosted_tool_turn_does_not_schedule_anthropic_file_sweep() -> None:
+def test_selfhosted_tool_turn_when_outputs_then_schedules_sweep() -> None:
+    """A self-hosted tool turn with an outputs runtime sweeps its files like any provider."""
     bot = MagicMock(spec=DaimonBot)
+    outputs = MagicMock(session_id="sh_session_test")
     outcome = RunOutcome(
         TurnState(
             content=[
@@ -1213,11 +1215,14 @@ def test_selfhosted_tool_turn_does_not_schedule_anthropic_file_sweep() -> None:
         "sh_session_test",
         None,
         False,
+        outputs=outputs,
     )
-    with patch.object(bot, "_spawn", side_effect=AssertionError("no Anthropic output sweep")):
-        DaimonBot._schedule_output_sweep(  # pyright: ignore[reportPrivateUsage]
-            bot, outcome, thread=_thread(), tenant_id=uuid.uuid4(), selfhosted=True
-        )
+    DaimonBot._schedule_output_sweep(  # pyright: ignore[reportPrivateUsage]
+        bot, outcome, thread=_thread(), tenant_id=uuid.uuid4()
+    )
+    queued = bot._queue_output_sweep  # pyright: ignore[reportPrivateUsage]
+    queued.assert_called_once()
+    assert queued.call_args.args[1] is outputs, "the sweep must read the turn's own outputs"
 
 
 # --- Direct messages ----------------------------------------------------------

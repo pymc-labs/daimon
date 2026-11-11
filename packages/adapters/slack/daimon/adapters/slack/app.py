@@ -735,16 +735,13 @@ class SlackApp:
         channel: str,
         thread_id: str,
         team_id: str,
-        selfhosted: bool,
         requester_user_id: str,
     ) -> None:
         """Serialize the file sweep after a tool turn."""
 
         outputs = outcome.outputs
-        if (
-            selfhosted
-            or outputs is None
-            or not any(isinstance(block, ToolUseBlock) for block in outcome.state.content)
+        if outputs is None or not any(
+            isinstance(block, ToolUseBlock) for block in outcome.state.content
         ):
             return
         # Read the chain link synchronously, before spawning, so it cannot be lost.
@@ -3363,10 +3360,6 @@ class SlackApp:
                 thread_id=thread_id,
                 team_id=team_id,
                 requester_user_id=author_id,
-                selfhosted=(
-                    admission.backend_revision is not None
-                    and admission.backend_revision.backend == "selfhosted"
-                ),
             )
         finally:
             # Bookkeeping only -- see the comment above the try. Deregister

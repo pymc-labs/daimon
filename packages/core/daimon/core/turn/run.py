@@ -408,7 +408,7 @@ class RunOutcome:
     continuity: ContinuityOutcome = ContinuityOutcome()
     loss_told: bool = False
     # Where this turn's output files live; None when its provider has none to
-    # deliver (self-hosted) or the turn never reached a provider.
+    # deliver or the turn never reached a provider.
     outputs: OutputRuntime | None = None
 
     @property

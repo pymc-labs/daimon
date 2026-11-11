@@ -1920,15 +1920,7 @@ class TeamsApp:
             markers.add(outcome.mapping_id)
         final = holder[-1]
         if final.output_authorization is None:
-            await self._finish_outputs(
-                inbound,
-                outcome,
-                final,
-                selfhosted=(
-                    admission.backend_revision is not None
-                    and admission.backend_revision.backend == "selfhosted"
-                ),
-            )
+            await self._finish_outputs(inbound, outcome, final)
         if outcome.mapping_id is not None and final.final_message_id is not None:
             mark = final.final_message_id
             if inbound.kind != "dm":
@@ -1947,14 +1939,10 @@ class TeamsApp:
         inbound: TeamsInbound,
         outcome: RunOutcome,
         final: TeamsTurnLifecycle,
-        *,
-        selfhosted: bool,
     ) -> None:
         """Release controls immediately when no file sweep applies."""
-        if (
-            not selfhosted
-            and outcome.outputs is not None
-            and any(isinstance(block, ToolUseBlock) for block in outcome.state.content)
+        if outcome.outputs is not None and any(
+            isinstance(block, ToolUseBlock) for block in outcome.state.content
         ):
             sweep = self.outputs.sweep(
                 inbound,

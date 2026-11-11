@@ -2,12 +2,14 @@
 
 Anthropic runs over the transport-level fake client, Gemini over its real driver
 with a fake transport (a workspace file cannot be removed, so a ledger hides it),
-and a third port removes deleted artifacts outright.
+self-hosted over its real driver with a fake harness, and a third port removes
+deleted artifacts outright.
 """
 
 from __future__ import annotations
 
 import ast
+import base64
 import io
 import re
 import tarfile
@@ -23,16 +25,20 @@ from daimon.core.output_runtime import AnthropicOutputRuntime, ArtifactOutputRun
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
-from mux.contracts.ids import ModelRef, Page, PageRequest, ResourceRef, Scope
-from mux.contracts.ports import Artifacts
+from mux.contracts.ids import ModelRef, Page, PageRequest, ResourceRef, Revision, Scope
+from mux.contracts.ports import Agents, Artifacts, Environments
 from mux.contracts.receipts import DeletionReceipt
 from mux.contracts.resources import (
+    Agent,
     AgentSpec,
     Artifact,
+    Environment,
     EnvironmentSpec,
     SessionSpec,
 )
 from mux.drivers.gemini import GeminiManagedAgents
+from mux.drivers.selfhosted import SelfHostedDriver, wire
+from mux.drivers.selfhosted.transport import DirectTransport
 from mux.errors import ProviderError
 from mux.state.memory import MemoryStateStore
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
@@ -40,6 +46,7 @@ from mux.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 
 SCOPE = Scope(tenant_id="t", account_id="a", principal_id="p", authorization_id="allowed")
 NOW = datetime(2026, 8, 25, 12, 0, 0, tzinfo=UTC)
+STAMP = NOW.isoformat()
 FILES = {"report.csv": b"a,b\n1,2\n", "notes.txt": b"hello"}
 
 
@@ -196,6 +203,82 @@ async def _gemini() -> tuple[OutputRuntime, FakeTransport]:
     return ArtifactOutputRuntime(ma.artifacts, session.ref, scope=SCOPE), transport
 
 
+class _Record:
+    """An agent or environment port that only answers `retrieve`."""
+
+    def __init__(self, value: Agent | Environment) -> None:
+        self.value = value
+
+    async def retrieve(self, scope: Scope, ref: ResourceRef) -> Agent | Environment:
+        return self.value
+
+
+class _SelfHostedHarness:
+    """The harness output routes over files the agent saved in its workspace."""
+
+    def __init__(self, *, legacy: bool = False) -> None:
+        self.saved = dict(FILES)
+        self.legacy = legacy
+
+    def _ids(self) -> dict[str, str]:
+        return {wire.output_id(path, f"1-{len(body)}-1"): path for path, body in self.saved.items()}
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        if self.legacy:
+            return httpx.Response(404, json={"detail": "Not Found"})
+        tail = request.url.path.split("/outputs", 1)[1].strip("/").split("/")
+        ids = self._ids()
+        if tail == [""]:
+            listed = [
+                {"id": key, "path": path, "size_bytes": len(self.saved[path]), "modified_at": STAMP}
+                for key, path in ids.items()
+            ]
+            return httpx.Response(200, json={"outputs": listed})
+        path = ids[tail[0]]
+        if tail[1:] == ["delete"]:
+            del self.saved[path]
+            return httpx.Response(200, json={"deleted": True, "id": tail[0]})
+        body = base64.b64encode(self.saved[path]).decode()
+        return httpx.Response(
+            200, json={"id": tail[0], "size_bytes": len(self.saved[path]), "content_b64": body}
+        )
+
+
+async def _selfhosted(client: httpx.AsyncClient) -> OutputRuntime:
+    def ref(kind: str) -> ResourceRef:
+        return ResourceRef(
+            provider="selfhosted", kind=kind, id=kind, account_scope_id="t", tenant_id="t"
+        )
+
+    spec = AgentSpec(name="a", model=ModelRef(provider="selfhosted", id="model"))
+    agent = Agent(ref=ref("agent"), revision=Revision(local=1), spec=spec, created_at=NOW)
+    env = Environment(
+        ref=ref("environment"),
+        revision=Revision(local=1),
+        spec=EnvironmentSpec(name="e", execution="self_hosted"),
+        created_at=NOW,
+    )
+    driver = SelfHostedDriver(
+        DirectTransport(client, base_url="https://harness", token="token"),
+        account_scope_id="t",
+        agents=cast(Agents, _Record(agent)),
+        environments=cast(Environments, _Record(env)),
+        authorization=lambda scope, kind, id_: scope == SCOPE,
+        deployment="model",
+    )
+    session = await driver.sessions.create(
+        SCOPE,
+        SessionSpec(
+            agent=agent.ref,
+            agent_revision=agent.revision,
+            environment=env.ref,
+            config_revision=1,
+        ),
+        key="session",
+    )
+    return ArtifactOutputRuntime(driver.artifacts, session.ref, scope=SCOPE)
+
+
 async def test_anthropic_outputs_are_delivered_once_then_deleted() -> None:
     runtime, deleted = _anthropic()
     assert await _deliver(runtime) == FILES, "every file is posted with its bytes"
@@ -210,6 +293,25 @@ async def test_removing_port_outputs_are_delivered_once_then_deleted() -> None:
     assert await _deliver(runtime) == FILES, "every file is posted with its bytes"
     assert sorted(artifacts.deleted) == sorted(FILES), "each posted file is deleted"
     assert await _deliver(runtime) == {}, "nothing is delivered twice"
+
+
+async def test_selfhosted_outputs_are_delivered_once_then_deleted() -> None:
+    """Files a self-hosted agent saves reach the reply, then leave its workspace."""
+    harness = _SelfHostedHarness()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(harness.handle)) as client:
+        runtime = await _selfhosted(client)
+        assert await _deliver(runtime) == FILES, "every saved file is posted with its bytes"
+        assert harness.saved == {}, "each posted file is deleted from the workspace"
+        assert await _deliver(runtime) == {}, "nothing is delivered twice"
+
+
+async def test_selfhosted_outputs_when_harness_predates_files_then_reply_unaffected() -> None:
+    """A harness without the output routes delivers no files and raises nothing."""
+    harness = _SelfHostedHarness(legacy=True)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(harness.handle)) as client:
+        runtime = await _selfhosted(client)
+        assert await _deliver(runtime) == {}, "an old harness delivers nothing"
+    assert harness.saved == FILES, "nothing is deleted on an old harness"
 
 
 async def test_gemini_outputs_are_delivered_once_then_ledgered() -> None:

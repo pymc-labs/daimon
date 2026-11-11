@@ -1003,7 +1003,6 @@ class DaimonBot(commands.Bot):
         thread: discord.Thread,
         tenant_id: uuid.UUID,
         lifecycle: DiscordTurnLifecycle | None = None,
-        selfhosted: bool = False,
     ) -> None:
         """Sweep the session's files onto the turn's answer, detached from the turn.
 
@@ -1016,10 +1015,8 @@ class DaimonBot(commands.Bot):
         if lifecycle is not None and lifecycle.output_authorization is not None:
             # A watch's execution grant ends with the turn, before detached sweeps.
             return
-        if (
-            selfhosted
-            or outcome.outputs is None
-            or not any(isinstance(block, ToolUseBlock) for block in outcome.state.content)
+        if outcome.outputs is None or not any(
+            isinstance(block, ToolUseBlock) for block in outcome.state.content
         ):
             return
         self._queue_output_sweep(
@@ -4611,10 +4608,6 @@ class DaimonBot(commands.Bot):
             thread=thread,
             tenant_id=tenant_id,
             lifecycle=final_lifecycle,
-            selfhosted=(
-                prepared.admission.backend_revision is not None
-                and prepared.admission.backend_revision.backend == "selfhosted"
-            ),
         )
         if archive_after:
             await self._archive_after_outputs(outcome, thread)
@@ -6057,10 +6050,6 @@ class DaimonBot(commands.Bot):
             thread=thread,
             tenant_id=tenant_id,
             lifecycle=final_lifecycle,
-            selfhosted=(
-                prepared.admission.backend_revision is not None
-                and prepared.admission.backend_revision.backend == "selfhosted"
-            ),
         )
         if archive_after:
             await self._archive_after_outputs(outcome, thread)
