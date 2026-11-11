@@ -212,41 +212,55 @@ memory stores or workspace export and import.
 
 ### Create the resource records
 
-Apply migrations, then store an agent and an environment for an existing tenant:
+Apply migrations, then store an agent and an environment for an existing
+tenant, and grant the channels that may use them:
 
 ```bash
 daimon selfhosted init \
   --tenant-id <tenant-uuid> \
   --harness-url https://harness.example \
   --model <azure-deployment-name> \
-  --auth-ref DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY
+  --auth-ref DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY \
+  --channel discord:<channel-id> --account-id <account-id> \
+  --input-usd <price> --output-usd <price> \
+  --manifest /path/to/runtime.json
 ```
 
-It needs only the database and prints the agent and environment IDs. Repeating
-it with the same configuration reuses them, and a changed configuration is
-refused. Override the names `daimon` and `default` with `--name` and
-`--environment-name`, and read the system prompt from a file with
-`--system-file`. `--auth-ref` records a variable name, never its value. HTTPS is
-required outside loopback. `--allow-insecure-http` permits HTTP on internal
-names and private addresses.
+It needs only the database. It prints the agent and environment IDs, then the
+settings to add to the environment: the admission flag, the harness auth
+binding for the tenant and the model's rates. It writes one row per
+`--channel` into the runtime file (`--manifest`, or
+`DAIMON_TURN__PROVIDER_RUNTIME_FILE`). `--input-usd` and `--output-usd` are
+verified prices in USD per million tokens and have no defaults.
+`--cache-read-usd` follows the input price when unset, and
+`--infrastructure-usd` is your audited cost per request (`0` if none).
 
-### Enable admission and the runtime file
+Repeating it with the same configuration reuses the resources and replaces
+the same rows, and a changed configuration is refused.
 
-1. Set
-   [`DAIMON_SELFHOSTED__ADMISSION_ENABLED=true`](configuration.md#daimon_selfhosted__admission_enabled).
-   It defaults to `false` and needs a configured harness runtime. Select the
+Override the names
+`daimon` and `default` with `--name` and `--environment-name`, and read the
+system prompt from a file with `--system-file`. `--auth-ref` records a
+variable name, never its value. HTTPS is required outside loopback.
+`--allow-insecure-http` permits HTTP on internal names and private addresses;
+those origins get no auth binding line.
+
+### Check admission and the runtime file
+
+The printed lines cover these; this is what each does.
+
+1. [`DAIMON_SELFHOSTED__ADMISSION_ENABLED=true`](configuration.md#daimon_selfhosted__admission_enabled)
+   defaults to `false` and needs a configured harness runtime. Select the
    self-hosted agent and environment on each channel.
-2. Declare each harness token in
-   [`DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS`](configuration.md#daimon_selfhosted__harness_auth_bindings),
-   a JSON list of `{"name": "DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY",
+2. [`DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS`](configuration.md#daimon_selfhosted__harness_auth_bindings)
+   declares each harness token as a JSON list of
+   `{"name": "DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY",
    "origin": "https://harness.example", "tenants": ["<tenant-uuid>"]}`.
-   The exact origin and tenant must match before a token is read. Wildcard
-   tenants need
+   The exact origin and tenant must match before a token is read. Merge the
+   printed entry into any list you already have. Wildcard tenants need
    [`DAIMON_SELFHOSTED__SINGLE_TENANT=true`](configuration.md#daimon_selfhosted__single_tenant).
-3. Mount a runtime file and point
-   `DAIMON_TURN__PROVIDER_RUNTIME_FILE`
-   at it. Each row grants one configuration to one tenant, channel and
-   account:
+3. The runtime file, pointed to by `DAIMON_TURN__PROVIDER_RUNTIME_FILE`, holds
+   one row per tenant, channel and account:
 
    ```json
    [
@@ -266,11 +280,12 @@ names and private addresses.
    ]
    ```
 
-   `infrastructure_usd` is required: enter your audited per-request cost, or
-   `"0"` if you fund infrastructure separately.
-4. Set deployment-to-model mappings and verified rates, as described in
-   [billing](billing.md). A turn on an unpriced deployment is refused before
-   any harness call.
+   The digest is that of the default `selfhosted.loop` configuration for the
+   model. A channel that changes its backend settings needs its own row.
+4. `DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS` and
+   `DAIMON_BILLING__SELFHOSTED__MODELS` hold the deployment-to-model mapping
+   and the rates, as described in [billing](billing.md). A turn on an unpriced
+   deployment is refused before any harness call.
 
 Daimon's MCP public URL and JWT secret must be set. Each turn passes the
 harness a caller-bound MCP token that is revoked when the turn ends. Provide

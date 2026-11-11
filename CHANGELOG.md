@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tools. A converted agent that listed it no longer names page reading as a
   loss, so its owner may be asked to confirm the copy again.
 
+- **`daimon selfhosted init` sets up the whole grant.** Beyond the agent and
+  environment, it writes a runtime-file row for each `--channel` and prints the
+  admission flag, the harness auth binding for the tenant and the model's rates
+  as settings lines. `--input-usd` and `--output-usd` are required: no price is
+  assumed.
+
 - **Environments made by Daimon show up everywhere.** The environment lists, picks
   and checks in the CLI, the MCP tools and Discord, Slack and Teams now see
   environments Daimon keeps itself, not only Anthropic ones. Long jobs say they

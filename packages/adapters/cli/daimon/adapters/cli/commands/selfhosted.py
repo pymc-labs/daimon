@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+from datetime import date
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import typer
+from daimon.core.config import HarnessAuthBinding, SelfhostedModelPrice
 from daimon.core.db import build_engine
 from daimon.core.stores.selfhosted_resources import (
     SelfHostedAgents,
     SelfHostedEnvironments,
 )
+from daimon.core.turn.selfhosted_deployment import SelfHostedDeployment
+from mux.contracts.config import ResolvedBackend
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.resources import Agent, AgentSpec, Environment, EnvironmentSpec
@@ -21,6 +29,8 @@ from mux.errors import ProviderError
 from mux.profiles.selfhosted import LOOP
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_MANIFEST_ENV = "DAIMON_TURN__PROVIDER_RUNTIME_FILE"
 
 selfhosted_app = typer.Typer(help="Manage tenant-owned self-hosted agents and environments.")
 
@@ -107,6 +117,108 @@ def _matching(resource: Agent | Environment, spec: AgentSpec | EnvironmentSpec) 
         )
 
 
+def channel_rows(
+    *,
+    tenant_id: UUID,
+    model: str,
+    agent_id: str,
+    environment_id: str,
+    account_id: str,
+    channels: list[tuple[str, str]],
+    infrastructure_usd: Decimal,
+) -> list[dict[str, object]]:
+    """One runtime-file row per channel, bound to the channel's default config digest."""
+    digest = ResolvedBackend(
+        backend=LOOP.provider, profile=LOOP.profile_id, model=model
+    ).content_digest()
+    return [
+        SelfHostedDeployment(
+            tenant_id=str(tenant_id),
+            platform=platform,
+            channel_id=channel_id,
+            account_id=account_id,
+            config_digest=digest,
+            agent_id=agent_id,
+            environment_id=environment_id,
+            infrastructure_usd=infrastructure_usd,
+        ).model_dump(mode="json")
+        for platform, channel_id in channels
+    ]
+
+
+def merge_rows(
+    existing: list[dict[str, object]], rows: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    """Replace rows that name the same tenant, channel and account; keep the rest."""
+    keys = ("profile", "tenant_id", "platform", "channel_id", "account_id")
+    replaced = {tuple(row[key] for key in keys) for row in rows}
+    kept = [row for row in existing if tuple(row.get(key) for key in keys) not in replaced]
+    return [*kept, *rows]
+
+
+def env_lines(
+    *,
+    tenant_id: UUID,
+    model: str,
+    harness: HarnessConfig,
+    input_usd: Decimal,
+    output_usd: Decimal,
+    cache_read_usd: Decimal,
+    today: date,
+) -> list[str]:
+    """The settings an operator adds to the environment, one `NAME=value` per line."""
+    price = SelfhostedModelPrice(
+        effective_from=today, input=input_usd, output=output_usd, cache_read=cache_read_usd
+    )
+    lines = ["DAIMON_SELFHOSTED__ADMISSION_ENABLED=true"]
+    parsed = urlsplit(harness.project_endpoint or harness.harness_url)
+    if parsed.scheme == "https":
+        binding = HarnessAuthBinding(
+            auth_mode=harness.auth_mode,  # pyright: ignore[reportArgumentType]
+            name=harness.auth_ref,
+            origin=f"{parsed.scheme}://{parsed.netloc}",
+            tenants=(tenant_id,),
+        )
+        lines.append(
+            "DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS="
+            + json.dumps([binding.model_dump(mode="json")], separators=(",", ":"))
+        )
+    lines.append(
+        "DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS="
+        + json.dumps({model: model}, separators=(",", ":"))
+    )
+    lines.append(
+        "DAIMON_BILLING__SELFHOSTED__MODELS="
+        + json.dumps({model: [price.model_dump(mode="json")]}, separators=(",", ":"))
+    )
+    return lines
+
+
+def _write_rows(path: Path, rows: list[dict[str, object]]) -> None:
+    # Atomic: serving services read this file live.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f"{path.suffix}.tmp-{os.getpid()}")
+    tmp.write_text(json.dumps(rows, indent=2) + "\n")
+    tmp.replace(path)
+
+
+def _price(value: str, flag: str, *, allow_zero: bool = False) -> Decimal:
+    try:
+        amount = Decimal(value)
+    except InvalidOperation:
+        raise typer.BadParameter("Enter a number.", param_hint=flag) from None
+    if not amount.is_finite() or amount < 0 or (amount == 0 and not allow_zero):
+        raise typer.BadParameter("Enter a positive number.", param_hint=flag)
+    return amount
+
+
+def _channel(value: str) -> tuple[str, str]:
+    platform, _, channel_id = value.partition(":")
+    if not platform or not channel_id:
+        raise typer.BadParameter("Use platform:channel-id.", param_hint="--channel")
+    return platform, channel_id
+
+
 @selfhosted_app.command("init")
 def selfhosted_init_command(
     tenant_id: Annotated[UUID, typer.Option("--tenant-id", help="Existing tenant UUID.")],
@@ -119,6 +231,19 @@ def selfhosted_init_command(
             show_envvar=True,
             help="Postgres connection URL.",
         ),
+    ],
+    channel: Annotated[
+        list[str],
+        typer.Option("--channel", help="platform:channel-id to grant; repeat for more."),
+    ],
+    account_id: Annotated[
+        str, typer.Option("--account-id", help="Account the channels belong to.")
+    ],
+    input_usd: Annotated[
+        str, typer.Option("--input-usd", help="Verified input price, USD per million tokens.")
+    ],
+    output_usd: Annotated[
+        str, typer.Option("--output-usd", help="Verified output price, USD per million tokens.")
     ],
     model: Annotated[
         str, typer.Option("--model", help="Azure model deployment name.")
@@ -151,8 +276,37 @@ def selfhosted_init_command(
     system_file: Annotated[
         Path | None, typer.Option("--system-file", exists=True, dir_okay=False)
     ] = None,
+    cache_read_usd: Annotated[
+        str | None,
+        typer.Option("--cache-read-usd", help="Cached input price; the input price if unset."),
+    ] = None,
+    infrastructure_usd: Annotated[
+        str, typer.Option("--infrastructure-usd", help="Audited cost per request; 0 if none.")
+    ] = "0",
+    manifest: Annotated[
+        Path | None,
+        typer.Option("--manifest", help=f"Runtime file path; defaults to ${_MANIFEST_ENV}."),
+    ] = None,
 ) -> None:
-    """Create or reuse one agent and environment; stdout contains their IDs only."""
+    """Create or reuse one agent and environment, grant the channels, print the settings.
+
+    Stdout is the agent ID, the environment ID, then `NAME=value` settings lines.
+    """
+    manifest_env = os.environ.get(_MANIFEST_ENV)
+    manifest_path = manifest or (Path(manifest_env) if manifest_env else None)
+    if manifest_path is None:
+        raise typer.BadParameter(
+            f"Pass --manifest or set {_MANIFEST_ENV}.", param_hint="--manifest"
+        )
+    input_price = _price(input_usd, "--input-usd")
+    output_price = _price(output_usd, "--output-usd")
+    cache_price = (
+        _price(cache_read_usd, "--cache-read-usd", allow_zero=True)
+        if cache_read_usd is not None
+        else input_price
+    )
+    infrastructure = _price(infrastructure_usd, "--infrastructure-usd", allow_zero=True)
+    channels = [_channel(value) for value in channel]
     try:
         harness = HarnessConfig.model_validate(
             {
@@ -206,5 +360,38 @@ def selfhosted_init_command(
         raise typer.BadParameter(
             "Initialization failed; check database access, migrations and the system file."
         ) from None
+    existing: list[dict[str, object]] = []
+    if manifest_path.exists():
+        existing = list(json.loads(manifest_path.read_text()))
+    _write_rows(
+        manifest_path,
+        merge_rows(
+            existing,
+            channel_rows(
+                tenant_id=tenant_id,
+                model=model,
+                agent_id=agent_id,
+                environment_id=environment_id,
+                account_id=account_id,
+                channels=channels,
+                infrastructure_usd=infrastructure,
+            ),
+        ),
+    )
     typer.echo(agent_id)
     typer.echo(environment_id)
+    lines = env_lines(
+        tenant_id=tenant_id,
+        model=model,
+        harness=harness,
+        input_usd=input_price,
+        output_usd=output_price,
+        cache_read_usd=cache_price,
+        today=date.today(),
+    )
+    for line in lines:
+        typer.echo(line)
+    if not any(line.startswith("DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS=") for line in lines):
+        typer.echo(
+            "The harness origin is not HTTPS, so no auth binding line was printed.", err=True
+        )
