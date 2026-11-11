@@ -36,6 +36,7 @@ from .credentials import (
 from .errors import HarnessError, ToolErrorResult
 from .identity import AsyncIdentity, CapturedIdentity
 from .isolation import validate_credential_sources
+from .outputs import outputs_note
 from .runtime import TurnContext
 
 JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
@@ -490,7 +491,9 @@ class AzureModelAdapter:
                         }
                     )
             items = cast(list[TResponseInputItem], history + [{"role": "user", "content": parts}])
-            instructions = context.request.instructions + "\n\n" + await context.skills()
+            instructions = "\n\n".join(
+                (context.request.instructions, outputs_note(context.work), await context.skills())
+            )
             agent = Agent[TurnContext](
                 name="Daimon",
                 instructions=instructions,
