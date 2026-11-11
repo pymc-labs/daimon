@@ -351,13 +351,20 @@ async def _native_admin(
     raise needs_admin(FEATURES["approvals"], platform)
 
 
+def thread_open_to_anyone(key: str, *, locked: bool = False) -> bool:
+    """Whether anyone who can use a thread may set `key` there: the spec says so and the value
+    is not a Lock. Every surface asks this; none restates it."""
+    spec = FEATURES.get(key)
+    return spec is not None and spec.authority.thread_anyone and not locked
+
+
 async def may_change(
     actor: FeatureActor, spec: FeatureSpec, tier: Tier, *, locked: bool, agent_id: str | None
 ) -> bool:
     """The tier's authority (not approvals'): a thread is anyone's where the spec says so,
     an agent its owner's (unless `agent_owner` is off) or an admin's, the rest an admin's.
     A Lock is an admin's."""
-    if tier == "thread" and spec.authority.thread_anyone and not locked:
+    if tier == "thread" and thread_open_to_anyone(spec.key, locked=locked):
         return True
     if actor.via_agent_key:
         return False

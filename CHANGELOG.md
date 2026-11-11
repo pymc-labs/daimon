@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the other removed keys) is ignored with a startup warning that names it; any
   other unknown feature still stops startup.
 
+- **The web app sets a thread's value as chat does.**
+  Where a setting is open to anyone in a thread, such as progress plans, a member who can
+  see the channel can change it on the thread's page, not only a channel admin. Locks and
+  every other setting stay with admins.
+
 - **Daimon tolerates its seeded agent being renamed in place to `default`.**
   Ahead of that rename, a workspace whose built-in agent is already called `default` keeps it: defaults sync no longer archives it or creates a second `daimon` beside it, and asking for `daimon` answers with it. Only the workspace's own built-in agent counts, never a user's agent named `default`.
 

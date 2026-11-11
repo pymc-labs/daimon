@@ -32,7 +32,12 @@ from daimon.core.agent_ownership import owns_agent
 from daimon.core.channel_changes import Expected
 from daimon.core.channel_directory import WEB_ROW_ID
 from daimon.core.features.registry import DEFAULT, Tier
-from daimon.core.features.service import FeatureActor, change_feature, read_features
+from daimon.core.features.service import (
+    FeatureActor,
+    change_feature,
+    read_features,
+    thread_open_to_anyone,
+)
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.features.surface import feature_schema, view_json
 from daimon.core.stores.domain import CHAT_PLATFORMS
@@ -175,9 +180,12 @@ def features_router(runtime: WebRuntime) -> APIRouter:
         readable(caller, place)
         needed = _NEEDED.get(body.tier)
         if body.tier == "thread":
-            # In chat anyone present may set a thread; on the web only a channel admin may, and
-            # only for a thread this workspace has a session in, run for this channel.
-            if needed not in caller.capabilities:
+            # Who may change a thread is the core's rule (`thread_open_to_anyone`): anyone who can
+            # read this channel where it holds, else a channel admin. The thread must be one this
+            # workspace has a session in, run for this channel.
+            if not thread_open_to_anyone(body.key, locked=body.locked) and (
+                needed not in caller.capabilities
+            ):
                 raise HTTPException(403, f"You can't change this. {NOT_ALLOWED}")
             thread_key, channel_id = place.thread_key, place.channel_id
             async with runtime.sessionmaker() as db:
