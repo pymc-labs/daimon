@@ -213,7 +213,10 @@ class ChannelSettingsDialog:
                         default=self._runtime.deployment_default,
                     )
                 names = await list_environment_names(
-                    self._runtime.anthropic, tenant_id=tenant_id, hidden=hidden
+                    self._runtime.anthropic,
+                    tenant_id=tenant_id,
+                    records=self._runtime.sessionmaker,
+                    hidden=hidden,
                 )
             except anthropic.APIError:
                 log.warning("teams.channel_settings.environments_unlisted", exc_info=True)
@@ -314,6 +317,7 @@ class ChannelSettingsDialog:
                 channel_id=channel_id,
                 environment_name=name,
                 default=self._runtime.deployment_default,
+                records=self._runtime.sessionmaker,
             )
         if not pick.decision:
             await self._audit(

@@ -84,6 +84,13 @@ def backend_refusal(err: AdmissionDenied, *, agent: str | None, admin: bool) -> 
                 _NO_ANSWER,
                 "Try again in a moment, then ask an admin.",
             )
+        case "channel_row_missing":
+            return _refusal(
+                f"{named} isn't set up for this chat's pin yet.",
+                _NO_ANSWER,
+                "Switch back to Claude." if admin else ask,
+                way_back,
+            )
         case "anthropic_unconfigured":
             return _refusal(f"{who} runs on Anthropic, which isn't set up here.", _NO_ANSWER, ask)
         case None:

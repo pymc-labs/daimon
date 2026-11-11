@@ -263,6 +263,7 @@ async def archive(
                 tenant_id=actor.tenant_id,
                 environment_name=name,
                 default=deps.deployment_default,
+                records=deps.session_factory,
             )
         if needed:
             raise EnvironmentNeedsConfirm(build_limited_channels_confirm(environment_name=None))

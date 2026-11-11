@@ -745,7 +745,12 @@ async def _with_network_warning(
         return replace(change, network_warning=LIMITED_OPEN_NETWORK_WARNING)
     async with sessionmaker() as session:
         warning = await limited_readers_network_warning(
-            session, anthropic, tenant_id=tenant_id, channel_id=change.channel_id, default=default
+            session,
+            anthropic,
+            tenant_id=tenant_id,
+            channel_id=change.channel_id,
+            default=default,
+            records=sessionmaker,
         )
     return replace(change, network_warning=warning)
 

@@ -236,3 +236,53 @@ async def test_start_refuses_origins_without_completion_before_registration_or_s
         sm.begin.assert_not_called()
     finally:
         await ma.close()
+
+
+async def test_start_refuses_a_daimon_owned_agent_before_any_read(monkeypatch):
+    from unittest.mock import MagicMock
+
+    auth = AuthIdentity(
+        tenant_id=uuid.uuid4(),
+        account_id=uuid.uuid4(),
+        platform="discord",
+        role=Role.USER,
+        platform_user_id="user",
+    )
+    origin = SimpleNamespace(
+        attended=True, platform="discord", helper_of=None, responder_ma_agent_id="dm_agent_1"
+    )
+    monkeypatch.setattr(tools, "_auth", AsyncMock(return_value=auth))
+    monkeypatch.setattr(tools, "require_turn_origin", AsyncMock(return_value=origin))
+    registration = AsyncMock()
+    monkeypatch.setattr(tools.store, "register", registration)
+    sm = MagicMock(spec=async_sessionmaker)
+    sm.begin.side_effect = AssertionError("A refused agent must not access job storage")
+    ma = build_fake_anthropic(MARouter().dispatch)
+    mcp = FastMCP("owned agent long jobs")
+    tools.register_long_job_tools(
+        mcp,
+        McpRuntime(
+            session_factory=sm,
+            client=ma,
+            settings=Settings(
+                database=DatabaseSettings(url="postgresql+asyncpg://unused/db"),
+                anthropic=AnthropicSettings(api_key=SecretStr("fake")),
+                _env_file=None,
+            ),
+            deployment_default=DeploymentDefault(),
+        ),
+    )
+    try:
+        async with Client(mcp) as client:
+            with pytest.raises(ToolError, match="Long jobs are not available for this agent"):
+                await client.call_tool(
+                    "start_long_job",
+                    {
+                        "command": "sleep 600",
+                        "title": "fit",
+                        "origin_context_id": str(uuid.uuid4()),
+                    },
+                )
+        registration.assert_not_awaited()
+    finally:
+        await ma.close()

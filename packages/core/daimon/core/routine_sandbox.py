@@ -127,6 +127,7 @@ async def run_matches_pin(
     session: BetaManagedAgentsSession,
     *,
     tenant_id: uuid.UUID | None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> bool:
     """True only when the run's own session uses exactly the pinned agent and environment.
 
@@ -142,7 +143,10 @@ async def run_matches_pin(
         return False
     try:
         environment = await retrieve_environment(
-            client, pin.environment_id, scope=resource_scope(tenant_id=str(tenant_id))
+            client,
+            pin.environment_id,
+            scope=resource_scope(tenant_id=str(tenant_id)),
+            records=records,
         )
     except Exception:  # unreadable: fail closed
         log.warning("routine.sandbox_pin_unreadable", environment_id=pin.environment_id)

@@ -22,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tools. A converted agent that listed it no longer names page reading as a
   loss, so its owner may be asked to confirm the copy again.
 
+- **Environments made by Daimon show up everywhere.** The environment lists, picks
+  and checks in the CLI, the MCP tools and Discord, Slack and Teams now see
+  environments Daimon keeps itself, not only Anthropic ones. Long jobs say they
+  are not available for those agents.
+
+- **A channel pinned to OpenAI says what is missing.** With only an OpenAI key
+  and no channel row set up, the refusal now says whoever runs Daimon needs to
+  add one, or the pin can be cleared.
+
 - **Reasoning effort on OpenAI and Gemini agents.** An agent on either provider
   can carry a low, medium or high effort, kept with its model. Speed (Fast)
   stays Claude-only. Effort shows in the web editor and the Discord, Slack

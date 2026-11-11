@@ -60,7 +60,9 @@ async def environments_list(*, rt: CliRuntime, console: Console, as_json: bool) 
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
     # Session closed. MA calls below.
-    rows = await list_environments_by_tenant(rt.anthropic, tenant_id=tenant_id)
+    rows = await list_environments_by_tenant(
+        rt.anthropic, tenant_id=tenant_id, records=rt.sessionmaker
+    )
     emit_rows(
         console,
         rows,
@@ -91,7 +93,9 @@ async def environments_get(*, rt: CliRuntime, console: Console, name: str, as_js
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
     # Session closed. MA calls below.
-    env = await find_environment_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
+    env = await find_environment_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=name, records=rt.sessionmaker
+    )
     if env is None:
         raise StoreError(f"no environment named {name!r} in your account or system defaults.")
     emit_rows(
@@ -127,7 +131,7 @@ async def environments_create(*, rt: CliRuntime, console: Console, path: Path) -
     # Tenant-scoped collision pre-check before the MA create — a same-name create
     # would otherwise feed reconcile dedup. ANY match blocks regardless of owner.
     matches = await find_environments_by_daimon_tag(
-        rt.anthropic, tenant_id=tenant_id, name=spec.name
+        rt.anthropic, tenant_id=tenant_id, name=spec.name, records=rt.sessionmaker
     )
     if matches:
         raise StoreError(
@@ -141,6 +145,7 @@ async def environments_create(*, rt: CliRuntime, console: Console, path: Path) -
             "metadata": build_metadata(tenant_id=tenant_id, name=spec.name),
         },
         scope=resource_scope(tenant_id=str(tenant_id)),
+        records=rt.sessionmaker,
     )
     console.print(f"[green]✓ created environment {spec.name!r}[/green]")
 
@@ -168,7 +173,9 @@ async def environments_update(*, rt: CliRuntime, console: Console, name: str, pa
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
     # Session closed. MA calls below.
-    env = await find_environment_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
+    env = await find_environment_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=name, records=rt.sessionmaker
+    )
     if env is None:
         raise StoreError(f"no environment named {name!r} in your account.")
     if spec.name != name:
@@ -181,6 +188,7 @@ async def environments_update(*, rt: CliRuntime, console: Console, name: str, pa
             "metadata": build_metadata(tenant_id=tenant_id, name=spec.name),
         },
         scope=resource_scope(tenant_id=str(tenant_id)),
+        records=rt.sessionmaker,
     )
     console.print(f"[green]✓ updated environment {spec.name!r}[/green]")
 
@@ -208,10 +216,17 @@ async def environments_archive(*, rt: CliRuntime, console: Console, name: str, y
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
     # Session closed. MA calls below.
-    env = await find_environment_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
+    env = await find_environment_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=name, records=rt.sessionmaker
+    )
     if env is None:
         raise StoreError(f"no environment named {name!r} in your account or system defaults.")
-    await archive_environment(rt.anthropic, env.id, scope=resource_scope(tenant_id=str(tenant_id)))
+    await archive_environment(
+        rt.anthropic,
+        env.id,
+        scope=resource_scope(tenant_id=str(tenant_id)),
+        records=rt.sessionmaker,
+    )
     await _clear_picks(rt, console, tenant_id=tenant_id, name=name)
     console.print(f"[green]✓ archived environment {name!r}[/green]")
 
@@ -252,18 +267,26 @@ async def environments_delete(*, rt: CliRuntime, console: Console, name: str, ye
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
     # Session closed. MA calls below.
-    env = await find_environment_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
+    env = await find_environment_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=name, records=rt.sessionmaker
+    )
     if env is None:
         raise StoreError(f"no environment named {name!r} in your account or system defaults.")
     archived_instead = False
     try:
         await delete_environment(
-            rt.anthropic, env.id, scope=resource_scope(tenant_id=str(tenant_id))
+            rt.anthropic,
+            env.id,
+            scope=resource_scope(tenant_id=str(tenant_id)),
+            records=rt.sessionmaker,
         )
     except APIStatusError as err:
         if err.status_code == 409:
             await archive_environment(
-                rt.anthropic, env.id, scope=resource_scope(tenant_id=str(tenant_id))
+                rt.anthropic,
+                env.id,
+                scope=resource_scope(tenant_id=str(tenant_id)),
+                records=rt.sessionmaker,
             )
             archived_instead = True
         else:
@@ -320,17 +343,24 @@ async def environments_fork(
     # The dst==src guard above only catches the trivial case; a fork to an existing
     # *different* environment name would silently collide and feed reconcile dedup.
     # Reject ANY tenant match on dst regardless of owner, before the MA create.
-    dst_matches = await find_environments_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=dst)
+    dst_matches = await find_environments_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=dst, records=rt.sessionmaker
+    )
     if dst_matches:
         raise StoreError(
             f"environment {dst!r} already exists in this server — pick a different name, "
             "or use 'daimon environments update' to modify it."
         )
-    source = await find_environment_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=src)
+    source = await find_environment_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=src, records=rt.sessionmaker
+    )
     if source is None:
         raise StoreError(f"no environment named {src!r} in your account or system defaults.")
     source_ma = await retrieve_environment(
-        rt.anthropic, source.id, scope=resource_scope(tenant_id=str(tenant_id))
+        rt.anthropic,
+        source.id,
+        scope=resource_scope(tenant_id=str(tenant_id)),
+        records=rt.sessionmaker,
     )
     source_cfg = source_ma.config.model_dump(mode="json")
     allowed = ("type", "networking", "packages")

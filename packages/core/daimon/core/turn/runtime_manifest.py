@@ -1708,6 +1708,8 @@ async def read_preparation_counterpart(
         # tenant) reaches the person as itself; anything else stays "unsupported".
         if error.reason != "backend_unsupported":
             raise
+        if error.cause == "channel_row_missing":
+            raise
         raise AdmissionDenied(reason="backend_unsupported") from error
     except AgentBackendRefused as error:
         # A stale consent is not missing provider setup: name the fresh preview
@@ -1994,6 +1996,11 @@ def select_runtime_manifest[Plan: CounterpartPlan](
             selected = _most_specific(
                 _matching_rows(defaults, revision, request, allow_wildcard=True)
             )
+            if not selected and request.admission.backend_revision_origin != "agent":
+                # A channel pin the code defaults can't serve: name the fix.
+                raise AdmissionDenied(
+                    reason="backend_unsupported", cause="channel_row_missing", provider=provider
+                )
         if len(selected) != 1:
             raise AdmissionDenied(reason="backend_unsupported")
         resolved = dict(selected[0])

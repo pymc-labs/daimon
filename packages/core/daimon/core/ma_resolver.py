@@ -148,7 +148,12 @@ async def retrieve_agent_cached(
 
 
 async def retrieve_environment_cached(
-    client: AsyncAnthropic, cache: ResolverCache, tenant_id: uuid.UUID, environment_id: str
+    client: AsyncAnthropic,
+    cache: ResolverCache,
+    tenant_id: uuid.UUID,
+    environment_id: str,
+    *,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaEnvironment:
     backend_scope = resource_scope(tenant_id=str(tenant_id))
     key = (tenant_id, environment_id)
@@ -157,7 +162,9 @@ async def retrieve_environment_cached(
             cache.environments,
             cache.environment_retrieves,
             key,
-            lambda: retrieve_environment(client, environment_id, scope=backend_scope),
+            lambda: retrieve_environment(
+                client, environment_id, scope=backend_scope, records=records
+            ),
         )
     except ScopeViolation:
         cache.environments.pop(key, None)

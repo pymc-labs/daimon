@@ -6,7 +6,6 @@ import ast
 from pathlib import Path
 
 PACKAGES = Path(__file__).resolve().parents[2]
-# Environments route through the records seam too, but their sweep is a later step.
 AGENT_WRAPPERS = {
     "find_agent_by_daimon_tag",
     "find_agents_by_daimon_tag",
@@ -19,6 +18,16 @@ AGENT_WRAPPERS = {
     "archive_agent",
     "create_agent",
     "list_agents",
+    "find_environment_by_daimon_tag",
+    "find_environments_by_daimon_tag",
+    "list_environments_by_tenant",
+    "list_environments",
+    "retrieve_environment",
+    "retrieve_environment_cached",
+    "create_environment",
+    "update_environment",
+    "archive_environment",
+    "list_environment_names",
 }
 SKILLS = "skill ids exist only on Anthropic; the agent is read to attach one"
 SESSIONS = "session, vault, output and extension ports exist only on Anthropic"
@@ -29,7 +38,7 @@ WRAPPER_ALLOWED = {
     "core/daimon/core/skill_sync/": SKILLS,
     "core/daimon/core/server_skills/": SKILLS,
     "core/daimon/core/reader_agent.py": "the reader agent is an Anthropic-hosted helper",
-    "core/daimon/core/long_jobs_ma.py": "long jobs run as Anthropic sessions",
+    "core/daimon/core/long_jobs_ma.py": "long jobs run as Anthropic sessions; Daimon ids refused",
     "core/daimon/core/agent_fork.py": "forking an Anthropic agent; Daimon-owned forks use records",
     "core/daimon/core/ma_resolver.py": "resolves Anthropic agents by name; dm_ ids use records",
     "adapters/web/": "web adapter sweep is separate",

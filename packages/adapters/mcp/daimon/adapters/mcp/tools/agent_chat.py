@@ -808,7 +808,7 @@ async def _start_turn_impl(
         raise ToolError("environment not found")
 
     environment: BetaEnvironment | None = await find_environment_by_daimon_tag(
-        runtime.client, tenant_id=auth.tenant_id, name=env_name
+        runtime.client, tenant_id=auth.tenant_id, name=env_name, records=runtime.session_factory
     )
     if environment is None:
         raise ToolError("environment not found")

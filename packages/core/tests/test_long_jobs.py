@@ -1054,3 +1054,26 @@ async def test_a_workspace_and_an_agent_can_only_lower_the_long_job_limits(db_se
     await choose(db_session, tenant.id, agent, "long_jobs_max_deadline", "60")
     assert await limits("a") == (Decimal("10"), 30), "an agent cannot raise what the workspace set"
     assert await limits("b") == (Decimal("20"), 30)
+
+
+async def test_worker_creation_refuses_daimon_owned_agents_and_environments(db_engine, db_clean):
+    from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
+    from daimon.core.long_jobs_ma import ManagedLongJobPort
+    from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
+    from pydantic import SecretStr
+
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    seeded = await seed(sm)
+    client = build_fake_anthropic(MARouter().dispatch)  # No routes: any provider call fails.
+    settings = Settings(
+        database=DatabaseSettings(url="postgresql+asyncpg://unused/db"),
+        anthropic=AnthropicSettings(api_key=SecretStr("fake")),
+        _env_file=None,
+    )
+    try:
+        port = ManagedLongJobPort(client, sm, settings)
+        for update in ({"agent_id": "dm_agent_1"}, {"environment_id": "sh_env_1"}):
+            with pytest.raises(WorkerVanished, match="not available for this agent"):
+                await port.create_or_find(seeded.model_copy(update=update))
+    finally:
+        await client.close()

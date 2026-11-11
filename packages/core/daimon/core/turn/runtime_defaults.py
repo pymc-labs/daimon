@@ -11,8 +11,8 @@ Served: Gemini agent and channel turns, and an OpenAI agent's own turn once its
 tenant's hosted environment is known
 (`request.openai_environment_id`). Both agent templates keep the agent's Daimon
 MCP tools (`template_capabilities: "mcp"`), with a per-turn caller credential.
-A channel pinned to OpenAI needs a native agent of its own, so it still needs an
-operator row.
+A channel pinned to OpenAI needs a native agent of its own, so it needs an
+operator row; without one the turn is refused with `channel_row_missing`.
 """
 
 from __future__ import annotations

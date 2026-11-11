@@ -121,6 +121,7 @@ async def set_environment(
             channel_id=channel_id,
             environment_name=environment_name,
             default=default,
+            records=sessionmaker,
         )
     if not pick.decision and pick.decision.reason != "not_a_reader":
         raise ChannelChangeRefused(NEEDS_ADMIN, kind="forbidden")

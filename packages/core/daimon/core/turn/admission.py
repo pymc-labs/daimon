@@ -1363,7 +1363,7 @@ async def _admit_gates(
             observation.agent_id = agent.id
         try:
             environment = await retrieve_environment_cached(
-                deps.anthropic, deps.resolver_cache, tenant_id, env_id
+                deps.anthropic, deps.resolver_cache, tenant_id, env_id, records=deps.sessionmaker
             )
         except APIStatusError as err:
             if err.status_code not in (400, 404):
@@ -1545,6 +1545,8 @@ async def _admit_gates(
                 if error.cause is None:
                     # The agent's own backend: its runtime can't serve this agent here.
                     raise _backend_refusal(revision, "agent", None) from error
+                if error.cause == "channel_row_missing":
+                    raise error
                 if (
                     error.cause in ("re_confirm", "preparation_busy", "preparation_failed")
                     and error.provider is None
