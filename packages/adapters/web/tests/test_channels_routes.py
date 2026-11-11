@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import httpx
 from daimon.adapters.web import channel_visibility
@@ -47,11 +47,14 @@ _ROUTES: list[tuple[str, str, dict[str, object] | None]] = [
 
 @asynccontextmanager
 async def _channels(
-    web_client: WebClientFactory, factory: async_sessionmaker[AsyncSession], tmp_path: Path
+    web_client: WebClientFactory,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    **extra: Any,
 ) -> AsyncIterator[Admin]:
     """The admin fixture with two named channels, one of them only its own agents read."""
     channel_visibility.forget_visibility()
-    async with signed_in_admin(web_client, factory, tmp_path) as admin:
+    async with signed_in_admin(web_client, factory, tmp_path, **extra) as admin:
         tenant_id = admin.ws.tenant_id
         async with factory.begin() as db:
             await upsert_channel_names(

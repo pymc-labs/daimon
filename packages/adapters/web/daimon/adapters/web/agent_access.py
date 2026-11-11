@@ -78,7 +78,8 @@ def change_deps(runtime: WebRuntime, caller: WebCaller | None = None) -> AgentCh
             else backend_capture.for_agent(
                 None if runtime.turns is None else runtime.turns.deps,
                 account_id=caller.person.account_id,
-                subject=actor_of(caller).subject,
+                subject=Subject(is_admin=is_admin(caller.role), platform_user_id=None),
+                external_user_id=str(caller.person.id),
             ),
         ),
     )

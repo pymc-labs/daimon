@@ -42,6 +42,7 @@ from daimon.core.output_runtime import OutputRuntime
 from daimon.core.stores import file_uploads
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.domain import (
+    Role,
     WebCard,
     WebMessageBlocks,
     WebMessageRow,
@@ -323,7 +324,10 @@ class WebTurns:
             AdmissionDenied,
             UserFacingError,
         ) as err:
-            await lifecycle.finish("done", card=refusal_for(err))
+            await lifecycle.finish(
+                "done",
+                card=refusal_for(err, agent=thread.agent_name, admin=principal.role is Role.ADMIN),
+            )
             return
         async with self.sessionmaker.begin() as session:
             intent = await create_turn_card_intent(
@@ -394,7 +398,12 @@ class WebTurns:
                 deadline=deadline,
             )
         except _BIND_REFUSALS as error:
-            await lifecycle.finish("done", card=refusal_for(error))
+            await lifecycle.finish(
+                "done",
+                card=refusal_for(
+                    error, agent=thread.agent_name, admin=principal.role is Role.ADMIN
+                ),
+            )
             return
         if prepared.mapping_id is not None:
             async with self.sessionmaker.begin() as session:

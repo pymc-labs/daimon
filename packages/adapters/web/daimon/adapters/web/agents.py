@@ -20,6 +20,7 @@ from daimon.adapters.web.agent_access import (
 from daimon.adapters.web.agent_audit import recorded
 from daimon.adapters.web.caller import WebCaller
 from daimon.adapters.web.channel_names import channel_names
+from daimon.adapters.web.model_preview import ModelPreview, consent_of, preview_doc, refused_doc
 from daimon.adapters.web.nodes import AgentNode, agent_nodes, build_nodes, tenant_workspace
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import (
@@ -43,13 +44,15 @@ from daimon.core.agent_view import (
     PersonRef,
     SkillDoc,
 )
-from daimon.core.channel_backend import NO_CAPTURE, make_backend_service
+from daimon.core.channel_backend import NO_CAPTURE, AgentBackendRefused, make_backend_service
 from daimon.core.constants import DEFAULT_AGENT_MODEL, MODEL_DISPLAY_NAMES
 from daimon.core.defaults.ma_index import list_agents_by_tenant, list_skills_lenient
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import list_skills_lenient_cached
 from daimon.core.model_presets import ModelSelection
-from daimon.core.models_catalog import priced_claude_ids
+from daimon.core.model_switch import SwitchRefusal, preview_or_refusal
+from daimon.core.models_catalog import catalog_model, list_model_choices, priced_claude_ids
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import agent_drafts as drafts_store
 from daimon.core.stores import agent_mcp_credentials as credentials_store
@@ -58,7 +61,7 @@ from daimon.core.stores import web_people as people_store
 from daimon.core.tenant_summary import load_tenant_summary
 from fastapi import APIRouter, HTTPException
 from mux.contracts.config import DEFAULT_BACKEND
-from mux.contracts.ids import Provider
+from mux.contracts.ids import ModelRef
 from pydantic import BaseModel, Field, StringConstraints, ValidationError
 
 
@@ -111,6 +114,10 @@ class DraftBody(BaseModel):
 
 class ApplyBody(BaseModel):
     note: str | None = None
+    # What the person saw and confirmed when the draft moves the provider.
+    accepted_drops: list[str] | None = None
+    preview_digest: str | None = None
+    preview_revision: int | None = None
 
 
 class HelpersBody(BaseModel):
@@ -150,6 +157,36 @@ _BLANK = Template(
 
 def _model_id(model: ModelSelection) -> str:
     return model if isinstance(model, str) else model["id"]
+
+
+async def _picked_elsewhere(
+    d: AgentChangeDeps, caller: WebCaller, model: str | None
+) -> ModelRef | None:
+    """The other provider's model a create names, or None for a Claude one.
+
+    Refused (403) unless the shared catalog offers it to this workspace now.
+    """
+    named = next(
+        (
+            entry.model
+            for entry in agent_model_names.agent_catalog()
+            if model in (entry.model.id, f"{entry.model.provider}:{entry.model.id}")
+            and entry.model.provider != DEFAULT_BACKEND
+        ),
+        None,
+    )
+    if named is None:
+        return None
+    enabled = d.backends is not None and d.backends.enabled
+    policy = (
+        await d.backends.tenant_policy(caller.person.tenant_id)
+        if d.backends is not None and enabled
+        else None
+    )
+    try:
+        return catalog_model(f"{named.provider}:{named.id}", tenant=policy)
+    except AgentBackendRefused as exc:
+        raise HTTPException(status_code=403, detail="That model isn't allowed here.") from exc
 
 
 def _template_doc(spec: AgentSpec) -> Template:
@@ -266,15 +303,14 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
         backends = make_backend_service(
             runtime.sessionmaker, runtime.settings.turn, capture_source=NO_CAPTURE
         )
-        providers: tuple[Provider, ...] = (DEFAULT_BACKEND,)
-        if backends.enabled:
-            providers += (await backends.tenant_policy(tenant_id)).enabled_backends
+        policy = await backends.tenant_policy(tenant_id) if backends.enabled else None
+        offered = [c.model for c in list_model_choices(tenant=policy, default=None)]
         platform, found = await channel_names(
             runtime, tenant_id, {c.channel_id for c in summary.channels}
         )
         return Catalog(
             models=agent_catalog.models_of(
-                agent_model_names.agent_catalog(), providers=providers, priced=priced_claude_ids()
+                agent_model_names.agent_catalog(), offered=offered, priced=priced_claude_ids()
             ),
             skills=agent_catalog.skills_of(
                 rows, tenant_id=tenant_id, descriptions=runtime.skill_descriptions
@@ -300,21 +336,7 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
             raise HTTPException(status_code=404, detail="No such template.")
         d = deps(caller)
         # Another provider's model: the agent is made on the default model, then switched.
-        elsewhere = next(
-            (
-                entry.model
-                for entry in agent_model_names.agent_catalog()
-                if entry.model.id == body.model and entry.model.provider != DEFAULT_BACKEND
-            ),
-            None,
-        )
-        if elsewhere is not None and (
-            d.backends is None
-            or not d.backends.enabled
-            or elsewhere.provider
-            not in (await d.backends.tenant_policy(caller.person.tenant_id)).enabled_backends
-        ):
-            raise HTTPException(status_code=403, detail="That model isn't allowed here.")
+        elsewhere = await _picked_elsewhere(d, caller, body.model)
         selection: ModelSelection = (body.model if elsewhere is None else None) or (
             chosen.model if chosen is not None else DEFAULT_AGENT_MODEL
         )
@@ -354,7 +376,12 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
                     d.edit, actor=actor, ma_agent_id=ma_agent_id
                 )
                 await agent_changes.switch_provider(
-                    d, actor=actor, agent=made, provider=target.provider, model_id=target.id
+                    d,
+                    actor=actor,
+                    agent=made,
+                    provider=target.provider,
+                    model_id=target.id,
+                    new_agent=True,
                 )
 
             start = start_elsewhere
@@ -424,11 +451,37 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc
 
+    @router.get("/{agent_id}/model-preview")
+    async def model_preview(caller: Editor, agent_id: str, value: str) -> ModelPreview:  # pyright: ignore[reportUnusedFunction]
+        """What picking `value` (`provider:id`) changes, or why it can't be picked."""
+        d = deps(caller)
+        agent = await agent_view.fetch_tenant_agent(
+            d.view, tenant_id=caller.person.tenant_id, ma_agent_id=agent_id
+        )
+        if agent is None or d.backends is None:
+            raise HTTPException(status_code=404, detail="No such agent.")
+        name = agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name
+        found = await preview_or_refusal(
+            d.backends,
+            d.edit,
+            actor=actor_of(caller),
+            agent_name=name,
+            value=value,
+            admin=is_admin(caller.role),
+        )
+        if isinstance(found, SwitchRefusal):
+            return refused_doc(found)
+        return preview_doc(found, agent_name=name)
+
     @router.post("/{agent_id}/apply")
     async def apply(caller: Editor, agent_id: str, body: ApplyBody) -> AgentDetail:  # pyright: ignore[reportUnusedFunction]
         try:
             await agent_changes.apply_draft(
-                deps(caller), actor=actor_of(caller), ma_agent_id=agent_id, note=body.note
+                deps(caller),
+                actor=actor_of(caller),
+                ma_agent_id=agent_id,
+                note=body.note,
+                consent=consent_of(body.accepted_drops, body.preview_digest, body.preview_revision),
             )
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc

@@ -11,6 +11,8 @@ from daimon.adapters.web import directory
 from daimon.adapters.web.caller import FILES_OFF, WebCaller, requires
 from daimon.adapters.web.cards import CardChoice
 from daimon.adapters.web.chat_json import agent_json, message_json, session_json
+from daimon.adapters.web.chat_model import thread_model
+from daimon.adapters.web.chat_switch_back import switch_back
 from daimon.adapters.web.control_cards import ControlRefused, is_control_card
 from daimon.adapters.web.credential_cards import CredentialRefused
 from daimon.adapters.web.faces import avatars_of
@@ -228,7 +230,12 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
                 creator_account_id=caller.person.account_id,
                 kind="web",
             )
-        return session_json(thread, agent, avatar=(await faces(caller, [agent])).get(agent.id, ""))
+        return session_json(
+            thread,
+            agent,
+            avatar=(await faces(caller, [agent])).get(agent.id, ""),
+            model=await thread_model(runtime, caller, thread, agent),
+        )
 
     @router.get("/sessions/{session_id}")
     async def detail(  # pyright: ignore[reportUnusedFunction]
@@ -270,6 +277,7 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
             agent,
             running="resume_from" in out,
             avatar=(await faces(caller, [agent])).get(thread.agent_id, ""),
+            model=await thread_model(runtime, caller, thread, agent),
         )
         return out
 
@@ -288,7 +296,16 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
             agent,
             running=is_running(thread.id),
             avatar=(await faces(caller, [agent])).get(thread.agent_id, ""),
+            model=await thread_model(runtime, caller, thread, agent),
         )
+
+    @router.post("/sessions/{session_id}/switch-back")
+    async def back_to_claude(session_id: uuid.UUID, caller: Caller) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
+        """The refusal card's way back: the agent answers on Claude again."""
+        async with runtime.sessionmaker() as db:
+            thread = await thread_of(db, caller, session_id)
+        runtime.agents.forget(caller.person.tenant_id)
+        return {"line": await switch_back(runtime, caller, thread)}
 
     @router.delete("/sessions/{session_id}")
     async def delete(session_id: uuid.UUID, caller: Caller) -> dict[str, bool]:  # pyright: ignore[reportUnusedFunction]
