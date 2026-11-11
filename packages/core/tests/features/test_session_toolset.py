@@ -188,6 +188,18 @@ def test_repo_memory_locked_off_at_the_deployment_hides_nothing() -> None:
     assert DEFAULT_TOOLSET.legacy_memory_servers(("old",)) == ("old",), "and step aside when on"
 
 
+def test_repo_memory_without_its_setup_hides_nothing() -> None:
+    """Without the setup the server registers no memory tools, so the session's tools, and so
+    its tool hash, stay as they were, whatever tier turned the feature Off."""
+    base = _snapshot()
+    for tier in ("default", "workspace", "agent"):
+        gap = ResolvedFeature("repo_memory", "off", tier, unavailable="requires")  # pyright: ignore[reportArgumentType]
+        toolset = agent_toolset(
+            FeatureSnapshot(base.place, 1, {**base.features, "repo_memory": gap}), _agent()
+        )
+        assert not toolset.hidden_daimon_tools, f"nothing is hidden for a {tier} Off without setup"
+
+
 def test_repo_memory_unlocked_off_at_the_deployment_hides_its_tools() -> None:
     """An unlocked Off leaves the tools registered, so the session must not be offered them."""
     base = _snapshot()
