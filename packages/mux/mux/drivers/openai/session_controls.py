@@ -22,3 +22,5 @@ class SessionControls(Contract):
     container_size: Literal["small", "medium", "large"] | None = None
     spend_limit_usd_cents: int | None = Field(default=None, gt=0, strict=True)
     mcp_enabled: Literal[False] | None = additive(None)
+    reasoning_effort: Literal["low", "medium", "high"] | None = additive(None)
+    """The agent's `reasoning.effort` for this session; omitted keeps the model's own."""

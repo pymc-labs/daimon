@@ -373,7 +373,8 @@ def model_request(request: Object) -> bool:
         or not request["model"]
         or request.get("tools") != []
         or not isinstance(config, dict)
-        or set(config) != {"max_output_tokens"}
+        or not {"max_output_tokens"} <= set(config) <= {"max_output_tokens", "thinking_level"}
+        or not isinstance(config.get("thinking_level", ""), str)
         or type(config.get("max_output_tokens")) is not int
         or not 0 < cast(int, config["max_output_tokens"]) <= 65_536
     ):

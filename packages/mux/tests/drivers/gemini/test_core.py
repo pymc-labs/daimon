@@ -1121,3 +1121,16 @@ async def test_a_stop_observation_holds_no_lock_while_it_reads_the_provider(
     assert wrote and stop.stopped and stop.outcome == "interrupted"
     t.get = real_get  # type: ignore[method-assign]  # retrieve still reads under the lock
     assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "idle"
+
+
+def test_thinking_level_compiles_into_the_model_or_the_agent_config() -> None:
+    spec = AgentSpec(name="a", model=ModelRef(provider="gemini", id="gemini-3.8-flash"))
+    assert "thinking_level" not in str(compile_agent(spec))
+    agent = compile_agent(spec, thinking_level="low")
+    assert agent["agent_config"] == {
+        "type": "antigravity",
+        "model": "gemini-3.8-flash",
+        "thinking_level": "low",
+    }
+    model = compile_agent(spec, max_output_tokens=64, thinking_level="high")
+    assert model["generation_config"] == {"max_output_tokens": 64, "thinking_level": "high"}

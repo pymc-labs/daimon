@@ -253,6 +253,11 @@ class OpenAISessions:
                 **object_json(body.get("agent") or {}),
                 "multi_agent": {"enabled": False},
             }
+        if self._controls.reasoning_effort is not None:
+            body["agent"] = {
+                **object_json(body.get("agent") or {}),
+                "reasoning": {"effort": self._controls.reasoning_effort},
+            }
         if self._controls.spend_limit_usd_cents is not None:
             body["spend_control"] = {"limit": self._controls.spend_limit_usd_cents}
         if vaults is not None:

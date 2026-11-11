@@ -350,3 +350,41 @@ async def test_mcp_disabled_session_drops_agent_mcp_without_a_resolver() -> None
         native["agent"] = {"id": "a", "model": "fixture", "tools": [mcp]}
         with pytest.raises(ProviderError):
             await driver.sessions.retrieve(SCOPE, session.ref)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("effort", [None, "low", "high"])
+async def test_reasoning_effort_rides_the_agent_block(effort: str | None) -> None:
+    seen: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path == "/v1/agents/a":
+            return httpx.Response(200, json={"id": "a", "metadata": {}})
+        return httpx.Response(200, json=native_session())
+
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
+        api_key="offline-placeholder",
+        base_url="https://openai.invalid/v1",
+    ) as sdk:
+        driver = OpenAIDriver(
+            SDKTransport(sdk),
+            account_scope_id="project",
+            authorization=lambda scope, kind, id_: scope == SCOPE,
+            journal=MemoryRecoveryJournal(),
+            usage_revisions=MemoryUsageRevisions(),
+            session_controls=SessionControls.model_validate({"reasoning_effort": effort}),
+        )
+        await driver.sessions.create(
+            SCOPE,
+            SessionSpec(
+                agent=REF.model_copy(update={"kind": "agent", "id": "a"}),
+                agent_revision=Revision(local=0),
+                config_revision=1,
+                environment=REF.model_copy(update={"kind": "environment", "id": "template"}),
+            ),
+            key="create",
+        )
+    reasoning = json.loads(seen[-1].content).get("agent", {}).get("reasoning")
+    assert reasoning == (None if effort is None else {"effort": effort})

@@ -21,6 +21,9 @@ from mux.contracts.ids import Provider
 
 Support = Literal["native", "emulated", "unsupported", "unknown"]
 
+Effort = Literal["low", "medium", "high"]
+"""A neutral reasoning effort; each profile maps it to its provider's own value."""
+
 SUPPORTED: frozenset[Support] = frozenset({"native", "emulated"})
 """The support levels admission accepts."""
 
@@ -122,6 +125,9 @@ class Profile(Contract):
     implicit_execution: bool = False
     model_controls: tuple[str, ...] = ()
     """`ModelRef.options` keys this profile's driver compiles; any other key is refused."""
+    effort_map: FrozenMap[Effort, str] = Field(default_factory=dict[Effort, str], exclude=True)
+    """The provider value for each neutral effort the profile carries; empty: none.
+    Excluded from dumps, so profile digests hold."""
     mcp_policy_keys: tuple[Literal["allowed_tools", "required"], ...] = ()
     skill_digest: Literal["version", "content"] | None = None
     tool_readback: Literal["authored", "compiled"] = "authored"
@@ -198,6 +204,7 @@ __all__ = [
     "AccountingMode",
     "CORE_CAPABILITIES",
     "Capability",
+    "Effort",
     "Profile",
     "SUPPORTED",
     "Support",

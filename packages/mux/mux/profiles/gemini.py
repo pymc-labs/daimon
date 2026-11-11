@@ -9,10 +9,13 @@ it.
 from __future__ import annotations
 
 from mux.contracts.extensions import ExtensionRef
-from mux.contracts.profile import AccountingMode, Profile
+from mux.contracts.profile import AccountingMode, Effort, Profile
 
 # Opt-in model: one attempt, never the Flash fallback chain.
 ARGON_MODEL = "gemini-4-argon"
+
+# The agent's thinking level; the neutral names match.
+_EFFORT: dict[Effort, str] = {"low": "low", "medium": "medium", "high": "high"}
 
 INLINE_REUSE = Profile(
     provider="gemini",
@@ -22,6 +25,7 @@ INLINE_REUSE = Profile(
     accounting_mode=AccountingMode.NATIVE_TOTALS,
     sdk_pin="google-genai>=2.7.0,<3",
     core=False,
+    effort_map=_EFFORT,
     extensions=(ExtensionRef(namespace="gemini.session", version=1),),
     execution_tool="code_execution",
     mcp_policy_keys=("allowed_tools",),

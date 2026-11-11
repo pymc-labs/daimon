@@ -95,3 +95,15 @@ def test_an_additive_field_counts_only_once_set() -> None:
     assert digest_body(_After(items=items)) == before
     assert digest_body(_After(items=items, tier="x")) == {**before, "tier": "x"}
     assert digest_body(_Nested(inner=_After(items=items))) == {"inner": before}
+
+
+def test_effort_joins_digests_only_once_set() -> None:
+    plain = ResolvedBackend(
+        backend="openai", profile="openai.persistent_workspace", model="gpt-6-luna"
+    )
+    high = plain.model_copy(update={"effort": "high"})
+    assert plain.content_digest() != high.content_digest()
+    assert "effort" not in digest_body(plain)
+    assert digest_body(high)["effort"] == "high"
+    assert "reasoning_effort" not in digest_body(SessionControls())
+    assert digest_body(SessionControls(reasoning_effort="low"))["reasoning_effort"] == "low"
