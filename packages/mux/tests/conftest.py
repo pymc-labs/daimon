@@ -18,6 +18,7 @@ from mux.contracts.actions import (
     UserToolResult,
 )
 from mux.contracts.admission import Admission, FallbackApplied
+from mux.contracts.completions import CompletionResult, CompletionUsage
 from mux.contracts.config import (
     BackendConfig,
     CapabilityRequirement,
@@ -342,6 +343,12 @@ SAMPLES: tuple[BaseModel, ...] = (
         satisfied=("cancel",),
         fallbacks=(FallbackApplied(capability="steer", support="unknown", fallback="f"),),
     ),
+    CompletionResult(
+        text="t",
+        usage=CompletionUsage(input_tokens=3, output_tokens=2, cache_read_input_tokens=1),
+        refused=True,
+    ),
+    CompletionUsage(input_tokens=5, output_tokens=0),
 )
 
 
