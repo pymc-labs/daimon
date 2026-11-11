@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
+from daimon.core import thread_model_reask
 from daimon.core.channel_backend import AgentBackendRefused, ThreadBackend
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.domain import AgentBackendRevision
@@ -58,7 +59,9 @@ def asked(selector_host, monkeypatch):
     calls: list[StaleThread] = []
     monkeypatch.setattr(admission, "thread_backend", thread_of)
     monkeypatch.setattr(runtime_manifest, "prepare_source", stale)
-    monkeypatch.setattr(admission, "spawn_thread_reask", lambda **kw: calls.append(kw["stale"]))
+    monkeypatch.setattr(
+        thread_model_reask, "spawn_thread_reask", lambda **kw: calls.append(kw["stale"])
+    )
 
     async def notify(card):
         return None

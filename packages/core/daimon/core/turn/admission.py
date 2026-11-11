@@ -125,7 +125,6 @@ from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.shared_channels import is_channel_shared, mark_channel_shared
 from daimon.core.stores.thread_sessions import get_thread_session_at
-from daimon.core.thread_model_reask import StaleThread, spawn_thread_reask
 from daimon.core.thread_models import apply_thread_model, conversation_key, thread_backend
 from daimon.core.thread_release import apply_thread_release, release_due, release_now
 from daimon.core.turn.approvals import daimon_rule_set_for
@@ -1489,10 +1488,14 @@ async def _admit_gates(
             or conversation is None
         ):
             return False
-        spawn_thread_reask(
+        # Deferred: the model switch modules it imports reach `channel_rules`, whose
+        # import chain comes back through this package.
+        from daimon.core import thread_model_reask
+
+        thread_model_reask.spawn_thread_reask(
             sessionmaker=deps.sessionmaker,
             notifier=notifier,
-            stale=StaleThread(
+            stale=thread_model_reask.StaleThread(
                 deps=deps,
                 settings=deps.settings,
                 tenant_id=tenant_id,
