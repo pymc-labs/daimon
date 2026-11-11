@@ -8,20 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - **Chat hides what is not set up, and nine development switches are gone.**
-  `/settings` and `get_settings` list a feature only when it is available or has
-  a saved value at some level, as the web app does. An unavailable feature that
-  nothing sets stays out of view, and a group left empty disappears. "Allow writes"
-  in the approvals panel covers chat replies only; routines and watches follow the
-  deployment's unattended-writes rule, and the operator switch for approval
-  overrides (`allow_gate_overrides`) is removed, so saved choices always apply.
-  Daimon tools, full turn controls, the working-file carry-over, chart images in
-  artifacts, and cost on native-model footers (off) are fixed, as are the
-  separate-message status card, the unmentioned-reply hint, the no-writers notice
-  and the waiting card (all off). Their features, deployment variables
-  (`DAIMON_TURN__STATUS_LOG`, `DAIMON_DISCORD__WRITERS_NONE_NOTICE` and the rest)
-  and stored values are gone. A variable left over from an older setup
-  (`DAIMON_TOOL_SAFETY__ALLOW_GATE_OVERRIDES`, or `DAIMON_FEATURES__STATUS_LOG` and
-  the other removed keys) is ignored with a startup warning that names it; any
+  `/settings` and `get_settings` list a feature only when it is available or has a saved value at some level, as the
+  web app does. "Allow writes" in the approvals panel covers chat replies only; routines and watches follow the
+  deployment's unattended-writes rule. Upgrade notes: saved "Allow writes" choices are reset to Ask and must be set
+  again. Stored Off values of Daimon tools, full turn controls, the working-file carry-over and chart images in
+  artifacts are reset to the default (On). Third-party tools whose names look like permission, policy or admin setters
+  now always ask in chat. These variables log a startup warning naming them and are otherwise ignored:
+  `DAIMON_TOOL_SAFETY__ALLOW_GATE_OVERRIDES`, `DAIMON_TURN__STATUS_LOG`, `DAIMON_TURN__NATIVE_FOOTER_COST`,
+  `DAIMON_DISCORD__WRITERS_NONE_NOTICE`, `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT`,
+  `DAIMON_DISCORD__TENANT_CAP_WAITING_CARD`, `DAIMON_ARTIFACTS__EMBED_IMAGES` (`false` no longer stops image
+  embedding) and `DAIMON_FEATURES__<removed key>`; an agent spec that lists a removed key is loaded without it. Any
   other unknown feature still stops startup.
 
 - **The web app sets a thread's value as chat does.**
@@ -75,7 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Completion pings, table rendering, message feedback buttons are set at every level; typed `@name` mentions, budget notices and thread naming down to a channel; direct messages and read-only memory in direct messages at the workspace. Each web app module is a setting too (`web.chat`, `web.agents` and so on).
   The old per-workspace variables (`DAIMON_COMPLETION_PINGS`, `DAIMON_TABLE_RENDERING`, `DAIMON_BUDGET_NOTICES`) keep working, log a deprecation, and lose to any workspace setting; `daimon features import-env` writes them as workspace settings. The other old variables still work but log a deprecation.
   `daimon tenants access-policy set --dm-memory-read-only` is gone, as nothing read it; set the `dm_memory_read_only` feature instead.
-  The remaining older controls (the web settings, `PATCH /api/admin/settings` and the direct-message commands) behave as before and now change the same stored values, so the two never disagree.
+  The older controls (the web settings, `PATCH /api/admin/settings` and the direct-message commands) write the same stored values, so the two never disagree. `PATCH /api/admin/settings` refuses the fields that are features now (`modules`, `dm_enabled`, `dm_memory_read_only`, `plain_text_mentions`) with a 422.
 
 - **Guardrails are features too, and a lower level can only make them stricter.**
   Tool safety (`tool_safety`), the reach check (`reach_budget`), built-in tools in routines (`unattended_capabilities`) and requiring a routine destination (`require_routine_destination`) are set at the levels `docs/features.md` lists, and a level below can tighten but never loosen them. An agent asking to change one gets a confirmation card, or a refusal where no card can be shown.
