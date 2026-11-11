@@ -11,14 +11,16 @@ from typing import Final
 
 import structlog
 from daimon.core.pricing import side_call_rates
+from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Provider
+from mux.profiles import INLINE_REUSE, PERSISTENT_WORKSPACE
 
 log = structlog.get_logger()
 
 AUXILIARY_MODELS: Final[Mapping[Provider, str]] = {
-    "anthropic": "claude-haiku-5-5",
-    "openai": "gpt-6-luna",
-    "gemini": "gemini-3.5-flash-lite",
+    DEFAULT_BACKEND: "claude-haiku-5-5",
+    PERSISTENT_WORKSPACE.provider: "gpt-6-luna",
+    INLINE_REUSE.provider: "gemini-3.5-flash-lite",
 }
 
 

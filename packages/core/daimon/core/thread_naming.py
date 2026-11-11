@@ -23,10 +23,11 @@ from anthropic import AsyncAnthropic
 from daimon.core.auxiliary_calls import auxiliary_complete
 from daimon.core.auxiliary_models import AUXILIARY_MODELS
 from daimon.core.name_mentions import strip_name_mentions
+from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Provider
 
 # Priced in AGENT_MODEL_PRICING; a title must never run on an unmetered model.
-THREAD_NAMING_MODEL = AUXILIARY_MODELS["anthropic"]
+THREAD_NAMING_MODEL = AUXILIARY_MODELS[DEFAULT_BACKEND]
 THREAD_NAME_MAX_CHARS = 50
 _MAX_OUTPUT_TOKENS = 60
 _MENTION_RE = re.compile(r"<(?:@[!&]?|#)\d+>")

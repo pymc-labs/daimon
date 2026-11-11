@@ -26,6 +26,7 @@ from daimon.core.thread_participation import (
     classifier_system_prompt,
     parse_classifier_response,
 )
+from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Provider
 
 log = structlog.get_logger()
@@ -50,7 +51,7 @@ class ClassifierOutcome:
     verdict: ClassifierVerdict
     usage: ClassifierUsage | None
     """`None` when the call failed before the API answered: nothing to meter."""
-    provider: Provider = "anthropic"
+    provider: Provider = DEFAULT_BACKEND
     model_id: str | None = None
     """What the call ran on, for metering."""
 

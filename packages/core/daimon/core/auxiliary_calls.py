@@ -17,6 +17,7 @@ from daimon.core.auxiliary_models import AUXILIARY_MODELS, side_call_priced
 from daimon.core.errors import DaimonError
 from daimon.core.provider_keys import DEFAULT_KEY_ENV
 from mux.contracts.completions import CompletionEffort, Completions, CompletionUsage
+from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Provider, Scope
 from mux.drivers.anthropic import AnthropicCompletions
 
@@ -52,7 +53,7 @@ def auxiliary_provider(anthropic: AsyncAnthropic, admitted: Provider | None) -> 
     A provider whose side-call model has no price today is skipped.
     """
     if anthropic_configured(anthropic):
-        return "anthropic"
+        return DEFAULT_BACKEND
     for provider in (admitted, *DEFAULT_KEY_ENV):
         if provider is not None and provider in _FACTORIES and side_call_priced(provider):
             return provider
@@ -73,8 +74,8 @@ async def auxiliary_complete(
     """One side call. Metering is the caller's (`usage_recording.record_auxiliary_usage`)."""
     require_anthropic_allowed()
     chosen = auxiliary_provider(anthropic, provider)
-    model = (anthropic_model if chosen == "anthropic" else None) or AUXILIARY_MODELS[chosen]
-    driver = AnthropicCompletions(anthropic) if chosen == "anthropic" else _FACTORIES[chosen]()
+    model = (anthropic_model if chosen == DEFAULT_BACKEND else None) or AUXILIARY_MODELS[chosen]
+    driver = AnthropicCompletions(anthropic) if chosen == DEFAULT_BACKEND else _FACTORIES[chosen]()
     scope = Scope.legacy_host_authorized(call_site=f"auxiliary_calls:{purpose}")
     result = await driver.complete(scope, model, system, prompt, max_tokens, effort)
     return AuxiliaryCompletion(result.text, result.usage, result.refused, chosen, model)

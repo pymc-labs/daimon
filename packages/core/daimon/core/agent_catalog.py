@@ -71,7 +71,7 @@ def models_of(
             backend=entry.model.provider,
             in_usd=entry.input_usd,
             out_usd=entry.output_usd,
-            fast=entry.model.provider == "anthropic" and entry.model.id + _FAST in priced,
+            fast=entry.model.provider == DEFAULT_BACKEND and entry.model.id + _FAST in priced,
             efforts=provider_efforts(entry.model.provider),
         )
         for entry in entries

@@ -34,6 +34,7 @@ from daimon.core.mux_compat import create_agent, legacy_call, source_agent_recor
 from daimon.core.specs import merge_default_agent_toolset
 from daimon.core.stores.agent_rekey import open_agent_work, rekey_agent
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
+from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import ModelRef, Provider
 from mux.contracts.resources import Agent
 from mux.errors import ProviderError
@@ -194,7 +195,7 @@ async def convert_agent_to_anthropic(
         name=name,
         source_id=record.ref.id,
         agent_id=created.id,
-        provider="anthropic",
+        provider=DEFAULT_BACKEND,
     )
     return ConvertedAgent(created, dropped)
 
