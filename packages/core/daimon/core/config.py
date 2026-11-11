@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 from daimon.core.features.registry import FEATURES, deployment_key, parse_deployment
+from daimon.core.features.removed import without_removed_features, without_removed_fields
 from daimon.core.mcp_server_url import ascii_mcp_url, canonical_mcp_url
 from daimon.core.outbound.reach import DEFAULT_MAX_PEOPLE
 from daimon.core.scope_cascade import CascadeMode
@@ -2992,6 +2993,16 @@ class Settings(BaseSettings):
     def _features_are_registered(cls, value: dict[str, str]) -> dict[str, str]:
         return _registered_features(value)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_removed_fields(cls, values: object) -> object:
+        """A removed field left in the environment is ignored with a warning, not fatal."""
+        return (
+            without_removed_fields(cast("dict[str, object]", values))
+            if isinstance(values, dict)
+            else values
+        )
+
     @model_validator(mode="after")
     def _tool_safety_feature(self) -> Settings:
         """`DAIMON_FEATURES__TOOL_SAFETY` sets the policy every tool-safety reader holds."""
@@ -3034,7 +3045,7 @@ def load_settings(*, _env_file: str | None = ".env") -> Settings:
 
 
 def _registered_features(value: dict[str, str]) -> dict[str, str]:
-    features = {deployment_key(key): raw for key, raw in value.items()}
+    features = {deployment_key(key): raw for key, raw in without_removed_features(value).items()}
     for key, raw in features.items():
         parse_deployment(key, raw)
     return features

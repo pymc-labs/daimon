@@ -19,7 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   separate-message status card, the unmentioned-reply hint, the no-writers notice
   and the waiting card (all off). Their features, deployment variables
   (`DAIMON_TURN__STATUS_LOG`, `DAIMON_DISCORD__WRITERS_NONE_NOTICE` and the rest)
-  and stored values are gone; a stale nested variable now fails settings validation.
+  and stored values are gone. A variable left over from an older setup
+  (`DAIMON_TOOL_SAFETY__ALLOW_GATE_OVERRIDES`, or `DAIMON_FEATURES__STATUS_LOG` and
+  the other removed keys) is ignored with a startup warning that names it; any
+  other unknown feature still stops startup.
 
 - **Daimon tolerates its seeded agent being renamed in place to `default`.**
   Ahead of that rename, a workspace whose built-in agent is already called `default` keeps it: defaults sync no longer archives it or creates a second `daimon` beside it, and asking for `daimon` answers with it. Only the workspace's own built-in agent counts, never a user's agent named `default`.
