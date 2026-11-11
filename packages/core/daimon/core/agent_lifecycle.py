@@ -20,6 +20,7 @@ import anthropic as anthropic_errors
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.core._models import ConnectorToken, HostCallCard, ThreadModelConsent
 from daimon.core.agent_ownership import agent_name_lock, record_agent_creator
 from daimon.core.anthropic_guard import AnthropicDisabled
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
@@ -44,6 +45,7 @@ from daimon.core.stores.access_policy import (
 )
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from pydantic import ValidationError
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger()
@@ -261,17 +263,29 @@ async def forget_archived_agent(
             updated = without_agent_rules(policy, names)
             if updated != policy:
                 await set_access_policy(session, tenant_id=tenant_id, policy=updated)
-            await _clear_references(session, tenant_id=tenant_id, names=names)
+            await _clear_references(session, tenant_id=tenant_id, names=names, agent=agent)
         return tuple(n for n in names if n in policy.agent_rules)
     except (AccessPolicyUnreadable, PolicyBusyError):
         _log.warning("agent_lifecycle.agent_rule_kept", exc_info=True, **log_fields)
     async with sessionmaker.begin() as session:
-        await _clear_references(session, tenant_id=tenant_id, names=names)
+        await _clear_references(session, tenant_id=tenant_id, names=names, agent=agent)
     return ()
 
 
 async def _clear_references(
-    session: AsyncSession, *, tenant_id: uuid.UUID, names: tuple[str, ...]
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    names: tuple[str, ...],
+    agent: BetaManagedAgentsAgent,
 ) -> None:
     for each in names:
         await clear_agent_references(session, tenant_id=tenant_id, agent_name=each)
+    # No agents table to cascade from: drop the rows keyed by the agent's id.
+    agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
+    for stmt in (
+        delete(ConnectorToken).where(ConnectorToken.agent_id == agent_uuid),
+        delete(ThreadModelConsent).where(ThreadModelConsent.agent_id == agent_uuid),
+        delete(HostCallCard).where(HostCallCard.executing_agent_id == agent_uuid),
+    ):
+        await session.execute(stmt)
