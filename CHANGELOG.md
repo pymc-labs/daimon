@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes. Memory needs an Anthropic key; without one the memory settings show
   as needing setup. Self-hosted agents still have no memory.
 
+- **OpenAI and self-hosted agents open web pages.** An agent whose provider has
+  no page reader of its own gets Daimon's: it opens public https pages only,
+  checks every redirect the same way, and returns the page text, cut short
+  past a size limit. The web page setting of the place decides, as it does for
+  Claude agents; a routine keeps it only when an admin turned on its built-in
+  tools. A converted agent that listed it no longer names page reading as a
+  loss, so its owner may be asked to confirm the copy again.
+
 - **Reasoning effort on OpenAI and Gemini agents.** An agent on either provider
   can carry a low, medium or high effort, kept with its model. Speed (Fast)
   stays Claude-only. Effort shows in the web editor and the Discord, Slack

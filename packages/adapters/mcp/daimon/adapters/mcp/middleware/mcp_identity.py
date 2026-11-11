@@ -44,6 +44,7 @@ from daimon.core.anthropic_guard import AnthropicDisabled, without_anthropic
 from daimon.core.channel_backend import is_selfhosted_channel
 from daimon.core.config import Settings
 from daimon.core.host_memory import HOST_MEMORY_TAG, HOST_MEMORY_TOOLS
+from daimon.core.host_web_fetch import HOST_WEB_FETCH_TAG
 from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.operator_tokens import scope_tag
@@ -531,6 +532,9 @@ class IdentityMiddleware(Middleware):
         # Malformed identity fails closed at tools that require an agent.
         if _host_memory_visible(identity):
             await enable_components(fastmcp_ctx, tags={HOST_MEMORY_TAG})
+        if identity.no_confirmation_surface:
+            # No provider-turn backend has a page fetch of its own.
+            await enable_components(fastmcp_ctx, tags={HOST_WEB_FETCH_TAG})
         if agent_id is not None:
             await disable_components(fastmcp_ctx, match_all=True)
             await enable_components(fastmcp_ctx, tags={"agent-chat"})

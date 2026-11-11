@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 220 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 221 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -18,6 +18,7 @@ tool is hidden by default and restored only for a matching caller.
 - **agent tokens only** — carries the `agent-chat` tag.
 - **Discord callers** — carries the `discord` tag.
 - **OpenAI and Gemini agents** — carries the `host-memory` tag.
+- **OpenAI, Gemini and self-hosted agents** — carries the `host-web-fetch` tag.
 - **operator tokens with agents:archive** — carries the `scope:agents:archive` tag.
 - **operator tokens with channels:write** — carries the `scope:channels:write` tag.
 - **operator tokens with promo:create** — carries the `scope:promo:create` tag.
@@ -347,6 +348,14 @@ Current-place status tool with short text and complete structured facts.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `where_am_i` | all callers | Return the short who-answers-here text and the full structured facts. |
+
+## `host_web_fetch`
+
+`web_fetch` for agents whose backend has no page fetch of its own.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `web_fetch` | OpenAI, Gemini and self-hosted agents | Open a public https web page and return its text. |
 
 ## `lead_intake`
 

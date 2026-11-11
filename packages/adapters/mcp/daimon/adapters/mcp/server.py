@@ -83,6 +83,7 @@ from daimon.adapters.mcp.tools.github_requests import register_github_request_to
 from daimon.adapters.mcp.tools.github_working_repo import register_github_working_repo_tools
 from daimon.adapters.mcp.tools.helpers import register_helper_tools
 from daimon.adapters.mcp.tools.here import register_here_tools
+from daimon.adapters.mcp.tools.host_web_fetch import register_host_web_fetch_tool
 from daimon.adapters.mcp.tools.lead_intake import register_lead_intake_tools
 from daimon.adapters.mcp.tools.media import register_media_tools, register_upload_tool
 from daimon.adapters.mcp.tools.microsoft._access import MicrosoftGraph
@@ -128,6 +129,7 @@ from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.errors import BootstrapError
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.host_memory import HOST_MEMORY_TAG
+from daimon.core.host_web_fetch import HOST_WEB_FETCH_TAG, PINNED_HOST_TOOLS
 from daimon.core.logging_setup import configure_logging, mark_shutting_down
 from daimon.core.mcp_tool_call import pinned_http_client
 from daimon.core.node_exchange import node_identity_key
@@ -478,13 +480,14 @@ def create_mcp_app(
     mcp.add_transform(Visibility(False, tags={"web"}))
     # Memory for backends without their own stores: provider turns only.
     mcp.add_transform(Visibility(False, tags={HOST_MEMORY_TAG}))
+    mcp.add_transform(Visibility(False, tags={HOST_WEB_FETCH_TAG}))
     # Deployment-wide promo issuing: only an operator token holding the scope
     # re-enables these (middleware/mcp_identity.py); admins never see them.
     mcp.add_transform(Visibility(False, tags={scope_tag("promo:create")}))
     mcp.add_transform(
         AgentChatAwareBM25SearchTransform(
             max_results=5,
-            always_visible=["get_long_job"],
+            always_visible=["get_long_job", *PINNED_HOST_TOOLS],
             search_result_serializer=serialize_tools_for_output_markdown,
         )
     )
@@ -556,6 +559,7 @@ def create_mcp_app(
     register_github_working_repo_tools(mcp, runtime)
     register_repo_memory_tools(mcp, runtime)
     register_agent_memory_tools(mcp, runtime)
+    register_host_web_fetch_tool(mcp, runtime)
     register_github_remove_repo_tools(mcp, runtime)
     register_wizard_tools(mcp, runtime)
     skills.register_skill_tools(mcp, runtime)

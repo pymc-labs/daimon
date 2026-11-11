@@ -20,7 +20,9 @@ from daimon.adapters.mcp.middleware.mcp_identity import (
     production_subject_resolver,
     production_tenant_resolver,
 )
+from daimon.adapters.mcp.search_transform import AgentChatAwareBM25SearchTransform
 from daimon.core.host_memory import HOST_MEMORY_TAG
+from daimon.core.host_web_fetch import HOST_WEB_FETCH_TAG, PINNED_HOST_TOOLS
 from daimon.testing.asgi import call_mcp_tool, mcp_session
 from fastmcp import Client, FastMCP
 from fastmcp.server.auth import AccessToken
@@ -1480,7 +1482,7 @@ async def test_selfhosted_mcp_dispatch_blocks_legacy_helpers_and_preserves_neutr
 def _make_host_memory_app(
     sessionmaker: async_sessionmaker[AsyncSession], claims: dict[str, object]
 ) -> ASGIApp:
-    """The production host-memory baseline: hidden by tag, shown per credential."""
+    """The production host-tool baseline: hidden by tag, shown per credential."""
     mcp = FastMCP(name="host-memory-test", auth=StaticTokenVerifier(tokens={"t": claims}))
     mcp.add_middleware(
         IdentityMiddleware(
@@ -1494,24 +1496,37 @@ def _make_host_memory_app(
         )
     )
     mcp.add_transform(Visibility(False, tags={HOST_MEMORY_TAG}))
+    mcp.add_transform(Visibility(False, tags={HOST_WEB_FETCH_TAG}))
+    mcp.add_transform(AgentChatAwareBM25SearchTransform(always_visible=list(PINNED_HOST_TOOLS)))
+
+    @mcp.tool(tags={HOST_WEB_FETCH_TAG})  # pyright: ignore[reportArgumentType]
+    async def web_fetch() -> str:  # pyright: ignore[reportUnusedFunction]
+        return "page"
 
     @mcp.tool(tags={HOST_MEMORY_TAG})  # pyright: ignore[reportArgumentType]
     async def memory_view() -> str:  # pyright: ignore[reportUnusedFunction]
         return "memory"
 
+    @mcp.tool
+    async def other_tool() -> str:  # pyright: ignore[reportUnusedFunction]
+        return "other"
+
     return mcp.http_app()  # pyright: ignore[reportReturnType]
 
 
 @pytest.mark.parametrize(
-    ("extra", "visible"),
+    ("extra", "memory", "fetch"),
     [
-        ({"no_confirmation_surface": True}, True),
-        ({}, False),
-        ({"no_confirmation_surface": True, "anthropic_disabled": True}, False),
+        ({"no_confirmation_surface": True}, True, True),
+        ({}, False, False),
+        ({"no_confirmation_surface": True, "anthropic_disabled": True}, False, True),
     ],
 )
-async def test_host_memory_visibility_when_credential_varies_then_provider_turns_only(
-    sessionmaker: async_sessionmaker[AsyncSession], extra: dict[str, object], visible: bool
+async def test_host_tool_visibility_when_credential_varies_then_provider_turns_only(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    extra: dict[str, object],
+    memory: bool,
+    fetch: bool,
 ) -> None:
     claims: dict[str, object] = {
         "sub": str(uuid.uuid4()),
@@ -1522,4 +1537,6 @@ async def test_host_memory_visibility_when_credential_varies_then_provider_turns
         **extra,
     }
     names = await _list_tools(_make_host_memory_app(sessionmaker, claims), token="t")
-    assert ("memory_view" in names) is visible, f"host memory for {extra}"
+    assert ("memory_view" in names) is memory, f"host memory listed by name for {extra}"
+    assert ("web_fetch" in names) is fetch, f"host page fetch listed by name for {extra}"
+    assert "other_tool" not in names, "the rest stays behind search"

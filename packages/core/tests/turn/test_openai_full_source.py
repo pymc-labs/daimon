@@ -181,7 +181,8 @@ class FullWire(Wire):
 @pytest.fixture
 async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path, request):
     gated = getattr(request, "param", False)
-    native_defaults = gated == "native-defaults"
+    host_tools = gated == "host-tools"
+    native_defaults = gated in ("native-defaults", "host-tools")
     request, _, source, actor, accepted, router, source_reads, *_ = consent_request
     sessions = request.deps.sessionmaker
     scope = admitted_session_scope(
@@ -239,6 +240,10 @@ async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path, reques
             "publish_report",
             "search_tools",
         ]
+    if host_tools:
+        from daimon.core.host_web_fetch import PINNED_HOST_TOOLS
+
+        names = sorted((*names, *PINNED_HOST_TOOLS))
     catalogue_state = {"names": names if gated else None}
 
     async def mcp(call):
@@ -385,8 +390,13 @@ async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path, reques
             "mcp_tool:daimon-mcp:publish_report",
             "memory",
         )
+    if host_tools:
+        # Daimon's own memory and page fetch carry both: neither is a loss.
+        expected_drops = tuple(
+            d for d in expected_drops if d not in ("builtin_tool:web_fetch", "memory")
+        )
     assert quote.allowed and quote.declared_drops == expected_drops
-    if native_defaults:
+    if native_defaults and not host_tools:
         from daimon.core.channel_backend import AgentBackendRefused
 
         with pytest.raises(AgentBackendRefused) as missing_consent:
@@ -820,6 +830,19 @@ async def test_live_native_defaults_drop_gated_tools_and_preserve_siblings(full_
     tools = wire.posts[0]["agent"]["tools"]
     assert any(tool["type"] == "web_search" for tool in tools)
     assert next(tool for tool in tools if tool["type"] == "mcp")["allowed_tools"] == expected
+
+
+@pytest.mark.parametrize("consent_request", [NATIVE_DEFAULT_PARAMS], indirect=True)
+@pytest.mark.parametrize("full_openai", ["host-tools"], indirect=True)
+async def test_host_web_fetch_when_listed_then_never_a_declared_drop(full_openai):
+    """A catalogue listing Daimon's own `web_fetch` and memory tools loses neither."""
+    from daimon.core.host_web_fetch import PINNED_HOST_TOOLS
+
+    target = full_openai[2].target_spec
+    assert "builtin_tool:web_fetch" not in target.declared_drops, "host fetch carries it"
+    assert "memory" not in target.declared_drops, "host memory carries it"
+    allowed = target.mcp_servers[0].tool_policy["allowed_tools"]
+    assert set(PINNED_HOST_TOOLS) <= set(allowed), "the host tools are listed by name"
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)

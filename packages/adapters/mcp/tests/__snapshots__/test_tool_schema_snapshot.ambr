@@ -11431,6 +11431,36 @@
         'type': 'object',
       }),
     }),
+    'web_fetch': dict({
+      'description': '''
+        Open a public https web page and return its text.
+        <blank line>
+        Long pages are cut short. Pages that are not text are refused.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'url': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'url',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'where_am_i': dict({
       'description': '''
         Return the short who-answers-here text and the full structured facts.

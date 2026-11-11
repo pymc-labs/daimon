@@ -18,6 +18,7 @@ import structlog
 from daimon.core.config import get_repo_memory_settings
 from daimon.core.connector_relay import relay_key
 from daimon.core.errors import DaimonError
+from daimon.core.host_web_fetch import WEB_FETCH_TOOL
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import remaining_s, turn_deadline
@@ -690,9 +691,12 @@ async def _capture_source_capabilities(
             # URL fetching has no native hosted-Agents tool. Keep the exact
             # source capability visible as a consented loss instead of silently
             # treating shell HTTP execution as the provider's fetch tool.
+            # Daimon's own `web_fetch` (`daimon.core.host_web_fetch`) carries it when listed.
+            host_fetch = permissions.get(WEB_FETCH_TOOL) == "auto"
             unavailable_builtin_tools = (
                 ("builtin_tool:web_fetch",)
                 if profile.provider == "openai"
+                and not host_fetch
                 and any(tool.kind == "builtin" and tool.name == "web_fetch" for tool in tools)
                 else ()
             )
@@ -709,7 +713,9 @@ async def _capture_source_capabilities(
                     tool for tool in own_tools if tool.kind == "builtin" and tool.name in _WEB_TOOLS
                 )
                 unavailable_builtin_tools = tuple(
-                    f"builtin_tool:{tool.name}" for tool in sorted(web, key=lambda t: t.name)
+                    f"builtin_tool:{tool.name}"
+                    for tool in sorted(web, key=lambda t: t.name)
+                    if not (host_fetch and tool.name == WEB_FETCH_TOOL)
                 )
                 try:
                     mapped_tools = (
@@ -732,9 +738,9 @@ async def _capture_source_capabilities(
                         tool
                         for tool in own_tools
                         if not (
-                            unavailable_builtin_tools
+                            (unavailable_builtin_tools or host_fetch)
                             and tool.kind == "builtin"
-                            and tool.name == "web_fetch"
+                            and tool.name == WEB_FETCH_TOOL
                         )
                     ),
                 )
