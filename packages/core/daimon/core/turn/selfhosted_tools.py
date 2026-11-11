@@ -68,6 +68,8 @@ class TurnTools:
     mcp_servers: tuple[MCPServer, ...]
     skills: tuple[InlineSkill, ...]
     skipped: tuple[SkippedSkill, ...] = ()
+    relayed: tuple[str, ...] = ()
+    """Connectors mounted through Daimon's relay; their calls need the turn's session."""
 
 
 @dataclass(frozen=True)
@@ -203,6 +205,7 @@ def build_turn_tools(
     platform_skills: Sequence[SkillRef] = (),
     channel_skills: Sequence[ChannelSkillRow] = (),
     daimon_tools: bool = True,
+    relayed: Collection[str] = (),
 ) -> TurnTools:
     """Pure preparation from authorized records; exact pins never fall back to latest.
 
@@ -211,7 +214,10 @@ def build_turn_tools(
     the shared ownership, mount and count rules. Archive corruption/digest/cap
     failures refuse the turn rather than quietly changing requested content.
     With `daimon_tools` off the Daimon server is left out; its name stays reserved.
+    A `relayed` server is mounted at its relay URL under the turn's own Daimon credential.
     """
+    from daimon.core.connector_relay import relay_url
+
     daimon_mcp_url = _mcp_url(daimon_mcp_url, credential=True)
     servers = [
         MCPServer(
@@ -253,6 +259,11 @@ def build_turn_tools(
                 raise ScopeViolation(connection.name, "MCP credential belongs to another tenant")
             headers["Authorization"] = connection.credential_ref
         names.add(connection.name)
+        if connection.name in relayed:
+            url, headers = (
+                relay_url(daimon_mcp_url, connection.name),
+                {"Authorization": DAIMON_MCP_AUTH_ENV},
+            )
         servers.append(MCPServer(name=connection.name, url=url, headers_env=headers))
 
     skills: list[InlineSkill] = []
@@ -333,6 +344,7 @@ def build_turn_tools(
         tuple(servers),
         tuple(sorted(skills, key=lambda skill: skill.name)),
         tuple(sorted(set(skipped), key=lambda item: (item.name, item.reason))),
+        tuple(sorted(name for name in names if name in relayed)),
     )
 
 
@@ -349,13 +361,15 @@ async def mint_turn_mcp_authorization(
     hold: TurnHold | None = None,
     seal_ids: Collection[str] = (),
     memory_read_only: bool | None = None,
+    bind_session: bool = False,
 ) -> MintedMcpAuthorization:
     """Register a live agent's token; the host revokes jti in its turn-finally path.
 
     A `hold` binds it to the held channel as MA's chat credential does; the server
     then lists only the held allowlist. `seal_ids` signs the turn's seals.
     `memory_read_only` binds the token to the
-    executing turn's origin, so the server reads that turn's memory as read-only."""
+    executing turn's origin, so the server reads that turn's memory as read-only;
+    `bind_session` binds it alone, as the connector relay needs."""
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.mcp_auth import CHAT_TOKEN_TTL, bind_execution_session, mint_chat_mcp_token
     from daimon.core.stores.accounts import get_account_with_tenant
@@ -410,7 +424,7 @@ async def mint_turn_mcp_authorization(
             hold=hold,
             seal_ids=seal_ids,
         )
-    if memory_read_only:
+    if memory_read_only or bind_session:
         token = await bind_execution_session(
             sessions,
             token=token,
@@ -418,7 +432,7 @@ async def mint_turn_mcp_authorization(
             scope=scope,
             agent_id=agent_id,
             now=now,
-            memory_read_only=True,
+            memory_read_only=True if memory_read_only else None,
         )
     return MintedMcpAuthorization(SecretStr(f"Bearer {token}"), jti, expires_at)
 

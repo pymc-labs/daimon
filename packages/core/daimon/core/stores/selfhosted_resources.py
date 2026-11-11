@@ -620,6 +620,26 @@ class _Resources[
             return DeletionReceipt(operation_id=receipt.operation_id, deleted=(ref,))
 
 
+async def record_agent_row(
+    session: AsyncSession, *, tenant_id: UUID, agent_id: UUID
+) -> SelfHostedAgentRecord | None:
+    """The tenant's live agent record whose derived uuid is `agent_id`, if any."""
+    rows = await session.scalars(
+        select(SelfHostedAgentRecord).where(
+            SelfHostedAgentRecord.tenant_id == tenant_id,
+            SelfHostedAgentRecord.archived_at.is_(None),
+        )
+    )
+    return next(
+        (
+            row
+            for row in rows
+            if derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=row.id) == agent_id
+        ),
+        None,
+    )
+
+
 class SelfHostedAgents(_Resources[AgentSpec, AgentPatch, Agent]):
     table = SelfHostedAgentRecord
     spec_type = AgentSpec
@@ -629,16 +649,8 @@ class SelfHostedAgents(_Resources[AgentSpec, AgentPatch, Agent]):
     async def find_by_derived_uuid(self, scope: Scope, agent_id: UUID) -> Agent | None:
         """Resolve a chat credential's execution identity among this tenant's live records."""
         async with self.sessionmaker() as session:
-            rows = await session.scalars(
-                select(SelfHostedAgentRecord).where(
-                    SelfHostedAgentRecord.tenant_id == self._tenant(scope),
-                    SelfHostedAgentRecord.archived_at.is_(None),
-                )
-            )
-            for row in rows:
-                if derive_agent_uuid(tenant_id=self._tenant(scope), ma_agent_id=row.id) == agent_id:
-                    return self._result(scope, row)
-        return None
+            row = await record_agent_row(session, tenant_id=self._tenant(scope), agent_id=agent_id)
+            return None if row is None else self._result(scope, row)
 
     async def list(self, scope: Scope, *, filters: AgentFilter, page: PageRequest) -> Page[Agent]:
         return await self._list(scope, filters=filters, page=page)

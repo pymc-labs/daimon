@@ -364,6 +364,11 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             channel_skills=channel_rows,
             agent=agent,
         )
+        from daimon.core.connector_relay import harness_connectors
+        from daimon.core.features.snapshot import deployment_on
+
+        relay_on = deployment_on(settings, "mcp_connector_relay", request.platform)
+        relayed = frozenset(harness_connectors(agent.spec)) if relay_on else frozenset[str]()
         prepared_tools = await asyncio.to_thread(
             build_turn_tools,
             daimon_mcp_url=str(public_url),
@@ -376,6 +381,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             single_tenant=settings.selfhosted.single_tenant,
             mcp_allowed_http_hosts=settings.selfhosted.mcp_allowed_http_hosts,
             daimon_tools=toolset.daimon_tools,
+            relayed=relayed,
             # The driver compiles permissions from the original pinned spec;
             # this builder only resolves credential-free connection fields.
             mcp_servers=tuple(
@@ -479,6 +485,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                         hold=request.admission.hold,
                         seal_ids=request.admission.origin_seal_ids,
                         memory_read_only=origin_read_only(request.admission),
+                        bind_session=bool(prepared_tools and prepared_tools.relayed),
                     )
 
             async def token_provider() -> str:

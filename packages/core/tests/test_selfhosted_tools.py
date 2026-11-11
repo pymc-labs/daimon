@@ -118,6 +118,33 @@ def test_reserved_server_and_configured_servers_are_credential_free() -> None:
     assert "Bearer" not in json.dumps([server.model_dump() for server in tools.mcp_servers])
 
 
+def test_relayed_connectors_mount_the_relay_with_the_turn_credential() -> None:
+    tools = build_turn_tools(
+        daimon_mcp_url="https://mcp.example/mcp",
+        tenant_id=TENANT,
+        platform="discord",
+        channel_id="channel",
+        agent_names=("agent",),
+        skill_bundles={},
+        mcp_servers=(
+            MCPConnection(name="notes", url="https://notes.example/mcp"),
+            MCPConnection(name="open", url="https://open.example/mcp"),
+        ),
+        mcp_credential_bindings=(),
+        single_tenant=False,
+        mcp_allowed_http_hosts=(),
+        agent_skills=(),
+        platform_skills=(),
+        channel_skills=(),
+        relayed=("notes",),
+    )
+    by_name = {server.name: server for server in tools.mcp_servers}
+    assert by_name["notes"].url == "https://mcp.example/mcp/connectors/notes"
+    assert by_name["notes"].headers_env == {"Authorization": DAIMON_MCP_AUTH_ENV}
+    assert by_name["open"].url == "https://open.example/mcp" and by_name["open"].headers_env == {}
+    assert tools.relayed == ("notes",)
+
+
 @pytest.mark.parametrize(
     "server",
     [
@@ -516,6 +543,27 @@ async def test_minted_token_is_registered_expiring_redacted_and_tenant_bound(
             now=NOW,
         )
     assert stamped is not None and stamped.memory_read_only is True, "the server reads it read-only"
+    reset = current_execution_origin_id.set(origin.id)
+    try:
+        relayed = await mint_turn_mcp_authorization(
+            db_session_factory,
+            scope=scope,
+            agent=agent,
+            agents=agents,
+            deadline_s=300,
+            secret=b"t" * 32,
+            now=NOW,
+            bind_session=True,
+        )
+    finally:
+        current_execution_origin_id.reset(reset)
+    claims = jwt.decode(
+        relayed.header.get_secret_value().removeprefix("Bearer "),
+        b"t" * 32,
+        algorithms=["HS256"],
+        options={"verify_exp": False},
+    )
+    assert claims["chat_session_id"] == str(origin.id), "the relay credential names its origin"
 
 
 def test_skill_count_cap_and_identical_reference_deduplication() -> None:

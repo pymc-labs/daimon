@@ -83,6 +83,9 @@ class RelayTurn:
     held: bool
     confirmed_call_id: uuid.UUID | None
     token_jti: uuid.UUID | None
+    carded: bool = True
+    """A provider turn's credential, whose asks become cards; else a self-hosted
+    harness's, which asks the person itself (`host_calls.gate_path`)."""
 
     @property
     def requester(self) -> uuid.UUID:
@@ -113,7 +116,7 @@ def _uuid(raw: object) -> uuid.UUID | None:
 
 
 def relay_turn(claims: Mapping[str, object]) -> RelayTurn | None:
-    """The turn a provider-turn chat credential names; None for any other credential."""
+    """The turn a provider-turn or self-hosted chat credential names; None for any other."""
     account, tenant = _uuid(claims.get("sub")), _uuid(claims.get("tenant_id"))
     agent, session = _uuid(claims.get("chat_agent_id")), claims.get("chat_session_id")
     platform = claims.get("platform")
@@ -125,8 +128,12 @@ def relay_turn(claims: Mapping[str, object]) -> RelayTurn | None:
         or not session
         or not isinstance(platform, str)
         or claims.get(CHAT_EXECUTION_CLAIM) is not True
-        # Only a provider turn's credential: a card-capable turn calls its connectors natively.
-        or claims.get("no_confirmation_surface") is not True
+        # A provider turn's credential (cards) or a self-hosted harness's (asks itself);
+        # Managed Agents call connectors natively. Only a pressed card names a call.
+        or (
+            claims.get("no_confirmation_surface") is not True
+            and (claims.get("anthropic_disabled") is not True or "confirmed_call" in claims)
+        )
         # A malformed binding must not read as "no requester": refuse it, as identity does.
         or any(
             claims.get(name) is not None and _uuid(claims.get(name)) is None
@@ -144,6 +151,7 @@ def relay_turn(claims: Mapping[str, object]) -> RelayTurn | None:
         held=claims.get(HOLD_CLAIM) is not None,
         confirmed_call_id=_uuid(claims.get("confirmed_call")),
         token_jti=_uuid(claims.get(TOKEN_JTI_CLAIM)),
+        carded=claims.get("no_confirmation_surface") is True,
     )
 
 
@@ -184,7 +192,9 @@ class ConnectorRelay:
         self._load, self._token_for, self._post_card = load_connectors, token_for, post_card
         self._open, self._clock, self._monotonic = open_session, clock, monotonic
         self._tools = tools or ToolsCache(clock=monotonic)
-        self._connectors: dict[tuple[uuid.UUID, uuid.UUID], tuple[float, Mapping[str, Connector]]]
+        self._connectors: dict[
+            tuple[uuid.UUID, uuid.UUID, bool], tuple[float, Mapping[str, Connector]]
+        ]
         self._connectors = {}
 
     async def handle(self, request: Request) -> Response:
@@ -272,7 +282,7 @@ class ConnectorRelay:
     async def _turn_connectors(
         self, turn: RelayTurn, origin: TurnOriginRow
     ) -> Mapping[str, Connector]:
-        owner = (turn.tenant_id, turn.agent_id)
+        owner = (turn.tenant_id, turn.agent_id, turn.carded)
         cached = self._connectors.get(owner)
         if cached is not None and self._monotonic() - cached[0] <= CACHE_TTL_S:
             return cached[1]
@@ -347,8 +357,9 @@ class ConnectorRelay:
         if verdict == "refuse":
             log.info("connector_relay.call_refused", server_key=connector.key, tool=name)
             return _tool_text(REFUSED_TEXT)
-        if verdict == "ask":
+        if verdict == "ask" and turn.carded:
             return await self._ask(turn, origin, connector, name, args)
+        # Uncarded, the harness asked the person in-process before calling (its tool policy).
         async with self._open(connector.url, token) as upstream:
             return await upstream.call_tool_result(name, args)
 
@@ -464,12 +475,40 @@ async def relay_token(
     )
 
 
+async def record_connectors(
+    sessionmaker: async_sessionmaker[AsyncSession], turn: RelayTurn, origin: TurnOriginRow
+) -> Mapping[str, Connector]:
+    """A Daimon-record agent's connectors, when the credential fits where it runs.
+
+    A self-hosted harness asks in-process, so only its uncarded credential is
+    served, and only connectors without the operator's own harness credential.
+    """
+    from daimon.core.connector_relay import connectors_of, harness_connectors
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.stores.selfhosted_resources import SelfHostedAgents
+    from mux.errors import ProviderError
+
+    scope = resource_scope(tenant_id=str(turn.tenant_id))
+    try:
+        agent = await SelfHostedAgents(sessionmaker).resolve(scope, origin.responder_ma_agent_id)
+    except ProviderError:
+        return {}
+    in_process = host_calls.gate_path(agent.spec.model.provider) == "in_process"
+    if (
+        derive_agent_uuid(tenant_id=turn.tenant_id, ma_agent_id=agent.ref.id) != turn.agent_id
+        or in_process == turn.carded
+    ):
+        return {}
+    return harness_connectors(agent.spec) if in_process else connectors_of(agent.spec)
+
+
 def build_connector_relay(
     runtime: McpRuntime, auth: TokenVerifier, public_url: str
 ) -> ConnectorRelay:
     """The relay over this server's runtime: the agent's source spec, R1 tokens, own cards."""
     from daimon.adapters.mcp.auth.resolver import AuthIdentity
     from daimon.adapters.mcp.tools._own_card import post_own_card
+    from daimon.core.agent_record_ports import DAIMON_ID_PREFIXES
     from daimon.core.channel_backend import AgentBackendRefused, load_backend_agent
     from daimon.core.connector_relay import connectors_of
     from daimon.core.stores.domain import Role
@@ -477,6 +516,10 @@ def build_connector_relay(
     sessionmaker = runtime.session_factory
 
     async def load_connectors(turn: RelayTurn, origin: TurnOriginRow) -> Mapping[str, Connector]:
+        if origin.responder_ma_agent_id.startswith(DAIMON_ID_PREFIXES):
+            return await record_connectors(sessionmaker, turn, origin)
+        if not turn.carded:
+            return {}  # A card-capable turn calls its connectors natively.
         try:
             agent = await load_backend_agent(
                 runtime.client,

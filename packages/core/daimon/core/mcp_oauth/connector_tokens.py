@@ -66,8 +66,14 @@ def refresh_owner_for(selection: ResolvedBackend) -> ConnectorRefreshOwner:
 async def agent_refresh_owner(
     session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, selection_enabled: bool
 ) -> ConnectorRefreshOwner:
-    """The refresh owner for the agent's current backend (MA when selection is off)."""
+    """The refresh owner for the agent's current backend (MA when selection is off).
+
+    A Daimon-held agent record has no MA vault, so Daimon refreshes its grants."""
+    from daimon.core.stores.selfhosted_resources import record_agent_row  # import cycle
+
     revision = await current_agent_backend(session, tenant_id, agent_id)
+    if revision is None and await record_agent_row(session, tenant_id=tenant_id, agent_id=agent_id):
+        return "daimon"
     return refresh_owner_for(resolve_agent_backend(None, revision, enabled=selection_enabled))
 
 

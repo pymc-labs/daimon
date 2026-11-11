@@ -13,7 +13,7 @@ import json
 import uuid
 from collections.abc import Mapping
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, cast
 from urllib.parse import parse_qs
 
@@ -553,6 +553,80 @@ async def test_server_keys_resolve_only_in_the_turns_tenant_and_agent(rig: Rig) 
     malformed = rig.claims(requester_account_id="not-a-uuid")
     assert (await rig.send("tools/list", claims=malformed)).status_code == 403, "malformed"
     assert set(rig.loads) == {(rig.tenant_id, rig.agent_id)}, "only this agent's spec loads"
+
+
+def _harness(rig: Rig, **changes: Any) -> dict[str, Any]:
+    """A self-hosted harness's credential: no card surface, asks the person itself."""
+    return rig.claims(no_confirmation_surface=False, anthropic_disabled=True, **changes)
+
+
+async def test_a_self_hosted_harness_runs_its_own_asks_without_a_card(rig: Rig) -> None:
+    """The harness asked in-process before the call: Daimon runs it, posts no card."""
+    result = _result(
+        await rig.send("tools/call", {"name": "write", "arguments": {}}, claims=_harness(rig))
+    )
+    assert _text(result) == "done" and rig.upstream.calls == ["write"], f"ran: {result}"
+    assert await _cards(rig) == [] and rig.posted == [], "no card for a harness ask"
+    confirmed = _harness(rig, confirmed_call=str(uuid.uuid4()))
+    assert (await rig.send("tools/list", claims=confirmed)).status_code == 403, "no pressed call"
+
+
+async def test_a_self_hosted_harness_ask_is_refused_unattended(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Nobody is there to answer the harness: the unattended refusal still applies."""
+    rig = await _make_rig(committing_sessionmaker, attended=False)
+    sent = await rig.send("tools/call", {"name": "write", "arguments": {}}, claims=_harness(rig))
+    assert _text(_result(sent)) == REFUSED_TEXT and rig.upstream.calls == [], "refused"
+
+
+async def test_a_self_hosted_record_serves_only_its_daimon_signed_connectors(rig: Rig) -> None:
+    """A record's relay connectors skip the operator's own credentials, fit the credential
+    kind and the record's own identity; Daimon refreshes its sign-ins."""
+    from daimon.adapters.mcp.connector_relay import record_connectors
+    from daimon.core.mcp_oauth.connector_tokens import agent_refresh_owner
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.stores.domain import TurnOriginRow
+    from daimon.core.stores.selfhosted_resources import SelfHostedAgents
+
+    agent = await SelfHostedAgents(rig.sessions).create(
+        resource_scope(tenant_id=str(rig.tenant_id), account_id=str(rig.account_id)),
+        AgentSpec(
+            name="harness",
+            model=ModelRef(provider="selfhosted", id="m"),
+            tools=(
+                ToolSpec(name=_KEY, kind="mcp_toolset", permission="ask"),
+                ToolSpec(name="bound", kind="mcp_toolset"),
+            ),
+            mcp_servers=(
+                MCPConnection(name=_KEY, url=_UP),
+                MCPConnection(
+                    name="bound",
+                    url="https://bound.example/mcp",
+                    credential_ref="HARNESS_MCP_CRED_B",
+                ),
+            ),
+        ),
+        key="harness",
+    )
+    origin = cast("TurnOriginRow", type("Origin", (), {"responder_ma_agent_id": agent.ref.id}))
+    own = derive_agent_uuid(tenant_id=rig.tenant_id, ma_agent_id=agent.ref.id)
+    turn = replace(_turn(rig, None), agent_id=own, carded=False)
+    served = await record_connectors(rig.sessions, turn, origin)
+    assert set(served) == {_KEY}, f"Daimon-signed connectors only: {set(served)}"
+    assert served[_KEY].permission("write") == "ask", "the harness's own permission applies"
+    carded = replace(turn, carded=True)
+    assert await record_connectors(rig.sessions, carded, origin) == {}, "a card turn is not its own"
+    other = replace(turn, agent_id=rig.agent_id)
+    assert await record_connectors(rig.sessions, other, origin) == {}, "another identity gets none"
+    async with rig.sessions() as session:
+        owner = await agent_refresh_owner(
+            session, tenant_id=rig.tenant_id, agent_id=own, selection_enabled=False
+        )
+        legacy = await agent_refresh_owner(
+            session, tenant_id=rig.tenant_id, agent_id=rig.agent_id, selection_enabled=False
+        )
+    assert (owner, legacy) == ("daimon", "ma"), "a record has no vault; MA keeps its own"
 
 
 async def test_turning_the_feature_off_closes_the_route(rig: Rig) -> None:

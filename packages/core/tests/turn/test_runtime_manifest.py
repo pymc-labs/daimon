@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import os
 import traceback
+import uuid
 from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 from daimon.core.config import load_settings, load_turn_settings
+from daimon.core.host_calls import gate_path
 from daimon.core.turn.gemini_deployment import GeminiPlan
 from daimon.core.turn.openai_deployment import OpenAIDeployment
 from daimon.core.turn.runtime_manifest import (
@@ -491,11 +493,13 @@ async def test_a_counterpart_that_wont_prepare_names_its_real_error(monkeypatch)
 
 @pytest.mark.parametrize(
     "profile",
-    sorted(p.profile_id for p in PROFILES.values() if p.provider in ("openai", "gemini")),
+    sorted(p.profile_id for p in PROFILES.values() if gate_path(p.provider) != "native"),
 )
-def test_every_template_profile_mounts_connectors_never_a_loss(profile: str) -> None:
-    """Every OpenAI and Gemini profile relays each connector on Daimon's credential."""
+def test_every_non_ma_profile_mounts_connectors_never_a_loss(profile: str) -> None:
+    """Every OpenAI, Gemini and self-hosted profile relays each connector on Daimon's credential."""
+    from daimon.core.connector_relay import harness_connectors
     from daimon.core.turn.runtime_manifest import relayed_connectors
+    from daimon.core.turn.selfhosted_tools import DAIMON_MCP_AUTH_ENV, build_turn_tools
     from mux.contracts.ids import ModelRef
     from mux.contracts.resources import AgentSpec, MCPConnection, ToolSpec
 
@@ -507,17 +511,40 @@ def test_every_template_profile_mounts_connectors_never_a_loss(profile: str) -> 
         tools=tuple(ToolSpec(name=n, kind="mcp_toolset") for n in names),
     )
     daimon = MCPConnection(name="daimon-mcp", url="https://d.invalid/mcp", credential_ref="turn")
+    provider = PROFILES[profile].provider
+    if gate_path(provider) == "in_process":
+        tools = build_turn_tools(
+            daimon_mcp_url=daimon.url,
+            tenant_id=uuid.uuid4(),
+            platform="discord",
+            channel_id="c",
+            agent_names=("source",),
+            skill_bundles={},
+            mcp_servers=source.mcp_servers or (),
+            mcp_credential_bindings=(),
+            single_tenant=False,
+            mcp_allowed_http_hosts=(),
+            agent_skills=(),
+            platform_skills=(),
+            channel_skills=(),
+            relayed=harness_connectors(source),
+        )
+        mounted = [
+            (s.name, s.url, s.headers_env.get("Authorization"))
+            for s in tools.mcp_servers
+            if s.name != daimon.name
+        ]
+        assert mounted == [
+            (n, f"https://d.invalid/mcp/connectors/{n}", DAIMON_MCP_AUTH_ENV) for n in names
+        ], "the harness mounts each connector through the relay"
+        return
     relayed = relayed_connectors(
-        source,
-        daimon,
-        provider=PROFILES[profile].provider,
-        relay_on=True,
-        public_url=daimon.url,
+        source, daimon, provider=provider, relay_on=True, public_url=daimon.url
     )
     assert [(s.name, s.url, s.credential_ref) for s in relayed] == [
         (n, f"https://d.invalid/mcp/connectors/{n}", "turn") for n in names
     ], "each connector mounts through the relay"
     off = relayed_connectors(
-        source, daimon, provider=PROFILES[profile].provider, relay_on=False, public_url=daimon.url
+        source, daimon, provider=provider, relay_on=False, public_url=daimon.url
     )
     assert off == (), "with the relay off nothing mounts"

@@ -154,9 +154,12 @@ guarantees are in the
 - **Where it applies.** A channel pin only, never an agent's model. It needs
   one session per caller, so shared threads are refused, as are agents with an
   `ask` rule or a publishing confirmation.
-- **No connectors, memory, effort or spend limit.** A turn is bounded by the
+- **No memory, effort or spend limit.** A turn is bounded by the
   row's `max_tool_calls` and `deadline_s`. Routines do not run on it.
   Daimon's page-reading tool is available.
+- **Connectors.** The agent's own connectors run through Daimon's relay, with
+  the person's sign-in; the harness never sees it. A server with a
+  `credential_ref` keeps the operator's own credential and is called directly.
 
 - **Skills.** Turns support only the seeded default skills. Custom uploads and
   channel-library additions have no provisioning path on this backend.

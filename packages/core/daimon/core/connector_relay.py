@@ -33,6 +33,7 @@ __all__ = [
     "ToolsCache",
     "connectors_of",
     "daimon_destination",
+    "harness_connectors",
     "relay_key",
     "relay_url",
     "relay_verdict",
@@ -128,6 +129,37 @@ def connectors_of(spec: AgentSpec) -> dict[str, Connector]:
                     tools[config.name] = own
             name = native.mcp_server_name
             found[name] = Connector(name, servers[name], default or "ask", tools)
+    return found
+
+
+def harness_connectors(spec: AgentSpec) -> dict[str, Connector]:
+    """The connectors a self-hosted harness reaches through the relay.
+
+    A server with a harness credential (`credential_ref`) is the operator's own
+    connection and is mounted directly; every other one signs in through Daimon,
+    under the same permissions the harness asks by. A spec the harness refuses
+    relays nothing.
+    """
+    from mux.drivers.selfhosted import agent_tool_policy
+    from mux.errors import UnsupportedCapability
+
+    try:
+        policy = agent_tool_policy(spec)
+    except UnsupportedCapability:
+        return {}
+    own: dict[str, Permission] = {"auto": "auto", "ask": "ask", "deny": "disabled"}
+    found: dict[str, Connector] = {}
+    for server in spec.mcp_servers or ():
+        if server.name == DAIMON_SERVER_NAME or server.credential_ref is not None:
+            continue
+        prefix = server.name + "/"
+        tools: dict[str, Permission] = {
+            name.removeprefix(prefix): own[permission]
+            for name, permission in policy.items()
+            if name.startswith(prefix) and name != prefix + "*"
+        }
+        default = own[policy.get(prefix + "*", "auto")]
+        found[server.name] = Connector(server.name, server.url, default, tools)
     return found
 
 

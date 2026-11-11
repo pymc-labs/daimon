@@ -14,7 +14,7 @@ in one conversation.
 | Set as an agent's model or a thread's | Yes | Yes | Yes | No, only as a channel pin |
 | Shared threads | Yes | Yes, without Daimon's tools | Yes, without Daimon's tools | Not supported |
 | Tools that need a confirmation | Yes | Daimon's Approve card | Daimon's Approve card | Refused when the agent has an `ask` rule |
-| The agent's own MCP connectors | Yes | Through Daimon | Through Daimon | Not supported |
+| The agent's own MCP connectors | Yes | Through Daimon | Through Daimon | Through Daimon |
 | Sealed channels and Slack DM context | Yes | Yes | Yes | Yes |
 | Multi-agent delegation | Yes | Copies of itself | Copies of itself | Copies of itself |
 | Memory across turns | Yes | Through Daimon, needs an Anthropic key | Through Daimon, needs an Anthropic key | Not supported |
@@ -35,7 +35,7 @@ never runs it on Anthropic in its place.
 - **Gemini:** custom and channel skills, web search, and stopping a turn at a
   spend limit.
 - **OpenAI:** web search, which it neither prices nor counts.
-- **Self-hosted:** connectors, memory, shared threads, routines, effort and a
+- **Self-hosted:** memory, shared threads, routines, effort and a
   spend limit. It cannot be an agent's model. It needs a channel pin.
 - **OpenAI, Gemini and self-hosted:** an agent with an `ask` rule or a
   channel-scoped `deny` on a Daimon tool is refused, and so is workspace export
@@ -127,6 +127,7 @@ Memory settings show as needing setup.
 - **Connectors.** The agent's own MCP connectors run through Daimon with the
   turn's credential, and the provider never sees a sign-in. Each tool keeps the
   agent's permission. Personal connectors need one Reconnect after a switch.
+  Self-hosted agents get it too, and their harness asks before an `ask` tool.
   Turn it off with the `mcp_connector_relay` feature.
 - **Confirmations.** A tool that needs one posts an Approve and Deny card on
   Discord, Slack, Teams and the web. Only the asker answers, and an approved
