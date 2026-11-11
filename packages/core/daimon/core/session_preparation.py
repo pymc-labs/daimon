@@ -143,6 +143,12 @@ log = structlog.get_logger(__name__)
 
 CONTINUED = ContinuityOutcome()
 
+SeedCarryOver = Callable[[str], Awaitable[ContinuityOutcome]]
+"""Carries a thread's earlier provider into the session just created, by its id."""
+FindCarryOver = Callable[[], Awaitable[SeedCarryOver | None]]
+"""What a new session should carry over, found before it is created: once its row
+commits it is the thread's newest, and the earlier session is no longer found."""
+
 
 def _leaves_memory_store(recorded: SessionSnapshot | None, desired: SessionSnapshot) -> bool:
     """Whether the conversation moves off a shared or personal store its session had mounted.
@@ -645,7 +651,7 @@ async def prepare_session_for_turn(
     transfer: WorkspaceTransfer | None = None,
     deadline: dt.datetime | None = None,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
-    seed_carry_over: Callable[[str], Awaitable[ContinuityOutcome | None]] | None = None,
+    find_carry_over: FindCarryOver | None = None,
 ) -> PreparedTurn | PreparationDeferred | PreparationBusy | PreparationFailure:
     """Queue before the advisory-lock transaction checks out a connection."""
 
@@ -665,7 +671,7 @@ async def prepare_session_for_turn(
                 transfer=transfer,
                 deadline=deadline,
                 now=now,
-                seed_carry_over=seed_carry_over,
+                find_carry_over=find_carry_over,
             )
 
     return await retry_fences(attempt)
@@ -737,7 +743,7 @@ async def _prepare_session_for_turn_locked(
     transfer: WorkspaceTransfer | None = None,
     deadline: dt.datetime | None = None,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
-    seed_carry_over: Callable[[str], Awaitable[ContinuityOutcome | None]] | None = None,
+    find_carry_over: FindCarryOver | None = None,
 ) -> PreparedTurn | PreparationDeferred | PreparationBusy | PreparationFailure:
     """Find, refresh or replace this caller's session, then bind its recorder.
 
@@ -856,6 +862,7 @@ async def _prepare_session_for_turn_locked(
         )
 
         if row is None:
+            seed = await find_carry_over() if find_carry_over is not None else None
             fresh = await ops.create_fresh(
                 deps,
                 admission,
@@ -864,9 +871,7 @@ async def _prepare_session_for_turn_locked(
                 thread_id=thread_id,
                 session_account_id=session_account_id,
             )
-            carried = (
-                await seed_carry_over(fresh.ma_session_id) if seed_carry_over is not None else None
-            )
+            carried = await seed(fresh.ma_session_id) if seed is not None else None
             return await from_fresh(fresh, carried or CONTINUED)
 
         fresh_start = row.fresh_start_requested_at is not None
@@ -1157,6 +1162,8 @@ async def _prepare_session_for_turn_locked(
                     pending_reasons=("session_active",),
                     retry_after=moment + dt.timedelta(seconds=BUSY_RETRY_S),
                 )
+            # A fresh start may be a move here from another provider: carry that over.
+            seed = await find_carry_over() if fresh_start and find_carry_over is not None else None
             outcome = await _run_replacement(
                 deps,
                 admission,
@@ -1179,12 +1186,7 @@ async def _prepare_session_for_turn_locked(
             )
             if isinstance(outcome, PreparationFailure):
                 return outcome
-            # A fresh start may be a move here from another provider: carry that over.
-            carried = (
-                await seed_carry_over(outcome.fresh.ma_session_id)
-                if fresh_start and seed_carry_over is not None
-                else None
-            )
+            carried = await seed(outcome.fresh.ma_session_id) if seed is not None else None
             return await from_fresh(outcome.fresh, carried or outcome.continuity, recorded)
 
         assert recorded is not None, "an in-place path always has a recorded snapshot"

@@ -79,24 +79,20 @@ def _ref(binding: ProviderBinding) -> ResourceRef:
     )
 
 
-async def _move(
+async def _request(
     monkeypatch: pytest.MonkeyPatch,
     store: MemoryStateStore,
     *,
-    source: str,
     target: str,
-    ma_row_at: datetime | None,
+    rows: list[SimpleNamespace],
     runtimes: dict[str, object] | None = None,
-) -> CarriedOver | None:
-    backend = _Backend()
-    row = (
-        SimpleNamespace(ma_session_id="old-session", created_at=ma_row_at)
-        if ma_row_at is not None
-        else None
-    )
+    backend: object | None = None,
+) -> ProviderPreparationRequest:
+    """A preparation into `target`; `rows` are the thread's session rows, newest last."""
+    backend = backend if backend is not None else _Backend()
 
     async def get_row(session: object, **_: object) -> object:
-        return row
+        return rows[-1] if rows else None
 
     def reader(
         runtime: object, revision: object, scope: object, binding: ProviderBinding, store: object
@@ -138,8 +134,26 @@ async def _move(
         reuse_existing=True,
         now=lambda: RELEASED_AT + timedelta(minutes=1),
     )
+    return cast(ProviderPreparationRequest, request)
+
+
+def _row(at: datetime, session_id: str = "old-session") -> SimpleNamespace:
+    return SimpleNamespace(ma_session_id=session_id, created_at=at)
+
+
+async def _move(
+    monkeypatch: pytest.MonkeyPatch,
+    store: MemoryStateStore,
+    *,
+    source: str,
+    target: str,
+    ma_row_at: datetime | None,
+    runtimes: dict[str, object] | None = None,
+) -> CarriedOver | None:
+    rows = [_row(ma_row_at)] if ma_row_at is not None else []
+    request = await _request(monkeypatch, store, target=target, rows=rows, runtimes=runtimes)
     return await carry_on_adoption(
-        cast(ProviderPreparationRequest, request),
+        request,
         store=store,
         slot=SLOT,
         model_id="model-1",
@@ -208,19 +222,93 @@ async def test_missing_runtime_when_carried_then_degrades_to_the_lost_framing(
     assert carried.continuity.state == "replaced_after_loss", carried.continuity.state
 
 
-async def test_managed_agents_target_when_it_already_ran_then_carries_nothing_again(
+async def test_managed_agents_target_when_found_before_the_create_then_carries_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The predecessor is found before the new session's row exists; that row is then
+    the newest, so the next new session (a fresh start) carries nothing again."""
     store = MemoryStateStore()
     await _released(store, "openai.persistent_workspace")
-    carried = await _move(
+    rows: list[SimpleNamespace] = []
+    request = await _request(monkeypatch, store, target=MA, rows=rows)
+    found = await carry_over.adoption_predecessor(request, store, SLOT)
+    rows.append(_row(RELEASED_AT + timedelta(seconds=1), "new-session"))
+    assert found is not None and found.provider == "openai", f"nothing found: {found}"
+    again = await carry_over.adoption_predecessor(request, store, SLOT)
+    assert again is None, "a session started after the move carries nothing again"
+
+
+class _FilesBackend(_Backend):
+    """An old session with one file, which is also the new session's upload target."""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.mounted: list[str] = []
+        listed = SimpleNamespace(
+            size_bytes=3,
+            ref=ResourceRef(id="f-old", kind="file", provider="openai", account_scope_id="s"),
+            filename="notes.txt",
+            media_type="text/plain",
+        )
+        self.artifacts = SimpleNamespace(
+            list=self._list_files, download=lambda *_: b"abc", upload=self._upload
+        )
+        self.session_admin = SimpleNamespace(add_file=self._add_file)
+        self._listed = listed
+
+    async def _list_files(self, *_: object, **__: object) -> object:
+        return SimpleNamespace(data=[self._listed])
+
+    async def _upload(self, *_: object, **__: object) -> object:
+        ref = ResourceRef(id="f-new", kind="file", provider="anthropic", account_scope_id="s")
+        return SimpleNamespace(ref=ref)
+
+    async def _add_file(self, scope: object, session: object, mount: object, **_: object) -> None:
+        self.mounted.append(cast(ResourceBinding, mount).target_path or "")
+
+
+@pytest.mark.parametrize("readable", [True, False])
+async def test_openai_to_claude_default_when_created_then_carries_transcript_and_files(
+    monkeypatch: pytest.MonkeyPatch, readable: bool
+) -> None:
+    """Found before the new session exists, the OpenAI session's conversation and file
+    reach the new Claude session; unreadable, it starts with the loss framing, whose
+    `replaced_after_loss` state is what the adapters tell the person."""
+    store = MemoryStateStore()
+    await _released(store, "openai.persistent_workspace")
+    backend = _FilesBackend()
+    rows: list[SimpleNamespace] = []
+    request = await _request(
         monkeypatch,
         store,
-        source="openai.persistent_workspace",
         target=MA,
-        ma_row_at=RELEASED_AT + timedelta(seconds=1),
+        rows=rows,
+        runtimes=None if readable else {},
+        backend=backend,
     )
-    assert carried is None, "a session started after the move carries nothing again"
+    predecessor = await carry_over.adoption_predecessor(request, store, SLOT)
+    assert predecessor is not None, "the released OpenAI session is the predecessor"
+    rows.append(_row(RELEASED_AT + timedelta(seconds=1), "new-session"))
+    carried = await carry_over.carry_into_managed_agents(
+        request,
+        store=store,
+        slot=SLOT,
+        predecessor=predecessor,
+        session_id="new-session",
+        model_id="model-1",
+        agent_name="Daimon",
+    )
+    continuity = carried.continuity
+    if readable:
+        assert continuity.state == "replaced", continuity.state
+        assert "What is the answer?" in continuity.user_prefix, "transcript missing"
+        assert backend.mounted == ["/workspace/previous/notes.txt"], (
+            f"file not mounted: {backend.mounted}"
+        )
+    else:
+        assert continuity.state == "replaced_after_loss", continuity.state
+        assert "was lost" in continuity.user_prefix, "loss framing missing"
+        assert backend.mounted == [], "nothing is mounted from an unreadable session"
 
 
 async def test_bound_slot_when_host_prepares_then_carries_nothing(
@@ -297,7 +385,7 @@ async def test_claude_default_target_when_files_carried_then_mounts_them_on_the_
     def ma_backend(*_: object, resources: frozenset[tuple[str, str]], **__: object) -> object:
         return SimpleNamespace(artifacts=object(), session_admin=_Admin(resources))
 
-    monkeypatch.setattr(carry_over, "carry_on_adoption", carried)
+    monkeypatch.setattr(carry_over, "carry_over", carried)
     monkeypatch.setattr(carry_over, "managed_agents", ma_backend)
     monkeypatch.setattr(carry_over, "resource_ref", lambda *_, **__: None)
     request = SimpleNamespace(deps=SimpleNamespace(anthropic=object()), scope=SCOPE)
@@ -305,11 +393,12 @@ async def test_claude_default_target_when_files_carried_then_mounts_them_on_the_
         cast(ProviderPreparationRequest, request),
         store=store,
         slot=SLOT,
+        predecessor=_old_binding("openai.persistent_workspace", 1, {"session": "s"}),
         session_id="new-session",
         model_id="m",
         agent_name="Daimon",
     )
-    assert result is not None and result.mounts == (mount,), f"mounts lost: {result}"
+    assert result.mounts == (mount,), f"mounts lost: {result}"
     assert added == [("m1", frozenset({("session", "new-session"), ("file", "file-1")}))], added
 
 

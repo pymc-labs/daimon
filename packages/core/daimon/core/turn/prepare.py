@@ -1265,28 +1265,43 @@ async def bind_session_impl(
             turn_path=deps.turn_path,
         )
 
-        async def seed_carry_over(session_id: str) -> ContinuityOutcome | None:
+        async def find_carry_over() -> Callable[[str], Awaitable[ContinuityOutcome]] | None:
             # A thread moved here from another provider starts with its conversation.
             from daimon.core.stores.mux_state import PostgresStateStore
-            from daimon.core.turn.carry_over import carry_into_managed_agents, carry_over_channel
+            from daimon.core.turn.carry_over import (
+                adoption_predecessor,
+                carry_into_managed_agents,
+                carry_over_channel,
+            )
             from mux.contracts.ids import ThreadRef
             from mux.state.lease import Slot
 
             channel = carry_over_channel(current, tenant_id=tenant_id, platform=platform)
             if channel is None or not deps.channel_backends:
                 return None
-            carried = await carry_into_managed_agents(
-                replace(request, admission=current),
-                store=deps.state_store or PostgresStateStore(deps.sessionmaker),
-                slot=Slot(
-                    thread=ThreadRef(channel=channel, thread_id=thread_id),
-                    account_id=str(session_account_id),
-                ),
-                session_id=session_id,
-                model_id=current.agent.model.id,
-                agent_name=current.agent.name,
+            carrying = replace(request, admission=current)
+            store = deps.state_store or PostgresStateStore(deps.sessionmaker)
+            slot = Slot(
+                thread=ThreadRef(channel=channel, thread_id=thread_id),
+                account_id=str(session_account_id),
             )
-            return None if carried is None else carried.continuity
+            predecessor = await adoption_predecessor(carrying, store, slot)
+            if predecessor is None:
+                return None
+
+            async def seed(session_id: str) -> ContinuityOutcome:
+                carried = await carry_into_managed_agents(
+                    carrying,
+                    store=store,
+                    slot=slot,
+                    predecessor=predecessor,
+                    session_id=session_id,
+                    model_id=current.agent.model.id,
+                    agent_name=current.agent.name,
+                )
+                return carried.continuity
+
+            return seed
 
         # `SessionOps` is built here rather than at import time so that
         # `create_session` and the store helpers resolve from this module's
@@ -1309,7 +1324,7 @@ async def bind_session_impl(
             transfer=effective_transfer,
             deadline=effective_deadline,
             now=now,
-            seed_carry_over=seed_carry_over,
+            find_carry_over=find_carry_over,
         )
         if isinstance(outcome, PreparationDeferred):
             prepared_turn = await _decide_reuse_again(deps, outcome.prepared, now=now)

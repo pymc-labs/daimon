@@ -10,6 +10,7 @@ gets the lost-workspace framing. Old sessions are left as they are.
 
 A move to Managed Agents carries files too: they are uploaded before, and
 mounted on, the session that was just created (`carry_into_managed_agents`).
+Its predecessor is found before that session is created (`adoption_predecessor`).
 """
 
 from __future__ import annotations
@@ -244,6 +245,19 @@ async def carry_over(
     )
 
 
+async def adoption_predecessor(
+    request: ProviderPreparationRequest, store: StateStore, slot: Slot
+) -> ProviderBinding | None:
+    """`thread_predecessor` for a caller that may reuse what came before.
+
+    Read it before the new session is created: once that row commits it is the
+    newest, so the session it should carry from is no longer found.
+    """
+    if not request.reuse_existing:
+        return None
+    return await thread_predecessor(request, store, slot)
+
+
 async def carry_on_adoption(
     request: ProviderPreparationRequest,
     *,
@@ -254,9 +268,7 @@ async def carry_on_adoption(
     target_artifacts: Artifacts | None = None,
 ) -> CarriedOver | None:
     """What a host's first session on `slot` starts with; None when nothing came before."""
-    if not request.reuse_existing:
-        return None
-    predecessor = await thread_predecessor(request, store, slot)
+    predecessor = await adoption_predecessor(request, store, slot)
     if predecessor is None:
         return None
     return await carry_over(
@@ -275,24 +287,29 @@ async def carry_into_managed_agents(
     *,
     store: StateStore,
     slot: Slot,
+    predecessor: ProviderBinding,
     session_id: str,
     model_id: str,
     agent_name: str,
-) -> CarriedOver | None:
-    """`carry_on_adoption` for a just-created Managed Agents session, files mounted on it."""
+) -> CarriedOver:
+    """`carry_over` into a just-created Managed Agents session, files mounted on it.
+
+    `predecessor` comes from `adoption_predecessor`, read before that session existed.
+    """
     client = request.deps.anthropic
     target = managed_agents(
         client, scope=request.scope, resources=frozenset({("session", session_id)})
     )
-    carried = await carry_on_adoption(
+    carried = await carry_over(
         request,
         store=store,
         slot=slot,
+        predecessor=predecessor,
         model_id=model_id,
         agent_name=agent_name,
         target_artifacts=target.artifacts,
     )
-    if carried is None or not carried.mounts:
+    if not carried.mounts:
         return carried
     files = frozenset(
         ("file", mount.resource.id) for mount in carried.mounts if mount.resource is not None
