@@ -21,12 +21,12 @@ const github: AgentGithub = {
 const config = {
   name: "Analyst", purpose: "", avatar: "", model: { id: "claude-sonnet-5-5", effort: null }, system: "", skills: [], tools: [], mcp_servers: [], places: [], helpers: [],
 }
-const show = (details: boolean, extra: object = {}, select = () => {}) => {
+const show = (details: boolean, extra: object = {}, select = () => {}, selected = "") => {
   const agent = { ...config, ...extra, id: "ag_w", can_view_details: details, nodes: [], owner: { id: "p_ada", name: "Ada" }, co_owners: [] } as unknown as Agent
   render(
     <QueryClientProvider client={new QueryClient()}>
       <MemoryRouter><TooltipProvider><ReactFlowProvider>
-        <Canvas agent={agent} config={agent} changed={new Set()} changedNodes={new Set()} selected="" select={select} ro={false} />
+        <Canvas agent={agent} config={agent} changed={new Set()} changedNodes={new Set()} selected={selected} select={select} ro={false} />
       </ReactFlowProvider></TooltipProvider></MemoryRouter>
     </QueryClientProvider>,
   )
@@ -64,9 +64,10 @@ describe("Canvas Access via MCP card", () => {
 })
 
 describe("Canvas card fold", () => {
-  afterEach(() => vi.restoreAllMocks())
+  const tools = Array.from({ length: 20 }, (_, i) => ({ name: `tool_${i}`, description: "", effect: "read", rule: "allow" }))
+  const big = { mcp_servers: [{ key: "big", name: "Big", url: "https://mcp.example.com", auth: "token", credential: "connected", tools }] }
 
-  it("folds a long card behind Show more, and opening it selects nothing", async () => {
+  beforeEach(() => {
     // jsdom has no layout: rows are 32px and stack, a card body is as tall as its rows, and card bodies
     // (the only observed elements without a class; React Flow's own have one) are measured at once.
     vi.stubGlobal("ResizeObserver", class {
@@ -82,13 +83,30 @@ describe("Canvas card fold", () => {
     vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
       return this.dataset.row ? [...this.parentElement!.children].indexOf(this) * 32 : 0
     })
-    const tools = Array.from({ length: 20 }, (_, i) => ({ name: `tool_${i}`, description: "", effect: "read", rule: "allow" }))
+  })
+  afterEach(() => vi.restoreAllMocks())
+
+  it("folds a long card behind Show more, and opening it selects nothing", async () => {
     const select = vi.fn()
-    show(false, { mcp_servers: [{ key: "big", name: "Big", url: "https://mcp.example.com", auth: "token", credential: "connected", tools }] }, select)
+    show(false, big, select)
     // React Flow hides cards it has not measured, so find the button by its text.
     fireEvent.click(await screen.findByText("Show 13 more"))
     expect(await screen.findByText("Show less"), "the card opens").toBeInTheDocument()
     expect(select, "the button is not a click on the card").not.toHaveBeenCalled()
     expect(screen.queryByText(/^Show (\d+ )?more$/), "short cards never fold").toBeNull()
+  })
+
+  it("opens for a hidden row that is selected", async () => {
+    show(false, big, () => {}, "mcp:big/tool_17")
+    expect(await screen.findByText("Show less"), "a selected row shows").toBeInTheDocument()
+  })
+
+  it("opens when Tab reaches a hidden row", async () => {
+    show(false, big)
+    await screen.findByText("Show 13 more")
+    fireEvent.focus(document.querySelector('[data-row="mcp:big/tool_3"]')!)
+    expect(screen.queryByText("Show less"), "a visible row leaves it folded").toBeNull()
+    fireEvent.focus(document.querySelector('[data-row="mcp:big/tool_12"]')!)
+    expect(await screen.findByText("Show less")).toBeInTheDocument()
   })
 })

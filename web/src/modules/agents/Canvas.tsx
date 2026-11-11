@@ -69,8 +69,10 @@ function Card({ id, icon, title, count, children, className, action }: {
 
 /** Card bodies taller than this fold behind Show more, so one long card does not shrink the whole canvas. */
 const FOLD = 240
+const below = (body: HTMLElement, row: HTMLElement) => row.offsetTop - body.offsetTop + row.offsetHeight > FOLD
 
 function Fold({ children }: { children: React.ReactNode }) {
+  const { selected } = useCanvas()
   const body = useRef<HTMLDivElement>(null)
   const [tall, setTall] = useState(false)
   const [more, setMore] = useState(0)
@@ -81,15 +83,22 @@ function Fold({ children }: { children: React.ReactNode }) {
     const ro = new ResizeObserver(() => {
       // Folding to hide a row or so would cost as much room as the button.
       setTall(el.offsetHeight > FOLD + 48)
-      setMore([...el.querySelectorAll<HTMLElement>("[data-row]")].filter((r) => r.offsetTop - el.offsetTop + r.offsetHeight > FOLD).length)
+      setMore([...el.querySelectorAll<HTMLElement>("[data-row]")].filter((r) => below(el, r)).length)
     })
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
+  // A hidden row selected from the inspector or a link, or reached by Tab, opens the card.
+  const reveal = (row: HTMLElement | null | undefined) => { if (row && body.current && below(body.current, row)) setOpen(true) }
+  useEffect(() => reveal([...(body.current?.querySelectorAll<HTMLElement>("[data-row]") ?? [])].find((r) => r.dataset.row === selected)), [selected])
   const folded = tall && !open
   return (
     <>
-      <div className={cn(folded && "overflow-hidden")} style={folded ? { maxHeight: FOLD } : undefined}>
+      <div
+        className={cn(folded && "overflow-clip")}
+        style={folded ? { maxHeight: FOLD } : undefined}
+        onFocus={(e) => reveal((e.target as HTMLElement).closest<HTMLElement>("[data-row]"))}
+      >
         <div ref={body}>{children}</div>
       </div>
       {folded && <div className="pointer-events-none relative -mt-8 h-8 bg-gradient-to-t from-card" />}
