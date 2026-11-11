@@ -11,7 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.agent_admin import archive as archive_agent_as_admin
 from daimon.core.agent_editing import (
     AgentActor,
@@ -23,12 +23,23 @@ from daimon.core.agent_editing import (
 from daimon.core.agent_fork import fork_agent
 from daimon.core.anthropic_guard import ANTHROPIC_UNCONFIGURED_PLACEHOLDER
 from daimon.core.authz import Subject, Surface
+from daimon.core.channel_rules import set_agent_rule
 from daimon.core.defaults.provisioning import derive_guild_account_uuid, reconcile_tenant_defaults
 from daimon.core.defaults.report import Action
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import TurnRuntime, resource_scope
 from daimon.core.provider_keys import DEFAULT_KEY_ENV
 from daimon.core.purge import purge_account
+from daimon.core.roster import load_roster
+from daimon.core.routine_service import (
+    CallView,
+    NewRoutine,
+    RoutineCaller,
+    RoutineEnv,
+    create_routine,
+)
+from daimon.core.rule_views import RuleViewer
+from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import agent_backends
 from daimon.core.stores.access_policy import set_access_policy
@@ -301,4 +312,68 @@ async def test_a_managed_agents_agent_is_refused_clearly(db_session, db_session_
         provider=denied.value.provider,
     )
     assert "make a copy" in text and "Anthropic key" in text, f"the card offers a copy: {text}"
+    assert calls.requests == [], f"no Anthropic request on a keyless install: {calls.requests}"
+
+
+@pytest.mark.parametrize("only_key", PROVIDERS, indirect=True)
+async def test_routine_rule_and_roster_on_an_owned_agent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    only_key: Provider,
+) -> None:
+    """A routine, a channel rule and the roster find a Daimon record with no Anthropic key."""
+    calls = AnthropicCalls()
+    client = calls.client()
+    tenant = await make_tenant(db_session)
+    await make_account(db_session, tenant=tenant, id=derive_guild_account_uuid(tenant.id))
+    await db_session.commit()
+    await reconcile_tenant_defaults(client, db_session_factory, DEFAULTS_ROOT, tenant_id=tenant.id)
+    default = DeploymentDefault(agent_name="daimon")
+
+    async def view() -> CallView:
+        return CallView(viewer=RuleViewer(policy=OPEN_ACCESS_POLICY))
+
+    env = RoutineEnv(sessionmaker=db_session_factory, anthropic=client, load_view=view)
+    caller = RoutineCaller(
+        tenant_id=tenant.id,
+        subject=Subject(is_admin=True, platform_user_id="u_owner"),
+        platform=tenant.platform,
+        is_admin=True,
+    )
+    row = await create_routine(
+        env,
+        caller,
+        NewRoutine(
+            agent_name="daimon", cron_expr="0 9 * * *", timezone="UTC", trigger_message="report"
+        ),
+    )
+    assert row.agent_id.startswith("dm_agent_"), (
+        f"a routine on a Daimon-owned agent keeps its Daimon id: {row.agent_id}"
+    )
+
+    change = await set_agent_rule(
+        client,
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform=tenant.platform,
+        agent_name="daimon",
+        runs_in=("c1",),
+        subject=Subject(is_admin=True),
+        default=default,
+    )
+    assert change.runs_in == ("c1",), f"the rule lands on the Daimon-owned agent: {change}"
+
+    roster = await load_roster(
+        db_session,
+        client,
+        tenant_id=tenant.id,
+        platform=tenant.platform,
+        channel_id=None,
+        thread_id=None,
+        default=default,
+        records=db_session_factory,
+    )
+    assert [agent.name for agent in roster.rows] == ["daimon"], (
+        f"the roster lists the Daimon-owned agent: {roster.rows}"
+    )
     assert calls.requests == [], f"no Anthropic request on a keyless install: {calls.requests}"
