@@ -534,3 +534,18 @@ def test_a_reach_limit_applies_only_while_the_reach_check_is_on(key: str) -> Non
         check = {"reach_budget": ResolvedFeature("reach_budget", value, "workspace")}
         found = resolve_one(spec, None, place, (), check)
         assert found.unavailable == reason, f"{key} with the reach check {value}"
+
+
+def test_resolution_order_puts_every_dependency_before_its_dependents() -> None:
+    """The readers resolve in this order; a dependency read later would never apply."""
+    from daimon.core.features.registry import resolution_order
+
+    for spec in FEATURES.values():
+        assert all(dep in FEATURES for dep in spec.depends_on), f"{spec.key} names a real feature"
+    every = [spec.key for spec in resolution_order()]
+    assert sorted(every) == sorted(FEATURES), "every feature is resolved once"
+    for spec in resolution_order():
+        for dep in spec.depends_on:
+            assert every.index(dep) < every.index(spec.key), f"{dep} before {spec.key}"
+    alone = [spec.key for spec in resolution_order(["outbound_threads"])]
+    assert alone == ["reach_budget", "outbound_threads"], "a read of one pulls in its dependency"

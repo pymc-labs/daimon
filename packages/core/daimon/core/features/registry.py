@@ -8,7 +8,7 @@ in code is registered and every registered key is read.
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from typing import Final, Literal, get_args
 
@@ -1044,6 +1044,27 @@ FEATURE_KEYS: Final[tuple[str, ...]] = tuple(FEATURES)
 
 def feature(key: str) -> FeatureSpec | None:
     return FEATURES.get(key)
+
+
+def resolution_order(keys: Collection[str] | None = None) -> list[FeatureSpec]:
+    """`keys` (every feature by default) plus what they depend on, each after its
+    dependencies and otherwise in registry order, so a reader that resolves one by one
+    always has a feature's `depends_on` answered before it."""
+    ordered: dict[str, FeatureSpec] = {}
+
+    def visit(key: str, path: tuple[str, ...]) -> None:
+        if key in ordered:
+            return
+        if key in path:
+            raise ValueError(f"feature dependency cycle: {' -> '.join((*path, key))}")
+        for dep in FEATURES[key].depends_on:
+            visit(dep, (*path, key))
+        ordered[key] = FEATURES[key]
+
+    for key in FEATURES:
+        if keys is None or key in keys:
+            visit(key, ())
+    return list(ordered.values())
 
 
 def deployment_key(name: str) -> str:

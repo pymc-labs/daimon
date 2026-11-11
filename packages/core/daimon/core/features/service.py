@@ -35,6 +35,7 @@ from daimon.core.features.registry import (
     LOCKABLE,
     FeatureSpec,
     Tier,
+    resolution_order,
 )
 from daimon.core.features.resolver import (
     ResolvedFeature,
@@ -196,9 +197,11 @@ async def read_features(
             if any(spec.key == "approvals" for spec in specs)
             else None
         )
+    wanted = {spec.key for spec in specs}
     resolved: dict[str, ResolvedFeature] = {}
-    views: list[FeatureView] = []
-    for spec in specs:
+    views: dict[str, FeatureView] = {}
+    # Dependencies resolve first, even ones the caller did not ask for.
+    for spec in resolution_order(wanted):
         if spec.key == "approvals":
             view = _approvals_view(cast(TenantAccessPolicy, policy), place)
         else:
@@ -209,8 +212,8 @@ async def read_features(
                 resolve_one(spec, settings, place, rows, resolved, agent_builtins),
             )
         resolved[spec.key] = view.resolved
-        views.append(view)
-    return tuple(views)
+        views[spec.key] = view
+    return tuple(views[spec.key] for spec in specs)
 
 
 # ---------- Changing ----------
