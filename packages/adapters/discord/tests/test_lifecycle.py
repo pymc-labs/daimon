@@ -710,6 +710,26 @@ def _assert_stopped_card(edit_kwargs: dict[str, Any]) -> None:
     assert edit_kwargs.get("view") is None, "the Stop button is gone"
 
 
+async def test_a_reply_tagging_many_people_pings_only_the_asker() -> None:
+    """Deliberate difference from Slack, which caps a reply's pings at the people limit:
+    a Discord reply may name anyone but its sends allow only the asker to be notified,
+    so no cap is needed here."""
+    lc, sends, edits = _make_lifecycle(notify_on_completion=True)
+    await lc.post_initial()
+    crowd = " ".join(f"<@{900 + n}>" for n in range(8))
+
+    await lc.on_terminal_success(_make_success_state(f"Looping in {crowd}"))
+
+    carrying = [
+        kw for kw in [*sends, *[e[1] for e in edits]] if "<@900>" in str(kw.get("content", ""))
+    ]
+    assert carrying, "the reply with the tags was posted"
+    for kwargs in carrying:
+        allowed = kwargs["allowed_mentions"]
+        assert not allowed.everyone and not allowed.roles, "no group pings"
+        assert [u.id for u in allowed.users or []] in ([], [123]), "only the asker can be pinged"
+
+
 async def test_interrupted_tool_turn_without_text_shows_cancelled() -> None:
     lc, sends, edits = _make_lifecycle(notify_on_completion=True)
     await lc.post_initial()

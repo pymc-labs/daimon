@@ -1252,9 +1252,7 @@ async def test_update_routine_sets_and_clears_a_destination(
     assert set_.trigger_message == "orig"
     if require_destination:
         with pytest.raises(ToolError, match="must post somewhere"):
-            await _update_routine_impl(
-                runtime, auth, routine_id=created.id, clear_destination=True
-            )
+            await _update_routine_impl(runtime, auth, routine_id=created.id, clear_destination=True)
         async with committing_sessionmaker() as session:
             kept = await get_routine(session, created.id, tenant_id=tenant.id)
         assert kept is not None and (kept.destination_kind, kept.destination_id) == (

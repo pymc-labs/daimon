@@ -143,7 +143,8 @@ async def test_opt_out_lookup_when_it_fails_then_post_sends_without_pings(
 
     monkeypatch.setattr(_outbound, "tag_opt_outs", broken)
     runtime = SimpleNamespace(
-        session_factory=db_session_factory, settings=SimpleNamespace(outbound=OutboundSettings())
+        session_factory=db_session_factory,
+        settings=SimpleNamespace(outbound=OutboundSettings(), features={}),
     )
     tenant = await make_tenant(db_session, platform=platform, workspace_id="W_NT_3")
     await db_session.commit()
@@ -205,7 +206,7 @@ async def test_thread_turn_when_posting_top_level_then_reach_on_every_platform(
     )
     runtime = SimpleNamespace(
         session_factory=db_session_factory,
-        settings=SimpleNamespace(outbound=OutboundSettings()),
+        settings=SimpleNamespace(outbound=OutboundSettings(), features={}),
         teams_client=None,
     )
     auth = AuthIdentity(
@@ -249,7 +250,7 @@ async def test_own_conversation_when_tagging_past_the_limit_then_card_or_nobody_
     )
     runtime = SimpleNamespace(
         session_factory=db_session_factory,
-        settings=SimpleNamespace(outbound=OutboundSettings()),
+        settings=SimpleNamespace(outbound=OutboundSettings(), features={}),
         teams_client=None,
     )
     auth = AuthIdentity(
