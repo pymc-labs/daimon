@@ -236,10 +236,11 @@ row can never serve another tenant. A narrower row wins over a wildcard row.
 Two equally specific rows, or rows naming different fields, are refused as
 ambiguous. Unknown fields, a stale digest or a missing resource are refused too.
 
-An optional `spend_limit_usd_cents` caps one turn. OpenAI refuses a native
-session spend limit, so the host enforces it: it prices the turn's usage while it
-runs (container time not counted), cancels the turn once the limit is passed and
-tells the agent on its next turn. The host refuses `OPENAI_CUSTOM_HEADERS` for configured OpenAI
+An optional `spend_limit_usd_cents` caps each reply, not the whole session. OpenAI
+refuses a native session spend limit, so the host enforces it: it prices the reply's
+usage while it runs (container time not counted), stops it once the limit is passed
+and tells the agent next time. Past 272k input tokens, `gpt-6-luna` counts at its base
+rate, a lower bound. The host refuses `OPENAI_CUSTOM_HEADERS` for configured OpenAI
 runtimes so ambient headers cannot replace the channel's key or project.
 
 ## Run on Gemini
