@@ -16,8 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider step is gone. MCP `update_agent` and `daimon agents create|update
   --model provider:id` (for example `openai:gpt-6-luna`, with `--yes` and
   `--accept-drops`) do the same. Admins can pin a channel to such a model from
-  its web page, and an agent can carry a low, medium or high reasoning effort
-  on OpenAI and Gemini.
+  its web page, and an OpenAI agent can carry a low, medium or high reasoning
+  effort; Gemini agents take none. An unset effort shows as the model's
+  default, and Claude's max or extra-high effort becomes the new provider's
+  highest level on a switch.
 
 - **One conversation can run on another provider's model.** `set_thread_model`
   takes a model from `list_models`, and the chat shortcuts above do the same for
@@ -55,7 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agents you create live there too, pinned, so no turn falls back to Anthropic.
   Lookups of routines, rules, rosters, agent details, skills, MCP connections,
   forks and reports use Daimon's own agent records as well as Claude's. Thread
-  titles and participation checks use a small model from the active provider.
+  titles and participation checks use a small model from the active provider,
+  or another keyed provider's when that model has no known price.
   Environment lists and checks show environments Daimon keeps itself. An agent
   still on Anthropic gets a card offering a copy on another provider. A channel
   pinned to OpenAI without a channel row says whoever runs Daimon must add one.
@@ -67,7 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skill over its size limit is named on the switch card. Both providers read and
   write shared, personal and channel memory through Daimon's tools, which needs
   an Anthropic key. They ask copies of themselves through `ask_helper`, with all
-  copies of one message stopping at $10 together. OpenAI, Gemini and self-hosted agents
+  copies of one message stopping at $10 together; a refused copy says why,
+  such as a model with no known price. OpenAI, Gemini and self-hosted agents
   open public https pages through Daimon's page reader, under the place's web
   page setting. Files an agent produces are posted on Discord, Slack, Teams and
   the web on OpenAI and Gemini, each once. A spend limit now stops an OpenAI
