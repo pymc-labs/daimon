@@ -29,6 +29,7 @@ from daimon.core.features.service import (
     read_features,
 )
 from daimon.core.features.snapshot import CACHE, FeaturePlace, FeatureSnapshot, resolve_one
+from daimon.core.features.tool_gate import SESSION_KEPT_TOOLS
 from daimon.core.features.toolset import place_toolset
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
 from daimon.core.session_snapshot import desired_snapshot, session_mcp_servers, session_tools
@@ -198,14 +199,27 @@ def test_capabilities_change_nothing_at_their_defaults() -> None:
 def test_a_capability_off_turns_exactly_its_tools_off(key: str) -> None:
     agent = _agent()
     toolset = agent_toolset(_snapshot(**{key: "off"}), agent)
-    assert toolset.hidden_daimon_tools == CAPABILITY_TOOLS[key]
+    assert toolset.hidden_daimon_tools == CAPABILITY_TOOLS[key] - SESSION_KEPT_TOOLS
     tools = session_tools(
         agent, frozenset(), tool_safety=OPEN_TOOL_SAFETY, public_url=PUBLIC, toolset=toolset
     )
     daimon = next(t for t in _dicts(tools) if t.get("mcp_server_name") == "daimon-mcp")
     assert {c["name"] for c in daimon["configs"] if c.get("enabled") is False} == (
-        CAPABILITY_TOOLS[key]
+        CAPABILITY_TOOLS[key] - SESSION_KEPT_TOOLS
     ), "each tool is off in the session"
+
+
+def test_compute_off_keeps_the_stop_tools_and_long_jobs_off_hides_its_own() -> None:
+    """A deliberate difference: a running sandbox session stays stoppable from chat with
+    compute Off, while the long job tools all go with their feature."""
+    assert {"fly_stop_session", "fly_list_sessions"} == SESSION_KEPT_TOOLS, "the allow-list"
+    assert CAPABILITY_TOOLS["compute"] > SESSION_KEPT_TOOLS, "kept tools belong to compute"
+    assert not SESSION_KEPT_TOOLS & CAPABILITY_TOOLS["long_jobs"], "long jobs keep none"
+    compute = agent_toolset(_snapshot(compute="off"), _agent())
+    assert not SESSION_KEPT_TOOLS & compute.hidden_daimon_tools, "stop tools stay offered"
+    assert "fly_launch_session" in compute.hidden_daimon_tools, "the rest still goes"
+    jobs = agent_toolset(_snapshot(long_jobs="off"), _agent())
+    assert jobs.hidden_daimon_tools == CAPABILITY_TOOLS["long_jobs"], "all long job tools go"
 
 
 def test_a_capability_off_at_the_deployment_hides_its_tools_too() -> None:

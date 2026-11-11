@@ -15,7 +15,11 @@ STOP_TOOLS: Final[frozenset[str]] = frozenset(
     {"fly_stop_session", "fly_list_sessions", "list_long_jobs", "get_long_job", "cancel_long_job"}
 )
 """The server keeps these callable while their feature is Off: Off leaves running work running,
-so it must stay findable and stoppable. Session toolsets still hide them."""
+so it must stay findable and stoppable."""
+
+SESSION_KEPT_TOOLS: Final[frozenset[str]] = frozenset({"fly_stop_session", "fly_list_sessions"})
+"""Compute Off hides the rest of its tools from a session but not these two: a running sandbox
+session must stay stoppable from chat. Long jobs have no such exception; their tools all go."""
 
 _TOOLS: Final[dict[str, frozenset[str]]] = {**CAPABILITY_TOOLS, "repo_memory": REPO_MEMORY_TOOLS}
 _FEATURE_OF: Final[dict[str, str]] = {tool: key for key, tools in _TOOLS.items() for tool in tools}
@@ -32,8 +36,8 @@ def hides_tools(found: ResolvedFeature) -> bool:
 
 
 def gated_tools(keys: Iterable[str]) -> frozenset[str]:
-    """The Daimon tools of `keys` (from `GATED_KEYS`)."""
-    return frozenset[str]().union(*(_TOOLS[key] for key in keys))
+    """The Daimon tools a session loses when `keys` (from `GATED_KEYS`) are Off."""
+    return frozenset[str]().union(*(_TOOLS[key] for key in keys)) - SESSION_KEPT_TOOLS
 
 
 def server_gate_key(tool: str) -> str | None:
