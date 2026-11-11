@@ -69,7 +69,12 @@ def _effort_service(
 ) -> Any:
     preview = SimpleNamespace(allowed=True, setting_revision=4, digest="d", declared_drops=("x",))
     revision = SimpleNamespace(
-        backend=backend, profile=None, requires=None, thread_mode=None, effort=None
+        backend=backend,
+        profile=None,
+        requires=None,
+        thread_mode=None,
+        effort=None,
+        environment=None,
     )
     service = SimpleNamespace(
         may_edit=AsyncMock(return_value=editor),
