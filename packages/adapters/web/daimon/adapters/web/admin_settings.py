@@ -30,7 +30,7 @@ from daimon.core.web_admin import WebAdminError
 from fastapi import APIRouter, HTTPException
 from mux.contracts.ids import Provider
 from mux.profiles import PROVIDER_LABELS
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 _PROVIDERS: Final[tuple[tuple[Provider, str], ...]] = tuple(PROVIDER_LABELS.items())
 _PROVIDER_LABEL: Final = PROVIDER_LABELS
@@ -45,6 +45,10 @@ class InvokersChange(BaseModel):
 
 
 class SettingsChange(BaseModel):
+    """Only these fields; a removed one (modules, dm_enabled, ...) is a 422, not a silent no-op."""
+
+    model_config = ConfigDict(extra="forbid")
+
     default_agent: str | None = None
     invokers: InvokersChange | None = None
     providers: list[Provider] | Literal["default"] | None = None

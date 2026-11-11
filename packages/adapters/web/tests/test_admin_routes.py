@@ -482,16 +482,21 @@ async def test_settings_are_read_without_switches_that_are_features(
     feature list only; the settings page neither lists nor accepts them."""
     async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
         before = (await admin.client.get("/api/admin/settings")).json()
-        ignored = await admin.client.patch(
-            "/api/admin/settings",
-            json={"modules": {"agents": False}, "dm_enabled": True, "plain_text_mentions": True},
-        )
+        refused = [
+            await admin.client.patch("/api/admin/settings", json=body)
+            for body in (
+                {"modules": {"agents": False}},
+                {"dm_enabled": True},
+                {"dm_memory_read_only": True},
+                {"plain_text_mentions": True},
+            )
+        ]
         features = (await admin.client.get("/api/features")).json()["features"]
 
     assert set(before) == {"default_agent", "access", "providers"}, before
     assert set(before["access"]) == {"people", "others"}, before["access"]
     assert before["default_agent"] == AGENT_ID, "the workspace default is offered"
-    assert ignored.status_code == 200 and set(ignored.json()) == set(before), ignored.text
+    assert [r.status_code for r in refused] == [422] * 4, "a removed field is refused, not ignored"
     assert await admin.trail(db_session_factory) == [], "a stale switch changes nothing"
     shown = {f["key"] for f in features}
     assert {"web.agents", "dm_memory_read_only"} <= shown, "the feature list holds the switches"
