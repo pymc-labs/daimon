@@ -933,7 +933,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     FeatureSpec(
         key="thread_providers",
         name="Other providers per conversation",
-        category="capabilities",
+        category="chat",
         effect="capability",
         values=_ON_OFF,
         default="off",

@@ -95,7 +95,7 @@ def test_preview_reports_unknown_and_unsupported_from_profile_metadata() -> None
     assert preview.unsupported_skills == ("native-pin",)
     assert preview.unsupported_mcps == ("private-server",)
     assert preview.unsupported_capabilities == ("native_schedules", "workspace_export_import")
-    assert preview.shared_thread_limits
+    assert preview.shared_thread_limits == (), "Gemini runs shared threads, so no limit is shown"
     assert (
         preview.digest
         == compatibility_preview(agent, "gemini", policy, cost_line=preview.cost_line).digest

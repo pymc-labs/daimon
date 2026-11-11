@@ -349,7 +349,8 @@ async def test_denied_policy_never_reads_selected_key_or_constructs_transport(
     monkeypatch.setattr(os.environ, "get", tracked)
 
     async def deny(deps: TurnDeps, selected: Admission) -> Admission:
-        return replace(selected, memory_read_only=True)
+        # A read-only stamp no longer denies on a provider host; a lost policy does.
+        raise AdmissionDenied(reason="invoker_not_allowed")
 
     monkeypatch.setattr(openai_host, "reauthorize", deny)
     with pytest.raises(AdmissionDenied):

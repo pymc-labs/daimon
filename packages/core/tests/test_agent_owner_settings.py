@@ -12,7 +12,6 @@ from daimon.core.channel_backend import (
     AgentSettings,
     BackendActor,
     BackendAgent,
-    BackendUnsupported,
     agent_selection,
     resolve_turn_backend,
     revision_selection,
@@ -263,14 +262,14 @@ async def test_the_owner_edits_settings_and_backend_and_a_member_cannot(people) 
     assert revision.thread_mode == "shared" and revision.backend is None
     assert revision_selection(revision) == agent_selection("anthropic", None, settings)
 
-    # Shared threads don't run on OpenAI: the switch is refused, never silently per caller.
-    with pytest.raises(BackendUnsupported):
-        await service.set_backend(agent, "openai", 1, actors["owner"])
-    await service.set_settings(agent, AgentSettings(requires=REQUIRES_TOOLS), 1, actors["owner"])
-    switched = await service.set_backend(agent, "openai", 2, actors["owner"])
+    # Shared threads run on OpenAI too: the switch keeps them shared.
+    moved = await service.set_backend(agent, "openai", 1, actors["owner"])
+    assert moved.backend == "openai" and moved.thread_mode == "shared"
+    await service.set_settings(agent, AgentSettings(requires=REQUIRES_TOOLS), 2, actors["owner"])
+    switched = await service.set_backend(agent, "openai", 3, actors["owner"])
     assert switched.backend == "openai" and switched.requires == REQUIRES_TOOLS
-    reverted = await service.revert(agent, actors["owner"], expected_revision=3)
-    assert reverted.backend is None and reverted.requires == REQUIRES_TOOLS
+    reverted = await service.revert(agent, actors["owner"], expected_revision=4)
+    assert reverted.backend == "openai" and reverted.requires == REQUIRES_TOOLS
 
     rows = await service.audit(agent.tenant_id, agent_id=agent.agent_id)
     assert {row.operation for row in rows} >= {"settings", "set", "revert"}
