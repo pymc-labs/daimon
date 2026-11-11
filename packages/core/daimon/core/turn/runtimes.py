@@ -158,14 +158,23 @@ def has_agent_grants(profile: str, tenant_id: str) -> bool:
     return read is not None and bool(read(tenant_id))
 
 
-def agent_granted_prices(tenant_id: str) -> Mapping[tuple[str, str], ProviderPrice]:
-    """Tariffs of the grant-gated profiles where this tenant has an agent grant."""
+def agent_granted_prices(
+    tenant_id: str, agent_id: uuid.UUID | None = None
+) -> Mapping[tuple[str, str], ProviderPrice]:
+    """Tariffs of the grant-gated profiles where this tenant has an agent grant.
+
+    With `agent_id`, only profiles where that agent holds a grant.
+    """
     for registration in entry_points(group="daimon.turn_runtimes"):
         ensure_channel_runtime(registration.name)
     prices: dict[tuple[str, str], ProviderPrice] = {}
     for registration in _RUNTIME_FACTORIES.values():
         read, tariffs = registration.agent_grants, registration.tariffs
-        if read is not None and tariffs is not None and read(tenant_id):
+        if (
+            read is not None
+            and tariffs is not None
+            and any(agent_id in (None, grant.source_agent_id) for grant in read(tenant_id))
+        ):
             prices.update(tariffs())
     return MappingProxyType(prices)
 

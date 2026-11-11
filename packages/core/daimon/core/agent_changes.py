@@ -795,7 +795,8 @@ async def _require_in_catalog(
     tenant = await backends.tenant_policy(agent.tenant_id)
     if not backend_is_enabled(model.provider, tenant.enabled_backends):
         raise AgentBackendRefused("backend_not_allowed", provider=model.provider)
-    if not any(choice.model == model for choice in list_model_choices(tenant=tenant, default=None)):
+    choices = list_model_choices(tenant=tenant, default=None, agent_id=agent.agent_id)
+    if not any(choice.model == model for choice in choices):
         raise AgentBackendRefused("model_not_selectable", provider=model.provider)
 
 

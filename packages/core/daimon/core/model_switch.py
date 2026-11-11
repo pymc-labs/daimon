@@ -151,7 +151,7 @@ async def read_picker(
     )
     policy = await service.tenant_policy(tenant_id) if service.enabled else None
     return ModelPicker(
-        choices=list_model_choices(tenant=policy, default=current),
+        choices=list_model_choices(tenant=policy, default=current, agent_id=agent.agent_id),
         current=current,
         efforts=provider_efforts(current.provider) if service.enabled else (),
         effort=revision.effort if revision is not None else None,

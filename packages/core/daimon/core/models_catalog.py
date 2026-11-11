@@ -8,6 +8,8 @@ come from here too, so nothing else reads the raw id table.
 
 from __future__ import annotations
 
+import uuid
+
 from daimon.core.agent_model_names import (
     AgentModel,
     AmbiguousModel,
@@ -98,9 +100,15 @@ def _runnable(entry: AgentModel, tenant: TenantBackendPolicy | None) -> bool:
 
 
 def list_model_choices(
-    *, tenant: TenantBackendPolicy | None, default: ModelRef | None
+    *,
+    tenant: TenantBackendPolicy | None,
+    default: ModelRef | None,
+    agent_id: uuid.UUID | None = None,
 ) -> tuple[ModelChoice, ...]:
     """Every model this tenant's agents can run now, `default` flagged.
+
+    With `agent_id`, a model that needs an operator grant is listed only when
+    that agent holds one: any other agent picking it would be refused.
 
     `tenant` None means provider choice is off here: Claude only. Unpriced,
     expired and unrunnable models are absent.
@@ -111,7 +119,7 @@ def list_model_choices(
     entries = agent_catalog()
     if tenant is not None:
         listed = {(e.model.provider, e.model.id) for e in entries}
-        entries += _granted_entries(str(tenant.tenant_id), listed)
+        entries += _granted_entries(str(tenant.tenant_id), listed, agent_id)
     return tuple(
         ModelChoice(
             id=entry.model.id,
@@ -126,7 +134,9 @@ def list_model_choices(
     )
 
 
-def _granted_entries(tenant_id: str, listed: set[tuple[str, str]]) -> tuple[AgentModel, ...]:
+def _granted_entries(
+    tenant_id: str, listed: set[tuple[str, str]], agent_id: uuid.UUID | None
+) -> tuple[AgentModel, ...]:
     """Models an operator grants this tenant's agents, beyond the public catalog."""
     from daimon.core.turn.runtimes import agent_granted_prices
 
@@ -137,7 +147,7 @@ def _granted_entries(tenant_id: str, listed: set[tuple[str, str]]) -> tuple[Agen
             float(rate.input),
             float(rate.output),
         )
-        for rate in agent_granted_prices(tenant_id).values()
+        for rate in agent_granted_prices(tenant_id, agent_id).values()
         if (rate.provider, rate.model) not in listed
     )
 

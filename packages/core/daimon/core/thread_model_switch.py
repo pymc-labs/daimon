@@ -157,7 +157,8 @@ async def thread_model_picker(pick: ThreadPick) -> ModelPicker:
     )
     service = pick.service
     policy = await service.tenant_policy(pick.agent.tenant_id) if service.enabled else None
-    return ModelPicker(choices=list_model_choices(tenant=policy, default=current), current=current)
+    choices = list_model_choices(tenant=policy, default=current, agent_id=pick.agent.agent_id)
+    return ModelPicker(choices=choices, current=current)
 
 
 async def may_pick_provider(pick: ThreadPick) -> bool:

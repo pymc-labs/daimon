@@ -193,8 +193,8 @@ def test_catalog_lists_a_selfhosted_model_once_an_agent_is_granted(monkeypatch, 
     path.write_text("[]")
     monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
 
-    def selfhosted() -> set[str]:
-        choices = list_model_choices(tenant=tenant, default=None)
+    def selfhosted(agent_id: uuid.UUID | None = None) -> set[str]:
+        choices = list_model_choices(tenant=tenant, default=None, agent_id=agent_id)
         return {c.id for c in choices if c.provider == "selfhosted"}
 
     assert selfhosted() == set(), "no agent grant: nothing to pick"
@@ -208,10 +208,12 @@ def test_catalog_lists_a_selfhosted_model_once_an_agent_is_granted(monkeypatch, 
         agent_id="sh_agent_x",
         environment_id="sh_env_x",
         infrastructure_usd="0",
-        source_agent_id=str(uuid.uuid4()),
+        source_agent_id=str(granted := uuid.uuid4()),
     )
     path.write_text(json.dumps([row]))
-    assert selfhosted() == {"gpt-6.1-sol"}
+    assert selfhosted() == {"gpt-6.1-sol"}, "a tenant-wide list shows the granted model"
+    assert selfhosted(granted) == {"gpt-6.1-sol"}, "the granted agent can pick it"
+    assert selfhosted(uuid.uuid4()) == set(), "an agent without a grant is not offered it"
     assert catalog_model("selfhosted:gpt-6.1-sol", tenant=tenant).provider == "selfhosted"
     foreign = _tenant("selfhosted")
     assert not any(
