@@ -3,8 +3,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import stat
 from pathlib import Path
-from typing import Any
 
 import httpx
 import pytest
@@ -168,15 +168,18 @@ def test_output_delete_when_name_swapped_after_pinning_then_changed_and_kept(
     (outputs / "draft.txt").write_text("one")
     (outputs / "other.txt").write_text("keep")
     expected = output_exec.version(os.stat(outputs / "draft.txt"))
-    real_stat = os.stat
+    real_fstat = os.fstat
 
-    def swapping_stat(*args: Any, **kwargs: Any) -> os.stat_result:
-        os.replace(outputs / "other.txt", outputs / "draft.txt")
-        return real_stat(*args, **kwargs)
+    def swapping_fstat(descriptor: int) -> os.stat_result:
+        info = real_fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode):
+            # The pinned file has just been read; the name now points elsewhere.
+            os.replace(outputs / "other.txt", outputs / "draft.txt")
+        return info
 
     root = output_exec.open_outputs(tmp_path)
     assert root is not None, "outputs directory opens"
-    monkeypatch.setattr(output_exec.os, "stat", swapping_stat)
+    monkeypatch.setattr(output_exec.os, "fstat", swapping_fstat)
     try:
         with pytest.raises(output_exec.Refused) as refused:
             output_exec.delete(root, "draft.txt", expected)
