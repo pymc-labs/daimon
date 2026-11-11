@@ -44,6 +44,7 @@ from daimon.core.purge import (
     sweep_privacy_session_deletes,
 )
 from daimon.core.stores import credential_requests as credential_requests_store
+from daimon.core.stores import host_call_cards as host_call_cards_store
 from daimon.core.stores import message_feedback as message_feedback_store
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
@@ -1336,6 +1337,51 @@ async def test_purge_principal_platform_deletes_credential_request_and_reports_c
     report = await purge_principal(sm=db_session_factory, principal_id=pp.id, kind="platform")
 
     assert report.db.credential_requests == 1, "must delete the platform principal's request row"
+
+
+async def test_purge_principal_deletes_their_host_call_cards_in_that_tenant_only(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A principal purge deletes the cards they asked for, not another tenant's or person's."""
+    tenant = await make_tenant(db_session)
+    other_tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    pp = await make_platform_principal(
+        db_session, platform="discord", external_id="card-user", tenant=tenant, account=account
+    )
+    for tenant_id, user in (
+        (tenant.id, "card-user"),
+        (other_tenant.id, "card-user"),
+        (tenant.id, "x"),
+    ):
+        await host_call_cards_store.create_card(
+            db_session,
+            tenant_id=tenant_id,
+            origin_id=uuid.uuid4(),
+            requester_account_id=account.id,
+            requester_platform_user_id=user,
+            platform="discord",
+            channel_id="c1",
+            thread_id="t1",
+            executing_agent_id=uuid.uuid4(),
+            executing_ma_agent_id="agent_x",
+            agent_name="Researcher",
+            tool_name="send_message",
+            args_digest="d1",
+            reference={"args": {"text": "private"}, "admin": False},
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        )
+    await db_session.commit()
+
+    report = await purge_principal(sm=db_session_factory, principal_id=pp.id, kind="platform")
+
+    assert report.db.host_call_cards == 1, f"only the person's own card goes: {report.db}"
+    db_session.expire_all()
+    left = await host_call_cards_store.list_cards(db_session, tenant_id=tenant.id)
+    assert [c.requester_platform_user_id for c in left] == ["x"], "another person's card stays"
+    kept = await host_call_cards_store.list_cards(db_session, tenant_id=other_tenant.id)
+    assert len(kept) == 1, "the same user id in another tenant keeps its card"
 
 
 async def test_purge_principal_cli_credential_requests_reports_zero_when_none_exist(

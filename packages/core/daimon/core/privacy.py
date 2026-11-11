@@ -35,6 +35,7 @@ from daimon.core.stores import direct_messages as direct_messages_store
 from daimon.core.stores import gemini_runtime_state as gemini_state_store
 from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_links as github_links_store
+from daimon.core.stores import host_call_cards as host_call_cards_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import lead_intake as lead_intake_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
@@ -120,6 +121,7 @@ class PurgePreview(BaseModel):
     mux_leases: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     mux_release_requests: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     mux_operations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    host_call_cards: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     # What stays, so the confirmation can say so: conversations other people share with
     # the person (and the person's requests in them), and settlement records.
     retained_shared_conversations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
@@ -157,6 +159,7 @@ def held_lines(preview: PurgePreview) -> list[str]:
         (preview.web_admin_grants, "web app admin role"),
         (preview.mux_slots, "saved conversation"),
         (preview.mux_journal_events, "saved conversation message"),
+        (preview.host_call_cards, "approval request"),
     )
     parts = [
         "saved settings"
@@ -511,6 +514,9 @@ async def collect_purge_preview(
         web_admin_grants_total = await web_roles_store.count_admin_grants_for_account(
             session, account_id=account_id
         )
+        host_call_cards_total = await host_call_cards_store.count_for_account(
+            session, account_id=account_id
+        )
         mux = await mux_erasure_store.inventory(
             session, account_id=account_id, principal_ids=[p.id for p in (*cli_list, *pp_list)]
         )
@@ -569,6 +575,7 @@ async def collect_purge_preview(
         mux_leases=PurgePreviewRow(count=mux.erased.leases, example=None),
         mux_release_requests=PurgePreviewRow(count=mux.erased.release_requests, example=None),
         mux_operations=PurgePreviewRow(count=mux.erased.operations, example=None),
+        host_call_cards=PurgePreviewRow(count=host_call_cards_total, example=None),
         retained_shared_conversations=PurgePreviewRow(
             count=mux.retained.shared_conversations, example=None
         ),

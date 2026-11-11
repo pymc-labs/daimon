@@ -302,6 +302,30 @@ async def fail_approved(session: AsyncSession, *, card_id: uuid.UUID, outcome: s
     return failed is not None
 
 
+async def delete_for_platform_user(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, platform_user_id: str
+) -> int:
+    """Delete every card a person asked for in one tenant: their args are personal data."""
+    deleted = await session.execute(
+        delete(HostCallCard)
+        .where(
+            HostCallCard.tenant_id == tenant_id,
+            HostCallCard.platform == platform,
+            HostCallCard.requester_platform_user_id == platform_user_id,
+        )
+        .returning(HostCallCard.id)
+    )
+    return len(deleted.all())
+
+
+async def count_for_account(session: AsyncSession, *, account_id: uuid.UUID) -> int:
+    """Cards the account asked for; they cascade when the account is erased."""
+    count = await session.scalar(
+        select(func.count()).where(HostCallCard.requester_account_id == account_id)
+    )
+    return count or 0
+
+
 async def sweep(
     session: AsyncSession,
     *,

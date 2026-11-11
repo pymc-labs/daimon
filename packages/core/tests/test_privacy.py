@@ -1005,6 +1005,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "mux_leases": "mux_leases",
         "mux_release_requests": "mux_release_requests",
         "mux_operations": "mux_operations",
+        "host_call_cards": "host_call_cards",
     }
 
     uncovered = report_fields - set(mapping.keys())

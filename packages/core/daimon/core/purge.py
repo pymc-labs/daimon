@@ -158,6 +158,7 @@ from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import github_router_sessions as github_router_sessions_store
+from daimon.core.stores import host_call_cards as host_call_cards_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import lead_intake as lead_intake_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
@@ -235,6 +236,7 @@ class PurgeReport(BaseModel):
     mux_leases: int = 0
     mux_release_requests: int = 0
     mux_operations: int = 0
+    host_call_cards: int = 0
 
     def merge(self, other: PurgeReport) -> PurgeReport:
         return PurgeReport(
@@ -280,6 +282,7 @@ class PurgeReport(BaseModel):
             mux_leases=self.mux_leases + other.mux_leases,
             mux_release_requests=self.mux_release_requests + other.mux_release_requests,
             mux_operations=self.mux_operations + other.mux_operations,
+            host_call_cards=self.host_call_cards + other.host_call_cards,
         )
 
 
@@ -313,6 +316,7 @@ async def _purge_principal_in_session(
     teams_messages_count = 0
     microsoft_user_tokens_count = 0
     lead_intakes_count = 0
+    host_call_cards_count = 0
     if isinstance(principal, PlatformPrincipalRow):
         lead_intakes_count = await lead_intake_store.erase_actor(
             session, principal.tenant_id, principal.external_id
@@ -387,6 +391,14 @@ async def _purge_principal_in_session(
         # A turn's posts and an auto-opened thread name who asked; the posts
         # are the agent's, so only the person's id leaves them.
         agent_post_requesters_count = await agent_posts_store.clear_requester(
+            session,
+            tenant_id=principal.tenant_id,
+            platform=principal.platform,
+            platform_user_id=principal.external_id,
+        )
+        # A gated call's card holds the args the person asked for; account erasure
+        # cascades, so this path covers a principal purged on its own.
+        host_call_cards_count = await host_call_cards_store.delete_for_platform_user(
             session,
             tenant_id=principal.tenant_id,
             platform=principal.platform,
@@ -490,6 +502,7 @@ async def _purge_principal_in_session(
         platform_user_names=platform_user_names_count,
         teams_messages=teams_messages_count,
         microsoft_user_tokens=microsoft_user_tokens_count,
+        host_call_cards=host_call_cards_count,
     )
 
 
