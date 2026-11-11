@@ -18,7 +18,7 @@ from daimon.core.pricing import ProviderPrice, provider_cost_of
 from daimon.core.session_compat import ReplaceSession
 from daimon.core.shared_threads import shared_owner
 from daimon.core.turn.admission import reauthorize
-from daimon.core.turn.carry_over import carry_on_adoption
+from daimon.core.turn.carry_over import carry_on_adoption, replaced_session
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.gemini import (
     PROFILE,
@@ -284,10 +284,14 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             store=store,
             slot=slot,
             scope=scope,
-            old=OldSession(
-                binding=prior,
-                ref=ref_of(prior),
-                backend=backend if prior.provider == "gemini" else None,
+            # Another provider's session is read through its own reader.
+            old=await replaced_session(
+                request,
+                store,
+                prior,
+                OldSession(binding=prior, ref=ref_of(prior), backend=backend)
+                if prior.provider == "gemini" and "session" in prior.native_refs
+                else None,
             ),
             reasons=decision.reasons,
             create=lambda era, _mounts, _lease: created(era),

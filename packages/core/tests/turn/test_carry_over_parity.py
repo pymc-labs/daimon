@@ -18,7 +18,7 @@ from typing import cast
 
 import pytest
 from daimon.core.channel_backend import channel_ref
-from daimon.core.turn import carry_over
+from daimon.core.turn import carry_over, gemini_prepare
 from daimon.core.turn import prepare as preparation
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.carry_over import CarriedOver, carry_on_adoption
@@ -333,3 +333,18 @@ async def test_replacement_when_host_cannot_read_old_session_then_uses_its_provi
     own = OldSession(binding=old, ref=None, backend=None)
     assert await carry_over.replaced_session(request, store, old, own) is own, "own replaced"
     assert calls == ["binding-1"], calls
+
+
+def test_every_host_replacement_when_scanned_then_falls_back_to_the_provider_reader() -> None:
+    """A host that replaces a binding reads an old session it cannot read through its own reader."""
+    modules = {inspect.getmodule(prepare) for prepare in HOSTS.values()}
+    sources = {Path(inspect.getfile(m)).read_text() for m in modules if m is not None}
+    sources.add(Path(inspect.getfile(gemini_prepare)).read_text())
+    for source in sources:
+        called = {
+            node.func.id
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        if "replace_binding" in called:
+            assert "replaced_session" in called, "a replacement skips the provider reader"
