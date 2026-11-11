@@ -1168,6 +1168,60 @@ class ChannelSkill(Base):
     )
 
 
+class SkillSize(Base):
+    """The measured bundle of one source skill version, so a turn reads no bytes twice."""
+
+    __tablename__ = "skill_sizes"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "skill_id", "version", name="pk_skill_sizes"),
+        ForeignKeyConstraint(
+            ["tenant_id"], ["tenants.id"], ondelete="CASCADE", name="fk_skill_sizes_tenants"
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    skill_id: Mapped[str] = mapped_column(Text)
+    version: Mapped[str] = mapped_column(Text)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    total_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    largest_file_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    file_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    text_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    measured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class SkillCopy(Base):
+    """A source skill version uploaded once to a provider project, reused by every session."""
+
+    __tablename__ = "skill_copies"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "tenant_id",
+            "provider",
+            "account_scope_id",
+            "skill_id",
+            "version",
+            name="pk_skill_copies",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id"], ["tenants.id"], ondelete="CASCADE", name="fk_skill_copies_tenants"
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    provider: Mapped[str] = mapped_column(Text)
+    account_scope_id: Mapped[str] = mapped_column(Text)
+    skill_id: Mapped[str] = mapped_column(Text)
+    version: Mapped[str] = mapped_column(Text)
+    copy_id: Mapped[str] = mapped_column(Text, nullable=False)
+    copy_version: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class AgentCreationChannel(Base):
     """The legacy channel recorded when an agent was created.
 

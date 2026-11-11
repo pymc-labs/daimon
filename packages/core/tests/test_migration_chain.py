@@ -160,6 +160,7 @@ TAIL = (
     "0195_thread_model_consents",
     "0196_agent_backend_effort",
     "0197_self_helpers",
+    "0198_skill_copies",
 )
 HEAD = TAIL[-1]
 

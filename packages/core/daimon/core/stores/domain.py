@@ -15,7 +15,7 @@ from typing import Annotated, Any, Literal, cast
 
 from daimon.core.session_snapshot import SessionSnapshot
 from mux.contracts.config import CapabilityRequirement, ThreadMode
-from mux.contracts.ids import PROVIDERS, Provider, Scope
+from mux.contracts.ids import PROVIDERS, Provider, Scope, SkillRef
 from mux.contracts.profile import Capability, Effort
 from mux.contracts.resources import (
     Agent,
@@ -99,6 +99,35 @@ class AccountIdentityRow(BaseModel):
     # platform_principals.foreign_home_id: the principal was verified to belong to another
     # organisation (sticky), so it is a client on every call, even with no running turn.
     foreign_home_id: str | None = None
+
+
+class SkillSizeRow(BaseModel):
+    """One source skill version's measured bundle."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    skill_id: str
+    version: str
+    name: str
+    total_bytes: int
+    largest_file_bytes: int
+    file_count: int
+    text_only: bool
+
+
+class SkillCopyRow(BaseModel):
+    """A source skill version's copy in one provider project."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    provider: str
+    account_scope_id: str
+    skill_id: str
+    version: str
+    copy_id: str
+    copy_version: str
 
 
 class ChannelSkillRow(BaseModel):
@@ -1427,6 +1456,9 @@ class SourceRepresentation(_Facts):
     # Whole capabilities a partial representation (an agent template) leaves out;
     # consent must declare each one.
     unavailable_capabilities: tuple[str, ...] = ()
+    # Source skills, at concrete versions, the target installs per session (not on
+    # its agent): every custom and channel skill within the profile's size limit.
+    session_skills: tuple[SkillRef, ...] = ()
 
 
 class BackendAgent(_Facts):
