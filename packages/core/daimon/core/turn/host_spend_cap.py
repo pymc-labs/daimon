@@ -26,7 +26,7 @@ __all__ = ["HOST_SPEND_CAP_NOTICE", "SpendGuard", "priced_cents"]
 log = structlog.get_logger(__name__)
 
 HOST_SPEND_CAP_NOTICE = (
-    "Your last turn was stopped because it passed the spend limit set for this agent."
+    "Your last reply was stopped because it passed the spend limit set for this agent."
 )
 POLL_INTERVAL_S = 5.0
 

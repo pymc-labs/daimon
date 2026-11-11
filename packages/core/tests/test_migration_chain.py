@@ -158,6 +158,7 @@ TAIL = (
     "0193_agent_record_versions",
     "0194_connector_tokens",
     "0195_thread_model_consents",
+    "0196_agent_backend_effort",
 )
 HEAD = TAIL[-1]
 
