@@ -2068,3 +2068,20 @@ async def test_output_delete_when_answered_then_checkpointed_and_not_restored(tm
         assert (workspace / "work/result.txt").read_text() == "durable", "workspace restored"
         listed = (await client.get("/v0/sessions/session-1/outputs")).json()["outputs"]
         assert listed == [], "a restored workspace must not bring the delivered file back"
+
+
+async def test_output_delete_when_checkpoint_fails_then_not_answered_as_done(tmp_path):
+    """A delete whose checkpoint failed is an error, so the file is not reported gone."""
+    blobs = MemoryBlobs()
+    async with harness(tmp_path / "home", blobs) as (supervisor, client):
+        assert (await client.post("/v0/turns", json=turn("tool"))).status_code == 202
+        await supervisor.tasks["turn-1"]
+        workspace, _ = await supervisor.io(supervisor.journal.sandbox, "session-1")
+        (workspace / "work/outputs").mkdir()
+        (workspace / "work/outputs/report.txt").write_text("delivered")
+        await supervisor.checkpoint("session-1")
+        [output] = (await client.get("/v0/sessions/session-1/outputs")).json()["outputs"]
+        blobs.fail = True
+        deleted = await client.post(f"/v0/sessions/session-1/outputs/{output['id']}/delete")
+        assert deleted.status_code == 503, deleted.text
+        assert "secret" not in deleted.text, "storage detail must not leak"

@@ -1365,8 +1365,11 @@ def create_app(
         )
         await output_operation(home, uid, "delete", path, version)
         # Checkpoint before answering, so a restart cannot restore a delivered file and
-        # post it twice. A failed upload is retried and announced as for any turn.
+        # post it twice. A failed upload is retried and announced as for any turn, but
+        # this delete is not answered as done: the driver must not treat the file as gone.
         await supervisor.checkpoint(session_id)
+        if supervisor.checkpoint_pending == session_id:
+            raise HTTPException(status_code=503, detail="Checkpoint unavailable")
         return OutputDeleted(id=output_id)
 
     async def invoke(
