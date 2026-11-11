@@ -22,6 +22,7 @@ import { layoutNarrow, layoutWide, type Dep, type Plan, type Pt, type Size } fro
 import { EFFORT_LABEL, placeName } from "./lib"
 import { nodeId, nodeUi } from "./nodes/registry"
 import type { Agent, AgentConfig, AgentNode as ConnectionNode, Catalog } from "./types"
+import { useWheelZoom } from "./zoom"
 
 type Ctx = {
   agent: Agent
@@ -448,6 +449,8 @@ const rowY = (skill: string) => {
 // ---------- Canvas ----------
 
 export const PANEL_W = 440
+const MIN_ZOOM = 0.3
+const MAX_ZOOM = 1.6
 
 type Props = Omit<Ctx, "ro"> & { ro: boolean }
 
@@ -465,6 +468,8 @@ export function Canvas({ agent, config, catalog, changed, changedNodes, selected
   const sizes = useStore((s) => s.nodes.map((n) => `${n.id}:${n.measured?.width ?? 0}x${n.measured?.height ?? 0}`).join("|"))
   const measured = useStore((s) => s.nodes.length > 0 && s.nodes.every((n) => n.measured?.width))
   const ready = nodes.length > 0 && nodes.every((n) => n.style?.opacity === 1)
+  const wrap = useRef<HTMLDivElement>(null)
+  useWheelZoom(wrap, rf, MIN_ZOOM, MAX_ZOOM)
 
   useEffect(() => {
     setNodes((prev) => built.nodes.map((n) => {
@@ -525,14 +530,15 @@ export function Canvas({ agent, config, catalog, changed, changedNodes, selected
   return (
     <CanvasCtx.Provider value={{ agent, config, catalog, changed, changedNodes, selected, select, ro }}>
       <ReactFlow
+        ref={wrap}
         nodes={nodes}
         edges={edges}
         onNodesChange={onNodesChange}
         nodeTypes={NODE_TYPES}
         edgeTypes={EDGE_TYPES}
         colorMode={resolved}
-        minZoom={0.3}
-        maxZoom={1.6}
+        minZoom={MIN_ZOOM}
+        maxZoom={MAX_ZOOM}
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={false}
