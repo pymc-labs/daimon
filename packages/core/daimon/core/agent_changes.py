@@ -315,7 +315,9 @@ def unsupported(changes: list[Change], *, a: AgentConfigDoc, b: AgentConfigDoc) 
             return "Fast isn't available for this model. Nothing was saved."
         effort = b.model.effort
         offered = provider_efforts(b.model.backend)
-        if effort is not None and offered and effort not in (*offered, *_CLAUDE_TOP_EFFORTS):
+        # An effort carried over unchanged is dropped where the model has none.
+        chosen = effort is not None and effort != a.model.effort
+        if chosen and effort not in (*offered, *_CLAUDE_TOP_EFFORTS):
             return "That effort isn't available for this model. Nothing was saved."
     return None
 
@@ -603,6 +605,7 @@ _PROVIDER_REFUSALS: dict[str, tuple[str, AgentEditRefusal]] = {
     "admin_required": ("Only an admin can do that.", "forbidden"),
     "model_not_selectable": ("That model isn't available. Pick another.", "invalid"),
     "profile_not_selectable": ("That model isn't available. Pick another.", "invalid"),
+    "effort_not_offered": ("That model has no effort setting.", "invalid"),
     "stale_revision": ("The model changed since your draft began", "stale"),
     "drops_required": ("That model can't use some of this agent's skills or servers.", "invalid"),
     "stale_preview": ("The model changed since your draft began", "stale"),

@@ -61,5 +61,5 @@ def test_models_of_lists_the_efforts_each_profile_declares() -> None:
     assert [(m.backend, m.efforts) for m in listed] == [
         ("anthropic", ()),
         ("openai", ("low", "medium", "high")),
-        ("gemini", ("low", "medium", "high")),
-    ], "the profile declares the efforts; Claude keeps its own on the agent record"
+        ("gemini", ()),
+    ], "the profile declares the efforts; Claude keeps its own; a Gemini named agent takes none"

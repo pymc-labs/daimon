@@ -352,6 +352,11 @@ class BackendActor:
     subject: Subject
 
 
+#: Providers that run an agent as a named agent of their own, which takes no
+#: per-conversation effort; the agent's effort stays unset there.
+NAMED_AGENT_BACKENDS: Final = frozenset({"gemini"})
+
+
 @dataclass(frozen=True)
 class AgentSettings:
     """What an agent states about how it runs; unset is its backend's default.
@@ -400,8 +405,9 @@ class AgentSettings:
 
     def for_backend(self, backend: Provider | None) -> AgentSettings:
         """Keep what still applies on `backend`: a profile belongs to one backend only, and
-        the default one keeps its effort on the agent's own record."""
-        kept = self if backend not in (None, DEFAULT_BACKEND) else replace(self, effort=None)
+        the default one keeps its effort on the agent's own record, and a named agent takes none."""
+        drops_effort = backend in (None, DEFAULT_BACKEND, *NAMED_AGENT_BACKENDS)
+        kept = replace(self, effort=None) if drops_effort else self
         if kept.profile is None or kept.profile.startswith(f"{backend or DEFAULT_BACKEND}."):
             return kept
         return AgentSettings(None, kept.requires, kept.thread_mode, kept.effort)
@@ -801,6 +807,7 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         "owner_or_admin_required",
         "admin_required_for_shared_threads",
         "profile_not_selectable",
+        "effort_not_offered",
         "channel_pin_lacks_capability",
         "re_confirm",
         "revision_busy",
@@ -979,6 +986,13 @@ def compatibility_preview(
         raise AgentBackendRefused("tenant_mismatch")
     if target_backend == "selfhosted":
         raise AgentBackendRefused("selfhosted_requires_channel_configuration")
+    # Refused at save: such an agent would otherwise fail every message it is sent.
+    if (
+        settings is not None
+        and settings.effort is not None
+        and target_backend in NAMED_AGENT_BACKENDS
+    ):
+        raise AgentBackendRefused("effort_not_offered", provider=target_backend)
     selection = agent_selection(target_backend, model, settings)
     profile = get_profile(selection.profile)
     from daimon.core.turn.runtime_manifest import source_translations

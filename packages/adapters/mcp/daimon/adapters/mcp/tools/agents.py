@@ -1736,6 +1736,7 @@ def _backend_switch_refusal(
             ),
             "model_not_selectable": f"That model isn't available on {provider}. Pick another.",
             "profile_not_selectable": f"That model isn't available on {provider}. Pick another.",
+            "effort_not_offered": f"Models on {provider} have no effort setting here.",
             "selfhosted_requires_channel_configuration": (
                 f"A self-hosted model is set per channel, not per agent. Ask {admin}."
             ),
@@ -2238,9 +2239,10 @@ async def _request_agent_backend_switch_impl(
             # as the agent has it: an effort set earlier survives a thread-mode change.
             kept = channel_backend.AgentSettings.of(await service.current(agent))
             if target_backend != DEFAULT_BACKEND:
-                effort = effort or kept.effort
+                offered = provider_efforts(target_backend)
+                effort = effort or (kept.effort if kept.effort in offered else None)
                 profile = kept.profile
-                if effort is not None and effort not in provider_efforts(target_backend):
+                if effort is not None and effort not in offered:
                     raise ToolError(
                         f"{effort} isn't an effort {target_backend} offers. Nothing changed."
                     )

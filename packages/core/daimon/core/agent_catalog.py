@@ -12,6 +12,7 @@ from collections.abc import Collection, Mapping, Sequence
 from anthropic.types.beta.skill_list_response import SkillListResponse
 from daimon.core.agent_model_names import AgentModel, model_name
 from daimon.core.agent_view import PlaceDoc, SkillDoc
+from daimon.core.channel_backend import NAMED_AGENT_BACKENDS
 from daimon.core.constants import MODEL_DISPLAY_NAMES
 from daimon.core.defaults.metadata import strip_tenant_prefix
 from daimon.core.platform_names import UNNAMED_CHANNEL
@@ -41,9 +42,10 @@ class CatalogModel(BaseModel):
 def provider_efforts(provider: Provider) -> tuple[Effort, ...]:
     """The neutral efforts `provider`'s profile declares, lowest first; none where it has none.
 
-    Claude carries its own effort on the agent record, so it is not read from a profile.
+    Claude carries its own effort on the agent record, so it is not read from a profile;
+    a provider that runs the agent as its own named agent takes none.
     """
-    if provider == DEFAULT_BACKEND:
+    if provider == DEFAULT_BACKEND or provider in NAMED_AGENT_BACKENDS:
         return ()
     profile = PROFILES.get(backend_selection(provider).profile)
     if profile is None:

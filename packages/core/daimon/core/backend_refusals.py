@@ -57,6 +57,7 @@ _LINES: Final[dict[str, tuple[str, RefusalAction | None]]] = {
     "owner_or_admin_required": ("Only the agent's owner or an admin can do that.", None),
     "model_not_selectable": ("That model isn't available. Pick another.", "pick_another_model"),
     "profile_not_selectable": ("That model isn't available. Pick another.", "pick_another_model"),
+    "effort_not_offered": ("That model has no effort setting. Leave it on the default.", None),
     "selfhosted_requires_channel_configuration": (
         "A self-hosted model is set per channel, not per agent.",
         None,

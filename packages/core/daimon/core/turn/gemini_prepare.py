@@ -144,6 +144,10 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             raise AdmissionDenied(reason="backend_unsupported")
         if request.verified_counterpart != checked:
             raise AdmissionDenied(reason="backend_unsupported")
+        # A named agent compiles its own configuration: no per-conversation level. Saves
+        # refuse this pair; this backstops a row stored before they did.
+        if config.effort is not None:
+            raise AdmissionDenied(reason="backend_unsupported")
         deployment = replace(deployment, native_agent=request.counterpart.agent)
         journal = replace(journal, deployment=deployment)
         runtime = replace(runtime, journal=journal)

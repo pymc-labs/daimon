@@ -167,6 +167,25 @@ def test_claude_top_effort_maps_to_the_provider_highest_on_a_switch() -> None:
     )
 
 
+def test_effort_on_a_model_without_one_is_refused_unless_carried() -> None:
+    claude = _config(
+        model=ModelChoice(
+            id="claude-sonnet-4-6", backend="anthropic", speed="standard", effort="high"
+        )
+    )
+    gemini = _on(claude, id="gemini-4-argon", backend="gemini")
+    assert (
+        agent_changes.unsupported(agent_changes.diff_config(claude, gemini), a=claude, b=gemini)
+        is None
+    ), "a level carried over unchanged is dropped, not refused"
+    assert agent_changes._stated_effort(claude, gemini) is None, "nothing stated on Gemini"
+    picked = _on(gemini, effort="low")
+    assert (
+        agent_changes.unsupported(agent_changes.diff_config(gemini, picked), a=gemini, b=picked)
+        == "That effort isn't available for this model. Nothing was saved."
+    ), "a level chosen on a model without one is refused at save"
+
+
 def test_patch_for_writes_only_what_changed() -> None:
     agent = ma_agent(
         id="ag_x",

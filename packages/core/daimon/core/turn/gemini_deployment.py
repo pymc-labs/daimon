@@ -444,9 +444,6 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             plan.environment,
             max_output_tokens=plan.max_output_tokens,
         )
-    # A named catalog agent compiles its own configuration: no per-session level.
-    if revision.effort is not None and deployment.native_agent is not None:
-        raise AdmissionDenied(reason="backend_unsupported")
     namespace = json.dumps([scope.tenant_id, scope.account_id, plan.project], separators=(",", ":"))
     counterpart_verified = False
 

@@ -308,6 +308,9 @@ def test_effort_belongs_to_the_agent_selection_and_not_the_default_backend() -> 
     assert chosen.effort == "low"
     assert agent_selection("openai", None, AgentSettings()).effort is None
     assert AgentSettings(effort="low").for_backend("anthropic").effort is None
-    assert AgentSettings(effort="low").for_backend("gemini").effort == "low"
+    assert AgentSettings(effort="low").for_backend("openai").effort == "low"
+    assert AgentSettings(effort="low").for_backend("gemini").effort is None, (
+        "a Gemini named agent takes no effort"
+    )
     with pytest.raises(Exception, match="effort|selectable"):
         agent_selection("anthropic", None, AgentSettings(effort="low"))

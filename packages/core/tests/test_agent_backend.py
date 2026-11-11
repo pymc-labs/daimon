@@ -21,6 +21,7 @@ from daimon.core.channel_backend import (
     NO_CAPTURE,
     AgentBackendRefused,
     AgentBackendService,
+    AgentSettings,
     BackendActor,
     BackendAgent,
     BackendUnsupported,
@@ -118,6 +119,24 @@ def test_preview_reports_unknown_and_unsupported_from_profile_metadata() -> None
         != compatibility_preview(
             agent, "gemini", policy, setting_revision=1, cost_line=preview.cost_line
         ).digest
+    )
+
+
+def test_gemini_agent_effort_is_refused_at_save_and_not_carried() -> None:
+    """A Gemini agent runs as its own named agent, which takes no effort: saving one is
+    refused instead of failing every message, and a switch drops the level it carried."""
+    agent = BackendAgent(
+        tenant_id=uuid.uuid4(), agent_id=uuid.uuid4(), name="helper", configuration_digest="d"
+    )
+    policy = TenantBackendPolicy(tenant_id=agent.tenant_id, revision="policy")
+    with pytest.raises(AgentBackendRefused) as refused:
+        compatibility_preview(agent, "gemini", policy, settings=AgentSettings(effort="high"))
+    assert refused.value.reason == "effort_not_offered", "the save names why"
+    assert AgentSettings(effort="high").for_backend("gemini").effort is None, (
+        "a switch to Gemini drops the carried level"
+    )
+    assert AgentSettings(effort="high").for_backend("openai").effort == "high", (
+        "a provider that offers the level keeps it"
     )
 
 

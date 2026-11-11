@@ -632,8 +632,7 @@ async def test_a_switch_states_an_effort_and_a_later_settings_change_keeps_it(ac
     _without_own_tools(payload)
     base = {
         "agent_name": "Researcher",
-        "target_backend": "gemini",
-        "model": "gemini-4-argon",
+        "target_backend": "openai",
         "origin_context_id": str(origin.id),
     }
 
@@ -667,6 +666,13 @@ async def test_a_switch_states_an_effort_and_a_later_settings_change_keeps_it(ac
     assert first.effort == "high", "the call states the effort"
     second = await confirm(thread_mode="per_caller")
     assert second.effort == "high", "stating other settings keeps the effort the agent has"
+    gate()
+    agent()
+    with pytest.raises(ToolError, match="isn't an effort") as refused:
+        await _request_agent_backend_switch_impl(
+            runtime, auth, **{**base, "target_backend": "gemini"}, effort="high"
+        )
+    assert "Nothing changed" in str(refused.value), "a Gemini agent takes no effort"
 
 
 @pytest.mark.parametrize(("backend", "model"), [("gemini", "gemini-3.8-pro"), ("openai", "x")])
