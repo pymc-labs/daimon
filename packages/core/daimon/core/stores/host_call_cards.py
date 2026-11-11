@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from daimon.core._models import HostCallCard
-from sqlalchemy import func, select, text, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -309,8 +309,11 @@ async def sweep(
     executing_before: datetime,
     crashed_outcome: str,
     unrun_outcome: str,
+    retain_before: datetime,
 ) -> int:
     """Expire unanswered cards; fail approved calls nobody ran and ones a crashed worker left.
+
+    Cards that expired before `retain_before` are deleted: their args hold what a person asked.
 
     A stuck `executing` row may or may not have run, so it is failed, never retried.
     An `approved` row past its expiry never reached a wake turn (the wake was refused or
@@ -334,4 +337,5 @@ async def sweep(
         .values(status="failed", outcome=crashed_outcome)
         .returning(HostCallCard.id)
     )
+    await session.execute(delete(HostCallCard).where(HostCallCard.expires_at < retain_before))
     return len(expired.all()) + len(stranded.all()) + len(stuck.all())

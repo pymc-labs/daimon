@@ -309,6 +309,10 @@ def confirmed_call_prefix(runner: ConfirmedCallRunner) -> Callable[[], Awaitable
     return prefix
 
 
+#: How long a closed card stays for the record before the sweep deletes it.
+CARD_RETENTION: Final = dt.timedelta(days=30)
+
+
 async def sweep_stale_calls(
     sessionmaker: async_sessionmaker[AsyncSession], *, now: dt.datetime
 ) -> int:
@@ -326,6 +330,7 @@ async def sweep_stale_calls(
             executing_before=now - dt.timedelta(seconds=CONFIRMED_CALL_TTL_S),
             crashed_outcome=CRASHED_TEXT,
             unrun_outcome=NOT_RUN_TEXT,
+            retain_before=now - CARD_RETENTION,
         )
 
 

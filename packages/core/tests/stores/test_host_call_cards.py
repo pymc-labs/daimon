@@ -248,6 +248,7 @@ async def test_sweep_expires_unanswered_and_fails_stuck_executing(lane: Lane) ->
             executing_before=later,
             crashed_outcome=CRASHED_TEXT,
             unrun_outcome=NOT_RUN_TEXT,
+            retain_before=later - timedelta(days=30),
         )
         expired = await cards.get_card(session, tenant_id=lane.tenant_id, card_id=late.row.id)
         failed = await cards.get_card(session, tenant_id=lane.tenant_id, card_id=stuck.row.id)
@@ -272,6 +273,7 @@ async def test_sweep_fails_an_approved_call_nobody_ran_as_not_run(lane: Lane) ->
             executing_before=later,
             crashed_outcome=CRASHED_TEXT,
             unrun_outcome=NOT_RUN_TEXT,
+            retain_before=later - timedelta(days=30),
         )
         stranded = await cards.get_card(session, tenant_id=lane.tenant_id, card_id=stale.row.id)
         waiting = await cards.get_card(session, tenant_id=lane.tenant_id, card_id=fresh.row.id)
@@ -279,6 +281,28 @@ async def test_sweep_fails_an_approved_call_nobody_ran_as_not_run(lane: Lane) ->
     assert stranded is not None and stranded.status == "failed", f"stranded fails: {stranded}"
     assert stranded.outcome == NOT_RUN_TEXT, "approved-but-never-run says it did not run"
     assert waiting is not None and waiting.status == "approved", "an unexpired approval waits"
+
+
+async def test_sweep_deletes_cards_past_retention(lane: Lane) -> None:
+    """A card past its retention goes: its args hold what a person asked."""
+    now = datetime.now(UTC)
+    old = await _card(lane, thread_id="t4", digest="o", expires_in=timedelta(minutes=1), now=now)
+    kept = await _card(lane, thread_id="t4", digest="k", expires_in=timedelta(hours=2), now=now)
+    assert old is not None and kept is not None, "cards recorded"
+    later = now + timedelta(hours=1)
+    async with lane.sessions.begin() as session:
+        await cards.sweep(
+            session,
+            now=later,
+            executing_before=later,
+            crashed_outcome=CRASHED_TEXT,
+            unrun_outcome=NOT_RUN_TEXT,
+            retain_before=later,
+        )
+        gone = await cards.get_card(session, tenant_id=lane.tenant_id, card_id=old.row.id)
+        left = await cards.get_card(session, tenant_id=lane.tenant_id, card_id=kept.row.id)
+    assert gone is None, "the expired card is deleted"
+    assert left is not None, "a card still within retention stays"
 
 
 async def _press_with(
