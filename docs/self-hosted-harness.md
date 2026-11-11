@@ -163,6 +163,8 @@ guarantees are in the
 - **Connectors.** The agent's own connectors run through Daimon's relay, with
   the person's sign-in; the harness never sees it. A server with a
   `credential_ref` keeps the operator's own credential and is called directly.
+  Outside a shared thread, the harness asks the person about `ask` rules itself;
+  Daimon trusts the operator's harness to have asked and runs the call.
 
 - **Skills.** Turns support only the seeded default skills. Custom uploads and
   channel-library additions have no provisioning path on this backend.

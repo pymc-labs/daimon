@@ -360,6 +360,7 @@ class ConnectorRelay:
         if verdict == "ask" and turn.carded:
             return await self._ask(turn, origin, connector, name, args)
         # Uncarded, the harness asked the person in-process before calling (its tool policy).
+        # Daimon cannot verify that: it trusts the operator who runs the harness.
         async with self._open(connector.url, token) as upstream:
             return await upstream.call_tool_result(name, args)
 
