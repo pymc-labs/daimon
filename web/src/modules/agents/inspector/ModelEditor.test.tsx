@@ -62,11 +62,20 @@ describe("ModelEditor", () => {
     expect(screen.getByRole("radio", { name: "High" }), "effort off").toBeDisabled()
   })
 
-  it("moves an effort the new model lacks to medium when the model is picked", async () => {
+  it("moves Claude's top effort to the new model's highest when the model is picked", async () => {
     const update = show({ id: "claude-opus-5-5", backend: "anthropic", speed: "standard", effort: "max" })
     await userEvent.click(screen.getByRole("button", { name: /GPT-6 Luna/ }))
     const c = { model: { id: "claude-opus-5-5", backend: "anthropic", speed: "standard", effort: "max" } } as AgentConfig
     vi.mocked(update).mock.calls[0]![0](c)
-    expect(c.model.effort, "clamped").toBe("medium")
+    expect(c.model.effort, "mapped down").toBe("high")
+  })
+
+  it("shows no level for a model default and keeps it unset on another provider", async () => {
+    const update = show({ id: "gpt-6-luna", backend: "openai", speed: "standard", effort: null })
+    expect(screen.getByRole("radio", { name: "Medium" }), "nothing picked").not.toBeChecked()
+    await userEvent.click(screen.getByRole("button", { name: /GPT-6 Plain/ }))
+    const c = { model: { id: "gpt-6-luna", backend: "openai", speed: "standard", effort: null } } as AgentConfig
+    vi.mocked(update).mock.calls[0]![0](c)
+    expect(c.model.effort, "still the model default").toBeNull()
   })
 })

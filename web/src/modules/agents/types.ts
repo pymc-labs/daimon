@@ -8,7 +8,8 @@ export type Backend = "anthropic" | "openai" | "gemini" | "selfhosted"
 export type ToolRule = "allow" | "ask" | "deny"
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max"
 
-export type ModelChoice = { id: string; backend: Backend; speed: "standard" | "fast"; effort: Effort }
+/** `effort` null runs the model's own default. */
+export type ModelChoice = { id: string; backend: Backend; speed: "standard" | "fast"; effort: Effort | null }
 export type CatalogModel = { id: string; label: string; backend: Backend; in_usd: number; out_usd: number; fast?: boolean; efforts?: Effort[] }
 
 /** `agent_toolset_20260401` configs. */

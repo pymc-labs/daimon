@@ -14,6 +14,17 @@ const CLAUDE_EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"]
 const effortsOf = (x: CatalogModel | undefined, backend: Backend): Effort[] =>
   backend === "anthropic" ? CLAUDE_EFFORTS : (x?.efforts ?? [])
 
+/**
+ * The effort a model pick keeps. Unset stays unset off Claude; Claude's top levels
+ * become the provider's highest; another missing level falls to the middle one.
+ */
+const carriedEffort = (effort: Effort | null, carried: Effort[], backend: Backend): Effort | null => {
+  if (effort === null) return backend === "anthropic" ? "high" : null
+  if (carried.length === 0 || carried.includes(effort)) return effort
+  if (effort === "xhigh" || effort === "max") return carried.at(-1)!
+  return carried.includes("medium") ? "medium" : carried[0]!
+}
+
 export function ModelEditor({ agent, config, catalog, ro, update }: Props) {
   const m = config.model
   const cur = catalog?.models.find((x) => x.id === m.id && x.backend === m.backend)
@@ -32,9 +43,7 @@ export function ModelEditor({ agent, config, catalog, ro, update }: Props) {
                 key={`${x.backend}:${x.id}`}
                 disabled={ro}
                 onClick={() => update((c) => {
-                  const carried = effortsOf(x, x.backend)
-                  // A level the new model lacks falls to the middle one; none keeps the old value.
-                  const effort = carried.length === 0 || carried.includes(c.model.effort) ? c.model.effort : carried.includes("medium") ? "medium" : carried[0]!
+                  const effort = carriedEffort(c.model.effort, effortsOf(x, x.backend), x.backend)
                   c.model = { ...c.model, id: x.id, backend: x.backend, speed: x.fast ? c.model.speed : "standard", effort }
                 }, 0)}
                 className={cn("flex min-h-12 w-full items-center gap-3 rounded-lg border px-3 py-2 text-left text-sm enabled:hover:bg-accent", on && "border-primary bg-accent")}
@@ -55,7 +64,7 @@ export function ModelEditor({ agent, config, catalog, ro, update }: Props) {
         <div className="space-y-3">
           <Field label="Effort">
             <Reason reason={noEffort}>
-              <ToggleGroup type="single" value={m.effort} disabled={ro || !!noEffort} onValueChange={(v) => v && update((c) => { c.model.effort = v as Effort }, 0)} variant="segmented" size="sm">
+              <ToggleGroup type="single" value={m.effort ?? ""} disabled={ro || !!noEffort} onValueChange={(v) => v && update((c) => { c.model.effort = v as Effort }, 0)} variant="segmented" size="sm">
                 {(efforts.length ? efforts : CLAUDE_EFFORTS).map((e) => <ToggleGroupItem key={e} value={e} className="px-2.5 text-xs">{EFFORT_LABEL[e]}</ToggleGroupItem>)}
               </ToggleGroup>
             </Reason>
