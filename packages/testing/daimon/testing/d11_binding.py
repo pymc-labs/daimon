@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, cast
 
-from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.pricing import ProviderPrice
 from daimon.core.usage_billing import ObservationBilled
 from daimon.core.usage_recording import record_provider_usage
@@ -24,14 +23,13 @@ from daimon.testing.discord_surface import (
 )
 from daimon.testing.footer_accounting import FooterAccountingHook, FooterAccountingReport
 from daimon.testing.outcome_oracle import (
-    CheckResult,
     OutcomeReport,
     RunEvidence,
     VisibleText,
     evaluate,
 )
 from daimon.testing.platform_surface import PlatformSurfaceCapture
-from daimon.testing.product_profiles import OPT_IN_PASS, QAProductProfile
+from daimon.testing.product_profiles import QAProductProfile
 from daimon.testing.slack_surface import (
     _decode as decode_slack,  # pyright: ignore[reportPrivateUsage]
 )
@@ -58,8 +56,6 @@ class D11Result:
 
     @property
     def status(self) -> str:
-        if self.outcome.status == "PASS" and self.profile.flags["core.turn.native_footer_cost"]:
-            return OPT_IN_PASS
         return self.outcome.status
 
 
@@ -90,7 +86,6 @@ class D11TurnBinding:
     infrastructure_policy: str | None = None
     infrastructure_evidence_id: str | None = None
     _issued: bool = field(default=False, init=False)
-    _cost: NativeFooterCostContext | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self._admit()
@@ -135,20 +130,12 @@ class D11TurnBinding:
         )
 
     def billing(self) -> ObservationBilled:
-        """Real recorder, with the opt-in context only on the opted native path."""
+        """Real recorder for the native path."""
         self._admit()
         if self._issued:
             raise ValueError("D11 billing binding cannot be reused")
         object.__setattr__(self, "_issued", True)
-        if self.profile.flags["core.turn.native_footer_cost"]:
-            object.__setattr__(
-                self,
-                "_cost",
-                NativeFooterCostContext(
-                    self.sessions, self.scope, self.binding, self.native_session, self.markup
-                ),
-            )
-        return ObservationBilled(self._record, native_footer_cost=self._cost)
+        return ObservationBilled(self._record)
 
     async def _record(self, *, observation: UsageObservation) -> bool:
         self._admit()  # Every bind, including changed routing, before any connection.
@@ -179,14 +166,6 @@ class D11TurnBinding:
             markup=self.markup,
             channel_id=self.binding.thread.channel.channel_id,
         )
-        if self._cost is not None:
-            self._cost.note(
-                normalized,
-                price=price,
-                infrastructure_usd=infra,
-                infrastructure_seconds=self.infrastructure_seconds,
-                settled=settled,
-            )
         return settled
 
     async def evaluate(
@@ -277,22 +256,6 @@ class D11TurnBinding:
         )
         replacements = {c.kind: c for c in report.checks}
         checks = tuple(replacements.get(check.kind, check) for check in base.checks)
-        if self.profile.flags["core.turn.native_footer_cost"] and (
-            self._cost is None
-            or not self._cost.finished
-            or self._cost.root_turn_id != self.root_turn_id
-            or self._cost.result.status != "complete"
-        ):
-            checks += (
-                CheckResult(
-                    kind="native_footer_cost_binding",
-                    turn=1,
-                    status="PENDING",
-                    code="OPT_IN_NATIVE_COST_CONTEXT_INCOMPLETE",
-                    evidence_ids=(capture.evidence_id,),
-                ),
-            )
-
         outcome = OutcomeReport(scenario_id=base.scenario_id, backend=base.backend, checks=checks)
         return D11Result(bound, outcome, report, self.profile)
 

@@ -951,7 +951,6 @@ def test_server_names_with_a_slash_are_rejected(name: str) -> None:
     assert get_mcp_server_name_rejection("linear-bridge") is None
 
 
-@pytest.mark.parametrize("overrides", [False, True])
 @pytest.mark.parametrize("tool", ["set_branch_protection_rule", "configure_admin_panel"])
 @pytest.mark.parametrize(
     ("authority", "effect", "reason"),
@@ -962,14 +961,15 @@ def test_server_names_with_a_slash_are_rejected(name: str) -> None:
         ("combined", "read", "agent_rule_allow"),
     ],
 )
-def test_protected_names_preserve_existing_decisions_without_deployment_opt_in(
-    overrides: bool, tool: str, authority: str, effect: str, reason: str
+def test_protected_names_always_ask_whatever_annotations_or_rules_say(
+    tool: str, authority: str, effect: str, reason: str
 ) -> None:
+    """A confirmation or permission-setter name on a third-party server asks even when an
+    annotation, an operator read pin or an agent allow rule would let it run."""
     rule = ResolvedAgentToolRule(rule="allow") if authority in {"agent", "combined"} else None
     verdict = decide_tool_call(
         ToolSafetyPolicy(
             enabled=True,
-            allow_gate_overrides=overrides,
             agent_rules=rule is not None,
             effects={"third-party": "read"} if authority == "operator" else {},
         ),
@@ -981,8 +981,10 @@ def test_protected_names_preserve_existing_decisions_without_deployment_opt_in(
         agent_rule=rule,
     )
     assert (verdict.outcome, verdict.effect, verdict.reason) == (
-        ("ask", "write", "protected_tool_name") if overrides else ("allow", effect, reason)
-    )
+        "ask",
+        "write",
+        "protected_tool_name",
+    ), f"{authority} must not widen a protected name (would have been {effect}/{reason})"
 
 
 @pytest.mark.parametrize(

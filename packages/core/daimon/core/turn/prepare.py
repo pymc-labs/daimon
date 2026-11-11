@@ -50,7 +50,6 @@ from daimon.core.mcp_hold import hold_key
 from daimon.core.memory_resource import memory_scope
 from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call
-from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.permissions import any_readers_limited
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES, ChangeReason, MaCapabilities
@@ -215,7 +214,6 @@ class PreparedTurn:
     backend: ManagedAgents | None = None
     session_ref: ResourceRef | None = None
     runtime: TurnRuntime | None = None
-    native_footer_cost: NativeFooterCostContext | None = None
     native_chat_session_id: str | None = field(default=None, kw_only=True)
     _scope: Scope | None = field(default=None, kw_only=True, compare=False, repr=False)
     _native_spec: AgentSpec | None = field(default=None, kw_only=True, compare=False, repr=False)
@@ -1254,7 +1252,6 @@ async def bind_session_impl(
             platform=platform,
             channel_id=admission.budget_channel_id,
             turn_path=deps.turn_path,
-            checkpoint=admission.feature_on("checkpoint_prompt"),
         )
 
         # `SessionOps` is built here rather than at import time so that

@@ -140,7 +140,6 @@ class HereCog(commands.Cog):
                         app_configured=runtime.settings.github_app.app_id is not None
                         and runtime.settings.github_app.private_key is not None,
                     ),
-                    gate_overrides_active=runtime.settings.tool_safety.gate_overrides_active,
                     public_mcp_url=str(runtime.settings.mcp.public_url)
                     if runtime.settings.mcp.public_url is not None
                     else None,

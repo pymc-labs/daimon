@@ -1023,36 +1023,33 @@ async def run_turn(
     async def _pump_metered() -> TurnState:
         if not isinstance(billing, ObservationBilled):
             return await _pump_unwedging()
-        context = billing.native_footer_cost
-        with context.activate() if context is not None else contextlib.nullcontext():
+        try:
+            final = await _pump_unwedging()
+        except BaseException:
+            # The codec's bounded post-run fetch retains pending unknown usage
+            # on interrupted/failed runs too. Its callback is transactionally
+            # idempotent, including observations already consumed live.
             try:
-                final = await _pump_unwedging()
-            except BaseException:
-                # The codec's bounded post-run fetch retains pending unknown usage
-                # on interrupted/failed runs too. Its callback is transactionally
-                # idempotent, including observations already consumed live.
-                try:
-                    await _replay_usage(io, billing, [TurnState()], set())
-                except Exception as error:
-                    log.warning(
-                        "turn.usage_reconciliation_failed",
-                        session_id=session_id,
-                        error_class=type(error).__name__,
-                    )
-                raise
-            final_cell = [final]
-            if billing.native_footer_cost is None or not billing.native_footer_cost.finished:
-                await _replay_usage(
-                    io,
-                    billing,
-                    final_cell,
-                    set(),
-                    finalized_rate_limit=(
-                        final.termination == TerminationReason.RATE_LIMITED
-                        and isinstance(final.error, TurnError)
-                    ),
+                await _replay_usage(io, billing, [TurnState()], set())
+            except Exception as error:
+                log.warning(
+                    "turn.usage_reconciliation_failed",
+                    session_id=session_id,
+                    error_class=type(error).__name__,
                 )
-            return final_cell[0]
+            raise
+        final_cell = [final]
+        await _replay_usage(
+            io,
+            billing,
+            final_cell,
+            set(),
+            finalized_rate_limit=(
+                final.termination == TerminationReason.RATE_LIMITED
+                and isinstance(final.error, TurnError)
+            ),
+        )
+        return final_cell[0]
 
     # Native usage reconciliation remains inside the admitted binding lease.
     pumped = _pump_metered if isinstance(billing, ObservationBilled) else _pump_unwedging
@@ -1617,13 +1614,6 @@ async def _pump(
 
         # Normal termination path.
         await _cancel_render()
-        if isinstance(billing, ObservationBilled) and billing.native_footer_cost is not None:
-            # Opted-in native footers need the same final usage reconciliation
-            # before posting. _pump_metered skips its duplicate afterwards.
-            await _replay_usage(io, billing, state_cell, billed_event_ids)
-            await billing.native_footer_cost.finish(
-                authoritative_terminal=normalized_terminal_cell[0] == TerminationReason.COMPLETED
-            )
         return await _finalize_success_or_error(
             normalized_reason=normalized_terminal_cell[0],
             state_cell=state_cell,
@@ -1889,8 +1879,6 @@ async def _replay_usage(
     for usage in values:
         await _bill_once(billing, usage, billed_event_ids)
         state_cell[0] = apply_usage_observation(state_cell[0], usage)
-    if isinstance(billing, ObservationBilled) and billing.native_footer_cost is not None:
-        billing.native_footer_cost.reconciled(values)
 
 
 async def _consume_with_reconnect(

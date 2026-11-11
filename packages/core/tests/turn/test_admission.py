@@ -2515,13 +2515,11 @@ async def test_a_caller_in_an_isolated_channel_may_be_an_admin(
     assert await _stored_role(db_session, admission) == Role.ADMIN.value
 
 
-@pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("is_dm", [False, True])
 async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
-    enabled: bool,
     is_dm: bool,
 ) -> None:
     from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
@@ -2553,7 +2551,7 @@ async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
             router=router,
             native_member_admin=False,
         ),
-        tool_safety=ToolSafetyPolicy(enabled=True, allow_gate_overrides=enabled),
+        tool_safety=ToolSafetyPolicy(enabled=True),
     )
     admission = await admit(
         deps,
@@ -2568,7 +2566,7 @@ async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
         now=_NOW,
     )
     assert admission.approval_gate == (
-        ApprovalGate("inherit", "server", None, tenant.id) if enabled and not is_dm else None
+        ApprovalGate("inherit", "server", None, tenant.id) if not is_dm else None
     )
     async with db_session_factory.begin() as session:
         await set_access_policy(
@@ -2584,12 +2582,10 @@ async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
         )
     fresh = await reauthorize(deps, admission)
     assert fresh.approval_gate == (
-        ApprovalGate("on", "channel:chan-1", "channel-admin", tenant.id)
-        if enabled and not is_dm
-        else None
+        ApprovalGate("on", "channel:chan-1", "channel-admin", tenant.id) if not is_dm else None
     )
     assert admission.approval_gate == (
-        ApprovalGate("inherit", "server", None, tenant.id) if enabled and not is_dm else None
+        ApprovalGate("inherit", "server", None, tenant.id) if not is_dm else None
     )
 
     assert fresh.grant is not None
@@ -2655,7 +2651,7 @@ async def test_gate_revocation_reaches_prepared_and_running_turns(
                 ma_environment(id="env_1", name="default", tenant_id=tenant.id),
             ),
         ),
-        tool_safety=ToolSafetyPolicy(enabled=True, allow_gate_overrides=True),
+        tool_safety=ToolSafetyPolicy(enabled=True),
     )
     target = {"server": None, "channel": "chan-1", "thread": "thread-1"}[scope]
 

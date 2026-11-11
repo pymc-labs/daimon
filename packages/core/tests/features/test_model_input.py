@@ -10,7 +10,6 @@ from daimon.core.features.model_input import (
     HistoryDepth,
     SessionToolset,
     guidance_applies,
-    turn_controls,
 )
 from daimon.core.features.registry import FEATURES, limit_int
 from daimon.core.features.resolver import ResolvedFeature, TierValue, resolve_feature
@@ -26,8 +25,8 @@ def _snapshot(*found: ResolvedFeature) -> FeatureSnapshot:
 
 def test_model_features_apply_off_chat_platforms() -> None:
     """Model features apply on web, CLI and MCP, unlike the chat-only ones."""
-    found = resolve_one(FEATURES["daimon_tools"], None, PLACE, [])
-    assert found.unavailable is None, "daimon_tools must apply on the web platform"
+    found = resolve_one(FEATURES["guidance"], None, PLACE, [])
+    assert found.unavailable is None, "guidance must apply on the web platform"
 
 
 def test_guidance_never_applies_to_isolated_agents() -> None:
@@ -37,14 +36,6 @@ def test_guidance_never_applies_to_isolated_agents() -> None:
     assert not guidance_applies(isolated=True, features=snapshot), "isolated agents get none"
     off = _snapshot(ResolvedFeature("guidance", "off", "agent"))
     assert not guidance_applies(isolated=False, features=off), "Off removes guidance"
-
-
-def test_daimon_tools_lift_minimal_turn_controls_to_origin() -> None:
-    """Daimon tools need the origin ids, so Minimal becomes Origin while they are On."""
-    minimal = ResolvedFeature("turn_controls", "minimal", "agent")
-    assert turn_controls(_snapshot(minimal)) == "origin", "tools On lift Minimal"
-    tools_off = ResolvedFeature("daimon_tools", "off", "agent")
-    assert turn_controls(_snapshot(minimal, tools_off)) == "minimal", "tools Off keep Minimal"
 
 
 def test_toolset_defaults_change_nothing() -> None:

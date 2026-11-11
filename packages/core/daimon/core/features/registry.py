@@ -228,42 +228,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
-    FeatureSpec(
-        key="daimon_tools",
-        name="Daimon tools",
-        category="model_input",
-        effect="model",
-        values=_ON_OFF,
-        default="on",
-        tiers=("deployment", "workspace", "agent", "channel", "thread"),
-        binds="session_mutable",
-        doc=(
-            "Daimon's own tools: chat, settings, routines, memory and the rest. An agent kept "
-            "apart from the team's data never has them, and Gemini and OpenAI agents always do. "
-            "Applies from the next message in a conversation."
-        ),
-        backend_fixed={_GEMINI: "on", _OPENAI: "on"},
-        platforms=EVERY_PLATFORM,
-        authority=Authority(DelegatedAction.AGENT_SETTINGS),
-    ),
     *(_builtin(tool) for tool in BUILTIN_TOOLS),
-    FeatureSpec(
-        key="turn_controls",
-        name="Message controls",
-        category="model_input",
-        effect="model",
-        values={"full": "Full", "origin": "Where and who", "minimal": "Basics"},
-        default="full",
-        tiers=TIERS,
-        binds="turn",
-        doc=(
-            "What each message tells the agent: where it was sent, who is answering and how to "
-            "act on that. Where and who drops the how-to; Basics keeps only the model and the "
-            "conversation. Daimon tools need Where and who or more."
-        ),
-        platforms=EVERY_PLATFORM,
-        authority=Authority(DelegatedAction.AGENT_SETTINGS),
-    ),
     FeatureSpec(
         key="web_awareness",
         name="Web app links",
@@ -324,24 +289,6 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
             "The agent's saved keys as a .env file in its working files. Off leaves the file "
             "out; the keys stay saved. Applies from the next message in a conversation. "
             "Claude agents only."
-        ),
-        backend_tiers=_MANAGED_AGENTS_ONLY,
-        platforms=EVERY_PLATFORM,
-        authority=Authority(DelegatedAction.AGENT_SETTINGS),
-    ),
-    FeatureSpec(
-        key="checkpoint_prompt",
-        name="Carry working files",
-        category="model_input",
-        effect="model",
-        values=_ON_OFF,
-        default="on",
-        tiers=TIERS,
-        binds="turn",
-        doc=(
-            "When a long conversation starts over, the agent is first asked to save its working "
-            "files to carry across. Off carries only the conversation and skips that extra paid "
-            "step. Claude agents only."
         ),
         backend_tiers=_MANAGED_AGENTS_ONLY,
         platforms=EVERY_PLATFORM,
@@ -565,53 +512,11 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         env_map="budget_notices",
     ),
     _shown(
-        "status_log",
-        "Separate agent messages",
-        (
-            "An answer made of several agent messages keeps each one, set apart by a blank line, "
-            "instead of joining them into one block."
-        ),
-        legacy_env=("DAIMON_TURN__STATUS_LOG",),
-    ),
-    _shown(
-        "native_footer_cost",
-        "Cost on Gemini and OpenAI footers",
-        (
-            "A finished answer from a Gemini or OpenAI agent shows what it cost, or that the "
-            "cost is unknown or partial. Claude agent footers are unchanged."
-        ),
-        legacy_env=("DAIMON_TURN__NATIVE_FOOTER_COST",),
-    ),
-    _shown(
         "message_feedback",
         "Vote buttons",
         "Finished answers get thumbs up and down for feedback.",
         default="on",
         platforms=_DISCORD,
-    ),
-    _shown(
-        "unmentioned_reply_hint",
-        "Reply hint",
-        "A short reminder that a reply needs a mention, where an unmentioned message is skipped.",
-        platforms=_DISCORD,
-        tiers=_CHANNELS,
-        legacy_env=("DAIMON_DISCORD__UNMENTIONED_REPLY_HINT",),
-    ),
-    _shown(
-        "writers_none_notice",
-        "No-writers notice",
-        "Says so when a channel's write access is set to no one and a message is skipped.",
-        platforms=_DISCORD,
-        tiers=_CHANNELS,
-        legacy_env=("DAIMON_DISCORD__WRITERS_NONE_NOTICE",),
-    ),
-    _shown(
-        "waiting_card",
-        "Waiting card",
-        "A card shows in a channel whose reply is waiting on the team's limit on replies at once.",
-        platforms=_DISCORD,
-        tiers=("deployment", "workspace"),
-        legacy_env=("DAIMON_DISCORD__TENANT_CAP_WAITING_CARD",),
     ),
     FeatureSpec(
         key="private_channel_messages",
@@ -879,24 +784,6 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         requires=("microsoft_accounts",),
     ),
     FeatureSpec(
-        key="artifact_images",
-        name="Chart images in answers",
-        category="capabilities",
-        effect="capability",
-        values=_ON_OFF,
-        default="on",
-        tiers=("deployment", "workspace"),
-        binds="turn",
-        doc=(
-            "Charts the agent makes come back inside its answer to a connected app as "
-            "pictures the app can see. Off sends the links only, for an app that cannot "
-            "take pictures."
-        ),
-        platforms=EVERY_PLATFORM,
-        authority=_SETTINGS,
-        legacy_env=("DAIMON_ARTIFACTS__EMBED_IMAGES",),
-    ),
-    FeatureSpec(
         key="support_escalation",
         name="Ask a person",
         category="capabilities",
@@ -1015,8 +902,9 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         tiers=("workspace", "channel", "thread"),
         binds="turn",
         doc=(
-            "Ask before an agent writes to an outside service. Only an admin of the chat app can "
-            "change it, once whoever runs Daimon allows approval changes."
+            "Ask before an agent writes to an outside service in a chat reply. Allow writes "
+            "covers chat replies only: routines and watches follow the unattended rule whoever "
+            "runs Daimon set. Only an admin of the chat app can change it."
         ),
         authority=Authority(native=True),
         combine_override="most_specific",

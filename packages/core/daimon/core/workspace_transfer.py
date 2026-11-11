@@ -449,7 +449,6 @@ async def transfer_workspace(
     account_id: uuid.UUID | None = None,
     fernet: MultiFernet | None = None,
     turn_path: Literal["legacy", "mux"] | None = None,
-    checkpoint: bool = True,
 ) -> TransferOutcome:
     """Walk the ladder for one replacement and report how far it got.
 
@@ -476,9 +475,6 @@ async def transfer_workspace(
 
     `turn_path` is the turn path the checkpoint turn runs on, resolved by the
     caller; `None` reads settings in the driver.
-
-    `checkpoint` False (`checkpoint_prompt` Off) sends no checkpoint turn: only the
-    conversation crosses.
 
     Never raises for an expected degradation — every rung below the top is a
     returned value. It does raise for an unexpected upstream failure (a 500
@@ -513,9 +509,6 @@ async def transfer_workspace(
 
     turns = select_recent_turns(events)
     transcript = render_previous_session(turns, from_agent_name=from_agent_name) if turns else None
-    if not checkpoint:
-        return TranscriptOnly(transcript=transcript or "", gap_reason="checkpoint_off")
-
     from daimon.core.access_policy import agent_invoker_roles
     from daimon.core.authz import build_agent_ref
     from daimon.core.mux_compat import retrieve_agent
@@ -864,8 +857,6 @@ class WorkspaceTransferRunner:
     """The account from the caller's existing tenant authorization decision."""
     turn_path: Literal["legacy", "mux"] | None = None
     """The turn path the checkpoint turn runs on; `None` reads settings in the driver."""
-    checkpoint: bool = True
-    """`checkpoint_prompt` at the place; False carries only the conversation."""
 
     async def __call__(
         self,
@@ -907,7 +898,6 @@ class WorkspaceTransferRunner:
             channel_id=self.channel_id,
             before_send=before_send,
             turn_path=self.turn_path,
-            checkpoint=self.checkpoint,
         )
         prepared = as_prepared_replacement(
             outcome,

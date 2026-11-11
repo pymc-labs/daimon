@@ -40,7 +40,6 @@ from daimon.core.channel_budget import balance_footer
 from daimon.core.channel_tidy import record_turn_post, relabel_turn_post
 from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.message_split import split_fenced
-from daimon.core.native_footer_cost import native_footer_text
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.outbound.opt_out import tag_opt_outs
@@ -571,7 +570,7 @@ class TeamsTurnLifecycle(OutputGate):
         return format_summary(
             agent_name=None if named_above else self._agent_name,
             elapsed_seconds=self._clock() - self._state.started_at,
-            cost=native_footer_text(t)
+            cost=None
             if self._provider_draft is not None or isinstance(t, ProviderUsageTotals)
             else format_cost(cost),
             left=await self._balance(),

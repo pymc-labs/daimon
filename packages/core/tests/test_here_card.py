@@ -648,7 +648,6 @@ async def test_loader_names_a_teams_setter_from_the_stored_name_never_a_mention(
             github=GitHubDeploymentFacts(has_fallback_pat=False, app_configured=False),
             public_mcp_url=None,
             is_admin=True,
-            gate_overrides_active=True,
             is_dm=False,
             caller_account_id=None,
         )

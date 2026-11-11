@@ -21,7 +21,6 @@ Where each feature can be set, and its default.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Chat history | `history_depth` | Model input | 100 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Setup guidance | `guidance` | Model input | On | ✓ | ✓ | ✓ |  |  |  |
-| Daimon tools | `daimon_tools` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always On on Gemini, OpenAI |
 | Run commands | `tool.bash` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
 | Read files | `tool.read` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
 | Edit files | `tool.edit` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
@@ -30,12 +29,10 @@ Where each feature can be set, and its default.
 | Find files | `tool.glob` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
 | Open web pages | `tool.web_fetch` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
 | Search the web | `tool.web_search` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
-| Message controls | `turn_controls` | Model input | Full | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Web app links | `web_awareness` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Connected server briefing | `mcp_briefing` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
 | Notes on non-chat messages | `origin_fragments` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Keys file | `agent_env_file` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
-| Carry working files | `checkpoint_prompt` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
 | Platform prompt | `platform_prompt` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always Off on OpenAI |
 | Platform skills | `platform_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
 | Agent skills | `agent_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always On on Gemini, OpenAI |
@@ -48,12 +45,7 @@ Where each feature can be set, and its default.
 | Completion pings | `completion_pings` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Table images | `table_rendering` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ | Only Discord, Slack; Off by default on Slack |
 | Budget notices | `budget_notices` | Chat | On | ✓ | ✓ |  | ✓ |  |  |
-| Separate agent messages | `status_log` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
-| Cost on Gemini and OpenAI footers | `native_footer_cost` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Vote buttons | `message_feedback` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ | Only Discord |
-| Reply hint | `unmentioned_reply_hint` | Chat | Off | ✓ | ✓ |  | ✓ |  | Only Discord |
-| No-writers notice | `writers_none_notice` | Chat | Off | ✓ | ✓ |  | ✓ |  | Only Discord |
-| Waiting card | `waiting_card` | Chat | Off | ✓ | ✓ |  |  |  | Only Discord |
 | Repository memory | `repo_memory` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Context provider | `context_provider` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
 | Personal memory | `memory_personal` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always Off on Gemini, OpenAI |
@@ -75,7 +67,6 @@ Where each feature can be set, and its default.
 | Report publishing | `report_publish` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Video transcripts | `media` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Microsoft 365 | `microsoft_365` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
-| Chart images in answers | `artifact_images` | Capability | On | ✓ | ✓ |  |  |  |  |
 | Ask a person | `support_escalation` | Capability | On | ✓ | ✓ |  |  |  | Needs setup by whoever runs Daimon |
 | GitHub access | `github` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Lead intake | `lead_intake` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
@@ -96,7 +87,7 @@ Where each feature can be set, and its default.
 
 ## Approvals
 
-Ask before an agent writes to an outside service. Only an admin of the chat app can change it, once whoever runs Daimon allows approval changes.
+Ask before an agent writes to an outside service in a chat reply. Allow writes covers chat replies only: routines and watches follow the unattended rule whoever runs Daimon set. Only an admin of the chat app can change it.
 
 | | |
 | --- | --- |
@@ -192,18 +183,6 @@ Instructions at the top of the agent's prompt on where its keys, repo, memory an
 | Values | `on` (On), `off` (Off) |
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent |
-| Combines | Most specific wins |
-
-## Daimon tools
-
-Daimon's own tools: chat, settings, routines, memory and the rest. An agent kept apart from the team's data never has them, and Gemini and OpenAI agents always do. Applies from the next message in a conversation.
-
-| | |
-| --- | --- |
-| Key | `daimon_tools` |
-| Values | `on` (On), `off` (Off) |
-| Default | `on` |
-| Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
 
 ## Run commands
@@ -318,18 +297,6 @@ The agent can search the web. Off removes it here; On never gives more than the 
 | Levels on Gemini | Deployment, Workspace, Agent |
 | Levels on OpenAI | Deployment, Workspace, Agent |
 
-## Message controls
-
-What each message tells the agent: where it was sent, who is answering and how to act on that. Where and who drops the how-to; Basics keeps only the model and the conversation. Daimon tools need Where and who or more.
-
-| | |
-| --- | --- |
-| Key | `turn_controls` |
-| Values | `full` (Full), `origin` (Where and who), `minimal` (Basics) |
-| Default | `full` |
-| Levels | Deployment, Workspace, Agent, Channel, Thread |
-| Combines | Most specific wins |
-
 ## Web app links
 
 Each message tells the agent the web app's address and the pages it may link to.
@@ -376,20 +343,6 @@ The agent's saved keys as a .env file in its working files. Off leaves the file 
 | | |
 | --- | --- |
 | Key | `agent_env_file` |
-| Values | `on` (On), `off` (Off) |
-| Default | `on` |
-| Levels | Deployment, Workspace, Agent, Channel, Thread |
-| Combines | Most specific wins |
-| Levels on Gemini | Not available |
-| Levels on OpenAI | Not available |
-
-## Carry working files
-
-When a long conversation starts over, the agent is first asked to save its working files to carry across. Off carries only the conversation and skips that extra paid step. Claude agents only.
-
-| | |
-| --- | --- |
-| Key | `checkpoint_prompt` |
 | Values | `on` (On), `off` (Off) |
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
@@ -551,32 +504,6 @@ Admins are told in a direct message when a channel's budget is nearly used or sp
 | Combines | Most specific wins |
 | Deprecated | `DAIMON_BUDGET_NOTICES` |
 
-## Separate agent messages
-
-An answer made of several agent messages keeps each one, set apart by a blank line, instead of joining them into one block.
-
-| | |
-| --- | --- |
-| Key | `status_log` |
-| Values | `on` (On), `off` (Off) |
-| Default | `off` |
-| Levels | Deployment, Workspace, Agent, Channel, Thread |
-| Combines | Most specific wins |
-| Deprecated | `DAIMON_TURN__STATUS_LOG` |
-
-## Cost on Gemini and OpenAI footers
-
-A finished answer from a Gemini or OpenAI agent shows what it cost, or that the cost is unknown or partial. Claude agent footers are unchanged.
-
-| | |
-| --- | --- |
-| Key | `native_footer_cost` |
-| Values | `on` (On), `off` (Off) |
-| Default | `off` |
-| Levels | Deployment, Workspace, Agent, Channel, Thread |
-| Combines | Most specific wins |
-| Deprecated | `DAIMON_TURN__NATIVE_FOOTER_COST` |
-
 ## Vote buttons
 
 Finished answers get thumbs up and down for feedback.
@@ -588,45 +515,6 @@ Finished answers get thumbs up and down for feedback.
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-
-## Reply hint
-
-A short reminder that a reply needs a mention, where an unmentioned message is skipped.
-
-| | |
-| --- | --- |
-| Key | `unmentioned_reply_hint` |
-| Values | `on` (On), `off` (Off) |
-| Default | `off` |
-| Levels | Deployment, Workspace, Channel |
-| Combines | Most specific wins |
-| Deprecated | `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT` |
-
-## No-writers notice
-
-Says so when a channel's write access is set to no one and a message is skipped.
-
-| | |
-| --- | --- |
-| Key | `writers_none_notice` |
-| Values | `on` (On), `off` (Off) |
-| Default | `off` |
-| Levels | Deployment, Workspace, Channel |
-| Combines | Most specific wins |
-| Deprecated | `DAIMON_DISCORD__WRITERS_NONE_NOTICE` |
-
-## Waiting card
-
-A card shows in a channel whose reply is waiting on the team's limit on replies at once.
-
-| | |
-| --- | --- |
-| Key | `waiting_card` |
-| Values | `on` (On), `off` (Off) |
-| Default | `off` |
-| Levels | Deployment, Workspace |
-| Combines | Most specific wins |
-| Deprecated | `DAIMON_DISCORD__TENANT_CAP_WAITING_CARD` |
 
 ## Private channel messages
 
@@ -833,19 +721,6 @@ People can connect a Microsoft account and the agent can search, read, write and
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Off above is a ceiling |
-
-## Chart images in answers
-
-Charts the agent makes come back inside its answer to a connected app as pictures the app can see. Off sends the links only, for an app that cannot take pictures.
-
-| | |
-| --- | --- |
-| Key | `artifact_images` |
-| Values | `on` (On), `off` (Off) |
-| Default | `on` |
-| Levels | Deployment, Workspace |
-| Combines | Off above is a ceiling |
-| Deprecated | `DAIMON_ARTIFACTS__EMBED_IMAGES` |
 
 ## Ask a person
 

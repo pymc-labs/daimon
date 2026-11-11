@@ -17,7 +17,6 @@ from daimon.core.config import (
     OutboundSettings,
     ProgressPlansSettings,
     Settings,
-    TurnSettings,
 )
 from daimon.core.features.deployment import deployment_value
 from daimon.core.features.model_input import SESSION_KEYS, TOOL_KEYS
@@ -76,16 +75,12 @@ _NARROWED: dict[str, str] = {
     "participation": _PRE_AGENT,
     "thread_naming": "read when a thread opens, before an agent or thread exists",
     "plain_text_mentions": _PRE_AGENT,
-    "unmentioned_reply_hint": _PRE_AGENT,
-    "writers_none_notice": _PRE_AGENT,
     "budget_notices": "read when a turn is refused for budget, before an agent or thread resolves",
-    "waiting_card": "read before the turn's place resolves, so workspace only",
     "cost_footer": "read by the finished-turn footer, which has no deployment settings or agent",
     "support_escalation": "the escalation button re-checks at the workspace when pressed",
     "private_channel_messages": "operator-only: read once at startup",
     "direct_messages": "a workspace policy for DMs, which have no agent or thread to choose",
     "dm_memory_read_only": "a workspace policy for DMs, which have no agent or thread to choose",
-    "artifact_images": "read by the artifact tool at the workspace",
     "tool_safety": "operator-only security switch",
     "unattended_capabilities": "read for unattended runs, which have no channel or thread",
     "require_routine_destination": "read when a routine is created, at the workspace",
@@ -146,14 +141,6 @@ def test_deployment_env_and_its_legacy_variable() -> None:
     legacy = _settings(progress_plans=ProgressPlansSettings.model_validate({"mode": "disabled"}))
     assert deployment_value(legacy, plans) == TierValue("deployment", "off", True)
     assert deployment_value(_settings(), plans) is None
-
-
-def test_status_log_keeps_the_operators_old_switch_as_its_deployment_value() -> None:
-    spec = FEATURES["status_log"]
-    assert deployment_value(_settings(), spec) is None
-    assert deployment_value(_settings(turn=TurnSettings(status_log=True)), spec) == TierValue(
-        "deployment", "on"
-    )
 
 
 def test_a_limit_takes_the_operators_number_and_lower_tiers_only_its_steps() -> None:
@@ -231,6 +218,52 @@ def _named_calls(path: Path, name: str) -> list[ast.Call]:
     ]
 
 
+_FULL_LISTINGS = {
+    "adapters/web/features.py": "the web app hides the rows itself (Settings.tsx), same rule",
+    "adapters/cli/commands/features.py": "the operator CLI lists every registered feature",
+}
+
+
+def _single_key(call: ast.Call) -> bool:
+    keys = next((k.value for k in call.keywords if k.arg == "keys"), None)
+    return isinstance(keys, ast.Tuple | ast.List) and len(keys.elts) == 1
+
+
+def test_every_chat_listing_of_features_hides_the_not_set_up_ones() -> None:
+    """A listing that reads many features passes them through `surface.listed`.
+
+    A feature that is unavailable here with no saved value at any tier has nothing to show
+    or set, so chat leaves it out as the web does. Single-key reads are not listings."""
+    seen = 0
+    for path in _PRODUCT:
+        tree = ast.parse(path.read_text())
+        for func in ast.walk(tree):
+            if not isinstance(func, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            reads = [
+                c
+                for c in ast.walk(func)
+                if isinstance(c, ast.Call)
+                and getattr(c.func, "id", "") == "read_features"
+                and not _single_key(c)
+            ]
+            if not reads or any(path.as_posix().endswith(rel) for rel in _FULL_LISTINGS):
+                continue
+            seen += 1
+            filters = [
+                n
+                for n in ast.walk(func)
+                if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "listed"
+            ]
+            assert filters, (
+                f"{path.name}:{func.name} lists features without `listed()`; use it or add the "
+                "file to _FULL_LISTINGS with a reason"
+            )
+    assert seen >= 3, "the chat listings moved; point this test at them"
+    for rel in _FULL_LISTINGS:
+        assert any(p.as_posix().endswith(rel) for p in _PRODUCT), f"{rel} moved: update the list"
+
+
 def test_every_guidance_writer_asks_the_one_predicate() -> None:
     """Each writer of the guidance block decides with `guidance_applies`, never alone."""
     writers = {
@@ -248,7 +281,7 @@ def test_every_guidance_writer_asks_the_one_predicate() -> None:
 
 
 def test_every_turn_origin_render_gets_the_turn_features() -> None:
-    """Each turn's controls follow `turn_controls` and `web_awareness` at its place."""
+    """Each turn's controls follow `web_awareness` at its place."""
     calls = [(p, c) for p in _PRODUCT for c in _named_calls(p, "render_turn_origin")]
     assert len(calls) >= 10, "the turn-origin renderers moved; point this test at them"
     for path, call in calls:
@@ -396,10 +429,7 @@ _CONFIG_SWITCHES: dict[str, str] = {
     "McpContextSettings.enabled": _LEGACY,
     "ThreadParticipationSettings.mode": _LEGACY,
     "RepoMemorySettings.enabled": _LEGACY,
-    "DiscordSettings.writers_none_notice": _LEGACY,
     "DiscordSettings.credential_form_expiry": _ROLLOUT,
-    "DiscordSettings.unmentioned_reply_hint": _LEGACY,
-    "DiscordSettings.tenant_cap_waiting_card": _LEGACY,
     "TeamsSettings.enabled": _SERVICE,
     "WebSettings.manual_topup": _OPS,
     "WebSettings.dev": _OPS,
@@ -409,15 +439,12 @@ _CONFIG_SWITCHES: dict[str, str] = {
     "SelfHostedSettings.admission_enabled": _OPS,
     "SelfHostedSettings.single_tenant": _OPS,
     "NotebookSettings.allow_editable": _OPS,
-    "TurnSettings.native_footer_cost": _LEGACY,
     "TurnSettings.channel_backends": _ROLLOUT,
     "TurnSettings.agent_backends": _ROLLOUT,
-    "TurnSettings.status_log": _LEGACY,
     "ThreadNamingSettings.enabled": _LEGACY,
     "OutboundSettings.reach_budget_enabled": _LEGACY,
     "PrivateChannelMessagesSettings.enabled": _LEGACY,
     "PrivacySettings.delete_enabled": _OPS,
-    "ArtifactsSettings.embed_images": _LEGACY,
     "DirectMessagePolicy.mode": _OPS,
     "AgentIdentitySettings.enabled": _SERVICE,
     "TurnQueueSettings.enabled": _SERVICE,

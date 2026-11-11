@@ -7,7 +7,6 @@ from daimon.adapters.discord.gating import (
     HintCooldown,
     is_participation_candidate,
     is_plain_text_mention_candidate,
-    is_unmentioned_reply_hint_candidate,
     should_process_message,
 )
 
@@ -236,44 +235,6 @@ def test_participation_candidate_only_in_guild_threads() -> None:
         in_thread=True,
         guild_id=None,
     ), "no guild means no tenant"
-
-
-def _hint_candidate(**overrides: object) -> bool:
-    kwargs: dict[str, object] = {
-        "enabled": True,
-        "author_is_bot": False,
-        "author_is_webhook": False,
-        "bot_mentioned": False,
-        "in_bot_owned_thread": True,
-        "mentions_someone_else": False,
-        "is_plain_message": True,
-    }
-    kwargs.update(overrides)
-    return is_unmentioned_reply_hint_candidate(**kwargs)  # pyright: ignore[reportArgumentType]
-
-
-def test_hint_candidate_is_a_persons_plain_reply_in_daimons_thread() -> None:
-    assert _hint_candidate(), "an unmentioned reply in daimon's own thread may get the hint"
-
-
-def test_hint_candidate_excludes_everything_else() -> None:
-    excluded = {
-        "setting off": {"enabled": False},
-        "mention takes the turn path": {"bot_mentioned": True},
-        "thread daimon did not open": {"in_bot_owned_thread": False},
-        "talking to someone else": {"mentions_someone_else": True},
-        "system message": {"is_plain_message": False},
-        "webhook": {"author_is_webhook": True},
-        "bot": {"author_is_bot": True},
-    }
-    for reason, overrides in excluded.items():
-        assert not _hint_candidate(**overrides), f"no hint: {reason}"
-
-
-def test_hint_candidate_rejects_allow_listed_qa_bot() -> None:
-    assert not _hint_candidate(author_is_bot=True), (
-        "the QA allow-list admits addressed turns only; no bot ever gets the hint"
-    )
 
 
 def test_hint_cooldown_allows_one_per_thread_per_window() -> None:

@@ -3568,21 +3568,13 @@ async def test_orphan_archive_second_cancel_preserves_the_unwinding_error(
 
 
 @pytest.mark.parametrize(
-    "gate_scope,overrides_enabled",
-    [
-        (None, True),
-        ("server", True),
-        ("channel:chan-1", True),
-        ("thread:thread-hook-threading", True),
-        ("server", False),
-    ],
+    "gate_scope", [None, "server", "channel:chan-1", "thread:thread-hook-threading"]
 )
 async def test_the_confirmation_hook_reaches_the_turn_through_the_observing_wrapper(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     gate_scope: str | None,
-    overrides_enabled: bool,
 ) -> None:
     """SYS-038 x SYS-081: `run_prepared_turn` observes, `run_prepared_turn_impl`
     runs; the adapter's card hook and `attended` must survive the hop."""
@@ -3605,7 +3597,7 @@ async def test_the_confirmation_hook_reaches_the_turn_through_the_observing_wrap
     router = _router(session_bodies=[], dead_session_ids=set())
     deps = dataclasses.replace(
         _deps(sessionmaker=db_session_factory, router=router),
-        tool_safety=ToolSafetyPolicy(enabled=True, allow_gate_overrides=overrides_enabled),
+        tool_safety=ToolSafetyPolicy(enabled=True),
     )
     prepared = _prepared_turn(
         deps=deps,
@@ -3668,7 +3660,7 @@ async def test_the_confirmation_hook_reaches_the_turn_through_the_observing_wrap
         ToolCall(tool_use_id="tu", server_name="linear", tool_name="create_issue")
     )
     assert result.allow
-    assert len(prompts) == (0 if gate_scope is not None and overrides_enabled else 1)
+    assert len(prompts) == (0 if gate_scope is not None else 1)
 
 
 @pytest.mark.parametrize("attended", [True, False], ids=["chat", "unattended"])

@@ -593,15 +593,10 @@ def test_prepared_turn_public_fields_exclude_recorder() -> None:
         "backend",
         "session_ref",
         "runtime",
-        "native_footer_cost",
         "native_chat_session_id",
         "snapshot",
     }, "PreparedTurn must expose exactly the documented public fields"
     assert next(f for f in dataclasses.fields(PreparedTurn) if f.name == "runtime").default is None
-    assert (
-        next(f for f in dataclasses.fields(PreparedTurn) if f.name == "native_footer_cost").default
-        is None
-    )
 
 
 async def test_bind_session_syncs_agent_mcp_credential_into_a_reused_session_vault(

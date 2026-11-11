@@ -26,7 +26,6 @@ from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.features.service import (
     FeatureActor,
     change_feature,
-    feature_refusal,
     read_features,
 )
 from daimon.core.features.snapshot import CACHE, FeaturePlace, FeatureSnapshot, resolve_one
@@ -336,19 +335,6 @@ async def test_agent_tier_tool_writes_the_agent_config_not_a_row(
             value="off",
             place=place,
         )
-
-
-def test_daimon_tools_is_fixed_on_for_gemini_and_openai() -> None:
-    """Gemini and OpenAI keep Daimon's tools, so the feature says so instead of reading Off."""
-    spec = FEATURES["daimon_tools"]
-    for backend in ("gemini", "openai"):
-        place = FeaturePlace(uuid.uuid4(), "discord", "c1", backend=backend)
-        got = resolve_one(spec, None, place, [])
-        assert (got.value, got.unavailable) == ("on", "backend"), f"{backend} keeps the tools"
-        refusal = feature_refusal(
-            "daimon_tools", "channel", "off", locked=False, place=place, settings=SETTINGS
-        )
-        assert refusal is not None and "always On" in str(refusal), "the control says why"
 
 
 async def test_tool_agent_tier_is_read_from_the_agent_and_checks_expected(

@@ -19,14 +19,11 @@ class Mcp(BaseModel):
 
 class Discord(BaseModel):
     credential_form_expiry: bool = False
-    writers_none_notice: bool = False
-    tenant_cap_waiting_card: bool = False
     table_rendering: bool = False
     bot_token: SecretStr = SecretStr("offline-fixture")
 
 
 class Turn(BaseModel):
-    native_footer_cost: bool = False
     path: str = "legacy"
 
 
@@ -51,13 +48,10 @@ def install_declarations(monkeypatch):
     monkeypatch.setattr(profiles, "import_module", module)
 
 
-def test_exact_five_flags_and_unknown_profile_are_closed() -> None:
+def test_exact_flags_and_unknown_profile_are_closed() -> None:
     expected = {
         "core.mcp.require_routine_destination": True,
         "core.discord.credential_form_expiry": True,
-        "core.discord.writers_none_notice": True,
-        "core.discord.tenant_cap_waiting_card": True,
-        "core.turn.native_footer_cost": True,
     }
     assert profiles.OPT_IN_PRODUCT_PROFILE.flags == expected
     assert profiles.DEFAULT_PRODUCT_PROFILE.flags == dict.fromkeys(expected, False)
@@ -75,28 +69,19 @@ def test_copy_preserves_secrets_backend_and_unrelated_flags_without_constructor_
     monkeypatch.setattr(Core, "__init__", constructor)
     monkeypatch.setattr(Host, "__init__", constructor)
     enabled = profiles.OPT_IN_PRODUCT_PROFILE.apply(base, service="core")
-    assert enabled.turn.native_footer_cost is True
     assert enabled.turn.path == base.turn.path == "legacy"
-    assert base.turn.native_footer_cost is False
     assert enabled.mcp.require_routine_destination is True
     assert enabled.discord is not None and enabled.discord.credential_form_expiry is True
-    assert enabled.discord.writers_none_notice is True
-    assert enabled.discord.tenant_cap_waiting_card is True
     assert enabled.discord.table_rendering is False and enabled.backend == base.backend
     assert enabled.discord.bot_token is base.discord.bot_token
     assert base.mcp.require_routine_destination is False
     assert base.discord.credential_form_expiry is False
-    assert base.discord.writers_none_notice is False
-    assert base.discord.tenant_cap_waiting_card is False
     for service in ("notebook", "report"):
         # The notebook and report hosts have no granted switch: their settings pass through.
         assert profiles.OPT_IN_PRODUCT_PROFILE.apply(host, service=service) is host
     disabled = profiles.DEFAULT_PRODUCT_PROFILE.apply(enabled, service="core")
-    assert disabled.turn.native_footer_cost is False
     assert disabled.mcp.require_routine_destination is False
     assert disabled.discord.credential_form_expiry is False
-    assert disabled.discord.writers_none_notice is False
-    assert disabled.discord.tenant_cap_waiting_card is False
     constructor.assert_not_called()
 
 
@@ -161,9 +146,6 @@ def test_flag_application_receipt_is_scoped_and_not_an_outcome(monkeypatch):
         assert profiles.applied_product_flags() == {
             "core.mcp.require_routine_destination",
             "core.discord.credential_form_expiry",
-            "core.discord.writers_none_notice",
-            "core.discord.tenant_cap_waiting_card",
-            "core.turn.native_footer_cost",
         }
         profiles.OPT_IN_PRODUCT_PROFILE.apply(Host(_env_file=None), service="notebook")
         profiles.OPT_IN_PRODUCT_PROFILE.apply(Host(_env_file=None), service="report")
@@ -189,33 +171,25 @@ def test_missing_granted_declarations_are_named_without_partial_application(monk
     install_declarations(monkeypatch)
 
     class EarlierDiscord(BaseModel):
-        credential_form_expiry: bool = False
-
-    class EarlierTurn(BaseModel):
-        path: str = "legacy"
+        table_rendering: bool = False
 
     def module(name):
         if name == "daimon.core.config":
-            return SimpleNamespace(
-                McpSettings=Mcp, DiscordSettings=EarlierDiscord, TurnSettings=EarlierTurn
-            )
+            return SimpleNamespace(McpSettings=Mcp, DiscordSettings=EarlierDiscord)
         return SimpleNamespace(Settings=Host)
 
     monkeypatch.setattr(profiles, "import_module", module)
     with pytest.raises(profiles.ProductProfileUnavailable) as refused:
         profiles.OPT_IN_PRODUCT_PROFILE.require_available()
-    assert set(refused.value.missing) == {
-        "core.discord.writers_none_notice",
-        "core.discord.tenant_cap_waiting_card",
-        "core.turn.native_footer_cost",
-    }
+    assert set(refused.value.missing) == {"core.discord.credential_form_expiry"}
     profiles.DEFAULT_PRODUCT_PROFILE.require_available()
 
 
-def test_missing_queue_card_field_refuses_without_modifying_existing_settings():
+def test_missing_flag_field_refuses_without_modifying_existing_settings():
+    """A settings model lacking a granted switch is refused and left untouched."""
+
     class EarlierDiscord(BaseModel):
-        credential_form_expiry: bool = False
-        writers_none_notice: bool = False
+        table_rendering: bool = False
 
     class EarlierCore(BaseModel):
         mcp: Mcp = Mcp()
@@ -225,7 +199,7 @@ def test_missing_queue_card_field_refuses_without_modifying_existing_settings():
     original = EarlierCore()
     snapshot = original.model_dump()
     with pytest.raises(
-        profiles.ProductProfileUnavailable, match="core.discord.tenant_cap_waiting_card"
+        profiles.ProductProfileUnavailable, match="core.discord.credential_form_expiry"
     ):
         profiles.OPT_IN_PRODUCT_PROFILE.apply(original, service="core")
     assert original.model_dump() == snapshot

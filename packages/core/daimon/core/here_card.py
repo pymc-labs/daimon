@@ -19,7 +19,6 @@ from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.approval_gate import resolve_approval_gate
 from daimon.core.authz import Action, AgentRef, Place, Subject, authorize
-from daimon.core.features.surface import OVERRIDES_OFF
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.outsiders import OutsiderVisibility
 from daimon.core.permissions import (
@@ -481,7 +480,6 @@ async def load_here_card(
     github: GitHubDeploymentFacts,
     public_mcp_url: str | None,
     is_admin: bool,
-    gate_overrides_active: bool = False,
     is_dm: bool = False,
     caller_account_id: uuid.UUID | None,
     resolve_setter_display: Callable[[str], Awaitable[str | None]] | None = None,
@@ -681,8 +679,6 @@ async def load_here_card(
         note = "Approvals: Ask (default)."
     else:
         note = f"Approvals: {shown[gate.value]} (set by the {gate.scope})."
-        if not gate_overrides_active:
-            note += f" {OVERRIDES_OFF}"
     card = card.model_copy(
         update={
             "approval_gate_note": note,

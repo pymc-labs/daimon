@@ -78,7 +78,6 @@ from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.channel_budget import balance_footer
 from daimon.core.channel_tidy import record_turn_post
 from daimon.core.cost_footer import cost_footer_shown
-from daimon.core.native_footer_cost import native_footer_text
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.outbound.mentions import mentioned_user_ids, untag
@@ -502,9 +501,8 @@ class SlackTurnLifecycle(OutputGate):
         """
         t = state.usage_totals
         if self._provider_draft is not None or isinstance(t, ProviderUsageTotals):
-            # Only an opted-in, authorized host attempt supplies a complete
-            # native cost. Compatibility counters never become an MA meter.
-            self._state = dataclasses.replace(self._state, cost_str=native_footer_text(t))
+            # Compatibility counters never become an MA meter: no cost shown.
+            self._state = dataclasses.replace(self._state, cost_str=None)
             return
         cost = cost_of_totals(
             state.usage_totals,

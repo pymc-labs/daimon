@@ -9,7 +9,7 @@ Lock, and ``@<agent>`` after the agent tier's choice (the agent it applies to).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, cast
 
@@ -46,6 +46,17 @@ _UNAVAILABLE: Final[Mapping[str, str]] = {
 LOCK_FLAG: Final = "lock"
 
 
+def listed(views: Iterable[FeatureView]) -> tuple[FeatureView, ...]:
+    """The views a chat or agent listing shows: a feature that is not available here and has
+    no saved value at any tier is left out, as the web does (`Settings.tsx`), so nobody is
+    offered a row they cannot use. The one place that rule lives; every listing calls it."""
+    return tuple(
+        view
+        for view in views
+        if view.resolved.unavailable is None or any(t.value != DEFAULT for t in view.tiers)
+    )
+
+
 def value_text(spec: FeatureSpec, value: str, locked: bool = False) -> str:
     text = spec.label(value)
     return f"{text}, locked" if locked and value != DEFAULT else text
@@ -75,16 +86,7 @@ def own_text(spec: FeatureSpec, own: TierSetting) -> str:
     return value_text(spec, own.value, own.locked)
 
 
-OVERRIDES_OFF: Final = "Saved, but it has no effect yet. Ask an admin to allow approval changes."
-
-
-def _ignored(spec: FeatureSpec, overrides_active: bool) -> str:
-    return f" {OVERRIDES_OFF}" if spec.key == "approvals" and not overrides_active else ""
-
-
-def change_note(
-    change: FeatureChange, platform: str | None, *, overrides_active: bool = True
-) -> str:
+def change_note(change: FeatureChange, platform: str | None) -> str:
     """What a change saved, and what is in effect when another tier still decides."""
     spec, after, resolved = change.view.spec, change.after, change.view.resolved
     where_ = where(change.tier, platform)
@@ -94,7 +96,7 @@ def change_note(
         note = f"{spec.name} is now {value_text(spec, after.value, after.locked)} for {where_}."
     if resolved.tier != change.tier:
         note += f" In effect: {source_text(spec, resolved, platform)}."
-    return note + _ignored(spec, overrides_active)
+    return note
 
 
 def choice(
@@ -182,9 +184,7 @@ def feature_schema() -> list[dict[str, Any]]:
     ]
 
 
-def view_json(
-    view: FeatureView, platform: str | None, *, overrides_active: bool = True
-) -> dict[str, Any]:
+def view_json(view: FeatureView, platform: str | None) -> dict[str, Any]:
     """One feature at a place for a surface that draws its own controls: each tier's own
     value (with its `expected` text), what is in effect, where from, and why it cannot apply."""
     resolved = view.resolved
@@ -199,6 +199,5 @@ def view_json(
         "source": resolved.tier,
         "locked": resolved.locked,
         "unavailable": resolved.unavailable,
-        "summary": source_text(view.spec, resolved, platform)
-        + _ignored(view.spec, overrides_active),
+        "summary": source_text(view.spec, resolved, platform),
     }

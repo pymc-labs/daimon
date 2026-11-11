@@ -12,9 +12,9 @@ from daimon.core.authz import Subject
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.features import service
 from daimon.core.features.registry import FEATURES
-from daimon.core.features.service import FeatureActor
+from daimon.core.features.service import FeatureActor, read_features
 from daimon.core.features.snapshot import FeaturePlace
-from daimon.core.features.surface import choice
+from daimon.core.features.surface import choice, listed
 from daimon.testing.factories import make_tenant
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -73,8 +73,31 @@ async def test_the_root_picks_a_group_and_each_group_lists_its_features(
         screen = await panel.show(db_session_factory, _settings(), actor, _place(actor), op)
         assert screen is not None and screen.back is not None
         seen |= {o.value.split(":")[2] for o in screen.selects[0].options}
-    discord = {k for k, s in FEATURES.items() if s.on_platform("discord")}
-    assert seen == discord
+    place = _place(actor)
+    views = await read_features(db_session_factory, _settings(), place)
+    discord = {v.spec.key for v in listed(views) if v.spec.on_platform("discord")}
+    assert seen == discord, "the groups list exactly the features that are set up or set"
+
+
+async def test_a_feature_that_is_not_set_up_and_not_set_is_not_listed(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    """Unavailable here with no saved value: out of every group, as the web hides it."""
+    actor = _actor(await _tenant(db_session), True)
+    views = await read_features(db_session_factory, _settings(), _place(actor))
+    hidden = {
+        v.spec.key
+        for v in views
+        if v.spec.on_platform("discord") and v.resolved.unavailable is not None
+    } - {v.spec.key for v in listed(views)}
+    assert hidden, "the test deployment must have a feature that is not set up"
+    root = await panel.open_panel(db_session_factory, _settings(), actor, _place(actor))
+    shown: set[str] = set()
+    for group in (o.value for o in root.selects[0].options):
+        screen = await panel.show(db_session_factory, _settings(), actor, _place(actor), group)
+        assert screen is not None, f"group {group} opens"
+        shown |= {o.value.split(":")[2] for o in screen.selects[0].options}
+    assert not hidden & shown, f"hidden features must not be offered: {hidden & shown}"
 
 
 async def test_every_feature_opens_with_a_control_for_an_admin(
@@ -176,7 +199,7 @@ async def test_a_builtin_tool_is_not_offered_per_agent_in_chat(
 async def test_no_select_is_cut_by_the_platform_option_limit(
     db_session: AsyncSession, db_session_factory: Sessions
 ) -> None:
-    """Discord allows 25 options a select: a group lists every feature on the platform within
+    """Discord allows 25 options a select: a group lists every shown feature on the platform within
     it, and an agent picker never offers more, so nothing is silently dropped."""
     actor = _actor(await _tenant(db_session), True)
     many = [panel.AgentChoice(f"a{i}", f"Agent {i}") for i in range(40)]
@@ -186,16 +209,21 @@ async def test_no_select_is_cut_by_the_platform_option_limit(
 
     for platform in ("discord", "slack", "teams"):
         place = FeaturePlace.of(actor.tenant_id, platform, "C1")
+        shown = {
+            v.spec.key for v in listed(await read_features(db_session_factory, _settings(), place))
+        }
         for category in {spec.category for spec in FEATURES.values()}:
             screen = await panel.show(
                 db_session_factory, _settings(), actor, place, panel.open_op(category)
             )
             assert screen is not None
-            listed = len(screen.selects[0].options)
+            offered = len(screen.selects[0].options)
             wanted = sum(
-                1 for s in FEATURES.values() if s.category == category and s.on_platform(platform)
+                1
+                for s in FEATURES.values()
+                if s.category == category and s.on_platform(platform) and s.key in shown
             )
-            assert listed == wanted <= panel.SELECT_LIMIT, f"{platform} {category} is cut"
+            assert offered == wanted <= panel.SELECT_LIMIT, f"{platform} {category} is cut"
     op = panel.open_op("chat", "progress_plans")
     screen = await panel.show(
         db_session_factory, _settings(), actor, _place(actor), op, agents=agents

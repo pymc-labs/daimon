@@ -703,15 +703,6 @@ Maximum recently active Discord channels and threads scanned per guild on startu
 Maximum recent Discord messages scanned per channel or thread on startup. Current
 message gates and durable admissions prevent duplicate turns.
 
-### `DAIMON_DISCORD__WRITERS_NONE_NOTICE`
-
-`bool` · optional · default `False`
-
-Opt in to one stop reaction on an explicit bot mention refused by a confirmed
-writers=none rule. Only the posting owner reacts, with per-requester, channel and bot-
-wide cooldowns. No text, DM or agent turn is sent. Unknown protection stays silent.
-Limits are process-local and reset on restart.
-
 ### `DAIMON_DISCORD__CREDENTIAL_FORM_EXPIRY`
 
 `bool` · optional · default `False`
@@ -730,24 +721,6 @@ thread is still opening. Includes thread naming and Discord rate-limit waits. Se
 to react immediately. The reaction is removed when creation finishes; a failed creation
 is answered with a visible error reply.
 
-### `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT`
-
-`bool` · optional · default `False`
-
-React with 🔔 to a person's reply that does not @mention the bot in a thread the bot
-opened, as a hint that only mentions start a turn. The message itself is never answered.
-At most once per thread per unmentioned_reply_hint_cooldown_h, never on a message that
-mentions someone else, never to any bot, never where the agent may not post, and never
-while the thread is followed (thread participation on). Off by default: the cooldown is
-kept in memory, so each restart allows one more hint per thread.
-
-### `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT_COOLDOWN_H`
-
-`float` · optional · default `24.0`
-
-Hours before the unmentioned-reply hint may be shown again in the same thread. Kept in
-memory, so a restart allows one more.
-
 ### `DAIMON_DISCORD__PROTECTED_CHANNEL_NOTICE_COOLDOWN_MIN`
 
 `float` · optional · default `10.0`
@@ -763,15 +736,6 @@ per person and channel, so a restart allows one more.
 
 Maximum number of agent turns a single tenant (Discord guild) may have in flight at
 once. Caps one noisy guild from starving others on the shared Anthropic key.
-
-### `DAIMON_DISCORD__TENANT_CAP_WAITING_CARD`
-
-`bool` · optional · default `False`
-
-Opt in to queue wording on the existing initial Discord mention card while its admitted
-turn waits behind the tenant concurrency cap. The same card returns to ordinary progress
-when the turn starts. Admission, Stop and queue limits are unchanged; no other tenant
-information is displayed.
 
 ### `DAIMON_DISCORD__MAX_CONCURRENT_TURNS`
 
@@ -1734,15 +1698,6 @@ retried work before it is sent again.
 Turn I/O path. mux (the default) runs turns through the neutral Events/Sessions ports.
 Emergency stop only: legacy returns every turn to the Managed Agents-only path.
 
-### `DAIMON_TURN__NATIVE_FOOTER_COST`
-
-`bool` · optional · default `False`
-
-Display settled native OpenAI/Gemini turn cost on platform footers. Requires complete
-normalized usage, verified rates and root accounting. Incomplete totals display Cost
-unknown or Cost partial, never an estimate. Off by default; Anthropic footers are
-unchanged with either value.
-
 ### `DAIMON_TURN__CHANNEL_BACKENDS`
 
 `bool` · optional · default `True`
@@ -1761,16 +1716,6 @@ Capture complete scoped source and resource intent for an agent-selected native 
 Unproved obligations are refused; counterpart identity readback alone never authorizes
 execution. Requires mux and channel_backends; on by default. Emergency stop only: false
 refuses agent-selected native backends.
-
-### `DAIMON_TURN__STATUS_LOG`
-
-`bool` · optional · default `False`
-
-Keep each message the agent writes apart in its answer. Off by default: consecutive
-messages from the agent are joined into one block of text. On: an answer made of several
-messages keeps every one, set apart by a blank line instead of being run together.
-Either way the "Working on it…" card shows the last three messages the agent wrote,
-oldest first, one line each (cut at 120 characters).
 
 ## Thread Naming
 
@@ -2009,16 +1954,6 @@ Apply workspace-admin tool rules for individual agents and MCP tools: third-part
 and Daimon's own daimon-mcp/&lt;tool&gt; (ask and deny). Off by default; stored rules
 remain editable but inactive until enabled.
 
-### `DAIMON_TOOL_SAFETY__ALLOW_GATE_OVERRIDES`
-
-`bool` · optional · default `False`
-
-Let native server admins change third-party MCP write approvals from /settings at
-server, channel or thread scope. The most specific explicit on/off setting wins. Stored
-settings are ignored while off. Fixed confirmation and permission-setter names never
-receive an override, regardless of server host. Deny rules, direct messages and
-unattended_writes retain their existing behavior.
-
 ### `DAIMON_TOOL_SAFETY__EFFECTS`
 
 `dict[str, 'read' | 'write']` · optional · default `{}`
@@ -2136,13 +2071,6 @@ S3 signing region supplied by the bucket provider.
 `int` · optional · default `600`
 
 Lifetime of each presigned artifact GET URL; defaults to ten minutes.
-
-### `DAIMON_ARTIFACTS__EMBED_IMAGES`
-
-`bool` · optional · default `True`
-
-Also return bounded MCP image blocks for model vision. Disable independently when a
-hosted client cannot accept image content.
 
 ## Scheduler
 

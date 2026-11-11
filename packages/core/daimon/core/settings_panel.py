@@ -39,6 +39,7 @@ from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.features.surface import (
     CATEGORIES,
     change_note,
+    listed,
     own_text,
     parse_choice,
     source_text,
@@ -117,9 +118,7 @@ async def apply_choice(
         )
     except ChannelChangeRefused as exc:
         return False, str(exc)
-    return True, change_note(
-        change, place.platform, overrides_active=settings.tool_safety.gate_overrides_active
-    )
+    return True, change_note(change, place.platform)
 
 
 @dataclass(frozen=True)
@@ -183,8 +182,10 @@ def _short(view: FeatureView, platform: str) -> str:
     return view.spec.label(resolved.value) + (", locked" if resolved.locked else "")
 
 
-def _root(place: FeaturePlace) -> PanelScreen:
-    groups = {spec.category for spec in _on_platform(place)}
+async def _root(sessions: Sessions, settings: Settings, place: FeaturePlace) -> PanelScreen:
+    specs = _on_platform(place)
+    views = listed(await read_features(sessions, settings, place, keys=[s.key for s in specs]))
+    groups = {view.spec.category for view in views}
     here = "this thread" if place.thread_id else "this channel"
     return PanelScreen(
         TITLE,
@@ -210,7 +211,7 @@ async def _category(
     category: Category,
 ) -> PanelScreen:
     specs = [spec for spec in _on_platform(place) if spec.category == category]
-    views = await read_features(sessions, settings, place, keys=[s.key for s in specs])
+    views = listed(await read_features(sessions, settings, place, keys=[s.key for s in specs]))
     shorts = [(view.spec, _short(view, place.platform)) for view in views]
     return PanelScreen(
         CATEGORIES[category],
@@ -334,7 +335,7 @@ async def show(
         return None
     category, key, agent = found
     if category is None:
-        return _root(place)
+        return await _root(sessions, settings, place)
     if key is None:
         return await _category(sessions, settings, actor, place, category)
     if not FEATURES[key].on_platform(place.platform):
