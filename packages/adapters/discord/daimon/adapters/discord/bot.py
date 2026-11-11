@@ -2760,7 +2760,12 @@ class DaimonBot(commands.Bot):
         assert message.guild is not None
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(message.guild.id))
         # A failed read leaves the message unaddressed, as with the switch off.
-        place = FeaturePlace.of(tenant_id, "discord", str(message.channel.id))
+        # A thread's setting lives under its parent channel; its own id is no channel.
+        channel = message.channel
+        if isinstance(channel, discord.Thread):
+            place = FeaturePlace.of(tenant_id, "discord", str(channel.parent_id), str(channel.id))
+        else:
+            place = FeaturePlace.of(tenant_id, "discord", str(channel.id))
         enabled = (
             await place_feature(
                 self.runtime.sessionmaker, self.runtime.settings, place, "plain_text_mentions"
