@@ -9,7 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Reasoning effort on OpenAI and Gemini agents.** An agent on either provider
   can carry a low, medium or high effort, kept with its model. Speed (Fast)
-  stays Claude-only.
+  stays Claude-only. Effort shows in the web editor and the Discord, Slack
+  and Teams setup panels, and an MCP backend switch keeps it unless the call
+  changes it.
+
+- **Pick a conversation's model from Discord and the web chat.** `/model` in
+  Discord lists the catalog with prices, and the chat header on the web has the
+  same menu. A pick on another provider shows what changes and the price, then
+  switches after one confirm. Refusals say why and nothing changes.
 
 - **A spend limit now stops an OpenAI turn.** A turn that passes the limit set for
   its agent is cancelled and the agent is told why. Cache writes are not metered

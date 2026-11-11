@@ -11,6 +11,7 @@ import pytest
 from daimon.adapters.discord.commands import model as model_command
 from daimon.adapters.discord.commands.model import ModelCog
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core import channel_backend
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
@@ -168,7 +169,10 @@ def _cross_provider_preview() -> ModelSwitchPreview:
 
 
 def _with_selection(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(model_command.channel_backend, "backend_selection_enabled", lambda _t: True)
+    def enabled(_turn: object) -> bool:
+        return True
+
+    monkeypatch.setattr(channel_backend, "backend_selection_enabled", enabled)
     monkeypatch.setattr(ModelCog, "_thread_pick", AsyncMock(return_value=MagicMock()))
 
 
