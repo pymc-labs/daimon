@@ -1,8 +1,9 @@
 # Model providers
 
-Choose which model backend answers in your channels, and run OpenAI, Gemini or
-a self-hosted harness instead of, or beside, the default Anthropic backend.
-Read this if you self-host and do not want every turn on Anthropic.
+Choose which model backend answers in your agents and threads: the default
+Anthropic backend, OpenAI, Gemini or a self-hosted harness. Read this if you
+self-host and do not want every turn on Anthropic, or want to try another model
+in one conversation.
 
 ## Compare backends
 
@@ -10,18 +11,37 @@ Read this if you self-host and do not want every turn on Anthropic.
 | --- | --- | --- | --- | --- |
 | Needs | Anthropic API key | OpenAI key and project | Gemini key | Your own harness service and Azure OpenAI |
 | Models | The agent's own model | `gpt-6-luna`, `gpt-6-astra` | `gemini-3.8-flash`, `gemini-4-argon` (priced through 2026-11-30, then refused) | The deployment you name (default `gpt-6.1-sol`) |
-| Shared threads | Yes | Yes, without Daimon's tools | Yes, without Daimon's tools | No |
-| Tools that need a confirmation | Yes | Daimon's own card in chat | Daimon's own card in chat | Not documented |
-| The agent's own MCP connectors | Yes | Through Daimon | Through Daimon | No |
+| Set as an agent's model or a thread's | Yes | Yes | Yes | No, only as a channel pin |
+| Shared threads | Yes | Yes, without Daimon's tools | Yes, without Daimon's tools | Not supported |
+| Tools that need a confirmation | Yes | Daimon's Approve card | Daimon's Approve card | Refused when the agent has an `ask` rule |
+| The agent's own MCP connectors | Yes | Through Daimon | Through Daimon | Not supported |
 | Sealed channels and Slack DM context | Yes | Yes | Yes | Yes |
 | Multi-agent delegation | Yes | Copies of itself | Copies of itself | Copies of itself |
-| Memory across turns | Yes | No | Not documented | No |
-| Workspace export and import | Yes | No | Not documented | No |
-| Skills | Full | Custom and channel skills, up to 28 MiB each | Not documented | Seeded defaults only |
+| Memory across turns | Yes | Through Daimon, needs an Anthropic key | Through Daimon, needs an Anthropic key | Not supported |
+| Web fetch | Yes | Through Daimon | Through Daimon | Through Daimon |
+| Web search | Yes | Not supported | Not supported | Not supported |
+| Output files | Yes | Yes | Yes | Through the MCP message tools |
+| Reasoning effort | Yes | Low, medium, high | Low, medium, high | Not supported |
+| Spend limit for one turn | Yes | Daimon stops the turn | Holds only, no stop mid-turn | Not supported |
+| Routines | Yes | Yes | Yes | Not supported |
+| Workspace export and import | Yes | Not supported | Not supported | Not supported |
+| Skills | Full | Custom and agent skills, up to 28 MiB each | Default skills only | Seeded defaults only |
 
-Everything else works the same on every backend: chat platforms, routines and
-the default skill set. A backend that cannot meet a channel's requirements
-refuses the turn. Daimon never runs it on Anthropic in its place.
+A backend that cannot meet a channel's requirements refuses the turn. Daimon
+never runs it on Anthropic in its place.
+
+### What is not supported yet
+
+- **Gemini:** custom and channel skills, web search, and stopping a turn at a
+  spend limit.
+- **OpenAI:** web search, which it neither prices nor counts.
+- **Self-hosted:** connectors, memory, shared threads, routines, effort and a
+  spend limit. It cannot be an agent's model. It needs a channel pin.
+- **OpenAI, Gemini and self-hosted:** an agent with an `ask` rule or a
+  channel-scoped `deny` on a Daimon tool is refused, and so is workspace export
+  and import. A connector that OpenAI's size limit cannot hold, or whose tool
+  names clash with Gemini's own, is named on the switch card as a loss.
+- **Without an Anthropic key:** memory.
 
 ## Route channels to a backend
 
@@ -36,6 +56,8 @@ docker compose run --rm init "daimon agents backend set <agent-name-or-id> opena
 This sends every channel that uses the agent to OpenAI. To route single
 channels instead, use `daimon channels rule set` and scope the runtime file row
 with `--platform`, `--channel-id` and `--account-id` on `daimon openai init`.
+An admin can also pin a channel from its page on the web. A self-hosted
+backend is only ever a channel pin.
 
 A channel's own pin outranks the agent's provider there. An admin can clear it
 from chat by asking Daimon to clear the channel's pin and confirming the card.
@@ -48,15 +70,78 @@ channel yet. Backend selection is on by default
 Setting it to `false` sends every turn back to Anthropic, as an emergency
 stop.
 
+## Switch with a model pick
+
+Picking a model on another provider is the switch. `/model` on Discord, the
+Model shortcut on Slack, the `model` command on Teams, the web model editor and
+chat header, and the agent panels all list every model your install can run with
+its price. A pick shows what the move drops, the shared-thread limits, the cost
+and what happens to threads, then asks once. Confirming accepts those losses.
+Earlier messages carry over, and so do saved files where the new provider keeps
+a workspace. A refusal names its cause and changes nothing.
+
+Picking a model for one conversation, in chat or with the MCP tool
+`set_thread_model`, leaves the agent on its own model everywhere else. Only the
+agent's owner or an admin may do it, unless the `thread_providers` feature is
+on. It is off by default and lets anyone who may change a conversation's model
+do it. After an admin edits the agent, the next message in that conversation
+asks once more.
+
+An admin can **Switch back to Claude** from a refused reply, a switch card or
+a panel, when the install has an Anthropic key. MCP tools and the CLI take
+`--model provider:id`, for example `openai:gpt-6-luna`, with `--yes` and
+`--accept-drops`.
+
+### Convert an agent in either direction
+
+```bash
+daimon agents convert <name> [--to openai|gemini|anthropic] [--yes]
+```
+
+An admin runs it. Without `--to` it picks the first provider that has a key.
+Moving to OpenAI or Gemini keeps the agent's name, owner, and channel and agent
+rules, and retires the Claude original. Skills that exist only on Claude are
+left off, and the command names each one. `--to anthropic` makes it a Claude
+agent again with the same owner, threads, routines, memory, settings and grants.
+Both are safe to re-run after a failure. They are refused while the agent has
+queued wakes, pending approvals or running jobs.
+
+## Run without an Anthropic key
+
+Set only an OpenAI or Gemini key. `init` seeds the default agents on the first
+keyed provider at its default model, and agents you create later live there
+too. Each is pinned, so a turn never falls back to Anthropic and no Anthropic
+request is made. Thread titles and participation checks use a small model from
+that provider. An agent still on Anthropic gets a card offering a copy on
+another provider, or asking whoever runs Daimon to add the Anthropic key.
+Memory settings show as needing setup.
+
+## What Daimon adds on OpenAI and Gemini
+
+- **Memory.** Daimon's own tools read and write the agent's shared, personal
+  and channel memory, under the same rules as on Claude. The stores live on
+  Anthropic.
+- **Web fetch.** Daimon opens public https pages for the agent, checks every
+  redirect and cuts long text. The place's web page setting decides. Self-hosted
+  agents get it too.
+- **Connectors.** The agent's own MCP connectors run through Daimon with the
+  turn's credential, and the provider never sees a sign-in. Each tool keeps the
+  agent's permission. Personal connectors need one Reconnect after a switch.
+  Turn it off with the `mcp_connector_relay` feature.
+- **Confirmations.** A tool that needs one posts an Approve and Deny card on
+  Discord, Slack, Teams and the web. Only the asker answers, and an approved
+  call runs once. An unattended turn runs only what its rules allow. Turn it off
+  with the `host_call_gate` feature.
+- **Copies of itself.** `ask_helper` with `self` starts a fresh copy per ask.
+  All copies of one message stop at $10 of spend together, and share no files.
+- **Effort.** Low, medium or high, kept with the model. Fast stays on Claude.
+- **Spend limit.** The host prices a turn's usage while it runs, as the runtime
+  file section below describes.
+
 ## Run on OpenAI
 
-OpenAI needs no Anthropic account. Leave
-[`DAIMON_ANTHROPIC__API_KEY`](configuration.md#daimon_anthropic__api_key)
-unset and `init` seeds the default agents on OpenAI, at its default model.
-Agents created later also run on OpenAI. An agent kept on Anthropic is refused
-with a card that offers a copy on another provider. Two limits apply beyond the
-table: no mid-session resource changes (initial file mounts work), and fixed model and
-container defaults with no Daimon model settings.
+Two limits apply beyond the table: no mid-session resource changes (initial
+file mounts work), and fixed container defaults.
 
 1. Create an OpenAI project and an API key scoped to it. Add the key to
    `.env` under a name outside the reserved `OPENAI_*`, `ANTHROPIC_*`,
@@ -205,147 +290,7 @@ In a row, name the profile `gemini.inline_reuse` and the model
 
 ## Run a self-hosted harness
 
-The `selfhosted.loop` backend runs turns through a separate `daimon-harness/0`
-service that you operate. Each caller gets a separate persistent session. The
-backend does not support steering, shared sessions, workers, session transfer,
-memory stores or workspace export and import.
-
-### Create the resource records
-
-Apply migrations, then store an agent and an environment for an existing
-tenant, and grant the channels that may use them:
-
-```bash
-daimon selfhosted init \
-  --tenant-id <tenant-uuid> \
-  --harness-url https://harness.example \
-  --model <azure-deployment-name> \
-  --auth-ref DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY \
-  --channel discord:<channel-id> --account-id <account-id> \
-  --input-usd <price> --output-usd <price> \
-  --manifest /path/to/runtime.json
-```
-
-It needs only the database. It prints the agent and environment IDs, then the
-settings to add to the environment: the admission flag, the harness auth
-binding for the tenant and the model's rates. It writes one row per
-`--channel` into the runtime file (`--manifest`, or
-`DAIMON_TURN__PROVIDER_RUNTIME_FILE`). `--input-usd` and `--output-usd` are
-verified prices in USD per million tokens and have no defaults.
-`--cache-read-usd` follows the input price when unset, and
-`--infrastructure-usd` is your audited cost per request (`0` if none).
-
-Repeating it with the same configuration reuses the resources and replaces
-the same rows, and a changed configuration is refused.
-
-Override the names
-`daimon` and `default` with `--name` and `--environment-name`, and read the
-system prompt from a file with `--system-file`. `--auth-ref` records a
-variable name, never its value. HTTPS is required outside loopback.
-`--allow-insecure-http` permits HTTP on internal names and private addresses;
-those origins get no auth binding line.
-
-### Check admission and the runtime file
-
-The printed lines cover these; this is what each does.
-
-1. [`DAIMON_SELFHOSTED__ADMISSION_ENABLED=true`](configuration.md#daimon_selfhosted__admission_enabled)
-   defaults to `false` and needs a configured harness runtime. Select the
-   self-hosted agent and environment on each channel.
-2. [`DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS`](configuration.md#daimon_selfhosted__harness_auth_bindings)
-   declares each harness token as a JSON list of
-   `{"name": "DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY",
-   "origin": "https://harness.example", "tenants": ["<tenant-uuid>"]}`.
-   The exact origin and tenant must match before a token is read. Merge the
-   printed entry into any list you already have. Wildcard tenants need
-   [`DAIMON_SELFHOSTED__SINGLE_TENANT=true`](configuration.md#daimon_selfhosted__single_tenant).
-3. The runtime file, pointed to by `DAIMON_TURN__PROVIDER_RUNTIME_FILE`, holds
-   one row per tenant, channel and account:
-
-   ```json
-   [
-     {
-       "profile": "selfhosted.loop",
-       "tenant_id": "<tenant-uuid>",
-       "platform": "discord",
-       "channel_id": "<channel-id>",
-       "account_id": "<account-uuid>",
-       "config_digest": "<admitted-config-digest>",
-       "agent_id": "sh_agent_<id>",
-       "environment_id": "sh_env_<id>",
-       "infrastructure_usd": "0",
-       "max_tool_calls": 100,
-       "deadline_s": 300
-     }
-   ]
-   ```
-
-   The digest is that of the default `selfhosted.loop` configuration for the
-   model. A channel that changes its backend settings needs its own row.
-4. `DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS` and
-   `DAIMON_BILLING__SELFHOSTED__MODELS` hold the deployment-to-model mapping
-   and the rates, as described in [billing](billing.md). A turn on an unpriced
-   deployment is refused before any harness call.
-
-Daimon's MCP public URL and JWT secret must be set. Each turn passes the
-harness a caller-bound MCP token that is revoked when the turn ends. Provide
-third-party MCP credentials to the harness as environment references. Wildcard
-MCP credential bindings need `DAIMON_SELFHOSTED__SINGLE_TENANT=true`.
-Credential-free HTTP MCP servers on private ranges are refused unless listed in
-[`DAIMON_SELFHOSTED__MCP_ALLOWED_HTTP_HOSTS`](configuration.md#daimon_selfhosted__mcp_allowed_http_hosts).
-Also restrict harness egress, since host checks cannot stop DNS rebinding.
-
-### Run the harness container
-
-Build it from the repository root:
-
-```bash
-docker build -f apps/harness/Dockerfile -t daimon-harness .
-```
-
-The image holds NumPy, pandas, PyMC and PyMC-Marketing. Port 8088 serves
-authenticated `/v0/*` requests. Use private ingress with bearer or Entra
-authentication.
-
-- **Credentials.** Supply `HARNESS_TOKEN`, `AZURE_OPENAI_ENDPOINT` and either
-  `AZURE_OPENAI_API_KEY` or a managed identity (`IDENTITY_ENDPOINT` and
-  `IDENTITY_HEADER`, optionally `AZURE_CLIENT_ID`). Startup refuses
-  file-backed credentials, certificate paths and tool-readable files on
-  external mounts.
-- **Storage.** Mount a persistent home at `/home/harness` and run one worker
-  per home. Keep the image's tini process as PID 1 in custom entrypoints.
-- **Sessions.** The default `HARNESS_SESSION_MODE=single` binds the first
-  session and answers other IDs with 409. In either mode, a `/proc` mounted
-  with `hidepid` must add `gid=60002`, or startup refuses it. Multi-session mode
-  needs `hidepid=2,gid=60002` process visibility and shared scratch directories,
-  including `/tmp`, `/var/tmp` and `/dev/shm`, that tools cannot write. Startup
-  refuses it otherwise.
-- **Azure Container Apps pools.** Use the pool's management endpoint as
-  `harness_url`, one container per session, and set the environment's
-  configuration to `session_pool: true`, `transport: "direct"`,
-  `auth_mode: "entra"`, `auth_ref: "https://dynamicsessions.io"`. The host
-  identity needs the Session Executor role on the pool.
-- **Checkpoints.** Ephemeral sandboxes need Blob checkpoints before you enable
-  admission. Set `HARNESS_CHECKPOINT_ACCOUNT_URL` and
-  `HARNESS_CHECKPOINT_CONTAINER` to an existing private container, grant the
-  service identity Storage Blob Data Contributor, and use single-session mode.
-  `HARNESS_CHECKPOINT_KEEP` defaults to three snapshots. Without a checkpoint
-  a destroyed sandbox loses its files and history.
-
-If a checkpoint fails, the next turn posts a one-time notice that messages or
-files may be lost. Paid work is refused with a retryable error when the
-write-ahead record cannot be saved. `HARNESS_LOOP=codex` selects an
-experimental loop and is not for production. Variables and recovery
-guarantees are in the
-[harness README](https://github.com/pymc-labs/daimon/blob/main/apps/harness/README.md).
-
-### Know the limits
-
-- **Skills.** Turns support only the seeded default skills. Custom uploads and
-  channel-library additions have no provisioning path on this backend.
-- **Agent edits.** Editing an agent applies to an open thread at its next
-  message, on the same harness session. A turn already running finishes on its
-  old configuration, and a message sent meanwhile is told to wait. A different
-  environment, account scope or archived agent needs a new session.
-- **Files.** The automatic output sweep does not run. Agents deliver files
-  through the MCP message tools.
+The `selfhosted.loop` backend sends turns to a `daimon-harness/0` service that
+you operate. It is only ever a channel pin, never an agent's model. Setup, the
+admission settings and the harness container are in
+[self-hosted harness](self-hosted-harness.md).
