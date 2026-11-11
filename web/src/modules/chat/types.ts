@@ -47,3 +47,6 @@ export type StreamEvent =
   | { type: "card"; card: Card }
   | { type: "done"; message: Msg }
   | { type: "settled"; message: Msg | null }
+
+/** What a chat can pick its model from; `current` is the pick it runs on, null for the agent's own. */
+export type ThreadModels = { current: string | null; choices: { value: string; label: string; price: string; provider: string }[] }

@@ -20,6 +20,7 @@ import type { AgentRef, ChatSession, CreditMeter } from "@/lib/types"
 import { Pill } from "../agents/bits"
 import { AgentPicker } from "./AgentPicker"
 import { Refusal } from "./Cards"
+import { ThreadModel } from "./ThreadModel"
 import { Composer } from "./Composer"
 import { AssistantMessage, UserMessage } from "./Message"
 import type { SessionDetail } from "./types"
@@ -192,8 +193,8 @@ export function ChatView() {
           <span className="hidden items-center gap-1.5 text-xs text-muted-foreground sm:flex">
             <AgentAvatar src={session.agent.avatar} name={session.agent.name} className="size-4 rounded" />
             <span>{session.agent.name}</span>
-            {session.agent.model && <span className="text-faint">{session.agent.model}</span>}
           </span>
+          <ThreadModel sid={session.id} model={session.agent.model ?? ""} onChanged={() => void detail.refetch()} />
           {me?.role === "visitor" && <Pill>Held to this chat</Pill>}
           {meter && <HeaderMeter meter={meter} />}
           <DropdownMenu>

@@ -9,6 +9,7 @@ from daimon.core.channel_backend import BackendUnsupported, effective_thread_bac
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import agent_backends
 from daimon.core.stores.domain import AgentBackendRevision, WebThreadRow
+from daimon.core.stores.thread_models import get_thread_choice
 from daimon.core.web_identity import place_of, thread_key
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Provider
@@ -39,14 +40,19 @@ async def thread_model(
 ) -> str | None:
     """The model this chat's next message runs on, or None for an agent that is gone.
 
-    A chat bound to a provider keeps it until its next message, so the header shows that
-    provider's model, not the agent's newest setting. A binding that can't be read shows
-    the agent's own model.
+    A model someone picked for this chat comes first. A chat bound to a provider keeps it
+    until its next message, so the header shows that provider's model, not the agent's
+    newest setting. A binding that can't be read shows the agent's own model.
     """
     if agent is None:
         return None
     tenant_id = caller.person.tenant_id
     async with runtime.sessionmaker() as session:
+        chosen = await get_thread_choice(
+            session, tenant_id=tenant_id, platform="web", thread_id=thread_key(thread.id)
+        )
+        if chosen is not None:
+            return chosen.id
         try:
             provider = await effective_thread_backend(
                 session,

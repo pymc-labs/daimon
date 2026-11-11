@@ -290,6 +290,13 @@ function continuation(pid: string, sid: string, card: Card, a: CardAnswer) {
   return turn(pid, sid, async function* () { yield { type: "delta", text: "" } }, 0)
 }
 
+let chatPick: string | null = null
+const CHAT_MODELS = [
+  { value: "anthropic:claude-haiku-5-5", label: "Claude Haiku 5.5", price: "$1 / $5", provider: "anthropic" },
+  { value: "anthropic:claude-sonnet-5-5", label: "Claude Sonnet 5.5", price: "$3 / $15", provider: "anthropic" },
+  { value: "openai:gpt-6-luna", label: "GPT-6 Luna", price: "$2 / $10", provider: "openai" },
+]
+
 export const chatHandlers: HttpHandler[] = [
   http.get("/api/chat/agents", async () => {
     await wait()
@@ -382,6 +389,30 @@ export const chatHandlers: HttpHandler[] = [
   http.post("/api/chat/sessions/:id/switch-back", async () => {
     await sleep(300)
     return HttpResponse.json({ line: "Claude answers here again." })
+  }),
+  http.get("/api/chat/sessions/:id/models", async () => {
+    await sleep(150)
+    return HttpResponse.json({ current: chatPick, choices: CHAT_MODELS })
+  }),
+  http.get("/api/chat/sessions/:id/model-preview", async ({ request }) => {
+    await sleep(150)
+    const value = new URL(request.url).searchParams.get("value") ?? ""
+    const base = { moves: false, allowed: true, skills: [], servers: [], capabilities: [], shared_limits: [], drops: [], cost: "", threads: "", digest: "", revision: 0, refusal: null }
+    if (value.startsWith("anthropic:")) return HttpResponse.json(base)
+    return HttpResponse.json({
+      ...base, moves: true, drops: ["memory"], skills: ["Pricing playbook"], cost: "Costs about the same per message",
+      threads: "This chat only.", digest: "d".repeat(64), revision: 4,
+    })
+  }),
+  http.put("/api/chat/sessions/:id/model", async ({ params, request }) => {
+    const p = session.user()
+    const s = p && find(p.id, String(params.id))
+    if (!s) return notFound()
+    const { value } = (await request.json()) as { value: string }
+    chatPick = value === "default" ? null : value
+    s.agent = { ...s.agent, model: chatPick ? (CHAT_MODELS.find((c) => c.value === chatPick)?.label ?? chatPick) : "Claude Sonnet 5.5" }
+    await sleep(200)
+    return HttpResponse.json({ model: chatPick, note: "This chat runs on that model from the next reply." })
   }),
   http.post("/api/chat/sessions/:id/stop", async ({ params }) => {
     stopping.add(String(params.id))

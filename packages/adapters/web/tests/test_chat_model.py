@@ -86,3 +86,52 @@ async def test_the_way_back_answers_with_a_line_or_the_words_that_refuse(
     assert admin_answer.status_code == 200 and admin_answer.json()["line"], admin_answer.text
     assert member_answer.status_code == 403, member_answer.text
     assert "admin" in member_answer.json()["detail"].lower(), "the refusal names who can help"
+
+
+async def test_a_chat_keeps_its_own_model_and_a_member_cannot_move_it_off_the_provider(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A Claude pick on a Claude agent is kept at once and shows in the header; a pick on
+    another provider is refused in words to someone who neither owns the agent nor is an admin."""
+    agents, owner, member = await _people(db_session)
+    await _admin(db_session_factory, owner)
+    settings = await provider_choice(db_session_factory, owner, ("anthropic", "openai"))
+    async with db_session_factory.begin() as db:
+        threads = [
+            await chat_store.create_thread(
+                db,
+                tenant_id=person.tenant_id,
+                person_id=person.id,
+                agent_id="ag_w",
+                agent_name="helper",
+                title="New chat",
+            )
+            for person in (owner, member)
+        ]
+    haiku, luna = "anthropic:claude-haiku-5-5", "openai:gpt-6-luna"
+    token = await _token(db_session_factory, owner)
+    async with _client(
+        agents, owner.tenant_id, db_session_factory, token, settings=settings, with_turns=True
+    ) as client:
+        base = f"/api/chat/sessions/{threads[0].id}"
+        offered = (await client.get(f"{base}/models", headers=_OWN)).json()
+        assert haiku in {c["value"] for c in offered["choices"]}, offered
+        assert offered["current"] is None
+        shown = (await client.get(f"{base}/model-preview?value={haiku}", headers=_OWN)).json()
+        assert shown["moves"] is False and shown["refusal"] is None, shown
+        kept = await client.put(base + "/model", json={"value": haiku}, headers=_OWN)
+        assert kept.status_code == 200, kept.text
+        assert (await client.get(f"{base}/models", headers=_OWN)).json()["current"] == haiku
+        await client.get("/api/chat/agents", headers=_OWN)  # the roster the header reads
+        header = (await client.get(base, headers=_OWN)).json()["session"]
+        assert header["agent"]["model"] == "claude-haiku-5-5", header
+
+    token = await _token(db_session_factory, member)
+    async with _client(
+        agents, owner.tenant_id, db_session_factory, token, settings=settings, with_turns=True
+    ) as client:
+        base = f"/api/chat/sessions/{threads[1].id}"
+        refused = (await client.get(f"{base}/model-preview?value={luna}", headers=_OWN)).json()
+        assert refused["refusal"] is not None and refused["allowed"] is False, refused
+        put = await client.put(base + "/model", json={"value": luna}, headers=_OWN)
+        assert put.status_code == 403, put.text
