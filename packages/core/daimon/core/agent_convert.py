@@ -32,6 +32,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import create_agent, legacy_call, source_agent_record
 from daimon.core.specs import merge_default_agent_toolset
+from daimon.core.stores import thread_models
 from daimon.core.stores.agent_rekey import open_agent_work, rekey_agent
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from mux.contracts.config import DEFAULT_BACKEND
@@ -244,4 +245,8 @@ async def _move_rows(
         if await open_agent_work(session, tenant_id=tenant_id, agent_id=old_id):
             raise UserFacingError(f"{name} is still working. Try again when it's done.")
         moved = await rekey_agent(session, tenant_id=tenant_id, old_id=old_id, new_id=new_id)
+        # Consent covered the old record, archived next: no delete would ever find it.
+        await thread_models.delete_consents_for_agent(
+            session, agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=old_id)
+        )
     _log.info("agent.rekeyed", name=name, old_id=old_id, new_id=new_id, rows=moved)

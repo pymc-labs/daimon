@@ -88,7 +88,7 @@ KEPT: Final[dict[tuple[str, str], str]] = {
     ("agent_versions", "agent_id"): "the old record's provider versions",
     ("selfhosted_agent_versions", "agent_id"): "the Daimon record's own history",
     ("agent_drafts", "agent_id"): "drafts were made against the old version",
-    ("thread_model_consents", "agent_id"): "consent covered the old revision; asked again",
+    ("thread_model_consents", "agent_id"): "consent covered the old revision; dropped at the move",
     ("agent_tool_rule_history", "agent_id"): "history",
     ("long_job_policy_history", "agent_id"): "history",
     ("long_job", "agent_id"): "history; running jobs block the move",

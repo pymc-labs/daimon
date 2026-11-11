@@ -39,6 +39,7 @@ from daimon.testing.factories import (
 from daimon.testing.ma_models import ma_agent
 from mux.errors import ProviderError
 from mux.testing.drivers.anthropic.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _ADMIN = Subject(is_admin=True)
@@ -135,6 +136,36 @@ async def test_rekey_moves_only_this_agent_and_is_repeatable(
     assert kept_routine is not None and kept_routine.agent_id == "agent_other", "other stays"
     assert moved_thread is not None and moved_thread.ma_agent_id == "dm_x", "thread follows"
     assert owner == account.id, "owner follows"
+
+
+async def test_a_move_when_the_old_agent_had_thread_consents_then_drops_them(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Consents stay keyed by the archived old id, so the move drops them: none is orphaned."""
+    from daimon.core._models import ThreadModelConsent
+
+    tenant = await make_tenant(db_session)
+    for ma_id in ("agent_old", "agent_other"):
+        db_session.add(
+            ThreadModelConsent(
+                tenant_id=tenant.id,
+                platform="slack",
+                thread_id="t",
+                agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=ma_id),
+                revision={},
+                digest="d",
+            )
+        )
+    await db_session.commit()
+
+    await agent_convert._move_rows(  # pyright: ignore[reportPrivateUsage]
+        db_session_factory, tenant_id=tenant.id, name="analyst", old_id="agent_old", new_id="dm_x"
+    )
+
+    async with db_session_factory() as session:
+        left = set(await session.scalars(select(ThreadModelConsent.agent_id)))
+    other = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_other")
+    assert left == {other}, "the old agent's consents go; another agent's stay"
 
 
 async def test_round_trip_keeps_name_owner_threads_routines_and_rules(
