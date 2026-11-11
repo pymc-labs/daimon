@@ -30,7 +30,7 @@ from daimon.adapters.cli.tenant import (
     resolve_tenant_override,
 )
 from daimon.core import channel_backend
-from daimon.core.agent_convert import convert_agent_to_daimon
+from daimon.core.agent_convert import convert_agent_to_anthropic, convert_agent_to_daimon
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_identity import ensure_agent_face
 from daimon.core.agent_lifecycle import archive_memory_store_best_effort, forget_archived_agent
@@ -1270,12 +1270,12 @@ async def agents_archive(
 
 @agents_app.command(
     "convert",
-    help="Move a Claude agent to a Daimon agent on OpenAI or Gemini, keeping its name and rules.",
+    help="Move an agent between Claude and OpenAI or Gemini.",
 )
 def agents_convert_command(
     ctx: typer.Context,
     name: str,
-    to: Annotated[str | None, typer.Option("--to", help="openai or gemini.")] = None,
+    to: Annotated[str | None, typer.Option("--to", help="anthropic, openai or gemini.")] = None,
     yes: Annotated[bool, YES_OPTION] = False,
 ) -> None:
     settings = load_settings()
@@ -1300,22 +1300,35 @@ async def agents_convert(
     yes: bool,
     selector: TenantSelector | None = None,
 ) -> None:
-    """Convert an MA agent to a Daimon record (`agent_convert`)."""
-    if to not in (None, "openai", "gemini"):
-        raise StoreError("--to takes openai or gemini.")
+    """Convert an agent between Managed Agents and a Daimon record (`agent_convert`)."""
+    if to not in (None, "anthropic", "openai", "gemini"):
+        raise StoreError("--to takes anthropic, openai or gemini.")
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
         tenant_id = await discover_tenant(session, override=override)
         tenant_label = await resolve_tenant_display(session, tenant_id)
         confirm_or_abort(console, f"convert agent {name!r} in {tenant_label}?", yes=yes)
-    converted = await convert_agent_to_daimon(
-        rt.anthropic,
-        rt.sessionmaker,
-        tenant_id=tenant_id,
-        name=name,
-        subject=Subject(is_admin=True),
-        provider=cast("Provider | None", to),
-    )
+    if to == "anthropic":
+        public_url = (
+            str(rt.settings.mcp.public_url) if rt.settings.mcp.public_url is not None else None
+        )
+        converted = await convert_agent_to_anthropic(
+            rt.anthropic,
+            rt.sessionmaker,
+            tenant_id=tenant_id,
+            name=name,
+            subject=Subject(is_admin=True),
+            public_url=public_url,
+        )
+    else:
+        converted = await convert_agent_to_daimon(
+            rt.anthropic,
+            rt.sessionmaker,
+            tenant_id=tenant_id,
+            name=name,
+            subject=Subject(is_admin=True),
+            provider=cast("Provider | None", to),
+        )
     console.print(f"[green]✓ converted agent {name!r} ({converted.agent.id})[/green]")
     if converted.dropped_skills:
         console.print(f"[yellow]Left off: {', '.join(converted.dropped_skills)}[/yellow]")
