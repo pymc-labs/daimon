@@ -38,6 +38,8 @@ class SessionOutput:
     filename: str
     mime_type: str
     size_bytes: int
+    max_read_bytes: int | None = None
+    """The provider's own download limit; a larger file is never read."""
 
 
 class OutputRuntime(Protocol):
@@ -123,7 +125,11 @@ class ArtifactOutputRuntime:
                 self._refs[artifact.ref.id] = artifact.ref
                 found.append(
                     SessionOutput(
-                        artifact.ref.id, artifact.filename, artifact.media_type, artifact.size_bytes
+                        artifact.ref.id,
+                        artifact.filename,
+                        artifact.media_type,
+                        artifact.size_bytes,
+                        artifact.max_download_bytes,
                     )
                 )
             if not page.has_more or page.next_cursor is None:

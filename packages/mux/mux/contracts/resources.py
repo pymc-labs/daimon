@@ -345,6 +345,8 @@ class Artifact(Contract):
     session: ResourceRef | None = None
     turn_id: str | None = None
     created_at: datetime
+    max_download_bytes: int | None = Field(default=None, ge=0)
+    """The largest file the provider lets the host download, when it has a limit."""
     native: JsonValue | None = None
     """The provider's own record, filled by the driver and opaque to the host."""
 

@@ -98,6 +98,7 @@ class SelfHostedArtifacts:
             size_bytes=raw.size_bytes,
             session=session,
             created_at=raw.modified_at,
+            max_download_bytes=wire.OUTPUT_FILE_MAX_BYTES,
             native={"path": raw.path},
         )
 

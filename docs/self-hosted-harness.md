@@ -174,4 +174,5 @@ guarantees are in the
   environment, account scope or archived agent needs a new session.
 - **Files.** Files the agent saves in its `outputs` folder are attached to
   its reply, then removed from the harness. Update the harness to 0.2.0 or
-  later to get this; an older harness attaches no files.
+  later to get this; an older harness attaches no files. A file over 32 MB
+  stays on the harness, and the reply says it was too large to attach.

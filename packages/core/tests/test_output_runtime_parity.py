@@ -20,7 +20,13 @@ from typing import cast
 
 import httpx
 from anthropic.types.beta import FileMetadata
-from daimon.core.output_delivery import DeliverableFile, sweep_outputs
+from daimon.core.output_delivery import (
+    DeliverableFile,
+    NoticedFiles,
+    SkippedFile,
+    render_oversize_notice,
+    sweep_outputs,
+)
 from daimon.core.output_runtime import AnthropicOutputRuntime, ArtifactOutputRuntime, OutputRuntime
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
@@ -219,6 +225,8 @@ class _SelfHostedHarness:
     def __init__(self, *, legacy: bool = False) -> None:
         self.saved = dict(FILES)
         self.legacy = legacy
+        self.listed_size: dict[str, int] = {}
+        self.reads = 0
 
     def _ids(self) -> dict[str, str]:
         return {wire.output_id(path, f"1-{len(body)}-1"): path for path, body in self.saved.items()}
@@ -230,7 +238,12 @@ class _SelfHostedHarness:
         ids = self._ids()
         if tail == [""]:
             listed = [
-                {"id": key, "path": path, "size_bytes": len(self.saved[path]), "modified_at": STAMP}
+                {
+                    "id": key,
+                    "path": path,
+                    "size_bytes": self.listed_size.get(path, len(self.saved[path])),
+                    "modified_at": STAMP,
+                }
                 for key, path in ids.items()
             ]
             return httpx.Response(200, json={"outputs": listed})
@@ -238,6 +251,7 @@ class _SelfHostedHarness:
         if tail[1:] == ["delete"]:
             del self.saved[path]
             return httpx.Response(200, json={"deleted": True, "id": tail[0]})
+        self.reads += 1
         body = base64.b64encode(self.saved[path]).decode()
         return httpx.Response(
             200, json={"id": tail[0], "size_bytes": len(self.saved[path]), "content_b64": body}
@@ -312,6 +326,37 @@ async def test_selfhosted_outputs_when_harness_predates_files_then_reply_unaffec
         runtime = await _selfhosted(client)
         assert await _deliver(runtime) == {}, "an old harness delivers nothing"
     assert harness.saved == FILES, "nothing is deleted on an old harness"
+
+
+async def test_selfhosted_output_when_over_harness_limit_then_noticed_once_and_never_read() -> None:
+    """A file the harness will not hand over is announced once, never fetched or retried."""
+    harness = _SelfHostedHarness()
+    harness.saved = {"big.bin": b"x"}
+    harness.listed_size = {"big.bin": wire.OUTPUT_FILE_MAX_BYTES + 1}
+    skipped: list[SkippedFile] = []
+    noticed = NoticedFiles()
+
+    async def post(file: DeliverableFile) -> None:
+        raise AssertionError(f"posted {file.filename}")
+
+    async def on_skip(file: SkippedFile) -> None:
+        skipped.append(file)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(harness.handle)) as client:
+        runtime = await _selfhosted(client)
+        for _ in range(2):
+            await sweep_outputs(
+                runtime,
+                post=post,
+                on_skip=on_skip,
+                noticed=noticed,
+                sleep=_no_sleep,
+                max_bytes=200 * 1024 * 1024,
+            )
+    assert harness.reads == 0, "a file over the harness limit is never downloaded"
+    assert [file.filename for file in skipped] == ["big.bin"], "announced once"
+    notice = render_oversize_notice(skipped[0], max_bytes=200 * 1024 * 1024)
+    assert "over the 32 MB upload limit" in notice, f"the harness limit is quoted: {notice}"
 
 
 async def test_gemini_outputs_are_delivered_once_then_ledgered() -> None:

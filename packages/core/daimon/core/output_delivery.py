@@ -88,6 +88,8 @@ class SkippedFile:
     filename: str
     size_bytes: int
     mime_type: str = "application/octet-stream"
+    max_bytes: int | None = None
+    """The limit that skipped it, when lower than the caller's own."""
 
 
 class OutputPostingUnavailable(DaimonError):
@@ -123,7 +125,7 @@ def render_oversize_notice(
     The file is kept, so the notice says so and names what the person can ask
     for instead; it never offers a download it cannot give.
     """
-    limit = _mb(max_bytes)
+    limit = _mb(max_bytes if skipped.max_bytes is None else min(max_bytes, skipped.max_bytes))
     prefix = f"For {for_whom}: " if for_whom else ""
     return (
         f"{prefix}`{sanitize_title(skipped.filename)}` is {_mb(skipped.size_bytes)} MB, over the "
@@ -338,14 +340,16 @@ async def sweep_outputs(
             await runtime.delete_output(meta.id)
             continue
 
+        # The provider's own download limit applies too: a larger file only fails to read.
+        limit = max_bytes if meta.max_read_bytes is None else min(max_bytes, meta.max_read_bytes)
         try:
-            if meta.size_bytes > max_bytes:
+            if meta.size_bytes > limit:
                 _log.info(
                     "output_delivery.skipped_oversize",
                     session_id=session_id,
                     file_id=meta.id,
                     size_bytes=meta.size_bytes,
-                    max_bytes=max_bytes,
+                    max_bytes=limit,
                 )
                 if on_skip is not None and (noticed is None or meta.id not in noticed):
                     # Notice before any delete: if the notice fails, the
@@ -357,6 +361,7 @@ async def sweep_outputs(
                             filename=meta.filename,
                             size_bytes=meta.size_bytes,
                             mime_type=meta.mime_type,
+                            max_bytes=limit if limit < max_bytes else None,
                         )
                     )
                     if noticed is not None:
