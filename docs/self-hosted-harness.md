@@ -166,10 +166,10 @@ guarantees are in the
   Outside a shared thread, the harness asks the person about `ask` rules itself;
   Daimon trusts the operator's harness to have asked and runs the call.
 
-- **Skills.** Turns support only the seeded default skills. Custom uploads and
-  channel-library additions have no provisioning path on this backend.
+- **Skills.** Replies support only the seeded default skills. Custom uploads and
+  channel-library additions have no provisioning path on this provider.
 - **Agent edits.** Editing an agent applies to an open thread at its next
-  message, on the same harness session. A turn already running finishes on its
+  message, on the same harness session. A reply already running finishes on its
   old configuration, and a message sent meanwhile is told to wait. A different
   environment, account scope or archived agent needs a new session.
 - **Files.** Files the agent saves in its `outputs` folder are attached to

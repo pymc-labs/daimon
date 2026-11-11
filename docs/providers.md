@@ -17,17 +17,17 @@ in one conversation.
 | The agent's own connectors | Yes | Through Daimon | Through Daimon | Through Daimon |
 | Sealed channels and Slack DM context | Yes | Yes | Yes | Yes |
 | Multi-agent delegation | Yes | Copies of itself | Copies of itself | Copies of itself |
-| Memory across turns | Yes | Through Daimon, needs an Anthropic key | Through Daimon, needs an Anthropic key | Not supported |
+| Memory across replies | Yes | Through Daimon, needs an Anthropic key | Through Daimon, needs an Anthropic key | Not supported |
 | Web fetch | Yes | Through Daimon | Through Daimon | Through Daimon |
 | Web search | Yes | Not supported | Not supported | Not supported |
 | Output files | Yes | Yes | Yes | Yes, from harness 0.2.0 |
 | Reasoning effort | Yes | Low, medium, high | Low, medium, high | Not supported |
-| Spend limit for one turn | Yes | Daimon stops the turn | Holds only, no stop mid-turn | Not supported |
+| Spend limit for one reply | Yes | Daimon stops the reply | Holds only, no stop mid-turn | Not supported |
 | Routines | Yes | Yes | Yes | Not supported |
 | Workspace export and import | Yes | Not supported | Not supported | Not supported |
 | Skills | Full | Custom and agent skills, up to 28 MiB each | Custom and channel skills, text only, 2 MiB in all | Seeded defaults only |
 
-A backend that cannot meet a channel's requirements refuses the turn. Daimon
+A provider that cannot meet a channel's requirements refuses the reply. Daimon
 never runs it on Anthropic in its place.
 
 ### What is not supported yet
@@ -64,11 +64,11 @@ A channel's own pin outranks the agent's provider there. An admin can clear it
 from chat by asking Daimon to clear the channel's pin and confirming the card.
 Existing threads keep their model.
 
-A refused turn names the cause in chat: the channel's pin, a tenant allowlist
+A refused reply names the cause in chat: the channel's pin, a tenant allowlist
 that does not enable the provider ([enable it](#enable-providers-for-a-tenant)), or an agent whose provider cannot serve the
 channel yet. Backend selection is on by default
 ([`DAIMON_TURN__CHANNEL_BACKENDS`](configuration.md#daimon_turn__channel_backends)).
-Setting it to `false` sends every turn back to Anthropic, as an emergency
+Setting it to `false` sends every reply back to Anthropic, as an emergency
 stop.
 
 ## Switch with a model pick
@@ -111,7 +111,7 @@ queued wakes, pending approvals or running jobs.
 
 Set only an OpenAI or Gemini key. `init` seeds the default agents on the first
 keyed provider at its default model, and agents you create later live there
-too. Each is pinned, so a turn never falls back to Anthropic and no Anthropic
+too. Each is pinned, so a reply never falls back to Anthropic and no Anthropic
 request is made. Thread titles and participation checks use a small model from
 that provider. An agent still on Anthropic gets a card offering a copy on
 another provider, or asking whoever runs Daimon to add the Anthropic key.
@@ -132,12 +132,12 @@ Memory settings show as needing setup.
   Turn it off with the `mcp_connector_relay` feature.
 - **Confirmations.** A tool that needs one posts an Approve and Deny card on
   Discord, Slack, Teams and the web. Only the asker answers, and an approved
-  call runs once. An unattended turn runs only what its rules allow. Turn it off
+  call runs once. An unattended reply runs only what its rules allow. Turn it off
   with the `host_call_gate` feature.
 - **Copies of itself.** `ask_helper` with `self` starts a fresh copy per ask.
   All copies of one message stop at $10 of spend together, and share no files.
 - **Effort.** Low, medium or high, kept with the model. Fast stays on Claude.
-- **Spend limit.** The host prices a turn's usage while it runs, as the runtime
+- **Spend limit.** The host prices a reply's usage while it runs, as the runtime
   file section below describes.
 
 ## Run on OpenAI
