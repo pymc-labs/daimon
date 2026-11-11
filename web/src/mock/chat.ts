@@ -136,7 +136,8 @@ const find = (pid: string, sid: string) => mine(pid).find((s) => s.id === sid)
 type Kind = "mmm" | "pricing" | "general"
 const kindOf = (id: string): Kind => (id === "ag_mmm" ? "mmm" : id === "ag_pricing" ? "pricing" : "general")
 const scenarioOf = (t: string) =>
-  /refus|restricted|salary|confidential/i.test(t) ? "refusal"
+  /provider|openai|gpt/i.test(t) ? "provider"
+    : /refus|restricted|salary|confidential/i.test(t) ? "refusal"
     : /credential|api key|token|connect|hubspot/i.test(t) ? "credential"
       : /approv|send|email|publish/i.test(t) ? "approval" : "rich"
 
@@ -232,6 +233,13 @@ function scripted(pid: string, sid: string, text: string, ag: string) {
   const kind = kindOf(ag)
   const sc = scenarioOf(text)
   const name = agent(ag).name
+  if (sc === "provider") {
+    return turn(pid, sid, async function* (m) {
+      await sleep(500)
+      yield { type: "card", card: { id: `c_${uid()}`, kind: "refusal", title: "GPT-6 Luna can't answer right now.", body: `${name} can't run right now.`, help: "Switch back to Claude, or try again later.", action: me()?.capabilities.includes("people.manage") ? "switch_back_to_claude" : null } }
+      m.content = ""
+    }, 0)
+  }
   if (sc === "refusal") {
     return turn(pid, sid, async function* (m) {
       await sleep(500)
@@ -370,6 +378,10 @@ export const chatHandlers: HttpHandler[] = [
     else if (c.kind === "credential") c.state = a.answer === "skip" ? "skipped" : "saved"
     await wait(150)
     return continuation(p.id, sid, c, a)
+  }),
+  http.post("/api/chat/sessions/:id/switch-back", async () => {
+    await sleep(300)
+    return HttpResponse.json({ line: "Claude answers here again." })
   }),
   http.post("/api/chat/sessions/:id/stop", async ({ params }) => {
     stopping.add(String(params.id))

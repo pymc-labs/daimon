@@ -23,7 +23,7 @@ import { Refusal } from "./Cards"
 import { Composer } from "./Composer"
 import { AssistantMessage, UserMessage } from "./Message"
 import type { SessionDetail } from "./types"
-import { answer, evict, hydrate, loadEarlier, resume, send, stop, useThread } from "./turns"
+import { answer, evict, hydrate, loadEarlier, resume, send, stop, switchBack, useThread } from "./turns"
 
 
 /** Credit left, and the card that replaces the composer's promise when it is gone. */
@@ -233,7 +233,7 @@ export function ChatView() {
               {agent && messages.map((m, i) => (m.role === "user" ? <UserMessage key={m.id} m={m} /> : (
                 <AssistantMessage
                   key={m.id} m={m} agent={agent} first={messages[i - 1]?.role !== "assistant"} last={i === messages.length - 1} busy={busy}
-                  onAnswer={(c, a) => answer(qc, id!, c.id, a)}
+                  onAnswer={(c, a) => answer(qc, id!, c.id, a)} onSwitchBack={() => switchBack(qc, id!)}
                 />
               )))}
               <div ref={bottom} />
