@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer loses the rest: Previous and Next buttons on Discord, Slack and Teams move
   between pages.
 
+- **A capability turned off is refused on every path, not only in Claude sessions.**
+  The MCP server checks the feature where the call runs (its conversation, routine,
+  agent key channel, or else the workspace) and refuses a tool whose capability is Off,
+  for Gemini and OpenAI turns, connected MCP clients and agent keys alike, including calls
+  made through `call_tool`. Other clients' tool lists drop those tools too. Stopping and
+  listing cloud computers and long jobs stays available, so running work can be stopped.
+
 - **Daimon tolerates its seeded agent being renamed in place to `default`.**
   Ahead of that rename, a workspace whose built-in agent is already called `default` keeps it: defaults sync no longer archives it or creates a second `daimon` beside it, and asking for `daimon` answers with it. Only the workspace's own built-in agent counts, never a user's agent named `default`.
 
