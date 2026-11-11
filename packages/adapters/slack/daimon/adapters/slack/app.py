@@ -2852,6 +2852,7 @@ class SlackApp:
                             self.runtime.anthropic,
                             error.source_agent_id,
                             scope=resource_scope(tenant_id=str(tenant_id)),
+                            records=self.runtime.sessionmaker,
                         )
                         owner_name = owner_agent.name
                 except (anthropic.APIStatusError, ScopeViolation):

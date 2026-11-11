@@ -917,6 +917,7 @@ class SetupPanel:
                 self._runtime.anthropic,
                 target.ma_agent_id,
                 scope=resource_scope(tenant_id=str(actor.tenant_id)),
+                records=self._runtime.sessionmaker,
             )
             agent = build_agent_ref(ma_agent.name, ma_agent.metadata, target.name)
         decision, bound_channel_id = authorize_coding_token(

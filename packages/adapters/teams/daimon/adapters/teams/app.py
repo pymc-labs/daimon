@@ -1719,6 +1719,7 @@ class TeamsApp:
                         self.runtime.anthropic,
                         error.source_agent_id,
                         scope=resource_scope(tenant_id=str(tenant_id)),
+                        records=self.runtime.sessionmaker,
                     )
                 ).name
         text = render_responder_changed_without_handoff(

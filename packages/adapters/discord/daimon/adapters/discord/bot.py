@@ -521,7 +521,11 @@ def admission_refusal_message(
 
 
 async def _resolve_agent_display_name(
-    anthropic: _anthropic.AsyncAnthropic, *, tenant_id: uuid.UUID, ma_agent_id: str
+    anthropic: _anthropic.AsyncAnthropic,
+    *,
+    tenant_id: uuid.UUID,
+    ma_agent_id: str,
+    records: async_sessionmaker[AsyncSession],
 ) -> str:
     """Best-effort display name for a concrete MA agent id, tenant-scoped.
 
@@ -529,7 +533,7 @@ async def _resolve_agent_display_name(
     back to a generic phrase rather than failing the render.
     """
     try:
-        agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+        agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id, records=records)
     except _anthropic.APIError:
         return "the previous agent"
     for candidate in agents:
@@ -900,7 +904,10 @@ class DaimonBot(commands.Bot):
 
     async def _routine_agent_names(self, row: RoutineRow) -> tuple[str | None, ...]:
         agent = await find_agent_by_daimon_tag(
-            self.runtime.anthropic, tenant_id=row.tenant_id, name=row.agent_name
+            self.runtime.anthropic,
+            tenant_id=row.tenant_id,
+            name=row.agent_name,
+            records=self.runtime.sessionmaker,
         )
         if agent is None or agent.id != row.agent_id:
             return ()
@@ -1516,7 +1523,10 @@ class DaimonBot(commands.Bot):
                     log.info("guild_seed_roster_check_skipped", tenant_id=str(tenant_id))
                 else:
                     default_agent = await find_agent_by_daimon_tag(
-                        self.runtime.anthropic, tenant_id=tenant_id, name=agent_name
+                        self.runtime.anthropic,
+                        tenant_id=tenant_id,
+                        name=agent_name,
+                        records=self.runtime.sessionmaker,
                     )
                     if default_agent is None:
                         seed_ok = False
@@ -5718,7 +5728,10 @@ class DaimonBot(commands.Bot):
                 or admission.backend_revision.backend != "selfhosted"
             ):
                 owner_name = await _resolve_agent_display_name(
-                    self.runtime.anthropic, tenant_id=tenant_id, ma_agent_id=error.source_agent_id
+                    self.runtime.anthropic,
+                    tenant_id=tenant_id,
+                    ma_agent_id=error.source_agent_id,
+                    records=self.runtime.sessionmaker,
                 )
             error_text = render_error(
                 error,

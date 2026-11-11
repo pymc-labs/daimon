@@ -667,11 +667,17 @@ async def _refuse_a_changed_agent(
     An unedited agent costs one agent read.
     """
     scope = mcp_scope(auth)
-    agent = await retrieve_agent(runtime.client, session.agent.id, scope=scope)
+    agent = await retrieve_agent(
+        runtime.client, session.agent.id, scope=scope, records=runtime.session_factory
+    )
     if agent.version == session.agent.version:
         return
     started = await retrieve_agent_version(
-        runtime.client, agent.id, session.agent.version, scope=scope
+        runtime.client,
+        agent.id,
+        session.agent.version,
+        scope=scope,
+        records=runtime.session_factory,
     )
     if _session_setup(started) != _session_setup(agent):
         log.info(

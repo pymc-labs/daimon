@@ -143,7 +143,10 @@ class _DestinationPicker(discord.ui.Select["RoutinesPanelView"]):
                 agent_ref = AgentRef.of(row.agent_name)
                 if self.values[0] == "dm" and any_agent_rules(policy):
                     agent = await find_agent_by_daimon_tag(
-                        self.view.runtime.anthropic, tenant_id=row.tenant_id, name=row.agent_name
+                        self.view.runtime.anthropic,
+                        tenant_id=row.tenant_id,
+                        name=row.agent_name,
+                        records=self.view.runtime.sessionmaker,
                     )
                     if agent is None:
                         await interaction.response.send_message(

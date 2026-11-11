@@ -225,6 +225,7 @@ async def _recorded_as_gated(
         runtime.client,
         ma_agent_id,
         scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+        records=runtime.session_factory,
     )
     hidden = await resolve_hidden_mcp_server_names(
         runtime.session_factory,

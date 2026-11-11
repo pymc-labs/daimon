@@ -2052,7 +2052,10 @@ def build_oauth_github_routes(
             return None
         try:
             return await find_agent_by_derived_uuid(
-                anthropic, tenant_id=invitation.tenant_id, agent_id=invitation.agent_id
+                anthropic,
+                tenant_id=invitation.tenant_id,
+                agent_id=invitation.agent_id,
+                records=sessionmaker,
             )
         except APIError:
             return None

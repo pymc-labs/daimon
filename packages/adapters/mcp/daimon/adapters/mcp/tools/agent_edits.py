@@ -202,7 +202,9 @@ async def _live_agents(runtime: McpRuntime, auth: AuthIdentity) -> list[BetaMana
     if auth.anthropic_disabled or anthropic_disabled():
         async with runtime.session_factory() as session:
             return await list_live_agent_facts(session, tenant_id=auth.tenant_id)
-    return await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    return await list_agents_by_tenant(
+        runtime.client, tenant_id=auth.tenant_id, records=runtime.session_factory
+    )
 
 
 def _agent_named(ref: str, agents: list[BetaManagedAgentsAgent]) -> BetaManagedAgentsAgent:

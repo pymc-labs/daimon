@@ -112,7 +112,9 @@ async def _tool_rule_target(
         principal = await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
-    agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
+    agent = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=name, records=rt.sessionmaker
+    )
     if agent is None:
         raise StoreError(f"no agent named {name!r} in this workspace")
     url = None
@@ -298,7 +300,7 @@ async def agents_list(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
     # Session closed. MA calls below.
-    rows = await list_agents_by_tenant(rt.anthropic, tenant_id=tenant_id)
+    rows = await list_agents_by_tenant(rt.anthropic, tenant_id=tenant_id, records=rt.sessionmaker)
     emit_rows(
         console,
         rows,
@@ -361,7 +363,11 @@ async def agents_get(
         )
         return
     agent = await find_agent_by_daimon_tag(
-        rt.anthropic, tenant_id=tenant_id, name=name, include_archived=include_archived
+        rt.anthropic,
+        tenant_id=tenant_id,
+        name=name,
+        include_archived=include_archived,
+        records=rt.sessionmaker,
     )
     if agent is None:
         raise StoreError(f"no agent named {name!r} in your account or system defaults.")
@@ -547,7 +553,9 @@ async def agents_bind_google(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
     # Session closed. MA calls below.
-    agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
+    agent = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=name, records=rt.sessionmaker
+    )
     if agent is None:
         raise StoreError(f"no agent named {name!r} in your account or system defaults.")
 
@@ -666,7 +674,9 @@ async def agents_create(
     # Tenant-scoped collision pre-check MUST precede reconcile_agent — reconcile
     # silently UPDATEs an existing name instead of raising (name-as-identity).
     # ANY match in this tenant blocks the create regardless of owner.
-    matches = await find_agents_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=spec.name)
+    matches = await find_agents_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=spec.name, records=rt.sessionmaker
+    )
     if matches:
         raise StoreError(
             f"agent {spec.name!r} already exists in this server — pick a different name, "
@@ -764,7 +774,9 @@ async def agents_update(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
     # Session closed. MA calls below.
-    agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
+    agent = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=name, records=rt.sessionmaker
+    )
     if agent is None:
         raise StoreError(f"no agent named {name!r} in your account.")
     public_url = str(rt.settings.mcp.public_url) if rt.settings.mcp.public_url is not None else None
@@ -1443,7 +1455,9 @@ async def agents_backfill_toolset(
     report_rows: list[_BackfillRow] = []
     for tenant_row in tenant_rows:
         tenant_id: uuid.UUID = tenant_row.id
-        agents = await list_agents_by_tenant(rt.anthropic, tenant_id=tenant_id)
+        agents = await list_agents_by_tenant(
+            rt.anthropic, tenant_id=tenant_id, records=rt.sessionmaker
+        )
         for agent in agents:
             has_toolset = any(tool.type == "agent_toolset_20260401" for tool in agent.tools)
             if not has_toolset:
@@ -1479,7 +1493,10 @@ async def agents_backfill_toolset(
 
     for row in report_rows:
         fresh = await retrieve_agent(
-            rt.anthropic, row.agent_id, scope=resource_scope(tenant_id=row.tenant_id)
+            rt.anthropic,
+            row.agent_id,
+            scope=resource_scope(tenant_id=row.tenant_id),
+            records=rt.sessionmaker,
         )
         # Re-check predicate against fresh copy — a concurrent edit may have
         # already added the toolset; skip rather than double-apply.
@@ -1498,6 +1515,7 @@ async def agents_backfill_toolset(
             version=fresh.version,
             payload={"tools": patched_tools},
             scope=resource_scope(tenant_id=row.tenant_id),
+            records=rt.sessionmaker,
         )
         console.print(f"[green]✓[/green] patched {row.agent_name!r}")
 
@@ -1569,7 +1587,9 @@ async def agents_rekey(
         tenant_id: uuid.UUID = tenant_row.id
         guild_account: uuid.UUID = derive_guild_account_uuid(tenant_id)
 
-        agents = await list_agents_by_tenant(rt.anthropic, tenant_id=tenant_id)
+        agents = await list_agents_by_tenant(
+            rt.anthropic, tenant_id=tenant_id, records=rt.sessionmaker
+        )
         # Canonical-first: max created_at keeps the bare name on collision
         # (list_agents_by_tenant returns MA list order, which is unsorted).
         agents.sort(key=lambda agent: agent.created_at, reverse=True)
@@ -1671,7 +1691,10 @@ async def agents_rekey(
         to_rekey, post_rekey_names, strict=True
     ):
         agent = await retrieve_agent(
-            rt.anthropic, agent_id, scope=resource_scope(tenant_id=str(tid))
+            rt.anthropic,
+            agent_id,
+            scope=resource_scope(tenant_id=str(tid)),
+            records=rt.sessionmaker,
         )
         new_meta = build_metadata(
             tenant_id=tid,
@@ -1691,6 +1714,7 @@ async def agents_rekey(
             version=agent.version,
             payload={"name": new_name, "metadata": new_meta},
             scope=resource_scope(tenant_id=str(tid)),
+            records=rt.sessionmaker,
         )
 
     console.print(f"[green]✓ Re-keyed {n_agents} agent(s).[/green]")
@@ -1908,7 +1932,9 @@ async def agents_owner(
             owner_id = await _owner_account_argument(
                 session, tenant_id=tenant_id, account=account, platform=platform, user=user
             )
-    agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=name)
+    agent = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=name, records=rt.sessionmaker
+    )
     if agent is None:
         raise StoreError(f"no agent named {name!r} in your account.")
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)

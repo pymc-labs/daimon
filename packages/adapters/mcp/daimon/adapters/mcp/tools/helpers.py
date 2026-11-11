@@ -102,7 +102,9 @@ async def _roster(
         async with runtime.session_factory() as session:
             agents = await list_live_agent_facts(session, tenant_id=auth.tenant_id)
     else:
-        agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+        agents = await list_agents_by_tenant(
+            runtime.client, tenant_id=auth.tenant_id, records=runtime.session_factory
+        )
     view = await load_isolation_view(
         runtime, auth, agents=agents, location_channel_id=origin.parent_channel_id
     )

@@ -409,7 +409,9 @@ def _edit_actor(auth: AuthIdentity) -> agent_editing.AgentActor:
 
 async def _free_agent_name(runtime: McpRuntime, auth: AuthIdentity, name: str) -> str:
     """`name`, or the first of `name-2`, `name-3`... that no live agent here holds."""
-    rows = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    rows = await list_agents_by_tenant(
+        runtime.client, tenant_id=auth.tenant_id, records=runtime.session_factory
+    )
     taken = {row.metadata.get(MA_METADATA_KEY_NAME) for row in rows}
     candidate, n = name, 1
     while candidate in taken:
@@ -426,7 +428,9 @@ async def _list_agents_impl(
     mine: bool = False,
 ) -> list[AgentInfo]:
     del page
-    rows = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    rows = await list_agents_by_tenant(
+        runtime.client, tenant_id=auth.tenant_id, records=runtime.session_factory
+    )
     owned = await caller_owned_ids(runtime, auth)
     origin = await get_chat_origin(runtime, auth, origin_context_id)
     caller = await load_caller_view(
@@ -888,6 +892,7 @@ async def _create_agent_impl(
         runtime.client,
         ma_agent_id,
         scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+        records=runtime.session_factory,
     )
     # agents.create succeeded — always return AgentInfo even if sync fails.
     # if agents.create itself raises, let it propagate as ToolError.
@@ -1325,7 +1330,9 @@ async def _require_member_copy_room(runtime: McpRuntime, auth: AuthIdentity) -> 
     """A member may own only so many copies they made by talking to an agent."""
     limit = runtime.settings.mcp.member_copy_limit
     owned = await caller_owned_ids(runtime, auth)
-    agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    agents = await list_agents_by_tenant(
+        runtime.client, tenant_id=auth.tenant_id, records=runtime.session_factory
+    )
     mine = [
         agent
         for agent in agents
@@ -1508,6 +1515,7 @@ async def _archive_agent_impl(
         runtime.client,
         agent.id,
         scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+        records=runtime.session_factory,
     )
     try:
         await archive_memory_store_for_agent(

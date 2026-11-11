@@ -38,7 +38,7 @@ from daimon.core.stores.scoped_config_write import (
 )
 from pydantic import BaseModel
 from rich.console import Console
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 config_app = typer.Typer(
     help="Config: get/set/unset/propagate across scopes.",
@@ -287,6 +287,7 @@ async def _refuse_breaking_home(
     scope: ScopeRef,
     agent_name: str | None,
     anthropic: AsyncAnthropic | None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
     """Exit before routing `agent_name` at `scope` (None: unsetting it) breaks a rule.
 
@@ -303,7 +304,9 @@ async def _refuse_breaking_home(
         refusal = clear_refusal(policy, channel_id=channel_id) if channel_id else None
     else:
         agent = (
-            await find_agent_by_daimon_tag(anthropic, tenant_id=scope.tenant_id, name=agent_name)
+            await find_agent_by_daimon_tag(
+                anthropic, tenant_id=scope.tenant_id, name=agent_name, records=records
+            )
             if anthropic is not None
             else None
         )
@@ -361,6 +364,7 @@ async def _config_set_command_entry(
             value=value,
             scope_str=scope_str,
             anthropic=rt.anthropic,
+            records=rt.sessionmaker,
         )
 
 
@@ -374,6 +378,7 @@ async def _config_set_entry(
     value: str,
     scope_str: str,
     anthropic: AsyncAnthropic | None = None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
     # deployment is read-only; handled before _parse_scope
     if scope_str == "deployment":
@@ -390,6 +395,7 @@ async def _config_set_entry(
             scope=scope,
             agent_name=value,
             anthropic=anthropic,
+            records=records,
         )
         await set_fields(
             session,
@@ -410,7 +416,9 @@ async def _config_set_entry(
         )
     console.print(f"[green]✓ set {key}={value} at {scope_str}[/green]")
     if key == "agent_name" and anthropic is not None:
-        agent = await find_agent_by_daimon_tag(anthropic, tenant_id=tenant_id, name=value)
+        agent = await find_agent_by_daimon_tag(
+            anthropic, tenant_id=tenant_id, name=value, records=records
+        )
         summary = await agent_repo_summary(session, tenant_id=tenant_id)
         if agent is not None and summary.by_agent.get(
             derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
@@ -537,6 +545,7 @@ async def _config_propagate_command_entry(
             fields_str=fields_str,
             reset=reset,
             anthropic=rt.anthropic,
+            records=rt.sessionmaker,
         )
 
 
@@ -551,6 +560,7 @@ async def _config_propagate_entry(
     fields_str: str | None,
     reset: bool,
     anthropic: AsyncAnthropic | None = None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
     source = _parse_scope(from_str, tenant_id=tenant_id, account_id=account_id)
     targets = [_parse_scope(t, tenant_id=tenant_id, account_id=account_id) for t in to_strs]
@@ -570,6 +580,7 @@ async def _config_propagate_entry(
                     scope=target,
                     agent_name=agent_name,
                     anthropic=anthropic,
+                    records=records,
                 )
 
     result = await propagate(

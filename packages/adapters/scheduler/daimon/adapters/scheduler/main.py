@@ -802,7 +802,10 @@ async def _build_fire(
             any_agent_rules(fire_policy) or any_own_readers(fire_policy)
         ):
             ran = await retrieve_agent(
-                client, resolved_agent_id, scope=resource_scope(tenant_id=str(row.tenant_id))
+                client,
+                resolved_agent_id,
+                scope=resource_scope(tenant_id=str(row.tenant_id)),
+                records=sm,
             )
             decision = authorize(
                 fire_policy,

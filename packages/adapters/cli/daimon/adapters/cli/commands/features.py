@@ -107,7 +107,9 @@ def _agent_actor(target: _Target) -> AgentActor:
 
 
 async def _agent_id(rt: CliRuntime, target: _Target, name: str) -> str:
-    agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=target.tenant_id, name=name)
+    agent = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=target.tenant_id, name=name, records=rt.sessionmaker
+    )
     if agent is None:
         raise StoreError(f"no agent named {name!r} in this workspace")
     return agent.id

@@ -327,7 +327,10 @@ async def authorize_source(
     if subject.verified_membership is not True:
         raise PollAccessRevoked("Watch membership revoked")
     agent = await retrieve_agent(
-        runtime.client, watch.agent_id, scope=resource_scope(tenant_id=str(watch.tenant_id))
+        runtime.client,
+        watch.agent_id,
+        scope=resource_scope(tenant_id=str(watch.tenant_id)),
+        records=runtime.session_factory,
     )
     ref = build_agent_ref(agent.name, agent.metadata)
     auth = AuthIdentity(

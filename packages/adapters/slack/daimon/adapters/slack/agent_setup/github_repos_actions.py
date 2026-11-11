@@ -144,6 +144,7 @@ async def _owns_agent_now(
         runtime.anthropic,
         tenant_id=tenant_id,
         agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id),
+        records=runtime.sessionmaker,
     )
     if live is None or live.id != ma_agent_id:
         return False

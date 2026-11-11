@@ -213,7 +213,9 @@ async def _hand_off_task_impl(
     # `require_turn_origin` already refused any non-chat platform.
     platform = cast(ChatPlatform, origin.platform)
 
-    agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    agents = await list_agents_by_tenant(
+        runtime.client, tenant_id=auth.tenant_id, records=runtime.session_factory
+    )
     # A thread under an isolated channel hands off only to that channel's own
     # agents; anywhere else, never to them.
     caller = await load_isolation_view(

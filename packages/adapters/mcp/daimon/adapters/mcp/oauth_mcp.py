@@ -326,7 +326,10 @@ def build_oauth_mcp_routes(
         """Whether the pinned-agent write rule refuses finishing this flow now."""
         try:
             agent = await find_agent_by_derived_uuid(
-                runtime.client, tenant_id=flow.tenant_id, agent_id=flow.agent_id
+                runtime.client,
+                tenant_id=flow.tenant_id,
+                agent_id=flow.agent_id,
+                records=runtime.session_factory,
             )
         except anthropic.APIError:
             agent = None

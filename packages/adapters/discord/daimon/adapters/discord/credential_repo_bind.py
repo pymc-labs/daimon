@@ -70,6 +70,7 @@ from daimon.core.github_visibility import is_public_repo, pat_can_access_repo
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.operation_policy import decide_operation
 from daimon.core.stores.domain import RepoAccessProof
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
 
@@ -90,7 +91,11 @@ _WRONG_GUILD_MESSAGE: Final[str] = (
 
 
 async def resolve_ma_agent_for_uuid(
-    client: AsyncAnthropic, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+    client: AsyncAnthropic,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    records: async_sessionmaker[AsyncSession],
 ) -> BetaManagedAgentsAgent | None:
     """Reverse-resolve a derived agent uuid back to the MA agent it came from.
 
@@ -102,7 +107,7 @@ async def resolve_ma_agent_for_uuid(
     when nothing matches — the agent was archived or deleted since the row
     was minted.
     """
-    agents = await list_agents_by_tenant(client, tenant_id=tenant_id)
+    agents = await list_agents_by_tenant(client, tenant_id=tenant_id, records=records)
     for agent in agents:
         if derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)) == agent_id:
             return agent
@@ -192,7 +197,7 @@ async def refuse_if_shared_and_not_admin_for_request(
         await _send_ephemeral(interaction, "Only a platform admin can bind GitHub repos.")
         return True
     agent = await resolve_ma_agent_for_uuid(
-        runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id
+        runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id, records=runtime.sessionmaker
     )
     if agent is None:
         log.warning(
