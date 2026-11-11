@@ -1,4 +1,4 @@
-"""An install with only an OpenAI or Gemini key: defaults, creation, edits and turns.
+"""An install with only an OpenAI or Gemini key: defaults, create, edit, fork, archive, purge, turns.
 
 Every Anthropic HTTP request fails the test: the client carries the keyless
 placeholder and a transport that records and refuses each call.
@@ -12,6 +12,7 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.agent_admin import archive as archive_agent_as_admin
 from daimon.core.agent_editing import (
     AgentActor,
     AgentEditDeps,
@@ -19,13 +20,15 @@ from daimon.core.agent_editing import (
     create_agent,
     update_agent,
 )
+from daimon.core.agent_fork import fork_agent
 from daimon.core.anthropic_guard import ANTHROPIC_UNCONFIGURED_PLACEHOLDER
 from daimon.core.authz import Subject, Surface
-from daimon.core.channel_backend import derive_agent_uuid
 from daimon.core.defaults.provisioning import derive_guild_account_uuid, reconcile_tenant_defaults
 from daimon.core.defaults.report import Action
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import TurnRuntime, resource_scope
 from daimon.core.provider_keys import DEFAULT_KEY_ENV
+from daimon.core.purge import purge_account
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import agent_backends
 from daimon.core.stores.access_policy import set_access_policy
@@ -39,12 +42,15 @@ from daimon.core.turn.prepare import ProviderPreparationRequest
 from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.factories import make_account, make_tenant, make_tenant_config
 from daimon.testing.turn_fakes import deps_for_pinned_mux
-from mux.contracts.ids import ResourceRef, Revision
+from mux.contracts.ids import Provider, ResourceRef, Revision
 from mux.contracts.resources import Agent
+from mux.errors import ProviderError
 from mux.profiles import backend_selection, selectable_models
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 DEFAULTS_ROOT = Path(__file__).resolve().parents[3] / "defaults"
-PROVIDERS = ("openai", "gemini")
+# Every provider with a deployment key, read from the key registry.
+PROVIDERS = tuple(DEFAULT_KEY_ENV)
 
 
 class AnthropicCalls:
@@ -144,6 +150,53 @@ async def test_defaults_create_and_edit_without_anthropic(db_session, db_session
     assert edited.spec.system is not None and "Help briefly." in edited.spec.system, (
         "an edit reaches the Daimon record"
     )
+    assert calls.requests == [], f"no Anthropic request on a keyless install: {calls.requests}"
+
+
+@pytest.mark.parametrize("only_key", PROVIDERS, indirect=True)
+async def test_fork_archive_and_purge_without_anthropic(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    only_key: Provider,
+) -> None:
+    """A Daimon record forks, archives and purges with no Anthropic request."""
+    calls = AnthropicCalls()
+    client = calls.client()
+    tenant = await make_tenant(db_session)
+    await make_account(db_session, tenant=tenant, id=derive_guild_account_uuid(tenant.id))
+    member = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    scope = resource_scope(tenant_id=str(tenant.id))
+    await reconcile_tenant_defaults(client, db_session_factory, DEFAULTS_ROOT, tenant_id=tenant.id)
+
+    copy = await fork_agent(
+        client,
+        db_session_factory,
+        tenant_id=tenant.id,
+        source_name="daimon",
+        new_name="helper",
+        public_url=None,
+        subject=Subject(is_admin=True),
+        default_agent_name="daimon",
+    )
+    assert copy.agent.id.startswith("dm_agent_"), "a fork of a Daimon record is a Daimon record"
+    forked = await SelfHostedAgents(db_session_factory).resolve(scope, "helper")
+    assert forked.spec.model.provider == only_key, "the fork stays on the keyed provider"
+
+    deps = AgentEditDeps(client=client, session_factory=db_session_factory, public_url=None)
+    actor = AgentActor(
+        tenant_id=tenant.id,
+        account_id=member.id,
+        subject=Subject(is_admin=True),
+        surface=Surface.WEB,
+    )
+    name = await archive_agent_as_admin(deps, actor=actor, ma_agent_id=copy.agent.id)
+    assert name == "helper", "the archive names the agent it retired"
+    with pytest.raises(ProviderError):
+        await SelfHostedAgents(db_session_factory).resolve(scope, "helper")
+
+    result = await purge_account(sm=db_session_factory, account_id=member.id, anthropic=client)
+    assert result.db.accounts == 1, f"the account purge finishes with no Anthropic key: {result}"
     assert calls.requests == [], f"no Anthropic request on a keyless install: {calls.requests}"
 
 
