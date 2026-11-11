@@ -26,6 +26,12 @@ PROFILES: Mapping[str, Profile] = {
     for p in (MANAGED_AGENTS, PERSISTENT_WORKSPACE, CONVERSATION_ONLY, INLINE_REUSE, LOOP)
 }
 
+DAIMON_RECORD_PROVIDERS: tuple[Provider, ...] = (
+    PERSISTENT_WORKSPACE.provider,
+    INLINE_REUSE.provider,
+)
+"""Providers whose agent definitions Daimon stores and serves itself, not the provider."""
+
 PROVIDER_LABELS: Mapping[Provider, str] = {
     "anthropic": "Anthropic",
     "openai": "OpenAI",
@@ -163,6 +169,7 @@ def meters_cache_writes_for(provider: Provider) -> bool:
 
 __all__ = [
     "CONSENTED_DEFAULT_MODELS",
+    "DAIMON_RECORD_PROVIDERS",
     "CONVERSATION_ONLY",
     "PROVIDER_ALIASES",
     "INLINE_REUSE",

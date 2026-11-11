@@ -8,8 +8,16 @@ it.
 
 from __future__ import annotations
 
+from typing import Final, Literal
+
 from mux.contracts.extensions import ExtensionRef
 from mux.contracts.profile import AccountingMode, Effort, Profile, SkillLimits
+
+InlineReuseId = Literal["gemini.inline_reuse"]
+"""The profile id as a type, for a record that must name this profile."""
+INLINE_REUSE_ID: Final[InlineReuseId] = "gemini.inline_reuse"
+#: The extension config that carries a thread's session binding.
+SESSION_NAMESPACE: Final = "gemini.session"
 
 # Opt-in model: one attempt, never the Flash fallback chain.
 ARGON_MODEL = "gemini-4-argon"
@@ -20,14 +28,14 @@ MIB = 1024 * 1024
 
 INLINE_REUSE = Profile(
     provider="gemini",
-    profile_id="gemini.inline_reuse",
+    profile_id=INLINE_REUSE_ID,
     carries_caller_resources=True,
     schema_version="1",
     accounting_mode=AccountingMode.NATIVE_TOTALS,
     sdk_pin="google-genai>=2.7.0,<3",
     core=False,
     effort_map=_EFFORT,
-    extensions=(ExtensionRef(namespace="gemini.session", version=1),),
+    extensions=(ExtensionRef(namespace=SESSION_NAMESPACE, version=1),),
     execution_tool="code_execution",
     mcp_policy_keys=("allowed_tools",),
     skill_digest="version",
