@@ -18,6 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The image includes the Gemini SDK.** Running agents on Gemini no longer needs a
   custom image.
 
+- **Move a Claude agent to OpenAI or Gemini with `daimon agents convert`.**
+  `daimon agents convert <name> [--to openai|gemini]` turns a Claude agent into
+  an agent Daimon keeps itself, on the provider you pick (the first one with a
+  key when you don't). It keeps the agent's name, its channel and agent rules,
+  and its owner, then retires the Claude original, so people keep addressing it
+  the same way. An admin runs it and confirms first. Skills that exist only on
+  Claude are left off, and the command names each one.
+
+- **An agent on OpenAI or Gemini is found everywhere on a keyless install.**
+  Routines, channel and agent rules, the roster and "who answers here" cards,
+  agent details, skills, MCP connections, forks, reports and setup
+  conversations now look an agent up in Daimon's own records as well as on
+  Claude. On an install with only an OpenAI or Gemini key, these no longer
+  report an agent as missing. Installs with an Anthropic key behave as before.
+  A thread title is now written on the provider the conversation runs on when
+  no Anthropic key is set.
+
 - **One conversation on another provider's model.** An MCP client's
   `set_thread_model` takes a model from `list_models`, such as an OpenAI or
   Gemini one. Off Claude it first returns what changes and the price, and keeps
