@@ -13,7 +13,7 @@ from typing import Literal
 
 from anthropic import AsyncAnthropic
 from daimon.core.anthropic_guard import anthropic_configured, require_anthropic_allowed
-from daimon.core.auxiliary_models import AUXILIARY_MODELS
+from daimon.core.auxiliary_models import AUXILIARY_MODELS, side_call_priced
 from daimon.core.errors import DaimonError
 from daimon.core.provider_keys import DEFAULT_KEY_ENV
 from mux.contracts.completions import CompletionEffort, Completions, CompletionUsage
@@ -49,13 +49,12 @@ def auxiliary_provider(anthropic: AsyncAnthropic, admitted: Provider | None) -> 
     """Anthropic when keyed, else the admitted provider, else the first reachable one.
 
     "First" follows the deployment key registry, the order keyless records default to.
+    A provider whose side-call model has no price today is skipped.
     """
     if anthropic_configured(anthropic):
         return "anthropic"
-    if admitted is not None and admitted in _FACTORIES:
-        return admitted
-    for provider in DEFAULT_KEY_ENV:
-        if provider in _FACTORIES:
+    for provider in (admitted, *DEFAULT_KEY_ENV):
+        if provider is not None and provider in _FACTORIES and side_call_priced(provider):
             return provider
     raise AuxiliaryUnavailable("No provider is available for this call.")
 

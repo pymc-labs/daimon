@@ -475,7 +475,7 @@ async def record_auxiliary_usage(
         managed_session_id=managed_session_id,
         event_id=event_id,
         markup=markup,
-        pricing=side_call_rates(model_id),
+        pricing=side_call_rates(model_id, input_tokens + cache_read_input_tokens),
         reason=reason,
         session_prefix=prefix,
         idempotency_prefix=prefix,

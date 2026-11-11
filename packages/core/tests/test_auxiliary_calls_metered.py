@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import ast
+import importlib
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from anthropic import AsyncAnthropic
-from daimon.core import auxiliary_calls
+from daimon.core import auxiliary_calls, auxiliary_models, pricing
 from daimon.core.anthropic_guard import ANTHROPIC_UNCONFIGURED_PLACEHOLDER
-from daimon.core.auxiliary_calls import register_completions
+from daimon.core.auxiliary_calls import AuxiliaryUnavailable, register_completions
 from daimon.core.auxiliary_models import AUXILIARY_MODELS
-from daimon.core.pricing import MODEL_PRICING, side_call_rates
+from daimon.core.pricing import MODEL_PRICING, ModelRates, side_call_rates
 from daimon.core.provider_keys import DEFAULT_KEY_ENV
 from daimon.core.thread_classifier import classify
 from daimon.core.thread_naming import THREAD_NAMING_MODEL, suggest_thread_name
@@ -21,6 +22,7 @@ from daimon.core.turn import gemini_deployment, openai_deployment
 from mux.contracts.completions import CompletionResult, CompletionUsage
 from mux.contracts.ids import Provider, Scope
 from mux.errors import ProviderError
+from structlog.testing import capture_logs
 
 KEYLESS = AsyncAnthropic(api_key=ANTHROPIC_UNCONFIGURED_PLACEHOLDER)
 KEYED = AsyncAnthropic(api_key="test-key")
@@ -160,3 +162,51 @@ def test_no_core_module_calls_a_provider_completion_directly() -> None:
         and node.func.value.attr == "messages"
     ]
     assert not offenders, f"side calls go through the completions port: {offenders}"
+
+
+def _unpriced(unpriced: str) -> object:
+    def rates(model: str, prompt_tokens: int = 0) -> ModelRates:
+        if model == unpriced:
+            raise KeyError(model)
+        return side_call_rates(model, prompt_tokens)
+
+    return rates
+
+
+async def test_naming_skips_a_provider_whose_side_call_price_expired(
+    registered: dict[Provider, _Fake], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(auxiliary_models, "side_call_rates", _unpriced(AUXILIARY_MODELS["openai"]))
+    suggestion = await suggest_thread_name(
+        KEYLESS, message_text="plan the weekly report", max_input_chars=2000, provider="openai"
+    )
+    assert suggestion.provider == "gemini", "an unpriced side call falls back to a priced one"
+    assert registered["openai"].models == [], "the unpriced model is never called"
+    del registered["gemini"]
+    auxiliary_calls._FACTORIES.pop("gemini")  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(AuxiliaryUnavailable):
+        await suggest_thread_name(
+            KEYLESS, message_text="plan the weekly report", max_input_chars=2000, provider="openai"
+        )
+
+
+def test_an_expired_side_call_price_warns_at_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pricing, "side_call_rates", _unpriced(AUXILIARY_MODELS["gemini"]))
+    try:
+        with capture_logs() as logs:
+            importlib.reload(auxiliary_models)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(auxiliary_models)
+    assert [entry["model"] for entry in logs if entry["event"] == "auxiliary_model.unpriced"] == [
+        AUXILIARY_MODELS["gemini"]
+    ], "the process starts and names the unpriced model"
+
+
+def test_side_call_over_the_priced_limit_keeps_long_context_rates() -> None:
+    astra = side_call_rates("gpt-6-astra", 300_000)
+    assert (astra.input, astra.output) == (20.0, 75.0), "sourced multipliers apply"
+    with capture_logs() as logs:
+        luna = side_call_rates("gpt-6-luna", 300_000)
+    assert luna == side_call_rates("gpt-6-luna"), "no sourced long rate: the base rate floor"
+    assert [entry["event"] for entry in logs] == ["side_call.priced_at_base_rate"]
