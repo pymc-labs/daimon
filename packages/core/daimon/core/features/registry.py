@@ -124,6 +124,9 @@ class FeatureSpec:
     env_map: str | None = None
     """The `Settings` field of a deprecated per-workspace map (workspace id to on/off) that
     stands for the workspace tier; a stored workspace row always beats it."""
+    minimum: float = 0
+    """The smallest number a limit's deployment tier takes. 0 where no limit is a real setting;
+    above 0 where 0 would be an unusable limit, not an off switch."""
 
     def default_for(self, platform: str) -> str:
         return self.platform_defaults.get(platform, self.default)
@@ -142,7 +145,7 @@ class FeatureSpec:
 
     def accepts(self, value: str, tier: Tier) -> bool:
         """Whether `value` may be stored at `tier`. A limit's deployment tier also takes any
-        non-negative number, so an operator's variable keeps its exact value; lower tiers
+        number from its `minimum`, so an operator's variable keeps its exact value; lower tiers
         choose from the listed steps."""
         if value in self.values:
             return True
@@ -151,7 +154,7 @@ class FeatureSpec:
                 number = float(value)
             except ValueError:
                 return False
-            return math.isfinite(number) and number >= 0
+            return math.isfinite(number) and number >= self.minimum
         return False
 
     def label(self, value: str) -> str:
@@ -704,6 +707,7 @@ def _limit(
     default: str | None = None,
     legacy_env: tuple[str, ...] = (),
     authority: Authority = _SETTINGS,
+    minimum: float = 0,
 ) -> FeatureSpec:
     """A limit: the smallest tier setting wins. `steps` run from the loosest down to the
     strictest; the default is the first unless `default` names another step."""
@@ -720,6 +724,7 @@ def _limit(
         platforms=EVERY_PLATFORM,
         authority=authority,
         legacy_env=legacy_env,
+        minimum=minimum,
     )
 
 
@@ -820,6 +825,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent"),
         legacy_env=("DAIMON_LONG_JOBS__MAX_USD",),
         authority=_SERVER_ADMIN,
+        minimum=0.01,
     ),
     _limit(
         "long_jobs_max_deadline",
@@ -829,6 +835,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent"),
         legacy_env=("DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES",),
         authority=_SERVER_ADMIN,
+        minimum=1,
     ),
     _capability(
         "outbound_reach",

@@ -146,9 +146,12 @@ def test_deployment_env_and_its_legacy_variable() -> None:
 def test_a_limit_takes_the_operators_number_and_lower_tiers_only_its_steps() -> None:
     usd = FEATURES["long_jobs_max_usd"]
     assert parse_deployment("long_jobs_max_usd", "35.5") == ("35.5", False)
-    for bad in ("-1", "nan", "lots"):
+    for bad in ("-1", "nan", "lots", "0"):
         with pytest.raises(ValueError, match="long_jobs_max_usd"):
             parse_deployment("long_jobs_max_usd", bad)
+    for bad in ("0", "0.5"):
+        with pytest.raises(ValueError, match="long_jobs_max_deadline"):
+            parse_deployment("long_jobs_max_deadline", bad)
     with pytest.raises(ValueError, match="takes"):
         parse_deployment("outbound_reach", "7")
     got = resolve_feature(usd, [TierValue("deployment", "35.5"), TierValue("workspace", "5")])

@@ -92,17 +92,20 @@ def register_long_job_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 context=ScopeContext(tenant_id=auth.tenant_id, channel_id=origin.parent_channel_id),
                 default=runtime.deployment_default,
             )
-            policy = await store.get_policy(
-                db,
-                place=FeaturePlace.of(
-                    auth.tenant_id,
-                    origin.platform,
-                    origin.parent_channel_id,
-                    origin.thread_id,
-                    agent_id=origin.responder_ma_agent_id,
-                ),
-                settings=runtime.settings,
-            )
+            try:
+                policy = await store.get_policy(
+                    db,
+                    place=FeaturePlace.of(
+                        auth.tenant_id,
+                        origin.platform,
+                        origin.parent_channel_id,
+                        origin.thread_id,
+                        agent_id=origin.responder_ma_agent_id,
+                    ),
+                    settings=runtime.settings,
+                )
+            except StoreError as exc:
+                raise ToolError(str(exc)) from exc
         if live is None:
             raise ToolError("The original conversation is unavailable")
         parent = await retrieve_session(runtime.client, live.ma_session_id, scope=mcp_scope(auth))

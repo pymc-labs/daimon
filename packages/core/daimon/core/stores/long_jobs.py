@@ -44,13 +44,17 @@ async def get_policy(
     enabled = await feature_in(session, settings, place, "long_jobs")
     usd = await feature_in(session, settings, place, "long_jobs_max_usd")
     minutes = await feature_in(session, settings, place, "long_jobs_max_deadline")
-    maximum = limit_int(minutes.value)
-    return LongJobPolicy(
-        enabled=enabled.on,
-        default_deadline_minutes=min(DEFAULT_DEADLINE_MINUTES, maximum),
-        max_deadline_minutes=maximum,
-        max_usd=Decimal(usd.value),
-    )
+    try:
+        maximum = limit_int(minutes.value)
+        return LongJobPolicy(
+            enabled=enabled.on,
+            default_deadline_minutes=min(DEFAULT_DEADLINE_MINUTES, maximum),
+            max_deadline_minutes=maximum,
+            max_usd=Decimal(usd.value),
+        )
+    except (ValueError, ArithmeticError) as exc:
+        # A stored value `accepts` would refuse today; a job fails cleanly instead of crashing.
+        raise StoreError("Long job limits are set to a value that cannot be used") from exc
 
 
 def job_place(job: LongJob | LongJobRecord) -> FeaturePlace:
@@ -223,6 +227,9 @@ async def request_cancel(
     return row
 
 
+MAX_CLAIM_ROUNDS = 20
+
+
 async def claim(
     session: AsyncSession,
     *,
@@ -242,57 +249,80 @@ async def claim(
     )
     if tenant is None:
         return []
-    rows = (
-        await session.scalars(
-            select(LongJobRecord)
-            .where(
-                LongJobRecord.tenant_id == tenant_id,
-                LongJobRecord.state.in_(ACTIVE_STATES),
-                or_(
-                    LongJobRecord.lease_expires_at.is_(None), LongJobRecord.lease_expires_at <= now
-                ),
-            )
-            .order_by(
-                LongJobRecord.state == "queued",
-                LongJobRecord.cancel_requested.desc(),
-                LongJobRecord.created_at,
-            )
-            .limit(limit)
-            .with_for_update(skip_locked=True)
-        )
-    ).all()
     result: list[LongJob] = []
-    for row in rows:
-        if row.state == "queued" and not row.cancel_requested:
-            enabled = await feature_in_or_none(session, settings, job_place(row), "long_jobs")
-            if enabled is None or not enabled.on:
-                # Off or unreadable here: a queued job waits, and launches once On again.
-                continue
-            active = select(LongJobRecord).where(
-                LongJobRecord.tenant_id == tenant_id,
-                LongJobRecord.state.in_(("launching", "running")),
-            )
-            count = await session.scalar(select(func.count()).select_from(active.subquery())) or 0
-            own = (
-                await session.scalar(
-                    select(func.count()).select_from(
-                        active.where(
-                            LongJobRecord.owner_account_id == row.owner_account_id
-                        ).subquery()
-                    )
+    # Rows seen and left alone (Off here, or over a running cap). Each round skips them, so
+    # a pile of jobs that cannot start never fills the limit and starves the newer ones.
+    passed: list[uuid.UUID] = []
+    for _ in range(MAX_CLAIM_ROUNDS):
+        rows = (
+            await session.scalars(
+                select(LongJobRecord)
+                .where(
+                    LongJobRecord.tenant_id == tenant_id,
+                    LongJobRecord.state.in_(ACTIVE_STATES),
+                    or_(
+                        LongJobRecord.lease_expires_at.is_(None),
+                        LongJobRecord.lease_expires_at <= now,
+                    ),
+                    LongJobRecord.id.not_in(passed),
                 )
-                or 0
+                .order_by(
+                    LongJobRecord.state == "queued",
+                    LongJobRecord.cancel_requested.desc(),
+                    LongJobRecord.created_at,
+                )
+                .limit(limit - len(result))
+                .with_for_update(skip_locked=True)
             )
-            if count >= ceilings.per_tenant_running or own >= ceilings.per_owner_running:
+        ).all()
+        if not rows:
+            break
+        for row in rows:
+            if not await _admit(session, row, tenant_id, now, ceilings, settings):
+                passed.append(row.id)
                 continue
-            row.state = "launching"
-            row.deadline_at = now + timedelta(minutes=row.deadline_minutes)
-        row.lease_owner = owner
-        row.lease_expires_at = now + timedelta(seconds=90)
-        row.version += 1
-        await session.flush()
-        result.append(LongJob.model_validate(row))
+            row.lease_owner = owner
+            row.lease_expires_at = now + timedelta(seconds=90)
+            row.version += 1
+            await session.flush()
+            result.append(LongJob.model_validate(row))
+        if len(result) >= limit:
+            break
     return result
+
+
+async def _admit(
+    session: AsyncSession,
+    row: LongJobRecord,
+    tenant_id: uuid.UUID,
+    now: datetime,
+    ceilings: LongJobsSettings,
+    settings: Settings | None,
+) -> bool:
+    """Whether `claim` may take `row`; a queued job is moved to launching as it is admitted."""
+    if row.state == "queued" and not row.cancel_requested:
+        enabled = await feature_in_or_none(session, settings, job_place(row), "long_jobs")
+        if enabled is None or not enabled.on:
+            # Off or unreadable here: a queued job waits, and launches once On again.
+            return False
+        active = select(LongJobRecord).where(
+            LongJobRecord.tenant_id == tenant_id,
+            LongJobRecord.state.in_(("launching", "running")),
+        )
+        count = await session.scalar(select(func.count()).select_from(active.subquery())) or 0
+        own = (
+            await session.scalar(
+                select(func.count()).select_from(
+                    active.where(LongJobRecord.owner_account_id == row.owner_account_id).subquery()
+                )
+            )
+            or 0
+        )
+        if count >= ceilings.per_tenant_running or own >= ceilings.per_owner_running:
+            return False
+        row.state = "launching"
+        row.deadline_at = now + timedelta(minutes=row.deadline_minutes)
+    return True
 
 
 async def save_worker(
