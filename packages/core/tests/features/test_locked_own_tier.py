@@ -15,7 +15,7 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.features.registry import DEFAULT
-from daimon.core.features.service import FeatureActor, change_feature
+from daimon.core.features.service import FeatureActor, change_feature, change_refusal
 from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.stores.domain import ChangeSurface
 from daimon.testing.factories import make_tenant
@@ -98,3 +98,30 @@ async def test_an_owner_still_changes_an_unlocked_agent_value(
     )
     found = await feature_in(db_session, settings, place, KEY)
     assert (found.value, found.tier) == ("on", "agent"), "no lock, no refusal"
+
+
+async def test_the_early_refusal_names_a_lock_at_the_own_tier(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    settings = _settings()
+    place = FeaturePlace(tenant.id, "discord", "C1", agent_id="agent_1")
+    admin = _actor(tenant.id, "web", admin=True, owner=False)
+    owner = _actor(tenant.id, "web", admin=False, owner=True)
+    open_to_owner = await change_refusal(
+        db_session_factory, settings, owner, key=KEY, tier="agent", place=place, value="on"
+    )
+    assert open_to_owner is None, "an unlocked value shows its control"
+    await change_feature(
+        db_session_factory, settings, admin, key=KEY, tier="agent", value="off", place=place,
+        locked=True,
+    )  # fmt: skip
+    early = await change_refusal(
+        db_session_factory, settings, owner, key=KEY, tier="agent", place=place, value="on"
+    )
+    assert early is not None and early.reason == "locked_here", "refused before a card"
+    by_admin = await change_refusal(
+        db_session_factory, settings, admin, key=KEY, tier="agent", place=place, value="on"
+    )
+    assert by_admin is None, "an admin may still change a lock"

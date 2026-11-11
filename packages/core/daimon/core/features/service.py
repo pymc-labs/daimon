@@ -404,9 +404,11 @@ async def change_refusal(
             await _native_admin(sessions, settings, actor, place.platform)
         elif not await may_change(actor, spec, tier, locked=locked, agent_id=place.agent_id):
             raise needs_admin(spec, place.platform)
+        async with sessions() as session:
+            values = await _values_at(session, settings, spec, place)
+        if not spec.authority.native:
+            await _check_own_lock(actor, spec, _before(spec, place, values, tier), place, tier)
         if value is not None and spec.combine != "most_specific":
-            async with sessions() as session:
-                values = await _values_at(session, settings, spec, place)
             above = resolve_above(spec, values, tier)
             if _loosens(spec, TierSetting(tier, value), above):
                 raise _looser_than_above(spec, above, place, tier)
@@ -503,6 +505,22 @@ def _locked_here(spec: FeatureSpec, place: FeaturePlace, tier: Tier) -> ChannelC
         "locked_here",
         "forbidden",
     )
+
+
+def _before(
+    spec: FeatureSpec, place: FeaturePlace, values: list[TierValue], tier: Tier
+) -> TierSetting:
+    return next((s for s in _own(spec, place, values) if s.tier == tier), TierSetting(tier))
+
+
+async def _check_own_lock(
+    actor: FeatureActor, spec: FeatureSpec, before: TierSetting, place: FeaturePlace, tier: Tier
+) -> None:
+    """A row already locked at this tier is only changed by someone who may lock."""
+    if before.locked and not await may_change(
+        actor, spec, tier, locked=True, agent_id=place.agent_id
+    ):
+        raise _locked_here(spec, place, tier)
 
 
 def _loosens(spec: FeatureSpec, after: TierSetting, above: ResolvedFeature) -> bool:
@@ -607,15 +625,11 @@ async def _write_in(
     tier = after.tier
     await lock_tenant(session, place.tenant_id)  # the `expected` check below is then atomic
     values = await _values_at(session, settings, spec, place)
-    before = next((s for s in _own(spec, place, values) if s.tier == tier), TierSetting(tier))
+    before = _before(spec, place, values, tier)
     if expected is not None and expected.value != before.text:
         raise StaleChannelValue(spec.key, before.text)
-    if (
-        check_own_lock
-        and before.locked
-        and not await may_change(actor, spec, tier, locked=True, agent_id=place.agent_id)
-    ):
-        raise _locked_here(spec, place, tier)
+    if check_own_lock:
+        await _check_own_lock(actor, spec, before, place, tier)
     above = resolve_above(spec, values, tier)
     if above.locked and after.value not in (DEFAULT, above.value):
         raise _locked_above(spec, above, place, tier)
