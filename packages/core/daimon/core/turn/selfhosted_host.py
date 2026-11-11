@@ -598,6 +598,9 @@ def _old_session(
 ) -> OldSession:
     """A released self-hosted session, read after its thread moved to another provider."""
     host = runtime_for(runtime, revision)
+    # Another harness's session is never read with this one's credential.
+    if binding.native_refs.get("account_scope", host.account_scope_id) != host.account_scope_id:
+        raise ScopeViolation(binding.id, "self-hosted session belongs to another account scope")
     # An account-less binding is a shared thread's: its session is the thread owner's.
     if binding.legacy_account_id is None:
         scope = owner_turn_scope(scope, str(shared_owner(Slot(thread=binding.thread))))
