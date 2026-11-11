@@ -7,6 +7,7 @@ import binascii
 import json
 import logging
 import mimetypes
+import time
 from collections.abc import AsyncIterator, Mapping
 from pathlib import PurePosixPath
 
@@ -21,6 +22,9 @@ from mux.drivers.selfhosted.events import SelfHostedEvents, segment
 from mux.errors import ProviderError, ScopeViolation
 
 log = logging.getLogger(__name__)
+# The 404 details of a harness without the output routes (direct, then invocations).
+ROUTE_MISSING = frozenset({"Not Found", "Unknown C3 route"})
+REPROBE_SECONDS = 600.0
 
 
 def artifact_identity(session: str, output: str) -> str:
@@ -48,7 +52,7 @@ class SelfHostedArtifacts:
 
     def __init__(self, context: Context, events: SelfHostedEvents) -> None:
         self._c, self._events = context, events
-        self._unavailable = False
+        self._unavailable_until = 0.0
 
     def _base(self, session: ResourceRef) -> str:
         return f"/v0/sessions/{segment(session.id)}/outputs"
@@ -108,16 +112,18 @@ class SelfHostedArtifacts:
         self._c.check(scope, session, "session")
         if turn_id is not None:
             raise self._c.unsupported("file_turn_or_order_filter")
-        if self._unavailable:
+        if time.monotonic() < self._unavailable_until:
             return Page[Artifact](data=())
         try:
             raw = await self._call(session, "GET", self._base(session))
         except ProviderError as exc:
             if exc.category != "not_found":
                 raise
-            # A harness older than 0.2.0 has no output routes: deliver nothing.
-            self._unavailable = True
-            log.warning("selfhosted.outputs_unavailable", extra={"session": session.id})
+            if exc.native_error_code in ROUTE_MISSING:
+                # A harness older than 0.2.0 has no output routes: deliver nothing, and
+                # ask again later in case it was upgraded in place.
+                self._unavailable_until = time.monotonic() + REPROBE_SECONDS
+                log.warning("selfhosted.outputs_unavailable", extra={"session": session.id})
             return Page[Artifact](data=())
         try:
             listing = wire.OutputsResponse.model_validate(raw)

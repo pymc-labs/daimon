@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 from mux.contracts.ids import PageRequest
-from mux.drivers.selfhosted import wire
+from mux.drivers.selfhosted import artifacts, wire
 from mux.drivers.selfhosted.artifacts import artifact_identity, artifact_route
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 
@@ -28,6 +28,7 @@ class OutputHarness(Harness):
         self.files: dict[str, bytes] = {}
         self.output_calls: list[tuple[str, str, dict[str, str]]] = []
         self.content_override: dict[str, str | int] | None = None
+        self.session_missing = False
 
     def ids(self) -> dict[str, str]:
         return {wire.output_id(path, f"1-{len(data)}-1"): path for path, data in self.files.items()}
@@ -42,6 +43,8 @@ class OutputHarness(Harness):
         self.output_calls.append((method, path, {k: str(v) for k, v in query.items()}))
         if self.legacy:
             return httpx.Response(404, json={"detail": "Not Found"})
+        if self.session_missing:
+            return httpx.Response(404, json={"detail": "session_not_found"})
         tail = path.split("/outputs", 1)[1].strip("/").split("/")
         if tail == [""]:
             outputs = [
@@ -107,6 +110,33 @@ async def test_outputs_when_harness_predates_outputs_then_empty_and_logged_once(
     warnings = [r for r in caplog.records if r.message == "selfhosted.outputs_unavailable"]
     assert len(warnings) == 1, "the missing routes must be logged once"
     assert len(harness.output_calls) == 1, "later sweeps must not ask the old harness again"
+
+
+async def test_outputs_when_old_harness_upgraded_then_reprobed_after_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A harness upgraded in place delivers again once the wait has passed."""
+    harness = OutputHarness(legacy=True)
+    harness.files = {"a.txt": b"hi"}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(harness.handle)) as client:
+        driver, session = await setup(client, harness)
+        assert (await driver.artifacts.list(SCOPE, session.ref, page=PAGE)).data == (), "old"
+        harness.legacy = False
+        monkeypatch.setattr(artifacts.time, "monotonic", lambda: 1e12)
+        page = await driver.artifacts.list(SCOPE, session.ref, page=PAGE)
+    assert [a.filename for a in page.data] == ["a.txt"], "the upgraded harness must be asked again"
+
+
+async def test_outputs_when_session_missing_then_empty_and_not_latched() -> None:
+    """A 404 for one session is not a missing route: the next sweep asks again."""
+    harness = OutputHarness()
+    harness.session_missing = True
+    async with httpx.AsyncClient(transport=httpx.MockTransport(harness.handle)) as client:
+        driver, session = await setup(client, harness)
+        for _ in range(2):
+            page = await driver.artifacts.list(SCOPE, session.ref, page=PAGE)
+            assert page.data == (), "a missing session lists nothing"
+    assert len(harness.output_calls) == 2, "a missing session must not stop later sweeps"
 
 
 async def test_outputs_when_content_is_malformed_then_refused() -> None:
