@@ -22,6 +22,7 @@ from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
 from daimon.core import agent_editing
+from daimon.core.agent_catalog import provider_efforts
 from daimon.core.agent_editing import (
     AgentActor,
     AgentEditDeps,
@@ -299,7 +300,8 @@ def diff_config(a: AgentConfigDoc, b: AgentConfigDoc) -> list[Change]:
     return out
 
 
-_PROVIDER_EFFORTS: dict[str, Effort] = {"low": "low", "medium": "medium", "high": "high"}
+#: Levels only Claude has; another provider runs its highest in their place.
+_CLAUDE_TOP_EFFORTS = ("xhigh", "max")
 
 
 def unsupported(changes: list[Change], *, a: AgentConfigDoc, b: AgentConfigDoc) -> str | None:
@@ -311,7 +313,9 @@ def unsupported(changes: list[Change], *, a: AgentConfigDoc, b: AgentConfigDoc) 
     if b.model.backend != DEFAULT_BACKEND:
         if b.model.speed != "standard":
             return "Fast isn't available for this model. Nothing was saved."
-        if b.model.effort not in _PROVIDER_EFFORTS:
+        effort = b.model.effort
+        offered = provider_efforts(b.model.backend)
+        if effort is not None and offered and effort not in (*offered, *_CLAUDE_TOP_EFFORTS):
             return "That effort isn't available for this model. Nothing was saved."
     return None
 
@@ -327,10 +331,19 @@ class SwitchConsent:
 
 
 def _stated_effort(a: AgentConfigDoc, b: AgentConfigDoc) -> Effort | None:
-    """The effort ``b`` changes on its provider, or None when it leaves the agent's own. Pure."""
-    if b.model.backend == DEFAULT_BACKEND or a.model.effort == b.model.effort:
+    """The effort ``b`` states on its provider, or None when it leaves the agent's own. Pure.
+
+    Claude's top levels, carried over on a switch, map to the provider's highest.
+    """
+    effort = b.model.effort
+    offered = provider_efforts(b.model.backend)
+    if effort is None or not offered:
         return None
-    return _PROVIDER_EFFORTS.get(b.model.effort)
+    if effort in _CLAUDE_TOP_EFFORTS:
+        return offered[-1]
+    if a.model.effort == effort:
+        return None
+    return effort if effort in offered else None
 
 
 def provider_moved(a: AgentConfigDoc, b: AgentConfigDoc) -> bool:
@@ -377,7 +390,9 @@ def patch_for(
     model: ModelConfig | None = None
     # Another provider's model is the provider setting's (`switch_provider`), not Managed Agents'.
     if "model" in heads and target.model.backend == DEFAULT_BACKEND:
-        model = {"id": target.model.id, "speed": target.model.speed, "effort": target.model.effort}
+        model = {"id": target.model.id, "speed": target.model.speed}
+        if target.model.effort is not None:
+            model["effort"] = target.model.effort
     skills: list[BetaManagedAgentsSkillParams] | None = None
     if "skill" in heads:
         skills = [
