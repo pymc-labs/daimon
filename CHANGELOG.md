@@ -15,6 +15,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can change a conversation's model do this; off, only the agent's owner or an
   admin can.
 
+- **Web chat and agent editor match the other platforms for providers.** The
+  model editor lists every model once, with its provider as a tag and its price.
+  Picking a model on another provider shows what it drops, the shared-thread
+  limits, the cost and what happens to threads; confirming sends that consent, so
+  the switch is not refused afterwards. New agents choose from the same list, and
+  only providers the organisation allows are offered. Skills, helpers, servers,
+  keys and memory the new provider cannot run are marked. An admin can pin a
+  channel to a model on another provider from the channel's page. A refused reply
+  offers "Switch back to Claude" to an admin, the chat header shows the model the
+  chat really answers on, and a free reply shows $0.00 instead of no cost.
+
 - **One model select on the Discord, Slack and Teams agent panels.** The panel
   lists every model the organisation can run with its price. Picking a model on
   another provider shows what would be lost and what it costs, then asks for one
