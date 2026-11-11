@@ -2043,3 +2043,28 @@ async def test_degraded_fifo_warning_survives_destroyed_home(tmp_path):
         warnings = [event for event in events if event["type"] == "checkpoint_warning"]
         assert len(warnings) == 1, "restored degraded checkpoint lost warning"
         assert warnings[0]["turn_id"] == "next"
+
+
+async def test_output_delete_when_answered_then_checkpointed_and_not_restored(tmp_path):
+    """A delivered file is gone from the checkpoint before the delete is answered."""
+    blobs = MemoryBlobs()
+    home = tmp_path / "home"
+    async with harness(home, blobs) as (supervisor, client):
+        assert (await client.post("/v0/turns", json=turn("tool"))).status_code == 202
+        await supervisor.tasks["turn-1"]
+        workspace, _ = await supervisor.io(supervisor.journal.sandbox, "session-1")
+        (workspace / "work/outputs").mkdir()
+        (workspace / "work/outputs/report.txt").write_text("delivered")
+        await supervisor.checkpoint("session-1")
+        [output] = (await client.get("/v0/sessions/session-1/outputs")).json()["outputs"]
+        uploads = len(blobs.uploads)
+        deleted = await client.post(f"/v0/sessions/session-1/outputs/{output['id']}/delete")
+        assert deleted.status_code == 200, deleted.text
+        assert len(blobs.uploads) > uploads, "the delete must be checkpointed before its answer"
+    shutil.rmtree(home)
+    async with harness(home, blobs) as (supervisor, client):
+        assert (await client.get("/v0/sessions/session-1/events")).status_code == 200, "restore"
+        workspace, _ = await supervisor.io(supervisor.journal.sandbox, "session-1")
+        assert (workspace / "work/result.txt").read_text() == "durable", "workspace restored"
+        listed = (await client.get("/v0/sessions/session-1/outputs")).json()["outputs"]
+        assert listed == [], "a restored workspace must not bring the delivered file back"

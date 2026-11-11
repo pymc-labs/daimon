@@ -1364,8 +1364,9 @@ def create_app(
             session_id, output_id, context_session_id, after_seq
         )
         await output_operation(home, uid, "delete", path, version)
-        # Keep the workspace checkpoint from restoring a delivered file.
-        supervisor.schedule_checkpoint(session_id)
+        # Checkpoint before answering, so a restart cannot restore a delivered file and
+        # post it twice. A failed upload is retried and announced as for any turn.
+        await supervisor.checkpoint(session_id)
         return OutputDeleted(id=output_id)
 
     async def invoke(
