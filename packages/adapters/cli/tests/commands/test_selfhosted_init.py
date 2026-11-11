@@ -1,6 +1,7 @@
 """Postgres-only initialization is repeatable and never constructs a provider client."""
 
 import asyncio
+import re
 from pathlib import Path
 
 import pytest
@@ -424,7 +425,9 @@ def test_cli_refuses_to_run_without_a_price(monkeypatch, tmp_path: Path, missing
 
     result = CliRunner().invoke(app, args)
 
-    assert result.exit_code != 0 and missing in result.output, "no default price is assumed"
+    # Typer forces rich styling under CI (GITHUB_ACTIONS), which splits the option name.
+    output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert result.exit_code != 0 and missing in output, "no default price is assumed"
     assert not (tmp_path / "runtime.json").exists()
 
 
