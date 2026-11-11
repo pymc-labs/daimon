@@ -134,6 +134,10 @@ class HostCallGate:
         async with self._runtime.session_factory.begin() as session:
             await cards.finish(session, card_id=card_id, status=status, outcome=outcome)
 
+    def off_for(self, identity: AuthIdentity) -> bool:
+        """Whether the host call gate is off on this credential's platform."""
+        return not deployment_on(self._runtime.settings, "host_call_gate", identity.platform or "")
+
     async def ask(self, context: MiddlewareContext, identity: AuthIdentity) -> ToolResult:
         """Record the gated call and post its card; fail closed on anything missing."""
         from daimon.adapters.mcp.tools._own_card import post_own_card
@@ -143,7 +147,7 @@ class HostCallGate:
         name, args = _call_of(context)
         settings = self._runtime.settings
         platform = identity.platform or ""
-        if not deployment_on(settings, "host_call_gate", platform):
+        if self.off_for(identity):
             raise _refuse("off")
         if name not in host_call_carded_tools():
             # A reach approval is tallied under the asking turn, which is gone by the press.

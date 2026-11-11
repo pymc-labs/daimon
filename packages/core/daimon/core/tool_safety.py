@@ -260,6 +260,10 @@ def host_call_previews(name: str, args: Mapping[str, object]) -> bool:
     return name == "set_thread_model" and args.get(CONFIRMED_DAIMON_TOOLS[name]) is None
 
 
+#: Gated tools that run uncarded while the host call gate is off; each refuses what needs a card.
+GATE_OFF_TOOLS: Final[frozenset[str]] = frozenset({"set_thread_model"})
+
+
 def host_call_carded_tools() -> frozenset[str]:
     """Gated tools the host call gate cards on a turn with no card of its own.
 

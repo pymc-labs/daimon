@@ -28,6 +28,7 @@ from daimon.core import channel_backend
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_model_names import AmbiguousModel
 from daimon.core.backend_refusals import refusal_card
+from daimon.core.features.snapshot import deployment_on
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.model_switch import switch_fact_lines
 from daimon.core.models_catalog import catalog_model
@@ -45,6 +46,10 @@ from fastmcp.exceptions import ToolError
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import ModelRef
 
+_NO_CARD = (
+    "Moving this conversation to another provider needs an approval card, and none can "
+    "be shown here. Nothing changed."
+)
 _UNATTENDED = (
     "Only someone in the conversation can change its model, and nobody started "
     "this run. Nothing was changed."
@@ -88,21 +93,28 @@ async def _set_thread_model_impl(
     if picked.provider == DEFAULT_BACKEND and not await _off_claude(runtime, auth, origin):
         return await _choose_claude(runtime, auth, origin, _word_of(picked.id, said=model))
     pick = await _pick(runtime, auth, origin)
+    # With the host call gate off nothing cards the confirm, so only same-provider picks run.
+    uncarded = auth.no_confirmation_surface and not deployment_on(
+        runtime.settings, "host_call_gate", origin.platform
+    )
     try:
-        if digest is None or revision is None:
+        if digest is None or revision is None or uncarded:
             shown = await preview_thread_model(pick, value)
+            if uncarded and shown.model.provider != shown.before:
+                raise ToolError(_NO_CARD)
             if shown.preview is None:
                 # The agent moved to Claude meanwhile: nothing to consent to.
                 word = _word_of(shown.model.id, said=model)
                 return await _choose_claude(runtime, auth, origin, word)
-            lines = switch_fact_lines(shown, agent_name=None, applies_to=APPLIES_TO)
-            return ThreadModelResult(
-                model=f"{shown.model.provider}:{shown.model.id}",
-                note="Read these changes to the person and ask whether to go ahead.",
-                changes=list(lines),
-                digest=shown.digest,
-                revision=shown.revision,
-            )
+            if digest is None or revision is None:
+                lines = switch_fact_lines(shown, agent_name=None, applies_to=APPLIES_TO)
+                return ThreadModelResult(
+                    model=f"{shown.model.provider}:{shown.model.id}",
+                    note="Read these changes to the person and ask whether to go ahead.",
+                    changes=list(lines),
+                    digest=shown.digest,
+                    revision=shown.revision,
+                )
         change = await confirm_thread_model(
             pick, value, thread_id=origin.thread_id, digest=digest, revision=revision
         )

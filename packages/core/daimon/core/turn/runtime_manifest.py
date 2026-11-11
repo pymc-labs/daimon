@@ -673,6 +673,7 @@ async def _capture_source_capabilities(
             # unavailable (and the server refuses it for provider-turn credentials).
             from daimon.core.features.snapshot import deployment_on
             from daimon.core.tool_safety import (
+                GATE_OFF_TOOLS,
                 confirmation_gated_tools,
                 host_call_carded_tools,
                 self_carded_tools,
@@ -682,6 +683,8 @@ async def _capture_source_capabilities(
             gated, carded = confirmation_gated_tools(), self_carded_tools()
             if settings is not None and deployment_on(settings, "host_call_gate", request.platform):
                 carded |= host_call_carded_tools()
+            else:
+                carded |= GATE_OFF_TOOLS
             permissions = {
                 # A carded tool runs (Daimon posts its card) unless the agent
                 # turned it off, which stays a named loss as before.

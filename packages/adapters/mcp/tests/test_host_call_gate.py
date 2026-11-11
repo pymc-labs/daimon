@@ -385,6 +385,22 @@ async def test_a_thread_model_pick_cards_only_its_cross_provider_confirm(
         assert [card.tool_name for card in cards] == ["set_thread_model"], "the confirm cards"
 
 
+@pytest.mark.parametrize("digest", [None, "d1"], ids=["preview", "confirm"])
+async def test_a_thread_model_pick_runs_uncarded_with_the_gate_off(
+    rig: Rig, digest: str | None
+) -> None:
+    """With the gate off the tool itself refuses another provider; its provider's picks run."""
+    _attach(rig, host_call_gate="off")
+    args: dict[str, Any] = {"model": "openai:gpt-5"}
+    if digest is not None:
+        args["digest"] = digest
+
+    await _call(rig, rig.identity(), "set_thread_model", args)
+
+    assert [name for name, _, _ in rig.ran] == ["set_thread_model"], "the tool decides"
+    assert await _cards(rig) == [], "no card with the gate off"
+
+
 # --- the one-shot credential runs only its own call --------------------------------
 
 

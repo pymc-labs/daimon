@@ -560,6 +560,7 @@ class IdentityMiddleware(Middleware):
             )
         if identity.no_confirmation_surface and context.method == "tools/call":
             from daimon.core.tool_safety import (
+                GATE_OFF_TOOLS,
                 confirmation_gated_tools,
                 host_call_previews,
                 self_carded_tools,
@@ -575,7 +576,9 @@ class IdentityMiddleware(Middleware):
             if name in (confirmation_gated_tools() - self_carded_tools()) and not (
                 host_call_previews(name, args)
             ):
-                return await self._require_host_call_gate().ask(context, identity)
+                gate = self._require_host_call_gate()
+                if not (name in GATE_OFF_TOOLS and gate.off_for(identity)):
+                    return await gate.ask(context, identity)
         return await self._run_backend(context, call_next, identity)
 
     def attach_host_call_gate(self, gate: HostCallGate) -> None:
