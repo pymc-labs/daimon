@@ -281,7 +281,79 @@ async def test_a_long_agent_list_pages_and_every_agent_is_reachable(
         agents=agents,
     )  # fmt: skip
     assert chosen is not None and chosen.back is not None
-    assert chosen.back.value.endswith("~1"), "Back from an agent returns to its page"
+    assert chosen.back.value == panel.open_op("chat", "progress_plans", page=0, picker=1), (
+        "Back from an agent returns to its picker page"
+    )
+
+
+async def test_back_from_a_setting_returns_to_the_group_page_it_was_picked_from(
+    db_session: AsyncSession, db_session_factory: Sessions, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The group's page rides in the op, also through the agent picker's own paging."""
+    actor = _actor(await _tenant(db_session), True)
+    monkeypatch.setattr(panel, "SELECT_LIMIT", 2)
+    many = [panel.AgentChoice(f"a{i}", f"Agent {i:02d}") for i in range(5)]
+    key = "completion_pings"
+
+    async def agents() -> list[panel.AgentChoice]:
+        return many
+
+    async def show(op: str) -> panel.PanelScreen:
+        found = await panel.show(
+            db_session_factory, _settings(), actor, _place(actor), op, agents=agents
+        )
+        assert found is not None, op
+        return found
+
+    groups = await _walk(db_session_factory, actor, panel.open_op("chat"), None)
+    page = next(
+        n
+        for n, g in enumerate(groups)
+        if any(o.value.startswith(f"open:chat:{key}") for o in g.selects[0].options)
+    )
+    assert page > 0, "the setting sits past the first page"
+    picked = await show(
+        next(o for o in groups[page].selects[0].options if f":{key}" in o.value).value
+    )
+    assert picked.back is not None
+    assert picked.back.value == panel.open_op("chat", page=page), "Back returns to its group page"
+    assert (await show(picked.back.value)).lines == groups[page].lines, "and shows that page"
+
+    next_agents = await show(next(o for o in picked.paging if o.label == panel.NEXT).value)
+    assert next_agents.back is not None
+    assert next_agents.back.value == panel.open_op("chat", page=page), "paging the picker keeps it"
+    agent_screen = await show(next_agents.selects[-1].options[0].value)
+    assert agent_screen.back is not None
+    assert agent_screen.back.value == panel.open_op("chat", key, page=page, picker=1), (
+        "Back from an agent returns to the setting, on its group page and picker page"
+    )
+
+
+async def test_an_agent_id_that_cannot_ride_in_an_op_is_not_offered(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    """Discord caps a select value at 100 characters and an id with a mark in it would split
+    the op; such an agent is left out, and every value left fits."""
+    actor = _actor(await _tenant(db_session), True)
+    agents_ = [
+        panel.AgentChoice("a1", "Fine"),
+        panel.AgentChoice("a" * 80, "Too long"),
+        panel.AgentChoice("a~1", "Tilde"),
+        panel.AgentChoice("a:b@c", "Separators"),
+    ]
+
+    async def agents() -> list[panel.AgentChoice]:
+        return agents_
+
+    screen = await panel.show(
+        db_session_factory, _settings(), actor, _place(actor),
+        panel.open_op("chat", "progress_plans"), agents=agents,
+    )  # fmt: skip
+    assert screen is not None
+    picker = screen.selects[-1]
+    assert [o.label for o in picker.options] == ["Fine"], "only the safe id is offered"
+    longest = max(len(o.value) for s in screen.selects for o in s.options)
+    assert longest <= 100, "every select value fits Discord's limit"
 
 
 async def test_a_short_agent_list_has_no_paging(
@@ -314,19 +386,27 @@ async def test_a_long_group_pages_and_every_setting_is_reachable(
         if v.spec.category == "chat" and v.spec.on_platform("discord")
     }
     assert len(pages) > 1, "the group needs more than one page"
-    assert sorted(k.split(":")[2] for k in keys) == sorted(shown), "each setting once"
+    assert sorted(k.split(":")[2].split("~")[0] for k in keys) == sorted(shown), "each setting once"
     assert all(len(p.selects[0].options) <= 2 for p in pages)
     assert len({tuple(p.lines) for p in pages}) == len(pages), "a page lists its own settings"
 
 
 def test_a_page_is_part_of_the_op_and_a_forged_one_names_nothing() -> None:
-    """`~<page>` follows the group, the setting or the agent; anything else is refused."""
-    assert panel.parse_open(panel.open_op("chat", page=2)) == ("chat", None, None, 2)
-    assert panel.parse_open(panel.open_op("chat", "progress_plans", "a1", 3)) == (
-        "chat", "progress_plans", "a1", 3,
+    """`~<page>[~<picker>]` follows the group, the setting or the agent; anything else is refused."""
+    assert panel.parse_open(panel.open_op("chat", page=2)) == panel.OpenOp("chat", page=2)
+    assert panel.parse_open(panel.open_op("chat", "progress_plans", "a1", 3, 4)) == panel.OpenOp(
+        "chat", "progress_plans", "a1", 3, 4
+    )
+    assert panel.parse_open(panel.open_op("chat", "progress_plans", page=0, picker=2)) == (
+        panel.OpenOp("chat", "progress_plans", None, 0, 2)
+    )
+    assert panel.parse_open(panel.open_op("chat")) == panel.OpenOp("chat")
+    forged_ops = (
+        "open:chat~x", "open:chat~-1", "open:chat~", "open:chat~99999", "open~1~2",
+        "open:chat~1~2", "open:chat:progress_plans~1~2~3", "open:chat:progress_plans@a~b",
+        "open:chat:progress_plans@" + "a" * 41, "open:chat:progress_plans@a:b",
     )  # fmt: skip
-    assert panel.parse_open(panel.open_op("chat")) == ("chat", None, None, 0)
-    for forged in ("open:chat~x", "open:chat~-1", "open:chat~", "open:chat~99999", "open~1~2"):
+    for forged in forged_ops:
         assert panel.parse_open(forged) is None, forged
 
 
