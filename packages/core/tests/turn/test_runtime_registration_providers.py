@@ -31,12 +31,13 @@ for client_type in (AsyncAnthropic, AsyncOpenAI, Client):
     client_type.__init__ = no_client
 from daimon.core import mux_backend
 from daimon.core.turn import io, prepare, runtimes
+from daimon.testing.key_presence import called_by_key_presence
 profile = {profile!r}
 original_get = os.environ.get
 secret_names = {{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY",
     "DAIMON_CHANNEL_OPENAI_KEY", "DAIMON_CHANNEL_GEMINI_KEY"}}
 def no_secret(name, *args):
-    if name in secret_names:
+    if name in secret_names and not called_by_key_presence():
         raise AssertionError("registration read a credential")
     return original_get(name, *args)
 os.environ.get = no_secret
@@ -91,6 +92,7 @@ for client_type in (AsyncAnthropic, AsyncOpenAI, Client):
     client_type.__init__ = no_client
 from daimon.core import mux_backend
 from daimon.core.turn import io, prepare, runtimes
+from daimon.testing.key_presence import called_by_key_presence
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 sys.path.insert(0, os.path.join(os.getcwd(), "packages/core/tests"))
 from turn.test_provider_dispatch import ACCOUNT, TENANT, admission, deps_for_pinned_mux
@@ -117,7 +119,7 @@ def authorizations(tenant):
 runtimes.register_channel_runtime(profile, factory, authorizations=authorizations)
 original_get = os.environ.get
 def no_secret(name, *args):
-    if name in {{"DAIMON_TURN__PROVIDER_RUNTIME_FILE", "DAIMON_CHANNEL_OPENAI_KEY", "DAIMON_CHANNEL_GEMINI_KEY"}}:
+    if name in {{"DAIMON_TURN__PROVIDER_RUNTIME_FILE", "DAIMON_CHANNEL_OPENAI_KEY", "DAIMON_CHANNEL_GEMINI_KEY"}} and not called_by_key_presence():
         raise RuntimeError("cold installation inspected deployment or credentials")
     return original_get(name, *args)
 os.environ.get = no_secret

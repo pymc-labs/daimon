@@ -315,7 +315,7 @@ assert set(mux_backend._TURN_BACKENDS) == {{"anthropic.managed_agents"}}
 scope = Scope(tenant_id="tenant", account_id="account", principal_id="caller", authorization_id="authorized")
 revision = ConfigRevision.create(ChannelRef(tenant_id="tenant", platform="slack", channel_id="channel"), 1,
     resolve_default(BackendConfig(backend="openai", profile="openai.persistent_workspace", model="gpt-6-luna")))
-request = SimpleNamespace(admission=SimpleNamespace(backend_revision=revision),
+request = SimpleNamespace(admission=SimpleNamespace(backend_revision=revision, shared_owner=None),
     deps=SimpleNamespace(turn_path="mux", channel_backends=True), scope=scope,
     platform="slack", tenant_id="tenant", session_account_id="account", thread_id="thread")
 try:
