@@ -39,6 +39,7 @@ from daimon.core.config import (
     DatabaseSettings,
     DiscordSettings,
     McpSettings,
+    NotebookSettings,
     Settings,
 )
 from daimon.core.defaults.loader import (
@@ -179,6 +180,10 @@ def _make_app(sessionmaker: async_sessionmaker[AsyncSession]) -> ASGIApp:
             anthropic=AnthropicSettings(api_key=SecretStr("sk-test")),
             discord=DiscordSettings(bot_token=SecretStr("test-discord-token")),
             mcp=McpSettings(jwt_secret=SecretStr(SECRET), public_url=HttpUrl("https://x/mcp")),
+            # A skill's notebook tools are offered only where a notebook host is set up.
+            notebook=NotebookSettings(
+                host_url=HttpUrl("http://notebook.test:8001"), admin_secret=SecretStr("test")
+            ),
         ),
         sessionmaker=sessionmaker,
         anthropic=build_fake_anthropic(MARouter().dispatch),
