@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Switching such an agent to another provider records its copies as carried
   over, not as a loss.
 
+- **Pick a conversation's model on Slack and Teams.** In Slack, the Model message
+  shortcut opens the choices with their prices for the thread; in Teams, the
+  `model` command does the same in a channel thread or a chat. A pick that
+  changes provider shows what changes and asks once with a Confirm button.
+  Without the right to switch, the answer names who can help. When an admin
+  edits the agent after someone chose a model for a conversation, the next
+  message there posts the same card once; the reply still comes from the
+  agent's own model until someone confirms.
+
 - **OpenAI and Gemini agents keep memory.** They read and write the same
   shared, personal and channel memory a Claude agent uses, through Daimon's own
   memory tools, with the same rules: a shared conversation has no personal

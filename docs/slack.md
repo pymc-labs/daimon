@@ -192,11 +192,12 @@ channel.
 card with the agent that answers in the channel. `/settings` shows and changes
 every feature at the channel or workspace level (see [features](features.md));
 for a thread's own setting, ask Daimon in that thread or use the thread's Settings page in
-the web app. The **Model** shortcut on a message in a thread picks that thread's model. It lists
-the agent's models with prices, and a pick that changes provider asks you to confirm once.
-Members see only agents whose
+the web app. Members see only agents whose
 rules allow them to answer at that location, while admins see all. Knowing an
 agent's name does not grant edit rights.
+
+The **Model** shortcut on a message in a thread lists the agent's models with
+prices and picks one for that thread. A pick that changes provider asks you to confirm once.
 
 When a channel's readers are not `own`, `/here` and the Permissions screen warn
 that guest accounts aren't checked on Slack. A channel shared with another
