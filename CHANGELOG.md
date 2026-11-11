@@ -33,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer loses the rest: Previous and Next buttons on Discord, Slack and Teams move
   between pages.
 
+- **Upgrade note: limit settings with a zero or too-small value.**
+  `DAIMON_FEATURES__OUTBOUND_LENGTH=0` starts as before and means no post length limit,
+  as `DAIMON_OUTBOUND__MAX_LENGTH=0` does; it never overrides a limit a workspace sets,
+  and where limits combine, 0 counts as unlimited rather than the smallest value.
+  `DAIMON_FEATURES__LONG_JOBS_MAX_USD` below 0.01 and `DAIMON_FEATURES__LONG_JOBS_MAX_DEADLINE`
+  below 1 stop startup with an error that names the lowest value accepted; set a
+  workable limit or remove the variable.
+
 - **Feature settings now reach the paths that ignored them.**
   An Off watch no longer holds up the others in the poll queue. A routine retries when its
   features cannot be read, and a required destination can no longer be cleared. Long job

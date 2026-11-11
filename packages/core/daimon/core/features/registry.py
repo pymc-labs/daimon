@@ -128,6 +128,9 @@ class FeatureSpec:
     minimum: float = 0
     """The smallest number a limit's deployment tier takes. 0 where no limit is a real setting;
     above 0 where 0 would be an unusable limit, not an off switch."""
+    zero_unlimited: bool = False
+    """A limit whose deployment 0 means no limit, as its legacy variable did: when settings
+    combine, 0 is the loosest value, never the smallest."""
 
     def default_for(self, platform: str) -> str:
         return self.platform_defaults.get(platform, self.default)
@@ -712,6 +715,7 @@ def _limit(
     legacy_env: tuple[str, ...] = (),
     authority: Authority = _SETTINGS,
     minimum: float = 0,
+    zero_unlimited: bool = False,
     depends_on: tuple[str, ...] = (),
 ) -> FeatureSpec:
     """A limit: the smallest tier setting wins. `steps` run from the loosest down to the
@@ -730,6 +734,7 @@ def _limit(
         authority=authority,
         legacy_env=legacy_env,
         minimum=minimum,
+        zero_unlimited=zero_unlimited,
         depends_on=depends_on,
     )
 
@@ -891,7 +896,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
             "250": "250 characters",
         },
         tiers=TIERS,
-        minimum=1,
+        zero_unlimited=True,
         legacy_env=("DAIMON_OUTBOUND__MAX_LENGTH",),
     ),
     _limit(
@@ -1084,6 +1089,8 @@ def parse_deployment(key: str, raw: str) -> tuple[str, bool]:
     if value == "disabled" and spec.off is not None and not flag:
         return spec.off, True
     if not spec.accepts(value, "deployment") or flag not in ("", "locked"):
-        takes = ", ".join(spec.values) + (" or a number" if spec.effect == "limit" else "")
+        takes = ", ".join(spec.values) + (
+            f" or a number of at least {spec.minimum:g}" if spec.effect == "limit" else ""
+        )
         raise ValueError(f"feature {key!r} takes {takes}, optionally ':locked'")
     return value, flag == "locked"

@@ -512,14 +512,40 @@ def test_repo_memory_needs_the_setup_and_the_setting_does_not_read_the_feature()
     assert not resolve_one(spec, off, place, ()).on, "but turns the feature off"
 
 
-def test_an_operators_zero_post_length_cannot_override_a_workspace_limit() -> None:
-    """The reader treats 0 as no limit while the resolver takes the smallest number, so a
-    0 at any tier would switch off the limits narrower tiers set."""
-    for tier in ("deployment", "workspace", "channel"):
-        assert not FEATURES["outbound_length"].accepts("0", tier), f"0 refused at {tier}"
-        assert FEATURES["outbound_length"].accepts("250", tier), f"a length is taken at {tier}"
-    with pytest.raises(ValueError, match="outbound_length"):
-        parse_deployment("outbound_length", "0")
+def test_a_zero_post_length_means_no_limit_and_never_overrides_a_narrower_tier() -> None:
+    """0 is accepted from the operator, as the legacy variable was, and reads as the loosest
+    value: it lifts no workspace limit, and two limits combine to the smaller real one."""
+    spec = FEATURES["outbound_length"]
+    assert parse_deployment("outbound_length", "0") == ("0", False), "boot takes 0"
+    assert deployment_value(_settings(features={"outbound_length": "0"}), spec) == TierValue(
+        "deployment", "0"
+    ), "a deployment that sets 0 starts"
+    assert spec.accepts("0", "deployment"), "the operator's tier takes 0"
+    for tier in ("workspace", "channel"):
+        assert not spec.accepts("0", tier), f"a step, not 0, at {tier}"
+    alone = resolve_feature(spec, [TierValue("deployment", "0")])
+    assert (alone.value, alone.tier) == ("0", "deployment"), "0 alone stays no limit"
+    for narrower, tier in (("500", "workspace"), ("250", "channel")):
+        got = resolve_feature(spec, [TierValue("deployment", "0"), TierValue(tier, narrower)])
+        assert (got.value, got.tier) == (narrower, tier), f"0 does not override {tier}"
+    both = resolve_feature(spec, [TierValue("deployment", "1000"), TierValue("workspace", "500")])
+    assert both.value == "500", "real limits still take the smallest"
+
+
+@pytest.mark.parametrize(
+    ("key", "bad", "minimum"),
+    [
+        ("long_jobs_max_usd", "0", "0.01"),
+        ("long_jobs_max_usd", "0.001", "0.01"),
+        ("long_jobs_max_deadline", "0", "1"),
+        ("long_jobs_max_deadline", "0.5", "1"),
+    ],
+)
+def test_a_limit_below_its_minimum_is_refused_naming_the_minimum(
+    key: str, bad: str, minimum: str
+) -> None:
+    with pytest.raises(ValueError, match=f"at least {minimum}"):
+        parse_deployment(key, bad)
 
 
 @pytest.mark.parametrize("key", ["outbound_threads", "outbound_places", "outbound_people"])
