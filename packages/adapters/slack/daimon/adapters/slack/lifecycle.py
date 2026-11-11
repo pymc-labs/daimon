@@ -705,11 +705,11 @@ class SlackTurnLifecycle(OutputGate):
     def _feedback_block(self) -> dict[str, Any] | None:
         """👍/👎 while `message_feedback` is on, plus Ask a human when offered; None for neither."""
         block = build_feedback_actions_block(requested_by=self._author_id)
-        if not self._vote_buttons:
-            block["elements"] = []
+        elements: list[dict[str, Any]] = block["elements"] if self._vote_buttons else []
         if self._ask_human and not self._requester_foreign:
-            block["elements"].append(build_ask_human_button())
-        return block if block["elements"] else None
+            elements.append(build_ask_human_button())
+        block["elements"] = elements
+        return block if elements else None
 
     async def _flush_cancelled(self) -> None:
         """Replace the status message with a plain 'Turn cancelled.' notice.
