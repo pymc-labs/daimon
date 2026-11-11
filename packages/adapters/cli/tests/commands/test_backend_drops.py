@@ -581,25 +581,33 @@ async def capture(operator, **changes):
 
 
 @pytest.mark.parametrize("private", ["slack_turn_context_id", "private_dm_id"])
-async def test_actual_private_resource_intent_never_disappears_into_a_droppable_category(
-    operator, private
-):
+async def test_a_private_caller_context_rides_the_credential_not_the_source(operator, private):
+    """A provider host signs the caller's private context onto its turn credential, so
+    the capture holds no opaque source resource and the preview drops what it would without."""
     import uuid
 
+    from daimon.core.caller_resources import CALLER_RESOURCES_ID
     from daimon.core.turn.runtime_manifest import preview_source_drops
     from mux.contracts.ids import ModelRef
     from mux.errors import UnsupportedCapability
 
+    def outcome(source):
+        try:
+            return preview_source_drops(source, ModelRef(provider="openai", id="gpt-6-luna"))
+        except UnsupportedCapability as refused:
+            return sorted(refused.missing)
+
     baseline = await capture(operator)
-    assert not any(r.kind == "native" for r in baseline.resource_requirements)
     captured = await capture(
         operator, **{private: uuid.uuid4() if private == "slack_turn_context_id" else "owned-dm"}
     )
-    assert any(
-        r.id == "caller-resources" and r.kind == "native" for r in captured.resource_requirements
+    assert not any(r.id == CALLER_RESOURCES_ID for r in captured.resource_requirements), (
+        "a credential-carried context is no native source resource"
     )
-    with pytest.raises(UnsupportedCapability):
-        preview_source_drops(captured, ModelRef(provider="openai", id="gpt-6-luna"))
+    assert captured.resource_requirements == baseline.resource_requirements, (
+        "the private context adds no source obligation"
+    )
+    assert outcome(captured) == outcome(baseline), "the preview is the same as without it"
 
 
 @pytest.mark.parametrize("missing", ["target", "environment"])
