@@ -40,10 +40,10 @@ def test_declared_profiles_and_their_core_status() -> None:
 def test_legacy_rendering_declarations_round_trip(profile: Profile) -> None:
     assert profile.emits_legacy_events == (profile.provider == "anthropic")
     assert emits_legacy_events_for(profile.provider) is profile.emits_legacy_events
-    # The credential-carrier flag and the effort map are code-declared and never dumped.
+    # The credential-carrier flag, effort map and skill limits are code-declared, never dumped.
     restored = Profile.model_validate_json(profile.model_dump_json())
     assert restored == profile.model_copy(
-        update={"carries_caller_resources": False, "effort_map": {}}
+        update={"carries_caller_resources": False, "effort_map": {}, "skill_limits": None}
     )
     assert pickle.loads(pickle.dumps(profile)) == profile
 

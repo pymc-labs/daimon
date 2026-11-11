@@ -58,6 +58,7 @@ from mux.contracts.ids import (
     SkillRef,
     ThreadRef,
 )
+from mux.contracts.profile import SkillLimits
 from mux.contracts.receipts import (
     CancelReceipt,
     DeletionReceipt,
@@ -284,6 +285,8 @@ SAMPLES: tuple[BaseModel, ...] = (
     EnvironmentFilter(include_archived=True),
     ResourceBinding(id="r2", kind="native", native=EXT),
     SESSION_SPEC,
+    SESSION_SPEC.model_copy(update={"skills": (SkillRef(id="skill_1", version="2"),)}),
+    SkillLimits(total_bytes=10, file_bytes=5, files=2, text_only=True),
     CONTINUITY,
     BINDING,
     Session(

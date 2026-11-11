@@ -105,6 +105,23 @@ class AccountingMode(StrEnum):
         return "turn"
 
 
+class SkillLimits(Contract):
+    """The largest skill a profile installs: an attached skill never exceeds these."""
+
+    total_bytes: int = Field(gt=0)
+    file_bytes: int = Field(gt=0)
+    files: int = Field(gt=0)
+    text_only: bool = False
+
+    def fits(self, *, total_bytes: int, largest_file_bytes: int, files: int, text: bool) -> bool:
+        return (
+            0 < files <= self.files
+            and total_bytes <= self.total_bytes
+            and largest_file_bytes <= self.file_bytes
+            and (text or not self.text_only)
+        )
+
+
 class Profile(Contract):
     """One provider profile and what it supports.
 
@@ -137,6 +154,9 @@ class Profile(Contract):
     meters_cache_writes: bool = True
     """The usage meter counts cache-write input. False where the provider bills cache
     writes but its usage has no such count: the host then prices none, an estimate."""
+    skill_limits: SkillLimits | None = Field(default=None, exclude=True)
+    """The largest custom skill the profile attaches; None: no custom skills.
+    Excluded from dumps, so profile digests hold."""
     carries_caller_resources: bool = Field(default=False, exclude=True)
     """The host carries the caller's seals, Slack turn context and private DM on its
     per-turn credential, not as a native resource. Excluded from dumps: digests hold."""

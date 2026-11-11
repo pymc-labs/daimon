@@ -9,7 +9,16 @@ from pydantic import JsonValue
 
 from mux.contracts.actions import UserMessage
 from mux.contracts.config import ConfigRevision
-from mux.contracts.ids import ChannelRef, Page, PageRequest, ResourceRef, Revision, Scope, ThreadRef
+from mux.contracts.ids import (
+    ChannelRef,
+    Page,
+    PageRequest,
+    ResourceRef,
+    Revision,
+    Scope,
+    SkillRef,
+    ThreadRef,
+)
 from mux.contracts.receipts import DeletionReceipt, Operation, RestoreReceipt, UpdateReceipt
 from mux.contracts.resources import (
     Continuity,
@@ -208,6 +217,8 @@ class OpenAISessions:
                 raise self._c.unsupported("hosted_container_size")
             if spec.environment is not None or spec.resources:
                 raise self._c.unsupported("thread_workspace_persistence")
+            if spec.skills:
+                raise self._c.unsupported("skills_bundle")
             if initial is None or not initial.content:
                 raise ProviderError(
                     "invalid_request", retryable=False, native_code="initial_input_required"
@@ -226,7 +237,9 @@ class OpenAISessions:
         if agent.get("id") != spec.agent.id:
             raise ValueError("wrong session agent identity")
         self._c.record(scope, agent)
-        pins = decode(agent.get("metadata"))
+        if any(pin.source is not None for pin in spec.skills):
+            raise self._c.unsupported("session_skill_source")
+        pins = session_pins(decode(agent.get("metadata")), spec.skills)
         resolved = None
         if pins is not None:
             if self._c.profile_id == "openai.conversation_only" and pins:
@@ -515,3 +528,14 @@ class OpenAISessions:
     ) -> Session:
         self._c.check(scope, ref, "session")
         raise MigrationUnsupported(ref.id)
+
+
+def session_pins(
+    agent: tuple[SkillRef, ...] | None, extra: tuple[SkillRef, ...]
+) -> tuple[SkillRef, ...] | None:
+    """The agent's pins, then the session's own; a session never repins an agent skill."""
+    if not extra:
+        return agent
+    held = {pin.id for pin in agent or ()}
+    added = tuple({pin.id: pin for pin in extra if pin.id not in held}.values())
+    return (*(agent or ()), *added)

@@ -739,6 +739,9 @@ class GeminiSessions(Base):
         self._check(scope, spec.agent, "agent")
         if spec.resources or spec.state_mode != "continue" or initial is not None:
             refuse("session_resources", "initial_input_or_fresh_state")
+        if spec.skills:
+            # Its skills mount through the agent's environment sources.
+            refuse("session_skills")
         ext = spec.extensions.get("gemini.session")
         if set(spec.extensions) != {"gemini.session"} or ext is None:
             refuse("gemini.session")

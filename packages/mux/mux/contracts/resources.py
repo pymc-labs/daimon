@@ -20,6 +20,7 @@ from pydantic import AfterValidator, Field, JsonValue, StringConstraints
 
 from mux.contracts._base import Contract, FrozenMap
 from mux.contracts.actions import RequiredAction
+from mux.contracts.digest import additive
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Provider, ResourceRef, Revision, SkillRef, ThreadRef
 
@@ -52,7 +53,9 @@ MCPToolDrop = Annotated[
 BuiltinToolDrop = Literal["builtin_tool:web_fetch", "builtin_tool:web_search"]
 # One whole MCP server (a user's connector) the target can't reach; the rest stay.
 MCPServerDrop = Annotated[str, StringConstraints(pattern=r"^mcp_server:[A-Za-z0-9_.-]+$")]
-DeclaredDrop = CapabilityDrop | MCPToolDrop | BuiltinToolDrop | MCPServerDrop
+# One skill the target can't install (over its size limit); the rest attach.
+SkillDrop = Annotated[str, StringConstraints(pattern=r"^skill:[A-Za-z0-9_.-]+$")]
+DeclaredDrop = CapabilityDrop | MCPToolDrop | BuiltinToolDrop | MCPServerDrop | SkillDrop
 _DeclaredDrops = Annotated[tuple[DeclaredDrop, ...], AfterValidator(_unique_declared_drops)]
 
 
@@ -226,6 +229,10 @@ class SessionSpec(Contract):
     resources: tuple[ResourceBinding, ...] = ()
     state_mode: Literal["continue", "fresh"] = "continue"
     extensions: FrozenMap[str, ExtensionConfig] = Field(default_factory=dict[str, ExtensionConfig])
+    skills: tuple[SkillRef, ...] = additive(())
+    """Skills this session installs besides its agent's own (a channel's, say).
+
+    A driver that cannot install them refuses; none drops them."""
 
 
 class Continuity(Contract):
@@ -492,6 +499,7 @@ __all__ = [
     "SessionExport",
     "SessionFilter",
     "SessionSpec",
+    "SkillDrop",
     "Skill",
     "SkillUpload",
     "SkillUploadFile",

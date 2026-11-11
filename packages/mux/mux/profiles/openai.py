@@ -9,7 +9,7 @@ to name it to get it.
 from __future__ import annotations
 
 from mux.contracts.extensions import OPENAI_EXTENSIONS
-from mux.contracts.profile import AccountingMode, Effort, Profile
+from mux.contracts.profile import AccountingMode, Effort, Profile, SkillLimits
 
 LUNA_MODEL = "gpt-6-luna"
 ASTRA_MODEL = "gpt-6-astra"
@@ -22,6 +22,8 @@ NATIVE_MODELS = (LUNA_MODEL, ASTRA_MODEL)
 _METERS_CACHE_WRITES = False
 # `reasoning.effort` on the agent (Agents API reference); the neutral names match.
 _EFFORT: dict[Effort, str] = {"low": "low", "medium": "medium", "high": "high"}
+
+MIB = 1024 * 1024
 
 PERSISTENT_WORKSPACE = Profile(
     provider="openai",
@@ -38,6 +40,8 @@ PERSISTENT_WORKSPACE = Profile(
     mcp_policy_keys=("allowed_tools", "required"),
     tool_readback="compiled",
     skill_digest="content",
+    # The readback bounds in `drivers/openai/skills.py`: what is installed can be read back.
+    skill_limits=SkillLimits(total_bytes=28 * MIB, file_bytes=25 * MIB, files=500),
     support={
         "neutral_catalog": "native",
         "agent_delete": "native",
