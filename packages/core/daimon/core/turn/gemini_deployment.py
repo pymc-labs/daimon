@@ -14,12 +14,14 @@ from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from daimon.core import pricing
+from daimon.core.auxiliary_calls import register_completions
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.infrastructure_cost import known_infrastructure_usd
 from daimon.core.mcp_auth import read_private_credential_bytes, resolve_agent_mcp_credential
 from daimon.core.mux_backend import TurnRuntime, register_turn_backend
 from daimon.core.neutral_resources import NeutralResourceHost
+from daimon.core.provider_keys import DEFAULT_KEY_ENV, provider_key_present
 from daimon.core.shared_threads import shared_owner
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
@@ -56,6 +58,7 @@ from daimon.core.turn.runtime_manifest import (
     validate_counterpart_pins,
     validate_counterpart_request,
 )
+from mux.contracts.completions import Completions
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ModelRef, Scope, ThreadRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
@@ -676,8 +679,16 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     return runtime
 
 
+def _side_call_completions() -> Completions:
+    from mux.drivers.gemini import configured_completions
+
+    return configured_completions(api_key=os.environ.get(DEFAULT_KEY_ENV["gemini"]) or "")
+
+
 def register_runtime() -> None:
     """Install the provider's host callbacks without transports or credential access."""
+    if provider_key_present("gemini"):
+        register_completions("gemini", _side_call_completions)
     from daimon.core.turn.carry_over import register_session_reader
     from daimon.core.turn.runtimes import register_channel_runtime
 

@@ -158,8 +158,6 @@ TOOL_MODEL_PRICING: dict[str, ModelRates] = {
         input=2.00, output=120.00, cache_write=0.0, cache_read=0.0
     ),
     "gemini-2.5-flash": ModelRates(input=0.30, output=2.50, cache_write=0.0, cache_read=0.03),
-    # Side calls (titles, participation verdicts) on an OpenAI-only install.
-    "gpt-5-mini": ModelRates(input=0.25, output=2.00, cache_write=0.0, cache_read=0.025),
 }
 
 _SNAPSHOT_SUFFIX = re.compile(r"-\d{8}$")
@@ -729,6 +727,24 @@ def _priced_input_limits() -> Mapping[str, int | None]:
                 # Stored rows are bucketed by one limit per model before a tariff is chosen.
                 raise ValueError(f"{price.model} tariffs disagree on the priced input limit")
     return MappingProxyType(limits)
+
+
+def side_call_rates(model: str) -> ModelRates:
+    """Rates for a side call: the model's table row, else its sourced provider tariff today.
+
+    Raises KeyError when neither prices it, so a side call never runs unmetered.
+    """
+    if model in MODEL_PRICING:
+        return MODEL_PRICING[model]
+    price = provider_price_on(model, datetime.now(UTC).date())
+    if price is None:
+        raise KeyError(model)
+    return ModelRates(
+        input=float(price.input),
+        output=float(price.output),
+        cache_write=float(price.cache_write or 0),
+        cache_read=float(price.cache_read),
+    )
 
 
 #: Every provider-priced model and its tariff's priced input limit (None: no limit).

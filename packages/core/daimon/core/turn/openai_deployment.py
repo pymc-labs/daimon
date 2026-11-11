@@ -16,11 +16,13 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 import structlog
+from daimon.core.auxiliary_calls import register_completions
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.mcp_auth import resolve_agent_mcp_credential
 from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.pricing import provider_prices
+from daimon.core.provider_keys import DEFAULT_KEY_ENV, provider_key_present
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
@@ -43,6 +45,7 @@ from daimon.core.turn.runtime_manifest import (
     validate_counterpart_pins,
     validate_counterpart_request,
 )
+from mux.contracts.completions import Completions
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Revision, Scope
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, SessionSpec
@@ -641,8 +644,16 @@ async def prepare_tenant_environment(
     return replace(request, openai_environment_id=environment_id)
 
 
+def _side_call_completions() -> Completions:
+    from mux.drivers.openai import configured_completions
+
+    return configured_completions(api_key=os.environ.get(DEFAULT_KEY_ENV["openai"]) or "")
+
+
 def register_runtime() -> None:
     """Install the provider's host callbacks without transports or credential access."""
+    if provider_key_present("openai"):
+        register_completions("openai", _side_call_completions)
     from daimon.core.turn.runtimes import register_channel_runtime
 
     register_host()

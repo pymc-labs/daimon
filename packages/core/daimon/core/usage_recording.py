@@ -27,7 +27,13 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 from daimon.core.model_presets import OPUS, OPUS_FAST
-from daimon.core.pricing import MODEL_PRICING, ModelRates, ProviderPrice, cost_of, usage_tokens
+from daimon.core.pricing import (
+    ModelRates,
+    ProviderPrice,
+    cost_of,
+    side_call_rates,
+    usage_tokens,
+)
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.usage_compat import event_observation
@@ -469,7 +475,7 @@ async def record_auxiliary_usage(
         managed_session_id=managed_session_id,
         event_id=event_id,
         markup=markup,
-        pricing=MODEL_PRICING[model_id],
+        pricing=side_call_rates(model_id),
         reason=reason,
         session_prefix=prefix,
         idempotency_prefix=prefix,

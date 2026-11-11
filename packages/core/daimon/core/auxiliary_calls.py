@@ -15,6 +15,7 @@ from anthropic import AsyncAnthropic
 from daimon.core.anthropic_guard import anthropic_configured, require_anthropic_allowed
 from daimon.core.auxiliary_models import AUXILIARY_MODELS
 from daimon.core.errors import DaimonError
+from daimon.core.provider_keys import DEFAULT_KEY_ENV
 from mux.contracts.completions import CompletionEffort, Completions, CompletionUsage
 from mux.contracts.ids import Provider, Scope
 from mux.drivers.anthropic import AnthropicCompletions
@@ -45,13 +46,17 @@ class AuxiliaryCompletion:
 
 
 def auxiliary_provider(anthropic: AsyncAnthropic, admitted: Provider | None) -> Provider:
-    """Anthropic when keyed, else the admitted provider, else the only other one reachable."""
+    """Anthropic when keyed, else the admitted provider, else the first reachable one.
+
+    "First" follows the deployment key registry, the order keyless records default to.
+    """
     if anthropic_configured(anthropic):
         return "anthropic"
     if admitted is not None and admitted in _FACTORIES:
         return admitted
-    if len(_FACTORIES) == 1:
-        return next(iter(_FACTORIES))
+    for provider in DEFAULT_KEY_ENV:
+        if provider in _FACTORIES:
+            return provider
     raise AuxiliaryUnavailable("No provider is available for this call.")
 
 

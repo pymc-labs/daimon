@@ -12,10 +12,12 @@ from daimon.core import auxiliary_calls
 from daimon.core.anthropic_guard import ANTHROPIC_UNCONFIGURED_PLACEHOLDER
 from daimon.core.auxiliary_calls import register_completions
 from daimon.core.auxiliary_models import AUXILIARY_MODELS
-from daimon.core.pricing import MODEL_PRICING
+from daimon.core.pricing import MODEL_PRICING, side_call_rates
+from daimon.core.provider_keys import DEFAULT_KEY_ENV
 from daimon.core.thread_classifier import classify
 from daimon.core.thread_naming import THREAD_NAMING_MODEL, suggest_thread_name
 from daimon.core.thread_participation import SILENCE_ON_ERROR
+from daimon.core.turn import gemini_deployment, openai_deployment
 from mux.contracts.completions import CompletionResult, CompletionUsage
 from mux.contracts.ids import Provider, Scope
 from mux.errors import ProviderError
@@ -58,8 +60,12 @@ def registered() -> Iterator[dict[Provider, _Fake]]:
 
 
 def test_every_auxiliary_model_is_priced() -> None:
+    """Each side-call model has a rate, and only Anthropic's comes from the tool table."""
     for provider, model in AUXILIARY_MODELS.items():
-        assert MODEL_PRICING.get(model) is not None, f"{provider} side-call model is unpriced"
+        rates = side_call_rates(model)
+        assert rates.input > 0 and rates.output > 0, f"{provider} side-call model is unpriced"
+        in_table = model in MODEL_PRICING
+        assert in_table == (provider == "anthropic"), f"{model} is priced from a sourced row"
 
 
 def test_anthropic_keeps_the_model_titles_always_ran_on() -> None:
@@ -95,6 +101,41 @@ async def test_classifier_fails_closed_on_a_driver_error_without_a_key(
     )
     assert outcome.verdict == SILENCE_ON_ERROR, "an outage means silence"
     assert outcome.usage is None, "a failed call has nothing to meter"
+
+
+async def test_naming_without_an_admitted_provider_uses_the_first_keyed(
+    registered: dict[Provider, _Fake],
+) -> None:
+    """Callers that run before admission get the key registry's first provider."""
+    suggestion = await suggest_thread_name(
+        KEYLESS, message_text="plan the weekly report", max_input_chars=2000
+    )
+    first = next(iter(DEFAULT_KEY_ENV))
+    assert suggestion.provider == first, f"expected {first}, got {suggestion.provider}"
+
+
+@pytest.mark.parametrize("provider", ["openai", "gemini"])
+def test_runtime_registers_side_calls_only_with_a_key(
+    monkeypatch: pytest.MonkeyPatch, provider: Provider
+) -> None:
+    """Each provider runtime makes its completions reachable when its deployment key is set."""
+    register = {"openai": openai_deployment, "gemini": gemini_deployment}[provider]
+    saved = dict(auxiliary_calls._FACTORIES)  # pyright: ignore[reportPrivateUsage]
+    try:
+        for keyed in (False, True):
+            auxiliary_calls._FACTORIES.clear()  # pyright: ignore[reportPrivateUsage]
+            if keyed:
+                monkeypatch.setenv(DEFAULT_KEY_ENV[provider], "test-key")
+            else:
+                monkeypatch.delenv(DEFAULT_KEY_ENV[provider], raising=False)
+            register.register_runtime()
+            registered = provider in auxiliary_calls._FACTORIES  # pyright: ignore[reportPrivateUsage]
+            assert registered == keyed, (
+                f"{provider} side calls registered={registered}, key={keyed}"
+            )
+    finally:
+        auxiliary_calls._FACTORIES.clear()  # pyright: ignore[reportPrivateUsage]
+        auxiliary_calls._FACTORIES.update(saved)  # pyright: ignore[reportPrivateUsage]
 
 
 async def test_classifier_fails_closed_when_no_provider_is_reachable() -> None:

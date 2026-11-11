@@ -9,15 +9,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Final
 
-from daimon.core.pricing import MODEL_PRICING
+from daimon.core.pricing import side_call_rates
 from mux.contracts.ids import Provider
 
 AUXILIARY_MODELS: Final[Mapping[Provider, str]] = {
     "anthropic": "claude-haiku-5-5",
-    "openai": "gpt-5-mini",
-    "gemini": "gemini-2.5-flash",
+    "openai": "gpt-6-luna",
+    "gemini": "gemini-3.5-flash-lite",
 }
 
 for _model in AUXILIARY_MODELS.values():
-    if _model not in MODEL_PRICING:
-        raise RuntimeError(f"auxiliary model {_model!r} has no entry in MODEL_PRICING")
+    try:
+        side_call_rates(_model)
+    except KeyError:
+        raise RuntimeError(f"auxiliary model {_model!r} has no price") from None

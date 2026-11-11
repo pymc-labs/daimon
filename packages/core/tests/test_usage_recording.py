@@ -684,7 +684,7 @@ async def test_record_auxiliary_usage_meters_an_openai_side_call_at_its_price(
         sessionmaker=db_session_factory,
         tenant_id=tenant.id,
         platform_user_id="u1",
-        model_id="gpt-5-mini",
+        model_id="gpt-6-luna",
         input_tokens=100,
         output_tokens=8,
         cache_read_input_tokens=0,
@@ -692,7 +692,7 @@ async def test_record_auxiliary_usage_meters_an_openai_side_call_at_its_price(
         event_id="title",
     )
     rows = await usage_events.list_for_tenant(db_session, tenant_id=tenant.id)
-    assert [(r.model, r.input_tokens, r.output_tokens) for r in rows] == [("gpt-5-mini", 100, 8)], (
+    assert [(r.model, r.input_tokens, r.output_tokens) for r in rows] == [("gpt-6-luna", 100, 8)], (
         "the side call is one usage row on the model it ran on"
     )
     with pytest.raises(KeyError):
