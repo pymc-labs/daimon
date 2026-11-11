@@ -8,6 +8,15 @@ from mux.contracts.completions import CompletionEffort, CompletionResult, Comple
 from mux.contracts.ids import Scope
 from mux.drivers.gemini.transport import provider_call
 
+# Thoughts share the output budget, so a short side call left at the model's
+# default thinking can spend it all and return no text.
+_THINKING: dict[CompletionEffort, types.ThinkingLevel] = {
+    "none": types.ThinkingLevel.MINIMAL,
+    "low": types.ThinkingLevel.LOW,
+    "medium": types.ThinkingLevel.MEDIUM,
+    "high": types.ThinkingLevel.HIGH,
+}
+
 
 class GeminiCompletions:
     def __init__(self, client: Client) -> None:
@@ -27,7 +36,11 @@ class GeminiCompletions:
                 model=model,
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    system_instruction=system, max_output_tokens=max_tokens
+                    system_instruction=system,
+                    max_output_tokens=max_tokens,
+                    thinking_config=None
+                    if effort is None
+                    else types.ThinkingConfig(thinking_level=_THINKING[effort]),
                 ),
             )
         )

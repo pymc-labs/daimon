@@ -578,16 +578,17 @@ def compile_agent(
             result["system_instruction"] = spec.system
         model_request(result)
         return result
+    config: Object = {"type": "antigravity", "model": spec.model.id}
+    if thinking_level is not None:
+        # google-genai 2.7 refuses generation_config beside `agent`: an agent
+        # interaction carries its settings in agent_config (extra items allowed).
+        config["thinking_level"] = thinking_level
     result = {
         "agent": BASE_AGENT,
-        "agent_config": {"type": "antigravity", "model": spec.model.id},
+        "agent_config": config,
         # Omission would enable provider defaults, including billable web tools.
         "tools": [],  # filled below; never sent empty
     }
-    if thinking_level is not None:
-        config: Object = {"type": "antigravity", "model": spec.model.id}
-        config["thinking_level"] = thinking_level
-        result["agent_config"] = config
     if spec.system is not None:
         result["system_instruction"] = spec.system
     if spec.tools is not None or spec.mcp_servers is not None:

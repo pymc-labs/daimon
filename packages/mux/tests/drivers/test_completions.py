@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import httpx
 import pytest
 from google.genai import Client
+from mux.contracts.completions import CompletionEffort
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic.completions import AnthropicCompletions
 from mux.drivers.gemini.completions import GeminiCompletions
@@ -133,3 +134,34 @@ async def test_gemini_completion_bills_thinking_as_output() -> None:
     assert result.text == "Title", "the response text is returned"
     assert result.usage.input_tokens == 20, "cached tokens are split out of the prompt"
     assert result.usage.output_tokens == 10, "thinking tokens bill as output"
+
+
+@pytest.mark.parametrize(("effort", "level"), [("none", "MINIMAL"), ("low", "LOW"), (None, None)])
+async def test_gemini_completion_sends_effort_as_a_thinking_level(
+    effort: CompletionEffort | None, level: str | None
+) -> None:
+    from mux.testing.isolated_sdk import build_gemini_client
+
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [{"content": {"role": "model", "parts": [{"text": "Title"}]}}],
+                "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 2},
+            },
+        )
+
+    client = build_gemini_client(transport=httpx.MockTransport(handler), api_key="offline")
+    result = await GeminiCompletions(client).complete(
+        SCOPE, "gemini-3.5-flash-lite", "sys", "hi", 60, effort
+    )
+    await client.aio.aclose()
+    client.close()
+    assert result.text == "Title", "the reply text comes back"
+    thinking = bodies[0]["generationConfig"].get("thinkingConfig")
+    # google-genai 2.7 sends this one key in snake case; the API reads both.
+    sent = thinking and thinking.get("thinkingLevel", thinking.get("thinking_level"))
+    assert sent == level, "effort maps to a thinking level"
