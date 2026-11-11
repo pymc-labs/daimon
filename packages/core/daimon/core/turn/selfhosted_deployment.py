@@ -558,6 +558,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                         requester_account_id=request.admission.account_id
                         if shared is not None
                         else None,
+                        answering_agent_id=request.admission.agent.id if agent_origin else None,
                     )
 
             async def token_provider() -> str:

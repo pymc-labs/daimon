@@ -482,6 +482,8 @@ async def record_connectors(
 
     A self-hosted harness asks in-process, so only its uncarded credential is
     served, and only connectors without the operator's own harness credential.
+    An uncarded credential naming another record is an agent-origin harness turn
+    (`mint_turn_mcp_authorization`), which reaches that agent's connectors the same way.
     """
     from daimon.core.connector_relay import connectors_of, harness_connectors
     from daimon.core.mux_backend import resource_scope
@@ -494,12 +496,11 @@ async def record_connectors(
     except ProviderError:
         return {}
     in_process = host_calls.gate_path(agent.spec.model.provider) == "in_process"
-    if (
-        derive_agent_uuid(tenant_id=turn.tenant_id, ma_agent_id=agent.ref.id) != turn.agent_id
-        or in_process == turn.carded
+    if derive_agent_uuid(tenant_id=turn.tenant_id, ma_agent_id=agent.ref.id) != turn.agent_id or (
+        turn.carded and in_process
     ):
         return {}
-    return harness_connectors(agent.spec) if in_process else connectors_of(agent.spec)
+    return connectors_of(agent.spec) if turn.carded else harness_connectors(agent.spec)
 
 
 def build_connector_relay(
@@ -510,7 +511,7 @@ def build_connector_relay(
     from daimon.adapters.mcp.tools._own_card import post_own_card
     from daimon.core.agent_record_ports import DAIMON_ID_PREFIXES
     from daimon.core.channel_backend import AgentBackendRefused, load_backend_agent
-    from daimon.core.connector_relay import connectors_of
+    from daimon.core.connector_relay import connectors_of, harness_connectors
     from daimon.core.stores.domain import Role
 
     sessionmaker = runtime.session_factory
@@ -518,8 +519,8 @@ def build_connector_relay(
     async def load_connectors(turn: RelayTurn, origin: TurnOriginRow) -> Mapping[str, Connector]:
         if origin.responder_ma_agent_id.startswith(DAIMON_ID_PREFIXES):
             return await record_connectors(sessionmaker, turn, origin)
-        if not turn.carded:
-            return {}  # A card-capable turn calls its connectors natively.
+        # Uncarded and not a record: a Managed Agents agent answering on its own
+        # self-hosted pick. Only Daimon reads its configuration; the turn never does.
         try:
             agent = await load_backend_agent(
                 runtime.client,
@@ -532,7 +533,7 @@ def build_connector_relay(
         spec = agent.source.spec if agent.source is not None else None
         if spec is None or agent.agent_id != turn.agent_id:
             return {}
-        return connectors_of(spec)
+        return connectors_of(spec) if turn.carded else harness_connectors(spec)
 
     async def token_for(turn: RelayTurn, connector: Connector) -> str | None:
         if runtime.fernet is None:

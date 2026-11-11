@@ -363,6 +363,7 @@ async def mint_turn_mcp_authorization(
     memory_read_only: bool | None = None,
     bind_session: bool = False,
     requester_account_id: uuid.UUID | None = None,
+    answering_agent_id: str | None = None,
 ) -> MintedMcpAuthorization:
     """Register a live agent's token; the host revokes jti in its turn-finally path.
 
@@ -371,7 +372,10 @@ async def mint_turn_mcp_authorization(
     `memory_read_only` binds the token to the
     executing turn's origin, so the server reads that turn's memory as read-only;
     `bind_session` binds it alone, as the connector relay needs. `requester_account_id`
-    marks a shared thread's credential, so the relay hides personal sign-ins."""
+    marks a shared thread's credential, so the relay hides personal sign-ins.
+    `answering_agent_id` names the Daimon agent an agent-origin turn answers as: the
+    origin records that agent, so the credential must too, or every origin-bound tool
+    refuses and the agent's own connectors and tool rules never apply."""
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.mcp_auth import CHAT_TOKEN_TTL, bind_execution_session, mint_chat_mcp_token
     from daimon.core.stores.accounts import get_account_with_tenant
@@ -409,7 +413,7 @@ async def mint_turn_mcp_authorization(
     if memory_read_only and current_execution_origin_id.get() is None:
         raise ScopeViolation(agent.id, "a read-only turn's credential needs its executing origin")
     tenant_id, account_id = uuid.UUID(scope.tenant_id), uuid.UUID(scope.account_id)
-    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=answering_agent_id or agent.id)
     async with sessions() as session, session.begin():
         identity = await get_account_with_tenant(session, account_id=account_id)
         if identity is None or identity.tenant_id != tenant_id:

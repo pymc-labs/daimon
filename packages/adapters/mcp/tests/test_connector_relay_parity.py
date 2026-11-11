@@ -742,3 +742,131 @@ async def test_concurrent_relay_calls_refresh_the_token_once(rig: Rig) -> None:
     )
     assert len(forms) == 1, f"one token-endpoint call: {len(forms)}"
     assert set(tokens) == {"new-at"}, f"every call gets the refreshed token: {tokens}"
+
+
+async def test_an_agent_origin_harness_reply_acts_as_its_own_agent(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """An agent answering on its own self-hosted pick: the credential the harness gets
+    names that agent, as its origin does, so origin-bound tools accept it and the relay
+    serves that agent's own connectors, not the shared harness record's."""
+    from daimon.adapters.mcp.auth.resolver import AuthIdentity
+    from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
+    from daimon.adapters.mcp.connector_relay import record_connectors
+    from daimon.adapters.mcp.runtime import McpRuntime
+    from daimon.adapters.mcp.tools._channel_policy import get_verified_origin
+    from daimon.core.mux_backend import resource_scope
+    from daimon.core.stores.selfhosted_resources import SelfHostedAgents
+    from daimon.core.turn.selfhosted_tools import mint_turn_mcp_authorization
+    from daimon.core.turn_origin import current_execution_origin_id
+    from mux.contracts.ids import Scope
+
+    sessions = committing_sessionmaker
+    rig = await _make_rig(sessions, attended=True)
+    records = SelfHostedAgents(sessions)
+    scope = resource_scope(tenant_id=str(rig.tenant_id), account_id=str(rig.account_id))
+    harness = await records.create(
+        scope,
+        AgentSpec(name="harness", model=ModelRef(provider="selfhosted", id="m")),
+        key="harness",
+    )
+    own = await records.create(
+        scope,
+        AgentSpec(
+            name="researcher",
+            model=ModelRef(provider="openai", id="gpt-5"),
+            tools=(ToolSpec(name=_KEY, kind="mcp_toolset", permission="ask"),),
+            mcp_servers=(MCPConnection(name=_KEY, url=_UP),),
+        ),
+        key="researcher",
+    )
+    now = dt.datetime.now(dt.UTC)
+    async with sessions.begin() as session:
+        origin = await create_origin(
+            session,
+            tenant_id=rig.tenant_id,
+            account_id=rig.account_id,
+            platform="discord",
+            parent_channel_id="channel-1",
+            thread_id="thread-2",
+            responder_ma_agent_id=own.ref.id,
+            responder_name="researcher",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=Role.USER,
+            expires_at=now + dt.timedelta(hours=1),
+            now=now,
+            sender_foreign=False,
+            shared_channel=False,
+            attended=True,
+        )
+    reset = current_execution_origin_id.set(origin.id)
+    try:
+        minted = await mint_turn_mcp_authorization(
+            sessions,
+            scope=Scope(
+                tenant_id=str(rig.tenant_id),
+                account_id=str(rig.account_id),
+                principal_id=_USER,
+                authorization_id="admitted",
+            ),
+            agent=harness.ref,
+            agents=records,
+            secret=_SECRET.encode(),
+            deadline_s=300,
+            now=now,
+            bind_session=True,
+            answering_agent_id=own.ref.id,
+        )
+    finally:
+        current_execution_origin_id.reset(reset)
+    bearer = minted.header.get_secret_value().removeprefix("Bearer ")
+    verifier = DaimonJWTVerifier(secret=_SECRET.encode(), sessionmaker=sessions)
+    access = await verifier.verify_token(bearer)
+    assert access is not None, "the harness credential verifies"
+    turn = relay_turn(access.claims)
+    assert turn is not None and not turn.carded, "an uncarded harness credential"
+    assert turn.agent_id == derive_agent_uuid(tenant_id=rig.tenant_id, ma_agent_id=own.ref.id), (
+        "the credential names the answering agent, not the harness record"
+    )
+    identity = AuthIdentity(
+        account_id=rig.account_id,
+        tenant_id=rig.tenant_id,
+        role=Role.USER,
+        platform="discord",
+        chat_agent_id=turn.agent_id,
+        chat_session_id=turn.chat_session_id,
+        anthropic_disabled=True,
+    )
+    runtime = cast("McpRuntime", type("Runtime", (), {"session_factory": sessions}))
+    verified = await get_verified_origin(runtime, identity, str(origin.id))
+    assert verified is not None and verified.id == origin.id, "origin-bound tools accept it"
+
+    async def load(relayed: RelayTurn, at: Any) -> Mapping[str, Connector]:
+        return await record_connectors(sessions, relayed, at)
+
+    relay = ConnectorRelay(
+        auth=verifier,
+        settings=_settings(),
+        sessionmaker=sessions,
+        public_url=_PUBLIC,
+        load_connectors=load,
+        token_for=lambda _turn, _connector: asyncio.sleep(0, "person-token"),
+        post_card=_no_card,
+        open_session=rig.upstream.open,
+    )
+    app = Starlette(routes=[Route(CONNECTOR_ROUTE, relay.handle, methods=["GET", "POST"])])
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://daimon.example.com"
+    ) as client:
+        listed = await client.post(
+            f"/connectors/{_KEY}",
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            headers={"authorization": f"Bearer {bearer}"},
+        )
+    tools = _result(listed)["tools"]
+    assert [tool["name"] for tool in tools] == ["read", "write"], f"its own connector: {tools}"
+
+
+async def _no_card(_turn: RelayTurn, _origin: object, _row: HostCallCardRow) -> bool:
+    return False
