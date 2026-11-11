@@ -205,6 +205,20 @@ def test_host_policy_keeps_stricter_agent_and_operator_rules():
     )
 
 
+def test_host_policy_asks_publishing_and_rule_tools():
+    from daimon.core.tool_safety import PUBLISH_TOOLS, ToolSafetyPolicy
+    from daimon.core.turn.selfhosted_deployment import host_tool_policy
+
+    host = host_tool_policy(
+        ToolSafetyPolicy(enabled=False),
+        (),
+        asks_before_publishing=True,
+        rule_tools=frozenset({"memory_write"}),
+    )
+    asked = {"call_tool", "memory_write", *PUBLISH_TOOLS}
+    assert {name: host["daimon-mcp/" + name] for name in asked} == dict.fromkeys(asked, "ask")
+
+
 async def test_entra_refresh_failure_is_retryable_and_credential_is_reused(monkeypatch):
     import time
 

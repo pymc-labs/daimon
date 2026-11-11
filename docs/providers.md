@@ -13,7 +13,7 @@ in one conversation.
 | Models | The agent's own model | `gpt-6-luna`, `gpt-6-astra` | `gemini-3.8-flash`, `gemini-4-argon` (priced through 2026-11-30, then refused) | The deployment you name (default `gpt-6.1-sol`) |
 | Set as an agent's model or a thread's | Yes | Yes | Yes | No, only as a channel pin |
 | Shared threads | Yes | Yes, without Daimon's tools | Yes, without Daimon's tools | Not supported |
-| Tools that need a confirmation | Yes | Daimon's Approve card | Daimon's Approve card | Refused when the agent has an `ask` rule |
+| Tools that need a confirmation | Yes | Daimon's Approve card | Daimon's Approve card | Daimon's Approve card |
 | The agent's own MCP connectors | Yes | Through Daimon | Through Daimon | Through Daimon |
 | Sealed channels and Slack DM context | Yes | Yes | Yes | Yes |
 | Multi-agent delegation | Yes | Copies of itself | Copies of itself | Copies of itself |
@@ -36,8 +36,9 @@ never runs it on Anthropic in its place.
   spend limit.
 - **OpenAI:** web search, which it neither prices nor counts.
 - **Self-hosted:** memory, shared threads, routines, effort and a
-  spend limit. It cannot be an agent's model. It needs a channel pin.
-- **OpenAI, Gemini and self-hosted:** an agent with an `ask` rule or a
+  spend limit, workspace export and import. It cannot be an agent's model.
+  It needs a channel pin.
+- **OpenAI and Gemini:** an agent with an `ask` rule or a
   channel-scoped `deny` on a Daimon tool is refused, and so is workspace export
   and import. A connector that OpenAI's size limit cannot hold, or whose tool
   names clash with Gemini's own, is named on the switch card as a loss.

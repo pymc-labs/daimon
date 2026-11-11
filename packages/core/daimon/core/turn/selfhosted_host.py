@@ -370,10 +370,9 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
         raise ScopeViolation(request.thread_id, "self-hosted thread differs from admitted scope")
     if not runtime.price.current_on(request.now().date()):
         raise AdmissionDenied(reason="backend_unsupported")
-    current = await reauthorize(request.deps, request.admission)
     # Seals and Slack context ride the turn credential (`mint_turn_mcp_authorization`).
-    if current.asks_before_publishing or current.daimon_rules_need_driver:
-        raise AdmissionDenied(reason="backend_unsupported")
+    # Publishing and rule asks pause in the harness (`host_tool_policy`) for host approval.
+    current = await reauthorize(request.deps, request.admission)
     request = replace(request, admission=current)
     spec = await runtime.session_plan(request)
     if (

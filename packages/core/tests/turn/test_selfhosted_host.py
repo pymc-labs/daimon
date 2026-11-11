@@ -272,6 +272,18 @@ async def test_a_held_admission_prepares_without_io(composed):
     assert wire.posts == 0 and wire.turns == {}, "preparation sends nothing"
 
 
+@pytest.mark.parametrize("gate", ["asks_before_publishing", "daimon_rules_need_driver"])
+async def test_publishing_and_rule_asks_prepare_for_host_approval(composed, gate):
+    """The harness pauses those calls (`host_tool_policy`); admission no longer refuses."""
+    request, wire, _, _ = composed
+    request = replace(request, admission=replace(request.admission, **{gate: True}))
+
+    prepared = await prepare_selfhosted(request)
+
+    assert prepared.session_ref is not None
+    assert wire.posts == 0
+
+
 async def test_prepare_reuses_same_tenant_bound_session_without_a_turn(composed):
     request, wire, _, _ = composed
     first = await prepare_selfhosted(request)

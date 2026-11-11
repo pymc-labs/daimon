@@ -152,8 +152,8 @@ guarantees are in the
 ## Know the limits
 
 - **Where it applies.** A channel pin only, never an agent's model. It needs
-  one session per caller, so shared threads are refused, as are agents with an
-  `ask` rule or a publishing confirmation.
+  one session per caller, so shared threads are refused. `ask` rules and
+  publishing confirmations pause for Daimon's Approve card.
 - **No memory, effort or spend limit.** A turn is bounded by the
   row's `max_tool_calls` and `deadline_s`. Routines do not run on it.
   Daimon's page-reading tool is available.
