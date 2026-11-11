@@ -173,7 +173,7 @@ def _with_selection(monkeypatch: pytest.MonkeyPatch) -> None:
         return True
 
     monkeypatch.setattr(channel_backend, "backend_selection_enabled", enabled)
-    monkeypatch.setattr(ModelCog, "_thread_pick", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(model_command, "thread_pick_of", AsyncMock(return_value=MagicMock()))
 
 
 async def test_a_cross_provider_pick_shows_what_changes_then_confirms_once(

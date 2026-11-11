@@ -693,6 +693,10 @@ class DaimonBot(commands.Bot):
             self.runtime,
             turn_deps=replace(self.runtime.turn_deps, membership_resolver=self.membership_resolver),
         )
+        # Local import: the re-ask card's module reaches the /model command module.
+        from daimon.adapters.discord.thread_model_reask import with_thread_reask_notifier
+
+        self.runtime = with_thread_reask_notifier(self.runtime, self)
         # The SDK routes slash commands, buttons, and modals before dispatching
         # on_interaction, so filter their gateway payload before those callbacks.
         parse_interaction = self._connection.parsers["INTERACTION_CREATE"]
@@ -1318,6 +1322,9 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.thread_handoff import HandOverButton
 
         self.add_dynamic_items(HandOverButton)
+        from daimon.adapters.discord.thread_model_reask import ReaskConfirmButton
+
+        self.add_dynamic_items(ReaskConfirmButton)
 
         from daimon.adapters.discord.github_connect_button import GitHubConnectButton
 

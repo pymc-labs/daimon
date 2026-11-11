@@ -120,6 +120,68 @@ def _runtime_of(interaction: BotInteraction) -> DiscordRuntime:
     return cast(DiscordRuntime, interaction.client.runtime)  # type: ignore[attr-defined]
 
 
+async def thread_pick_of(
+    interaction: BotInteraction, thread: discord.Thread, *, admin: bool
+) -> ThreadPick | None:
+    """The pick flow for this person in `thread`: their account, rights and agent."""
+    runtime = _runtime_of(interaction)
+    tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
+    if tenant_id is None:
+        return None
+    async with runtime.sessionmaker() as session:
+        principal = await get_or_create_platform_principal(
+            session,
+            tenant_id=tenant_id,
+            platform="discord",
+            external_id=str(interaction.user.id),
+        )
+        await session.commit()
+    subject = build_subject(is_admin=admin, platform_user_id=str(interaction.user.id))
+    actor = channel_backend.BackendActor(
+        tenant_id=tenant_id, account_id=principal.account_id, subject=subject
+    )
+    service = channel_backend.make_backend_service(
+        runtime.sessionmaker,
+        runtime.settings.turn,
+        capture_source=backend_capture.for_agent(
+            runtime.turn_deps, account_id=principal.account_id, subject=subject
+        ),
+    )
+    return await thread_pick_for(
+        service=service,
+        anthropic=runtime.anthropic,
+        sessionmaker=runtime.sessionmaker,
+        settings=runtime.settings,
+        default=runtime.deployment_default,
+        actor=actor,
+        platform="discord",
+        channel_id=str(thread.parent_id),
+        thread_id=str(thread.id),
+        platform_user_id=str(interaction.user.id),
+    )
+
+
+async def may_switch_thread(
+    interaction: BotInteraction, tenant_id: uuid.UUID, thread: discord.Thread
+) -> bool:
+    """Whether this person may start a turn in `thread`, so may switch its model."""
+    runtime = _runtime_of(interaction)
+    parent = thread.parent
+    category_id = getattr(parent, "category_id", None)
+    return await may_choose_thread_model(
+        runtime.sessionmaker,
+        runtime.turn_deps.membership_resolver,
+        tenant_id=tenant_id,
+        platform="discord",
+        user_id=str(interaction.user.id),
+        is_admin=await is_guild_admin(interaction, action=DelegatedAction.MODEL),
+        channel_id=str(thread.parent_id),
+        thread_id=str(thread.id),
+        category_id=str(category_id) if category_id is not None else None,
+        category_unresolved=parent is None,
+    )
+
+
 @app_commands.guild_only()
 class ModelCog(commands.Cog):
     """Per-conversation model choice."""
@@ -148,20 +210,7 @@ class ModelCog(commands.Cog):
                     thread_id=str(thread.id),
                 )
             else:
-                parent = thread.parent
-                category_id = getattr(parent, "category_id", None)
-                if not await may_choose_thread_model(
-                    runtime.sessionmaker,
-                    runtime.turn_deps.membership_resolver,
-                    tenant_id=tenant_id,
-                    platform="discord",
-                    user_id=str(interaction.user.id),
-                    is_admin=await is_guild_admin(interaction, action=DelegatedAction.MODEL),
-                    channel_id=str(thread.parent_id),
-                    thread_id=str(thread.id),
-                    category_id=str(category_id) if category_id is not None else None,
-                    category_unresolved=parent is None,
-                ):
+                if not await may_switch_thread(interaction, tenant_id, thread):
                     raise UserFacingError(_NOT_ALLOWED)
                 text, view = await self._pick(interaction, tenant_id, thread, choice)
             await interaction.edit_original_response(
@@ -193,7 +242,7 @@ class ModelCog(commands.Cog):
             )
             return change.note, None
         admin = await is_guild_admin(interaction, action=DelegatedAction.AGENT_SETTINGS)
-        pick = await self._thread_pick(interaction, thread, admin=admin)
+        pick = await thread_pick_of(interaction, thread, admin=admin)
         if pick is None:
             raise UserFacingError("No agent answers in this conversation yet.")
         value = pick_value(choice)
@@ -222,45 +271,6 @@ class ModelCog(commands.Cog):
         )
         return text, view
 
-    async def _thread_pick(
-        self, interaction: BotInteraction, thread: discord.Thread, *, admin: bool
-    ) -> ThreadPick | None:
-        runtime = _runtime_of(interaction)
-        tenant_id = await resolve_tenant_for_interaction(interaction.client, interaction)
-        if tenant_id is None:
-            return None
-        async with runtime.sessionmaker() as session:
-            principal = await get_or_create_platform_principal(
-                session,
-                tenant_id=tenant_id,
-                platform="discord",
-                external_id=str(interaction.user.id),
-            )
-            await session.commit()
-        subject = build_subject(is_admin=admin, platform_user_id=str(interaction.user.id))
-        actor = channel_backend.BackendActor(
-            tenant_id=tenant_id, account_id=principal.account_id, subject=subject
-        )
-        service = channel_backend.make_backend_service(
-            runtime.sessionmaker,
-            runtime.settings.turn,
-            capture_source=backend_capture.for_agent(
-                runtime.turn_deps, account_id=principal.account_id, subject=subject
-            ),
-        )
-        return await thread_pick_for(
-            service=service,
-            anthropic=runtime.anthropic,
-            sessionmaker=runtime.sessionmaker,
-            settings=runtime.settings,
-            default=runtime.deployment_default,
-            actor=actor,
-            platform="discord",
-            channel_id=str(thread.parent_id),
-            thread_id=str(thread.id),
-            platform_user_id=str(interaction.user.id),
-        )
-
     @model.autocomplete("choice")
     async def _choices(
         self, interaction: BotInteraction, current: str
@@ -276,7 +286,7 @@ class ModelCog(commands.Cog):
             thread = interaction.channel
             if not isinstance(thread, discord.Thread):
                 return legacy
-            pick = await self._thread_pick(interaction, thread, admin=admin)
+            pick = await thread_pick_of(interaction, thread, admin=admin)
             if pick is None:
                 return legacy
             picker = await thread_model_picker(pick)
