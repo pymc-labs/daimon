@@ -3,7 +3,7 @@ import { http, HttpResponse, type HttpHandler } from "msw"
 
 import type {
   AccessChange, AgentRefs, ChannelApprovals, BudgetChange, Channel, ChannelDefaults, ChannelDetail, ChannelHistoryEntry, ChannelList, ChannelSettings, ChannelSwitch,
-  CopyRetire, DefaultAgentChange, EnvironmentChange, KeptAgentChange, PathNode, PinClear, Readers, SkillChange, ThreadClear,
+  CopyRetire, DefaultAgentChange, EnvironmentChange, KeptAgentChange, PathNode, PinClear, PinSet, Readers, SkillChange, ThreadClear,
   ToolRuleChange, WorkspaceAgentChange, Writers,
 } from "@/modules/channels/types"
 import { roster } from "./agents"
@@ -97,6 +97,10 @@ const curve = (total: number, days: number): { key: string; name: null; usd: num
 }
 const ap = (value: ChannelApprovals["value"], source: ChannelApprovals["source"], own: ChannelApprovals["own"] = null): ChannelApprovals =>
   ({ available: true, own, value, source, active: false, editable: true })
+const PIN_CHOICES: ChannelSettings["pin_choices"] = [
+  { value: "openai:gpt-6-luna", label: "GPT-6 Luna", provider: "openai", price: "~$0.10 input / $0.50 output per million tokens" },
+  { value: "openai:gpt-6-astra", label: "GPT-6 Astra", provider: "openai", price: "~$10.00 input / $50.00 output per million tokens" },
+]
 const settingsOf = (c: Stored): ChannelSettings => ({
   participation: sw("off", "deployment"),
   progress_plans: sw("on", "workspace"),
@@ -107,7 +111,8 @@ const settingsOf = (c: Stored): ChannelSettings => ({
     { agent: "clv", tool: "mail/send_email", tool_label: "Send email", server_name: "Mail", rule: "deny", scope: "chat_and_routines", revision: 1 },
     { agent: "retired-analyst", tool: "bigquery/run_query", tool_label: "Run query", server_name: "Bigquery", rule: "allow", scope: "chat", revision: 1 },
   ] : [] },
-  provider_pin: c.id === "c_clv" ? { backend: "openai", model: "gpt-5.5", model_label: null, local: 3 } : null,
+  provider_pin: c.id === "c_clv" ? { backend: "openai", model: "gpt-6-astra", model_label: null, local: 3 } : null,
+  pin_choices: PIN_CHOICES,
   channel_copy: c.id === "c_board" ? { name: "board-desk", agent_id: "agent_board" } : null,
   threads: c.id === "c_general" ? [
     { thread_id: "t_launch", name: "Launch", kind: "progress_plans", value: "off" }, { thread_id: "t_help", name: "Help", kind: "handoff", value: "clv" },
@@ -222,6 +227,18 @@ export const channelsHandlers: HttpHandler[] = [
     const rule = { agent: body.agent, tool: body.tool, tool_label: words(tool), server_name: server ? words(server) : "", rule: body.rule, scope: body.scope ?? "chat", revision: body.expected_revision + 1 }
     s.tool_rules.rules = [...s.tool_rules.rules.filter((r) => r !== prior), rule]
     return changed(c, {}, "tool_rule", prior ?? null, rule)
+  }),
+  http.post("/api/channels/:id/provider-pin", async ({ params, request }) => {
+    const c = find(params.id as string)
+    if (!c) return notFound()
+    const body = (await request.json()) as PinSet
+    const s = settingsFor(c)
+    if ((s.provider_pin?.local ?? null) !== body.expected_local) return stale()
+    const pick = PIN_CHOICES.find((x) => x.value === body.value)
+    if (!pick) return HttpResponse.json({ detail: "That model isn't allowed here." }, { status: 422 })
+    const before = s.provider_pin
+    s.provider_pin = { backend: pick.provider, model: pick.value.split(":")[1] ?? null, model_label: pick.label, local: (before?.local ?? 0) + 1 }
+    return changed(c, {}, "provider_pin", before, s.provider_pin)
   }),
   http.post("/api/channels/:id/provider-pin/clear", async ({ params, request }) => {
     const c = find(params.id as string)
