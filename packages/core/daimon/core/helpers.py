@@ -32,7 +32,7 @@ from daimon.core.context_prompt import TurnContext
 from daimon.core.errors import UserFacingError
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.media.filenames import sanitize_title
-from daimon.core.pricing import provider_prices
+from daimon.core.pricing import ProviderPrice, provider_prices
 from daimon.core.scope import HelperTarget
 from daimon.core.self_helpers import (
     TURN_BUDGET_USD,
@@ -90,6 +90,8 @@ _REFUSALS = {
     "provider_setup_pending": "its model provider is still being set up, so ask again shortly",
 }
 SELF_BUDGET_SPENT = "Your copies used up their spending limit for this message. Answer now."
+SELF_COST_UNKNOWN = "A copy's cost could not be counted, so no more copies can run. Answer now."
+SELF_UNPRICED = "Copies can't run on this model because its price is not known. Answer now."
 
 #: An ask's outcome: its status, its reply, and what its turn cost in US dollars
 #: (None when it could not be priced).
@@ -152,10 +154,14 @@ def helper_message(
     )
 
 
+def _price_of(profile: str, model: str) -> ProviderPrice | None:
+    return provider_prices(profile).get((get_profile(profile).provider, model))
+
+
 def turn_spend(state: TurnState, profile: str, model: str) -> Decimal | None:
     """What a finished helper turn cost at list price, in US dollars; None when unpriceable."""
     provider = get_profile(profile).provider
-    price = provider_prices(profile).get((provider, model))
+    price = _price_of(profile, model)
     if price is None or not isinstance(state.usage_totals, ProviderUsageTotals):
         return None
     cents = priced_cents(state.usage_totals.selected, price, provider)
@@ -183,12 +189,21 @@ class _Desk:
     running: dict[str, asyncio.Task[None]] = field(default_factory=dict[str, asyncio.Task[None]])
     stops: dict[str, list[asyncio.Event]] = field(default_factory=dict[str, list[asyncio.Event]])
     copies: int = 0
-    # What the copies cost so far; an unpriced one counts as over the limit.
+    # The keys of copies running now.
+    lanes: set[str] = field(default_factory=set[str])
+    # What the copies cost so far, and the dearest one: each running copy holds that much
+    # of the budget, so a fan-out cannot start past it. A copy whose cost could not be
+    # counted stops further copies.
     copies_spent: Decimal = Decimal(0)
+    copy_high: Decimal = Decimal(0)
     copies_unpriced: bool = False
 
-    def copies_over_budget(self) -> bool:
-        return self.copies_unpriced or spend_over_cap(float(self.copies_spent), TURN_BUDGET_USD)
+    def copies_refusal(self) -> str | None:
+        """Why the next copy may not start, if it may not."""
+        if self.copies_unpriced:
+            return SELF_COST_UNKNOWN
+        held = self.copies_spent + self.copy_high * (len(self.lanes) + 1)
+        return SELF_BUDGET_SPENT if spend_over_cap(float(held), TURN_BUDGET_USD) else None
 
     async def serve(self) -> None:
         while True:
@@ -196,6 +211,7 @@ class _Desk:
                 if task.done():
                     del self.running[helper_id]
                     self.stops.pop(helper_id, None)
+                    self.lanes.discard(helper_id)
             try:
                 async with self.deps.sessionmaker.begin() as session:
                     claimed = await helper_asks.claim_queued(
@@ -212,11 +228,13 @@ class _Desk:
             for ask in claimed:
                 lane = None
                 if ask.helper_agent_id == self.self_id:
-                    if self.copies_over_budget():
-                        await self._finish(ask, "failed", SELF_BUDGET_SPENT)
+                    refusal = self.copies_refusal()
+                    if refusal is not None:
+                        await self._finish(ask, "failed", refusal)
                         continue
                     self.copies += 1
                     lane = self_helper_thread_key(self.origin.thread_id, self.copies)
+                    self.lanes.add(lane)
                 key = lane or ask.helper_agent_id
                 cancel = asyncio.Event()
                 self.stops[key] = [cancel]
@@ -257,12 +275,26 @@ class _Desk:
             log.warning("helpers.ask_failed", err_type=type(error).__name__, exc_info=error)
             status, reply = "failed", refusal_words(error, ask.helper_name)
         if lane is not None:
-            # A copy that may have spent without a price fails closed: no more copies.
-            if spent is None:
-                self.copies_unpriced = True
-            else:
-                self.copies_spent += spent
+            self._count_copy(lane, spent)
         await self._finish(ask, status, reply)
+
+    def _count_copy(self, lane: str, spent: Decimal | None) -> None:
+        """Add a finished copy's cost; past the budget, the copies still running stop."""
+        # A copy that may have spent without a price fails closed: no more copies.
+        if spent is None:
+            self.copies_unpriced = True
+        else:
+            self.copies_spent += spent
+            self.copy_high = max(self.copy_high, spent)
+        if not self.copies_unpriced and not spend_over_cap(
+            float(self.copies_spent), TURN_BUDGET_USD
+        ):
+            return
+        others = self.lanes - {lane}
+        log.warning("helpers.copies_stopped", running=len(others), unpriced=self.copies_unpriced)
+        for key in others:
+            for event in self.stops.get(key, []):
+                event.set()
 
     async def _finish(self, ask: HelperAskRow, status: HelperAskStatus, reply: str) -> None:
         async with self.deps.sessionmaker.begin() as session:
@@ -284,6 +316,12 @@ class _Desk:
             thread_key=lane or helper_thread_key(asking.thread_id, ask.helper_agent_id),
         )
         admission = await admit_helper(deps, request, call, now=datetime.now(UTC))
+        revision = admission.backend_revision
+        if lane is not None and (
+            revision is None or _price_of(revision.profile, running_on(admission)["model"]) is None
+        ):
+            # Its cost could not be counted toward the copies' budget: it never starts.
+            return "failed", SELF_UNPRICED, Decimal(0)
         prepared = await bind_session(
             deps,
             admission,
@@ -353,7 +391,6 @@ class _Desk:
                 confirm_write=self.confirm_write,
                 provider_action=_in_thread(self.provider_action, asking.thread_id),
             )
-        revision = admission.backend_revision
         spent = (
             turn_spend(outcome.state, revision.profile, running_on(admission)["model"])
             if revision is not None

@@ -11,6 +11,7 @@ import pytest
 from daimon.core import helpers
 from daimon.core.helpers import (
     SELF_BUDGET_SPENT,
+    SELF_COST_UNKNOWN,
     _Desk,  # pyright: ignore[reportPrivateUsage]
     asks_copies,
     helper_message,
@@ -288,10 +289,12 @@ async def test_a_fan_out_of_two_copies_runs_in_parallel_with_distinct_keys(
     assert desk.copies_spent == Decimal("1.0")
 
 
-@pytest.mark.parametrize("spent", [TURN_BUDGET_USD + 1, None])
+@pytest.mark.parametrize(
+    ("spent", "words"), [(TURN_BUDGET_USD + 1, SELF_BUDGET_SPENT), (None, SELF_COST_UNKNOWN)]
+)
 @pytest.mark.usefixtures("fast_poll")
 async def test_the_spend_ceiling_stops_further_copies(
-    db_committing_engine: AsyncEngine, spent: Decimal | None
+    db_committing_engine: AsyncEngine, spent: Decimal | None, words: str
 ) -> None:
     sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     origin = await _desk_origin(sm)
@@ -315,4 +318,45 @@ async def test_the_spend_ceiling_stops_further_copies(
 
     assert calls == ["first"], "an over-limit or unpriced copy stops the next one"
     assert first.status == "done"
-    assert (second.status, second.reply) == ("failed", SELF_BUDGET_SPENT)
+    assert (second.status, second.reply) == ("failed", words), "the refusal says why"
+
+
+@pytest.mark.usefixtures("fast_poll")
+async def test_a_copy_over_the_budget_stops_the_copies_still_running(
+    db_committing_engine: AsyncEngine,
+) -> None:
+    """Parallel copies cannot jointly run past the budget: the rest stop once it is spent."""
+    sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    origin = await _desk_origin(sm)
+    await _ask_self(sm, origin, "dear")
+    await _ask_self(sm, origin, "slow")
+    started = asyncio.Event()
+
+    async def runner(ask: HelperAskRow, cancel: asyncio.Event, lane: str | None):
+        if ask.message == "dear":
+            await asyncio.wait_for(started.wait(), timeout=5)
+            return "done", "ok", TURN_BUDGET_USD + 1
+        started.set()
+        await asyncio.wait_for(cancel.wait(), timeout=5)
+        return "stopped", "stopped", Decimal(0)
+
+    desk = _desk(sm, origin, runner)
+    serving = asyncio.create_task(desk.serve())
+    try:
+        finished = await _settled(sm, origin, 2)
+    finally:
+        serving.cancel()
+        await asyncio.gather(serving, return_exceptions=True)
+        await desk.stop()
+
+    statuses = {ask.message: ask.status for ask in finished}
+    assert statuses == {"dear": "done", "slow": "stopped"}, statuses
+
+
+def test_running_copies_hold_budget_before_another_starts() -> None:
+    """Each running copy holds the dearest copy's cost, so a fan-out cannot start past it."""
+    desk = _desk(cast(Any, None), cast(TurnOriginRow, None), None)
+    desk.copies_spent = desk.copy_high = Decimal(4)
+    assert desk.copies_refusal() is None, "4 spent plus 4 held is under the budget"
+    desk.lanes.add("lane-2")
+    assert desk.copies_refusal() == SELF_BUDGET_SPENT, "4 spent plus 8 held passes it"
