@@ -1382,12 +1382,22 @@ async def _admit_gates(
     # adapter catch sites renders unchanged -- no new error taxonomy. ---
     if agent.archived_at is not None:
         if not daimon_record:
+            from daimon.core.turn.selfhosted_records import names_a_record
+
             deps.resolver_cache.pop((tenant_id, "agent", config.agent_name), None)
             deps.resolver_cache.agents.pop((tenant_id, agent_id), None)
-            async with deps.sessionmaker() as session, session.begin():
-                await clear_agent_references(
-                    session, tenant_id=tenant_id, agent_name=config.agent_name
-                )
+            record_scope = Scope(
+                tenant_id=str(tenant_id),
+                account_id=str(principal.account_id),
+                principal_id=external_user_id,
+                authorization_id="turn-admission",
+            )
+            # A convert archives the Managed Agents copy: the name's references are the record's.
+            if not await names_a_record(deps.sessionmaker, record_scope, config.agent_name):
+                async with deps.sessionmaker() as session, session.begin():
+                    await clear_agent_references(
+                        session, tenant_id=tenant_id, agent_name=config.agent_name
+                    )
         raise MAResolverMissError(kind="agent", tenant_id=tenant_id, daimon_tag=config.agent_name)
     if environment.archived_at is not None:
         deps.resolver_cache.pop((tenant_id, "environment", config.environment_name), None)

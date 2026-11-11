@@ -63,3 +63,16 @@ async def resolve_records(
         agent_facts(agent, tenant_id=scope.tenant_id),
         environment_facts(environment, tenant_id=scope.tenant_id),
     )
+
+
+async def names_a_record(
+    sessionmaker: async_sessionmaker[AsyncSession], scope: Scope, agent_name: str
+) -> bool:
+    """A Daimon record answers to `agent_name`, as one a convert moved off Managed Agents does."""
+    try:
+        await SelfHostedAgents(sessionmaker).resolve(scope, agent_name)
+    except ProviderError as error:
+        if error.category != "not_found":
+            raise
+        return False
+    return True
