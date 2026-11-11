@@ -27,7 +27,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from time import perf_counter
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import structlog
 from anthropic import APIError, APIStatusError
@@ -114,7 +114,7 @@ from daimon.core.stores import agent_backends, mux_state
 from daimon.core.stores.access_policy import PolicyBusyError, load_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.channel_skills import list_channel_skills
-from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, Role
+from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, Platform, Role
 from daimon.core.stores.identity import (
     find_platform_principal,
     get_or_create_platform_principal,
@@ -125,6 +125,7 @@ from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.shared_channels import is_channel_shared, mark_channel_shared
 from daimon.core.stores.thread_sessions import get_thread_session_at
+from daimon.core.thread_model_reask import StaleThread, spawn_thread_reask
 from daimon.core.thread_models import apply_thread_model, conversation_key, thread_backend
 from daimon.core.thread_release import apply_thread_release, release_due, release_now
 from daimon.core.turn.approvals import daimon_rule_set_for
@@ -1475,6 +1476,40 @@ async def _admit_gates(
             return None
         return chosen.thread_id
 
+    def _ask_thread_again() -> bool:
+        """Post the conversation's model card again when its own consent went stale."""
+        chosen = thread_choice
+        notifier = deps.thread_reask_notifier
+        conversation = conversation_key(channel_id=channel_id, thread_id=thread_id, is_dm=is_dm)
+        if (
+            notifier is None
+            or chosen is None
+            or chosen.consent is None
+            or source_agent is None
+            or conversation is None
+        ):
+            return False
+        spawn_thread_reask(
+            sessionmaker=deps.sessionmaker,
+            notifier=notifier,
+            stale=StaleThread(
+                deps=deps,
+                settings=deps.settings,
+                tenant_id=tenant_id,
+                platform=cast(Platform, platform),
+                channel_id=channel_id,
+                thread_id=thread_id,
+                conversation_id=conversation,
+                user_id=external_user_id,
+                admin=effective_admin,
+                source=source_agent,
+                ma_agent_id=agent.id,
+                agent_version=agent.version,
+                consent=chosen.consent,
+            ),
+        )
+        return True
+
     async def verify_origin(
         selection: ResolvedBackend,
         origin: Literal["channel", "agent"],
@@ -1691,7 +1726,9 @@ async def _admit_gates(
                 if stale is not None:
                     _log.info("turn.stale_switch_fallback", provider=stale)
                     backend_revision, backend, source = None, None, "default"
-                    backend_switch_stale = stale
+                    # The conversation's own pick posts its card again; the agent
+                    # offers no switch for it.
+                    backend_switch_stale = None if _ask_thread_again() else stale
                     if follow_generation is not None:
                         # Already on Anthropic: stay in that session, move nothing.
                         retained_revision, follow_generation, backend_follow = 0, None, None
