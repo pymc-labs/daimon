@@ -3,7 +3,8 @@
 Capture measures each source skill once per version (`skill_sizes`); a skill over
 the profile's limit is a named `skill:<name>` loss, never a silent one. The turn
 uploads each remaining skill once per version (`skill_copies`) and attaches the
-copies to its session.
+copies to its session. A skill left out at the turn (a channel's, or one whose
+upload failed) is told to the agent (`missing_skills_notice`).
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from daimon.core.defaults.ma_index import download_skill_version
 from daimon.core.errors import DaimonError
 from daimon.core.skill_zip import MAX_UNCOMPRESSED_BYTES
 from daimon.core.skills.ingest import SkillIngestError, retained_archive_files
+from daimon.core.stores.agent_notices import record_agent_notices
 from daimon.core.stores.domain import SkillCopyRow, SkillSizeRow
 from daimon.core.stores.skill_copies import (
     get_skill_copy,
@@ -32,11 +34,13 @@ from daimon.core.stores.skill_copies import (
     put_skill_copy,
     put_skill_size,
 )
+from daimon.core.turn.agent_notices import missing_skills_notice
 from mux.contracts.ids import Scope, SkillRef
 from mux.contracts.ports import Skills
 from mux.contracts.profile import Profile
 from mux.contracts.resources import AgentSpec, SkillUpload, SkillUploadFile
 from mux.errors import MuxError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -66,7 +70,11 @@ def skill_drop(row: SkillSizeRow) -> str:
 def fitting_skills(
     profile: Profile, pins: Sequence[SkillRef], sizes: Mapping[tuple[str, str], SkillSizeRow]
 ) -> tuple[SkillRef, ...]:
-    """The measured pins the profile installs, in order, together within `combined_bytes`."""
+    """The measured pins the profile installs, in order, together within `combined_bytes`.
+
+    The skills get all of it: a deployment that installs them mounts no other
+    inline files (`GeminiPlan.deployment` and admission refuse file sources).
+    """
     combined = profile.skill_limits.combined_bytes if profile.skill_limits else None
     kept: list[SkillRef] = []
     used = 0
@@ -213,8 +221,12 @@ async def copy_skills(
     provider: str,
     account_scope_id: str,
     pins: tuple[SkillRef, ...],
-) -> tuple[SkillRef, ...]:
-    """The provider's copy of each source skill version, uploading a version only once."""
+) -> tuple[tuple[SkillRef, ...], tuple[str, ...]]:
+    """The provider's copy of each source skill version, uploading a version only once.
+
+    Also returns a named `skill:<id>` loss for each pin that could not be copied:
+    one bad archive or refused upload costs that skill alone, never the reply.
+    """
 
     async def copy(pin: SkillRef) -> SkillRef:
         if pin.version in (None, "latest"):
@@ -262,8 +274,16 @@ async def copy_skills(
                 )
         return SkillRef(id=row.copy_id, version=row.copy_version)
 
+    copies: list[SkillRef] = []
+    losses: list[str] = []
     # One at a time: a provider's local record store may take a single writer.
-    return tuple([await copy(pin) for pin in pins])
+    for pin in pins:
+        try:
+            copies.append(await copy(pin))
+        except (AnthropicError, DaimonError, MuxError, ValueError) as error:
+            log.warning("session_skills.copy_failed", skill_id=pin.id, error=type(error).__name__)
+            losses.append(f"skill:{pin.id}")
+    return tuple(copies), tuple(losses)
 
 
 async def latest_version(anthropic: AsyncAnthropic, scope: Scope, attached: SkillRef) -> str:
@@ -289,16 +309,16 @@ async def latest_version(anthropic: AsyncAnthropic, scope: Scope, attached: Skil
 
 async def channel_session_skills(
     request: ProviderPreparationRequest, profile: Profile, scope: Scope
-) -> tuple[SkillRef, ...]:
-    """The channel's custom skills a channel-origin template installs.
+) -> tuple[tuple[SkillRef, ...], tuple[str, ...]]:
+    """The channel's custom skills a channel-origin template installs, and those left out.
 
     It has no capture, so they are measured here; one over the profile's limits,
-    or unreadable, is left out and logged.
+    or unreadable, is a named `skill:` loss.
     """
     deps, skills = request.deps, request.admission.channel_skills
     custom = tuple(s for s in skills if s.type == "custom")
     if not custom or not attaches_session_skills(profile):
-        return ()
+        return (), ()
 
     async def pin(skill: MaSkill) -> SkillRef | None:
         attached = SkillRef(id=skill.skill_id, version=skill.version, source="custom")
@@ -315,7 +335,11 @@ async def channel_session_skills(
             return None
         return SkillRef(id=skill.skill_id, version=version)
 
-    pins = tuple(p for p in await asyncio.gather(*(pin(s) for s in custom)) if p is not None)
+    resolved = await asyncio.gather(*(pin(s) for s in custom))
+    pins = tuple(p for p in resolved if p is not None)
+    unresolved = tuple(
+        f"skill:{s.skill_id}" for s, p in zip(custom, resolved, strict=True) if p is None
+    )
     sizes = await measure_skills(
         deps.sessionmaker,
         deps.anthropic,
@@ -324,9 +348,7 @@ async def channel_session_skills(
         pins=((p.id, str(p.version)) for p in pins),
     )
     kept = fitting_skills(profile, pins, sizes)
-    if left := skill_losses(pins, sizes, kept):
-        log.warning("session_skills.left_out", tenant_id=str(request.tenant_id), skills=list(left))
-    return kept
+    return kept, (*unresolved, *skill_losses(pins, sizes, kept))
 
 
 async def turn_session_skills(
@@ -351,17 +373,40 @@ async def turn_session_skills(
             represented_source(source, request.target_spec) if source is not None else None
         )
         pins = represented.session_skills if represented is not None else ()
+        left: tuple[str, ...] = ()
     else:
-        pins = await channel_session_skills(request, profile, scope)
-    if not pins:
-        return ()
-    return await copy_skills(
-        request.deps.sessionmaker,
-        request.deps.anthropic,
-        skills(),
-        scope=scope,
-        tenant_id=request.tenant_id,
-        provider=profile.provider,
-        account_scope_id=account_scope_id,
-        pins=pins,
-    )
+        pins, left = await channel_session_skills(request, profile, scope)
+    copies: tuple[SkillRef, ...] = ()
+    if pins:
+        copies, failed = await copy_skills(
+            request.deps.sessionmaker,
+            request.deps.anthropic,
+            skills(),
+            scope=scope,
+            tenant_id=request.tenant_id,
+            provider=profile.provider,
+            account_scope_id=account_scope_id,
+            pins=pins,
+        )
+        left = (*left, *failed)
+    if left:
+        await _tell_missing_skills(request, left)
+    return copies
+
+
+async def _tell_missing_skills(request: ProviderPreparationRequest, losses: Sequence[str]) -> None:
+    """Queue the agent a notice naming the skills its session goes without."""
+    names = sorted({loss.removeprefix("skill:") for loss in losses})
+    log.warning("session_skills.left_out", tenant_id=str(request.tenant_id), skills=names)
+    try:
+        async with request.deps.sessionmaker.begin() as db:
+            await record_agent_notices(
+                db,
+                tenant_id=request.tenant_id,
+                platform=request.platform,
+                thread_id=request.thread_id,
+                agent_id=request.admission.agent.id,
+                texts=[missing_skills_notice(names)],
+            )
+    except SQLAlchemyError as error:  # the notice is advisory; never block the reply
+        log.warning("session_skills.notice_failed", error=type(error).__name__)

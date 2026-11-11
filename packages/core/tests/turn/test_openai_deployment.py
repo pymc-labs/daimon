@@ -10,12 +10,15 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import httpx
 import pytest
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings, TurnSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.agent_notices import take_agent_notices
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn import openai_host
 from daimon.core.turn.admission import Admission
@@ -511,9 +514,11 @@ async def test_a_channels_own_deployment_attaches_its_channel_skills(
             )
     copied: list[tuple[SkillRef, ...]] = []
 
-    async def copy(*_: object, pins: tuple[SkillRef, ...], **__: object) -> tuple[SkillRef, ...]:
+    async def copy(
+        *_: object, pins: tuple[SkillRef, ...], **__: object
+    ) -> tuple[tuple[SkillRef, ...], tuple[str, ...]]:
         copied.append(pins)
-        return tuple(SkillRef(id=f"copy-{pin.id}", version="1") for pin in pins)
+        return tuple(SkillRef(id=f"copy-{pin.id}", version="1") for pin in pins), ()
 
     monkeypatch.setattr(session_skills, "copy_skills", copy)
     channel = tuple(
@@ -526,3 +531,54 @@ async def test_a_channels_own_deployment_attaches_its_channel_skills(
     plan = await runtime.session_plan(request)
     assert copied == [(SkillRef(id="skill_team", version="7"),)], "only the one that fits"
     assert plan.skills == (SkillRef(id="copy-skill_team", version="1"),), "attached per session"
+    async with application.deps.sessionmaker.begin() as db:
+        notices = await take_agent_notices(
+            db,
+            tenant_id=TENANT,
+            platform="slack",
+            thread_id="thread",
+            agent_id=request.admission.agent.id,
+            since=datetime.now(UTC) - timedelta(minutes=1),
+        )
+    assert len(notices) == 1 and "`skill_huge`" in notices[0], "the agent hears what is missing"
+
+
+async def test_copy_skills_when_one_archive_is_bad_then_copies_the_rest_and_names_it(
+    application: ProviderPreparationRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused or unreadable skill is a named loss of that skill alone, never a failed reply."""
+    import io
+    import zipfile
+
+    from daimon.core.turn import session_skills
+    from mux.contracts.ids import SkillRef
+
+    async with application.deps.sessionmaker() as db, db.begin():
+        await make_tenant(db, id=TENANT)
+    good = io.BytesIO()
+    with zipfile.ZipFile(good, "w") as archive:
+        archive.writestr("SKILL.md", "---\nname: team\ndescription: d\n---\nbody")
+
+    async def download(_: object, *, skill_id: str, **__: object) -> bytes:
+        return good.getvalue() if skill_id == "skill_team" else b"not an archive"
+
+    class Created(SimpleNamespace):
+        pass
+
+    class Skills:
+        async def create(self, *_: object, **__: object) -> Created:
+            return Created(id="copy-team", latest_version=Created(version="1"))
+
+    monkeypatch.setattr(session_skills, "download_skill_version", download)
+    copies, losses = await session_skills.copy_skills(
+        application.deps.sessionmaker,
+        application.deps.anthropic,
+        cast(Any, Skills()),
+        scope=SCOPE,
+        tenant_id=TENANT,
+        provider="openai",
+        account_scope_id="project",
+        pins=(SkillRef(id="skill_bad", version="7"), SkillRef(id="skill_team", version="7")),
+    )
+    assert copies == (SkillRef(id="copy-team", version="1"),), "the readable skill still copies"
+    assert losses == ("skill:skill_bad",), "the bad one is named, not raised"
