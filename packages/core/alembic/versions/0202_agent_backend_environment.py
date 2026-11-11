@@ -2,7 +2,9 @@
 
 `environment` is the self-hosted environment record (`sh_env_...`) the agent
 runs in; null everywhere else. Downgrading deletes self-hosted agent revisions
-(they would violate the narrower check) and drops the column.
+(they would violate the narrower check) and drops the column. A later revision
+whose `previous_local` named a deleted one is pointed past it first, so a revert
+lands on the choice before it.
 
 downgrade: destructive
 """
@@ -33,8 +35,21 @@ def upgrade() -> None:
     )
 
 
+_SKIP_DELETED = """
+UPDATE agent_backend_revision AS r SET previous_local = p.previous_local
+FROM agent_backend_revision AS p
+WHERE p.tenant_id = r.tenant_id AND p.agent_id = r.agent_id
+  AND p.local = r.previous_local AND p.backend = 'selfhosted'
+  AND r.backend IS DISTINCT FROM 'selfhosted'
+"""
+
+
 def downgrade() -> None:
     op.drop_constraint("ck_agent_backend_environment", "agent_backend_revision", type_="check")
+    bind = op.get_bind()
+    # Each pass moves a pointer one deleted revision further back; chains are short.
+    while bind.execute(sa.text(_SKIP_DELETED)).rowcount:
+        pass
     op.execute("DELETE FROM agent_backend_revision WHERE backend = 'selfhosted'")
     op.drop_constraint("ck_agent_backend_provider", "agent_backend_revision", type_="check")
     op.create_check_constraint(
