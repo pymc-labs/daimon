@@ -38,7 +38,7 @@ def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> McpRuntime:
         McpRuntime,
         SimpleNamespace(
             session_factory=sessionmaker,
-            settings=SimpleNamespace(outbound=OutboundSettings()),
+            settings=SimpleNamespace(outbound=OutboundSettings(), features={}),
             teams_client=None,
         ),
     )

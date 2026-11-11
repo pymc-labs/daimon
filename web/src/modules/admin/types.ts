@@ -55,10 +55,6 @@ export type Access = {
   people: { id: string; name: string }[] | null
   /** Allowed ids of people the web app doesn't list. */
   others: number
-  /** Null where the workspace's chat platform has no such setting. */
-  dm_enabled: boolean | null
-  dm_memory_read_only: boolean | null
-  plain_text_mentions: boolean | null
 }
 
 export type Providers = {
@@ -69,7 +65,6 @@ export type Providers = {
 }
 
 export type WorkspaceSettings = {
-  modules: Record<"chat" | "agents" | "channels" | "routines" | "credits" | "integrations", boolean>
   default_agent: string
   access: Access
   /** Null where choosing providers is switched off. */
@@ -77,12 +72,8 @@ export type WorkspaceSettings = {
 }
 
 export type SettingsPatch = {
-  modules?: WorkspaceSettings["modules"]
   default_agent?: string
   invokers?: { everyone: boolean; people: string[] }
-  dm_enabled?: boolean
-  dm_memory_read_only?: boolean
-  plain_text_mentions?: boolean
   providers?: string[] | "default"
 }
 

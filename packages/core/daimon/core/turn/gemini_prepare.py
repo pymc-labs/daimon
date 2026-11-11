@@ -14,7 +14,6 @@ from uuid import NAMESPACE_URL, uuid5
 
 import structlog
 from daimon.core.mux_backend import TurnRuntime
-from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.pricing import ProviderPrice, provider_cost_of
 from daimon.core.session_compat import ReplaceSession
 from daimon.core.shared_threads import shared_owner
@@ -314,18 +313,6 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     ):
         raise UnsupportedCapability(("gemini_changed_admission",), PROFILE)
 
-    footer_cost = (
-        NativeFooterCostContext(
-            request.deps.sessionmaker,
-            scope,
-            binding,
-            session_ref,
-            request.deps.markup,
-        )
-        if request.admission.shown("native_footer_cost", request.platform)
-        else None
-    )
-
     async def record(*, observation: UsageObservation) -> bool:
         if observation.session != session_ref or observation.model is None:
             raise ScopeViolation(observation.id, "Gemini billing received foreign usage")
@@ -352,13 +339,6 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             agent_id=current.agent.id,
         )
 
-        if footer_cost is not None:
-            footer_cost.note(
-                observation,
-                price=price,
-                infrastructure_usd=usage.infrastructure_usd,
-                settled=settled,
-            )
         await _settle_hold(usage.accounting, observation, price)
         return settled
 
@@ -373,7 +353,6 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         _record=record,
         backend=backend,
         session_ref=session_ref,
-        native_footer_cost=footer_cost,
         runtime=runtime if admission.backend_revision_origin == "agent" else None,
         # Revokes a per-turn MCP credential however the turn ends.
         _finalize=runtime.end_of_turn,

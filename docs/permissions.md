@@ -146,21 +146,21 @@ even where the rule does not name the channel.
 
 ## Approval overrides
 
-Admins can choose whether attended chat asks before a third-party MCP write,
-for the server, a channel or a thread. Each takes ask, allow writes or
+Admins choose whether attended chat asks before a third-party MCP write, per
+server, channel or thread. Each takes ask, allow writes or
 inherit, and the most specific choice wins. An inherited server default asks.
-Overrides work only while both `DAIMON_TOOL_SAFETY__ENABLED` and
-[`DAIMON_TOOL_SAFETY__ALLOW_GATE_OVERRIDES`](configuration.md#daimon_tool_safety__allow_gate_overrides)
-are on.
+They apply while `DAIMON_TOOL_SAFETY__ENABLED` is on.
 
 Only platform admins change them, in `/settings` (`settings` on Teams), the
-web app, or by asking Daimon behind an Approve card. Each change rechecks their
-standing live. On Slack, ask Daimon in a thread to set that thread.
+web app, or by asking Daimon behind an Approve card, and each change rechecks
+their standing live. On Slack, ask Daimon in a thread.
 
-An override relaxes only an ordinary third-party write. Deny and `ask` rules
+An override relaxes only a third-party write. Deny and `ask` rules
 still apply, and Daimon's own confirmed actions, publishing and permission
-changes always ask. DMs and unattended turns ignore overrides. An unreadable
-setting asks.
+changes always ask. Allow writes covers chat replies only; DMs ignore it, and
+routines and watches follow the
+[unattended rule](configuration.md#daimon_tool_safety__unattended_writes). An
+unreadable setting asks.
 
 > **Warning:** Older builds cannot read a policy with saved overrides and
 > refuse that server's turns. Before rolling back, set every saved override to

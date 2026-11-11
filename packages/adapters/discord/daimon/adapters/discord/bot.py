@@ -7,7 +7,7 @@ import contextlib
 import functools
 import io
 import uuid
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -44,7 +44,6 @@ from daimon.adapters.discord.gating import (
     HintCooldown,
     is_participation_candidate,
     is_plain_text_mention_candidate,
-    is_unmentioned_reply_hint_candidate,
     should_process_message,
 )
 from daimon.adapters.discord.lifecycle import (
@@ -73,7 +72,6 @@ from daimon.adapters.discord.provider_actions import (
     discord_provider_action_hook,
     provider_action_options,
 )
-from daimon.adapters.discord.queue_card import queue_card_ticket, tenant_slot_waiter
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.startup_replay import completed_orphan_text
@@ -145,11 +143,9 @@ from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.output_delivery import NoticedFiles
 from daimon.core.output_runtime import OutputRuntime
 from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
-from daimon.core.permissions import channel_permissions
 from daimon.core.platform_words import words_for
 from daimon.core.posted_controls.lifecycle import drain_card_edits
 from daimon.core.routine_delivery import resolve_routine_identity, run_delivery_poller
-from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.discord_message_admissions import (
     claim_message,
@@ -316,43 +312,6 @@ _TURN_CARD_RECOVERY_CONCURRENCY = 4
 
 
 THREAD_OPENING_REACTION = "⌛"
-
-
-def _positive_discord_id(value: object) -> bool:
-    return isinstance(value, int) and value > 0
-
-
-class _WritersNoneNoticeLimiter:
-    """Bound attempts before I/O, on the single posting owner; not a distributed lease."""
-
-    MAX_ENTRIES = 2048
-
-    def __init__(self) -> None:
-        self._until: dict[tuple[str, ...], float] = {}
-        self._attempts: deque[float] = deque()
-
-    def reserve(
-        self, *, tenant: str, channel: str, requester: str, message: str, now: float
-    ) -> bool:
-        # No await: concurrent handlers reserve before either can perform I/O.
-        self._until = {key: expiry for key, expiry in self._until.items() if expiry > now}
-        while self._attempts and self._attempts[0] <= now - 60:
-            self._attempts.popleft()
-        limits = (
-            (("requester", tenant, channel, requester), 300),
-            (("channel", tenant, channel), 30),
-            (("message", tenant, message), 300),
-        )
-        if (
-            len(self._attempts) >= 10
-            or any(key in self._until for key, _ in limits)
-            or len(self._until) + len(limits) > self.MAX_ENTRIES
-        ):
-            return False
-        for key, ttl in limits:
-            self._until[key] = now + ttl
-        self._attempts.append(now)
-        return True
 
 
 async def _open_thread_with_notice(
@@ -663,9 +622,6 @@ class _TurnFailureSurface:
 _PARTICIPATION_BATCH_MAX_MESSAGES: Final[int] = BATCH_MAX_MESSAGES
 _PARTICIPATION_BATCH_MAX_QUIET_PERIODS: Final[int] = BATCH_MAX_QUIET_PERIODS
 
-#: The reaction on an unmentioned reply in a thread daimon opened: only a
-#: mention starts a turn. A reaction, not a message, so the hint stays quiet.
-UNMENTIONED_REPLY_HINT_EMOJI: Final[str] = "🔔"
 PROTECTED_CHANNEL_REACTION: Final[str] = "🔒"
 
 
@@ -797,12 +753,6 @@ class DaimonBot(commands.Bot):
         # Built on first use, not here: it needs `self.user`, which the gateway
         # only supplies once the bot is ready.
         self._participant: ThreadParticipant | None = None
-        # Unmentioned-reply hint: thread id -> when it was last shown there.
-        self._unmentioned_hint_cooldown = HintCooldown(
-            runtime.settings.discord.unmentioned_reply_hint_cooldown_h * 3600
-            if runtime.settings.discord is not None
-            else 1.0
-        )
         # Mentions replayed at startup: never told about a protected channel.
         self._replayed_message_ids: set[int] = set()
         # Messages already given the 🔒: never a second one (bounded, oldest out).
@@ -2843,7 +2793,12 @@ class DaimonBot(commands.Bot):
         assert message.guild is not None
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(message.guild.id))
         # A failed read leaves the message unaddressed, as with the switch off.
-        place = FeaturePlace.of(tenant_id, "discord", str(message.channel.id))
+        # A thread's setting lives under its parent channel; its own id is no channel.
+        channel = message.channel
+        if isinstance(channel, discord.Thread):
+            place = FeaturePlace.of(tenant_id, "discord", str(channel.parent_id), str(channel.id))
+        else:
+            place = FeaturePlace.of(tenant_id, "discord", str(channel.id))
         enabled = (
             await place_feature(
                 self.runtime.sessionmaker, self.runtime.settings, place, "plain_text_mentions"
@@ -2856,78 +2811,6 @@ class DaimonBot(commands.Bot):
                 channel_id=str(message.channel.id),
             )
         return enabled
-
-    async def _maybe_hint_unmentioned_reply(
-        self, message: discord.Message, *, bot_mentioned: bool
-    ) -> None:
-        """React once to a person's unmentioned reply in a thread daimon opened.
-
-        Such a reply starts no turn, by design. Without a sign, people read the
-        silence as daimon ignoring them and re-mention it in the channel, which
-        opens a sibling thread with none of this one's context. The reaction
-        says "mention me to continue" without a message: once per thread per
-        cooldown, not while the thread is followed, where the reply may still
-        be answered unprompted, and not where the agent may not post. Best
-        effort: a failure is logged only, and never shows the hint.
-        """
-        discord_settings = self.runtime.settings.discord
-        if discord_settings is None or self.user is None or message.guild is None:
-            return
-        thread = message.channel
-        if not isinstance(thread, discord.Thread):
-            return
-        hint_tenant = derive_tenant_uuid(platform="discord", workspace_id=str(message.guild.id))
-        if not is_unmentioned_reply_hint_candidate(
-            enabled=await self._feature_on(
-                "unmentioned_reply_hint",
-                hint_tenant,
-                str(thread.parent_id) if thread.parent_id else None,
-            ),
-            author_is_bot=message.author.bot,
-            author_is_webhook=isinstance(message.webhook_id, int),
-            bot_mentioned=bot_mentioned,
-            in_bot_owned_thread=thread.owner_id == self.user.id,
-            mentions_someone_else=(
-                message.mention_everyone
-                or bool(message.role_mentions)
-                or any(user.id != self.user.id for user in message.mentions)
-            ),
-            is_plain_message=message.type
-            in (discord.MessageType.default, discord.MessageType.reply),
-        ):
-            return
-        thread_id = thread.id
-        if thread_id in self._processing or thread_id in self._participation_pending:
-            return  # a turn is running or deciding here; this message may yet be read
-        now = asyncio.get_running_loop().time()
-        if not self._unmentioned_hint_cooldown.claim(thread_id, now=now):
-            return
-        tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(message.guild.id))
-        try:
-            responder = self._thread_participant(
-                bot_user_id=self.user.id, bot_display_name=discord_settings.bot_display_name
-            )
-            resolved = await responder.resolve(tenant_id=tenant_id, thread=thread)
-            if resolved.on:
-                self._unmentioned_hint_cooldown.release(thread_id)
-                return
-            # A reaction is a post: where the agent may not write (or that
-            # can't be established), it stays silent like every other notice.
-            post_state = await _channel_protection_state(
-                self.runtime.sessionmaker, tenant_id=tenant_id, channel=thread
-            )
-            if not post_state.may_post:
-                self._unmentioned_hint_cooldown.release(thread_id)
-                return
-            await message.add_reaction(UNMENTIONED_REPLY_HINT_EMOJI)
-        except Exception as exc:  # cosmetic hint: never surfaces, never retries
-            log.warning(
-                "unmentioned_reply_hint.failed",
-                thread_id=str(thread_id),
-                err_type=type(exc).__name__,
-            )
-            return
-        log.info("unmentioned_reply_hint.shown", thread_id=str(thread_id))
 
     async def _signal_protected_channel(self, message: discord.Message) -> None:
         """Tell a mentioner, quietly, why a Who-can-post-Nobody place stays silent.
@@ -3026,77 +2909,6 @@ class DaimonBot(commands.Bot):
         remember_guild_channels(
             self.runtime.sessionmaker, guild_id=interaction.guild_id, channels=[interaction.channel]
         )
-
-    async def _notice_writers_none(self, message: discord.Message, tenant_id: uuid.UUID) -> None:
-        """Opted-in, non-content host signal; never authorizes a post or a turn."""
-        settings = self.runtime.settings.discord
-        if (
-            settings is None
-            or self.wake_poller_enabled is not True
-            or self.user is None
-            or message.guild is None
-            or derive_tenant_uuid(platform="discord", workspace_id=str(message.guild.id))
-            != tenant_id
-            or not any(user.id == self.user.id for user in message.mentions)
-            or not should_process_message(
-                author_is_bot=message.author.bot,
-                author_id=str(message.author.id),
-                bot_mentioned=True,
-                author_is_webhook=isinstance(message.webhook_id, int),
-                guild_id=str(message.guild.id),
-                self_user_id=str(self.user.id),
-                qa_bot_user_ids=settings.qa_bot_user_ids,
-            )
-            or not await self._feature_on("writers_none_notice", tenant_id, str(message.channel.id))
-        ):
-            return
-        channel = message.channel
-        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
-            return
-        if channel.guild.id != message.guild.id:
-            return
-        parent_id = channel.parent_id if isinstance(channel, discord.Thread) else channel.id
-        if not all(
-            _positive_discord_id(value)
-            for value in (channel.id, parent_id, message.id, message.author.id)
-        ):
-            return
-        limiter = getattr(self, "_writers_none_notice_limiter", None)
-        if not isinstance(limiter, _WritersNoneNoticeLimiter):
-            limiter = _WritersNoneNoticeLimiter()
-            self._writers_none_notice_limiter = limiter
-        if not limiter.reserve(
-            tenant=str(tenant_id),
-            channel=str(parent_id),
-            requester=str(message.author.id),
-            message=str(message.id),
-            now=monotonic(),
-        ):
-            return
-        try:
-            async with asyncio.timeout(3):
-                async with self.runtime.sessionmaker() as session:
-                    policy = await load_access_policy(session, tenant_id=tenant_id)
-                category_id, _ = await _resolve_category(channel, fetch=False)
-                # Unresolved-category protection is conservative, not evidence
-                # of a real writers=none rule at this origin. Never fetch here.
-                confirmed = (
-                    channel_permissions(
-                        policy,
-                        channel_id=str(channel.id),
-                        parent_channel_id=(
-                            str(parent_id) if isinstance(channel, discord.Thread) else None
-                        ),
-                        category_id=category_id,
-                        category_unresolved=False,
-                    ).writers
-                    == "none"
-                )
-                if confirmed:
-                    await message.add_reaction("⛔")
-        except Exception as exc:
-            # Keep the reservation on failure: no retry or fallback post/DM.
-            log.warning("discord.writers_none_notice_failed", error_type=type(exc).__name__)
 
     async def on_message(
         self,
@@ -3238,8 +3050,6 @@ class DaimonBot(commands.Bot):
                 guild_id=str(message.guild.id) if message.guild else None,
             ):
                 await self._maybe_participate(message)
-            if not startup_replay:
-                await self._maybe_hint_unmentioned_reply(message, bot_mentioned=bot_mentioned)
             return
         assert message.guild is not None
         guild = message.guild
@@ -3276,17 +3086,7 @@ class DaimonBot(commands.Bot):
             )
             # Only a rule we could read says "not allowed here"; an unknown
             # state stays fully silent, and a replayed backlog is not re-told.
-            # The explicit writers_none_notice opt-in keeps its own static
-            # reaction instead, so one mention never gets both signals.
-            if (
-                post_state is ProtectionState.PROTECTED
-                and self.wake_poller_enabled is True
-                and await self._feature_on(
-                    "writers_none_notice", tenant_id, str(message.channel.id)
-                )
-            ):
-                await self._notice_writers_none(message, tenant_id)
-            elif post_state is ProtectionState.PROTECTED and not startup_replay:
+            if post_state is ProtectionState.PROTECTED and not startup_replay:
                 await self._signal_protected_channel(message)
             return
         claimed_message = False
@@ -3414,12 +3214,7 @@ class DaimonBot(commands.Bot):
                 await message.channel.send(embed=build_notice_embed(GLOBAL_CAP_NOTICE))
                 return
 
-            with (
-                holding(ticket),
-                queue_card_ticket(ticket, cap=cap)
-                if await self._feature_on("waiting_card", tenant_id)
-                else contextlib.nullcontext(),
-            ):
+            with holding(ticket):
                 # Channel-level mentions each open their own thread + MA session, so
                 # they run in parallel — no serialization (bounded by the
                 # per-tenant and optional process-wide slots claimed above).
@@ -5270,20 +5065,14 @@ class DaimonBot(commands.Bot):
             target = thread or message.channel
             if err.reason == "writers_none":
                 # Nothing is posted into a protected channel, a refusal
-                # included; the author gets the quiet signal instead (or, under
-                # the explicit opt-in, only its static host reaction).
+                # included; the author gets the quiet signal instead.
                 log.info(
                     "turn.skipped.writers_none",
                     guild_id=guild_id,
                     channel_id=parent_channel_id,
                     user_id=str(message.author.id),
                 )
-                if self.wake_poller_enabled is True and await self._feature_on(
-                    "writers_none_notice", tenant_id, parent_channel_id
-                ):
-                    await self._notice_writers_none(message, tenant_id)
-                else:
-                    await self._signal_protected_channel(message)
+                await self._signal_protected_channel(message)
             elif err.reason == "invoker_not_allowed":
                 log.info(
                     "turn.skipped.invoker_not_allowed",
@@ -5517,8 +5306,6 @@ class DaimonBot(commands.Bot):
         self._thread_stops.watch(thread.id, cancel)
         self._typed_stops.watch(thread.id, requester_id=message.author.id, cancel=cancel)
 
-        waiting_card = await self._feature_on("waiting_card", tenant_id)
-
         def _make_lifecycle(
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
         ) -> DiscordTurnLifecycle:
@@ -5550,9 +5337,6 @@ class DaimonBot(commands.Bot):
                 on_first_post=on_first_post,
                 on_replacement=lambda msg: recorder.message(
                     thread, msg, turn_card_intent_id=turn_id
-                ),
-                waiting_for_tenant_slot=(
-                    tenant_slot_waiter(self.turn_queue, tenant_id) if waiting_card else None
                 ),
             )
 
@@ -5610,7 +5394,6 @@ class DaimonBot(commands.Bot):
         # max wait is a safeguard that ends the card with the ordinary error.
         # The ⌛ add and remove are background tasks, never awaited here, so a
         # slow reaction call cannot hold up Stop, the max wait or a granted slot.
-        # Queue wording on the card itself stays opt-in (tenant_cap_waiting_card).
         assert self.runtime.settings.discord is not None
         marked: list[asyncio.Task[None]] = []
 
@@ -5659,9 +5442,6 @@ class DaimonBot(commands.Bot):
                 no_post_confirmed=not lifecycle.first_post_attempted,
             )
             return
-
-        if waiting_card:
-            await lifecycle.on_slot_started()
 
         # The per-turn ceiling clock starts here, once admission
         # has passed and the turn holds its slot, and covers session

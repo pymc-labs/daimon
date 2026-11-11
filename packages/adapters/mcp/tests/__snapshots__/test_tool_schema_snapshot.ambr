@@ -4405,7 +4405,7 @@
     }),
     'get_settings': dict({
       'description': '''
-        Report this conversation's settings (every registered feature).
+        Report this conversation's settings (features set up here or with a saved value).
         <blank line>
         Each lists its own value at the workspace, agent, channel and thread levels of where
         you are, what is in effect, which level decided it (``source``: ``default``,

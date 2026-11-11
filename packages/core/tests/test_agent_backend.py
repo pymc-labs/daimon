@@ -446,7 +446,7 @@ async def test_downgrade_prior_reader_accepts_real_nondefault_allowlist_write(ow
     assert owner_spec is not None and owner_spec.loader is not None
     owner_module = importlib.util.module_from_spec(owner_spec)
     owner_spec.loader.exec_module(owner_module)
-    effort_path = path.with_name("0196_agent_backend_effort.py")
+    effort_path = path.with_name("0198_agent_backend_effort.py")
     effort_spec = importlib.util.spec_from_file_location("agent_effort_restore", effort_path)
     assert effort_spec is not None and effort_spec.loader is not None
     effort_module = importlib.util.module_from_spec(effort_spec)

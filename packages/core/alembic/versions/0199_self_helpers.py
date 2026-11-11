@@ -11,8 +11,8 @@ downgrade: safe
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0197_self_helpers"
-down_revision: str | None = "0196_agent_backend_effort"
+revision: str = "0199_self_helpers"
+down_revision: str | None = "0198_agent_backend_effort"
 branch_labels: str | None = None
 depends_on: str | None = None
 

@@ -779,6 +779,11 @@ async def agents_update(
     )
     if agent is None:
         raise StoreError(f"no agent named {name!r} in your account.")
+    found_name = agent.metadata.get(MA_METADATA_KEY_NAME)
+    if found_name != name:
+        # The lookup can answer `daimon` with the seeded agent renamed to `default`;
+        # reconciling under the old name would create a second agent beside it.
+        raise StoreError(f"agent {name!r} is now named {found_name!r}; update it under that name.")
     public_url = str(rt.settings.mcp.public_url) if rt.settings.mcp.public_url is not None else None
     # Route through reconcile_agent so the daimon-mcp server + its mcp_toolset are
     # re-merged into the payload. MA's update is a per-field partial merge: a raw

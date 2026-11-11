@@ -544,17 +544,6 @@ class ToolSafetyPolicy(BaseModel):
             "Off by default; stored rules remain editable but inactive until enabled."
         ),
     )
-    allow_gate_overrides: bool = Field(
-        default=False,
-        exclude_if=lambda value: not value,
-        description=(
-            "Let native server admins change third-party MCP write approvals from /settings "
-            "at server, channel or thread scope. The most specific explicit on/off setting wins. "
-            "Stored settings are ignored while off. Fixed confirmation and permission-setter "
-            "names never receive an override, regardless of server host. Deny rules, direct "
-            "messages and unattended_writes retain their existing behavior."
-        ),
-    )
     effects: dict[str, ToolEffect] = Field(
         default_factory=dict,
         description=(
@@ -609,11 +598,6 @@ class ToolSafetyPolicy(BaseModel):
             "minutes."
         ),
     )
-
-    @property
-    def gate_overrides_active(self) -> bool:
-        """Whether native admins can override third-party write approvals."""
-        return self.enabled and self.allow_gate_overrides
 
 
 OPEN_TOOL_SAFETY: Final[ToolSafetyPolicy] = ToolSafetyPolicy()
@@ -975,12 +959,7 @@ def _decide_tool_call(
         return ToolVerdict(outcome="allow", effect="read", reason="disabled")
     if call.server_name is None:
         return ToolVerdict(outcome="allow", effect="read", reason="not_attached")
-    if (
-        policy.allow_gate_overrides
-        and attended
-        and call.server_name not in trusted_servers
-        and gate_protected_tool(call.tool_name)
-    ):
+    if attended and call.server_name not in trusted_servers and gate_protected_tool(call.tool_name):
         # Endpoint comparison cannot prove another hostname is third-party.
         # Protected names cannot be widened by annotations, operator read hints,
         # an agent allow rule, or a scoped approval switch. Denials still win.

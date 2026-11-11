@@ -380,13 +380,12 @@ def test_the_draft_log_does_not_repeat_the_latest_line() -> None:
     assert roll_draft(earlier, latest, "one") == ((), "one"), "a repeated line is shown once"
 
 
-@pytest.mark.usefixtures("status_log_on")
-def test_the_draft_log_is_the_same_whether_answers_keep_messages_apart() -> None:
-    """`turn.status_log` now only shapes the answer; the card logs either way."""
+def test_the_draft_log_keeps_each_line_and_cuts_long_ones() -> None:
+    """The card logs every message the agent wrote, each cut at 120 characters."""
     earlier, latest = roll_draft((), None, "one")
     earlier, latest = roll_draft(earlier, latest, "two")
-    assert draft_log(earlier, latest) == ("one", "two"), "the log does not depend on the switch"
-    assert format_draft("x" * 121) == "x" * 120 + "…", "nor does the line length"
+    assert draft_log(earlier, latest) == ("one", "two"), "the log lists both lines"
+    assert format_draft("x" * 121) == "x" * 120 + "…", "a long line is cut at 120"
 
 
 def test_built_in_tools_show_one_allowlisted_detail() -> None:
@@ -481,21 +480,3 @@ def test_the_card_reads_updates_then_plan_then_tool_lines() -> None:
     assert CARD_SECTIONS == ("updates", "plan", "tools"), "the latest updates lead the card"
     drawn = in_card_order({"tools": "T", "plan": None, "updates": "U"})
     assert drawn == ["U", "T"], "sections follow CARD_SECTIONS and an empty one drops out"
-
-
-@pytest.mark.parametrize(("raw", "expected"), [("on", True), ("off", False)])
-def test_status_log_outside_a_turn_reads_the_feature_env(
-    monkeypatch: pytest.MonkeyPatch, raw: str, expected: bool
-) -> None:
-    from daimon.core.features import deployment
-    from daimon.core.turn import status_log
-
-    monkeypatch.setenv("DAIMON_FEATURES__STATUS_LOG", raw)
-    deployment.env_features.cache_clear()
-    status_log._configured.cache_clear()
-    try:
-        assert status_log._configured() is expected
-    finally:
-        monkeypatch.undo()
-        deployment.env_features.cache_clear()
-        status_log._configured.cache_clear()

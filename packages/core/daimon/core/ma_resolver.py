@@ -29,11 +29,13 @@ from daimon.core.defaults.ma_index import (
     list_agents_by_tenant,
     list_environments_by_tenant,
     list_skills_lenient,
+    pick_renamed_seeded_agent,
 )
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
+    SEEDED_AGENT_RENAME,
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
@@ -348,8 +350,10 @@ async def _is_live_environment(client: AsyncAnthropic, env_id: str, tenant_id: u
 
 
 async def _list_tag_ids(client: AsyncAnthropic, tenant_id: uuid.UUID, kind: Kind) -> dict[str, str]:
+    renamed: BetaManagedAgentsAgent | None = None
     if kind == "agent":
         resources = await list_agents_by_tenant(client, tenant_id=tenant_id)
+        renamed = pick_renamed_seeded_agent(resources)
     else:
         resources = await list_environments_by_tenant(client, tenant_id=tenant_id)
     canonical: dict[str, tuple[str, object, str | None]] = {}
@@ -380,7 +384,11 @@ async def _list_tag_ids(client: AsyncAnthropic, tenant_id: uuid.UUID, kind: Kind
                 adopted_account=adopted_account,
                 duplicate_accounts=accounts,
             )
-    return {name: resource_id for name, (resource_id, _, _) in canonical.items()}
+    found = {name: resource_id for name, (resource_id, _, _) in canonical.items()}
+    if renamed is not None:
+        # `daimon` answers with the seeded agent renamed in place (`SEEDED_AGENT_RENAME`).
+        found.setdefault(SEEDED_AGENT_RENAME[0], renamed.id)
+    return found
 
 
 async def _lookup_tags(

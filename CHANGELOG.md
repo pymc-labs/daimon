@@ -234,6 +234,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the thread had no session yet now goes ahead the same way. The old session is
   left as it was, so switching back still works. A thread released before this
   change starts with a note that its earlier conversation could not be found.
+
+- **Chat hides what is not set up, and nine development switches are gone.**
+  `/settings` and `get_settings` list a feature only when it is available or has a saved value at some level, as the
+  web app does. "Allow writes" in the approvals panel covers chat replies only; routines and watches follow the
+  deployment's unattended-writes rule. Upgrade notes: saved "Allow writes" choices are reset to Ask and must be set
+  again. Stored Off values of Daimon tools, full turn controls, the working-file carry-over and chart images in
+  artifacts are reset to the default (On). Third-party tools whose names look like permission, policy or admin setters
+  now always ask in chat. These variables log a startup warning naming them and are otherwise ignored:
+  `DAIMON_TOOL_SAFETY__ALLOW_GATE_OVERRIDES`, `DAIMON_TURN__STATUS_LOG`, `DAIMON_TURN__NATIVE_FOOTER_COST`,
+  `DAIMON_DISCORD__WRITERS_NONE_NOTICE`, `DAIMON_DISCORD__UNMENTIONED_REPLY_HINT`,
+  `DAIMON_DISCORD__TENANT_CAP_WAITING_CARD`, `DAIMON_ARTIFACTS__EMBED_IMAGES` (`false` no longer stops image
+  embedding) and `DAIMON_FEATURES__<removed key>`; an agent spec that lists a removed key is loaded without it. Any
+  other unknown feature still stops startup.
+
+- **The web app sets a thread's value as chat does.**
+  Where a setting is open to anyone in a thread, such as progress plans, a member who can
+  see the channel can change it on the thread's page, not only a channel admin. Locks and
+  every other setting stay with admins.
+
+- **Admin > Workspace no longer repeats the feature switches.**
+  Web modules, direct messages, read-only memory in direct messages and typed
+  mentions are set on the feature list only.
+- **Chat `/settings` pages through long lists.**
+  A workspace with more than 25 agents, or a group with more than 25 settings, no
+  longer loses the rest: Previous and Next buttons on Discord, Slack and Teams move
+  between pages.
+
+- **Upgrade note: limit settings with a zero or too-small value.**
+  `DAIMON_FEATURES__OUTBOUND_LENGTH=0` starts as before and means no post length limit,
+  as `DAIMON_OUTBOUND__MAX_LENGTH=0` does; it never overrides a limit a workspace sets,
+  and where limits combine, 0 counts as unlimited rather than the smallest value.
+  `DAIMON_FEATURES__LONG_JOBS_MAX_USD` below 0.01 and `DAIMON_FEATURES__LONG_JOBS_MAX_DEADLINE`
+  below 1 stop startup with an error that names the lowest value accepted; set a
+  workable limit or remove the variable.
+
+- **Feature settings now reach the paths that ignored them.**
+  An Off watch no longer holds up the others in the poll queue. A routine retries when its
+  features cannot be read, and a required destination can no longer be cleared. Long job
+  limits of zero or below the minimum are refused, and Off jobs no longer block newer ones.
+  Turning cloud computers Off keeps a running session stoppable from chat. Posting to other
+  places stops when the posting rules cannot be read, a post length of 0 no longer lifts a
+  workspace limit, and the thread, place and people limits apply only while the reach check
+  is on. A Discord thread now takes its parent channel's setting for typed bot names. Vote
+  buttons can be switched off on Slack and Teams too. Platform and agent skills are off
+  wherever the read tool is, repository memory tools are hidden wherever it is Off, and
+  private channel messages now say they apply after a restart.
+
+- **A capability turned off is refused on every path, not only in Claude sessions.**
+  The MCP server checks the feature where the call runs (its conversation, routine,
+  agent key channel, or else the workspace) and refuses a tool whose capability is Off,
+  for Gemini and OpenAI turns, connected MCP clients and agent keys alike, including calls
+  made through `call_tool`. Other clients' tool lists drop those tools too. Stopping and
+  listing cloud computers and long jobs stays available, so running work can be stopped.
+
+- **Daimon tolerates its seeded agent being renamed in place to `default`.**
+  Ahead of that rename, a workspace whose built-in agent is already called `default` keeps it: defaults sync no longer archives it or creates a second `daimon` beside it, and asking for `daimon` answers with it. Only the workspace's own built-in agent counts, never a user's agent named `default`.
+
 - **Claude Fable 5.2 can be picked as an agent's model.**
   It appears as "Fable 5.2" in every model picker (Discord, Slack, Teams, web) and can be named in chat ("use Fable"). New agents still default to Sonnet 5.5. Fable 5.2 lists at $8 input / $40 output per million tokens, four times Sonnet 5.5, and is billed at that rate.
 - **One settings system for every feature.**
@@ -241,12 +298,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Set the deployment level with `DAIMON_FEATURES__<KEY>`. `DAIMON_PROGRESS_PLANS__MODE` and `DAIMON_THREAD_PARTICIPATION__MODE` still work but log a deprecation. The cost footer can be set per channel and thread.
   The web app shows every feature from one schema-driven list on the workspace, agent, channel and thread pages, with a feature-by-level table in the agent editor. `daimon features list|get|set|diff` does the same from the CLI.
 - **What the agent is sent is now a feature too.**
-  Guidance, the facts sent with each message, web app links, Daimon's own tools, each built-in tool, the connected server briefing, repository memory and context providers can be turned off at the levels `docs/features.md` lists, and take effect from the next message. An agent spec sets its own with a `features:` block.
+  Guidance, the facts sent with each message, web app links, each built-in tool, the connected server briefing, repository memory and context providers can be turned off at the levels `docs/features.md` lists, and take effect from the next message. An agent spec sets its own with a `features:` block.
   `DAIMON_MCP_CONTEXT__ENABLED` still works but logs a deprecation. Repository memory still needs `DAIMON_REPO_MEMORY__ENABLED` and is then on until a level turns it off.
-  Gemini and OpenAI agents always have Daimon's tools, and the setting says so there.
 
 - **What a conversation starts with, and how much chat it reads, are features too.**
-  The platform prompt, skills, memory, notes on non-chat messages, the keys file and the working-file save at a restart can be turned off at every level, and so can how many earlier messages a new conversation reads (100, 50, 25, 10 or none).
+  The platform prompt, skills, memory, notes on non-chat messages and the keys file can be turned off at every level, and so can how many earlier messages a new conversation reads (100, 50, 25, 10 or none).
   A conversation keeps what it started with until `/new`. Gemini and OpenAI agents show the ones they cannot change as unavailable, with the reason.
   `daimon sessions create` builds its session with the agent's features, as chat does.
 
@@ -254,11 +310,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Turn outcomes and conversations store an `eval_key`: the session's fingerprint and tools, hashes of the safety block, guidance and turn controls, the platform, and every feature with the level that decided it. Older rows keep it empty.
 
 - **What the agent can do is a feature too.**
-  Watches, routines, long jobs, cloud computers, notebooks, report publishing, video transcripts, Microsoft 365, GitHub and lead intake can be turned on or off at every level, and chart images in artifacts at the workspace. A level that turns one off removes its tools from the next message and stops the work it started there.
-  A capability whose setup is missing shows as unavailable, with the reason. Nothing changes until a level sets one. `DAIMON_WATCHES__ENABLED` and `DAIMON_ARTIFACTS__EMBED_IMAGES` still work but log a deprecation.
+  Watches, routines, long jobs, cloud computers, notebooks, report publishing, video transcripts, Microsoft 365, GitHub and lead intake can be turned on or off at every level. A level that turns one off removes its tools from the next message and stops the work it started there.
+  A capability whose setup is missing shows as unavailable, with the reason. Nothing changes until a level sets one. `DAIMON_WATCHES__ENABLED` still works but logs a deprecation.
 
 - **Limits and the last switches are features too.**
-  How far an agent may post outside its conversation, how many threads, places and people one post may reach, the longest post, long job cost and time, and a daily spend cap per model are limits, and the lowest wins. Asking a person for help and keeping an answer's messages apart are set too.
+  How far an agent may post outside its conversation, how many threads, places and people one post may reach, the longest post, long job cost and time, and a daily spend cap per model are limits, and the lowest wins. Asking a person for help is set too.
   Turning off long jobs, cloud computers or lead intake also stops their queued and scheduled work; running work finishes. The old variables for these still work but log a deprecation, and nothing changes until a level sets one.
 
 - **Long jobs are set as features.**
@@ -267,10 +323,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A workspace or agent owner, or an admin handed that job, can no longer change them in `/settings`, the web app or by asking Daimon.
 
 - **Chat behaviour and display settings join the same system.**
-  Completion pings, table rendering, message feedback buttons and cost shown with native models are set at every level; typed `@name` mentions, budget notices, thread naming, the unmentioned-reply hint and the "no writers" notice down to a channel; direct messages, read-only memory in direct messages and the waiting card at the workspace. Each web app module is a setting too (`web.chat`, `web.agents` and so on).
+  Completion pings, table rendering, message feedback buttons are set at every level; typed `@name` mentions, budget notices and thread naming down to a channel; direct messages and read-only memory in direct messages at the workspace. Each web app module is a setting too (`web.chat`, `web.agents` and so on).
   The old per-workspace variables (`DAIMON_COMPLETION_PINGS`, `DAIMON_TABLE_RENDERING`, `DAIMON_BUDGET_NOTICES`) keep working, log a deprecation, and lose to any workspace setting; `daimon features import-env` writes them as workspace settings. The other old variables still work but log a deprecation.
   `daimon tenants access-policy set --dm-memory-read-only` is gone, as nothing read it; set the `dm_memory_read_only` feature instead.
-  The remaining older controls (the web settings, `PATCH /api/admin/settings` and the direct-message commands) behave as before and now change the same stored values, so the two never disagree.
+  The older controls (the web settings, `PATCH /api/admin/settings` and the direct-message commands) write the same stored values, so the two never disagree. `PATCH /api/admin/settings` refuses the fields that are features now (`modules`, `dm_enabled`, `dm_memory_read_only`, `plain_text_mentions`) with a 422.
 
 - **Guardrails are features too, and a lower level can only make them stricter.**
   Tool safety (`tool_safety`), the reach check (`reach_budget`), built-in tools in routines (`unattended_capabilities`) and requiring a routine destination (`require_routine_destination`) are set at the levels `docs/features.md` lists, and a level below can tighten but never loosen them. An agent asking to change one gets a confirmation card, or a refusal where no card can be shown.
@@ -617,7 +673,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a live platform admin. Delegated admins do not acquire the hub exception for
   reading other people’s sessions or sealed transcripts.
 
-- Add opt-in server-admin overrides for third-party MCP write approvals at
+- Add server-admin overrides for third-party MCP write approvals at
   server, channel and thread scope, through audited native `/here` controls on
   Discord, Slack and Teams. Every click/submission rechecks native admin authority.
   Changes apply to the next write in prepared and running turns; failed setting
@@ -629,7 +685,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   native server/workspace admin must use `/here` (Teams: `here`) to choose
   **Inherit** for Server and for every channel/thread with a saved override.
   Alternatively, restore a policy backup from before overrides were saved.
-  Disabling the deployment flag does not remove the stored fields.
 
 - **Settings, redeeming and audit in the web app.** Admin > Settings gains an Access group
   (who may start turns, shown by person, plus direct messages, read-only DM memory and typed

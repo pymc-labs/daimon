@@ -12,7 +12,6 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 
 from daimon.core.access_policy import DM_SCOPE_PREFIX
-from daimon.core.features.model_input import turn_controls
 from daimon.core.platform_words import Place, one_platform_rule, turn_words
 from daimon.core.stores.domain import (
     CHAT_PLATFORMS,
@@ -330,15 +329,10 @@ def render_turn_origin(
     is the person's own words — it is truncated to `MAX_REQUESTED_WORK_CHARS`
     and JSON-encoded like everything else, never interpolated into the prose.
 
-    `features` sets the level (`turn_controls`) and `web_awareness`. Origin only drops the
-    words, web links and target prose; Minimal keeps only the honesty facts (running_on,
-    conversation_move, session_state, handoff). None renders everything.
+    `features` sets `web_awareness`; None renders everything.
     """
-    level = "full" if features is None else turn_controls(features)
     if features is not None and not features.on("web_awareness"):
         web = None
-    if level != "full":
-        responder_handle = responder_account = web = None
     responder: dict[str, object] = {
         "name": origin.responder_name,
         "ma_agent_id": origin.responder_ma_agent_id,
@@ -348,32 +342,27 @@ def render_turn_origin(
     if responder_account is not None:
         responder["platform_user_id"] = responder_account.user_id
         responder["mention"] = responder_account.mention
-    controls: dict[str, object] = (
-        {}
-        if level == "minimal"
-        else {
-            "origin_context_id": str(origin.id),
-            "is_setup": origin.is_setup,
-            "platform": origin.platform,
-            "parent_channel_id": origin.parent_channel_id,
-            "thread_id": origin.thread_id,
-            "current_role": origin.role,
-            "responder": responder,
-            "configuration_target": (
-                {
-                    "name": origin.configuration_target_name,
-                    "ma_agent_id": origin.configuration_target_ma_agent_id,
-                }
-                if origin.configuration_target_ma_agent_id is not None
-                else None
-            ),
-        }
-    )
-    words = _words_for_origin(origin) if level == "full" else None
+    controls: dict[str, object] = {
+        "origin_context_id": str(origin.id),
+        "is_setup": origin.is_setup,
+        "platform": origin.platform,
+        "parent_channel_id": origin.parent_channel_id,
+        "thread_id": origin.thread_id,
+        "current_role": origin.role,
+        "responder": responder,
+        "configuration_target": (
+            {
+                "name": origin.configuration_target_name,
+                "ma_agent_id": origin.configuration_target_ma_agent_id,
+            }
+            if origin.configuration_target_ma_agent_id is not None
+            else None
+        ),
+    }
+    words = _words_for_origin(origin)
     if words is not None:
         controls["words"] = words
-    if level != "minimal":
-        controls["effective_role"] = "admin" if effective_is_admin else "user"
+    controls["effective_role"] = "admin" if effective_is_admin else "user"
     if session_state is not None:
         controls["session_state"] = {
             "state": session_state.state,
@@ -421,21 +410,16 @@ def render_turn_origin(
             "reason. Earlier messages posted by that account may have come from a different "
             "agent that answered through it then; judge them by what they say."
         )
-    if level == "minimal":
-        rendered += "\n"
-    if level == "origin":
-        rendered += "\nPass origin_context_id to every tool that takes it."
-    if level == "full":
-        rendered += (
-            "\nUse the explicitly requested target when named; otherwise configure the "
-            "configuration_target. If is_setup is true and no target is selected, ask which "
-            "agent to configure before mutation. Only ordinary chat defaults to the responder. "
-            "Never substitute a "
-            "recreated namesake for a missing identity. Ask one concise question when the "
-            "target is missing or ambiguous. Pass expected_ma_agent_id with target-bearing "
-            "tools. Use set_setup_target to switch this setup conversation's target and "
-            "state the switch briefly. Pass origin_context_id to every tool that takes it."
-        )
+    rendered += (
+        "\nUse the explicitly requested target when named; otherwise configure the "
+        "configuration_target. If is_setup is true and no target is selected, ask which "
+        "agent to configure before mutation. Only ordinary chat defaults to the responder. "
+        "Never substitute a "
+        "recreated namesake for a missing identity. Ask one concise question when the "
+        "target is missing or ambiguous. Pass expected_ma_agent_id with target-bearing "
+        "tools. Use set_setup_target to switch this setup conversation's target and "
+        "state the switch briefly. Pass origin_context_id to every tool that takes it."
+    )
     if words is not None and origin.platform in CHAT_PLATFORMS:
         rendered += words_sentence(origin.platform)
     if running_on is not None:

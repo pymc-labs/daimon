@@ -152,6 +152,8 @@ SOURCE_BUDGET = UrlBudget()
 
 #: How far a watch whose server is busy steps back in the claim queue (plus jitter).
 BUSY_DEFER_S = 60
+OFF_DEFER_S = 600
+"""How long a watch that may not run now (Off here, expired) waits before it is claimed again."""
 
 #: Opens the bounded MCP session for one poll; tests swap in a fake server.
 open_source = mcp_tool_session
@@ -553,8 +555,11 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                 watch = await leased_poll(db, watch_id, lease, now=datetime.now(UTC))
             if watch is None:
                 # Gate/expiry/lease races are scheduling outcomes, not owner revocation.
+                # Step back in the claim queue: an Off watch claimed again every cycle
+                # would fill all 4 claim slots and starve every other watch.
+                until = datetime.now(UTC) + timedelta(seconds=OFF_DEFER_S)
                 async with runtime.session_factory.begin() as db:
-                    await release_poll_lease(db, watch_id, lease)
+                    await defer_busy_poll(db, watch_id, lease, until=until)
                 return False
             tool = str(watch.source_state["tool"])
             # The operator's current floor and credential, not those in place at approval.

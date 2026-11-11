@@ -14,8 +14,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0194_connector_tokens"
-down_revision: str | None = "0193_agent_record_versions"
+revision: str = "0196_connector_tokens"
+down_revision: str | None = "0195_agent_record_versions"
 branch_labels: str | None = None
 depends_on: str | None = None
 

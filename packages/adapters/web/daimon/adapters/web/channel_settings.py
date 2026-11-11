@@ -93,14 +93,13 @@ class SwitchJson(BaseModel):
 
 
 class ApprovalsJson(BaseModel):
-    """`own` is None while it inherits; `active` is False while saved but ignored; `editable`
+    """`own` is None while it inherits; `editable`
     needs a linked chat account (whose admin standing is checked live on save)."""
 
     available: bool
     own: ApprovalMode | None
     value: ApprovalMode
     source: Source
-    active: bool
     editable: bool
 
 
@@ -347,7 +346,6 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
             own=None if own is None or own.value == DEFAULT else _approval(own.value),
             value=_approval(view.resolved.value),
             source=view.resolved.tier,
-            active=settings.tool_safety.gate_overrides_active,
             editable=available and "channels.manage" in caller.capabilities and linked is not None,
         )
 

@@ -1,42 +1,39 @@
-"""Pure answers of the model-input features: guidance, the session toolset, turn controls."""
+"""Pure answers of the model-input features: guidance, the session toolset, history depth."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Final, Literal, cast
+from typing import Any, Final, cast
 
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.agent_create_params import Tool
-from daimon.core.capability_tools import CAPABILITY_KEYS, CAPABILITY_TOOLS
+from daimon.core.capability_tools import CAPABILITY_KEYS
 from daimon.core.features.registry import BUILTIN_TOOLS, limit_int
 from daimon.core.features.snapshot import FeatureSnapshot
-from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
+from daimon.core.features.tool_gate import gated_tools, hides_tools
 
 TOOL_KEYS: Final[tuple[str, ...]] = tuple(f"tool.{tool}" for tool in BUILTIN_TOOLS)
 SESSION_KEYS: Final[tuple[str, ...]] = (
-    "daimon_tools",
     *TOOL_KEYS,
     "agent_env_file",
     *CAPABILITY_KEYS,
 )
 TOOLSET_KEYS: Final[tuple[str, ...]] = (*SESSION_KEYS, "repo_memory")
 """What `SessionToolset.of` reads: `repo_memory` also hides its tools, while it binds per turn."""
-TURN_KEYS: Final[tuple[str, ...]] = ("daimon_tools", "turn_controls", "web_awareness")
+TURN_KEYS: Final[tuple[str, ...]] = ("web_awareness",)
 PER_TURN_KEYS: Final[tuple[str, ...]] = (
-    "mcp_briefing", "repo_memory", "context_provider", "origin_fragments", "checkpoint_prompt",
+    "mcp_briefing", "repo_memory", "context_provider", "origin_fragments",
 )  # fmt: skip
 """Turn-bound switches each turn checks with `Admission.feature_on`."""
-MODEL_INPUT_KEYS: Final[tuple[str, ...]] = ("guidance", *SESSION_KEYS, *TURN_KEYS[1:])
+MODEL_INPUT_KEYS: Final[tuple[str, ...]] = ("guidance", *SESSION_KEYS, *TURN_KEYS)
 
 HISTORY_KEYS: Final[tuple[str, ...]] = ("history_depth",)
 CHAT_KEYS: Final[tuple[str, ...]] = (
     "completion_pings",
     "table_rendering",
     "message_feedback",
-    "native_footer_cost",
     "support_escalation",
-    "status_log",
     "outbound_people",
     "reach_budget",
     "daily_model_cap",
@@ -46,21 +43,12 @@ CHAT_KEYS: Final[tuple[str, ...]] = (
 CHANNEL_BACKFILL: Final[int] = 25
 """The most channel messages around a new thread any chat adapter reads."""
 
-TurnControls = Literal["full", "origin", "minimal"]
 TOOLSET_TYPE: Final[str] = "agent_toolset_20260401"
 
 
 def guidance_applies(*, isolated: bool, features: FeatureSnapshot) -> bool:
     """The one predicate every guidance writer asks; an isolated agent never gets guidance."""
     return not isolated and features.on("guidance")
-
-
-def turn_controls(features: FeatureSnapshot) -> TurnControls:
-    """The turn-control level; Daimon tools need the origin ids, so they lift Minimal."""
-    level = features.value("turn_controls")
-    if level == "minimal" and features.on("daimon_tools"):
-        return "origin"
-    return "full" if level == "full" else "origin" if level == "origin" else "minimal"
 
 
 @dataclass(frozen=True)
@@ -121,25 +109,18 @@ class SessionToolset:
             if found.on and isolated:
                 continue
             builtins[tool] = found.on
-        found = features.features.get("daimon_tools")
         memory = features.features.get("repo_memory")
         env = features.features.get("agent_env_file")
-        # Without the setup, or Off and locked at the deployment, no memory tools are registered.
-        hides_memory = (
-            memory is not None and not memory.on and memory.tier not in ("default", "deployment")
-        )
         return cls(
-            daimon_tools=not isolated and (found is None or found.on),
+            daimon_tools=not isolated,
             builtins=builtins,
-            repo_memory=not hides_memory,
+            repo_memory=memory is None or not hides_tools(memory),
             memory_on=memory is not None and memory.on,
             env_file=env is None or env.on,
             off_capabilities=frozenset(
                 key
                 for key in CAPABILITY_KEYS
-                if (cap := features.features.get(key)) is not None
-                and not cap.on
-                and (cap.tier != "default" or cap.unavailable in (None, "requires"))
+                if (cap := features.features.get(key)) is not None and hides_tools(cap)
             ),
         )
 
@@ -160,8 +141,8 @@ class SessionToolset:
     @property
     def hidden_daimon_tools(self) -> frozenset[str]:
         """Daimon tools this place turns off on the session's `daimon-mcp` toolset."""
-        hidden: frozenset[str] = frozenset() if self.repo_memory else REPO_MEMORY_TOOLS
-        return hidden.union(*(CAPABILITY_TOOLS[key] for key in self.off_capabilities))
+        memory = () if self.repo_memory else ("repo_memory",)
+        return gated_tools((*self.off_capabilities, *memory))
 
     def apply_builtins(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """`tools` with the overrides applied; turning off a tool the agent lacks adds nothing."""

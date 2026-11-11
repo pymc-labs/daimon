@@ -1,4 +1,7 @@
-"""`/api/admin/settings`: the workspace's modules, web chat agent, access and providers."""
+"""`/api/admin/settings`: the workspace's web chat agent, who may use the agents, and providers.
+
+The switches for web modules, direct messages, read-only DM memory and typed mentions are
+features; the feature list is their one place."""
 
 from __future__ import annotations
 
@@ -22,25 +25,14 @@ from daimon.core.channel_backend import (
     make_backend_service,
 )
 from daimon.core.provider_keys import default_enabled_backends
-from daimon.core.stores import tenants
 from daimon.core.stores import web_workspace_settings as workspace_settings
 from daimon.core.stores.access_policy import PolicyBusyError
 from daimon.core.web_admin import WebAdminError
 from fastapi import APIRouter, HTTPException
 from mux.contracts.ids import Provider
 from mux.profiles import PROVIDER_LABELS
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
-_SWITCHABLE: tuple[
-    Literal["chat", "agents", "channels", "routines", "credits", "integrations"], ...
-] = (
-    "chat",
-    "agents",
-    "channels",
-    "routines",
-    "credits",
-    "integrations",
-)
 _PROVIDERS: Final[tuple[tuple[Provider, str], ...]] = tuple(PROVIDER_LABELS.items())
 _PROVIDER_LABEL: Final = PROVIDER_LABELS
 _BUSY = "Settings are being changed. Try again."
@@ -54,15 +46,12 @@ class InvokersChange(BaseModel):
 
 
 class SettingsChange(BaseModel):
-    modules: (
-        dict[Literal["chat", "agents", "channels", "routines", "credits", "integrations"], bool]
-        | None
-    ) = None
+    """Only these fields; a removed one (modules, dm_enabled, ...) is a 422, not a silent no-op."""
+
+    model_config = ConfigDict(extra="forbid")
+
     default_agent: str | None = None
     invokers: InvokersChange | None = None
-    dm_enabled: bool | None = None
-    dm_memory_read_only: bool | None = None
-    plain_text_mentions: bool | None = None
     providers: list[Provider] | Literal["default"] | None = None
 
 
@@ -90,20 +79,14 @@ def settings_router(runtime: WebRuntime) -> APIRouter:
         tenant_id = caller.person.tenant_id
         async with runtime.sessionmaker() as db:
             chosen = await workspace_settings.get_settings(db, tenant_id=tenant_id)
-            tenant = await tenants.get_tenant(db, tenant_id)
-            access = await access_settings.load_access(db, tenant_id=tenant_id)
             invokers = await access_settings.load_invoker_people(db, tenant_id=tenant_id)
-        platform = tenant.platform if tenant else ""
-        has_dms = platform in access_settings.DM_PLATFORMS
         default = chosen.default_agent
         if default is None and runtime.turns is not None:
             name = runtime.turns.deps.deployment_default.agent_name
             default = next(
                 (a.id for a in await listed_agents(runtime, tenant_id) if a.name == name), None
             )
-        offered = set(runtime.web.modules)
         return {
-            "modules": {m: m in offered and m not in chosen.modules_off for m in _SWITCHABLE},
             "default_agent": default or "",
             "access": {
                 "people": (
@@ -112,13 +95,6 @@ def settings_router(runtime: WebRuntime) -> APIRouter:
                     else None
                 ),
                 "others": invokers.others,
-                "dm_enabled": access.dm_enabled if has_dms else None,
-                "dm_memory_read_only": access.dm_memory_read_only if has_dms else None,
-                "plain_text_mentions": (
-                    access.plain_text_mentions
-                    if platform in access_settings.MENTION_PLATFORMS
-                    else None
-                ),
             },
             "providers": await providers_json(tenant_id),
         }
@@ -141,13 +117,9 @@ def settings_router(runtime: WebRuntime) -> APIRouter:
                 admin_of(caller),
                 runtime.now(),
                 agents=agents,
-                modules=body.modules,
                 default_agent=body.default_agent,
                 everyone_invokes=None if invokers is None else invokers.everyone,
                 invoker_people=[] if invokers is None else invokers.people,
-                dm_enabled=body.dm_enabled,
-                dm_memory_read_only=body.dm_memory_read_only,
-                plain_text_mentions=body.plain_text_mentions,
             )
         except WebAdminError as error:
             raise refused(error) from error

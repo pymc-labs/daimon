@@ -512,9 +512,9 @@ per-blob HTTPS user-delegation SAS; `ManagedIdentityCredential` uses the explici
 artifact client id with no developer-login or service-principal fallback.
 
 URL expiry defaults to ten minutes. Optional overrides belong in
-`serviceEnvironment.mcp`, for example `DAIMON_ARTIFACTS__URL_TTL_SECONDS` or
-`DAIMON_ARTIFACTS__EMBED_IMAGES`. Expiry does not remove blobs; versioning and
-soft delete do not impose an object-retention lifecycle or replace a backup.
+`serviceEnvironment.mcp`, for example `DAIMON_ARTIFACTS__URL_TTL_SECONDS`.
+Expiry does not remove blobs; versioning and soft delete do not impose an
+object-retention lifecycle or replace a backup.
 Plan retention and cleanup before storing artifacts. Offline tests validate
 wiring and role scopes; live identity, RBAC propagation and signed-download
 verification remain deployment checks.

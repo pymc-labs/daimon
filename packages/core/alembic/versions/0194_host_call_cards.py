@@ -15,8 +15,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0192_host_call_cards"
-down_revision: str | None = "0191_deployment_identity"
+revision: str = "0194_host_call_cards"
+down_revision: str | None = "0193_deployment_identity"
 branch_labels: str | None = None
 depends_on: str | None = None
 

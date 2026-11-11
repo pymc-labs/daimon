@@ -9,8 +9,8 @@ downgrade: safe
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0196_agent_backend_effort"
-down_revision: str | None = "0195_thread_model_consents"
+revision: str = "0198_agent_backend_effort"
+down_revision: str | None = "0197_thread_model_consents"
 branch_labels: str | None = None
 depends_on: str | None = None
 

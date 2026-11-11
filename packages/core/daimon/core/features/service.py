@@ -35,10 +35,12 @@ from daimon.core.features.registry import (
     LOCKABLE,
     FeatureSpec,
     Tier,
+    resolution_order,
 )
 from daimon.core.features.resolver import (
     ResolvedFeature,
     TierValue,
+    extent,
     resolve_above,
     stricter_than,
 )
@@ -196,9 +198,11 @@ async def read_features(
             if any(spec.key == "approvals" for spec in specs)
             else None
         )
+    wanted = {spec.key for spec in specs}
     resolved: dict[str, ResolvedFeature] = {}
-    views: list[FeatureView] = []
-    for spec in specs:
+    views: dict[str, FeatureView] = {}
+    # Dependencies resolve first, even ones the caller did not ask for.
+    for spec in resolution_order(wanted):
         if spec.key == "approvals":
             view = _approvals_view(cast(TenantAccessPolicy, policy), place)
         else:
@@ -209,8 +213,8 @@ async def read_features(
                 resolve_one(spec, settings, place, rows, resolved, agent_builtins),
             )
         resolved[spec.key] = view.resolved
-        views.append(view)
-    return tuple(views)
+        views[spec.key] = view
+    return tuple(views[spec.key] for spec in specs)
 
 
 # ---------- Changing ----------
@@ -351,13 +355,20 @@ async def _native_admin(
     raise needs_admin(FEATURES["approvals"], platform)
 
 
+def thread_open_to_anyone(key: str, *, locked: bool = False) -> bool:
+    """Whether anyone who can use a thread may set `key` there: the spec says so and the value
+    is not a Lock. Every surface asks this; none restates it."""
+    spec = FEATURES.get(key)
+    return spec is not None and spec.authority.thread_anyone and not locked
+
+
 async def may_change(
     actor: FeatureActor, spec: FeatureSpec, tier: Tier, *, locked: bool, agent_id: str | None
 ) -> bool:
     """The tier's authority (not approvals'): a thread is anyone's where the spec says so,
     an agent its owner's (unless `agent_owner` is off) or an admin's, the rest an admin's.
     A Lock is an admin's."""
-    if tier == "thread" and spec.authority.thread_anyone and not locked:
+    if tier == "thread" and thread_open_to_anyone(spec.key, locked=locked):
         return True
     if actor.via_agent_key:
         return False
@@ -393,9 +404,11 @@ async def change_refusal(
             await _native_admin(sessions, settings, actor, place.platform)
         elif not await may_change(actor, spec, tier, locked=locked, agent_id=place.agent_id):
             raise needs_admin(spec, place.platform)
+        async with sessions() as session:
+            values = await _values_at(session, settings, spec, place)
+        if not spec.authority.native:
+            await _check_own_lock(actor, spec, _before(spec, place, values, tier), place, tier)
         if value is not None and spec.combine != "most_specific":
-            async with sessions() as session:
-                values = await _values_at(session, settings, spec, place)
             above = resolve_above(spec, values, tier)
             if _loosens(spec, TierSetting(tier, value), above):
                 raise _looser_than_above(spec, above, place, tier)
@@ -485,6 +498,31 @@ def _locked_above(
     )
 
 
+def _locked_here(spec: FeatureSpec, place: FeaturePlace, tier: Tier) -> ChannelChangeRefused:
+    return _refused(
+        f"{spec.name} is locked for {where(tier, place.platform)}. "
+        f"Only {admin_word(place.platform)} can change it.",
+        "locked_here",
+        "forbidden",
+    )
+
+
+def _before(
+    spec: FeatureSpec, place: FeaturePlace, values: list[TierValue], tier: Tier
+) -> TierSetting:
+    return next((s for s in _own(spec, place, values) if s.tier == tier), TierSetting(tier))
+
+
+async def _check_own_lock(
+    actor: FeatureActor, spec: FeatureSpec, before: TierSetting, place: FeaturePlace, tier: Tier
+) -> None:
+    """A row already locked at this tier is only changed by someone who may lock."""
+    if before.locked and not await may_change(
+        actor, spec, tier, locked=True, agent_id=place.agent_id
+    ):
+        raise _locked_here(spec, place, tier)
+
+
 def _loosens(spec: FeatureSpec, after: TierSetting, above: ResolvedFeature) -> bool:
     """A write that resolution would override: the stricter of a guardrail, an Off capability
     turned back on, a limit raised above the one in force above it. Defaults decide nothing."""
@@ -496,7 +534,7 @@ def _loosens(spec: FeatureSpec, after: TierSetting, above: ResolvedFeature) -> b
         case "ceiling":
             return above.tier != "default" and above.value == spec.off and after.value != spec.off
         case "minimum":
-            return above.tier != "default" and float(after.value) > float(above.value)
+            return above.tier != "default" and extent(spec, after.value) > extent(spec, above.value)
         case "most_specific":
             return False
 
@@ -578,14 +616,20 @@ async def _write_in(
     after: TierSetting,
     place: FeaturePlace,
     expected: Expected[str] | None,
+    *,
+    check_own_lock: bool = True,
 ) -> TierSetting:
-    """One tier's write in the caller's transaction: the lock check, the row, the record."""
+    """One tier's write in the caller's transaction: the lock checks, the row, the record.
+    A row already locked at this tier is only changed by someone who may lock; callers that
+    have checked their admin themselves pass `check_own_lock=False`."""
     tier = after.tier
     await lock_tenant(session, place.tenant_id)  # the `expected` check below is then atomic
     values = await _values_at(session, settings, spec, place)
-    before = next((s for s in _own(spec, place, values) if s.tier == tier), TierSetting(tier))
+    before = _before(spec, place, values, tier)
     if expected is not None and expected.value != before.text:
         raise StaleChannelValue(spec.key, before.text)
+    if check_own_lock:
+        await _check_own_lock(actor, spec, before, place, tier)
     above = resolve_above(spec, values, tier)
     if above.locked and after.value not in (DEFAULT, above.value):
         raise _locked_above(spec, above, place, tier)
@@ -649,7 +693,14 @@ async def set_workspace_feature(
 
     actor = FeatureActor(tenant_id, account_id, surface, None, _nobody)
     return await _write_in(
-        session, settings, actor, FEATURES[key], TierSetting("workspace", value), place, None
+        session,
+        settings,
+        actor,
+        FEATURES[key],
+        TierSetting("workspace", value),
+        place,
+        None,
+        check_own_lock=False,
     )
 
 

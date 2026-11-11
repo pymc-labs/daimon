@@ -30,7 +30,14 @@ from daimon.adapters.mcp.middleware.mcp_identity import (
     production_tenant_resolver,
 )
 from daimon.adapters.mcp.server import create_mcp_app
-from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
+from daimon.core.config import (
+    AnthropicSettings,
+    DatabaseSettings,
+    McpSettings,
+    NotebookSettings,
+    ReportHostSettings,
+    Settings,
+)
 from daimon.core.mcp_auth import mint_agent_mcp_token, mint_chat_mcp_token
 from daimon.core.mcp_hold import HOLD_CLAIM
 from daimon.core.stores.accounts import set_role
@@ -462,7 +469,18 @@ async def test_a_held_call_cannot_publish_a_report_or_a_blog_or_an_editable_note
 ) -> None:
     account_id = await _slack_account(sessionmaker)
     held = await _chat_token(sessionmaker, account_id, HOLD)
-    app = create_mcp_app(settings=_SETTINGS, sessionmaker=sessionmaker)
+    # Hosts are set up, so the publish features are on and it is the hold that refuses.
+    publishing = _SETTINGS.model_copy(
+        update={
+            "notebook": NotebookSettings(
+                host_url=HttpUrl("http://notebook.test:8001"), admin_secret=SecretStr("test")
+            ),
+            "report_host": ReportHostSettings(
+                host_url=HttpUrl("http://report.test:8002"), admin_secret=SecretStr("test")
+            ),
+        }
+    )
+    app = create_mcp_app(settings=publishing, sessionmaker=sessionmaker)
 
     report = await mcp_session(
         app, token=held, method="tools/call", params={"name": "publish_report", "arguments": {}}

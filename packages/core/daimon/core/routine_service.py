@@ -636,6 +636,15 @@ async def update_routine(
         change.destination_kind is not None or change.destination_id is not None
     ):
         raise RoutineRefused("clear_destination cannot be combined with a new destination")
+    if (
+        change.clear_destination
+        and env.require_destination is not None
+        and await env.require_destination()
+    ):
+        raise RoutineRefused(
+            "A routine made here must post somewhere, so its destination can't be cleared. "
+            "Pick another destination instead."
+        )
     new_destination_channel_id = await check_destination(
         env, caller, kind=change.destination_kind, destination_id=change.destination_id
     )

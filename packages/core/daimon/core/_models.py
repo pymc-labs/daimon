@@ -2779,7 +2779,7 @@ class ThreadModelSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    # The model's provider; null is a Claude model chosen before providers could be (0195).
+    # The model's provider; null is a Claude model chosen before providers could be (0197).
     provider: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
@@ -2788,7 +2788,7 @@ class ThreadModelConsent(Base):
 
     One row per (tenant, platform, thread, agent): `revision` is the agent's
     backend revision with the thread's provider, model and loss consent, and
-    `digest` pins it for the channel revisions that reference it (0195).
+    `digest` pins it for the channel revisions that reference it (0197).
     """
 
     __tablename__ = "thread_model_consents"

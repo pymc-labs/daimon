@@ -24,7 +24,6 @@ from daimon.core.mux_backend import (
     TurnRuntime,
     register_turn_backend,
 )
-from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.pricing import ProviderPrice
 from daimon.core.session_compat import ReplaceSession
 from daimon.core.stores import mux_state
@@ -621,14 +620,6 @@ async def _prepare_with_runtime(
         if native.state == "terminated":
             raise ContinuityLost(binding.id, ("OpenAI session terminated",))
     ref = native.ref
-    footer_cost = (
-        NativeFooterCostContext(
-            request.deps.sessionmaker, request.scope, binding, ref, request.deps.markup
-        )
-        if request.admission.shown("native_footer_cost", request.platform)
-        else None
-    )
-
     # runtime_for admitted exactly one native model; usage is priced at its rate.
     model_id = revision.model or ""
 
@@ -652,15 +643,6 @@ async def _prepare_with_runtime(
             agent_id=current.agent.id,
         )
 
-        if footer_cost is not None:
-            from mux.contracts.ids import ModelRef
-
-            footer_cost.note(
-                observation.model_copy(update={"model": ModelRef(provider="openai", id=model_id)}),
-                price=runtime.price,
-                infrastructure_usd=infrastructure,
-                settled=settled,
-            )
         return settled
 
     return PreparedTurn(
@@ -673,7 +655,6 @@ async def _prepare_with_runtime(
         _record=record,
         backend=backend,
         session_ref=ref,
-        native_footer_cost=footer_cost,
         native_chat_session_id=binding.native_refs.get("daimon_chat_session_id"),
         continuity=continuity,
         # Revokes a template turn's per-turn MCP credential however the turn ends.

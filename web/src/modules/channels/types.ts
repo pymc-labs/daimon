@@ -130,15 +130,13 @@ export type ChannelSwitch = {
 export type ApprovalMode = "on" | "off"
 /**
  * Whether third-party writes wait for an Approve card here. `own` is this tier's own value (null: inherits);
- * `value` and `source` are what applies. `active` is false until the operator enables approval overrides,
- * so a saved value is ignored. `editable` needs a linked chat account; the server checks it is a chat admin.
+ * `value` and `source` are what applies. `editable` needs a linked chat account; the server checks it is a chat admin.
  */
 export type ChannelApprovals = {
   available: boolean
   own: ApprovalMode | null
   value: ApprovalMode
   source: "default" | "deployment" | "workspace" | "agent" | "channel" | "thread"
-  active: boolean
   editable: boolean
 }
 export type CostFooter = { shown: boolean; editable: boolean }

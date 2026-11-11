@@ -7,11 +7,12 @@ from typing import Final
 
 from anthropic import APIStatusError, AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
+from daimon.core.defaults.ma_index import find_agents_by_daimon_tag, find_renamed_seeded_agent
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_MANAGED,
     MA_METADATA_KEY_NAME,
     MA_METADATA_KEY_TENANT,
+    is_renamed_seeded_agent,
 )
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.mux_backend import resource_scope
@@ -108,7 +109,7 @@ async def get_setup_responder(
             "This setup conversation's Daimon agent is missing. "
             "Ask the operator to restore it, then open a new setup conversation."
         ) from error
-    if (
+    if not is_renamed_seeded_agent(responder.metadata) and (
         responder.metadata.get(MA_METADATA_KEY_MANAGED) != "true"
         or responder.metadata.get(MA_METADATA_KEY_NAME) != "daimon"
     ):
@@ -132,7 +133,7 @@ async def resolve_setup_agents(
             anthropic, tenant_id=tenant_id, name="daimon", records=records
         )
         if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    ]
+    ] or [ag for ag in [await find_renamed_seeded_agent(anthropic, tenant_id=tenant_id)] if ag]
     if len(responders) != 1:
         raise UserFacingError(
             "The built-in Daimon is unavailable. Ask the operator to restore it, then retry setup."

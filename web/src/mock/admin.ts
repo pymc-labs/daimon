@@ -80,9 +80,8 @@ const KEYED = [{ id: "anthropic", label: "Anthropic" }, { id: "openai", label: "
 const keyedIds = KEYED.map((p) => p.id)
 
 const settings: WorkspaceSettings = {
-  modules: { chat: true, agents: true, channels: true, routines: true, credits: true, integrations: true },
   default_agent: "ag_daimon",
-  access: { people: null, others: 0, dm_enabled: false, dm_memory_read_only: false, plain_text_mentions: false },
+  access: { people: null, others: 0 },
   providers: {
     offered: KEYED,
     allowed: keyedIds,
@@ -201,17 +200,12 @@ export const adminHandlers: HttpHandler[] = [
   http.get("/api/admin/settings", () => HttpResponse.json(settings)),
   http.patch("/api/admin/settings", async ({ request }) => {
     const b = (await request.json()) as SettingsPatch
-    if (b.modules) { settings.modules = b.modules; log("Changed setting", "Modules") }
     if (b.default_agent) { settings.default_agent = b.default_agent; log("Changed setting", "Web chat agent") }
     if (b.invokers) {
       if (b.invokers.everyone) settings.access.people = null
       else if (!b.invokers.people.length && !settings.access.others) return HttpResponse.json({ detail: "Pick at least one person, or let everyone. Nothing changed." }, { status: 422 })
       else settings.access.people = b.invokers.people.map((id) => ({ id, name: people.find((p) => p.id === id)?.name ?? "Unknown person" }))
       log("Changed setting", "Who can use the agents")
-    }
-    const flags = { dm_enabled: "Direct messages", dm_memory_read_only: "Read-only memory in direct messages", plain_text_mentions: "Typed mentions" } as const
-    for (const k of Object.keys(flags) as (keyof typeof flags)[]) {
-      if (b[k] !== undefined) { settings.access[k] = b[k]; log("Changed setting", flags[k], b[k] ? "On" : "Off") }
     }
     if (b.providers && settings.providers) {
       settings.providers.followed = b.providers === "default"

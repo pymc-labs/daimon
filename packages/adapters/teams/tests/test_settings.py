@@ -26,6 +26,15 @@ SCREEN = PanelScreen(
 )  # fmt: skip
 
 
+PAGED = PanelScreen(
+    "Progress plans",
+    ("In effect: On.",),
+    (PanelSelect("Change for an agent, page 2 of 3", (PanelOption("open:chat:progress_plans@a1~1", "Alpha"),)),),
+    PanelOption("open:chat", "Back"),
+    (PanelOption("open:chat:progress_plans", "Previous"), PanelOption("open:chat:progress_plans~2", "Next")),
+)  # fmt: skip
+
+
 def _context(kind: str) -> tuple[Any, list[Any]]:
     sent: list[Any] = []
     asked = SimpleNamespace(
@@ -60,6 +69,17 @@ async def test_the_card_is_for_the_post_it_was_typed_in(monkeypatch: pytest.Monk
     chat, sent = _context("personal")
     await teams_settings.show_settings(chat)
     assert "channel post" in json.dumps(sent[0].model_dump(by_alias=True, exclude_none=True))
+
+
+def test_a_long_list_adds_previous_and_next_buttons() -> None:
+    card = teams_settings.settings_card(PAGED, FeaturePlace.of(TENANT, "teams", CHANNEL, None))
+    body = card.model_dump(by_alias=True, exclude_none=True)["body"]
+    buttons = [a for block in body if block["type"] == "ActionSet" for a in block["actions"]]
+    assert [(b["title"], b["data"]["op"]) for b in buttons][-3:] == [
+        ("Back", "open:chat"),
+        ("Previous", "open:chat:progress_plans"),
+        ("Next", "open:chat:progress_plans~2"),
+    ]
 
 
 def _press(op: str, *, conversation: str = THREAD, kind: str = "channel", **data: str) -> MagicMock:

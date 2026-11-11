@@ -15,8 +15,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0195_thread_model_consents"
-down_revision: str | None = "0194_connector_tokens"
+revision: str = "0197_thread_model_consents"
+down_revision: str | None = "0196_connector_tokens"
 branch_labels: str | None = None
 depends_on: str | None = None
 

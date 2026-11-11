@@ -480,7 +480,6 @@ async def load_here_card(
     github: GitHubDeploymentFacts,
     public_mcp_url: str | None,
     is_admin: bool,
-    gate_overrides_active: bool = False,
     is_dm: bool = False,
     caller_account_id: uuid.UUID | None,
     resolve_setter_display: Callable[[str], Awaitable[str | None]] | None = None,
@@ -680,18 +679,13 @@ async def load_here_card(
     gate = resolve_approval_gate(
         policy, platform=platform, channel_id=channel_id, thread_id=thread_id
     )
-    effective = "on" if gate.value == "inherit" else gate.value
-    source = "Daimon default" if gate.value == "inherit" else gate.scope
-    note = (
-        f"Third-party write approvals: {effective} ({source})."
-        if gate_overrides_active
-        else (
-            f"Stored write approvals: {gate.value} ({gate.scope}); "
-            "approval overrides are not enabled."
-        )
-    )
+    shown = {"on": "Ask", "off": "Allow writes"}
     if is_dm:
-        note = "Direct-message write approvals are unchanged; scope overrides do not apply."
+        note = "Approvals: unchanged in direct messages."
+    elif gate.value == "inherit":
+        note = "Approvals: Ask (default)."
+    else:
+        note = f"Approvals: {shown[gate.value]} (set by the {gate.scope})."
     card = card.model_copy(
         update={
             "approval_gate_note": note,

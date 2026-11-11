@@ -1,6 +1,7 @@
 """`/settings`: the shared Settings panel (`daimon.core.settings_panel`) for this channel or
-thread. One message: a select per control and a Back button, redrawn on each press. Every
-change is applied by the core writer, which re-checks the presser live.
+thread. One message: a select per control, a Back button and, on a long list, Previous and
+Next, redrawn on each press. Every change is applied by the core writer, which re-checks
+the presser live.
 
 PEP-563 deferred evaluation breaks discord.py 2.x slash-param introspection
 for some signatures, so this module does NOT enable annotations futures.
@@ -62,7 +63,8 @@ def place_of(interaction: BotInteraction, tenant_id: uuid.UUID) -> FeaturePlace:
 
 
 class SettingsView(discord.ui.View):
-    """One screen of the panel: its selects (each one control) and a way back."""
+    """One screen of the panel: its selects (each one control), a way back and, on a long
+    list, Previous and Next."""
 
     def __init__(
         self,
@@ -84,10 +86,10 @@ class SettingsView(discord.ui.View):
             )
             select.callback = self.change
             self.add_item(select)
-        if screen.back is not None:
-            back: discord.ui.Button[SettingsView] = discord.ui.Button(label=screen.back.label)
-            back.callback = self._go(screen.back.value)  # type: ignore[method-assign]
-            self.add_item(back)
+        for option in (*([screen.back] if screen.back else []), *screen.paging):
+            button: discord.ui.Button[SettingsView] = discord.ui.Button(label=option.label)
+            button.callback = self._go(option.value)  # type: ignore[method-assign]
+            self.add_item(button)
 
     def _go(self, op: str) -> Callable[[BotInteraction], Coroutine[Any, Any, None]]:
         async def go(interaction: BotInteraction) -> None:

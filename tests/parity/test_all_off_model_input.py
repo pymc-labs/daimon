@@ -1,9 +1,8 @@
 """Every `model` feature Off, on each backend: the agent gets only the turn's framing, the
 safety block, its own system prompt and the person's text. No tools, no skills.
 
-Honest exceptions are the backend-fixed values the registry declares (`EXCEPTIONS`): Gemini
-and OpenAI agents always carry Daimon's tools and their own skills, and Daimon's tools lift
-Minimal turn controls to Origin because the tools need the conversation ids.
+Honest exceptions: Gemini and OpenAI agents always carry their own skills (`EXCEPTIONS`), and
+every non-isolated agent carries Daimon's tools and the full turn controls, which are fixed.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ from typing import Any
 import pytest
 from anthropic.types.beta import BetaManagedAgentsCustomSkill
 from daimon.core.agent_guidance import SAFETY_BLOCK, apply_credential_guidance
-from daimon.core.features.model_input import SessionToolset, guidance_applies, turn_controls
+from daimon.core.features.model_input import SessionToolset, guidance_applies
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.features.session_identity import SessionIdentity
@@ -28,8 +27,8 @@ from mux.profiles import INLINE_REUSE, MANAGED_AGENTS, PERSISTENT_WORKSPACE
 
 BACKENDS = (MANAGED_AGENTS.provider, INLINE_REUSE.provider, PERSISTENT_WORKSPACE.provider)
 EXCEPTIONS = {
-    INLINE_REUSE.provider: {"daimon_tools": "on", "agent_skills": "on"},
-    PERSISTENT_WORKSPACE.provider: {"daimon_tools": "on", "agent_skills": "on"},
+    INLINE_REUSE.provider: {"agent_skills": "on"},
+    PERSISTENT_WORKSPACE.provider: {"agent_skills": "on"},
 }
 PUBLIC = "https://daimon.example/mcp"
 SYSTEM = "You are the stats agent."
@@ -45,8 +44,7 @@ def _all_off(backend: str) -> FeatureSnapshot:
         if spec.effect != "model" or default.unavailable == "backend":
             found[key] = default
         else:
-            off = "minimal" if key == "turn_controls" else "off"
-            found[key] = ResolvedFeature(key, off, "channel")
+            found[key] = ResolvedFeature(key, "off", "channel")
     return FeatureSnapshot(place, 1, found)
 
 
@@ -75,13 +73,13 @@ def test_every_model_feature_off_leaves_only_the_base_input(backend: str) -> Non
     fixed = EXCEPTIONS.get(backend, {})
     model_keys = [key for key, spec in FEATURES.items() if spec.effect == "model"]
     for key in model_keys:
-        expected = fixed.get(key, "minimal" if key == "turn_controls" else "off")
+        expected = fixed.get(key, "off")
         assert features.value(key) == expected, f"{backend}: {key} is Off or a declared exception"
 
     toolset = SessionToolset.of(features, {})
     assert toolset.builtins and not any(toolset.builtins.values()), "every builtin tool is Off"
     assert not toolset.env_file, "no keys file"
-    assert toolset.daimon_tools == ("daimon_tools" in fixed), "Daimon tools only where fixed"
+    assert toolset.daimon_tools, "Daimon tools are fixed On"
     tools = session_tools(
         agent, frozenset(), tool_safety=OPEN_TOOL_SAFETY, public_url=PUBLIC, toolset=toolset
     )
@@ -96,7 +94,7 @@ def test_every_model_feature_off_leaves_only_the_base_input(backend: str) -> Non
         if config.get("enabled")
     ]
     assert enabled == [], "no builtin tool is enabled"
-    assert [s.name for s in servers] == (["daimon-mcp"] if fixed else []), "no Daimon server"
+    assert [s.name for s in servers] == ["daimon-mcp"], "the fixed Daimon server"
 
     identity = SessionIdentity.of(features)
     assert identity.extra_skills((_SKILL, _CHANNEL), frozenset({"skill_platform"})) == ()
@@ -108,8 +106,6 @@ def test_every_model_feature_off_leaves_only_the_base_input(backend: str) -> Non
     )
     assert guided == f"{SAFETY_BLOCK}\n\n{SYSTEM}", "only the safety block above the prompt"
 
-    level = turn_controls(features)
-    assert level == ("origin" if fixed else "minimal"), "Minimal unless Daimon tools need ids"
     origin = TurnOriginRow.model_validate(
         {
             "id": uuid.UUID(int=1),
@@ -129,4 +125,4 @@ def test_every_model_feature_off_leaves_only_the_base_input(backend: str) -> Non
         }
     )
     rendered = render_turn_origin(origin, effective_is_admin=False, features=features)
-    assert '"words"' not in rendered and '"web"' not in rendered, "no words or web links"
+    assert '"web"' not in rendered, "no web links with web awareness off"

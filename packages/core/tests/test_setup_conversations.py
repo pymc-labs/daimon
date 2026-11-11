@@ -80,6 +80,47 @@ async def test_missing_bound_responder_is_explicit_and_does_not_reconcile() -> N
         await get_setup_responder(client, tenant_id=uuid.uuid4(), ma_agent_id="ag_deleted")
 
 
+@pytest.mark.parametrize(
+    ("name", "managed", "answers"),
+    [("default", True, True), ("default", False, False), ("daimon", True, True)],
+    ids=["renamed-seeded", "unmanaged-default", "seeded-daimon"],
+)
+async def test_setup_accepts_the_seeded_agent_renamed_to_default(
+    name: str, managed: bool, answers: bool
+) -> None:
+    """A later release renames the seeded `daimon` to `default` in place; setup
+    keeps answering as it, both when opening and for a conversation bound to it,
+    but a workspace's own `default` is never the built-in agent.
+    """
+    tenant_id = uuid.uuid4()
+    agent = ma_agent(
+        id="ag_seeded",
+        name=name,
+        tenant_id=tenant_id,
+        metadata={"daimon_managed": "true"} if managed else None,
+    )
+    router = MARouter()
+    router.add(
+        "GET", r"/v1/agents", lambda req, match: list_response([agent.model_dump(mode="json")])
+    )
+    router.add(
+        "GET",
+        r"/v1/agents/ag_seeded",
+        lambda req, match: httpx.Response(200, json=agent.model_dump(mode="json")),
+    )
+    client = build_fake_anthropic(router.dispatch)
+
+    if answers:
+        responder, _ = await resolve_setup_agents(client, tenant_id=tenant_id)
+        bound = await get_setup_responder(client, tenant_id=tenant_id, ma_agent_id="ag_seeded")
+        assert responder.id == bound.id == "ag_seeded", "the seeded agent answers setup"
+    else:
+        with pytest.raises(UserFacingError, match="unavailable"):
+            await resolve_setup_agents(client, tenant_id=tenant_id)
+        with pytest.raises(UserFacingError, match="no longer the built-in"):
+            await get_setup_responder(client, tenant_id=tenant_id, ma_agent_id="ag_seeded")
+
+
 def test_setup_thread_name_names_the_target_when_one_is_chosen() -> None:
     assert setup_thread_name("writer") == "Setting up writer", (
         "the thread name says which agent is being set up"

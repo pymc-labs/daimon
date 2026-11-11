@@ -24,6 +24,7 @@ from daimon.core.features.registry import (
     FeatureSpec,
     Requirement,
     Tier,
+    resolution_order,
 )
 from daimon.core.features.resolver import (
     ResolvedFeature,
@@ -334,11 +335,11 @@ async def resolve_features(
                 thread_id=place.thread_id,
             )
             resolved["approvals"] = approvals_from_gate(gate.value, gate.scope)
-    for key in wanted:
-        if key != "approvals":
-            spec = FEATURES[key]
-            resolved[key] = resolve_one(spec, settings, place, rows, resolved, agent_builtins)
-    return FeatureSnapshot(place, revision, resolved)
+    # A feature's dependencies resolve first, even ones the caller did not ask for.
+    for spec in resolution_order(wanted):
+        if spec.key != "approvals":
+            resolved[spec.key] = resolve_one(spec, settings, place, rows, resolved, agent_builtins)
+    return FeatureSnapshot(place, revision, {key: resolved[key] for key in wanted})
 
 
 async def resolve_agent_features(
@@ -386,8 +387,10 @@ async def resolve_agent_features(
             for key, value in spec_values.items()
             if key not in personal
         ]
-    resolved = {key: resolve_one(FEATURES[key], settings, place, rows) for key in keys}
-    return FeatureSnapshot(place, revision, resolved)
+    resolved: dict[str, ResolvedFeature] = {}
+    for spec in resolution_order(keys):
+        resolved[spec.key] = resolve_one(spec, settings, place, rows, resolved)
+    return FeatureSnapshot(place, revision, {key: resolved[key] for key in keys})
 
 
 async def place_feature(

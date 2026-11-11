@@ -7,11 +7,17 @@ channel, the server, or an agent picked from a list. Each control is one choice
 A new registry key shows up here with no surface code.
 
 A platform draws a `PanelScreen`: its selects, a way back and a notice. Pressing a
-control or `open:<group>[:<key>[@<agent>]]` is `press`. Pure apart from the reads.
+control or `open:<group>[:<key>[@<agent>]][~<page>[~<picker>]]` is `press`. Pure apart from the
+reads. `<page>` is the page of the group's list the screen sits under, so Back returns to it;
+`<picker>` is the page of the agent picker.
+
+A select offers at most `SELECT_LIMIT` options. A group or an agent list longer than that
+is split into pages, and a screen carries Previous and Next options to move between them.
 """
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
@@ -39,10 +45,13 @@ from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.features.surface import (
     CATEGORIES,
     change_note,
+    listed,
     own_text,
     parse_choice,
     source_text,
+    split_pages,
     tier_options,
+    with_pages,
 )
 from daimon.core.stores.identity import find_platform_principal
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -52,6 +61,24 @@ TITLE: Final = "Settings"
 OPEN: Final = "open"
 SELECT_LIMIT: Final = 25
 """The most options a select offers on every platform that has one."""
+AGENT_ID_PATTERN: Final = re.compile(r"[A-Za-z0-9_.-]{1,40}")
+"""What an agent id may look like to ride in an op: the longest op stays under 100 characters
+(Discord's limit on a select value) and holds none of the marks that split it."""
+PREVIOUS: Final = "Previous"
+NEXT: Final = "Next"
+
+
+@dataclass(frozen=True)
+class OpenOp:
+    """What an `open` op names: a group, one of its settings, an agent, and two pages."""
+
+    category: Category | None = None
+    key: str | None = None
+    agent: str | None = None
+    page: int = 0
+    """The page of the group's list this screen sits under."""
+    picker: int = 0
+    """The page of the agent picker."""
 
 
 @dataclass(frozen=True)
@@ -119,9 +146,7 @@ async def apply_choice(
         )
     except ChannelChangeRefused as exc:
         return False, str(exc)
-    return True, change_note(
-        change, place.platform, overrides_active=settings.tool_safety.gate_overrides_active
-    )
+    return True, change_note(change, place.platform)
 
 
 @dataclass(frozen=True)
@@ -143,35 +168,74 @@ class PanelScreen:
     lines: tuple[str, ...]
     selects: tuple[PanelSelect, ...] = ()
     back: PanelOption | None = None
+    paging: tuple[PanelOption, ...] = ()
+    """Previous and Next, when a list is longer than one select holds."""
     notice: str | None = None
     ok: bool = True
     """False when `notice` says a change was refused."""
 
 
-def open_op(category: str | None = None, key: str | None = None, agent: str | None = None) -> str:
+def open_op(
+    category: str | None = None,
+    key: str | None = None,
+    agent: str | None = None,
+    page: int = 0,
+    picker: int = 0,
+) -> str:
     if category is None:
         return OPEN
     raw = f"{OPEN}:{category}" + (f":{key}" if key else "")
-    return f"{raw}@{agent}" if agent else raw
+    return with_pages(f"{raw}@{agent}" if agent else raw, page, picker)
 
 
-def parse_open(raw: object) -> tuple[Category | None, str | None, str | None] | None:
-    """``(group, key, agent)`` of an `open` op, or None when it names none of the registry's."""
+def parse_open(raw: object) -> OpenOp | None:
+    """The `open` op `raw` names, or None when it names none of the registry's."""
     if not isinstance(raw, str):
         return None
-    body, _, agent = raw.partition("@")
+    if (split := split_pages(raw)) is None:
+        return None
+    base, pages = split
+    page, picker = (pages + [0, 0])[:2]
+    body, _, agent = base.partition("@")
     head, *rest = body.split(":")
     if head != OPEN or len(rest) > 2 or (agent and len(rest) != 2):
         return None
+    if agent and not AGENT_ID_PATTERN.fullmatch(agent):
+        return None
     if not rest:
-        return None, None, None
+        return OpenOp() if len(pages) <= 1 else None
     category: Category | None = next((c for c in CATEGORIES if c == rest[0]), None)
     key = rest[1] if len(rest) == 2 else None
+    if key is None and picker:
+        return None
     if category is None or (
         key is not None and (key not in FEATURES or FEATURES[key].category != category)
     ):
         return None
-    return category, key, agent or None
+    return OpenOp(category, key, agent or None, page, picker)
+
+
+def _page(total: int, wanted: int) -> tuple[int, int, int]:
+    """``(page, first, last)`` of the page to show, kept inside the list as it is now."""
+    last_page = max(0, (total - 1) // SELECT_LIMIT)
+    page = min(wanted, last_page)
+    return page, page * SELECT_LIMIT, (page + 1) * SELECT_LIMIT
+
+
+def _paging(total: int, page: int, op: Callable[[int], str]) -> tuple[PanelOption, ...]:
+    """Previous and Next for the page shown, as the ops that open the neighbouring pages."""
+    options: list[PanelOption] = []
+    if page > 0:
+        options.append(PanelOption(op(page - 1), PREVIOUS))
+    if (page + 1) * SELECT_LIMIT < total:
+        options.append(PanelOption(op(page + 1), NEXT))
+    return tuple(options)
+
+
+def _paged(placeholder: str, total: int, page: int) -> str:
+    if total <= SELECT_LIMIT:
+        return placeholder
+    return f"{placeholder}, page {page + 1} of {(total - 1) // SELECT_LIMIT + 1}"
 
 
 def _on_platform(place: FeaturePlace) -> list[FeatureSpec]:
@@ -185,8 +249,10 @@ def _short(view: FeatureView, platform: str) -> str:
     return view.spec.label(resolved.value) + (", locked" if resolved.locked else "")
 
 
-def _root(place: FeaturePlace) -> PanelScreen:
-    groups = {spec.category for spec in _on_platform(place)}
+async def _root(sessions: Sessions, settings: Settings, place: FeaturePlace) -> PanelScreen:
+    specs = _on_platform(place)
+    views = listed(await read_features(sessions, settings, place, keys=[s.key for s in specs]))
+    groups = {view.spec.category for view in views}
     here = "this thread" if place.thread_id else "this channel"
     return PanelScreen(
         TITLE,
@@ -210,23 +276,26 @@ async def _category(
     actor: FeatureActor,
     place: FeaturePlace,
     category: Category,
+    wanted: int,
 ) -> PanelScreen:
     specs = [spec for spec in _on_platform(place) if spec.category == category]
-    views = await read_features(sessions, settings, place, keys=[s.key for s in specs])
-    shorts = [(view.spec, _short(view, place.platform)) for view in views]
+    views = listed(await read_features(sessions, settings, place, keys=[s.key for s in specs]))
+    page, first, last = _page(len(views), wanted)
+    shorts = [(view.spec, _short(view, place.platform)) for view in views[first:last]]
     return PanelScreen(
         CATEGORIES[category],
         tuple(f"{spec.name}: {short}" for spec, short in shorts),
         (
             PanelSelect(
-                "Pick a setting",
+                _paged("Pick a setting", len(views), page),
                 tuple(
-                    PanelOption(open_op(category, spec.key), spec.name, short)
-                    for spec, short in shorts[:SELECT_LIMIT]
+                    PanelOption(open_op(category, spec.key, page=page), spec.name, short)
+                    for spec, short in shorts
                 ),
             ),
         ),
         back=PanelOption(open_op(), "Back"),
+        paging=_paging(len(views), page, lambda n: open_op(category, page=n)),
     )
 
 
@@ -238,17 +307,25 @@ async def _feature(
     key: str,
     agent: str | None,
     agents: AgentLoader | None,
+    page: int = 0,
+    picker_page: int = 0,
 ) -> PanelScreen:
     spec = FEATURES[key]
     if agent:
         place = replace(place, agent_id=agent)
     (view,) = await read_features(sessions, settings, place, keys=(key,))
-    back = PanelOption(open_op(spec.category, key if agent else None), "Back")
+    back = PanelOption(
+        open_op(spec.category, key, page=page, picker=picker_page)
+        if agent
+        else open_op(spec.category, page=page),
+        "Back",
+    )
     title = spec.name
     lines = [f"In effect: {source_text(spec, view.resolved, place.platform)}."]
     if view.resolved.unavailable is not None:
-        return PanelScreen(title, tuple(lines), back=PanelOption(open_op(spec.category), "Back"))
+        return PanelScreen(title, tuple(lines), back=back)
     selects: list[PanelSelect] = []
+    paging: tuple[PanelOption, ...] = ()
     can_lock = await actor.admin_for(spec.authority.action) and not spec.authority.native
     for own in view.tiers:
         if own.tier == "deployment":
@@ -260,20 +337,29 @@ async def _feature(
         if await feature_refusal(sessions, settings, actor, key=key, tier=own.tier, place=place):
             continue
         options = tier_options(
-            spec, own.tier, own, can_lock=can_lock and own.tier in LOCKABLE, agent=agent
+            spec,
+            own.tier,
+            own,
+            can_lock=can_lock and own.tier in LOCKABLE,
+            agent=agent,
+            page=page,
+            picker=picker_page,
         )
         if options:
             choices = tuple(PanelOption(value, label) for value, label in options)
             selects.append(PanelSelect(f"Change for {where(own.tier, place.platform)}", choices))
     selects.reverse()
     if not agent and agents is not None and _agent_level(spec):
-        picker = await _agent_picker(sessions, settings, actor, place, spec, agents)
+        picker = await _agent_picker(
+            sessions, settings, actor, place, spec, agents, page, picker_page
+        )
         if picker is not None:
-            selects.append(picker)
+            selects.append(picker[0])
+            paging = picker[1]
     if not selects:
         who = admin_word(place.platform)
         lines.append(f"Only {who} can change this. Ask {who}.")
-    return PanelScreen(title, tuple(lines), tuple(selects), back)
+    return PanelScreen(title, tuple(lines), tuple(selects), back, paging)
 
 
 def _overridden(view: FeatureView, own: TierSetting, platform: str) -> str:
@@ -299,7 +385,9 @@ async def _agent_picker(
     place: FeaturePlace,
     spec: FeatureSpec,
     agents: AgentLoader,
-) -> PanelSelect | None:
+    list_page: int,
+    wanted: int,
+) -> tuple[PanelSelect, tuple[PanelOption, ...]] | None:
     refused = await feature_refusal(
         sessions,
         settings,
@@ -310,14 +398,20 @@ async def _agent_picker(
     )
     if refused is not None:
         return None
-    found = (await agents())[:SELECT_LIMIT]
-    if not found:
+    # An id that cannot ride in an op (too long or with a mark in it) cannot be picked here.
+    everyone = [agent for agent in await agents() if AGENT_ID_PATTERN.fullmatch(agent.id)]
+    if not everyone:
         return None
-    return PanelSelect(
-        "Change for an agent",
+    page, first, last = _page(len(everyone), wanted)
+    select = PanelSelect(
+        _paged("Change for an agent", len(everyone), page),
         tuple(
-            PanelOption(open_op(spec.category, spec.key, agent.id), agent.name) for agent in found
+            PanelOption(open_op(spec.category, spec.key, agent.id, list_page, page), agent.name)
+            for agent in everyone[first:last]
         ),
+    )
+    return select, _paging(
+        len(everyone), page, lambda n: open_op(spec.category, spec.key, page=list_page, picker=n)
     )
 
 
@@ -334,14 +428,15 @@ async def show(
     found = parse_open(op)
     if found is None:
         return None
-    category, key, agent = found
-    if category is None:
-        return _root(place)
-    if key is None:
-        return await _category(sessions, settings, actor, place, category)
-    if not FEATURES[key].on_platform(place.platform):
+    if found.category is None:
+        return await _root(sessions, settings, place)
+    if found.key is None:
+        return await _category(sessions, settings, actor, place, found.category, found.page)
+    if not FEATURES[found.key].on_platform(place.platform):
         return None
-    return await _feature(sessions, settings, actor, place, key, agent, agents)
+    return await _feature(
+        sessions, settings, actor, place, found.key, found.agent, agents, found.page, found.picker
+    )
 
 
 async def press(
@@ -362,7 +457,17 @@ async def press(
     done = await apply_choice(sessions, settings, actor, raw, place)
     if done is None:
         return None
-    screen = await _feature(sessions, settings, actor, place, choice.key, choice.agent, agents)
+    screen = await _feature(
+        sessions,
+        settings,
+        actor,
+        place,
+        choice.key,
+        choice.agent,
+        agents,
+        choice.page,
+        choice.picker,
+    )
     return replace(screen, notice=done[1], ok=done[0])
 
 
@@ -383,6 +488,7 @@ __all__ = [
     "DEFAULT",
     "AgentChoice",
     "AgentLoader",
+    "OpenOp",
     "PanelOption",
     "PanelScreen",
     "PanelSelect",

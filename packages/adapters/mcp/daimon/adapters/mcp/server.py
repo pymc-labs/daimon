@@ -26,6 +26,7 @@ from daimon.adapters.mcp.bundles import build_bundles_route
 from daimon.adapters.mcp.checkout import billing_cancel, billing_success, build_checkout_route
 from daimon.adapters.mcp.coding_key_claim import build_coding_key_claim_route
 from daimon.adapters.mcp.hub.app import mount_hub_apps
+from daimon.adapters.mcp.middleware.capability_gate import CapabilityGateMiddleware
 from daimon.adapters.mcp.middleware.ma_errors import MaErrorMiddleware
 from daimon.adapters.mcp.middleware.mcp_identity import (
     ClaimResolver,
@@ -539,6 +540,7 @@ def create_mcp_app(
     identity_middleware.attach_host_call_gate(
         HostCallGate(runtime, public_url=str(effective_settings.mcp.public_url or ""))
     )
+    mcp.add_middleware(CapabilityGateMiddleware(runtime))  # innermost: reads the identity
     agents.register_agent_tools(mcp, runtime)
     register_agent_removal_tools(mcp, runtime)
     environments.register_environment_tools(mcp, runtime)

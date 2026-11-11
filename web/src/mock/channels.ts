@@ -96,7 +96,7 @@ const curve = (total: number, days: number): { key: string; name: null; usd: num
   return weights.map((w, i) => ({ key: ago((days - 1 - i) * 24).slice(0, 10), name: null, usd: +((w / sum) * total).toFixed(2) }))
 }
 const ap = (value: ChannelApprovals["value"], source: ChannelApprovals["source"], own: ChannelApprovals["own"] = null): ChannelApprovals =>
-  ({ available: true, own, value, source, active: false, editable: true })
+  ({ available: true, own, value, source, editable: true })
 const PIN_CHOICES: ChannelSettings["pin_choices"] = [
   { value: "openai:gpt-6-luna", label: "GPT-6 Luna", provider: "openai", price: "~$0.10 input / $0.50 output per million tokens" },
   { value: "openai:gpt-6-astra", label: "GPT-6 Astra", provider: "openai", price: "~$10.00 input / $50.00 output per million tokens" },

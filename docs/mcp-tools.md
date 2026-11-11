@@ -532,7 +532,7 @@ The Settings group from chat: `get_settings` (anyone) and `change_setting` (card
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `change_setting` | Discord callers, Slack callers, Teams callers | Change one setting where you are, after the person presses Approve. |
-| `get_settings` | Discord callers, Slack callers, Teams callers | Report this conversation's settings (every registered feature). |
+| `get_settings` | Discord callers, Slack callers, Teams callers | Report this conversation's settings (features set up here or with a saved value). |
 
 ## `self_edit`
 
