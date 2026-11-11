@@ -95,6 +95,8 @@ _SETUP: Final[Mapping[Requirement, Callable[[Settings], bool]]] = {
         s.report_host.host_url is not None and s.report_host.admin_secret is not None
     ),
     "gemini_key": lambda s: s.gemini.api_key is not None,
+    # Every memory store lives with Anthropic, whichever backend answers.
+    "anthropic_key": lambda s: s.anthropic.api_key is not None,
     "microsoft_accounts": lambda s: s.microsoft_accounts_enabled and bool(s.crypto.keys),
     "repo_memory_setup": lambda s: get_repo_memory_settings(s).enabled,
     "teams_public_url": lambda s: s.teams is not None and s.teams.public_url is not None,

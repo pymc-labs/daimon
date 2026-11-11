@@ -43,6 +43,7 @@ from daimon.core.admin_authority import AuthorityCache, resolve_authority
 from daimon.core.anthropic_guard import AnthropicDisabled, without_anthropic
 from daimon.core.channel_backend import is_selfhosted_channel
 from daimon.core.config import Settings
+from daimon.core.host_memory import HOST_MEMORY_TAG, HOST_MEMORY_TOOLS
 from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.operator_tokens import scope_tag
@@ -528,6 +529,8 @@ class IdentityMiddleware(Middleware):
         # Only dedicated external agent_id credentials select the restricted
         # agent-chat surface. Chat execution identity leaves visibility intact.
         # Malformed identity fails closed at tools that require an agent.
+        if _host_memory_visible(identity):
+            await enable_components(fastmcp_ctx, tags={HOST_MEMORY_TAG})
         if agent_id is not None:
             await disable_components(fastmcp_ctx, match_all=True)
             await enable_components(fastmcp_ctx, tags={"agent-chat"})
@@ -605,6 +608,8 @@ class IdentityMiddleware(Middleware):
                 record_denial(HELD_DENIAL_REASON)
                 raise ToolError(refusal)
         await narrow_to_held_tools(fastmcp_ctx)
+        if not _host_memory_visible(identity):
+            await disable_components(fastmcp_ctx, names=set(HOST_MEMORY_TOOLS))
         return await self._dispatch_for_backend(context, call_next, identity)
 
     async def _resolve_operator(
@@ -629,6 +634,11 @@ class IdentityMiddleware(Middleware):
         if identity.scopes:
             await enable_components(fastmcp_ctx, tags={scope_tag(s) for s in identity.scopes})
         return await call_next(context)
+
+
+def _host_memory_visible(identity: AuthIdentity) -> bool:
+    """Host memory is for provider turns: a Claude session mounts its stores natively."""
+    return identity.no_confirmation_surface and not identity.anthropic_disabled
 
 
 def _hold_from_claims(claims: Mapping[str, object]) -> TurnHold | None:

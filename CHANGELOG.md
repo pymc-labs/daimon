@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **OpenAI and Gemini agents keep memory.** They read and write the same
+  shared, personal and channel memory a Claude agent uses, through Daimon's own
+  memory tools, with the same rules: a shared conversation has no personal
+  memory, a restricted channel sees only its own, and read-only places refuse
+  writes. Memory needs an Anthropic key; without one the memory settings show
+  as needing setup. Self-hosted agents still have no memory.
+
 - **Reasoning effort on OpenAI and Gemini agents.** An agent on either provider
   can carry a low, medium or high effort, kept with its model. Speed (Fast)
   stays Claude-only. Effort shows in the web editor and the Discord, Slack

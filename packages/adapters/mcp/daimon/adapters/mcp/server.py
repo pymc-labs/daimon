@@ -62,6 +62,7 @@ from daimon.adapters.mcp.tools import (
 from daimon.adapters.mcp.tools.admins import register_admin_tools
 from daimon.adapters.mcp.tools.agent_coding_keys import register_agent_coding_key_tools
 from daimon.adapters.mcp.tools.agent_edits import register_agent_edit_tools
+from daimon.adapters.mcp.tools.agent_memory import register_agent_memory_tools
 from daimon.adapters.mcp.tools.agent_removal import register_agent_removal_tools
 from daimon.adapters.mcp.tools.agent_tool_rules import register_agent_tool_rule_tools
 from daimon.adapters.mcp.tools.allowances import register_allowance_tools
@@ -126,6 +127,7 @@ from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.errors import BootstrapError
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.host_memory import HOST_MEMORY_TAG
 from daimon.core.logging_setup import configure_logging, mark_shutting_down
 from daimon.core.mcp_tool_call import pinned_http_client
 from daimon.core.node_exchange import node_identity_key
@@ -474,6 +476,8 @@ def create_mcp_app(
     mcp.add_transform(Visibility(False, tags={"slack"}))
     mcp.add_transform(Visibility(False, tags={"teams"}))
     mcp.add_transform(Visibility(False, tags={"web"}))
+    # Memory for backends without their own stores: provider turns only.
+    mcp.add_transform(Visibility(False, tags={HOST_MEMORY_TAG}))
     # Deployment-wide promo issuing: only an operator token holding the scope
     # re-enables these (middleware/mcp_identity.py); admins never see them.
     mcp.add_transform(Visibility(False, tags={scope_tag("promo:create")}))
@@ -551,6 +555,7 @@ def create_mcp_app(
     register_github_request_tools(mcp, runtime)
     register_github_working_repo_tools(mcp, runtime)
     register_repo_memory_tools(mcp, runtime)
+    register_agent_memory_tools(mcp, runtime)
     register_github_remove_repo_tools(mcp, runtime)
     register_wizard_tools(mcp, runtime)
     skills.register_skill_tools(mcp, runtime)

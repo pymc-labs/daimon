@@ -56,9 +56,9 @@ Where each feature can be set, and its default.
 | Waiting card | `waiting_card` | Chat | Off | ✓ | ✓ |  |  |  | Only Discord |
 | Repository memory | `repo_memory` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Context provider | `context_provider` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
-| Personal memory | `memory_personal` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always Off on Gemini, OpenAI |
-| Shared memory | `memory_shared` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always On on Gemini, OpenAI |
-| Channel memory | `memory_channel` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
+| Personal memory | `memory_personal` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
+| Shared memory | `memory_shared` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon; Always On on Gemini, OpenAI |
+| Channel memory | `memory_channel` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Private channel messages | `private_channel_messages` | Capability | On | ✓ |  |  |  |  | Needs setup by whoever runs Daimon; Only Teams |
 | Direct messages | `direct_messages` | Capability | Off | ✓ | ✓ |  |  |  | Only Discord, Slack |
 | Web app: chat | `web.chat` | Capability | On | ✓ | ✓ |  |  |  |  |
@@ -454,7 +454,7 @@ The skills added to a channel. They need the read tool, so they are off wherever
 
 ## Personal memory
 
-Each person's own memory with the agent, in conversations only they can read. On never adds it anywhere else. A conversation keeps what it started with until /new. Off for Gemini and OpenAI agents.
+Each person's own memory with the agent, in conversations only they can read. On never adds it anywhere else. A conversation keeps what it started with until /new.
 
 | | |
 | --- | --- |
@@ -478,7 +478,7 @@ The agent's memory shared by everyone who talks to it. A conversation keeps what
 
 ## Channel memory
 
-The memory a restricted channel keeps for itself in place of the shared one. A conversation keeps what it started with until /new. Claude agents only.
+The memory a restricted channel keeps for itself in place of the shared one. A conversation keeps what it started with until /new.
 
 | | |
 | --- | --- |
@@ -487,8 +487,6 @@ The memory a restricted channel keeps for itself in place of the shared one. A c
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Off above is a ceiling |
-| Levels on Gemini | Not available |
-| Levels on OpenAI | Not available |
 
 ## Thread titles
 

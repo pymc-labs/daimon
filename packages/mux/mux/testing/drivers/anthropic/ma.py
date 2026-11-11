@@ -705,7 +705,8 @@ def make_fake_memory_store_handler(
 
     Raises NotHandled for non-memory paths — compose with other handlers via
     combine_handlers. Covers: store create/retrieve/archive/delete, memory
-    create/list/retrieve/delete. (update/versions endpoints are out of v1 scope.)
+    create/list/retrieve/update/delete (update honours a content_sha256
+    precondition). Versions endpoints are out of scope.
 
     When combining with make_fake_ma_handler (which returns a 404 catch-all),
     pass this handler first to combine_handlers() so requests are tried here before fallthrough.
@@ -772,6 +773,26 @@ def make_fake_memory_store_handler(
                 return not_found_response("no such memory")
             st.memories[sid] = kept
             return httpx.Response(200, json={"id": mid, "type": "memory_deleted"})
+        if m and method == "POST":
+            sid, mid = m.group("sid"), m.group("mid")
+            body = json_body(request)
+            current = next((x for x in st.memories.get(sid, []) if x["id"] == mid), None)
+            if current is None:
+                return not_found_response("no such memory")
+            precondition: dict[str, Any] = body.get("precondition") or {}
+            if precondition.get("content_sha256") not in (None, current["content_sha256"]):
+                return httpx.Response(
+                    409, json={"type": "error", "error": {"type": "conflict_error"}}
+                )
+            content = str(body.get("content", current["content"]))
+            current.update(
+                content=content,
+                content_sha256=hashlib.sha256(content.encode()).hexdigest(),
+                content_size_bytes=len(content.encode()),
+                memory_version_id=ma_id("memver"),
+                updated_at=datetime.now(UTC).isoformat(),
+            )
+            return httpx.Response(200, json=_memory_view(current, "full"))
         if m and method == "GET":
             sid, mid = m.group("sid"), m.group("mid")
             view = request.url.params.get("view", "basic")

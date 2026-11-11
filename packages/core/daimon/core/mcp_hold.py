@@ -31,6 +31,11 @@ HELD_TOOL_ALLOWLIST: Final[Mapping[str, str]] = MappingProxyType(
         # the hold, so a held turn reads and posts only inside its channel.
         "list_channels": "channel listing, filtered by the channel policy",
         "read_channel": "reads channel messages through the channel policy",
+        # Host memory: a held credential resolves only its channel's store.
+        "memory_view": "touches only the held channel's memory",
+        "memory_create": "touches only the held channel's memory",
+        "memory_str_replace": "touches only the held channel's memory",
+        "memory_delete": "touches only the held channel's memory",
         "read_thread": "reads a thread through the channel policy",
         "get_message": "reads one message through the channel policy",
         "list_threads": "lists a channel's threads through the channel policy",

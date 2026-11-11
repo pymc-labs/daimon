@@ -51,6 +51,7 @@ from daimon.core.turn.runtime_manifest import (
     ConfigurationGrant,
     SourceCapabilities,
     fixed_plan_origin_allowed,
+    host_memory_represented,
     materialize_root_counterpart,
     read_counterpart,
     represented_source,
@@ -265,7 +266,10 @@ class GeminiPlan(BaseModel):
                 self.source_capabilities is not None
                 and self.source_capabilities.model.id != revision.model
             )
-            or "memory" not in target.declared_drops
+            or (
+                "memory" not in target.declared_drops
+                and not (represented is not None and host_memory_represented(target))
+            )
             or target.name != source.effective_spec.name
             or not source_instructions_preserved(source.effective_spec.system, target.system)
             or (full and represented is None)

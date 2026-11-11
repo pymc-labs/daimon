@@ -1088,6 +1088,25 @@ def memory_mount_retained(source: BackendAgent, resources: tuple[ResourceBinding
     )
 
 
+def host_memory_represented(target: AgentSpec | None) -> bool:
+    """Whether an OpenAI or Gemini target reaches the agent's memory stores through
+    Daimon's own memory tools (`daimon.core.host_memory`), all executable. Self-hosted
+    turns never call Anthropic, so their memory stays a declared drop."""
+    from daimon.core.host_memory import HOST_MEMORY_TOOLS
+
+    if target is None or target.model.provider not in ("openai", "gemini"):
+        return False
+    allowed = next(
+        (
+            server.tool_policy.get("allowed_tools")
+            for server in target.mcp_servers or ()
+            if server.name == DAIMON_SERVER_NAME
+        ),
+        None,
+    )
+    return isinstance(allowed, list) and set(HOST_MEMORY_TOOLS) <= set(cast(list[str], allowed))
+
+
 def classify_source_obligations(
     source: BackendAgent,
     target: AgentSpec | None,
@@ -1290,6 +1309,7 @@ def classify_source_obligations(
         and "memory" not in drops
         and not native_retained
         and not memory_mount_retained(source, resources)
+        and not (represented is not None and host_memory_represented(target))
     ):
         missing.add("memory")
     if source.environment is not None and source.environment.spec.native_config is not None:

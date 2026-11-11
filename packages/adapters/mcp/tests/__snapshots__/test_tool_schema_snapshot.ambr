@@ -6094,6 +6094,115 @@
         'type': 'object',
       }),
     }),
+    'memory_create': dict({
+      'description': 'Save a new memory file at `path` (for example `/notes/project.md`).',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'content': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'path': dict({
+            'type': 'string',
+          }),
+          'personal': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+          'path',
+          'content',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'memory_delete': dict({
+      'description': 'Delete a memory file.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'path': dict({
+            'type': 'string',
+          }),
+          'personal': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+          'path',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'memory_str_replace': dict({
+      'description': 'Replace the one occurrence of `old_str` in a memory file with `new_str`.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'new_str': dict({
+            'type': 'string',
+          }),
+          'old_str': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'path': dict({
+            'type': 'string',
+          }),
+          'personal': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+          'path',
+          'old_str',
+          'new_str',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'memory_view': dict({
+      'description': '''
+        Read a memory file, or list the memory paths under a directory.
+        <blank line>
+        Memory persists across conversations. `personal` selects the caller's own
+        memory instead of the agent's shared memory.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'path': dict({
+            'default': '/',
+            'type': 'string',
+          }),
+          'personal': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'microsoft_get': dict({
       'description': '''
         GET a Microsoft Graph v1.0 path as the person, e.g. /me/drive/root/children.

@@ -1093,6 +1093,54 @@ async def delete_memory(
     )
 
 
+async def create_memory(
+    client: AsyncAnthropic | None,
+    store_id: str,
+    path: str,
+    content: str,
+    *,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
+) -> str:
+    """Create one memory and return its id."""
+    backend, port = _memory_port(client, records, store_id, scope=scope)
+    created = await legacy_call(
+        port.write(
+            scope,
+            resource_ref(backend, "memory_store", store_id, scope=scope),
+            path,
+            content,
+            expected=None,
+            key=str(uuid4()),
+        )
+    )
+    return created.id
+
+
+async def update_memory(
+    client: AsyncAnthropic | None,
+    store_id: str,
+    memory_id: str,
+    content: str,
+    *,
+    expected_content_sha256: str,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
+) -> None:
+    """Replace one memory's content while it still hashes to the expected value."""
+    backend, port = _memory_port(client, records, store_id, scope=scope)
+    await legacy_call(
+        port.update_memory(
+            scope,
+            resource_ref(backend, "memory_store", store_id, scope=scope),
+            memory_id,
+            content,
+            expected_content_sha256=expected_content_sha256,
+            key=str(uuid4()),
+        )
+    )
+
+
 async def delete_memory_store(
     client: AsyncAnthropic | None,
     store_id: str,

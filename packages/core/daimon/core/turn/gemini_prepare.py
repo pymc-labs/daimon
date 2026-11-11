@@ -82,11 +82,17 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         # Refused before any key, transport or journal is touched.
         raise UnsupportedCapability(("daimon_tool_rules",), PROFILE)
     target = request.target_spec
+    from daimon.core.turn.runtime_manifest import host_memory_represented
+
     # Mounts and transfer require a separate complete deployment adapter. Never
     # silently drop those obligations in this slice. Seals ride the turn credential
-    # (`template_mcp`).
+    # (`template_mcp`); host memory reads the turn's read-only posture itself.
     if (
-        admission.memory_read_only and (target is None or "memory" not in target.declared_drops)
+        admission.memory_read_only
+        and (
+            target is None
+            or ("memory" not in target.declared_drops and not host_memory_represented(target))
+        )
     ) or (admission.channel_skills and (target is None or "skills" not in target.declared_drops)):
         raise UnsupportedCapability(("gemini_host_deployment_policy",), PROFILE)
     if not isinstance(runtime.journal, GeminiJournal) or not isinstance(

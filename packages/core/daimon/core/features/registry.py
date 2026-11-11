@@ -28,6 +28,7 @@ replacement (system prompt, skills, memory). ``provision``: on the agent's next 
 Category = Literal["model_input", "chat", "capabilities", "limits", "guardrails"]
 Requirement = Literal[
     "platform_adapter",
+    "anthropic_key",
     "compute_setup",
     "notebook_host",
     "report_host",
@@ -433,10 +434,10 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         binds="session_identity",
         doc=(
             "Each person's own memory with the agent, in conversations only they can read. "
-            f"On never adds it anywhere else. {_KEPT} Off for Gemini and OpenAI agents."
+            f"On never adds it anywhere else. {_KEPT}"
         ),
-        backend_fixed={_GEMINI: "off", _OPENAI: "off"},
         platforms=EVERY_PLATFORM,
+        requires=("anthropic_key",),
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
     FeatureSpec(
@@ -454,6 +455,7 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         ),
         backend_fixed=_FIXED_ON,
         platforms=EVERY_PLATFORM,
+        requires=("anthropic_key",),
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
     FeatureSpec(
@@ -466,11 +468,10 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         tiers=TIERS,
         binds="session_identity",
         doc=(
-            "The memory a restricted channel keeps for itself in place of the shared one. "
-            f"{_KEPT} Claude agents only."
+            f"The memory a restricted channel keeps for itself in place of the shared one. {_KEPT}"
         ),
-        backend_tiers=_MANAGED_AGENTS_ONLY,
         platforms=EVERY_PLATFORM,
+        requires=("anthropic_key",),
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
 )

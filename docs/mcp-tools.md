@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 216 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 220 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -17,6 +17,7 @@ tool is hidden by default and restored only for a matching caller.
 - **admin only** — carries the `admin` tag.
 - **agent tokens only** — carries the `agent-chat` tag.
 - **Discord callers** — carries the `discord` tag.
+- **OpenAI and Gemini agents** — carries the `host-memory` tag.
 - **operator tokens with agents:archive** — carries the `scope:agents:archive` tag.
 - **operator tokens with channels:write** — carries the `scope:channels:write` tag.
 - **operator tokens with promo:create** — carries the `scope:promo:create` tag.
@@ -86,6 +87,17 @@ owners and helpers and save a skill's files.
 | `save_agent_skill_files` | all callers | Edit an agent's skill file: publish text files as a new version of one of its skills, or a new skill when ``skill_id`` is left out, and pin it. |
 | `set_agent_helpers` | admin only | Set the agents an agent may ask for help to exactly these names or ids, for any agent you can see; helpers kept to channels you can't see stay. |
 | `set_agent_owners` | admin only | Set an agent's owner and co-owners to exactly these web person or account ids. |
+
+## `agent_memory`
+
+Memory tools for agents whose backend has no memory stores of its own.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `memory_create` | OpenAI and Gemini agents | Save a new memory file at `path` (for example `/notes/project.md`). |
+| `memory_delete` | OpenAI and Gemini agents | Delete a memory file. |
+| `memory_str_replace` | OpenAI and Gemini agents | Replace the one occurrence of `old_str` in a memory file with `new_str`. |
+| `memory_view` | OpenAI and Gemini agents | Read a memory file, or list the memory paths under a directory. |
 
 ## `agent_removal`
 
