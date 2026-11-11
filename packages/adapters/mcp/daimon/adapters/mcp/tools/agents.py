@@ -2613,10 +2613,11 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         expected_ma_agent_id: str | None = None,
         origin_context_id: str | None = None,
     ) -> AgentInfo:
-        """Change an agent's instructions (system prompt), switch its model, or add existing
-        skills such as build-models. Scalar ``model``, ``description`` and ``system`` fields
-        replace. Outside chat ``model`` may be any ``list_models`` model, another
-        provider's too; in chat move providers with ``request_agent_backend_switch``.
+        """Update an agent: change its instructions (system prompt), switch its model, or
+        add existing skills such as build-models. Scalar ``model``, ``description``
+        and ``system`` fields replace. Outside chat ``model`` may be any
+        ``list_models`` model, another provider's too; in chat move providers with
+        ``request_agent_backend_switch``.
 
         Prefer current-generation ``claude-sonnet-5-5`` for Sonnet,
         ``claude-opus-5-5`` for Opus and ``claude-haiku-5-5`` for the cheapest

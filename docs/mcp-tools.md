@@ -136,7 +136,7 @@ Agent tools: list / get / create / update / fork / archive.
 | `request_agent_backend_switch` | all callers | Preview a requested agent backend switch, then Confirm in this chat. |
 | `set_agent_backend` | all callers | Set an enabled model provider, or clear the agent setting with backend=null. |
 | `set_agent_builtin_tool` | all callers | Turn one of an agent's built-in tools on or off, e.g. "turn off its web search". |
-| `update_agent` | all callers | Change an agent's instructions (system prompt), switch its model, or add existing skills such as build-models. |
+| `update_agent` | all callers | Update an agent: change its instructions (system prompt), switch its model, or add existing skills such as build-models. |
 
 ## `allowances`
 
