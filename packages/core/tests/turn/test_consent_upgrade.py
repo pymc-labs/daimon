@@ -116,9 +116,13 @@ def test_a_regained_tool_still_pins_the_rest_of_the_target() -> None:
 
 
 def test_only_a_carded_tool_may_be_regained() -> None:
-    """A regained loss Daimon does not card per call, or a new loss, asks again."""
+    """A regained loss Daimon neither cards nor covers with its own tool, or a new loss, asks again."""
     fetch = consent_for(copy_for(drops=("builtin_tool:web_fetch", "memory")))
     assert not _regained(fetch, copy_for()), "a regained web tool asks again"
+    hosted = copy_for(allowed=("describe_agent", "web_fetch"))
+    assert _regained(fetch, hosted), "Daimon's own web_fetch covers the provider's"
+    moved = copy_for(allowed=("describe_agent", "web_fetch"), url="https://b.invalid/mcp")
+    assert not _regained(fetch, moved), "the rest of the target is still pinned"
     lost = consent_for(copy_for(drops=(PUBLISH, "memory")))
     assert not _regained(lost, copy_for(allowed=CARDED, drops=("memory", "skills"))), "new loss"
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
+from daimon.core.host_web_fetch import WEB_FETCH_TOOL
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from mux.contracts.ids import Provider
 from mux.contracts.resources import AgentSpec
@@ -151,6 +152,7 @@ def _with_daimon_tools_dropped(
     source_system: str | None,
     tools: frozenset[str],
     connectors: frozenset[str] = frozenset(),
+    covered: frozenset[str] = frozenset(),
 ) -> AgentSpec | None:
     """`target` as a consent that named Daimon's `tools` and relayed `connectors` lost builds it.
 
@@ -162,7 +164,8 @@ def _with_daimon_tools_dropped(
     from mux.contracts.resources import MCPConnection
 
     named = {f"mcp_tool:{DAIMON_SERVER_NAME}:{tool}" for tool in tools}
-    named |= {f"mcp_server:{name}" for name in connectors}
+    named |= {f"mcp_server:{name}" for name in connectors} | covered
+    removed = tools | {_HOST_EQUIVALENTS[drop] for drop in covered}
     if not named or named & set(target.declared_drops):
         return None
     if not connectors <= relayed_servers(target):
@@ -174,17 +177,17 @@ def _with_daimon_tools_dropped(
             continue
         allowed = server.tool_policy.get("allowed_tools") if server.tool_policy else None
         if server.name == DAIMON_SERVER_NAME and isinstance(allowed, list):
-            found.update(name for name in allowed if name in tools)
+            found.update(name for name in allowed if name in removed)
             server = server.model_copy(
                 update={
                     "tool_policy": {
                         **server.tool_policy,
-                        "allowed_tools": [name for name in allowed if name not in tools],
+                        "allowed_tools": [name for name in allowed if name not in removed],
                     }
                 }
             )
         servers.append(server)
-    if frozenset(found) != tools:
+    if frozenset(found) != removed:
         return None
     drops = tuple(sorted({*target.declared_drops, *named}))
     return target.model_copy(
@@ -205,14 +208,19 @@ def _with_switch_tool_dropped(target: AgentSpec, source_system: str | None) -> A
     )
 
 
+#: A provider loss Daimon's own tool of the same job carries when the target lists it.
+_HOST_EQUIVALENTS: Final[dict[str, str]] = {"builtin_tool:web_fetch": WEB_FETCH_TOOL}
+
+
 def _regained(
     target: AgentSpec, consent: _BackendDropConsent
-) -> tuple[frozenset[str], frozenset[str]] | None:
+) -> tuple[frozenset[str], frozenset[str], frozenset[str]] | None:
     """Daimon tools and relayed connectors `consent` named lost that `target` offers again.
 
     None when `target` drops anything `consent` did not accept, or regains
     anything but a tool Daimon cards per call or a connector the relay serves
-    under each person's own grant: a gain the person never saw asks again.
+    under each person's own grant, or a provider loss Daimon's own tool covers
+    (`_HOST_EQUIVALENTS`): a gain the person never saw asks again.
     """
     from daimon.core.tool_safety import host_call_carded_tools, self_carded_tools
 
@@ -222,13 +230,25 @@ def _regained(
     carded = host_call_carded_tools() | self_carded_tools()
     regained = set(consent.declared_drops) - set(target.declared_drops)
     servers = {d.removeprefix("mcp_server:") for d in regained if d.startswith("mcp_server:")}
-    rest = regained - {f"mcp_server:{name}" for name in servers}
+    covered = frozenset(
+        d for d in regained if d in _HOST_EQUIVALENTS and _HOST_EQUIVALENTS[d] in _offered(target)
+    )
+    rest = regained - {f"mcp_server:{name}" for name in servers} - covered
     tools = {drop.removeprefix(prefix) for drop in rest}
     if not all(drop.startswith(prefix) for drop in rest) or not tools <= carded:
         return None
     if not servers <= relayed_servers(target):
         return None
-    return frozenset(tools), frozenset(servers)
+    return frozenset(tools), frozenset(servers), covered
+
+
+def _offered(target: AgentSpec) -> frozenset[str]:
+    """The Daimon tools `target` mounts."""
+    for server in target.mcp_servers or ():
+        allowed = server.tool_policy.get("allowed_tools") if server.tool_policy else None
+        if server.name == DAIMON_SERVER_NAME and isinstance(allowed, list):
+            return frozenset(name for name in allowed if isinstance(name, str))
+    return frozenset()
 
 
 def _regains_carded(
