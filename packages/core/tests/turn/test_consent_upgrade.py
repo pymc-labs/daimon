@@ -172,3 +172,16 @@ def test_no_module_compares_a_consent_digest_outside_the_helper() -> None:
             if any(isinstance(o, ast.Attribute) and o.attr == "target_digest" for o in operands):
                 offenders.append(f"{path.relative_to(root)}:{node.lineno}")
     assert not offenders, f"compare consents through consent_upgrade.covers: {offenders}"
+
+
+def test_covers_a_template_that_attaches_the_skills_it_lost_whole() -> None:
+    """Fewer losses never ask again: the skills attach, one over the size limit is named."""
+    then = copy_for(drops=("memory", "skills"))
+    assert holds(consent_for(then), copy_for(), "gpt-6-luna"), "every skill attaches"
+    today = copy_for(drops=("memory", "skill:huge"))
+    assert holds(consent_for(then), today, "gpt-6-luna"), "one skill is less than all of them"
+
+
+def test_a_skill_loss_the_owner_never_accepted_asks_again() -> None:
+    today = copy_for(drops=("memory", "skill:huge"))
+    assert not holds(consent_for(copy_for()), today, "gpt-6-luna"), "a new loss asks again"

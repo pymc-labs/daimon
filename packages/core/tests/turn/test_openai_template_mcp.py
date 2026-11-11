@@ -32,6 +32,7 @@ from mux.contracts.config import ConfigRevision
 
 from ..test_agent_backend import owned as owned
 from .test_declared_drop_preparation import consent_request as consent_request
+from .test_gemini_full_source import CUSTOM, default_skill_bundles
 from .test_openai_agent_template import KEY, template_row
 from .test_openai_full_source import PARAMS, FullWire
 from .test_openai_runtime_transport import clients_for
@@ -96,6 +97,24 @@ async def source_mcp(consent_request):
         yield app
 
 
+def serve_source_skills(router) -> None:
+    """The source's custom skills, each readable at version 1."""
+    for name, _bundle, _version, data in default_skill_bundles():
+        skill_id = f"source-{name}"
+        router.add(
+            "GET",
+            rf"/v1/skills/{skill_id}/versions",
+            lambda *_, sid=skill_id: httpx.Response(
+                200, json={"data": [{"id": f"version-{sid}", "version": "1"}], "has_more": False}
+            ),
+        )
+        router.add(
+            "GET",
+            rf"/v1/skills/{skill_id}/versions/version-{skill_id}/content",
+            lambda *_, body=data: httpx.Response(200, content=body),
+        )
+
+
 def bearer(auth: dict[str, object]) -> str:
     token = auth["token"]
     assert isinstance(token, str)
@@ -117,6 +136,7 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
     request, _, source, actor, accepted, router, *_ = consent_request
     sessions = request.deps.sessionmaker
     router.add_environment_list(request.admission.environment)
+    serve_source_skills(router)
     scope = admitted_session_scope(
         request.admission, tenant_id=request.tenant_id, session_id="preparation"
     )
@@ -284,7 +304,9 @@ async def _revoked(request, token: str) -> bool:
 async def test_consent_keeps_daimon_tools_and_drops_only_what_the_template_lacks(template):
     _, quote, *_ = template
     assert "mcp" not in quote.declared_drops
-    assert {"memory", "skills"} <= set(quote.declared_drops)
+    assert "memory" in quote.declared_drops
+    # Its custom skills fit OpenAI's limits: each attaches, none is a loss.
+    assert not [d for d in quote.declared_drops if d.startswith("skill")]
     # J6b: its execution tools map to bash in the hosted environment; only web tools
     # (none on this source) would be named losses.
     assert "tools" not in quote.declared_drops
@@ -538,3 +560,71 @@ async def test_a_tool_the_owner_turned_off_after_the_switch_asks_again(template,
     assert isinstance(refused.value.__cause__, AgentBackendRefused), "refused as a re-confirm"
     assert refused.value.__cause__.reason == "re_confirm", "the owner's change needs a new card"
     assert wire.posts == [], "nothing reached OpenAI"
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_the_session_attaches_the_agents_custom_skills_uploaded_once(template):
+    request, _, wire, _ = template
+    await _turn(request, 0)
+    await _turn(request, 1)
+    uploads = [r for r in wire.requests if r.method == "POST" and r.url.path == "/v1/skills"]
+    assert len(uploads) == len(CUSTOM) == len(wire.skills), "each skill version uploads once"
+    (body,) = wire.posts
+    assert {s["skill_id"] for s in body["environment"]["skills"]} == set(wire.skills)
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_channels_skill_is_carried_and_one_over_the_limit_is_a_named_loss(
+    template, consent_request
+):
+    import io
+    import zipfile
+
+    from anthropic.types.beta import BetaManagedAgentsCustomSkill
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+    from mux.profiles import get_profile
+
+    request, *_ = template
+    router = consent_request[5]
+    limit = get_profile("openai.persistent_workspace").skill_limits
+    assert limit is not None
+    for skill_id, extra in (("skill_team", b""), ("skill_huge", b"\0" * (limit.total_bytes + 1))):
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as packed:
+            name = skill_id.replace("_", "-")
+            packed.writestr("SKILL.md", f"---\nname: {name}\ndescription: Fixture.\n---\nUse it.\n")
+            if extra:
+                packed.writestr("data.bin", extra)
+        router.add(
+            "GET",
+            rf"/v1/skills/{skill_id}/versions",
+            lambda *_, sid=skill_id: httpx.Response(
+                200, json={"data": [{"id": f"version-{sid}", "version": "7"}], "has_more": False}
+            ),
+        )
+        archive = stream.getvalue()
+        router.add(
+            "GET",
+            rf"/v1/skills/{skill_id}/versions/version-{skill_id}/content",
+            lambda *_, body=archive: httpx.Response(200, content=body),
+        )
+    channel = tuple(
+        BetaManagedAgentsCustomSkill(type="custom", skill_id=skill_id, version="7")
+        for skill_id in ("skill_team", "skill_huge")
+    )
+    request = replace(request, admission=replace(request.admission, channel_skills=channel))
+    source = await capture_preparation_source(request, capability_preview=True)
+    openai = [r for r in source.representations if r.target.model.provider == "openai"]
+    assert openai, "one per model the template grants"
+    for represented in source.representations:
+        if represented not in openai:
+            # Gemini's own template still loses its skills whole (not yet carried).
+            assert "skills" in represented.unavailable_capabilities
+            continue
+        carried = {skill.id for skill in represented.session_skills}
+        assert carried == {f"source-{s['skill_id']}" for s in CUSTOM} | {"skill_team"}
+        assert "skills" not in represented.unavailable_capabilities
+        assert "skill:skill-huge" in represented.unavailable_capabilities
+    from daimon.core.confirmation import drop_words
+
+    assert drop_words(("memory", "skill:skill-huge")) == "its memory and its skill-huge skill"

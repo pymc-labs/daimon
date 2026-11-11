@@ -123,6 +123,10 @@ def same_losses(target: AgentSpec, consent: _BackendDropConsent) -> bool:
         # Before #1483 a template lost the source's tools whole; now it keeps
         # them and names only the web tools it can't carry.
         accepted = (accepted - {"tools"}) | {d for d in today if d.startswith("builtin_tool:")}
+    if "skills" in accepted and "skills" not in today:
+        # A template that lost the skills whole now attaches them, naming only
+        # those over the provider's size limit: fewer losses than accepted.
+        accepted = (accepted - {"skills"}) | {d for d in today if d.startswith("skill:")}
     return today == accepted
 
 

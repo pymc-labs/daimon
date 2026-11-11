@@ -39,7 +39,7 @@ Where each feature can be set, and its default.
 | Platform prompt | `platform_prompt` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always Off on OpenAI |
 | Platform skills | `platform_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
 | Agent skills | `agent_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always On on Gemini, OpenAI |
-| Channel skills | `channel_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
+| Channel skills | `channel_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini |
 | Thread participation | `participation` | Chat | Off | ✓ | ✓ |  | ✓ | ✓ | Only Discord, Teams |
 | Progress plans | `progress_plans` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Cost footer | `cost_footer` | Chat | Shown |  | ✓ |  | ✓ | ✓ |  |
@@ -440,7 +440,7 @@ The skills listed on the agent. Off leaves them out of new conversations; the ag
 
 ## Channel skills
 
-The skills added to a channel. They need the read tool, so they are off wherever it is. A conversation keeps what it started with until /new. Claude agents only.
+The skills added to a channel. They need the read tool, so they are off wherever it is. A conversation keeps what it started with until /new. Not on Gemini agents.
 
 | | |
 | --- | --- |
@@ -450,7 +450,6 @@ The skills added to a channel. They need the read tool, so they are off wherever
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
 | Levels on Gemini | Not available |
-| Levels on OpenAI | Not available |
 
 ## Personal memory
 

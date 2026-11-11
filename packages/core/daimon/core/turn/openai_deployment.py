@@ -48,7 +48,7 @@ from daimon.core.turn.runtime_manifest import (
 )
 from mux.contracts.completions import Completions
 from mux.contracts.config import ConfigRevision
-from mux.contracts.ids import ResourceRef, Revision, Scope
+from mux.contracts.ids import ResourceRef, Revision, Scope, SkillRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, SessionSpec
 from mux.drivers.openai import SessionControls, Transport
 from mux.errors import ScopeViolation
@@ -322,6 +322,9 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     root_agent: ResourceRef | None = None
     allocating = False
     counterpart_verified = False
+    # A template's carried skills: uploading them, and the copies its session attaches.
+    copying = False
+    copied: set[str] = set()
     from daimon.core.turn.template_mcp import (
         TemplateMCPCredential,
         needs_turn_credential,
@@ -383,6 +386,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             agent = checked.agent.ref
         return SessionSpec(
             agent=agent,
+            skills=await template_skills(preparation) if deployment.root_materialization else (),
             agent_revision=Revision(local=0),
             environment=(
                 ref(deployment.environment_id, "environment")
@@ -392,9 +396,39 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             config_revision=revision.local,
         )
 
+    async def template_skills(preparation: ProviderPreparationRequest) -> tuple[SkillRef, ...]:
+        """The provider's copies of the custom and channel skills the capture carried."""
+        nonlocal copying
+        source = preparation.source
+        represented = (
+            represented_source(source, preparation.target_spec) if source is not None else None
+        )
+        if represented is None or not represented.session_skills:
+            return ()
+        from daimon.core.turn.session_skills import copy_skills
+
+        copying = True
+        try:
+            copies = await copy_skills(
+                preparation.deps.sessionmaker,
+                preparation.deps.anthropic,
+                driver(runtime, revision, scope).skills,
+                scope=scope,
+                tenant_id=preparation.tenant_id,
+                provider="openai",
+                account_scope_id=deployment.project,
+                pins=represented.session_skills,
+            )
+        finally:
+            copying = False
+        copied.update(copy.id for copy in copies)
+        return copies
+
     def authorize(authorized: Scope, kind: str, id_: str | None) -> bool:
         if authorized != scope:
             return False
+        if kind == "skill" and (id_ in copied or (copying and id_ is None)):
+            return True
         if kind == "session":
             # The host driver obtains existing sessions from its persisted scoped
             # binding; creation publishes the acknowledged native identity there.

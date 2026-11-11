@@ -400,6 +400,13 @@ async def _capture_source_capabilities(
     from daimon.core.stores.domain import SourceRepresentation
     from daimon.core.stores.mcp_tokens import revoke_mcp_token
     from daimon.core.turn.runtime_defaults import capture_template_rows
+    from daimon.core.turn.session_skills import (
+        attaches_session_skills,
+        carried_skills,
+        measure_skills,
+        skill_drop,
+        skill_fits,
+    )
     from mux.contracts.resources import SkillUpload, SkillUploadFile
     from mux.drivers.anthropic import (
         AGENT_TOOLS_NAMESPACE,
@@ -703,13 +710,15 @@ async def _capture_source_capabilities(
             )
             own_tools = tuple(tool for tool in tools if tool.kind != "mcp_toolset")
             template_losses: tuple[str, ...] = ()
+            # A template's custom and channel skills, where its provider installs them.
+            carried: tuple[SkillRef, ...] = ()
             if template:
                 # A template maps the source's execution tools to the provider's own
                 # (OpenAI bash in its hosted environment, Gemini code_execution): both
                 # are billed as tokens and container time already measured, never per
                 # call. Web tools stay named losses: OpenAI's web_search is unpriced
-                # and uncounted, and Gemini's grounding is off. Custom skills are a
-                # whole loss its consent must name.
+                # and uncounted, and Gemini's grounding is off. Custom skills go per
+                # session where the profile installs them, else a whole named loss.
                 web = tuple(
                     tool for tool in own_tools if tool.kind == "builtin" and tool.name in _WEB_TOOLS
                 )
@@ -730,8 +739,9 @@ async def _capture_source_capabilities(
                     # Tools it can't map (custom tools, a partial toolset) go whole.
                     mapped_tools, unavailable_builtin_tools = (), ()
                     template_losses = ("tools",)
-                if any(s.source in (None, "custom") for s in spec.skills or ()):
-                    template_losses = ("skills", *template_losses)
+                carried = carried_skills(spec)
+                if carried and not attaches_session_skills(profile):
+                    template_losses, carried = ("skills", *template_losses), ()
             else:
                 mapped_tools = represented_execution_tools(
                     profile,
@@ -817,7 +827,7 @@ async def _capture_source_capabilities(
             )
             if {item.source.id for item in inputs.skills} != {s.id for s in portable}:
                 raise ValueError("skill representation is incomplete")
-            unresolved = tuple(s for s in portable if s.version in (None, "latest"))
+            unresolved = tuple(s for s in (*portable, *carried) if s.version in (None, "latest"))
             latest: dict[str, str] = {}
             if unresolved:
                 # Grant reads only for ids captured from this actual source.
@@ -882,6 +892,32 @@ async def _capture_source_capabilities(
                     raise ValueError("target skill digest differs from source bytes")
 
             await asyncio.gather(*(verify_skill(item) for item in inputs.skills))
+            session_skills: tuple[SkillRef, ...] = ()
+            if carried:
+                # Measured here, uploaded by the turn: a preview never writes to the provider.
+                pins = tuple(
+                    SkillRef(id=s.id, version=latest.get(s.id, s.version)) for s in carried
+                )
+                sizes = await measure_skills(
+                    request.deps.sessionmaker,
+                    request.deps.anthropic,
+                    scope=scope,
+                    tenant_id=source.tenant_id,
+                    pins=((p.id, str(p.version)) for p in pins),
+                )
+                session_skills = tuple(
+                    p for p in pins if skill_fits(profile, sizes[(p.id, str(p.version))])
+                )
+                template_losses = (
+                    *template_losses,
+                    *sorted(
+                        {
+                            skill_drop(sizes[(p.id, str(p.version))])
+                            for p in pins
+                            if p not in session_skills
+                        }
+                    ),
+                )
             target = AgentSpec(
                 name=spec.name,
                 description=spec.description,
@@ -901,6 +937,7 @@ async def _capture_source_capabilities(
                     unavailable_builtin_tools=unavailable_builtin_tools,
                     environment=inputs.environment,
                     unavailable_capabilities=(*template_losses, *connector_losses),
+                    session_skills=session_skills,
                 )
             )
         if len({item.target.model.model_dump_json() for item in represented}) != len(represented):
