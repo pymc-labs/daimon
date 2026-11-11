@@ -199,6 +199,13 @@
   "POST /api/chat/sessions/{session_id}/stop": {
    "exempt": "web chat"
   },
+  "POST /api/chat/sessions/{session_id}/switch-back": {
+   "panel": {
+    "discord": "daimon.adapters.discord.agent_setup.details_view",
+    "slack": "daimon.adapters.slack.agent_setup.actions",
+    "teams": "daimon.adapters.teams.setup_panel"
+   }
+  },
   "POST /api/chat/uploads": {
    "exempt": "web chat"
   },
@@ -322,6 +329,9 @@
   },
   "PUT /api/channels/{channel_id}/tool-rules": {
    "tool": "set_agent_tool_rule"
+  },
+  "PUT /api/chat/sessions/{session_id}/model": {
+   "tool": "set_thread_model"
   },
   "PUT /api/features": {
    "tool": "change_setting",
