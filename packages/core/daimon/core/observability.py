@@ -875,9 +875,15 @@ _QUIETED_LOGGERS = ("httpx", "httpcore", "google.genai")
 
 
 def _redact_record_text(record: logging.LogRecord) -> None:
-    """Redact a record's message in place (access records keep their args)."""
+    """Redact a record's message in place (access records keep their args).
+
+    An access record also loses its client address: it is personal data the
+    operator has no use for, and uvicorn's own formatter reads the args by
+    position, so the slot holds `-` rather than going away.
+    """
     if record.name == _ACCESS_LOGGER and isinstance(record.args, tuple) and len(record.args) >= 3:
         args = list(record.args)
+        args[0] = "-"
         if isinstance(args[2], str):
             args[2] = _redact_secret_text(redact_request_target(args[2]))
         record.args = tuple(args)

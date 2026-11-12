@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 import structlog
 from daimon.core.logging_setup import (
+    ERROR_TEXT_LIMIT,
     clear_shutting_down,
     configure_log_level,
     configure_logging,
@@ -72,6 +73,25 @@ def test_stdlib_record_is_one_json_line_with_contract_fields(
     assert str(record["timestamp"]).endswith("Z")
     assert "exception" not in record
     assert "shutting_down" not in record
+
+
+def test_a_long_error_field_is_capped_on_the_structlog_path(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_log_level("INFO")
+    structlog.get_logger().warning("job.failed", error="x" * 5000, reason="y" * 5000)
+
+    line = json.loads(capsys.readouterr().out)
+    assert len(line["error"]) <= ERROR_TEXT_LIMIT + 3, "error text is bounded"
+    assert line["error"].startswith("x" * 100), "the start of the text is kept"
+    assert len(line["reason"]) == 5000, "only the error field is capped"
+
+
+def test_a_short_error_field_is_left_alone(capsys: pytest.CaptureFixture[str]) -> None:
+    configure_log_level("INFO")
+    structlog.get_logger().warning("job.failed", error="boom")
+
+    assert json.loads(capsys.readouterr().out)["error"] == "boom"
 
 
 @pytest.mark.parametrize(
@@ -216,7 +236,7 @@ def test_configure_logging_renders_library_output_and_uvicorn_as_json(
             logging.getLogger("discord.client").exception("Attempting a reconnect")
         access.info(
             '%s - "%s %s HTTP/%s" %d',
-            "10.0.0.1:5000",
+            "203.0.113.7:5000",
             "GET",
             "/uploads/abcdefghijklmnopqrstuvwxyz0123456789",
             "1.1",
@@ -239,6 +259,8 @@ def test_configure_logging_renders_library_output_and_uvicorn_as_json(
     assert uvicorn_record["logger"] == "uvicorn.access"
     assert uvicorn_record["severity"] == "INFO"
     assert "abcdefghijklmnopqrstuvwxyz0123456789" not in uvicorn_stream.getvalue()
+    assert "203.0.113.7" not in uvicorn_stream.getvalue(), "no client address in the access line"
+    assert "GET" in uvicorn_record["event"] and "200" in uvicorn_record["event"]
 
 
 def _unraisable(
