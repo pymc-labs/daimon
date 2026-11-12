@@ -81,7 +81,7 @@ async def conversation_days(
 async def _conversations(
     sm: async_sessionmaker[AsyncSession], settings: Settings, now: datetime
 ) -> None:
-    mappings = events = 0
+    mappings = events = outcomes = 0
     async with sm() as session:
         places = await retention.tenant_places(session)
     for tenant_id, platform in places:
@@ -101,8 +101,14 @@ async def _conversations(
             events += erased.journal_events
             if erased.slots < BATCH:
                 break
+        # After the conversations, whose existence keeps an outcome.
+        outcomes += await _drain(
+            sm, retention.delete_turn_outcomes, tenant_id=tenant_id, before=cutoff
+        )
     if mappings:
         log.info("thread_sessions.deleted", count=mappings)
+    if outcomes:
+        log.info("turn_outcomes.deleted", count=outcomes)
     if events:
         log.info("journal.deleted", count=events)
 
@@ -132,7 +138,6 @@ async def sweep(sm: async_sessionmaker[AsyncSession], settings: Settings, *, now
     rules: list[tuple[str, int, Batch]] = [
         ("web_audit.deleted", keep.admin_history_days, retention.delete_web_audit),
         ("channel_changes.deleted", keep.admin_history_days, retention.delete_channel_changes),
-        ("turn_outcomes.deleted", keep.turn_outcomes_days, retention.delete_turn_outcomes),
         (
             "task_continuations.deleted",
             keep.task_continuations_days,

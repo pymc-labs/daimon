@@ -16,11 +16,13 @@ from daimon.core._models import (
     ComputeTaskRecord,
     CredentialRequest,
     GitHubAccessRequest,
+    JournalSession,
     LongJobRecord,
     McpOAuthFlow,
     MessageFeedback,
     PlatformChannelName,
     Routine,
+    SessionSettleState,
     SupportEscalation,
     TaskContinuation,
     Tenant,
@@ -99,9 +101,34 @@ async def delete_channel_changes(session: AsyncSession, *, before: datetime, lim
     return await _delete_batch(session, ChannelChange, ChannelChange.at < before, limit)
 
 
-async def delete_turn_outcomes(session: AsyncSession, *, before: datetime, limit: int) -> int:
+async def delete_turn_outcomes(
+    session: AsyncSession, *, tenant_id: uuid.UUID, before: datetime, limit: int
+) -> int:
+    """A tenant's turn outcomes from before the conversation cutoff, once their
+    conversation is gone and their session has no settle pending.
+
+    Outcomes attribute usage, date an agent's last use and name the sessions
+    a settle reads, so they go with the conversation, never ahead of it.
+    """
     _check(before)
-    return await _delete_batch(session, TurnOutcome, TurnOutcome.started_at < before, limit)
+    session_id = TurnOutcome.session_id
+    live = or_(
+        exists().where(
+            ThreadSession.tenant_id == TurnOutcome.tenant_id,
+            ThreadSession.ma_session_id == session_id,
+        ),
+        exists().where(JournalSession.session_id == session_id),
+        exists().where(
+            SessionSettleState.managed_session_id == session_id,
+            SessionSettleState.settle_requested_at.is_not(None),
+        ),
+    )
+    condition = and_(
+        TurnOutcome.tenant_id == tenant_id,
+        TurnOutcome.started_at < before,
+        or_(session_id.is_(None), ~live),
+    )
+    return await _delete_batch(session, TurnOutcome, condition, limit)
 
 
 async def delete_task_continuations(session: AsyncSession, *, before: datetime, limit: int) -> int:

@@ -9,20 +9,24 @@ from daimon.core._models import (
     CredentialRequest,
     McpOAuthFlow,
     Routine,
+    SessionSettleState,
     TaskContinuation,
     ThreadSession,
+    TurnOutcome,
     Watch,
 )
 from daimon.core.credential_requests import mint_request_token
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores import retention, turn_outcomes
+from daimon.core.stores import tenants as tenants_store
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.factories import (
     make_account,
     make_routine,
     make_task_continuation,
     make_tenant,
+    make_usage_event,
 )
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -175,7 +179,9 @@ async def test_idle_sweep_keeps_threads_that_work_still_targets(db_session: Asyn
     )
 
 
-def _outcome(tenant_id: uuid.UUID, session_id: str) -> turn_outcomes.OutcomeRecord:
+def _outcome(
+    tenant_id: uuid.UUID, session_id: str | None, *, started_at: datetime = NOW
+) -> turn_outcomes.OutcomeRecord:
     return turn_outcomes.OutcomeRecord(
         id=uuid.uuid4(),
         tenant_id=tenant_id,
@@ -187,8 +193,8 @@ def _outcome(tenant_id: uuid.UUID, session_id: str) -> turn_outcomes.OutcomeReco
         session_id=session_id,
         origin="routine",
         reason=TerminationReason.COMPLETED,
-        started_at=NOW - timedelta(minutes=1),
-        ended_at=NOW,
+        started_at=started_at - timedelta(minutes=1),
+        ended_at=started_at,
         duration_ms=60_000,
         recovered=False,
         error_class=None,
@@ -214,3 +220,49 @@ async def test_any_turn_outcome_marks_its_conversation_used(db_session: AsyncSes
     assert last == NOW, "the outcome moves last_turn_at to when the turn ended"
     left = set(await db_session.scalars(select(ThreadSession.thread_id)))
     assert left == {"used"}, "only the mapping without a recent turn goes"
+
+
+async def test_turn_outcomes_go_with_their_conversation_once_settled(
+    db_session: AsyncSession,
+) -> None:
+    """An old outcome stays while its conversation lives or its usage awaits a settle."""
+    tenant = await make_tenant(db_session)
+    db_session.add(_mapping(tenant.id, "live"))
+    db_session.add(SessionSettleState(managed_session_id="sesn_unsettled", settle_requested_at=OLD))
+    await db_session.flush()
+    sessions = ["sesn_live", "sesn_unsettled", "sesn_gone", None]
+    for session_id in sessions:
+        await turn_outcomes.record(db_session, _outcome(tenant.id, session_id, started_at=OLD))
+    await turn_outcomes.record(db_session, _outcome(tenant.id, "sesn_recent"))
+
+    await retention.delete_turn_outcomes(
+        db_session, tenant_id=tenant.id, before=NOW - timedelta(days=30), limit=100
+    )
+
+    left = set(await db_session.scalars(select(TurnOutcome.session_id)))
+    assert left == {"sesn_live", "sesn_unsettled", "sesn_recent"}, (
+        "outcomes of a live conversation, an unsettled session or a recent turn stay; "
+        "an old one whose conversation is gone goes"
+    )
+
+
+async def test_tenant_deletion_finds_settle_state_without_outcomes(
+    db_session: AsyncSession,
+) -> None:
+    """Settle progress of a session only usage events name still goes with the tenant."""
+    tenant = await make_tenant(db_session)
+    other = await make_tenant(db_session)
+    await make_usage_event(db_session, tenant=tenant, managed_session_id="sesn_billed")
+    await make_usage_event(db_session, tenant=other, managed_session_id="sesn_other")
+    db_session.add_all(
+        [
+            SessionSettleState(managed_session_id="sesn_billed", settle_requested_at=OLD),
+            SessionSettleState(managed_session_id="sesn_other", settle_requested_at=OLD),
+        ]
+    )
+    await db_session.flush()
+
+    await tenants_store.delete_settle_state(db_session, tenant_id=tenant.id)
+
+    left = set(await db_session.scalars(select(SessionSettleState.managed_session_id)))
+    assert left == {"sesn_other"}, "the tenant's settle row goes, another tenant's stays"

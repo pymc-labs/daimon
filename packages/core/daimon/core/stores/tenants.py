@@ -17,7 +17,9 @@ from daimon.core._models import (
     AgentFile,
     AgentGitHubGrant,
     ChannelConfig,
+    JournalSession,
     PaymentEvent,
+    ProviderBindingSlot,
     Routine,
     SessionSettleState,
     SlackUserToken,
@@ -33,7 +35,7 @@ from daimon.core.errors import StoreError
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores.domain import FundingMode, Platform, TenantDependentCounts, TenantRow
 from daimon.core.stores.security_audit import erase_tenant
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import CompoundSelect, delete, func, select, union, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -160,6 +162,32 @@ async def list_tenants_by_platform(
         return [TenantRow.model_validate(r) for r in rows]
 
 
+def tenant_session_ids(tenant_id: uuid.UUID) -> CompoundSelect[tuple[str | None]]:
+    """Every provider session id the tenant's rows name.
+
+    Usage events are kept for accounting and every billed session has one, so
+    the set does not depend on conversation rows the retention sweep prunes.
+    """
+    return union(
+        select(ThreadSession.ma_session_id).where(ThreadSession.tenant_id == tenant_id),
+        select(TurnOutcome.session_id).where(
+            TurnOutcome.tenant_id == tenant_id, TurnOutcome.session_id.is_not(None)
+        ),
+        select(UsageEvent.managed_session_id).where(UsageEvent.tenant_id == tenant_id),
+        select(JournalSession.session_id)
+        .join(ProviderBindingSlot, ProviderBindingSlot.binding_id == JournalSession.binding_id)
+        .where(ProviderBindingSlot.tenant_id == tenant_id),
+    )
+
+
+async def delete_settle_state(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+    """Settlement progress, keyed by provider session, of the tenant's sessions."""
+    ids = tenant_session_ids(tenant_id).subquery()
+    await session.execute(
+        delete(SessionSettleState).where(SessionSettleState.managed_session_id.in_(select(ids)))
+    )
+
+
 async def delete_tenant(
     session: AsyncSession,
     *,
@@ -182,19 +210,7 @@ async def delete_tenant(
         await session.execute(
             delete(SlackUserToken).where(SlackUserToken.team_id == tenant.external_id)
         )
-    # Settlement progress is keyed by provider session; find the tenant's sessions.
-    tenant_sessions = (
-        select(ThreadSession.ma_session_id)
-        .where(ThreadSession.tenant_id == tenant_id)
-        .union(
-            select(TurnOutcome.session_id).where(
-                TurnOutcome.tenant_id == tenant_id, TurnOutcome.session_id.is_not(None)
-            )
-        )
-    )
-    await session.execute(
-        delete(SessionSettleState).where(SessionSettleState.managed_session_id.in_(tenant_sessions))
-    )
+    await delete_settle_state(session, tenant_id=tenant_id)
     await erase_tenant(session, tenant_id=tenant_id)
     stmt = delete(Tenant).where(Tenant.id == tenant_id)
     result = await session.execute(stmt)

@@ -269,12 +269,6 @@ erasure and tenant deletion still apply when this is 0.
 
 Days to keep the web admin audit and channel changes.
 
-### `DAIMON_RETENTION__TURN_OUTCOMES_DAYS`
-
-`int` · optional · default `90`
-
-Days to keep turn outcome records.
-
 ### `DAIMON_RETENTION__TASK_CONTINUATIONS_DAYS`
 
 `int` · optional · default `30`

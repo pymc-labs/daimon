@@ -2822,9 +2822,6 @@ class RetentionSettings(BaseModel):
     admin_history_days: int = Field(
         default=90, ge=0, description="Days to keep the web admin audit and channel changes."
     )
-    turn_outcomes_days: int = Field(
-        default=90, ge=0, description="Days to keep turn outcome records."
-    )
     task_continuations_days: int = Field(
         default=30,
         ge=0,

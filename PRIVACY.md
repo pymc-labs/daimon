@@ -59,10 +59,9 @@ the setting linked in the table; `0` keeps the records.
 | --- | --- | --- |
 | Security audit and agent posts | 90 days | [`DAIMON_RETENTION__SECURITY_AUDIT_DAYS`](docs/configuration.md#daimon_retention__security_audit_days) |
 | Web audit and channel changes | 90 days | [`DAIMON_RETENTION__ADMIN_HISTORY_DAYS`](docs/configuration.md#daimon_retention__admin_history_days) |
-| Turn outcomes | 90 days | [`DAIMON_RETENTION__TURN_OUTCOMES_DAYS`](docs/configuration.md#daimon_retention__turn_outcomes_days) |
 | Finished jobs, compute and routine output | 90 days | [`DAIMON_RETENTION__JOB_OUTPUT_DAYS`](docs/configuration.md#daimon_retention__job_output_days) |
 | Resolved credential and GitHub access requests | 90 days | [`DAIMON_RETENTION__ACCESS_REQUESTS_DAYS`](docs/configuration.md#daimon_retention__access_requests_days) |
-| Thread mappings and the shared journal | 365 days after last activity | [Conversation history kept](docs/features.md) |
+| Thread mappings, turn outcomes and the shared journal | 365 days after last activity | [Conversation history kept](docs/features.md) |
 | Deleted web threads | 30 days | [`DAIMON_RETENTION__DELETED_THREADS_DAYS`](docs/configuration.md#daimon_retention__deleted_threads_days) |
 | Finished task requests | 30 days | [`DAIMON_RETENTION__TASK_CONTINUATIONS_DAYS`](docs/configuration.md#daimon_retention__task_continuations_days) |
 | Uploads with no owner | 24 hours | Fixed |
