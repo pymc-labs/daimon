@@ -140,11 +140,23 @@ log = structlog.get_logger(__name__)
 # user's message is handed to the provider, so the caller knows whether a failed
 # turn ever sent it (and may put back what it would have carried).
 SEND_ATTEMPTED: ContextVar[list[bool] | None] = ContextVar("turn_send_attempted", default=None)
+
+
+@dataclasses.dataclass(frozen=True)
+class SendClaim:
+    """A framing the first send consumes, claimed once by whichever turn sends it first.
+
+    `take` returns False when another turn already claimed it; the send then goes
+    without it: its text drops `user_prefix` and its system blocks are left out.
+    """
+
+    take: Callable[[], Awaitable[bool]]
+    user_prefix: str
+
+
 # Set by the caller around a turn: awaited just before the user's message is handed
 # over, to settle what the send consumes. A failure here fails the turn unsent.
-SEND_CLAIM: ContextVar[Callable[[], Awaitable[None]] | None] = ContextVar(
-    "turn_send_claim", default=None
-)
+SEND_CLAIM: ContextVar[SendClaim | None] = ContextVar("turn_send_claim", default=None)
 
 InterruptPhase = Literal[
     "pre-stream", "stream-open", "send-initial", "replay", "reattach", "confirmation-gate"
@@ -928,19 +940,26 @@ async def run_turn(
             "type": "user.message",
             "content": content,
         }
-        batch: list[BetaManagedAgentsEventParams] = [event]
-        combined_system = list(system_blocks)
-        if provider_system and privileged:
-            combined_system.append({"type": "text", "text": provider_system})
-        if combined_system:
-            # LAST, and immediately after the user.message: the live API
-            # rejects the whole request otherwise (at most one per request,
-            # must be final, must follow a user.message / tool result).
-            system_event: BetaManagedAgentsSystemMessageEventParams = {
-                "type": "system.message",
-                "content": combined_system,
-            }
-            batch.append(system_event)
+
+        def _batch(
+            framing: Sequence[BetaManagedAgentsSystemContentBlockParam],
+        ) -> list[BetaManagedAgentsEventParams]:
+            events: list[BetaManagedAgentsEventParams] = [event]
+            combined_system = list(framing)
+            if provider_system and privileged:
+                combined_system.append({"type": "text", "text": provider_system})
+            if combined_system:
+                # LAST, and immediately after the user.message: the live API
+                # rejects the whole request otherwise (at most one per request,
+                # must be final, must follow a user.message / tool result).
+                system_event: BetaManagedAgentsSystemMessageEventParams = {
+                    "type": "system.message",
+                    "content": combined_system,
+                }
+                events.append(system_event)
+            return events
+
+        batch = _batch(system_blocks)
         async with send_guard() if send_guard is not None else contextlib.nullcontext():
             if before_send is not None:
                 # A last check by the caller, after the stream is open (`run_prepared_turn`).
@@ -951,11 +970,13 @@ async def run_turn(
                 prefix := await prefix_hook()
             ):
                 # Confirmed calls run here: after the last checks, inside the lease.
-                content[-1] = BetaManagedAgentsTextBlockParam(
-                    type="text", text=f"{prefix}\n\n{text}"
-                )
-            if (claim := SEND_CLAIM.get()) is not None:
-                await claim()
+                text = f"{prefix}\n\n{text}"
+                content[-1] = BetaManagedAgentsTextBlockParam(type="text", text=text)
+            if (claim := SEND_CLAIM.get()) is not None and not await claim.take():
+                # Another turn sent the framing first.
+                text = text.replace(claim.user_prefix, "", 1)
+                content[-1] = BetaManagedAgentsTextBlockParam(type="text", text=text)
+                batch = _batch(())
             mark = SEND_ATTEMPTED.get()
             if mark is not None:
                 mark.append(True)  # from here the message may have been delivered

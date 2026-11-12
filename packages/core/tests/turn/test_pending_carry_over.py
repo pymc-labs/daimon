@@ -2,26 +2,39 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSystemContentBlockParam
 from daimon.core.pending_carry_over_sweep import sweep_stale_pending_carry_overs
 from daimon.core.stores.pending_carry_overs import (
+    delete_pending_carry_over,
     get_pending_carry_over,
     record_pending_carry_over,
 )
 from daimon.core.turn import run as run_module
 from daimon.core.turn.driver import SEND_ATTEMPTED, SEND_CLAIM
+from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.prepare import CONTINUED, ContinuityOutcome
 from daimon.core.turn.state import TurnState
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.turn_fakes import (
+    FakeAnthropic,
+    RecordingLifecycle,
+    YieldEvent,
+    run_turn_on_leg,
+)
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from .conftest import make_end_turn, make_status_idle
 
 SYSTEM: tuple[BetaManagedAgentsSystemContentBlockParam, ...] = (
     {"type": "text", "text": "You took over this conversation."},
@@ -76,7 +89,7 @@ async def _turn(
         if not sends:
             raise RuntimeError("provider unreachable")
         if (claim := SEND_CLAIM.get()) is not None:
-            await claim()
+            await claim.take()
         mark = SEND_ATTEMPTED.get()
         assert mark is not None, "the turn runs with a send mark"
         mark.append(True)
@@ -293,3 +306,145 @@ async def test_a_framing_is_dropped_at_the_send_even_when_the_turn_then_fails(
     assert await _kept(db_session_factory, tenant.id, "sess_new") is None, "claimed at the send"
     later = await _turn(monkeypatch, db_session_factory, continuity=CONTINUED, sends=True, **common)
     assert later == CONTINUED, "the next turn carries no second framing"
+
+
+class _BrokenSessionmaker:
+    """A sessionmaker whose transactions cannot open, as when the database is down."""
+
+    def begin(self) -> Any:
+        raise OperationalError("DELETE", {}, Exception("connection lost"))
+
+
+@dataclass
+class _Send:
+    """What one `run_turn` did: the row as `io.send` was entered, and what it sent."""
+
+    kept_at_send: list[str | None]
+    sent: list[list[dict[str, Any]]]
+    marked: list[bool]
+    failure: BaseException | None
+
+
+async def _real_send(
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    *,
+    claim_sessions: Any = None,
+    before_send: Any = None,
+) -> _Send:
+    """Drive the real `run_turn` with a fake provider and the real claim, as `run.py` wires it."""
+    fake = FakeAnthropic()
+    fake.beta.sessions.events.stream_scripts = [
+        [YieldEvent(make_status_idle(event_id="idle", stop_reason=make_end_turn()))]
+    ]
+    kept_at_send: list[str | None] = []
+    events = fake.beta.sessions.events
+    deliver = events.send
+
+    async def spy(session_id: str, *, events: list[dict[str, Any]]) -> Any:
+        kept_at_send.append(await _kept(sessions, tenant_id, "sess_new"))
+        return await deliver(session_id, events=events)
+
+    events.send = spy  # pyright: ignore[reportAttributeAccessIssue]
+    claim = run_module._claim_carry_over(  # pyright: ignore[reportPrivateUsage]
+        SimpleNamespace(sessionmaker=claim_sessions or sessions),  # pyright: ignore[reportArgumentType]
+        SimpleNamespace(ma_session_id="sess_new", continuity=REPLACED),  # pyright: ignore[reportArgumentType]
+        tenant_id=tenant_id,
+    )
+    marked: list[bool] = []
+    claiming = SEND_CLAIM.set(claim)
+    marking = SEND_ATTEMPTED.set(marked)
+    failure: BaseException | None = None
+    try:
+        await run_turn_on_leg(
+            anthropic=cast(AsyncAnthropic, fake),
+            session_id="sess_new",
+            user_message=f"{REPLACED.user_prefix}hi",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            render_interval_s=0.001,
+            billing=BillingExempt(reason="cli-operator-run"),
+            system_blocks=SYSTEM,
+            before_send=before_send,
+        )
+    except Exception as error:
+        failure = error
+    finally:
+        SEND_ATTEMPTED.reset(marking)
+        SEND_CLAIM.reset(claiming)
+    return _Send(kept_at_send, [sent for _, sent in events.sent_events], marked, failure)
+
+
+async def _keep_framing(
+    sessions: async_sessionmaker[AsyncSession],
+) -> uuid.UUID:
+    async with sessions.begin() as db:
+        tenant = await make_tenant(db)
+        await record_pending_carry_over(
+            db,
+            tenant_id=tenant.id,
+            session_id="sess_new",
+            account_id=None,
+            user_prefix=REPLACED.user_prefix,
+            system_blocks=SYSTEM,
+        )
+    return tenant.id
+
+
+async def test_the_real_driver_claims_the_framing_before_it_sends(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The row is gone when `io.send` is entered, so a crash after it cannot send it twice."""
+    tenant_id = await _keep_framing(db_session_factory)
+    turn = await _real_send(db_session_factory, tenant_id)
+    assert turn.failure is None, f"the turn should complete: {turn.failure!r}"
+    assert turn.kept_at_send == [None], "the framing is claimed before the message is handed over"
+    (batch,) = turn.sent
+    assert [event["type"] for event in batch] == ["user.message", "system.message"], (
+        "the claiming send carries its framing"
+    )
+
+
+async def test_a_refused_send_keeps_the_framing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The claim comes after the caller's last checks: a refusal leaves the row for the retry."""
+    tenant_id = await _keep_framing(db_session_factory)
+
+    async def refuse() -> None:
+        raise PermissionError("send is denied")
+
+    turn = await _real_send(db_session_factory, tenant_id, before_send=refuse)
+    assert isinstance(turn.failure, PermissionError), "the refusal fails the turn"
+    assert not turn.sent, "nothing was sent"
+    assert await _kept(db_session_factory, tenant_id, "sess_new") == REPLACED.user_prefix, (
+        "a refused send keeps the framing"
+    )
+
+
+async def test_a_claim_that_cannot_reach_the_database_fails_the_turn_unsent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """If the claim cannot be made the message is not sent, and the framing stays kept."""
+    tenant_id = await _keep_framing(db_session_factory)
+    turn = await _real_send(db_session_factory, tenant_id, claim_sessions=_BrokenSessionmaker())
+    assert isinstance(turn.failure, OperationalError), f"the turn fails: {turn.failure!r}"
+    assert not turn.sent, "nothing was sent"
+    assert not turn.marked, "the turn is not marked as having sent"
+    assert await _kept(db_session_factory, tenant_id, "sess_new") == REPLACED.user_prefix, (
+        "the framing is kept for the retry"
+    )
+
+
+async def test_a_send_that_finds_the_framing_already_claimed_goes_without_it(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A second turn that loaded the same row sends neither its prefix nor its system blocks."""
+    tenant_id = await _keep_framing(db_session_factory)
+    async with db_session_factory.begin() as db:
+        await delete_pending_carry_over(db, tenant_id=tenant_id, session_id="sess_new")
+    turn = await _real_send(db_session_factory, tenant_id)
+    assert turn.failure is None, f"the turn should complete: {turn.failure!r}"
+    (batch,) = turn.sent
+    assert [event["type"] for event in batch] == ["user.message"], "no system framing again"
+    assert batch[0]["content"][-1]["text"] == "hi", "and no framing in the user text"

@@ -53,13 +53,14 @@ async def get_pending_carry_over(
 
 async def delete_pending_carry_over(
     session: AsyncSession, *, tenant_id: uuid.UUID, session_id: str
-) -> None:
-    """Drop the framing once the session's first message is sent."""
-    await session.execute(
-        delete(PendingCarryOver).where(
-            PendingCarryOver.tenant_id == tenant_id, PendingCarryOver.session_id == session_id
-        )
+) -> bool:
+    """Drop the framing once the session's first message is sent; False if none was held."""
+    deleted = await session.scalar(
+        delete(PendingCarryOver)
+        .where(PendingCarryOver.tenant_id == tenant_id, PendingCarryOver.session_id == session_id)
+        .returning(PendingCarryOver.id)
     )
+    return deleted is not None
 
 
 async def delete_stale_pending_carry_overs(

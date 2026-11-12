@@ -114,7 +114,13 @@ from daimon.core.turn.ceiling import (
     turn_deadline,
 )
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.driver import SEND_ATTEMPTED, SEND_CLAIM, run_turn, unattended_sends
+from daimon.core.turn.driver import (
+    SEND_ATTEMPTED,
+    SEND_CLAIM,
+    SendClaim,
+    run_turn,
+    unattended_sends,
+)
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
 from daimon.core.turn.io import LegacyTurnIO, TurnIO, turn_io
 from daimon.core.turn.lifecycle import (
@@ -1076,22 +1082,26 @@ async def _with_pending_carry_over(
     return replace(prepared, continuity=merged), waits
 
 
-def _claim_carry_over(
-    deps: TurnDeps, prepared: PreparedTurn, *, tenant_id: uuid.UUID
-) -> Callable[[], Awaitable[None]]:
-    """Drop the kept framing as the first send claims it, so it is never sent twice."""
+def _claim_carry_over(deps: TurnDeps, prepared: PreparedTurn, *, tenant_id: uuid.UUID) -> SendClaim:
+    """Drop the kept framing as the first send claims it, so it is never sent twice.
+
+    The send that finds the row already gone (another turn on the session claimed it
+    first) goes without the framing. Only the first send claims: a later one is a
+    retry or a recovery, which carries its own framing.
+    """
     claimed: list[bool] = []
 
-    async def claim() -> None:
+    async def take() -> bool:
         if claimed:
-            return
+            return True
         async with deps.sessionmaker.begin() as db:
-            await delete_pending_carry_over(
+            held = await delete_pending_carry_over(
                 db, tenant_id=tenant_id, session_id=prepared.ma_session_id
             )
         claimed.append(True)
+        return held
 
-    return claim
+    return SendClaim(take=take, user_prefix=prepared.continuity.user_prefix)
 
 
 async def _restore_handoff_summary(
