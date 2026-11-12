@@ -220,9 +220,14 @@ def _cross_origin(headers: Mapping[str, str], own_origin: str) -> bool:
     from chat.
     """
     origin = headers.get("origin")
-    if origin is not None and origin.lower() != own_origin:
-        return True
     site = headers.get("sec-fetch-site")
+    # ``Referrer-Policy: no-referrer`` makes a browser send ``Origin: null`` on
+    # the page's own form posts. Only the browser's own word that the request
+    # is same-origin (``Sec-Fetch-Site``) lets that one through; a sibling
+    # notebook's page or a sandboxed frame reads same-site or cross-site there.
+    own_null = origin is not None and origin.lower() == "null" and site == "same-origin"
+    if origin is not None and origin.lower() != own_origin and not own_null:
+        return True
     if site is None or site in ("same-origin", "none"):
         return False
     return not (
