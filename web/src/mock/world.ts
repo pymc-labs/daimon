@@ -71,9 +71,9 @@ const CAPS: Record<Role, Capability[]> = {
 /** Visitors the demo lets attach files, by person; the default visitor has them off. */
 export const visitorFiles: Record<string, boolean> = { p_jordan: false }
 const MODULES: Record<Role, ModuleKey[]> = {
-  owner: ["chat", "agents", "channels", "routines", "credits", "integrations", "admin"],
-  admin: ["chat", "agents", "channels", "routines", "credits", "integrations", "admin"],
-  member: ["chat", "agents", "channels", "routines", "credits"], visitor: ["chat"],
+  owner: ["chat", "agents", "channels", "routines", "workflows", "credits", "integrations", "admin"],
+  admin: ["chat", "agents", "channels", "routines", "workflows", "credits", "integrations", "admin"],
+  member: ["chat", "agents", "channels", "routines", "workflows", "credits"], visitor: ["chat"],
 }
 const CREDIT: Record<Role, Me["credit"]> = {
   owner: { left_usd: 63.2, total_usd: 100, window: "month", resets_at: "2026-11-01T00:00:00Z" },
