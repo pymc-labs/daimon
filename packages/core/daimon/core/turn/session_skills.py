@@ -28,6 +28,7 @@ from daimon.core.skill_zip import MAX_UNCOMPRESSED_BYTES
 from daimon.core.skills.ingest import SkillIngestError, retained_archive_files
 from daimon.core.stores.agent_notices import record_agent_notices
 from daimon.core.stores.domain import SkillCopyRow, SkillSizeRow
+from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
 from daimon.core.stores.skill_copies import (
     get_skill_copy,
     get_skill_sizes,
@@ -38,7 +39,7 @@ from daimon.core.turn.agent_notices import missing_skills_notice
 from mux.contracts.ids import Scope, SkillRef
 from mux.contracts.ports import Skills
 from mux.contracts.profile import Profile
-from mux.contracts.resources import AgentSpec, SkillUpload, SkillUploadFile
+from mux.contracts.resources import Agent, AgentSpec, SkillUpload, SkillUploadFile
 from mux.errors import MuxError, ProviderError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -175,6 +176,36 @@ def _is_text(body: bytes) -> bool:
     return True
 
 
+async def source_skill_archive(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    anthropic: AsyncAnthropic,
+    *,
+    scope: Scope,
+    record: Agent | None,
+    skill_id: str,
+    version: str,
+) -> bytes:
+    """A source skill version's archive: a record's own catalog copy, else Managed Agents.
+
+    A converted record keeps its skills after the Managed Agents original is gone.
+    """
+    if record is not None and record.ref.provider == "selfhosted":
+        catalog = PostgresNeutralCatalog(
+            sessionmaker, provider="selfhosted", account_scope_id=scope.tenant_id
+        )
+        pin = SkillRef(id=skill_id, version=version, source="custom")
+        try:
+            stored = await catalog.get_agent_skill(scope, record, pin)
+        except (MuxError, SQLAlchemyError) as error:
+            log.warning(
+                "session_skills.catalog_unread", skill_id=skill_id, error=type(error).__name__
+            )
+            stored = None
+        if stored is not None:
+            return stored.bundle.zip_bytes
+    return await download_skill_version(anthropic, skill_id=skill_id, version=version, scope=scope)
+
+
 async def measure_skills(
     sessionmaker: async_sessionmaker[AsyncSession],
     anthropic: AsyncAnthropic,
@@ -182,6 +213,7 @@ async def measure_skills(
     scope: Scope,
     tenant_id: uuid.UUID,
     pins: Iterable[tuple[str, str]],
+    record: Agent | None = None,
 ) -> dict[tuple[str, str], SkillSizeRow]:
     """Each `(skill_id, version)`'s size, downloading only versions never measured.
 
@@ -194,8 +226,13 @@ async def measure_skills(
 
     async def measure(skill_id: str, version: str) -> SkillSizeRow | None:
         try:
-            data = await download_skill_version(
-                anthropic, skill_id=skill_id, version=version, scope=scope
+            data = await source_skill_archive(
+                sessionmaker,
+                anthropic,
+                scope=scope,
+                record=record,
+                skill_id=skill_id,
+                version=version,
             )
         except (AnthropicError, DaimonError, MuxError) as error:
             log.warning("skill_size.measure_failed", skill_id=skill_id, error=type(error).__name__)
@@ -221,6 +258,7 @@ async def copy_skills(
     provider: str,
     account_scope_id: str,
     pins: tuple[SkillRef, ...],
+    record: Agent | None = None,
 ) -> tuple[tuple[SkillRef, ...], tuple[str, ...]]:
     """The provider's copy of each source skill version, uploading a version only once.
 
@@ -244,8 +282,13 @@ async def copy_skills(
             )
         if row is None:
             files = retained_archive_files(
-                await download_skill_version(
-                    anthropic, skill_id=pin.id, version=pin.version, scope=scope
+                await source_skill_archive(
+                    sessionmaker,
+                    anthropic,
+                    scope=scope,
+                    record=record,
+                    skill_id=pin.id,
+                    version=pin.version,
                 )
             )
             upload = SkillUpload(
@@ -378,9 +421,11 @@ async def turn_session_skills(
             represented_source(source, request.target_spec) if source is not None else None
         )
         pins = represented.session_skills if represented is not None else ()
+        record = source.source if source is not None else None
         left: tuple[str, ...] = ()
     else:
         pins, left = await channel_session_skills(request, profile, scope)
+        record = None
     copies: tuple[SkillRef, ...] = ()
     if pins:
         copies, failed = await copy_skills(
@@ -392,6 +437,7 @@ async def turn_session_skills(
             provider=profile.provider,
             account_scope_id=account_scope_id,
             pins=pins,
+            record=record,
         )
         left = (*left, *failed)
     if left:

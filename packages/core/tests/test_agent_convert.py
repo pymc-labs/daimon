@@ -6,7 +6,8 @@ import io
 import re
 import uuid
 import zipfile
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import anthropic
 import httpx
@@ -25,6 +26,7 @@ from daimon.core.skills.add import SkillAddResult
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
+from daimon.core.turn import session_skills
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.contracts.ids import SkillRef
@@ -323,3 +325,123 @@ async def test_convert_back_adds_the_records_skills_to_claude_as_the_person(
 
     assert added == [("agent_ma2", "skill-a-v1", person.id)], f"added as the person: {added}"
     assert converted.copied_skills == ("skill-a-v1",), f"the receipt names it: {converted}"
+
+
+async def test_a_rerun_by_another_admin_keeps_the_first_copy(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Copying onto a record that already holds the skills, as someone else, writes nothing."""
+    tenant = await make_tenant(db_session)
+    first = await make_account(db_session, tenant=tenant)
+    second = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    _downloads(monkeypatch)
+    router = _skill_router(tenant.id)
+    converted = await _to_daimon(db_session_factory, router, tenant.id, first.id)
+    source = ma_agent(id="agent_ma1", name="analyst", tenant_id=tenant.id, skills=_SKILLS)
+
+    copied, kept, dropped = await agent_convert._copy_skills_to_record(  # pyright: ignore[reportPrivateUsage]
+        build_fake_anthropic(router.dispatch),
+        db_session_factory,
+        tenant_id=tenant.id,
+        name="analyst",
+        source=source,
+        record_id=converted.agent.id,
+        account_id=second.id,
+    )
+
+    assert (copied, kept) == ((), ("skill-a-v1", "skill-b-v2")), "nothing is copied twice"
+    assert dropped == ("xlsx (built in)",)
+    receipt = agent_convert.skill_receipt(
+        agent_convert.ConvertedAgent(converted.agent, dropped, copied, kept)
+    )
+    assert receipt == (
+        "Skills already copied: skill-a-v1, skill-b-v2.",
+        "Skills left off: xlsx (built in).",
+    ), receipt
+    assert await _catalog_rows(db_session) == [
+        ("skill_a", "1", first.id),
+        ("skill_b", "2", first.id),
+    ], "the first copies stay the only ones"
+
+
+async def test_pinning_a_skill_again_replaces_its_other_version(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One pin per skill: a newer version replaces the held one instead of adding a second."""
+    tenant = await make_tenant(db_session)
+    person = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    _downloads(monkeypatch)
+    converted = await _to_daimon(db_session_factory, _skill_router(tenant.id), tenant.id, person.id)
+    person_scope = resource_scope(tenant_id=str(tenant.id), account_id=str(person.id))
+    newer = SkillRef(id="skill_a", version="3", source="custom")
+
+    await agent_convert._pin_record_skills(  # pyright: ignore[reportPrivateUsage]
+        db_session_factory, person_scope, converted.agent.id, (newer,)
+    )
+
+    record = await SelfHostedAgents(db_session_factory).resolve(
+        resource_scope(tenant_id=str(tenant.id)), "analyst"
+    )
+    assert record.spec.skills == (SkillRef(id="skill_b", version="2", source="custom"), newer), (
+        f"skill_a is pinned once, at the new version: {record.spec.skills}"
+    )
+
+
+async def test_a_converted_record_loads_its_skills_after_the_original_is_gone(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measure and copy for another provider read the record's catalog copy, not the MA one."""
+    tenant = await make_tenant(db_session)
+    person = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    _downloads(monkeypatch)
+    await _to_daimon(db_session_factory, _skill_router(tenant.id), tenant.id, person.id)
+
+    async def deleted(*_a: object, skill_id: str, **_k: object) -> bytes:
+        raise SkillVersionNotFoundError(skill_id)
+
+    uploaded: list[tuple[str, ...]] = []
+
+    class Skills:
+        async def create(self, _scope: object, upload: Any, **_k: object) -> SimpleNamespace:
+            uploaded.append(tuple(item.path for item in upload.files))
+            return SimpleNamespace(id="copy-a", latest_version=SimpleNamespace(version="1"))
+
+    monkeypatch.setattr(session_skills, "download_skill_version", deleted)
+    record = await SelfHostedAgents(db_session_factory).resolve(
+        resource_scope(tenant_id=str(tenant.id)), "analyst"
+    )
+    person_scope = resource_scope(tenant_id=str(tenant.id), account_id=str(person.id))
+    anthropic_client = build_fake_anthropic(MARouter().dispatch)
+    sizes = await session_skills.measure_skills(
+        db_session_factory,
+        anthropic_client,
+        scope=person_scope,
+        tenant_id=tenant.id,
+        pins=(("skill_a", "1"),),
+        record=record,
+    )
+    assert ("skill_a", "1") in sizes, "the size is measured from the catalog copy"
+    copies, losses = await session_skills.copy_skills(
+        db_session_factory,
+        anthropic_client,
+        cast(Any, Skills()),
+        scope=person_scope,
+        tenant_id=tenant.id,
+        provider="openai",
+        account_scope_id="project",
+        pins=(SkillRef(id="skill_a", version="1"),),
+        record=record,
+    )
+    assert (copies, losses) == ((SkillRef(id="copy-a", version="1"),), ()), (
+        "the copy uploads without the Managed Agents original"
+    )
+    assert uploaded == [("SKILL.md",)], f"the catalog bundle's files upload: {uploaded}"

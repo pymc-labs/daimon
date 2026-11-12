@@ -971,6 +971,7 @@ async def _capture_source_capabilities(
                     pins=(
                         (p.id, str(p.version)) for p in pins if p.version not in (None, "latest")
                     ),
+                    record=source.source,
                 )
                 # Unmeasured or over the limits: that skill alone is a named loss.
                 session_skills = fitting_skills(profile, pins, sizes)

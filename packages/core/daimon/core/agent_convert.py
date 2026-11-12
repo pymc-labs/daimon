@@ -65,6 +65,8 @@ class ConvertedAgent:
     agent: BetaManagedAgentsAgent
     dropped_skills: tuple[str, ...]
     copied_skills: tuple[str, ...] = ()
+    kept_skills: tuple[str, ...] = ()
+    """Skills an earlier run of the same move already copied."""
 
 
 def skill_receipt(converted: ConvertedAgent) -> tuple[str, ...]:
@@ -72,6 +74,8 @@ def skill_receipt(converted: ConvertedAgent) -> tuple[str, ...]:
     lines: list[str] = []
     if converted.copied_skills:
         lines.append(f"Skills copied: {', '.join(converted.copied_skills)}.")
+    if converted.kept_skills:
+        lines.append(f"Skills already copied: {', '.join(converted.kept_skills)}.")
     if converted.dropped_skills:
         lines.append(f"Skills left off: {', '.join(converted.dropped_skills)}.")
     return tuple(lines)
@@ -142,7 +146,7 @@ async def convert_agent_to_daimon(
             tenant_id=tenant_id,
             key=f"convert:{source.id}",
         )
-        copied, dropped = await _copy_skills_to_record(
+        copied, kept, dropped = await _copy_skills_to_record(
             anthropic,
             sessionmaker,
             tenant_id=tenant_id,
@@ -172,7 +176,7 @@ async def convert_agent_to_daimon(
     _log.info(
         "agent.converted", name=name, source_id=source.id, agent_id=created.id, provider=target
     )
-    return ConvertedAgent(created, dropped, copied)
+    return ConvertedAgent(created, dropped, copied, kept)
 
 
 async def convert_agent_to_anthropic(
@@ -257,8 +261,11 @@ async def _copy_skills_to_record(
     source: BetaManagedAgentsAgent,
     record_id: str,
     account_id: uuid.UUID | None,
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Copy `source`'s custom skills into the catalog and pin them: (copied, dropped)."""
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Copy `source`'s custom skills into the catalog and pin them: (copied, kept, dropped).
+
+    A skill the record already pins with a stored copy (an earlier run's) is kept as is.
+    """
     dropped: list[str] = []
     custom: list[tuple[str, str]] = []
     for skill in source.skills or ():
@@ -269,13 +276,20 @@ async def _copy_skills_to_record(
         else:
             custom.append((skill.skill_id, skill.version))
     if account_id is None or not custom:
-        return (), tuple(dropped)
+        return (), (), tuple(dropped)
     person = resource_scope(tenant_id=str(tenant_id), account_id=str(account_id))
     catalog = PostgresNeutralCatalog(
         sessionmaker, provider="selfhosted", account_scope_id=str(tenant_id)
     )
+    records = SelfHostedAgents(sessionmaker)
+    record = await records.retrieve(person, records.record_ref(person, record_id))
     copied: dict[str, SkillRef] = {}
+    kept: list[str] = []
     for skill_id, version in custom:
+        held = await _held_copy(catalog, person, record, skill_id)
+        if held is not None:
+            kept.append(held)
+            continue
         outcome = await _copy_one_to_catalog(
             anthropic, catalog, person, name=name, skill_id=skill_id, version=version
         )
@@ -284,13 +298,32 @@ async def _copy_skills_to_record(
         else:
             copied[outcome[0]] = outcome[1]
     if not copied:
-        return (), tuple(dropped)
+        return (), tuple(kept), tuple(dropped)
     try:
         await _pin_record_skills(sessionmaker, person, record_id, tuple(copied.values()))
     except _SKILL_ERRORS as error:
         _log.warning("agent.convert_skills_unpinned", name=name, error=type(error).__name__)
-        return (), (*dropped, *(f"{skill} (couldn't be added)" for skill in copied))
-    return tuple(copied), tuple(dropped)
+        return (), tuple(kept), (*dropped, *(f"{skill} (couldn't be added)" for skill in copied))
+    return tuple(copied), tuple(kept), tuple(dropped)
+
+
+async def _held_copy(
+    catalog: PostgresNeutralCatalog, person: Scope, record: Agent, skill_id: str
+) -> str | None:
+    """The name of `skill_id`'s copy the record already pins and the catalog holds."""
+    for pin in record.spec.skills or ():
+        if pin.id != skill_id:
+            continue
+        try:
+            stored = await catalog.get_agent_skill(person, record, pin)
+        except _SKILL_ERRORS as error:
+            _log.warning(
+                "agent.convert_skill_unread", skill_id=skill_id, error=type(error).__name__
+            )
+            continue
+        if stored is not None:
+            return stored.bundle.preview.name
+    return None
 
 
 async def _copy_one_to_catalog(
@@ -341,18 +374,22 @@ async def _pin_record_skills(
     record_id: str,
     pins: tuple[SkillRef, ...],
 ) -> None:
-    """Pin `pins` on the record as `person`, so the catalog ties them to that person."""
+    """Pin `pins` on the record as `person`, so the catalog ties them to that person.
+
+    A pin replaces any other version of the same skill: one pin per skill.
+    """
     records = SelfHostedAgents(sessionmaker)
     ref = records.record_ref(person, record_id)
     current = await records.retrieve(person, ref)
     held = current.spec.skills or ()
-    missing = tuple(pin for pin in pins if pin not in held)
-    if not missing:
+    ids = {pin.id for pin in pins}
+    skills = (*(pin for pin in held if pin.id not in ids), *pins)
+    if len(skills) == len(held) and all(pin in held for pin in pins):
         return
     await records.update(
         person,
         ref,
-        AgentPatch(skills=(*held, *missing)),
+        AgentPatch(skills=skills),
         expected=current.revision,
         key=f"convert-skills:{record_id}:{current.revision.local}",
     )
