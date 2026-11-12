@@ -2803,17 +2803,79 @@ def get_repo_memory_settings(settings: object) -> RepoMemorySettings:
     return value if isinstance(value, RepoMemorySettings) else RepoMemorySettings()
 
 
-class Settings(BaseSettings):
-    compute: ComputeSettings = Field(default_factory=ComputeSettings)
-    long_jobs: LongJobsSettings = Field(default_factory=LongJobsSettings)
-    security_audit_retention_days: int = Field(
+class RetentionSettings(BaseModel):
+    """How long the scheduler keeps operational records, in days. 0 keeps them forever.
+
+    Conversation history (thread sessions and Daimon's journal copy) is the
+    `conversation_retention` feature instead, so a workspace can shorten it.
+    """
+
+    security_audit_days: int = Field(
         default=90,
         ge=0,
         description=(
-            "Security audit retention age in days, default 90. Operators must schedule "
-            "`daimon audit prune TENANT_UUID` for each tenant (for example daily). "
-            "The command deletes older events. Set 0 to explicitly retain events forever; "
-            "privacy erasure and tenant deletion still apply."
+            "Days to keep security audit events and the record of messages the agent posted. "
+            "The scheduler deletes older ones; `daimon audit prune` does the same for one "
+            "tenant. Privacy erasure and tenant deletion still apply when this is 0."
+        ),
+    )
+    admin_history_days: int = Field(
+        default=90, ge=0, description="Days to keep the web admin audit and channel changes."
+    )
+    turn_outcomes_days: int = Field(
+        default=90, ge=0, description="Days to keep turn outcome records."
+    )
+    task_continuations_days: int = Field(
+        default=30,
+        ge=0,
+        description="Days to keep a delivered, skipped or cancelled task continuation.",
+    )
+    job_output_days: int = Field(
+        default=90,
+        ge=0,
+        description=(
+            "Days to keep finished long jobs, and the output tails of finished background "
+            "commands and routine runs."
+        ),
+    )
+    access_requests_days: int = Field(
+        default=90,
+        ge=0,
+        description="Days to keep credential and GitHub access requests once resolved or expired.",
+    )
+    deleted_threads_days: int = Field(
+        default=30,
+        ge=0,
+        description="Days before a web thread the user deleted is removed for good.",
+    )
+    feedback_days: int = Field(
+        default=365, ge=0, description="Days to keep message feedback and support escalations."
+    )
+    channel_names_days: int = Field(
+        default=365,
+        ge=0,
+        description="Days to keep a channel's last known name after it was last seen.",
+    )
+    archived_tenants_days: int = Field(
+        default=30,
+        ge=0,
+        description=(
+            "Days after a tenant is archived (its app uninstalled) before it and all its "
+            "data are deleted. Reinstalling before then keeps everything."
+        ),
+    )
+
+
+class Settings(BaseSettings):
+    compute: ComputeSettings = Field(default_factory=ComputeSettings)
+    long_jobs: LongJobsSettings = Field(default_factory=LongJobsSettings)
+    retention: RetentionSettings = Field(default_factory=RetentionSettings)
+    security_audit_retention_days: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Deprecated: use `DAIMON_RETENTION__SECURITY_AUDIT_DAYS`. When set, and that "
+            "variable is not, it is used as the security audit retention."
         ),
     )
     completion_pings: dict[uuid.UUID, bool] = Field(
@@ -3002,6 +3064,14 @@ class Settings(BaseSettings):
             if isinstance(values, dict)
             else values
         )
+
+    @model_validator(mode="after")
+    def _legacy_audit_retention(self) -> Settings:
+        """`DAIMON_SECURITY_AUDIT_RETENTION_DAYS` still sets the audit retention."""
+        legacy = self.security_audit_retention_days
+        if legacy is not None and "security_audit_days" not in self.retention.model_fields_set:
+            self.retention = self.retention.model_copy(update={"security_audit_days": legacy})
+        return self
 
     @model_validator(mode="after")
     def _tool_safety_feature(self) -> Settings:

@@ -270,9 +270,10 @@ export. Repeat per tenant for a person in several workspaces. It uses local
 database access and is not an MCP tool.
 
 Retention is 90 days
-([`DAIMON_SECURITY_AUDIT_RETENTION_DAYS`](configuration.md#daimon_security_audit_retention_days);
-`0` keeps rows indefinitely). Schedule `daimon audit prune` for each tenant, for example
-daily, and include it and your backup expiry in your retention policy. Privacy
+([`DAIMON_RETENTION__SECURITY_AUDIT_DAYS`](configuration.md#daimon_retention__security_audit_days);
+`0` keeps rows indefinitely). The scheduler deletes older rows daily; `daimon audit
+prune` does it now for one tenant. Include your backup expiry in your retention
+policy. See [Retention](configuration.md#retention) for the other records. Privacy
 erasure clears a person's identifiers from audit rows, and deleting a tenant
 removes its rows. Database triggers block ordinary updates and deletes. They
 guard against application mistakes, not against a database administrator.

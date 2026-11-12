@@ -18,6 +18,7 @@ typo is silent — check the spelling here.
 - [Core](#core)
 - [Compute](#compute)
 - [Long Jobs](#long-jobs)
+- [Retention](#retention)
 - [Database](#database)
 - [Anthropic](#anthropic)
 - [Privacy](#privacy)
@@ -73,12 +74,10 @@ section below is a nested block on this model, reached with the `__` delimiter.
 
 ### `DAIMON_SECURITY_AUDIT_RETENTION_DAYS`
 
-`int` · optional · default `90`
+`int | None` · optional · default unset
 
-Security audit retention age in days, default 90. Operators must schedule `daimon audit
-prune TENANT_UUID` for each tenant (for example daily). The command deletes older
-events. Set 0 to explicitly retain events forever; privacy erasure and tenant deletion
-still apply.
+Deprecated: use `DAIMON_RETENTION__SECURITY_AUDIT_DAYS`. When set, and that variable is
+not, it is used as the security audit retention.
 
 ### `DAIMON_COMPLETION_PINGS`
 
@@ -239,6 +238,79 @@ Maximum launching and running long jobs per tenant.
 `int` · optional · default `2`
 
 Maximum launching and running long jobs per owner within a tenant.
+
+## Retention
+
+Read from `daimon.core.config.RetentionSettings`. Prefix `DAIMON_RETENTION__`.
+
+How long the scheduler keeps operational records, in days. 0 keeps them forever.
+
+Conversation history (thread sessions and Daimon's journal copy) is the
+`conversation_retention` feature instead, so a workspace can shorten it.
+
+### `DAIMON_RETENTION__SECURITY_AUDIT_DAYS`
+
+`int` · optional · default `90`
+
+Days to keep security audit events and the record of messages the agent posted. The
+scheduler deletes older ones; `daimon audit prune` does the same for one tenant. Privacy
+erasure and tenant deletion still apply when this is 0.
+
+### `DAIMON_RETENTION__ADMIN_HISTORY_DAYS`
+
+`int` · optional · default `90`
+
+Days to keep the web admin audit and channel changes.
+
+### `DAIMON_RETENTION__TURN_OUTCOMES_DAYS`
+
+`int` · optional · default `90`
+
+Days to keep turn outcome records.
+
+### `DAIMON_RETENTION__TASK_CONTINUATIONS_DAYS`
+
+`int` · optional · default `30`
+
+Days to keep a delivered, skipped or cancelled task continuation.
+
+### `DAIMON_RETENTION__JOB_OUTPUT_DAYS`
+
+`int` · optional · default `90`
+
+Days to keep finished long jobs, and the output tails of finished background commands
+and routine runs.
+
+### `DAIMON_RETENTION__ACCESS_REQUESTS_DAYS`
+
+`int` · optional · default `90`
+
+Days to keep credential and GitHub access requests once resolved or expired.
+
+### `DAIMON_RETENTION__DELETED_THREADS_DAYS`
+
+`int` · optional · default `30`
+
+Days before a web thread the user deleted is removed for good.
+
+### `DAIMON_RETENTION__FEEDBACK_DAYS`
+
+`int` · optional · default `365`
+
+Days to keep message feedback and support escalations.
+
+### `DAIMON_RETENTION__CHANNEL_NAMES_DAYS`
+
+`int` · optional · default `365`
+
+Days to keep a channel's last known name after it was last seen.
+
+### `DAIMON_RETENTION__ARCHIVED_TENANTS_DAYS`
+
+`int` · optional · default `30`
+
+Days after a tenant is archived (its app uninstalled) before it and all its data are
+deleted. Reinstalling before then keeps everything.
 
 ## Database
 

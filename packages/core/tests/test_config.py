@@ -988,14 +988,24 @@ def test_security_audit_retention_environment(monkeypatch, days):
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
     monkeypatch.setenv("DAIMON_SECURITY_AUDIT_RETENTION_DAYS", days)
-    assert load_settings(_env_file=None).security_audit_retention_days == int(days)
+    retention = load_settings(_env_file=None).retention
+    assert retention.security_audit_days == int(days), "the old variable still sets it"
+
+
+def test_retention_new_variable_wins_over_the_old_one(monkeypatch):
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.setenv("DAIMON_SECURITY_AUDIT_RETENTION_DAYS", "7")
+    monkeypatch.setenv("DAIMON_RETENTION__SECURITY_AUDIT_DAYS", "30")
+    retention = load_settings(_env_file=None).retention
+    assert retention.security_audit_days == 30, "the nested variable is the source of truth"
 
 
 def test_security_audit_retention_default_and_negative_rejection(monkeypatch):
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
     monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
     monkeypatch.delenv("DAIMON_SECURITY_AUDIT_RETENTION_DAYS", raising=False)
-    assert load_settings(_env_file=None).security_audit_retention_days == 90
+    assert load_settings(_env_file=None).retention.security_audit_days == 90, "default"
     monkeypatch.setenv("DAIMON_SECURITY_AUDIT_RETENTION_DAYS", "-1")
     with pytest.raises(ValidationError, match="greater than or equal to 0"):
         load_settings(_env_file=None)
