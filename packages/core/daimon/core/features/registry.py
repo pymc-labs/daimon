@@ -848,6 +848,17 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         authority=_SERVER_ADMIN,
         minimum=1,
     ),
+    _limit(
+        "conversation_retention",
+        "Conversation history kept",
+        "How long Daimon keeps its copy of a conversation after its last message. An idle "
+        "thread past this starts a fresh session on its next message. The smallest setting "
+        "wins; 0 at the deployment keeps conversations until they are deleted.",
+        {"365": "1 year", "180": "180 days", "90": "90 days", "30": "30 days"},
+        tiers=("deployment", "workspace"),
+        authority=_SERVER_ADMIN,
+        zero_unlimited=True,
+    ),
     _capability(
         "outbound_reach",
         "Posting to others",

@@ -707,6 +707,10 @@ class ThreadSession(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # When a turn last started on this mapping; conversation retention ages from it.
+    last_turn_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class TurnCardIntent(Base):
@@ -2135,7 +2139,11 @@ class SlackTurnContext(Base):
     __table_args__ = (Index("ix_slack_turn_contexts_tenant_account", "tenant_id", "account_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_slack_turn_contexts_tenant"),
+        nullable=False,
+    )
     account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     channel_id: Mapped[str] = mapped_column(Text, nullable=False)
     thread_ts: Mapped[str] = mapped_column(Text, nullable=False)
@@ -4223,6 +4231,10 @@ class JournalSession(Base):
     next_sequence: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     # A `mux.contracts.resources.ProjectionSnapshot` as JSON; NULL before the first append.
     projection: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # The last append; conversation retention deletes a slot whose sessions all aged past it.
+    last_appended_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class Journal(Base):
