@@ -93,6 +93,17 @@ def test_main_view_policy_button_uses_operator_overridden_url() -> None:
     )
 
 
+def test_main_view_terms_button_appears_only_when_terms_url_is_set() -> None:
+    """Terms is a link button beside Policy once the operator sets a terms page."""
+    view = _make_view(runtime=_make_runtime(terms_url="https://example.com/terms"))
+    terms = _find_button(view, "📜 Terms")
+    assert terms.style == discord.ButtonStyle.link, "Terms opens the browser like Policy"
+    assert terms.url == "https://example.com/terms", "Terms must link the operator's terms page"
+    labels = [c.label for c in _make_view().walk_children() if isinstance(c, discord.ui.Button)]
+    assert "📜 Terms" not in labels, "no Terms button while terms_url is unset"
+    assert "📄 Policy" in labels, "Policy is always there"
+
+
 def test_main_view_export_button_is_secondary_style() -> None:
     view = _make_view()
     export = _find_button(view, "📤 Export")
