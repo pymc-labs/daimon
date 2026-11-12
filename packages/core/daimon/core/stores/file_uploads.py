@@ -272,3 +272,21 @@ async def delete_unreferenced_web_uploads(
         conditions.append(FileUpload.created_at < created_before)
     result = await session.execute(delete(FileUpload).where(and_(*conditions)))
     return cast(CursorResult[Any], result).rowcount
+
+
+async def delete_stale_unowned_uploads(
+    session: AsyncSession, *, created_before: datetime, limit: int
+) -> int:
+    """Delete up to `limit` files with no web person (MCP and tool uploads) made
+    before the cutoff and carried by no message; returns how many."""
+    stale = (
+        select(FileUpload.id)
+        .where(
+            FileUpload.person_id.is_(None),
+            FileUpload.created_at < created_before,
+            ~_carrying_message().exists(),
+        )
+        .limit(limit)
+    )
+    result = await session.execute(delete(FileUpload).where(FileUpload.id.in_(stale)))
+    return cast(CursorResult[Any], result).rowcount

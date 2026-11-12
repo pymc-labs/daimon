@@ -68,6 +68,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, fields
+from datetime import datetime
 from typing import Any, cast
 
 from daimon.core._models import (
@@ -298,8 +299,8 @@ async def inventory(
     return MuxInventory(erased=erased, retained=retained)
 
 
-async def _detach_accounting(session: AsyncSession, account_key: str) -> None:
-    """Keep what settling a private slot's usage rows reads, before the slot goes."""
+async def _detach_accounting(session: AsyncSession, slots: ColumnElement[bool]) -> None:
+    """Keep what settling the chosen slots' usage rows reads, before the slots go."""
     generations = ProviderBinding.binding_id == ProviderBindingSlot.binding_id
     newest = (
         select(ProviderBinding.profile)
@@ -330,7 +331,7 @@ async def _detach_accounting(session: AsyncSession, account_key: str) -> None:
                 ProviderBindingSlot.channel_id,
                 newest,
                 every,
-            ).where(ProviderBindingSlot.account_id == account_key, has_usage, newest.is_not(None)),
+            ).where(slots, has_usage, newest.is_not(None)),
         )
         .on_conflict_do_nothing()
     )
@@ -351,7 +352,7 @@ async def erase(
     """
     key = _account_key(account_id)
     principals = {str(principal) for principal in principal_ids}
-    await _detach_accounting(session, key)
+    await _detach_accounting(session, ProviderBindingSlot.account_id == key)
     events = await _delete(
         session, delete(Journal).where(Journal.session_id.in_(_private_session_ids(key)))
     )
@@ -382,6 +383,84 @@ async def erase(
         leases=leases,
         release_requests=releases,
         operations=operations,
+    )
+
+
+def _idle(cutoff: datetime) -> ColumnElement[bool]:
+    """A slot with no append, no new generation and no running turn since the cutoff."""
+    slot = ProviderBindingSlot
+    return and_(
+        ~exists().where(
+            JournalSession.binding_id == slot.binding_id, JournalSession.last_appended_at >= cutoff
+        ),
+        ~exists().where(
+            ProviderBinding.binding_id == slot.binding_id, ProviderBinding.created_at >= cutoff
+        ),
+        ~exists().where(
+            ThreadLease.tenant_id == slot.tenant_id,
+            ThreadLease.platform == slot.platform,
+            ThreadLease.channel_id == slot.channel_id,
+            ThreadLease.thread_id == slot.thread_id,
+            ThreadLease.account_id.is_not_distinct_from(slot.account_id),
+            ThreadLease.active.is_not(None),
+        ),
+    )
+
+
+async def delete_idle_slots(
+    session: AsyncSession, *, tenant_id: uuid.UUID, idle_before: datetime, limit: int
+) -> MuxErased:
+    """Delete up to `limit` of a tenant's conversations idle since the cutoff, whole.
+
+    A slot goes with every journal event and binding generation it holds, so no
+    journal is ever left with a gap; the thread's next turn binds afresh. Slots a
+    writer holds are skipped, and the predicate is checked again once the slots'
+    sessions are locked. Leases (their fences) and operation records stay.
+    """
+    if idle_before.utcoffset() is None:
+        raise ValueError("idle_before must include a timezone")
+    idle = and_(ProviderBindingSlot.tenant_id == tenant_id, _idle(idle_before))
+    candidates = list(
+        await session.scalars(
+            select(ProviderBindingSlot.binding_id)
+            .where(idle)
+            .order_by(ProviderBindingSlot.binding_id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+    )
+    if not candidates:
+        return MuxErased()
+    await session.execute(
+        select(JournalSession.session_id)
+        .where(JournalSession.binding_id.in_(candidates))
+        .with_for_update()
+    )
+    ids = list(
+        await session.scalars(
+            select(ProviderBindingSlot.binding_id).where(
+                ProviderBindingSlot.binding_id.in_(candidates), idle
+            )
+        )
+    )
+    if not ids:
+        return MuxErased()
+    chosen = ProviderBindingSlot.binding_id.in_(ids)
+    await _detach_accounting(session, chosen)
+    sessions = select(JournalSession.session_id).where(JournalSession.binding_id.in_(ids))
+    events = await _delete(session, delete(Journal).where(Journal.session_id.in_(sessions)))
+    journal_sessions = await _delete(
+        session, delete(JournalSession).where(JournalSession.binding_id.in_(ids))
+    )
+    generations = await _delete(
+        session, delete(ProviderBinding).where(ProviderBinding.binding_id.in_(ids))
+    )
+    slots = await _delete(session, delete(ProviderBindingSlot).where(chosen))
+    return MuxErased(
+        slots=slots,
+        binding_generations=generations,
+        journal_sessions=journal_sessions,
+        journal_events=events,
     )
 
 

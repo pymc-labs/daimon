@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Daimon deletes old records on a schedule.** Once a day the scheduler removes audit events, admin history, turn
+  diagnostics, finished jobs and their output, closed requests, deleted web threads, feedback and stale channel names
+  past their lifetime, each set under `DAIMON_RETENTION__*` (0 keeps forever). A conversation idle longer than the new
+  Conversation history kept feature (one year by default, which a workspace admin may shorten) loses its stored
+  history and starts a fresh session on its next message. A workspace uninstalled for 30 days is deleted; installing
+  it again first keeps it. Tenant deletion also removes Slack person tokens and settlement progress, and erasing a
+  person also removes their follow-up tasks, turn records, conversation links, model-switch cards and credential
+  requests in every workspace. `DAIMON_SECURITY_AUDIT_RETENTION_DAYS` still works.
 - **The agent editor lays its cards on a ring round the agent.** Instructions, model, channels and people sit top
   left, setup, tools and skills top right, and connections below; each group takes the room its cards need and keeps
   a much wider gap from the next. The ring takes the window's shape: a tall oval in a half-width window, a wide

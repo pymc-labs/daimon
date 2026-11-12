@@ -101,6 +101,7 @@ from daimon.core.permissions import any_agent_rules, any_own_readers
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.promo_settlement import settle_promo_credit
 from daimon.core.purge import sweep_privacy_session_deletes
+from daimon.core.retention import sweep as retention_sweep
 from daimon.core.routine_delivery import (
     DirectPost,
     agent_posted_to,
@@ -1177,6 +1178,27 @@ async def _sweep_github_issued_tokens(
         log.exception("scheduler.github_issued_token_sweep.failed")
 
 
+_RETENTION_INTERVAL = timedelta(hours=24)
+_last_retention_sweep: dict[str, datetime] = {}
+
+
+@scheduler_step
+async def _sweep_retention(
+    sm: async_sessionmaker[AsyncSession], settings: Settings, *, now: datetime | None = None
+) -> None:
+    """Delete records past their retention, once a day. Boundary catch: a sweep
+    failure is logged once and waits out the interval; the loop goes on."""
+    current = now or datetime.now(UTC)
+    last = _last_retention_sweep.get("started")
+    if last is not None and current - last < _RETENTION_INTERVAL:
+        return
+    _last_retention_sweep["started"] = current
+    try:
+        await retention_sweep(sm, settings, now=current)
+    except SQLAlchemyError:
+        log.exception("scheduler.retention.failed")
+
+
 # Each run lists every vault, and live sessions once a relay vault is old enough.
 _RELAY_VAULT_ARCHIVE_INTERVAL = timedelta(minutes=10)
 _last_relay_vault_archive: dict[str, datetime] = {}
@@ -2033,6 +2055,7 @@ async def run(
             await _sweep_lead_intake(sm)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
+            await _sweep_retention(sm, settings)
             await _archive_idle_relay_vaults(client)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(
@@ -2071,6 +2094,7 @@ async def run(
             await _sweep_lead_intake(sm)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
+            await _sweep_retention(sm, settings)
             await _archive_idle_relay_vaults(client)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(
