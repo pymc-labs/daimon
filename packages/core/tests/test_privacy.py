@@ -1336,3 +1336,26 @@ async def test_collect_purge_preview_linked_principals_example_omits_platform_na
     assert preview.linked_principals.example == "42", (
         "linked account examples must not name another chat platform"
     )
+
+
+def test_legal_links_hide_terms_until_the_operator_sets_one() -> None:
+    """Privacy is always linked; terms only once `DAIMON_TERMS_URL` is set."""
+    from daimon.core.config import Settings
+    from daimon.core.privacy import legal_links
+
+    base: dict[str, object] = {"database": {"url": "postgresql+asyncpg://u:p@h/db"}}
+    bare = legal_links(Settings(_env_file=None, **base))  # pyright: ignore[reportCallIssue, reportArgumentType]
+    full = legal_links(
+        Settings(  # pyright: ignore[reportCallIssue]
+            _env_file=None,  # pyright: ignore[reportCallIssue]
+            privacy_policy_url="https://example.com/privacy",  # pyright: ignore[reportArgumentType]
+            terms_url="https://example.com/terms",  # pyright: ignore[reportArgumentType]
+            **base,  # pyright: ignore[reportArgumentType]
+        )
+    )
+    assert bare.privacy.endswith("PRIVACY.md"), "the default policy link is the in-repo page"
+    assert bare.terms is None, "no terms link by default"
+    assert (full.privacy, full.terms) == (
+        "https://example.com/privacy",
+        "https://example.com/terms",
+    ), "both links come from the operator's settings"

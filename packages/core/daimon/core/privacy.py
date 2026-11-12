@@ -24,7 +24,7 @@ scope and erases those rows.
 from __future__ import annotations
 
 import uuid
-from typing import Final
+from typing import TYPE_CHECKING, Final, NamedTuple
 
 from daimon.core.stores import account_records as account_records_store
 from daimon.core.stores import accounts as accounts_store
@@ -58,6 +58,9 @@ from daimon.core.stores import wizard_session as wizard_session_store
 from daimon.core.stores.domain import CliPrincipalRow, PlatformPrincipalRow
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    from daimon.core.config import Settings
 
 
 class PurgePreviewRow(BaseModel):
@@ -196,6 +199,26 @@ DELETE_PAUSED: Final[str] = (
     "Deleting your account is paused during the event.\n\n"
     "Ask the team running Daimon if you need it deleted now."
 )
+
+
+class LegalLinks(NamedTuple):
+    """The deployment's own legal pages; `terms` is None until the operator sets one."""
+
+    privacy: str
+    terms: str | None
+
+
+def legal_links(settings: Settings) -> LegalLinks:
+    """Where every surface sends people for the policy and the terms.
+
+    One rule for the web app and each chat platform's privacy panel: the
+    privacy link is always there, the terms link only when
+    `DAIMON_TERMS_URL` is set.
+    """
+    return LegalLinks(
+        privacy=str(settings.privacy_policy_url),
+        terms=None if settings.terms_url is None else str(settings.terms_url),
+    )
 
 
 def privacy_lines(display_name: str) -> tuple[str, str]:

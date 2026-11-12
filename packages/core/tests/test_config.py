@@ -1359,3 +1359,15 @@ def test_selfhosted_admission_setting_defaults_false_and_reads_nested_env(monkey
     assert load_selfhosted_settings(_env_file=None).admission_enabled is True
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
     assert load_settings(_env_file=None).selfhosted.admission_enabled is True
+
+
+def test_terms_url_is_unset_by_default_and_reads_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DAIMON_TERMS_URL turns the Terms link on; without it there is none."""
+    monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h/d")
+    monkeypatch.setenv("DAIMON_ANTHROPIC__API_KEY", "sk-test")
+    monkeypatch.delenv("DAIMON_TERMS_URL", raising=False)
+    assert load_settings(_env_file=None).terms_url is None, "no terms page unless configured"
+    monkeypatch.setenv("DAIMON_TERMS_URL", "https://example.com/terms")
+    assert str(load_settings(_env_file=None).terms_url) == "https://example.com/terms", (
+        "DAIMON_TERMS_URL must set terms_url"
+    )

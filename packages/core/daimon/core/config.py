@@ -2924,8 +2924,17 @@ class Settings(BaseSettings):
     privacy_policy_url: HttpUrl = Field(
         default=HttpUrl("https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md"),
         description=(
-            "URL rendered on the privacy panels' Policy button. "
+            "URL of the privacy policy, linked from the web app and the privacy "
+            "panels' Policy button. "
             "Override via DAIMON_PRIVACY_POLICY_URL if you host your own policy page."
+        ),
+    )
+    terms_url: HttpUrl | None = Field(
+        default=None,
+        description=(
+            "URL of the terms page. Set DAIMON_TERMS_URL to show a Terms link beside "
+            "the privacy policy in the web app and the privacy panels; unset, no "
+            "Terms link appears."
         ),
     )
     privacy: PrivacySettings = Field(default_factory=PrivacySettings)
