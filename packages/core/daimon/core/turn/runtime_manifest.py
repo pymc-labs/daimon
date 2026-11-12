@@ -72,7 +72,9 @@ if TYPE_CHECKING:
     )
     from daimon.core.stores.neutral_catalog import AgentRevision
     from daimon.core.turn.prepare import ProviderPreparationRequest
+    from mux.contracts.ids import Scope
     from mux.contracts.ports import ManagedAgents
+    from mux.state.lease import Slot
 
 _RESERVED = ("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_")
 _ROWS = TypeAdapter(list[dict[str, JsonValue]])
@@ -272,6 +274,41 @@ def fixed_plan_origin_allowed(origin: str | None) -> bool:
     return origin == "channel"
 
 
+def preparation_account(request: ProviderPreparationRequest) -> str:
+    """The account a preparation runs as: a shared thread's owner, else the asker."""
+    shared = request.admission.shared_owner
+    return str(shared if shared is not None else request.admission.account_id)
+
+
+def caller_scope(request: ProviderPreparationRequest) -> Scope:
+    """The asker's own scope, which mints its MCP credential; never the thread owner's."""
+    from daimon.core.mux_backend import resource_scope
+
+    if request.scope.account_id == str(request.admission.account_id):
+        return request.scope
+    return resource_scope(
+        tenant_id=request.scope.tenant_id,
+        account_id=str(request.admission.account_id),
+        authorization_id=request.scope.authorization_id,
+    )
+
+
+def shared_copy_slot(request: ProviderPreparationRequest) -> Slot | None:
+    """A shared thread's slot when its owner holds the agent copy, else None."""
+    from mux.contracts.ids import ThreadRef
+    from mux.state.lease import Slot
+
+    admission = request.admission
+    revision = admission.backend_revision
+    if (
+        admission.shared_owner is None
+        or admission.backend_revision_origin != "agent"
+        or revision is None
+    ):
+        return None
+    return Slot(thread=ThreadRef(channel=revision.channel, thread_id=request.thread_id))
+
+
 async def capture_preparation_source(
     request: ProviderPreparationRequest, *, fresh: bool = False, capability_preview: bool = False
 ) -> BackendAgent:
@@ -317,9 +354,8 @@ async def capture_preparation_source(
         session_factory=request.deps.sessionmaker,
         tenant_id=request.tenant_id,
         agent_uuid=source.agent_id,
-        account_id=(
-            None if request.admission.shared_owner is not None else request.admission.account_id
-        ),
+        # A shared thread's copy is its owner's; personal sign-ins stay off it.
+        account_id=UUID(preparation_account(request)),
         resource_scope=request.scope,
         memory_read_only=request.admission.memory_read_only,
         fernet=request.deps.fernet,
@@ -585,7 +621,7 @@ async def _capture_source_capabilities(
                     request.deps.sessionmaker,
                     token=catalogue_token,
                     secret=secret,
-                    scope=scope,
+                    scope=caller_scope(request),
                     agent_id=source.agent_id,
                     now=now,
                     chat_execution=True,
@@ -1520,8 +1556,24 @@ def preview_source_drops(
     return target
 
 
-def _source_facts(source: BackendAgent) -> dict[str, object]:
+def _source_facts(source: BackendAgent, *, readdress: bool = True) -> dict[str, object]:
     updates: dict[str, object] = {"resource_scope": None}
+    if readdress and source.resource_scope is not None:
+        # The caller's own Daimon credential is addressed per person: any person's
+        # capture pins the same source (a shared thread captures as its owner).
+        caller = f"caller-mcp:{source.tenant_id}:{source.resource_scope.account_id}:"
+        anyone = f"caller-mcp:{source.tenant_id}::"
+        updates["resource_requirements"] = tuple(
+            binding.model_copy(
+                update={
+                    "id": binding.id.replace(caller, anyone, 1),
+                    "credential_ref": binding.credential_ref.replace(caller, anyone, 1),
+                }
+            )
+            if binding.credential_ref is not None and binding.credential_ref.startswith(caller)
+            else binding
+            for binding in source.resource_requirements
+        )
     for name in ("source", "environment"):
         resource = getattr(source, name)
         if resource is not None:
@@ -1541,9 +1593,9 @@ def _digest(facts: dict[str, object]) -> str:
     return request_digest(cast(JsonValue, TypeAdapter(object).dump_python(facts, mode="json")))
 
 
-def source_preservation_pin(source: BackendAgent) -> str:
+def source_preservation_pin(source: BackendAgent, *, readdress: bool = True) -> str:
     """Pin complete owner-captured intent independently of the current caller address."""
-    facts = _source_facts(source)
+    facts = _source_facts(source, readdress=readdress)
     # Daimon's own gating changes with a release or a place, not with the agent:
     # pin the source before it, so gating alone never asks to confirm a switch again.
     facts.pop("asks_before_publishing", None)
@@ -1561,7 +1613,11 @@ def source_pin_matches(source: BackendAgent, pin: str) -> bool:
     """
     if pin == source_preservation_pin(source):
         return True
-    legacy = _source_facts(source)
+    # Pins stored before the caller's credential was re-addressed match only
+    # their own consenter's capture: stricter, so safe to accept.
+    if pin == source_preservation_pin(source, readdress=False):
+        return True
+    legacy = _source_facts(source, readdress=False)
     legacy.pop("ungated_spec", None)
     return pin == _digest(legacy)
 
@@ -1602,7 +1658,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         or revision is None
         or request.scope.tenant_id != str(request.tenant_id)
         or request.scope.account_id != str(request.session_account_id)
-        or request.scope.account_id != str(request.admission.account_id)
+        or request.scope.account_id != preparation_account(request)
         or request.scope.is_platform
         or request.scope.is_legacy_host_authorized
     ):
@@ -2170,7 +2226,7 @@ def validate_counterpart_request(
             or not request.deps.agent_backends
             or request.deps.turn_path != "mux"
             or scope.tenant_id != str(request.tenant_id)
-            or scope.account_id != str(request.admission.account_id)
+            or scope.account_id != preparation_account(request)
             or scope.account_id != str(request.session_account_id)
             or (plan.tenant_id, plan.account_id) != (scope.tenant_id, scope.account_id)
             or (revision.channel.tenant_id, revision.channel.platform, revision.channel.channel_id)
@@ -2188,7 +2244,7 @@ def validate_counterpart_request(
         or not request.deps.channel_backends
         or request.deps.turn_path != "mux"
         or scope.tenant_id != str(request.tenant_id)
-        or scope.account_id != str(request.admission.account_id)
+        or scope.account_id != preparation_account(request)
         or scope.account_id != str(request.session_account_id)
         or (plan.tenant_id, plan.account_id) != (scope.tenant_id, scope.account_id)
         or (revision.channel.tenant_id, revision.channel.platform, revision.channel.channel_id)

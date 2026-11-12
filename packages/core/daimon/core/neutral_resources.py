@@ -49,7 +49,7 @@ from mux.profiles import native_agent_tools, neutral_catalog_profile_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
-    pass
+    from mux.state.lease import Slot
 
 AgentGate = Callable[[Agent], Awaitable[None]]
 PinResolver = Callable[[Scope, SkillRef], Awaitable[SkillRef]]
@@ -132,6 +132,7 @@ class NeutralResourceHost:
         resolve_pin: PinResolver | None = None,
         resource_catalog_enabled: bool = False,
         catalog_adapter: NativeCatalogReadback | None = None,
+        shared_slot: Slot | None = None,
     ) -> None:
         if (
             scope.is_platform
@@ -180,7 +181,10 @@ class NeutralResourceHost:
             raise UnsupportedCapability(("neutral_resource_host_profile",), capabilities.profile_id)
         self.sessions = sessions
         self.catalog = PostgresNeutralCatalog(
-            sessions, provider=profile.provider, account_scope_id=account_scope_id
+            sessions,
+            provider=profile.provider,
+            account_scope_id=account_scope_id,
+            shared_slot=shared_slot,
         )
 
     def check(self, agent: Agent) -> None:

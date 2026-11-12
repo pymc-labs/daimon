@@ -69,6 +69,8 @@ class _RuntimeRegistration:
     prepare: RuntimePreparation | None = None
     # Set by a profile an agent may select only where the operator granted it.
     agent_grants: Callable[[str], tuple[AgentGrant, ...]] | None = None
+    # Its host runs an agent's own copy in a shared thread as the thread's owner.
+    shares_agent_threads: bool = False
 
 
 _RUNTIME_FACTORIES: dict[str, _RuntimeRegistration] = {}
@@ -83,6 +85,7 @@ def register_channel_runtime(
     fallback: bool = False,
     prepare: RuntimePreparation | None = None,
     agent_grants: Callable[[str], tuple[AgentGrant, ...]] | None = None,
+    shares_agent_threads: bool = False,
 ) -> None:
     """Register a constructor; provider defaults preserve explicit host overrides."""
     if profile == "anthropic.managed_agents":
@@ -92,8 +95,14 @@ def register_channel_runtime(
             return
         raise ValueError(f"channel runtime already registered: {profile}")
     _RUNTIME_FACTORIES[profile] = _RuntimeRegistration(
-        factory, authorizations, tariffs, prepare, agent_grants
+        factory, authorizations, tariffs, prepare, agent_grants, shares_agent_threads
     )
+
+
+def shares_agent_threads(profile: str) -> bool:
+    """Whether `profile` runs an agent's own copy in a shared thread (as its owner)."""
+    registration = _RUNTIME_FACTORIES.get(profile)
+    return registration is not None and registration.shares_agent_threads
 
 
 def ensure_channel_runtime(profile: str, *, ready: Callable[[], bool] | None = None) -> bool:

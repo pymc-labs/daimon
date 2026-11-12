@@ -108,7 +108,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Shared, held and sealed channels run on other providers.** OpenAI and Gemini
   agents answer in shared threads, without Daimon's tools or any caller's
   personal stores, and in Slack Connect and other held channels with only that
-  channel's memory. Sealed channels and Slack DM context also run on
+  channel's memory. An agent that picks OpenAI itself keeps Daimon's tools in
+  a shared thread: each person acts as themselves, and nobody's personal
+  sign-ins are used. Sealed channels and Slack DM context also run on
   self-hosted harnesses, and sessions a sealed reply starts stay sealed.
   Self-hosted harnesses still refuse shared threads.
 

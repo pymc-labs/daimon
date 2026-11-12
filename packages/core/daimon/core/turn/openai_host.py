@@ -396,17 +396,18 @@ async def _prepare_with_runtime(
     if revision is None or not request.deps.channel_backends or request.deps.turn_path != "mux":
         raise AdmissionDenied(reason="backend_unsupported")
     # A held turn runs on a per-turn held credential (`template_mcp`). A shared
-    # thread binds the account-less slot and runs with no caller MCP credential;
-    # an agent-origin source's counterpart and MCP are per caller.
+    # thread binds the account-less slot. On a channel's own deployment it runs
+    # with no caller MCP credential; an agent's own copy, its environment and
+    # session are the thread owner's (`request.scope`), each asker's MCP its own.
     shared = request.admission.shared_owner
-    if shared is not None and request.admission.backend_revision_origin == "agent":
-        raise AdmissionDenied(reason="backend_unsupported")
+    owned = shared is not None and request.admission.backend_revision_origin == "agent"
     if (
         revision.channel.tenant_id != request.scope.tenant_id
         or revision.channel.platform != request.platform
         or str(request.session_account_id)
         != (str(shared) if shared is not None else request.scope.account_id)
-        or (shared is not None and runtime.mcp_secrets is not None)
+        or request.scope.account_id != (str(shared) if owned else str(request.admission.account_id))
+        or (shared is not None and not owned and runtime.mcp_secrets is not None)
     ):
         raise ScopeViolation("preparation", "OpenAI thread differs from admitted scope")
     current = await reauthorize(request.deps, request.admission)
@@ -676,6 +677,8 @@ async def _prepare_with_runtime(
         continuity=continuity,
         # Revokes a template turn's per-turn MCP credential however the turn ends.
         _finalize=runtime.end_of_turn,
+        # A shared agent copy's turn drives the owner's session.
+        _scope=request.scope if owned else None,
     )
 
 

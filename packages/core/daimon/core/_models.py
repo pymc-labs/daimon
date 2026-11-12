@@ -4591,9 +4591,8 @@ class NeutralAgentRevision(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
     )
-    account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
-    )
+    # No account key: a shared thread's owner has no account row (0204).
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     provider: Mapped[str] = mapped_column(Text, primary_key=True)
     account_scope_id: Mapped[str] = mapped_column(Text, primary_key=True)
     catalog_id: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -4614,9 +4613,8 @@ class NeutralSkillVersion(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
     )
-    account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
-    )
+    # No account key: a shared thread's owner has no account row (0204).
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     provider: Mapped[str] = mapped_column(Text, primary_key=True)
     account_scope_id: Mapped[str] = mapped_column(Text, primary_key=True)
     skill_id: Mapped[str] = mapped_column(Text, primary_key=True)

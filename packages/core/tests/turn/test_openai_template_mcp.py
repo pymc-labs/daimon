@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -133,6 +134,8 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
     # {"legacy": True}: consent was given before this deploy's template kept MCP.
     model = param if isinstance(param, str) else param.get("model", "gpt-6-luna")
     legacy = isinstance(param, dict) and param.get("legacy", False)
+    # {"shared": True}: the copy answers a shared thread.
+    thread_mode = "shared" if isinstance(param, dict) and param.get("shared") else "per_caller"
     request, _, source, actor, accepted, router, *_ = consent_request
     sessions = request.deps.sessionmaker
     router.add_environment_list(request.admission.environment)
@@ -192,7 +195,7 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
         configuration_grant={
             "profiles": ["openai.persistent_workspace"],
             "models": ["gpt-6-luna", "gpt-6-astra"],
-            "thread_modes": ["per_caller"],
+            "thread_modes": sorted({"per_caller", thread_mode}),
             "requires": {},
         },
     )
@@ -241,7 +244,9 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
         )
         state["expected"], state["local"] = confirmed.local, state["local"] + 1
         linked = ConfigRevision.create(
-            revision.channel, state["local"], revision.model_copy(update={"model": model})
+            revision.channel,
+            state["local"],
+            revision.model_copy(update={"model": model, "thread_mode": thread_mode}),
         )
         async with sessions.begin() as db:
             await mux_state.put_config_revision(
@@ -655,3 +660,126 @@ async def test_a_skill_that_cannot_be_read_is_its_own_named_loss(template, conse
         assert "skill:skill_gone" in represented.unavailable_capabilities, "named by its id"
         assert "skills" not in represented.unavailable_capabilities, "the others still carry"
         assert represented.session_skills, "the readable skills still attach"
+
+
+async def shared_caller(request, account):
+    """`request` as `account` asks it in its shared thread; returns it and the owner."""
+    from daimon.core.shared_threads import shared_owner
+    from mux.contracts.ids import ThreadRef
+    from mux.state.lease import Slot
+
+    channel = request.admission.backend_revision.channel
+    owner = shared_owner(Slot(thread=ThreadRef(channel=channel, thread_id=request.thread_id)))
+    admission = replace(request.admission, account_id=account, shared_owner=owner)
+    scope = admitted_session_scope(admission, tenant_id=request.tenant_id, session_id="shared")
+    return replace(request, admission=admission, scope=scope, session_account_id=owner), owner
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("template", [{"shared": True}], indirect=True)
+async def test_a_second_person_replies_in_the_owners_shared_copy_as_themselves(template):
+    """A shared thread's agent copy and session are its owner's; each asker's
+    credential names that asker, so the relay hides their personal sign-ins."""
+    import jwt
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.tenants import get_tenant
+    from daimon.core.turn_origin import turn_origin
+    from daimon.testing.factories import make_account
+    from mux.contracts.ids import ThreadRef
+    from mux.state.lease import Slot
+
+    request, _, wire, _ = template
+    async with request.deps.sessionmaker.begin() as db:
+        tenant = await get_tenant(db, request.tenant_id)
+        assert tenant is not None
+        other = (await make_account(db, tenant=tenant)).id
+    first, owner = await shared_caller(request, request.admission.account_id)
+    second, _ = await shared_caller(request, other)
+    for index, asker in enumerate((first, second)):
+        async with turn_origin(
+            request.deps.sessionmaker,
+            tenant_id=request.tenant_id,
+            account_id=asker.admission.account_id,
+            platform=tenant.platform,
+            parent_channel_id=request.admission.origin_channel_id or "channel",
+            thread_id=request.thread_id,
+            responder_ma_agent_id=request.admission.agent.id,
+            responder_name="helper",
+            role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
+        ):
+            await _turn(asker, index)
+    assert len(wire.posts) == 1, "the second person continues the owner's session"
+    thread = ThreadRef(channel=request.admission.backend_revision.channel, thread_id="thread")
+    binding = await request.deps.state_store.get_binding(Slot(thread=thread))
+    assert binding is not None and binding.id == str(owner)
+    secret = request.deps.mcp.jwt_secret.get_secret_value()
+    claims = [
+        jwt.decode(bearer(r["auth"]), secret, algorithms=["HS256"], options={"verify_aud": False})  # pyright: ignore[reportArgumentType]
+        for r in wire.rotations
+    ]
+    # Each reply's credential is its asker's own and names them, never the owner.
+    assert claims[-1]["sub"] == claims[-1]["requester_account_id"] == str(other)
+    assert (
+        claims[0]["sub"] == claims[0]["requester_account_id"] == str(request.admission.account_id)
+    )
+    assert str(owner) not in json.dumps(claims)
+    # The relay reads each credential as a shared turn: nobody's personal sign-in
+    # (the first asker's own, here) is lent to the thread.
+    from daimon.adapters.mcp.connector_relay import RelayTurn
+    from daimon.core.mcp_oauth.connector_tokens import connector_token_for_turn
+    from daimon.core.stores.connector_tokens import upsert_connector_token
+
+    agent_id = uuid.UUID(claims[0]["chat_agent_id"])
+    url = "https://mcp.linear.app/mcp"
+    async with request.deps.sessionmaker.begin() as db:
+        await upsert_connector_token(
+            db,
+            tenant_id=request.tenant_id,
+            account_id=request.admission.account_id,
+            agent_id=agent_id,
+            server_url=url,
+            access_token_encrypted=b"at",
+            refresh_token_encrypted=None,
+            token_endpoint="https://auth.example.com/token",
+            client_id="client",
+            client_secret_encrypted=None,
+            token_endpoint_auth_method="none",
+            scope=None,
+            resource=None,
+            expires_at=None,
+            refresh_owner="daimon",
+            now=datetime.now(UTC),
+        )
+    for claim in (claims[0], claims[-1]):
+        turn = RelayTurn(
+            tenant_id=request.tenant_id,
+            account_id=uuid.UUID(claim["sub"]),
+            agent_id=agent_id,
+            chat_session_id=claim["chat_session_id"],
+            platform=tenant.platform,
+            requester_account_id=uuid.UUID(claim["requester_account_id"]),
+            held=False,
+            confirmed_call_id=None,
+            token_jti=None,
+        )
+        assert turn.shared
+        hidden = await connector_token_for_turn(
+            request.deps.sessionmaker,
+            tenant_id=turn.tenant_id,
+            agent_id=turn.agent_id,
+            server_url=url,
+            requester_account_id=turn.requester,
+            hide_personal=turn.shared,
+        )
+        assert hidden is None, "a personal sign-in never reaches a shared thread"
+    own = await connector_token_for_turn(
+        request.deps.sessionmaker,
+        tenant_id=request.tenant_id,
+        agent_id=agent_id,
+        server_url=url,
+        requester_account_id=request.admission.account_id,
+        hide_personal=False,
+    )
+    assert own is not None, "the sign-in exists; only the shared thread hides it"

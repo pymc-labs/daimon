@@ -83,7 +83,8 @@ def from_binding(
         return None
     if (
         binding.thread.channel.tenant_id != scope.tenant_id
-        or binding.legacy_account_id != scope.account_id
+        # An account-less binding is a shared thread's, run as its owner (its id).
+        or (binding.legacy_account_id or binding.id) != scope.account_id
         or binding.provider != "openai"
         or binding.profile != context.profile_id
     ):

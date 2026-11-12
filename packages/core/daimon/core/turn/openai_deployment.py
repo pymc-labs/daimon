@@ -42,6 +42,7 @@ from daimon.core.turn.runtime_manifest import (
     represented_source,
     root_counterpart_catalog_id,
     select_runtime_manifest,
+    shared_copy_slot,
     source_pin_matches,
     validate_counterpart_pins,
     validate_counterpart_request,
@@ -334,7 +335,12 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     )
 
     mcp_template = deployment.template_capabilities == "mcp"
-    template_mcp = TemplateMCPCredential(request, scope, label=OPENAI_TEMPLATE_MCP_LABEL)
+    from daimon.core.turn.runtime_manifest import caller_scope
+
+    # A shared thread's copy runs as its owner (`scope`); each asker mints its own.
+    template_mcp = TemplateMCPCredential(
+        request, caller_scope(request), label=OPENAI_TEMPLATE_MCP_LABEL, session_scope=scope
+    )
 
     def check(config: ConfigRevision, authorized: Scope) -> None:
         if config != revision or authorized != scope:
@@ -481,6 +487,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             scope=scope,
             account_scope_id=deployment.project,
             operation_key="counterpart-read",
+            shared_slot=shared_copy_slot(preparation),
         )
         checked = await deployment.read_counterpart(preparation, source=source, resources=resources)
         # A template that keeps the agent's MCP serves one whose switch dropped it
@@ -559,6 +566,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             scope=scope,
             account_scope_id=deployment.project,
             operation_key="counterpart-read",
+            shared_slot=shared_copy_slot(preparation),
         )
         await deployment.verify_environment(preparation, resources=resources, expected=None)
         allocating = True
@@ -591,7 +599,12 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     guard = None
     if spend_limit is not None and not native_cap and price is not None:
         guard = SpendGuard(limit_cents=spend_limit, price=price, notify=notify_spend_cap)
-    shared = request.admission.shared_owner is not None
+    # A shared thread on a channel's own deployment has no caller to mint for; an
+    # agent's own copy mints each asker's credential, which hides personal sign-ins.
+    shared = (
+        request.admission.shared_owner is not None
+        and request.admission.backend_revision_origin != "agent"
+    )
     runtime = OpenAIHostRuntime(
         transport_factory=transport,
         read_agent_counterpart=read,
@@ -605,7 +618,6 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         # infrastructure. A persistent workspace's container cost stays unknown.
         session_plan=plan,
         authorization=authorize,
-        # A shared thread has no caller to mint for: its session carries no MCP.
         mcp_secrets=None
         if shared
         else resolve_mcp
@@ -717,4 +729,5 @@ def register_runtime() -> None:
             tariffs=partial(provider_prices, PROFILE) if profile == PROFILE else None,
             fallback=True,
             prepare=prepare_tenant_environment if profile == PROFILE else None,
+            shares_agent_threads=True,
         )

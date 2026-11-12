@@ -48,7 +48,13 @@ from daimon.core.github_app_session import AppSessionAccess, token_scopes_for_to
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import hold_key
 from daimon.core.memory_resource import memory_scope
-from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref, resource_scope
+from daimon.core.mux_backend import (
+    TurnRuntime,
+    managed_agents,
+    owner_turn_scope,
+    resource_ref,
+    resource_scope,
+)
 from daimon.core.mux_compat import legacy_call
 from daimon.core.permissions import any_readers_limited
 from daimon.core.pricing import MODEL_PRICING
@@ -1181,6 +1187,14 @@ async def bind_session_impl(
             prepare = _PROVIDER_PREPARATIONS.get(profile)
         if prepare is None:
             raise AdmissionDenied(reason="backend_unsupported")
+        if admission.shared_owner is not None and admission.backend_revision_origin == "agent":
+            # A shared thread's agent copy, environment and session are its owner's;
+            # each asker's own MCP credential is minted from the admission.
+            from daimon.core.turn.runtimes import shares_agent_threads
+
+            if not shares_agent_threads(profile):
+                raise AdmissionDenied(reason="backend_unsupported")
+            request = replace(request, scope=owner_turn_scope(scope, str(admission.shared_owner)))
         request, runtimes = scope_channel_runtimes(request)
 
         async def _prepare_provider() -> PreparedTurn:
@@ -1200,8 +1214,8 @@ async def bind_session_impl(
             result = replace(result, _native_spec=native_spec)
             ref = result.session_ref
             backend = result.backend
-            # A shared thread's session may belong to the thread's owner (Gemini) or
-            # carry the caller (OpenAI); never anyone else.
+            # A shared thread's session may belong to the thread's owner or carry
+            # the caller (a channel's own OpenAI deployment); never anyone else.
             ref_accounts = {scope.account_id}
             if admission.shared_owner is not None:
                 ref_accounts.add(str(admission.shared_owner))

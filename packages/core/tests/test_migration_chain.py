@@ -165,6 +165,7 @@ TAIL = (
     "0200_skill_copies",
     "0202_agent_backend_environment",
     "0203_pending_carry_overs",
+    "0204_shared_agent_copies",
 )
 HEAD = TAIL[-1]
 

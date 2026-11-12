@@ -17,9 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 TABLES = {"neutral_agent_revisions", "neutral_skill_versions"}
 
 
-def migration() -> ModuleType:
-    path = Path(__file__).parents[1] / "alembic/versions/0089_neutral_catalog.py"
-    spec = importlib.util.spec_from_file_location("neutral_catalog_migration", path)
+def migration(name: str = "0089_neutral_catalog") -> ModuleType:
+    path = Path(__file__).parents[1] / f"alembic/versions/{name}.py"
+    spec = importlib.util.spec_from_file_location(f"migration_{name}", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -50,6 +50,8 @@ async def test_catalog_migration_upgrade_downgrade_upgrade_preserves_legacy(
     ).scalar_one()
     connection = await db_session.connection()
     module = migration()
+    # 0204 drops the account keys (a shared thread's owner has no account row).
+    keyless = migration("0204_shared_agent_copies")
 
     def cycle(sync: Connection) -> None:
         here = sync.scalar(text("SELECT current_schema()"))
@@ -60,6 +62,7 @@ async def test_catalog_migration_upgrade_downgrade_upgrade_preserves_legacy(
             module.upgrade()
             assert sync.scalar(text("SHOW lock_timeout")) == "5s"
             assert TABLES.issubset(inspect(sync).get_table_names(schema=here))
+            keyless.upgrade()
             # Compare real migration DDL with all mapped columns, keys, checks and FKs.
             for name in TABLES:
                 actual = inspect(sync).get_columns(name, schema=here)
@@ -93,11 +96,19 @@ async def test_catalog_migration_upgrade_downgrade_upgrade_preserves_legacy(
                 ),
                 values,
             )
+            # 0204 down keeps an account's rows and restores its keys; up drops them.
+            keyless.downgrade()
+            for name in TABLES:
+                keys = inspect(sync).get_foreign_keys(name, schema=here)
+                assert any(key["referred_table"] == "accounts" for key in keys)
+                assert sync.scalar(text(f"SELECT count(*) FROM {name}")) == 1
+            keyless.upgrade()
             module.downgrade()
             assert not TABLES.intersection(inspect(sync).get_table_names(schema=here))
             module.upgrade()
             assert sync.scalar(text("SHOW lock_timeout")) == "5s"
             assert TABLES.issubset(inspect(sync).get_table_names(schema=here))
+            keyless.upgrade()
 
     await connection.run_sync(cycle)
     after = (

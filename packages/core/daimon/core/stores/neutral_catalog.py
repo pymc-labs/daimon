@@ -29,7 +29,8 @@ from mux.contracts.ids import Provider, Scope, SkillRef
 from mux.contracts.resources import Agent
 from mux.errors import ScopeViolation
 from mux.profiles import neutral_catalog_profile_for
-from sqlalchemy import ColumnElement, select, text
+from mux.state.lease import Slot
+from sqlalchemy import ColumnElement, delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -67,7 +68,9 @@ class PostgresNeutralCatalog:
         *,
         provider: Provider,
         account_scope_id: str,
+        shared_slot: Slot | None = None,
     ) -> None:
+        """`shared_slot` names a shared thread whose owner, not a person, holds the rows."""
         # Selfhosted retains local bundles without advertising native catalog APIs.
         if (
             provider != "selfhosted" and neutral_catalog_profile_for(provider) is None
@@ -76,6 +79,7 @@ class PostgresNeutralCatalog:
         self._sessions = sessions
         self._provider = provider
         self._workspace = account_scope_id
+        self._shared_slot = shared_slot
 
     def _key(self, scope: Scope) -> dict[str, Any]:
         if (
@@ -107,6 +111,16 @@ class PostgresNeutralCatalog:
 
     async def _authorize(self, session: AsyncSession, scope: Scope) -> None:
         key = self._key(scope)
+        slot = self._shared_slot
+        if slot is not None:
+            from daimon.core.shared_threads import shared_owner
+
+            # A shared thread's owner has no account row: its slot stands in.
+            if slot.thread.channel.tenant_id != scope.tenant_id or str(shared_owner(slot)) != str(
+                key["account_id"]
+            ):
+                raise ScopeViolation("catalog", "shared owner differs from its thread")
+            return
         account = await session.scalar(
             select(Account.id).where(
                 Account.id == key["account_id"], Account.tenant_id == key["tenant_id"]
@@ -388,3 +402,9 @@ class PostgresNeutralCatalog:
                 .order_by(NeutralSkillVersion.skill_id, NeutralSkillVersion.version)
             )
             return tuple(self._skill(row) for row in rows)
+
+
+async def delete_account_rows(session: AsyncSession, *, account_id: uuid.UUID) -> None:
+    """Delete one account's catalog rows (no account key cascades them, 0204)."""
+    for table in (NeutralAgentRevision, NeutralSkillVersion):
+        await session.execute(delete(table).where(table.account_id == account_id))

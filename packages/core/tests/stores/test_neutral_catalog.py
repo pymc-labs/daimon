@@ -19,9 +19,18 @@ from daimon.core.purge import purge_account
 from daimon.core.skills.ingest import SkillBundle, bundle_from_files, bundle_from_markdown
 from daimon.core.stores.neutral_catalog import CatalogConflict, PostgresNeutralCatalog
 from daimon.testing.factories import make_account, make_tenant
-from mux.contracts.ids import ModelRef, ResourceRef, Revision, Scope, SkillRef
+from mux.contracts.ids import (
+    ChannelRef,
+    ModelRef,
+    ResourceRef,
+    Revision,
+    Scope,
+    SkillRef,
+    ThreadRef,
+)
 from mux.contracts.resources import Agent, AgentSpec
 from mux.errors import ScopeViolation
+from mux.state.lease import Slot
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -335,3 +344,30 @@ async def test_account_purge_cascades_catalog_data_and_preserves_other_account(
     assert len(await catalog.list_skills(other)) == 1
     with pytest.raises(ScopeViolation):
         await catalog.list_agents(scope)
+
+
+async def test_a_shared_threads_copy_belongs_to_its_owner_and_no_person(setup: Setup) -> None:
+    from daimon.core.shared_threads import shared_owner
+
+    sessions, scope, other, foreign = setup
+    channel = ChannelRef(tenant_id=scope.tenant_id, platform="slack", channel_id="C1")
+    slot = Slot(thread=ThreadRef(channel=channel, thread_id="t1"))
+    owner = scope.model_copy(update={"account_id": str(shared_owner(slot))})
+    shared = PostgresNeutralCatalog(
+        sessions, provider="openai", account_scope_id="workspace", shared_slot=slot
+    )
+    await shared.put_agent(owner, "logical", agent(owner, "openai"), expected_revision=0)
+    assert len(await shared.list_agents(owner)) == 1
+    # A person, another thread's owner or another tenant never reaches it.
+    elsewhere = Slot(thread=ThreadRef(channel=channel, thread_id="t2"))
+    stranger = scope.model_copy(update={"account_id": str(shared_owner(elsewhere))})
+    for caller in (
+        scope,
+        other,
+        stranger,
+        foreign.model_copy(update={"account_id": owner.account_id}),
+    ):
+        with pytest.raises(ScopeViolation):
+            await shared.list_agents(caller)
+    with pytest.raises(ScopeViolation):
+        await store(sessions).list_agents(owner)

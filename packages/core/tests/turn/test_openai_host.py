@@ -1450,8 +1450,6 @@ async def test_existing_positional_runtime_constructor_keeps_billing_arguments(c
 
 
 async def test_a_shared_thread_binds_once_and_a_second_caller_continues_it(composed):
-    from daimon.core.turn.errors import AdmissionDenied
-
     request, wire, store, _, runtime = composed
     owner = uuid5(NAMESPACE_URL, "shared-owner-fixture")
     other = uuid5(NAMESPACE_URL, "second-caller")
@@ -1497,13 +1495,13 @@ async def test_a_shared_thread_binds_once_and_a_second_caller_continues_it(compo
     assert "daimon_chat_session_id" not in binding.native_refs
     assert await store.get_binding(Slot(thread=thread, account_id=SCOPE.account_id)) is None
     assert len([r for r in wire.requests if r.method == "POST"]) == 1
-    # A shared turn mints no per-caller credential, and an agent-origin source's
-    # counterpart and MCP are per caller.
+    # A shared turn mints no per-caller credential. An agent copy runs as the
+    # thread owner: a caller's own scope never reaches the owner's session.
     assert first._finalize is None
     agent_origin = caller(other)
     agent_origin = replace(
         agent_origin,
         admission=replace(agent_origin.admission, backend_revision_origin="agent"),
     )
-    with pytest.raises(AdmissionDenied):
+    with pytest.raises(ScopeViolation):
         await prepare_openai(agent_origin)

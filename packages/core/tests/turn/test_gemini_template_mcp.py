@@ -599,7 +599,7 @@ async def test_a_pin_from_before_the_gating_change_still_holds_but_not_for_an_ed
     from daimon.core.turn.runtime_manifest import capture_preparation_source as capture
 
     def legacy_pin(source):
-        facts = manifest._source_facts(source)  # pyright: ignore[reportPrivateUsage]
+        facts = manifest._source_facts(source, readdress=False)  # pyright: ignore[reportPrivateUsage]
         facts.pop("ungated_spec", None)
         return manifest._digest(facts)  # pyright: ignore[reportPrivateUsage]
 
