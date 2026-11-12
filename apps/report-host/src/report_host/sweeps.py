@@ -10,7 +10,8 @@ head-on: a deploy mid-turn surfaced a raw ``'NoneType' object is not
 subscriptable`` because its poll task died while the seam turn kept running.
 These four sweeps are the host's cleanup: re-attach to what survived a
 restart, cancel what timed out while the host was down, archive what has
-sat idle too long, and prune what has expired — one bad row must never abort
+sat idle too long, and prune what has expired (recipient links, and reports
+past their retention window) — one bad row must never abort
 a whole pass, so every loop below catches per item, logs, and
 continues.
 """
@@ -176,3 +177,29 @@ def prune_expired_recipients(*, conn: sqlite3.Connection, now: Callable[[], date
     many rows were removed.
     """
     return reports_store.prune_expired_recipients(conn, now=now())
+
+
+def prune_stale_reports(
+    *, conn: sqlite3.Connection, settings: Settings, now: Callable[[], datetime]
+) -> int:
+    """Delete every report idle past ``settings.retention_days``, files included.
+
+    Deleting the row cascades to recipients, revisions, upload tokens,
+    threads and messages. Threads still bound to an upstream session were
+    already archived by ``archive_idle_threads`` long before this window.
+    ``retention_days == 0`` keeps reports until an admin deletes them. One
+    bad report must not abort the pass. Returns how many were deleted.
+    """
+    if settings.retention_days == 0:
+        return 0
+    cutoff = now() - timedelta(days=settings.retention_days)
+    deleted = 0
+    for slug in reports_store.list_stale_report_slugs(conn, cutoff=cutoff):
+        try:
+            reports_store.delete_report(conn, slug=slug)
+            reports_store.remove_report_dir(settings.data_dir, slug)
+            deleted += 1
+        except Exception:
+            log.exception("retention delete failed for report=%s; continuing", slug)
+            continue
+    return deleted

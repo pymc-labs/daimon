@@ -37,6 +37,7 @@ from report_host.sweeps import (
     archive_idle_threads,
     cancel_expired_turns,
     prune_expired_recipients,
+    prune_stale_reports,
     resume_running_threads,
 )
 from report_host.threads_store import ThreadRow
@@ -141,7 +142,8 @@ async def _sweep_loop(
     *, conn: sqlite3.Connection, seam: SeamClient, settings: Settings, now: Callable[[], datetime]
 ) -> None:
     """Background task: every ``_SWEEP_INTERVAL_SECONDS``, cancel expired
-    turns, archive idle threads, and prune expired recipients.
+    turns, archive idle threads, prune expired recipients, and delete reports
+    past their retention window.
 
     One sweep failing must not stop the next tick — the
     individual sweep functions already guard per item; this loop's own
@@ -154,5 +156,6 @@ async def _sweep_loop(
             await cancel_expired_turns(conn=conn, seam=seam, settings=settings, now=now)
             await archive_idle_threads(conn=conn, seam=seam, settings=settings, now=now)
             prune_expired_recipients(conn=conn, now=now)
+            prune_stale_reports(conn=conn, settings=settings, now=now)
         except Exception:
             _log.exception("sweep iteration failed; will retry next cycle")

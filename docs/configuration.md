@@ -2515,6 +2515,13 @@ How long a per-recipient link remains valid before expiring.
 
 A thread idle longer than this is archived by the host's sweep.
 
+### `DAIMON_REPORT__RETENTION_DAYS`
+
+`int` · optional · default `365`
+
+A report is deleted, with its PDFs, revisions and comment threads, this many days after
+its last update. 0 keeps reports until an admin deletes them.
+
 ## Billing (Stripe)
 
 Read from the process environment by `daimon.core.billing.load_billing_config`, not from

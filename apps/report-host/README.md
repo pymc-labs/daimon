@@ -49,6 +49,7 @@ that they stay in sync except this README's own test.
 | `max_open_threads_per_recipient` | `DAIMON_REPORT__MAX_OPEN_THREADS_PER_RECIPIENT` | `3` | Cap on concurrently open threads a single recipient may hold. |
 | `max_running_turns_per_report` | `DAIMON_REPORT__MAX_RUNNING_TURNS_PER_REPORT` | `4` | Cap on concurrently running turns across one report's threads. |
 | `recipient_link_ttl_days` | `DAIMON_REPORT__RECIPIENT_LINK_TTL_DAYS` | `90` | How long a per-recipient link remains valid before expiring. |
+| `retention_days` | `DAIMON_REPORT__RETENTION_DAYS` | `365` | A report is deleted, with its PDFs, revisions and comment threads, this many days after its last update. `0` keeps reports until an admin deletes them. |
 | `thread_idle_archive_hours` | `DAIMON_REPORT__THREAD_IDLE_ARCHIVE_HOURS` | `24` | A thread idle longer than this is archived, upstream then locally, by the host's background sweep. |
 
 ## Routes
@@ -72,8 +73,15 @@ than one.
 - `PUT /admin/reports/{slug}`, `DELETE /admin/reports/{slug}`,
   `DELETE /admin/reports/{slug}/recipients/{token}` — create, update, delete
   a report and revoke a recipient link. Admin bearer.
+- `DELETE /admin/tenants/{tenant_id}/reports` — delete every report a tenant
+  published, with its files and threads, and return the count. Admin bearer.
 
 ## Operational notes
+
+- **Reports expire.** A background sweep deletes a report, its PDFs, revisions,
+  recipients and threads `retention_days` after its last update. A new
+  revision, recipient or message each counts as an update. A report with a
+  running thread is kept. Set `retention_days` to `0` to disable the sweep.
 
 - **Bundle archives are reclaimed by daimon's scheduler, not by this host.**
   A bundle pushed at publish time is deleted upstream on a retention timer

@@ -105,6 +105,14 @@ class Settings(BaseSettings):
         default=24,
         description="A thread idle longer than this is archived by the host's sweep.",
     )
+    retention_days: int = Field(
+        default=365,
+        ge=0,
+        description=(
+            "A report is deleted, with its PDFs, revisions and comment threads, this many "
+            "days after its last update. 0 keeps reports until an admin deletes them."
+        ),
+    )
 
     model_config = SettingsConfigDict(
         env_prefix="DAIMON_REPORT__",

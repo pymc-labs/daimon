@@ -40,6 +40,7 @@ landing with the publishing routes.
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -301,6 +302,59 @@ def delete_report(conn: sqlite3.Connection, *, slug: str) -> bool:
     with conn:
         cur = conn.execute("DELETE FROM reports WHERE slug = ?", (slug,))
     return cur.rowcount > 0
+
+
+def remove_report_dir(data_dir: Path, slug: str) -> None:
+    """Remove a report's bundle archives and PDF revisions from disk.
+
+    The one place a report directory is deleted. A validated slug can never
+    escape ``data_dir``, but this removes a directory tree, so it re-asserts
+    the containment it depends on rather than trusting validation alone.
+    """
+    report_dir = data_dir / slug
+    if report_dir.parent == data_dir:
+        shutil.rmtree(report_dir, ignore_errors=True)
+
+
+def list_slugs_for_tenant(conn: sqlite3.Connection, *, tenant_id: str) -> list[str]:
+    rows = conn.execute(
+        "SELECT slug FROM reports WHERE tenant_id = ? ORDER BY slug", (tenant_id,)
+    ).fetchall()
+    return [row["slug"] for row in rows]
+
+
+def list_stale_report_slugs(conn: sqlite3.Connection, *, cutoff: datetime) -> list[str]:
+    """Slugs of reports with no activity since ``cutoff`` and no turn running.
+
+    A report's last update is the latest of its creation, any recipient link
+    issued (a re-publish mints new ones), any revision, and any thread or
+    message under it. Timestamps are UTC ISO-8601 text, so comparing and
+    taking the maximum as text agrees with chronological order. A report
+    with a running turn is never stale: that turn is the activity.
+    """
+    rows = conn.execute(
+        """
+        SELECT r.slug FROM reports r
+        WHERE max(
+            r.created_at,
+            COALESCE((SELECT MAX(created_at) FROM recipients WHERE slug = r.slug), ''),
+            COALESCE((SELECT MAX(created_at) FROM revisions WHERE slug = r.slug), ''),
+            COALESCE((SELECT MAX(created_at) FROM threads WHERE slug = r.slug), ''),
+            COALESCE((SELECT MAX(idle_since) FROM threads WHERE slug = r.slug), ''),
+            COALESCE(
+                (SELECT MAX(m.created_at) FROM messages m
+                 JOIN threads t ON t.id = m.thread_id WHERE t.slug = r.slug),
+                ''
+            )
+        ) <= :cutoff
+        AND NOT EXISTS (
+            SELECT 1 FROM threads t WHERE t.slug = r.slug AND t.status = 'running'
+        )
+        ORDER BY r.slug
+        """,
+        {"cutoff": dt_to_text(cutoff)},
+    ).fetchall()
+    return [row["slug"] for row in rows]
 
 
 def save_bundle_reference(
