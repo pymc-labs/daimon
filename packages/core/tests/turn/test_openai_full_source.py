@@ -689,7 +689,7 @@ async def test_an_operator_row_pinned_before_the_gating_change_still_serves(full
         older = BetaManagedAgentsAgent.model_validate(payload)
         admission = replace(request.admission, agent=older)
         source = await capture_preparation_source(replace(request, admission=admission))
-    facts = runtime_manifest._source_facts(source)  # pyright: ignore[reportPrivateUsage]
+    facts = runtime_manifest._source_facts(source, readdress=False)  # pyright: ignore[reportPrivateUsage]
     facts.pop("ungated_spec", None)
     legacy = runtime_manifest._digest(facts)  # pyright: ignore[reportPrivateUsage]
     assert legacy != plan.source_capabilities.source_pin
