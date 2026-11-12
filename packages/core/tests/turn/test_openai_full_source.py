@@ -588,6 +588,20 @@ async def test_full_default_public_switch_real_factory_and_authenticated_session
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_shared_agent_copy_on_a_pinned_file_deployment_is_refused_at_admission(
+    full_openai,
+):
+    """The pinned file names one person's credential, so a shared copy never starts."""
+    _, plan, canonical, *_ = full_openai
+    assert plan.mcp_credential_file is not None, "the deployment pins an MCP credential file"
+    assert canonical.admission.backend_revision_origin == "agent"
+    shared = replace(canonical, admission=replace(canonical.admission, shared_owner=uuid4()))
+    with pytest.raises(AdmissionDenied) as denied:
+        build_openai_runtime(shared)
+    assert denied.value.reason == "backend_unsupported", "refused before any native write"
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize(
     "defect",
     [

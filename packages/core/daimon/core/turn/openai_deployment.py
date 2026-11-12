@@ -314,6 +314,10 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
     ):
         raise AdmissionDenied(reason="backend_unsupported")
     deployment = load_deployment(request)
+    if deployment.mcp_credential_file is not None and shared_copy_slot(request) is not None:
+        # The pinned file names the owner's credential, not the asker's: a shared copy's
+        # MCP could only fail late, after the native writes began.
+        raise AdmissionDenied(reason="backend_unsupported")
     spend_limit = deployment.spend_limit_usd_cents
     # Whether this project honours a native session cap: the profile says it doesn't
     # (OpenAI answers `spend_control` with HTTP 400), so nothing below may count on one.

@@ -1,7 +1,7 @@
 """M1 across backends: opt-in shared threads with explicit OpenAI or Gemini channels.
 
 Offline. The OpenAI and Gemini hosts share a thread themselves (their own tests
-cover that); a self-hosted shared channel is refused as `backend_unsupported` at
+cover that), though a channel's own OpenAI deployment still runs per caller; a self-hosted shared channel is refused as `backend_unsupported` at
 admission and again before dispatch, so its real host preparer never sees a
 shared owner, with no native I/O, binding or session row
 (`test_a_backend_that_does_not_share_never_sees_a_shared_owner`).
@@ -145,7 +145,7 @@ def providers(monkeypatch: pytest.MonkeyPatch) -> dict[str, _Provider]:
     for profile, provider in registered.items():
         monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, profile, provider)  # pyright: ignore[reportPrivateUsage]
     # The stand-ins' own admission policy, isolated from the real hosts' release
-    # policy (which admits OpenAI and Gemini per caller only): exactly the
+    # policy (which admits a channel's own OpenAI deployment per caller only): exactly the
     # stand-in revisions are admitted, everything else goes to the real check.
     real_check = shared_threads.check_backend
 
@@ -283,7 +283,7 @@ async def test_c14_a_provider_switch_moves_new_threads_only(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A: Gemini, shared. B: OpenAI, per caller (OpenAI does not share yet)."""
+    """A: Gemini, shared. B: a channel on OpenAI, per caller (only an agent that picks OpenAI shares)."""
     world = await _world(db_session)
     channel = channel_ref(world.tenant.id, "slack", "chan-x")
     on_gemini = await set_channel_backend(db_session, channel, CONFIGS[GEMINI])
