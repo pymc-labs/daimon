@@ -224,6 +224,9 @@ async def test_unreadable_old_session_gets_the_lost_workspace_framing() -> None:
     )
     assert replaced.continuity.state == "replaced_after_loss"
     assert "was lost" in replaced.continuity.user_prefix
+    assert replaced.continuity.predecessor_session_id == "old-session", (
+        "an unread session is still named, so its kept framing is taken over"
+    )
 
 
 async def test_replacement_when_binding_lost_during_create_then_ends_the_new_session() -> None:

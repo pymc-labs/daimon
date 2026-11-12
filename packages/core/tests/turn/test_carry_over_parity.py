@@ -220,6 +220,9 @@ async def test_missing_runtime_when_carried_then_degrades_to_the_lost_framing(
     )
     assert carried is not None, "a missing runtime must still carry the framing"
     assert carried.continuity.state == "replaced_after_loss", carried.continuity.state
+    assert carried.continuity.predecessor_session_id == "old-session", (
+        "an unread session is still named, so its kept framing is taken over"
+    )
 
 
 async def test_managed_agents_target_when_found_before_the_create_then_carries_once(

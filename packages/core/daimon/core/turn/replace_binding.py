@@ -45,7 +45,7 @@ from mux.contracts.ports import Artifacts, ManagedAgents
 from mux.contracts.resources import ProviderBinding, ResourceBinding
 from mux.errors import BindingConflict, MuxError, UnsupportedCapability
 from mux.state.lease import Lease, LeaseBusy, Slot, StaleFence
-from mux.state.store import ERA_REF, StateStore
+from mux.state.store import ERA_REF, SESSION_REF, StateStore
 
 log = structlog.get_logger(__name__)
 
@@ -154,6 +154,11 @@ class OldSession:
     backend: ManagedAgents | None
     # Where the session was authorized, when not the caller's: a shared thread's own owner.
     scope: Scope | None = None
+
+    @property
+    def session_id(self) -> str | None:
+        """The session's id, known from the binding even when it could not be read."""
+        return self.ref.id if self.ref is not None else self.binding.native_refs.get(SESSION_REF)
 
 
 @dataclass(frozen=True, slots=True)
@@ -413,6 +418,6 @@ async def replace_binding(
             transfer_kind="transcript" if state == "replaced" else "history",
             user_prefix=framing.user_prefix,
             system_blocks=framing.system.blocks if framing.system is not None else (),
-            predecessor_session_id=old.ref.id if old.ref is not None else None,
+            predecessor_session_id=old.session_id,
         ),
     )
