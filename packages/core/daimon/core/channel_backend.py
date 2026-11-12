@@ -1656,14 +1656,14 @@ class AgentBackendService:
         The changed source must declare exactly the drops the owner accepted. A
         consent that no longer matches the source is never vouched for here.
         """
-        from daimon.core.turn.runtime_manifest import preview_source_drops, source_preservation_pin
+        from daimon.core.turn.runtime_manifest import preview_source_drops, source_pin_matches
 
         consent = revision.drop_consent
         if consent is None or self._capture_source is None:
             return None
         captured = await self._capture_source(agent)
         if (captured.tenant_id, captured.agent_id) != (agent.tenant_id, agent.agent_id) or (
-            source_preservation_pin(captured) != consent.source_pin
+            not source_pin_matches(captured, consent.source_pin)
         ):
             return None
         changed = change(captured)
