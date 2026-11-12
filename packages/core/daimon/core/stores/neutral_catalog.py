@@ -408,3 +408,52 @@ async def delete_account_rows(session: AsyncSession, *, account_id: uuid.UUID) -
     """Delete one account's catalog rows (no account key cascades them, 0204)."""
     for table in (NeutralAgentRevision, NeutralSkillVersion):
         await session.execute(delete(table).where(table.account_id == account_id))
+
+
+async def delete_owner_rows(
+    session: AsyncSession, *, tenant_id: uuid.UUID, owner_id: uuid.UUID
+) -> None:
+    """Delete the catalog rows of one owner, such as a shared thread's (see `shared_owner`)."""
+    for table in (NeutralAgentRevision, NeutralSkillVersion):
+        await session.execute(
+            delete(table).where(table.tenant_id == tenant_id, table.account_id == owner_id)
+        )
+
+
+async def delete_shared_agent_copies(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+) -> None:
+    """Delete the copies of one agent that shared threads hold, and those owners' skills.
+
+    A shared thread's owner has no account row, so only such owners are touched;
+    a person's own copies go with the person. An owner left with no agent copy
+    loses its skill copies too.
+    """
+    people = select(Account.id).where(Account.tenant_id == tenant_id)
+    owners = tuple(
+        await session.scalars(
+            delete(NeutralAgentRevision)
+            .where(
+                NeutralAgentRevision.tenant_id == tenant_id,
+                NeutralAgentRevision.catalog_id.startswith(f"root:{agent_id}:"),
+                NeutralAgentRevision.account_id.not_in(people),
+            )
+            .returning(NeutralAgentRevision.account_id)
+        )
+    )
+    for owner in set(owners):
+        kept = await session.scalar(
+            select(NeutralAgentRevision.account_id)
+            .where(
+                NeutralAgentRevision.tenant_id == tenant_id,
+                NeutralAgentRevision.account_id == owner,
+            )
+            .limit(1)
+        )
+        if kept is None:
+            await session.execute(
+                delete(NeutralSkillVersion).where(
+                    NeutralSkillVersion.tenant_id == tenant_id,
+                    NeutralSkillVersion.account_id == owner,
+                )
+            )

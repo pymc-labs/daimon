@@ -34,7 +34,7 @@ from daimon.core.memory_resource import archive_memory_store_for_agent
 from daimon.core.permissions import without_agent_rules
 from daimon.core.specs import AgentSpec
 from daimon.core.stores import agent_mcp_credentials as mcp_credentials_store
-from daimon.core.stores import connector_tokens, host_call_cards, thread_models
+from daimon.core.stores import connector_tokens, host_call_cards, neutral_catalog, thread_models
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
     PolicyBusyError,
@@ -285,3 +285,7 @@ async def _clear_references(
     await connector_tokens.delete_connector_tokens_for_agent(session, agent_id=agent_uuid)
     await thread_models.delete_consents_for_agent(session, agent_id=agent_uuid)
     await host_call_cards.delete_for_agent(session, agent_id=agent_uuid)
+    # A shared thread's copy of the agent has no account to cascade from either.
+    await neutral_catalog.delete_shared_agent_copies(
+        session, tenant_id=tenant_id, agent_id=agent_uuid
+    )
