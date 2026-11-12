@@ -445,3 +445,57 @@ async def test_a_converted_record_loads_its_skills_after_the_original_is_gone(
         "the copy uploads without the Managed Agents original"
     )
     assert uploaded == [("SKILL.md",)], f"the catalog bundle's files upload: {uploaded}"
+
+
+async def test_a_turn_reads_a_converted_records_skills_from_its_catalog_copy(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`turn_session_skills` hands the captured record on, so a gone original still uploads."""
+    from daimon.core.turn import runtime_manifest
+
+    tenant = await make_tenant(db_session)
+    person = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    _downloads(monkeypatch)
+    await _to_daimon(db_session_factory, _skill_router(tenant.id), tenant.id, person.id)
+
+    async def deleted(*_a: object, skill_id: str, **_k: object) -> bytes:
+        raise SkillVersionNotFoundError(skill_id)
+
+    uploaded: list[tuple[str, ...]] = []
+
+    class Skills:
+        async def create(self, _scope: object, upload: Any, **_k: object) -> SimpleNamespace:
+            uploaded.append(tuple(item.path for item in upload.files))
+            return SimpleNamespace(id="copy-a", latest_version=SimpleNamespace(version="1"))
+
+    record = await SelfHostedAgents(db_session_factory).resolve(
+        resource_scope(tenant_id=str(tenant.id)), "analyst"
+    )
+    pins = (SkillRef(id="skill_a", version="1"),)
+    monkeypatch.setattr(session_skills, "download_skill_version", deleted)
+    monkeypatch.setattr(
+        runtime_manifest, "represented_source", lambda *_a: SimpleNamespace(session_skills=pins)
+    )
+    request = SimpleNamespace(
+        admission=SimpleNamespace(backend_revision_origin="agent"),
+        source=SimpleNamespace(source=record),
+        target_spec=None,
+        tenant_id=tenant.id,
+        deps=SimpleNamespace(
+            sessionmaker=db_session_factory, anthropic=build_fake_anthropic(MARouter().dispatch)
+        ),
+    )
+
+    copies = await session_skills.turn_session_skills(
+        cast(Any, request),
+        lambda: cast(Any, Skills()),
+        profile=cast(Any, SimpleNamespace(provider="openai")),
+        scope=resource_scope(tenant_id=str(tenant.id), account_id=str(person.id)),
+        account_scope_id="project",
+    )
+
+    assert copies == (SkillRef(id="copy-a", version="1"),), f"the copy still uploads: {copies}"
+    assert uploaded == [("SKILL.md",)], f"from the catalog bundle: {uploaded}"

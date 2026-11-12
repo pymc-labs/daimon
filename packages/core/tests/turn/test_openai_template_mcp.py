@@ -662,6 +662,32 @@ async def test_a_skill_that_cannot_be_read_is_its_own_named_loss(template, conse
         assert represented.session_skills, "the readable skills still attach"
 
 
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_capture_measures_the_sources_skills_through_its_own_record(
+    template, consent_request, monkeypatch
+):
+    """The captured record rides along, so a converted one is measured from its catalog copy."""
+    from anthropic.types.beta import BetaManagedAgentsCustomSkill
+    from daimon.core.turn import session_skills
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+    request, *_ = template
+    seen = []
+    measure = session_skills.measure_skills
+
+    async def spy(*args, record=None, **kwargs):
+        seen.append(record)
+        return await measure(*args, record=record, **kwargs)
+
+    monkeypatch.setattr(session_skills, "measure_skills", spy)
+    team = BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_team", version="7")
+    request = replace(request, admission=replace(request.admission, channel_skills=(team,)))
+    source = await capture_preparation_source(request, capability_preview=True)
+    assert source.source is not None, "the capture holds the source record"
+    assert seen, "the capture measured skills"
+    assert all(record == source.source for record in seen), "each measure reads through the record"
+
+
 async def shared_caller(request, account):
     """`request` as `account` asks it in its shared thread; returns it and the owner."""
     from daimon.core.shared_threads import shared_owner

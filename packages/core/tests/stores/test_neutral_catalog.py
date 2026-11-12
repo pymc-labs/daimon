@@ -440,6 +440,36 @@ async def test_deleting_an_agent_removes_the_copies_shared_threads_hold(setup: S
     assert await _rows(sessions, uuid.UUID(scope.account_id)) == (1, 0), "a person's copy stays"
 
 
+async def test_archiving_an_agent_clears_its_shared_copies_through_the_delete_path(
+    setup: Setup,
+) -> None:
+    """The archive flow's reference sweep reaches the shared owner's catalog rows."""
+    from daimon.core.agent_lifecycle import forget_archived_agent
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.testing.ma_models import ma_agent
+
+    sessions, scope, _, _ = setup
+    tenant = uuid.UUID(scope.tenant_id)
+    gone = derive_agent_uuid(tenant_id=tenant, ma_agent_id="ag_doomed")
+    kept = derive_agent_uuid(tenant_id=tenant, ma_agent_id="ag_kept")
+    held = await _shared_copy(sessions, scope, "t1", f"root:{gone}:1:openai")
+    other = await _shared_copy(sessions, scope, "t2", f"root:{kept}:1:openai")
+    await store(sessions).put_agent(
+        scope, f"root:{gone}:1:openai", agent(scope, "openai"), expected_revision=0
+    )
+
+    await forget_archived_agent(
+        sessions,
+        tenant_id=tenant,
+        name="doomed",
+        agent=ma_agent(id="ag_doomed", name="doomed", tenant_id=tenant),
+    )
+
+    assert await _rows(sessions, held) == (0, 0), "the archive flow removes the thread's copies"
+    assert await _rows(sessions, other) == (1, 1), "another agent's shared copy stays"
+    assert await _rows(sessions, uuid.UUID(scope.account_id)) == (1, 0), "a person's copy stays"
+
+
 async def test_deleting_a_thread_removes_its_owners_catalog_rows(setup: Setup) -> None:
     """A deleted thread's copy of a person's agent is not kept for good."""
     from daimon.core.stores.thread_agent_bindings import update_lifecycle
