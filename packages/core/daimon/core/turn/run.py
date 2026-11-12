@@ -114,7 +114,7 @@ from daimon.core.turn.ceiling import (
     turn_deadline,
 )
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.driver import SEND_ATTEMPTED, run_turn, unattended_sends
+from daimon.core.turn.driver import SEND_ATTEMPTED, SEND_CLAIM, run_turn, unattended_sends
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
 from daimon.core.turn.io import LegacyTurnIO, TurnIO, turn_io
 from daimon.core.turn.lifecycle import (
@@ -1024,58 +1024,74 @@ async def _with_handoff_summary(
 async def _with_pending_carry_over(
     deps: TurnDeps, prepared: PreparedTurn, *, tenant_id: uuid.UUID
 ) -> tuple[PreparedTurn, bool]:
-    """The turn with a replacement's framing kept until its first send, and whether one waits.
+    """The turn with every replacement framing not yet sent, and whether one waits.
 
     The framing exists only on the turn that prepared the replacement: a retry reuses
-    the session and prepares none, so a turn that fails before sending would lose the
-    earlier conversation. Kept in the database on every path (chat, routines, watches,
-    wakes) and given back as it was, system blocks included.
+    the session and prepares none, so it is kept in the database until the first send
+    claims it (`SEND_CLAIM`), on every path. A later replacement takes over its
+    predecessor's unsent framing, and a kept framing goes ahead of a turn's own.
     """
     continuity = prepared.continuity
-    framed = bool(continuity.user_prefix or continuity.system_blocks)
-    if framed and continuity.state != "replaced":
+    replaced = continuity.state in ("replaced", "replaced_after_loss")
+    # Only a replacement's session not yet sent to can hold one.
+    if not replaced and (prepared.watermark is not None or not prepared.reused):
         return prepared, False
-    # A Managed Agents session with a watermark has answered before: nothing waits.
-    if not framed and prepared.watermark is not None:
-        return prepared, False
+    session_id = prepared.ma_session_id
     try:
         async with deps.sessionmaker.begin() as db:
-            if framed:
+            held = continuity.predecessor_session_id if replaced else session_id
+            kept = (
+                await get_pending_carry_over(db, tenant_id=tenant_id, session_id=held)
+                if held is not None
+                else None
+            )
+            merged = continuity
+            if kept is not None:
+                merged = replace(
+                    continuity,
+                    user_prefix="\n\n".join(
+                        text for text in (kept.user_prefix, continuity.user_prefix) if text
+                    ),
+                    system_blocks=(*kept.system_blocks, *continuity.system_blocks),
+                )
+            waits = kept is not None or (
+                replaced and bool(merged.user_prefix or merged.system_blocks)
+            )
+            if replaced and kept is not None and held is not None:
+                await delete_pending_carry_over(db, tenant_id=tenant_id, session_id=held)
+            if replaced and waits:
                 await record_pending_carry_over(
                     db,
                     tenant_id=tenant_id,
-                    session_id=prepared.ma_session_id,
+                    session_id=session_id,
                     account_id=prepared.admission.account_id,
-                    user_prefix=continuity.user_prefix,
-                    system_blocks=continuity.system_blocks,
+                    user_prefix=merged.user_prefix,
+                    system_blocks=merged.system_blocks,
                 )
-                return prepared, True
-            pending = await get_pending_carry_over(
-                db, tenant_id=tenant_id, session_id=prepared.ma_session_id
-            )
     except SQLAlchemyError as error:  # a lost framing must never block the turn itself
         log.warning("turn.carry_over_keep_failed", error=type(error).__name__)
         return prepared, False
-    if pending is None:
-        return prepared, False
-    log.info("turn.carry_over_restored", session_id=prepared.ma_session_id)
-    restored = replace(
-        continuity, user_prefix=pending.user_prefix, system_blocks=pending.system_blocks
-    )
-    return replace(prepared, continuity=restored), True
+    if kept is not None:
+        log.info("turn.carry_over_restored", session_id=session_id, from_session_id=held)
+    return replace(prepared, continuity=merged), waits
 
 
-async def _drop_pending_carry_over(
+def _claim_carry_over(
     deps: TurnDeps, prepared: PreparedTurn, *, tenant_id: uuid.UUID
-) -> None:
-    """The first message was sent with the framing: it is no longer pending."""
-    try:
+) -> Callable[[], Awaitable[None]]:
+    """Drop the kept framing as the first send claims it, so it is never sent twice."""
+    claimed: list[bool] = []
+
+    async def claim() -> None:
+        if claimed:
+            return
         async with deps.sessionmaker.begin() as db:
             await delete_pending_carry_over(
                 db, tenant_id=tenant_id, session_id=prepared.ma_session_id
             )
-    except SQLAlchemyError as error:  # the sweep drops it; never mask the turn's outcome
-        log.warning("turn.carry_over_drop_failed", error=type(error).__name__)
+        claimed.append(True)
+
+    return claim
 
 
 async def _restore_handoff_summary(
@@ -1277,6 +1293,9 @@ async def run_prepared_turn(
         else None
     )
     marking = SEND_ATTEMPTED.set(sent)
+    claiming = SEND_CLAIM.set(
+        _claim_carry_over(deps, prepared, tenant_id=tenant_id) if carry_over_pending else None
+    )
     revision = prepared.admission.backend_revision
     backend = revision.backend if revision is not None else MANAGED_AGENTS.provider
     profile = revision.profile if revision is not None else MANAGED_AGENTS.profile_id
@@ -1333,8 +1352,6 @@ async def run_prepared_turn(
                 )
     except BaseException as exc:
         observation.finish(error=exc)
-        if carry_over_pending and sent:
-            await _drop_pending_carry_over(deps, prepared, tenant_id=tenant_id)
         if seeded is not None and not sent:
             await _restore_handoff_summary(
                 deps, prepared, seeded, tenant_id=tenant_id, platform=platform, thread_id=thread_id
@@ -1352,6 +1369,7 @@ async def run_prepared_turn(
     finally:
         try:
             SEND_ATTEMPTED.reset(marking)
+            SEND_CLAIM.reset(claiming)
             finalize = prepared._finalize  # pyright: ignore[reportPrivateUsage]
             if finalize is not None:
                 # Credential revocation must survive a second cancel of this task:
@@ -1369,8 +1387,6 @@ async def run_prepared_turn(
             structlog.contextvars.reset_contextvars(**bound)
     observation.session_id = result.ma_session_id
     observation.finish(state=result.state, recovered=result.recovered)
-    if carry_over_pending and sent:
-        await _drop_pending_carry_over(deps, prepared, tenant_id=tenant_id)
     if seeded is not None and not sent and result.state.error is not None:
         await _restore_handoff_summary(
             deps, prepared, seeded, tenant_id=tenant_id, platform=platform, thread_id=thread_id

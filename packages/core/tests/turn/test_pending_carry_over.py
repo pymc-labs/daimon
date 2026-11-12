@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -17,7 +17,7 @@ from daimon.core.stores.pending_carry_overs import (
     record_pending_carry_over,
 )
 from daimon.core.turn import run as run_module
-from daimon.core.turn.driver import SEND_ATTEMPTED
+from daimon.core.turn.driver import SEND_ATTEMPTED, SEND_CLAIM
 from daimon.core.turn.prepare import CONTINUED, ContinuityOutcome
 from daimon.core.turn.state import TurnState
 from daimon.testing.factories import make_account, make_tenant
@@ -39,6 +39,7 @@ class _Prepared:
     continuity: ContinuityOutcome
     ma_session_id: str = "sess_new"
     watermark: str | None = None
+    reused: bool = True
     mapping_id: uuid.UUID | None = None
     snapshot: None = None
     _finalize: None = None
@@ -53,6 +54,8 @@ async def _turn(
     continuity: ContinuityOutcome,
     origin: str,
     sends: bool,
+    session_id: str = "sess_new",
+    fails_after_send: bool = False,
 ) -> ContinuityOutcome:
     """Run one turn; return the continuity the driver was handed."""
     handed: list[ContinuityOutcome] = []
@@ -72,9 +75,13 @@ async def _turn(
         handed.append(prepared.continuity)
         if not sends:
             raise RuntimeError("provider unreachable")
+        if (claim := SEND_CLAIM.get()) is not None:
+            await claim()
         mark = SEND_ATTEMPTED.get()
         assert mark is not None, "the turn runs with a send mark"
         mark.append(True)
+        if fails_after_send:
+            raise RuntimeError("stream lost")
         return run_module.RunOutcome(
             state=TurnState(content=[]),
             ma_session_id=prepared.ma_session_id,
@@ -106,6 +113,7 @@ async def _turn(
             backend_revision=None,
         ),
         continuity=continuity,
+        ma_session_id=session_id,
     )
     deps = SimpleNamespace(
         sessionmaker=sessions,
@@ -184,3 +192,104 @@ async def test_a_framing_older_than_a_week_is_swept(
     )
     swept = await sweep_stale_pending_carry_overs(db_session_factory, now=now + timedelta(days=8))
     assert swept == 1, "a week-old row goes"
+
+
+async def _kept(
+    sessions: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, session_id: str
+) -> str | None:
+    async with sessions() as db:
+        row = await get_pending_carry_over(db, tenant_id=tenant_id, session_id=session_id)
+    return None if row is None else row.user_prefix
+
+
+async def test_a_second_replacement_before_the_first_send_keeps_the_conversation(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """R0 -> R1 (first send fails) -> R2: R2 opens with R0's conversation, R1's row is gone."""
+    async with db_session_factory.begin() as db:
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+    common: dict[str, Any] = {"tenant_id": tenant.id, "account_id": account.id, "origin": "chat"}
+    to_r1 = replace(REPLACED, predecessor_session_id="sess_r0")
+    await _turn(
+        monkeypatch,
+        db_session_factory,
+        continuity=to_r1,
+        sends=False,
+        session_id="sess_r1",
+        **common,
+    )
+    assert await _kept(db_session_factory, tenant.id, "sess_r1") == REPLACED.user_prefix
+
+    to_r2 = ContinuityOutcome(
+        state="replaced", user_prefix="R1 HAD NOTHING", predecessor_session_id="sess_r1"
+    )
+    handed = await _turn(
+        monkeypatch,
+        db_session_factory,
+        continuity=to_r2,
+        sends=False,
+        session_id="sess_r2",
+        **common,
+    )
+    merged = f"{REPLACED.user_prefix}\n\nR1 HAD NOTHING"
+    assert handed.user_prefix == merged, "R0's conversation goes ahead of R2's own framing"
+    assert handed.system_blocks == SYSTEM, "with R0's system blocks"
+    assert await _kept(db_session_factory, tenant.id, "sess_r1") is None, "R1's row is taken over"
+    assert await _kept(db_session_factory, tenant.id, "sess_r2") == merged, "and kept under R2"
+
+    retry = await _turn(
+        monkeypatch,
+        db_session_factory,
+        continuity=CONTINUED,
+        sends=True,
+        session_id="sess_r2",
+        **common,
+    )
+    assert retry.user_prefix == merged, "R2's retry still carries R0's conversation"
+    assert await _kept(db_session_factory, tenant.id, "sess_r2") is None, "sent, so dropped"
+
+
+async def test_a_kept_framing_goes_ahead_of_a_retrys_own_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A retry with a notice of its own still opens with the kept framing."""
+    async with db_session_factory.begin() as db:
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+    common: dict[str, Any] = {"tenant_id": tenant.id, "account_id": account.id, "origin": "chat"}
+    lost = replace(REPLACED, state="replaced_after_loss")
+    await _turn(monkeypatch, db_session_factory, continuity=lost, sends=False, **common)
+    assert await _kept(db_session_factory, tenant.id, "sess_new") == REPLACED.user_prefix, (
+        "a framing after a lost workspace is kept too"
+    )
+
+    noticed = ContinuityOutcome(user_prefix="A CONNECTOR IS UNAVAILABLE")
+    retry = await _turn(monkeypatch, db_session_factory, continuity=noticed, sends=True, **common)
+    assert retry.user_prefix == f"{REPLACED.user_prefix}\n\nA CONNECTOR IS UNAVAILABLE"
+    assert retry.system_blocks == SYSTEM, "the kept system blocks come along"
+    assert await _kept(db_session_factory, tenant.id, "sess_new") is None
+
+
+async def test_a_framing_is_dropped_at_the_send_even_when_the_turn_then_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The send claims the framing: a failure after it never sends the framing twice."""
+    async with db_session_factory.begin() as db:
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+    common: dict[str, Any] = {"tenant_id": tenant.id, "account_id": account.id, "origin": "chat"}
+    await _turn(
+        monkeypatch,
+        db_session_factory,
+        continuity=REPLACED,
+        sends=True,
+        fails_after_send=True,
+        **common,
+    )
+    assert await _kept(db_session_factory, tenant.id, "sess_new") is None, "claimed at the send"
+    later = await _turn(monkeypatch, db_session_factory, continuity=CONTINUED, sends=True, **common)
+    assert later == CONTINUED, "the next turn carries no second framing"

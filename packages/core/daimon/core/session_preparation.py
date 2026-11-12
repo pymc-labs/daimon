@@ -594,11 +594,15 @@ async def _run_replacement(
         new_session_id=fresh.ma_session_id,
         transfer_kind=None if replacement is None else replacement.transfer_kind,
     )
-    return _Replaced(fresh=fresh, continuity=_replaced_outcome(reasons, replacement))
+    return _Replaced(
+        fresh=fresh, continuity=_replaced_outcome(reasons, replacement, row.ma_session_id)
+    )
 
 
 def _replaced_outcome(
-    reasons: tuple[ChangeReason, ...], replacement: PreparedReplacement | None
+    reasons: tuple[ChangeReason, ...],
+    replacement: PreparedReplacement | None,
+    predecessor_session_id: str,
 ) -> ContinuityOutcome:
     """Describe the switch, using what the transfer actually managed to carry.
 
@@ -606,10 +610,13 @@ def _replaced_outcome(
     copy this feeds must not claim work moved when none did.
     """
     if replacement is None:
-        return ContinuityOutcome(state="replaced", applied=reasons)
+        return ContinuityOutcome(
+            state="replaced", applied=reasons, predecessor_session_id=predecessor_session_id
+        )
     return ContinuityOutcome(
         state="replaced",
         applied=reasons,
+        predecessor_session_id=predecessor_session_id,
         transfer_kind=replacement.transfer_kind,
         user_prefix=replacement.user_prefix,
         system_blocks=replacement.system_blocks,

@@ -140,6 +140,11 @@ log = structlog.get_logger(__name__)
 # user's message is handed to the provider, so the caller knows whether a failed
 # turn ever sent it (and may put back what it would have carried).
 SEND_ATTEMPTED: ContextVar[list[bool] | None] = ContextVar("turn_send_attempted", default=None)
+# Set by the caller around a turn: awaited just before the user's message is handed
+# over, to settle what the send consumes. A failure here fails the turn unsent.
+SEND_CLAIM: ContextVar[Callable[[], Awaitable[None]] | None] = ContextVar(
+    "turn_send_claim", default=None
+)
 
 InterruptPhase = Literal[
     "pre-stream", "stream-open", "send-initial", "replay", "reattach", "confirmation-gate"
@@ -949,6 +954,8 @@ async def run_turn(
                 content[-1] = BetaManagedAgentsTextBlockParam(
                     type="text", text=f"{prefix}\n\n{text}"
                 )
+            if (claim := SEND_CLAIM.get()) is not None:
+                await claim()
             mark = SEND_ATTEMPTED.get()
             if mark is not None:
                 mark.append(True)  # from here the message may have been delivered

@@ -150,6 +150,8 @@ class ContinuityOutcome:
     transfer_kind: TransferKind | None = None
     user_prefix: str = ""
     system_blocks: tuple[BetaManagedAgentsSystemContentBlockParam, ...] = ()
+    # The replaced session, whose framing may still wait for its first send.
+    predecessor_session_id: str | None = None
 
     def session_state(self) -> SessionState:
         """This bind as `<turn_controls>` facts.

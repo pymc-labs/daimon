@@ -1049,7 +1049,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "long_job": "accounts.id FK cascade; cancellation audit cascades from the job",
         "neutral_agent_revisions": "accounts.delete_account deletes rows (no FK)",
         "neutral_skill_versions": "accounts.delete_account deletes rows (no FK)",
-        "pending_carry_overs": "accounts.id FK cascade",
+        # Keyed to the asker: a shared thread's framing quoting another participant
+        # outlives that person until the 7-day pending carry-over sweep.
+        "pending_carry_overs": "accounts.id FK cascade (asker); others' words: 7-day sweep",
         "cli_principals": "account_id FK -> accounts.id",
         "platform_principals": "account_id FK -> accounts.id",
         "user_config": "account_id PK/FK -> accounts.id",

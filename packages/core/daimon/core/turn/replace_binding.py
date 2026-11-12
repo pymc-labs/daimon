@@ -413,5 +413,6 @@ async def replace_binding(
             transfer_kind="transcript" if state == "replaced" else "history",
             user_prefix=framing.user_prefix,
             system_blocks=framing.system.blocks if framing.system is not None else (),
+            predecessor_session_id=old.ref.id if old.ref is not None else None,
         ),
     )
