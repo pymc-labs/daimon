@@ -15,6 +15,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it again first keeps it. Tenant deletion also removes Slack person tokens and settlement progress, and erasing a
   person also removes their follow-up tasks, turn records, conversation links, model-switch cards and credential
   requests in every workspace. `DAIMON_SECURITY_AUDIT_RETENTION_DAYS` still works.
+
+- **The report and notebook hosts keep less, and send fewer details out.** Reports are deleted 365 days after they are
+  made (`DAIMON_REPORT__RETENTION_DAYS`, `0` keeps them), and both hosts take an admin call that deletes one workspace's
+  reports or notebooks. Notebooks keep their expiry of at most 365 days; blogs stay until deleted. The report viewer
+  serves pdf.js from the host with its licence instead of loading it from a public CDN, and the report pages carry
+  a content security policy. Both hosts send `Referrer-Policy: no-referrer`. Access logs no longer record the client
+  address, and a logged error is cut at 500 characters.
+
+- **Privacy and Terms links appear on the web app and in each chat privacy panel.** Set `DAIMON_TERMS_URL` to show a
+  Terms link beside the privacy policy on the sign-in page, in the account menu, and in the Discord, Slack and Teams
+  privacy panels; unset, no Terms link appears. The privacy page is now "How Daimon handles data": it lists how long
+  each record is kept and the setting that changes it, says plainly that per-turn context goes to connected tools by
+  default, and names what stays after an account is deleted.
+
 - **The agent editor lays its cards on a ring round the agent.** Instructions, model, channels and people sit top
   left, setup, tools and skills top right, and connections below; each group takes the room its cards need and keeps
   a much wider gap from the next. The ring takes the window's shape: a tall oval in a half-width window, a wide
