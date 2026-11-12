@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Collection
+from datetime import datetime
 from typing import Any, cast
 
 from daimon.core._models import (
@@ -18,10 +19,14 @@ from daimon.core._models import (
     ChannelConfig,
     PaymentEvent,
     Routine,
+    SessionSettleState,
+    SlackUserToken,
     Tenant,
     TenantConfig,
     TenantLedger,
     TenantUserCap,
+    ThreadSession,
+    TurnOutcome,
     UsageEvent,
 )
 from daimon.core.errors import StoreError
@@ -171,6 +176,25 @@ async def delete_tenant(
             .where(Account.tenant_id == tenant_id)
         )
     )
+    tenant = await session.get(Tenant, tenant_id)
+    if tenant is not None and tenant.platform == "slack":
+        # Person tokens are keyed by Slack team, not tenant, so no cascade reaches them.
+        await session.execute(
+            delete(SlackUserToken).where(SlackUserToken.team_id == tenant.external_id)
+        )
+    # Settlement progress is keyed by provider session; find the tenant's sessions.
+    tenant_sessions = (
+        select(ThreadSession.ma_session_id)
+        .where(ThreadSession.tenant_id == tenant_id)
+        .union(
+            select(TurnOutcome.session_id).where(
+                TurnOutcome.tenant_id == tenant_id, TurnOutcome.session_id.is_not(None)
+            )
+        )
+    )
+    await session.execute(
+        delete(SessionSettleState).where(SessionSettleState.managed_session_id.in_(tenant_sessions))
+    )
     await erase_tenant(session, tenant_id=tenant_id)
     stmt = delete(Tenant).where(Tenant.id == tenant_id)
     result = await session.execute(stmt)
@@ -179,6 +203,38 @@ async def delete_tenant(
     await session.flush()
     for github_user_id in github_user_ids:
         await github_links_store.delete_unlinked_user(session, github_user_id=github_user_id)
+
+
+async def list_expired_archived_tenants(
+    session: AsyncSession, *, archived_before: datetime, limit: int
+) -> list[uuid.UUID]:
+    """Tenants archived (uninstalled) before the cutoff, oldest first."""
+    rows = await session.scalars(
+        select(Tenant.id)
+        .where(Tenant.archived_at < archived_before)
+        .order_by(Tenant.archived_at)
+        .limit(limit)
+    )
+    return list(rows)
+
+
+async def delete_archived_tenant(
+    session: AsyncSession, *, tenant_id: uuid.UUID, archived_before: datetime
+) -> bool:
+    """Delete the tenant if it is still archived since before the cutoff.
+
+    Locks the row first, so a reinstall that restarted or cleared the archive in the
+    meantime keeps the tenant. Returns whether it was deleted.
+    """
+    if archived_before.utcoffset() is None:
+        raise ValueError("archived_before must include a timezone")
+    archived_at = await session.scalar(
+        select(Tenant.archived_at).where(Tenant.id == tenant_id).with_for_update()
+    )
+    if archived_at is None or archived_at >= archived_before:
+        return False
+    await delete_tenant(session, tenant_id=tenant_id)
+    return True
 
 
 async def get_tenant_dependent_counts(
