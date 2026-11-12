@@ -1,138 +1,197 @@
-// Agent editor layout: pure, from measured card sizes. Wide: two columns around the agent, connections
-// branching down from it in rows. Narrow: one column on a spine.
+// Agent editor layout: pure, from measured card sizes. Wide: groups of cards on a ring around the agent.
+// Narrow: one column on a spine. Lines are drawn live from card boxes, so cards can glide between layouts.
 
 export type Pt = { x: number; y: number }
 export type Size = { w: number; h: number }
 export type Box = Pt & Size
-/** A dashed line from a skill row (`y` inside the skills card) to the connection it calls. */
-export type Dep = { key: string; target: string; y: number }
-/** Card ids by place; `skills` is the card deps start from. */
-export type Plan = { left: string[]; right: string[]; conns: string[]; skills: string | null; deps: Dep[] }
-export type Line = { source: string; target: string; points: Pt[]; dep?: boolean }
-export type Laid = { pos: Record<string, Pt>; edges: Record<string, Line> }
+/** Cards that sit together, clockwise, and the angle the group leans to (degrees clockwise from the top). */
+export type Group = { ids: string[]; at: number }
 
-const line = (source: string, target: string, points: Pt[], dep = false): [string, Line] =>
-  [dep ? `dep:${source}>${target}` : `${source}>${target}`, { source, target, points, dep }]
-
-const GAP_X = 72
-const GAP_Y = 20
+const GAP = 20 // between cards of a group
+const GROUP_GAP = 6 * GAP // between groups
+const GROUP_MAX = 10 * GAP // room to spare widens the gaps between groups to this first
+const SPREAD = 1.25 // then the gaps within a group, by at most this
+const CLEAR = 56 // from the ellipse round the agent card to the ring
+const SHAPE = [0.4, 2.4] // ring width over height, matched to the screen within these
+const GAP_Y = 20 // narrow column
 const HEAD = 20 // y of a card's connector, mid header
-const BELOW = 32 // below the columns to the first connection bus
-const BUS = 24 // bus line above a row of connections
-const ROW_GAP = 48
-const GUTTER = 48 // gap the trunk passes through in rows above the last
 const SPINE = 18
+const TURN = 2 * Math.PI
+const STEP = Math.PI / 180
 
-const stack = (ids: string[], size: (id: string) => Size, gap: number) =>
-  ids.reduce((h, id, i) => h + size(id).h + (i ? gap : 0), 0)
+const ring = (t: number, r: number, k: number): Pt => ({ x: k * r * Math.sin(t), y: -r * Math.cos(t) })
+const mid = (b: Box): Pt => ({ x: b.x + b.w / 2, y: b.y + b.h / 2 })
+/** Gap between two boxes given by centre and size: the larger of the x and y gaps, negative when they overlap. */
+const gapOf = (a: Pt, as: Size, b: Pt, bs: Size) =>
+  Math.max(Math.abs(a.x - b.x) - (as.w + bs.w) / 2, Math.abs(a.y - b.y) - (as.h + bs.h) / 2)
+/** A box (centre `c`) clears the ellipse of radii `e` round the origin: its nearest point lies outside. */
+const clears = (c: Pt, s: Size, e: Size) =>
+  (Math.max(0, Math.abs(c.x) - s.w / 2) / e.w) ** 2 + (Math.max(0, Math.abs(c.y) - s.h / 2) / e.h) ** 2 >= 1
 
-/** Greedy rows no wider than `cap`; at least one card a row. */
-export function pack(ids: string[], size: (id: string) => Size, cap: number, gap = GAP_Y): string[][] {
-  const rows: string[][] = []
-  let width = 0
-  for (const id of ids) {
-    const w = size(id).w
-    const row = rows.at(-1)
-    if (row && width + gap + w <= cap) { row.push(id); width += gap + w }
-    else { rows.push([id]); width = w }
-  }
-  return rows
+type Item = Size & { id: string; g: number }
+
+/** Smallest ring of shape `k` on which the card clears the hub wherever it lands. */
+function hubRadius(s: Size, hub: Size, k: number) {
+  const ok = (r: number) => { for (let t = 0; t < TURN; t += 5 * STEP) if (!clears(ring(t, r, k), s, hub)) return false; return true }
+  let lo = 0, hi = 4096
+  for (let n = 0; n < 20; n++) { const m = (lo + hi) / 2; if (ok(m)) hi = m; else lo = m }
+  return hi
 }
 
-export function layoutWide(agent: string, plan: Plan, size: (id: string) => Size): Laid {
-  const pos: Record<string, Pt> = {}
-  const edges: Record<string, Line> = {}
-  const link = (...a: Parameters<typeof line>) => { const [k, v] = line(...a); edges[k] = v }
-  const colW = (ids: string[]) => Math.max(0, ...ids.map((id) => size(id).w))
-  const a = size(agent)
-  const wL = colW(plan.left), wR = colW(plan.right)
-  const H = Math.max(stack(plan.left, size, GAP_Y), stack(plan.right, size, GAP_Y), a.h)
-  const xA = wL ? wL + GAP_X : 0
-  const xR = xA + a.w + GAP_X
-  pos[agent] = { x: xA, y: Math.round((H - a.h) / 2) }
-  const aMid = pos[agent].y + a.h / 2
-  const cx = xA + a.w / 2
-  const column = (ids: string[], x: (w: number) => number, side: "left" | "right") => {
-    let y = Math.round((H - stack(ids, size, GAP_Y)) / 2)
-    for (const id of ids) {
-      const { w, h } = size(id)
-      pos[id] = { x: x(w), y }
-      if (side === "left") {
-        const mx = (wL + xA) / 2
-        link(id, agent, [{ x: x(w) + w, y: y + HEAD }, { x: mx, y: y + HEAD }, { x: mx, y: aMid }, { x: xA, y: aMid }])
-      } else {
-        const mx = (xA + a.w + xR) / 2
-        link(agent, id, [{ x: xA + a.w, y: aMid }, { x: mx, y: aMid }, { x: mx, y: y + HEAD }, { x: x(w), y: y + HEAD }])
-      }
-      y += h + GAP_Y
-    }
-  }
-  column(plan.left, (w) => wL - w, "left")
-  column(plan.right, () => xR, "right")
-  if (!plan.conns.length) return { pos, edges }
+/** Gaps to keep: `s` widens every gap alike, `extra` adds to the gaps between groups. */
+type Gaps = { s: number; extra: number }
 
-  // Connections branch from the agent's bottom edge: a trunk down, then a bus over each row.
-  const trunk = pos[agent].y + a.h
-  const topW = (plan.right.length ? xR + wR : xA + a.w)
-  const rows = pack(plan.conns, size, Math.max(topW, colW(plan.conns) * 2 + GAP_Y + GUTTER) - GUTTER)
-  let top = H + BELOW + BUS
-  const right: number[] = []
-  rows.forEach((row, r) => {
-    const last = r === rows.length - 1
-    const ws = row.map((id) => size(id).w)
-    const place = (ids: string[], x0: number) => {
-      let x = x0
-      for (const id of ids) { pos[id] = { x: Math.round(x), y: top }; x += size(id).w + GAP_Y }
+/** Cards placed clockwise from `start`, each as close as its gap allows; null when they do not close the ring. */
+function sweep(items: Item[], r: number, k: number, gaps: Gaps, start: number): number[] | null {
+  const t: number[] = []
+  const at = (i: number, a: number) => { // item i at angle a keeps its gap from the eight cards before it
+    const p = ring(a, r, k)
+    for (let j = Math.max(0, t.length - 8); j < t.length; j++) {
+      if (j === i) continue
+      const need = items[i]!.g === items[j]!.g ? GAP * gaps.s : GROUP_GAP * gaps.s + gaps.extra
+      if (gapOf(p, items[i]!, ring(t[j]!, r, k), items[j]!) < need) return false
     }
-    if (last) {
-      place(row, cx - (ws.reduce((s, w) => s + w, 0) + GAP_Y * (row.length - 1)) / 2)
-    } else {
-      // Rows above the last split around the trunk so it reaches the rows below.
-      const k = Math.ceil(row.length / 2)
-      const leftW = ws.slice(0, k).reduce((s, w) => s + w, 0) + GAP_Y * (k - 1)
-      place(row.slice(0, k), cx - GUTTER / 2 - leftW)
-      place(row.slice(k), cx + GUTTER / 2)
-    }
-    const bus = top - BUS
-    for (const id of row) {
-      const c = pos[id]!.x + size(id).w / 2
-      link(agent, id, [{ x: cx, y: trunk }, { x: cx, y: bus }, { x: c, y: bus }, { x: c, y: top }])
-      right.push(pos[id]!.x + size(id).w)
-    }
-    top += Math.max(...row.map((id) => size(id).h)) + ROW_GAP
-  })
-  // Skill dependencies run right of everything, then in above their connection.
-  const skills = plan.skills
-  if (skills && pos[skills]) {
-    const edge = Math.max(xR + wR, ...right) + 20
-    plan.deps.forEach((d, i) => {
-      const t = pos[d.target]
-      if (!t) return
-      const x = edge + i * 6
-      const y = t.y - BUS / 2 + (i % 3) * 3 - 3
-      const tx = t.x + size(d.target).w / 2 + 14 + (i % 3) * 6
-      const s = pos[skills]!
-      edges[`dep:${d.key}`] = { source: skills, target: d.target, dep: true, points: [{ x: s.x + size(skills).w, y: s.y + d.y }, { x, y: s.y + d.y }, { x, y }, { x: tx, y }, { x: tx, y: t.y }] }
-    })
+    return true
   }
-  return { pos, edges }
+  const next = (i: number, from: number) => {
+    let a = from
+    while (!at(i, a)) { a += STEP; if (a > from + Math.PI) return null }
+    for (let lo = a - STEP, n = 0; n < 12 && a > from; n++) { const m = (lo + a) / 2; if (at(i, m)) a = m; else lo = m }
+    return a
+  }
+  for (let i = 0; i < items.length; i++) {
+    const a = i ? next(i, t[i - 1]!) : start
+    if (a == null) return null
+    t.push(a)
+  }
+  // The first card again, one turn on, must clear the last ones.
+  const close = items.length > 1 ? next(0, t.at(-1)!) : start + TURN
+  return close != null && close <= start + TURN ? t : null
+}
+
+type Fit = { r: number; t: number[] }
+
+/** Largest `v` in [lo, hi] whose ring still closes, starting from the fit at `lo`. */
+function most(lo: number, hi: number, fits: (v: number) => number[] | null, first: number[]) {
+  const top = fits(hi)
+  if (top) return { v: hi, t: top }
+  let best = { v: lo, t: first }
+  for (let n = 0; n < 12; n++) { const m = (lo + hi) / 2, t = fits(m); if (t) { lo = m; best = { v: m, t } } else hi = m }
+  return best
+}
+
+/** The smallest ring, no smaller than `floor`, the cards close round from `start`; room to spare goes to the gaps. */
+function solve(items: Item[], floor: number, k: number, start: number): Fit {
+  const fits = (s: number, extra: number, r = floor) => sweep(items, r, k, { s, extra }, start)
+  const t = fits(1, 0)
+  if (t) {
+    // Room to spare: first part the groups, then loosen each group a little, then part the groups further.
+    const apart = most(0, GROUP_MAX - GROUP_GAP, (extra) => fits(1, extra), t)
+    if (apart.v < GROUP_MAX - GROUP_GAP) return { r: floor, t: apart.t }
+    const even = most(1, SPREAD, (s) => fits(s, apart.v), apart.t)
+    return { r: floor, t: most(apart.v, 4 * floor, (extra) => fits(even.v, extra), even.t).t }
+  }
+  // Grow the ring until the cards fit round it, then shrink it back to the smallest that does.
+  let lo = floor, hi = floor * 1.5, best: number[] | null
+  while (!(best = fits(1, 0, hi))) { lo = hi; hi *= 1.5 }
+  for (let n = 0; n < 14; n++) { const m = (lo + hi) / 2, f = fits(1, 0, m); if (f) { hi = m; best = f } else lo = m }
+  return { r: hi, t: best }
+}
+
+/**
+ * Cards on a ring round the agent: groups apart, cards within a group evenly close, no overlaps. The ring takes
+ * the shape of the screen (`view`, width over height), so a tall window gets a tall oval.
+ */
+export function layoutRing(agent: string, groups: Group[], size: (id: string) => Size, view: number): Record<string, Pt> {
+  const a = size(agent)
+  const centre: Pt = { x: -a.w / 2, y: -a.h / 2 }
+  const gs = groups.filter((g) => g.ids.length)
+  const items: Item[] = gs.flatMap((g, i) => g.ids.map((id) => ({ id, g: i, ...size(id) })))
+  if (!items.length) return { [agent]: centre }
+  const hub = { w: (a.w / 2) * Math.SQRT2 + CLEAR, h: (a.h / 2) * Math.SQRT2 + CLEAR }
+  const wrap = (v: number) => Math.atan2(Math.sin(v), Math.cos(v))
+  const lay = (k: number) => {
+    const floor = Math.max(...items.map((it) => hubRadius(it, hub, k)))
+    // Lay out once from the top, then again from where each group sits as near its own angle as the others allow.
+    // The ellipse is not round, so turning a laid-out ring would change its gaps.
+    const first = solve(items, floor, k, 0)
+    const turn = gs.reduce((sum, g, i) => {
+      const own = first.t.filter((_, n) => items[n]!.g === i)
+      return sum + wrap((g.at * Math.PI) / 180 - (own[0]! + own.at(-1)!) / 2)
+    }, 0) / gs.length
+    const { r, t } = solve(items, floor, k, turn)
+    const pos: Record<string, Pt> = { [agent]: centre }
+    items.forEach((it, i) => {
+      const c = ring(t[i]!, r, k)
+      pos[it.id] = { x: Math.round(c.x - it.w / 2), y: Math.round(c.y - it.h / 2) }
+    })
+    return pos
+  }
+  // Cards' own sizes skew the ring's outline, so lay it out, measure, and correct the shape twice.
+  const clamp = (k: number) => Math.min(SHAPE[1]!, Math.max(SHAPE[0]!, k))
+  let k = clamp(view), pos = lay(k)
+  for (let n = 0; n < 2; n++) {
+    const b = bounds(pos, size)
+    const next = clamp((k * view) / (b.w / b.h))
+    if (Math.abs(next - k) < 0.02) break
+    k = next
+    pos = lay(k)
+  }
+  return pos
+}
+
+/** The box round every card. */
+export function bounds(pos: Record<string, Pt>, size: (id: string) => Size): Box {
+  const ids = Object.keys(pos)
+  const x = Math.min(...ids.map((id) => pos[id]!.x)), y = Math.min(...ids.map((id) => pos[id]!.y))
+  return { x, y, w: Math.max(...ids.map((id) => pos[id]!.x + size(id).w)) - x, h: Math.max(...ids.map((id) => pos[id]!.y + size(id).h)) - y }
 }
 
 /** One column: the agent, then each card on a spine down its left. */
-export function layoutNarrow(agent: string, plan: Plan, size: (id: string) => Size): Laid {
+export function layoutNarrow(agent: string, ids: string[], size: (id: string) => Size): Record<string, Pt> {
   const pos: Record<string, Pt> = { [agent]: { x: SPINE, y: 0 } }
-  const edges: Record<string, Line> = {}
-  const link = (...a: Parameters<typeof line>) => { const [k, v] = line(...a); edges[k] = v }
-  const aMid = size(agent).h / 2
   let y = size(agent).h + GAP_Y
-  for (const id of [...plan.left, ...plan.right, ...plan.conns]) {
-    pos[id] = { x: SPINE, y }
-    link(agent, id, [{ x: SPINE, y: aMid }, { x: 0, y: aMid }, { x: 0, y: y + HEAD }, { x: SPINE, y: y + HEAD }])
-    y += size(id).h + GAP_Y
-  }
-  return { pos, edges }
+  for (const id of ids) { pos[id] = { x: SPINE, y }; y += size(id).h + GAP_Y }
+  return pos
 }
 
-/** Every card's box, for overlap checks. */
-export const boxes = (laid: Laid, size: (id: string) => Size): Box[] =>
-  Object.entries(laid.pos).map(([id, p]) => ({ ...p, ...size(id) }))
+/** Where the line from a box's centre toward `p` leaves the box. */
+function exit(b: Box, p: Pt): Pt {
+  const c = mid(b), dx = p.x - c.x, dy = p.y - c.y
+  const k = 1 / Math.max(Math.abs(dx) / (b.w / 2), Math.abs(dy) / (b.h / 2), 1e-9)
+  return { x: c.x + dx * k, y: c.y + dy * k }
+}
+
+/** A straight line from the agent to a card, border to border. */
+export const spoke = (agent: Box, b: Box): Pt[] => [exit(agent, mid(b)), exit(b, mid(agent))]
+
+/** The narrow column's line: out of the agent's left side, down the spine, into the card's header. */
+export function spine(agent: Box, b: Box): Pt[] {
+  const x = agent.x - SPINE, y = agent.y + agent.h / 2
+  return [{ x: agent.x, y }, { x, y }, { x, y: b.y + HEAD }, { x: b.x, y: b.y + HEAD }]
+}
+
+/**
+ * A skill's line to the connection it calls: out of the skill's row on the side facing the connection, into
+ * the connection, bent round the agent when the straight way crosses it. Points to draw a smooth curve through.
+ */
+export function depLine(from: Box, rowY: number, to: Box, agent: Box, i: number): Pt[] {
+  const c = mid(agent), lane = 28 + (i % 5) * 10
+  const rx = (agent.w / 2) * Math.SQRT2 + lane, ry = (agent.h / 2) * Math.SQRT2 + lane
+  const reach = (p: Pt) => Math.hypot((p.x - c.x) / rx, (p.y - c.y) / ry)
+  const lerp = (a: Pt, b: Pt, k: number) => ({ x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k })
+  const bend = (a: Pt, b: Pt, depth: number): Pt[] => {
+    if (depth > 3 || ![0.2, 0.4, 0.6, 0.8].some((k) => reach(lerp(a, b, k)) < 1)) return []
+    // Push the middle out to the track round the agent; straight through its centre, go round one side.
+    let m = lerp(a, b, 0.5)
+    if (reach(m) < 0.05) m = { x: c.x - (b.y - a.y), y: c.y + (b.x - a.x) }
+    const k = 1 / reach(m), p = { x: c.x + (m.x - c.x) * k, y: c.y + (m.y - c.y) * k }
+    return [...bend(a, p, depth + 1), p, ...bend(p, b, depth + 1)]
+  }
+  const left = mid(to).x < mid(from).x
+  const y = from.y + Math.min(rowY, from.h - 16)
+  const s = { x: left ? from.x : from.x + from.w, y }
+  const out = { x: s.x + (left ? -24 : 24), y }
+  const end = exit(to, out)
+  return [s, out, ...bend(out, end, 0), end]
+}

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The agent editor lays its cards on a ring round the agent.** Instructions, model, channels and people sit top
+  left, setup, tools and skills top right, and connections below; each group takes the room its cards need and keeps
+  a much wider gap from the next. The ring takes the window's shape: a tall oval in a half-width window, a wide
+  one on an ultrawide screen. A card body taller than about seven rows folds behind Show more, so one large MCP server
+  no longer pushes the first view far out. Cards glide to their new place when one opens, closes or finishes loading,
+  and their lines follow. Cmd or Ctrl with the mouse wheel zooms at most 1.15x at once and 2x a second, so a
+  smooth-scrolling mouse utility no longer jumps 3x on one notch; one plain notch and a trackpad pinch zoom as before.
+
 - **Chat hides what is not set up, and nine development switches are gone.**
   `/settings` and `get_settings` list a feature only when it is available or has a saved value at some level, as the
   web app does. "Allow writes" in the approvals panel covers chat replies only; routines and watches follow the

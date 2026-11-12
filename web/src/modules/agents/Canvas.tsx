@@ -1,10 +1,10 @@
 import "@xyflow/react/dist/style.css"
 
 import {
-  Background, BackgroundVariant, BaseEdge, type Edge, type EdgeProps, Handle, type Node, Position, ReactFlow, useEdgesState, useNodesState, useReactFlow,
-  useStore,
+  Background, BackgroundVariant, BaseEdge, type Edge, type EdgeProps, getViewportForBounds, Handle, type InternalNode, type Node, Position, ReactFlow, useEdgesState,
+  useInternalNode, useNodesState, useReactFlow, useStore,
 } from "@xyflow/react"
-import { Blocks, Brain, Cpu, KeyRound, Maximize, Minus, Plug, Plus, ScrollText, Sparkles, Users, Wrench } from "lucide-react"
+import { Blocks, Brain, ChevronDown, ChevronUp, Cpu, KeyRound, Maximize, Minus, Plug, Plus, ScrollText, Sparkles, Users, Wrench } from "lucide-react"
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react"
 
 import { BrandIcon } from "@/components/brand"
@@ -18,10 +18,11 @@ import { useAgents } from "./api"
 import { useAgentKeys, useCodingKeys, useKnowledge } from "./setup/api"
 import { GithubFacts } from "./setup/GithubPanel"
 import { Dot, Locked, Pill, PlaceIcon, RuleChip } from "./bits"
-import { layoutNarrow, layoutWide, type Dep, type Plan, type Pt, type Size } from "./layout"
+import { bounds, depLine, layoutNarrow, layoutRing, spine, spoke, type Box, type Group, type Pt, type Size } from "./layout"
 import { EFFORT_LABEL, placeName } from "./lib"
 import { nodeId, nodeUi } from "./nodes/registry"
 import type { Agent, AgentConfig, AgentNode as ConnectionNode, Catalog } from "./types"
+import { useWheelZoom } from "./zoom"
 
 type Ctx = {
   agent: Agent
@@ -61,8 +62,56 @@ function Card({ id, icon, title, count, children, className, action }: {
         {changedNodes.has(id) && <Dot />}
         <span className="ml-auto flex items-center">{action}</span>
       </div>
-      {children}
+      {children && <Fold>{children}</Fold>}
     </div>
+  )
+}
+
+/** Card bodies taller than this fold behind Show more, so one long card does not shrink the whole canvas. */
+const FOLD = 240
+const below = (body: HTMLElement, row: HTMLElement) => row.offsetTop - body.offsetTop + row.offsetHeight > FOLD
+
+function Fold({ children }: { children: React.ReactNode }) {
+  const { selected } = useCanvas()
+  const body = useRef<HTMLDivElement>(null)
+  const [tall, setTall] = useState(false)
+  const [more, setMore] = useState(0)
+  const [open, setOpen] = useState(false)
+  useEffect(() => {
+    const el = body.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      // Folding to hide a row or so would cost as much room as the button.
+      setTall(el.offsetHeight > FOLD + 48)
+      setMore([...el.querySelectorAll<HTMLElement>("[data-row]")].filter((r) => below(el, r)).length)
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  // A hidden row selected from the inspector or a link, or reached by Tab, opens the card.
+  const reveal = (row: HTMLElement | null | undefined) => { if (row && body.current && below(body.current, row)) setOpen(true) }
+  useEffect(() => reveal([...(body.current?.querySelectorAll<HTMLElement>("[data-row]") ?? [])].find((r) => r.dataset.row === selected)), [selected])
+  const folded = tall && !open
+  return (
+    <>
+      <div
+        className={cn(folded && "overflow-clip")}
+        style={folded ? { maxHeight: FOLD } : undefined}
+        onFocus={(e) => reveal((e.target as HTMLElement).closest<HTMLElement>("[data-row]"))}
+      >
+        <div ref={body}>{children}</div>
+      </div>
+      {folded && <div className="pointer-events-none relative -mt-8 h-8 bg-gradient-to-t from-card" />}
+      {tall && (
+        <button
+          className="flex h-8 w-full items-center justify-center gap-1 rounded-b-xl border-t text-xs text-muted-foreground hover:bg-accent/70 hover:text-foreground [&_svg]:size-3.5"
+          onClick={(e) => { e.stopPropagation(); setOpen(!open) }}
+          onKeyDown={(e) => e.stopPropagation()}
+        >
+          {open ? <>Show less<ChevronUp /></> : <>{more ? `Show ${more} more` : "Show more"}<ChevronDown /></>}
+        </button>
+      )}
+    </>
   )
 }
 
@@ -354,26 +403,45 @@ function roundedPath(p: Pt[], r = 10) {
   return `${d} L ${z.x} ${z.y}`
 }
 
-function LineEdge({ id, data }: EdgeProps) {
-  const { points, dep } = (data ?? {}) as { points?: Pt[]; dep?: boolean }
-  if (!points) return null
-  return (
-    <BaseEdge
-      id={id}
-      path={roundedPath(points)}
-      style={dep ? { stroke: "var(--link)", strokeWidth: 1.25, strokeDasharray: "4 4", opacity: 0.7 } : { stroke: "var(--border-strong)", strokeWidth: 1.25 }}
-    />
-  )
+/** A smooth curve through every point (Catmull-Rom as cubic Béziers). */
+function smoothPath(p: Pt[]) {
+  let d = `M ${p[0]!.x} ${p[0]!.y}`
+  for (let i = 0; i < p.length - 1; i++) {
+    const a = p[i - 1] ?? p[i]!, b = p[i]!, c = p[i + 1]!, e = p[i + 2] ?? c
+    d += ` C ${b.x + (c.x - a.x) / 6} ${b.y + (c.y - a.y) / 6} ${c.x - (e.x - b.x) / 6} ${c.y - (e.y - b.y) / 6} ${c.x} ${c.y}`
+  }
+  return d
+}
+
+/** Line kinds; each is drawn from the cards' live boxes, so it follows them as they glide. */
+type LineData = { kind: "spoke" | "spine" } | { kind: "dep"; y: number; i: number }
+
+const boxOf = (n: InternalNode | undefined): Box | null =>
+  n?.measured.width ? { ...n.internals.positionAbsolute, w: n.measured.width, h: n.measured.height ?? 0 } : null
+
+function LineEdge({ id, source, target, data }: EdgeProps) {
+  const s = boxOf(useInternalNode(source)), t = boxOf(useInternalNode(target)), a = boxOf(useInternalNode("agent"))
+  const line = data as LineData | undefined
+  if (!s || !t || !a || !line) return null
+  if (line.kind === "dep") {
+    return <BaseEdge id={id} path={smoothPath(depLine(s, line.y, t, a, line.i))} style={{ stroke: "var(--link)", strokeWidth: 1.25, strokeDasharray: "4 4", opacity: 0.7 }} />
+  }
+  return <BaseEdge id={id} path={roundedPath(line.kind === "spine" ? spine(s, t) : spoke(s, t))} style={{ stroke: "var(--border-strong)", strokeWidth: 1.25 }} />
 }
 const EDGE_TYPES = { line: LineEdge }
 
 // ---------- Graph and layout ----------
 
-/** The two columns around the agent; keys and coding keys are setup, for those who see it. */
+/** The agent's brief and its abilities; keys, coding keys and GitHub are setup, for those who see it. */
 const lanes = (agent: Agent) => ({
   left: ["instructions", "model", "places", "people"],
   right: ["skills", "tools", "helpers", ...(agent.can_view_details ? ["knowledge", "keys", "coding", "github"] : [])],
 })
+/** The ring, clockwise from the top: abilities top right with skills nearest the connections they call, connections below, the brief top left. */
+const groups = (agent: Agent, conns: string[]): Group[] => {
+  const { left, right } = lanes(agent)
+  return [{ ids: [...right].reverse(), at: 60 }, { ids: [...conns].reverse(), at: 180 }, { ids: [...left].reverse(), at: 300 }]
+}
 /** Below this canvas width the editor is one column. */
 const NARROW = 760
 
@@ -397,8 +465,12 @@ function graph(agent: Agent, config: AgentConfig) {
   ].map((n) => ({ ...n, position: { x: 0, y: 0 }, data: {}, draggable: false, selectable: false }))
   const ids = new Set(conns.map((c) => c.id))
   const deps = config.skills.flatMap((s) => (s.requires ?? []).filter((k) => ids.has(`mcp:${k}`)).map((k) => ({ skill: s.skill_id, target: `mcp:${k}` })))
-  return { nodes, conns: conns.map((c) => c.id), deps }
+  return { nodes, conns: conns.map((c) => c.id), column: [...left, ...right, ...conns.map((c) => c.id)], deps }
 }
+
+/** How long cards take to glide to a new layout. */
+const GLIDE_MS = 280
+const SHOWN = { opacity: 1 }
 
 /** The y of a skill's row inside the skills card. */
 const rowY = (skill: string) => {
@@ -409,6 +481,8 @@ const rowY = (skill: string) => {
 // ---------- Canvas ----------
 
 export const PANEL_W = 440
+const MIN_ZOOM = 0.3
+const MAX_ZOOM = 1.6
 
 type Props = Omit<Ctx, "ro"> & { ro: boolean }
 
@@ -418,14 +492,16 @@ export function Canvas({ agent, config, catalog, changed, changedNodes, selected
   const built = useMemo(() => graph(agent, config), [structure]) // eslint-disable-line react-hooks/exhaustive-deps
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([])
   const [edges, setEdges] = useEdgesState<Edge>([])
-  const fitted = useRef(false)
   const [fit, setFit] = useState(false)
   const rf = useReactFlow()
   const width = useStore((s) => s.width)
+  const height = useStore((s) => s.height)
   const narrow = width > 0 && width < NARROW
+  const shape = width > 0 && height > 0 ? Math.round((width / height) * 10) / 10 : 1.6 // the ring follows the screen's
   const sizes = useStore((s) => s.nodes.map((n) => `${n.id}:${n.measured?.width ?? 0}x${n.measured?.height ?? 0}`).join("|"))
   const measured = useStore((s) => s.nodes.length > 0 && s.nodes.every((n) => n.measured?.width))
-  const ready = nodes.length > 0 && nodes.every((n) => n.style?.opacity === 1)
+  const wrap = useRef<HTMLDivElement>(null)
+  useWheelZoom(wrap, rf, MIN_ZOOM, MAX_ZOOM)
 
   useEffect(() => {
     setNodes((prev) => built.nodes.map((n) => {
@@ -434,35 +510,63 @@ export function Canvas({ agent, config, catalog, changed, changedNodes, selected
     }))
   }, [built, setNodes])
 
+  // Frame each layout (cards still loading resize it) until the person moves the view, clicks or selects.
+  const auto = useRef(true)
+  useEffect(() => { auto.current = !selected }, [narrow, shape]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const el = wrap.current
+    const hold = () => { auto.current = false }
+    el?.addEventListener("pointerdown", hold, true)
+    el?.addEventListener("wheel", hold, true)
+    return () => { el?.removeEventListener("pointerdown", hold, true); el?.removeEventListener("wheel", hold, true) }
+  }, [])
+  const frame = (to: Record<string, Pt>, size: (id: string) => Size, duration: number) => {
+    const b = bounds(to, size)
+    if (!narrow) return rf.setViewport(getViewportForBounds({ x: b.x, y: b.y, width: b.w, height: b.h }, width, height, MIN_ZOOM, 1, 0.06), { duration })
+    // One column reads top down at full size; scroll to see the rest.
+    const right = b.x + b.w, zoom = Math.min(1, (width - 24) / (right + 12))
+    return rf.setViewport({ x: Math.max(12, (width - right * zoom) / 2), y: 16, zoom }, { duration })
+  }
+
+  // New cards appear in place; cards already shown glide there, their lines following.
+  const glide = useRef(0)
+  useEffect(() => () => cancelAnimationFrame(glide.current), [])
+  const place = (to: Record<string, Pt>) => {
+    cancelAnimationFrame(glide.current)
+    const from = Object.fromEntries(rf.getNodes().filter((n) => n.style?.opacity === 1).map((n) => [n.id, n.position]))
+    const t0 = performance.now()
+    const frame = (now: number) => {
+      const k = Math.min(1, (now - t0) / GLIDE_MS), e = 1 - (1 - k) ** 3
+      setNodes((ns) => ns.map((n) => {
+        const a = from[n.id], b = to[n.id]
+        return b ? { ...n, position: a ? { x: a.x + (b.x - a.x) * e, y: a.y + (b.y - a.y) * e } : b, style: SHOWN } : n
+      }))
+      if (k < 1) glide.current = requestAnimationFrame(frame)
+    }
+    if (Object.keys(from).length) glide.current = requestAnimationFrame(frame)
+    else frame(t0 + GLIDE_MS)
+  }
+
+  const last = useRef<{ to: Record<string, Pt>; size: (id: string) => Size } | null>(null)
   useEffect(() => {
     if (!measured) return
     const known = Object.fromEntries(rf.getNodes().map((n) => [n.id, { w: n.measured?.width ?? 240, h: n.measured?.height ?? 80 }]))
     const size = (id: string): Size => known[id] ?? { w: 240, h: 80 }
-    const deps: Dep[] = built.deps.map((d) => ({ key: `${d.skill}>${d.target}`, target: d.target, y: rowY(d.skill) }))
-    const plan: Plan = { ...lanes(agent), conns: built.conns, skills: "skills", deps }
-    const laid = (narrow ? layoutNarrow : layoutWide)("agent", plan, size)
-    setNodes((ns) => ns.map((n) => ({ ...n, position: laid.pos[n.id] ?? n.position, style: { opacity: 1 } })))
-    setEdges(Object.entries(laid.edges).map(([id, l]) => ({ id, source: l.source, target: l.target, type: "line", data: { points: l.points, dep: l.dep } })))
-  }, [sizes, measured, built, narrow]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Fit once laid out, and again when the editor switches between one and two columns.
-  useEffect(() => { fitted.current = false }, [narrow])
-  useEffect(() => {
-    if (!ready || fitted.current) return
-    fitted.current = true
-    setTimeout(() => {
-      if (!narrow) { void rf.fitView({ padding: 0.06, maxZoom: 1 }).then(() => setFit(true)); return }
-      // One column reads top down at full size; scroll to see the rest.
-      const ns = rf.getNodes()
-      const right = Math.max(...ns.map((n) => n.position.x + (n.measured?.width ?? 0)))
-      const zoom = Math.min(1, (width - 24) / (right + 12))
-      void rf.setViewport({ x: Math.max(12, (width - right * zoom) / 2), y: 16, zoom }).then(() => setFit(true))
-    }, 30)
-  }, [ready, narrow, sizes]) // eslint-disable-line react-hooks/exhaustive-deps
+    const to = narrow ? layoutNarrow("agent", built.column, size) : layoutRing("agent", groups(agent, built.conns), size, shape)
+    place(to)
+    last.current = { to, size }
+    if (auto.current || !fit) void frame(to, size, fit ? GLIDE_MS : 0).then(() => setFit(true))
+    setEdges([
+      ...built.nodes.filter((n) => n.id !== "agent").map((n) => ({ id: `agent>${n.id}`, source: "agent", target: n.id, type: "line", data: { kind: narrow ? "spine" : "spoke" } })),
+      ...(narrow ? [] : built.deps.map((d, i) => ({ id: `dep:${d.skill}>${d.target}`, source: "skills", target: d.target, type: "line", data: { kind: "dep", y: rowY(d.skill), i } }))),
+    ])
+  }, [sizes, measured, built, narrow, shape]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (auto.current && fit && last.current) void frame(last.current.to, last.current.size, 0) }, [width, height]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep the selected node clear of the inspector; pan back when it closes. One column: the panel covers it.
   const home = useRef<{ x: number; y: number; zoom: number } | null>(null)
   useEffect(() => {
+    if (selected) auto.current = false // a later reframe would put the card back under the inspector
     if (!fit || narrow) return
     if (!selected) {
       if (home.current) void rf.setViewport(home.current, { duration: 250 })
@@ -486,14 +590,15 @@ export function Canvas({ agent, config, catalog, changed, changedNodes, selected
   return (
     <CanvasCtx.Provider value={{ agent, config, catalog, changed, changedNodes, selected, select, ro }}>
       <ReactFlow
+        ref={wrap}
         nodes={nodes}
         edges={edges}
         onNodesChange={onNodesChange}
         nodeTypes={NODE_TYPES}
         edgeTypes={EDGE_TYPES}
         colorMode={resolved}
-        minZoom={0.3}
-        maxZoom={1.6}
+        minZoom={MIN_ZOOM}
+        maxZoom={MAX_ZOOM}
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={false}
