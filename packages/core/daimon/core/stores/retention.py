@@ -26,6 +26,7 @@ from daimon.core._models import (
     Tenant,
     ThreadSession,
     TurnOutcome,
+    Watch,
     WebAudit,
     WebIdentity,
     WebLogin,
@@ -50,6 +51,8 @@ from sqlalchemy.sql.elements import ColumnClause
 
 _FINISHED_JOB_STATES = ("succeeded", "failed", "timed_out", "cancelled", "lost", "over_budget")
 _CLOSED_CONTINUATIONS = ("delivered", "skipped", "cancelled")
+_OPEN_CONTINUATIONS = ("pending", "claimed")
+_LIVE_WATCHES = ("active", "paused")
 _CLOSED_ACCESS_REQUESTS = ("cancelled", "declined", "expired")
 
 
@@ -194,18 +197,46 @@ async def delete_channel_names(session: AsyncSession, *, before: datetime, limit
     return await _delete_batch(session, PlatformChannelName, seen < before, limit)
 
 
+def _same_thread(model: type[TaskContinuation] | type[Watch]) -> ColumnElement[bool]:
+    return and_(
+        model.tenant_id == ThreadSession.tenant_id,
+        model.platform == ThreadSession.platform,
+        model.thread_id == ThreadSession.thread_id,
+    )
+
+
 async def delete_idle_thread_sessions(
     session: AsyncSession, *, tenant_id: uuid.UUID, before: datetime, limit: int
 ) -> int:
     """A tenant's thread mappings with no turn since the cutoff and none running.
 
-    The thread's next message starts a fresh session.
+    A thread that still has work aimed at it stays: a pending continuation, a
+    live watch, or an enabled routine that posts into it would otherwise wake
+    in a fresh session with none of its context. The thread's next message
+    starts a fresh session.
     """
     _check(before)
+    continuation = exists().where(
+        _same_thread(TaskContinuation), TaskContinuation.status.in_(_OPEN_CONTINUATIONS)
+    )
+    watch = exists().where(_same_thread(Watch), Watch.status.in_(_LIVE_WATCHES))
+    routine = exists().where(
+        Routine.tenant_id == ThreadSession.tenant_id,
+        Routine.enabled.is_(True),
+        Routine.destination_kind == "thread",
+        or_(
+            Routine.destination_id == ThreadSession.thread_id,
+            # Slack names a routine's thread `channel:ts`.
+            Routine.destination_id.endswith(func.concat(":", ThreadSession.thread_id)),
+        ),
+    )
     condition = and_(
         ThreadSession.tenant_id == tenant_id,
         ThreadSession.last_turn_at < before,
         ThreadSession.active_turn_message_id.is_(None),
+        ~continuation,
+        ~watch,
+        ~routine,
     )
     return await _delete_batch(session, ThreadSession, condition, limit)
 

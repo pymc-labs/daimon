@@ -452,7 +452,6 @@ async def mark_turn_active(
             active_turn_owner_key=owner_key,
             active_turn_started_at=now,
             active_turn_channel_id=active_turn_channel_id,
-            last_turn_at=now,
         )
     )
     await session.flush()
