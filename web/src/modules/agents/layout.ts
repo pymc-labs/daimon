@@ -7,18 +7,19 @@ export type Box = Pt & Size
 /** Cards that sit together, clockwise, and the angle the group leans to (degrees clockwise from the top). */
 export type Group = { ids: string[]; at: number }
 
-const GAP = 24 // between cards of a group
-const GROUP_GAP = 3 * GAP // between groups
+const GAP = 20 // between cards of a group
+const GROUP_GAP = 6 * GAP // between groups
+const GROUP_MAX = 10 * GAP // room to spare widens the gaps between groups to this first
+const SPREAD = 1.25 // then the gaps within a group, by at most this
 const CLEAR = 56 // from the ellipse round the agent card to the ring
-const ASPECT = 1.3 // ring width over height, for landscape screens
-const SPREAD = 2 // most a ring with room to spare widens its gaps
+const SHAPE = [0.4, 2.4] // ring width over height, matched to the screen within these
 const GAP_Y = 20 // narrow column
 const HEAD = 20 // y of a card's connector, mid header
 const SPINE = 18
 const TURN = 2 * Math.PI
 const STEP = Math.PI / 180
 
-const ring = (t: number, r: number): Pt => ({ x: ASPECT * r * Math.sin(t), y: -r * Math.cos(t) })
+const ring = (t: number, r: number, k: number): Pt => ({ x: k * r * Math.sin(t), y: -r * Math.cos(t) })
 const mid = (b: Box): Pt => ({ x: b.x + b.w / 2, y: b.y + b.h / 2 })
 /** Gap between two boxes given by centre and size: the larger of the x and y gaps, negative when they overlap. */
 const gapOf = (a: Pt, as: Size, b: Pt, bs: Size) =>
@@ -29,11 +30,11 @@ const clears = (c: Pt, s: Size, e: Size) =>
 
 type Item = Size & { id: string; g: number }
 
-/** Smallest ring on which the card clears the hub wherever it lands. */
-function hubRadius(s: Size, hub: Size) {
-  const ok = (r: number) => { for (let t = 0; t < TURN; t += 5 * STEP) if (!clears(ring(t, r), s, hub)) return false; return true }
+/** Smallest ring of shape `k` on which the card clears the hub wherever it lands. */
+function hubRadius(s: Size, hub: Size, k: number) {
+  const ok = (r: number) => { for (let t = 0; t < TURN; t += 5 * STEP) if (!clears(ring(t, r, k), s, hub)) return false; return true }
   let lo = 0, hi = 4096
-  for (let k = 0; k < 20; k++) { const m = (lo + hi) / 2; if (ok(m)) hi = m; else lo = m }
+  for (let n = 0; n < 20; n++) { const m = (lo + hi) / 2; if (ok(m)) hi = m; else lo = m }
   return hi
 }
 
@@ -41,21 +42,21 @@ function hubRadius(s: Size, hub: Size) {
 type Gaps = { s: number; extra: number }
 
 /** Cards placed clockwise from `start`, each as close as its gap allows; null when they do not close the ring. */
-function sweep(items: Item[], r: number, gaps: Gaps, start: number): number[] | null {
+function sweep(items: Item[], r: number, k: number, gaps: Gaps, start: number): number[] | null {
   const t: number[] = []
   const at = (i: number, a: number) => { // item i at angle a keeps its gap from the eight cards before it
-    const p = ring(a, r)
+    const p = ring(a, r, k)
     for (let j = Math.max(0, t.length - 8); j < t.length; j++) {
       if (j === i) continue
       const need = items[i]!.g === items[j]!.g ? GAP * gaps.s : GROUP_GAP * gaps.s + gaps.extra
-      if (gapOf(p, items[i]!, ring(t[j]!, r), items[j]!) < need) return false
+      if (gapOf(p, items[i]!, ring(t[j]!, r, k), items[j]!) < need) return false
     }
     return true
   }
   const next = (i: number, from: number) => {
     let a = from
     while (!at(i, a)) { a += STEP; if (a > from + Math.PI) return null }
-    for (let lo = a - STEP, k = 0; k < 12 && a > from; k++) { const m = (lo + a) / 2; if (at(i, m)) a = m; else lo = m }
+    for (let lo = a - STEP, n = 0; n < 12 && a > from; n++) { const m = (lo + a) / 2; if (at(i, m)) a = m; else lo = m }
     return a
   }
   for (let i = 0; i < items.length; i++) {
@@ -75,49 +76,75 @@ function most(lo: number, hi: number, fits: (v: number) => number[] | null, firs
   const top = fits(hi)
   if (top) return { v: hi, t: top }
   let best = { v: lo, t: first }
-  for (let k = 0; k < 12; k++) { const m = (lo + hi) / 2, t = fits(m); if (t) { lo = m; best = { v: m, t } } else hi = m }
+  for (let n = 0; n < 12; n++) { const m = (lo + hi) / 2, t = fits(m); if (t) { lo = m; best = { v: m, t } } else hi = m }
   return best
 }
 
 /** The smallest ring, no smaller than `floor`, the cards close round from `start`; room to spare goes to the gaps. */
-function solve(items: Item[], floor: number, start: number): Fit {
-  const plain = { s: 1, extra: 0 }
-  const t = sweep(items, floor, plain, start)
+function solve(items: Item[], floor: number, k: number, start: number): Fit {
+  const fits = (s: number, extra: number, r = floor) => sweep(items, r, k, { s, extra }, start)
+  const t = fits(1, 0)
   if (t) {
-    // Room to spare: widen every gap alike, then give what is left to the gaps between groups.
-    const even = most(1, SPREAD, (s) => sweep(items, floor, { s, extra: 0 }, start), t)
-    return { r: floor, t: most(0, 4 * floor, (extra) => sweep(items, floor, { s: even.v, extra }, start), even.t).t }
+    // Room to spare: first part the groups, then loosen each group a little, then part the groups further.
+    const apart = most(0, GROUP_MAX - GROUP_GAP, (extra) => fits(1, extra), t)
+    if (apart.v < GROUP_MAX - GROUP_GAP) return { r: floor, t: apart.t }
+    const even = most(1, SPREAD, (s) => fits(s, apart.v), apart.t)
+    return { r: floor, t: most(apart.v, 4 * floor, (extra) => fits(even.v, extra), even.t).t }
   }
   // Grow the ring until the cards fit round it, then shrink it back to the smallest that does.
   let lo = floor, hi = floor * 1.5, best: number[] | null
-  while (!(best = sweep(items, hi, plain, start))) { lo = hi; hi *= 1.5 }
-  for (let k = 0; k < 14; k++) { const m = (lo + hi) / 2, f = sweep(items, m, plain, start); if (f) { hi = m; best = f } else lo = m }
+  while (!(best = fits(1, 0, hi))) { lo = hi; hi *= 1.5 }
+  for (let n = 0; n < 14; n++) { const m = (lo + hi) / 2, f = fits(1, 0, m); if (f) { hi = m; best = f } else lo = m }
   return { r: hi, t: best }
 }
 
-/** Cards on a ring round the agent: groups apart, cards within a group evenly close, no overlaps. */
-export function layoutRing(agent: string, groups: Group[], size: (id: string) => Size): Record<string, Pt> {
+/**
+ * Cards on a ring round the agent: groups apart, cards within a group evenly close, no overlaps. The ring takes
+ * the shape of the screen (`view`, width over height), so a tall window gets a tall oval.
+ */
+export function layoutRing(agent: string, groups: Group[], size: (id: string) => Size, view: number): Record<string, Pt> {
   const a = size(agent)
-  const pos: Record<string, Pt> = { [agent]: { x: -a.w / 2, y: -a.h / 2 } }
+  const centre: Pt = { x: -a.w / 2, y: -a.h / 2 }
   const gs = groups.filter((g) => g.ids.length)
   const items: Item[] = gs.flatMap((g, i) => g.ids.map((id) => ({ id, g: i, ...size(id) })))
-  if (!items.length) return pos
+  if (!items.length) return { [agent]: centre }
   const hub = { w: (a.w / 2) * Math.SQRT2 + CLEAR, h: (a.h / 2) * Math.SQRT2 + CLEAR }
-  const floor = Math.max(...items.map((it) => hubRadius(it, hub)))
-  // Lay out once from the top, then again from where each group sits as near its own angle as the others allow.
-  // The ellipse is not round, so turning a laid-out ring would change its gaps.
-  const first = solve(items, floor, 0)
   const wrap = (v: number) => Math.atan2(Math.sin(v), Math.cos(v))
-  const turn = gs.reduce((sum, g, i) => {
-    const own = first.t.filter((_, k) => items[k]!.g === i)
-    return sum + wrap((g.at * Math.PI) / 180 - (own[0]! + own.at(-1)!) / 2)
-  }, 0) / gs.length
-  const { r, t } = solve(items, floor, turn)
-  items.forEach((it, i) => {
-    const c = ring(t[i]!, r)
-    pos[it.id] = { x: Math.round(c.x - it.w / 2), y: Math.round(c.y - it.h / 2) }
-  })
+  const lay = (k: number) => {
+    const floor = Math.max(...items.map((it) => hubRadius(it, hub, k)))
+    // Lay out once from the top, then again from where each group sits as near its own angle as the others allow.
+    // The ellipse is not round, so turning a laid-out ring would change its gaps.
+    const first = solve(items, floor, k, 0)
+    const turn = gs.reduce((sum, g, i) => {
+      const own = first.t.filter((_, n) => items[n]!.g === i)
+      return sum + wrap((g.at * Math.PI) / 180 - (own[0]! + own.at(-1)!) / 2)
+    }, 0) / gs.length
+    const { r, t } = solve(items, floor, k, turn)
+    const pos: Record<string, Pt> = { [agent]: centre }
+    items.forEach((it, i) => {
+      const c = ring(t[i]!, r, k)
+      pos[it.id] = { x: Math.round(c.x - it.w / 2), y: Math.round(c.y - it.h / 2) }
+    })
+    return pos
+  }
+  // Cards' own sizes skew the ring's outline, so lay it out, measure, and correct the shape twice.
+  const clamp = (k: number) => Math.min(SHAPE[1]!, Math.max(SHAPE[0]!, k))
+  let k = clamp(view), pos = lay(k)
+  for (let n = 0; n < 2; n++) {
+    const b = bounds(pos, size)
+    const next = clamp((k * view) / (b.w / b.h))
+    if (Math.abs(next - k) < 0.02) break
+    k = next
+    pos = lay(k)
+  }
   return pos
+}
+
+/** The box round every card. */
+export function bounds(pos: Record<string, Pt>, size: (id: string) => Size): Box {
+  const ids = Object.keys(pos)
+  const x = Math.min(...ids.map((id) => pos[id]!.x)), y = Math.min(...ids.map((id) => pos[id]!.y))
+  return { x, y, w: Math.max(...ids.map((id) => pos[id]!.x + size(id).w)) - x, h: Math.max(...ids.map((id) => pos[id]!.y + size(id).h)) - y }
 }
 
 /** One column: the agent, then each card on a spine down its left. */

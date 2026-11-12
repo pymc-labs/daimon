@@ -18,7 +18,7 @@ import { useAgents } from "./api"
 import { useAgentKeys, useCodingKeys, useKnowledge } from "./setup/api"
 import { GithubFacts } from "./setup/GithubPanel"
 import { Dot, Locked, Pill, PlaceIcon, RuleChip } from "./bits"
-import { depLine, layoutNarrow, layoutRing, spine, spoke, type Box, type Group, type Pt, type Size } from "./layout"
+import { bounds, depLine, layoutNarrow, layoutRing, spine, spoke, type Box, type Group, type Pt, type Size } from "./layout"
 import { EFFORT_LABEL, placeName } from "./lib"
 import { nodeId, nodeUi } from "./nodes/registry"
 import type { Agent, AgentConfig, AgentNode as ConnectionNode, Catalog } from "./types"
@@ -497,6 +497,7 @@ export function Canvas({ agent, config, catalog, changed, changedNodes, selected
   const width = useStore((s) => s.width)
   const height = useStore((s) => s.height)
   const narrow = width > 0 && width < NARROW
+  const shape = width > 0 && height > 0 ? Math.round((width / height) * 10) / 10 : 1.6 // the ring follows the screen's
   const sizes = useStore((s) => s.nodes.map((n) => `${n.id}:${n.measured?.width ?? 0}x${n.measured?.height ?? 0}`).join("|"))
   const measured = useStore((s) => s.nodes.length > 0 && s.nodes.every((n) => n.measured?.width))
   const wrap = useRef<HTMLDivElement>(null)
@@ -511,7 +512,7 @@ export function Canvas({ agent, config, catalog, changed, changedNodes, selected
 
   // Frame each layout (cards still loading resize it) until the person moves the view, clicks or selects.
   const auto = useRef(true)
-  useEffect(() => { auto.current = true }, [narrow])
+  useEffect(() => { auto.current = !selected }, [narrow, shape]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const el = wrap.current
     const hold = () => { auto.current = false }
@@ -520,13 +521,11 @@ export function Canvas({ agent, config, catalog, changed, changedNodes, selected
     return () => { el?.removeEventListener("pointerdown", hold, true); el?.removeEventListener("wheel", hold, true) }
   }, [])
   const frame = (to: Record<string, Pt>, size: (id: string) => Size, duration: number) => {
-    const ids = Object.keys(to)
-    const x0 = Math.min(...ids.map((id) => to[id]!.x)), y0 = Math.min(...ids.map((id) => to[id]!.y))
-    const x1 = Math.max(...ids.map((id) => to[id]!.x + size(id).w)), y1 = Math.max(...ids.map((id) => to[id]!.y + size(id).h))
-    if (!narrow) return rf.setViewport(getViewportForBounds({ x: x0, y: y0, width: x1 - x0, height: y1 - y0 }, width, height, MIN_ZOOM, 1, 0.06), { duration })
+    const b = bounds(to, size)
+    if (!narrow) return rf.setViewport(getViewportForBounds({ x: b.x, y: b.y, width: b.w, height: b.h }, width, height, MIN_ZOOM, 1, 0.06), { duration })
     // One column reads top down at full size; scroll to see the rest.
-    const zoom = Math.min(1, (width - 24) / (x1 + 12))
-    return rf.setViewport({ x: Math.max(12, (width - x1 * zoom) / 2), y: 16, zoom }, { duration })
+    const right = b.x + b.w, zoom = Math.min(1, (width - 24) / (right + 12))
+    return rf.setViewport({ x: Math.max(12, (width - right * zoom) / 2), y: 16, zoom }, { duration })
   }
 
   // New cards appear in place; cards already shown glide there, their lines following.
@@ -553,7 +552,7 @@ export function Canvas({ agent, config, catalog, changed, changedNodes, selected
     if (!measured) return
     const known = Object.fromEntries(rf.getNodes().map((n) => [n.id, { w: n.measured?.width ?? 240, h: n.measured?.height ?? 80 }]))
     const size = (id: string): Size => known[id] ?? { w: 240, h: 80 }
-    const to = narrow ? layoutNarrow("agent", built.column, size) : layoutRing("agent", groups(agent, built.conns), size)
+    const to = narrow ? layoutNarrow("agent", built.column, size) : layoutRing("agent", groups(agent, built.conns), size, shape)
     place(to)
     last.current = { to, size }
     if (auto.current || !fit) void frame(to, size, fit ? GLIDE_MS : 0).then(() => setFit(true))
@@ -561,7 +560,7 @@ export function Canvas({ agent, config, catalog, changed, changedNodes, selected
       ...built.nodes.filter((n) => n.id !== "agent").map((n) => ({ id: `agent>${n.id}`, source: "agent", target: n.id, type: "line", data: { kind: narrow ? "spine" : "spoke" } })),
       ...(narrow ? [] : built.deps.map((d, i) => ({ id: `dep:${d.skill}>${d.target}`, source: "skills", target: d.target, type: "line", data: { kind: "dep", y: rowY(d.skill), i } }))),
     ])
-  }, [sizes, measured, built, narrow]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sizes, measured, built, narrow, shape]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (auto.current && fit && last.current) void frame(last.current.to, last.current.size, 0) }, [width, height]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep the selected node clear of the inspector; pan back when it closes. One column: the panel covers it.
