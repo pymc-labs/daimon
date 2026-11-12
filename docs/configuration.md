@@ -121,8 +121,15 @@ true. Set DAIMON_TABLE_RENDERING to a JSON object.
 
 `HttpUrl` · optional · default `https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md`
 
-URL rendered on the privacy panels' Policy button. Override via
-DAIMON_PRIVACY_POLICY_URL if you host your own policy page.
+URL of the privacy policy, linked from the web app and the privacy panels' Policy
+button. Override via DAIMON_PRIVACY_POLICY_URL if you host your own policy page.
+
+### `DAIMON_TERMS_URL`
+
+`HttpUrl | None` · optional · default unset
+
+URL of the terms page. Set DAIMON_TERMS_URL to show a Terms link beside the privacy
+policy in the web app and the privacy panels; unset, no Terms link appears.
 
 ### `DAIMON_FEATURES`
 

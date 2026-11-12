@@ -63,7 +63,7 @@ developer:
   name: daimon
   websiteUrl: https://DAIMON_HOST
   privacyUrl: https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md  # or DAIMON_PRIVACY_POLICY_URL
-  termsOfUseUrl: https://DAIMON_HOST/terms  # your own terms page; daimon serves none
+  termsOfUseUrl: https://DAIMON_HOST/terms  # your own terms page; also set DAIMON_TERMS_URL
 name:
   short: daimon
   full: daimon
