@@ -271,12 +271,25 @@ database access and is not an MCP tool.
 
 Retention is 90 days
 ([`DAIMON_RETENTION__SECURITY_AUDIT_DAYS`](configuration.md#daimon_retention__security_audit_days);
-`0` keeps rows indefinitely). The scheduler deletes older rows daily; `daimon audit
-prune` does it now for one tenant. Include your backup expiry in your retention
-policy. See [Retention](configuration.md#retention) for the other records. Privacy
+`0` keeps rows indefinitely). The scheduler deletes older rows daily, and
+`daimon audit prune` does the same for one tenant on demand. Include your backup
+expiry in your retention policy. Privacy
 erasure clears a person's identifiers from audit rows, and deleting a tenant
 removes its rows. Database triggers block ordinary updates and deletes. They
 guard against application mistakes, not against a database administrator.
+
+## Set retention
+
+The scheduler deletes operational records past their age every day. Each
+`DAIMON_RETENTION__*` setting in [the configuration reference](configuration.md#daimon_retention__security_audit_days)
+sets one age in days, and `0` keeps that record. [How Daimon handles data](https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md)
+lists every record and its default.
+
+Report and notebook hosts delete on their own: reports after
+[`DAIMON_REPORT__RETENTION_DAYS`](configuration.md#daimon_report__retention_days),
+notebooks at their expiry. Database backups, log storage and object-store
+buckets sit outside Daimon, so give each its own expiry and keep it no longer
+than the shortest age you promise users.
 
 ## Manage operator tokens
 
