@@ -31,6 +31,7 @@ from daimon.adapters.web.redirects import (
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.platform_sign_in import code_challenge_s256
+from daimon.core.privacy import legal_links
 from daimon.core.stores import web_sessions as sessions_store
 from daimon.core.stores.domain import WebPersonRow
 from daimon.core.stores.tenants import list_tenants_by_platform
@@ -46,6 +47,13 @@ _FAILED = "Sign-in didn't work. Try again."
 _EXPIRED = "Your sign-in took too long. Try again."
 _CANCELLED = "Sign-in was cancelled."
 _VISITOR_CONNECT = "Guests can't connect an account."
+
+
+class LegalOut(BaseModel):
+    """The operator's privacy policy and terms pages; terms is null when unset."""
+
+    privacy: str
+    terms: str | None
 
 
 class ProviderOut(BaseModel):
@@ -115,6 +123,11 @@ def auth_router(runtime: WebRuntime) -> APIRouter:
         if web.dev:
             out.append(ProviderOut(id="dev", label="Dev user", kind="dev"))
         return out
+
+    @router.get("/auth/legal")
+    async def legal() -> LegalOut:  # pyright: ignore[reportUnusedFunction]
+        links = legal_links(runtime.settings)
+        return LegalOut(privacy=links.privacy, terms=links.terms)
 
     @router.post("/auth/logout")
     async def logout(request: Request, response: Response) -> dict[str, bool]:  # pyright: ignore[reportUnusedFunction]

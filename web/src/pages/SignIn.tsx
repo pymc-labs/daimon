@@ -5,7 +5,7 @@ import { BrandIcon } from "@/components/brand"
 import { ErrorState, Rows } from "@/components/QueryState"
 import { Button } from "@/components/ui/button"
 import { api, ApiError } from "@/lib/api"
-import { useProviders } from "@/lib/hooks"
+import { useLegal, useProviders } from "@/lib/hooks"
 import type { Me, Provider } from "@/lib/types"
 import { safeNext } from "@/lib/safe-next"
 import { Card } from "./Card"
@@ -24,6 +24,7 @@ export function SignIn() {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const providers = useProviders()
+  const legal = useLegal().data
   const dev = useMutation({
     mutationFn: async (provider: string) => { await api.post("/auth/mock", { provider }); qc.clear(); return landing(next) },
     onSuccess: (to) => navigate(to),
@@ -48,6 +49,12 @@ export function SignIn() {
           ))}
       </div>
       {error && <p role="alert" className="mt-4 text-sm text-destructive">{error}</p>}
+      {legal && (
+        <p className="mt-6 flex justify-center gap-4 text-xs text-muted-foreground">
+          <a href={legal.privacy} target="_blank" rel="noreferrer" className="hover:text-foreground hover:underline">Privacy</a>
+          {legal.terms && <a href={legal.terms} target="_blank" rel="noreferrer" className="hover:text-foreground hover:underline">Terms</a>}
+        </p>
+      )}
     </Card>
   )
 }

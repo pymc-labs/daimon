@@ -3,7 +3,7 @@ import { useEffect, useMemo } from "react"
 import { useNavigate } from "react-router"
 
 import { api } from "./api"
-import type { AgentRef, Capability, ChatSession, Group, Me, Person, Provider } from "./types"
+import type { AgentRef, Capability, ChatSession, Group, Legal, Me, Person, Provider } from "./types"
 
 export const useMe = () => useQuery({ queryKey: ["me"], queryFn: () => api.get<Me>("/api/me"), staleTime: 60_000, refetchOnWindowFocus: true })
 /** Move to another of the person's workspaces, then to `next` with nothing from the old one cached. */
@@ -17,6 +17,7 @@ export function useSwitchWorkspace(next: string, { replace = false, onError }: {
   })
 }
 export const useProviders = () => useQuery({ queryKey: ["auth", "providers"], queryFn: () => api.get<Provider[]>("/auth/providers") })
+export const useLegal = () => useQuery({ queryKey: ["auth", "legal"], queryFn: () => api.get<Legal>("/auth/legal"), staleTime: Infinity })
 
 /** A list the server pages: `data` is every row loaded so far, `loadMore` fetches the next page. */
 export function usePaged<T>(key: readonly unknown[], path: string) {

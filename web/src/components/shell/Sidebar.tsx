@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import {
-  Check, ChevronsUpDown, CircleUser, Keyboard, Link2, LogOut, Monitor, Moon, MoreHorizontal, Plus, Search, Sun, UserRound,
+  Check, ChevronsUpDown, CircleUser, FileText, Keyboard, Link2, LogOut, Monitor, Moon, MoreHorizontal, Plus, Search, ShieldCheck, Sun, UserRound,
 } from "lucide-react"
 import { useMemo, useState } from "react"
 import { Link, NavLink, useMatch, useNavigate } from "react-router"
@@ -16,7 +16,7 @@ import {
   DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { api } from "@/lib/api"
-import { useMe, useProviders, useSessions } from "@/lib/hooks"
+import { useLegal, useMe, useProviders, useSessions } from "@/lib/hooks"
 import { useTheme } from "@/lib/theme-context"
 import type { ChatSession, Me, Person } from "@/lib/types"
 import { cn, MOD } from "@/lib/utils"
@@ -214,6 +214,7 @@ export function UserMenu() {
   const qc = useQueryClient()
   const [users, setUsers] = useState<Person[] | null>(null)
   const providers = useProviders()
+  const legal = useLegal().data
   const link = useMutation({
     mutationFn: (provider: string) => api.post<{ url: string }>(`/auth/${provider}/connect`, { next: "/chat" }),
     onSuccess: ({ url }) => location.assign(url),
@@ -283,6 +284,13 @@ export function UserMenu() {
               </DropdownMenuSub>
             )}
             <DropdownMenuSeparator />
+            {legal && (
+              <>
+                <DropdownMenuItem asChild><a href={legal.privacy} target="_blank" rel="noreferrer"><ShieldCheck />Privacy</a></DropdownMenuItem>
+                {legal.terms && <DropdownMenuItem asChild><a href={legal.terms} target="_blank" rel="noreferrer"><FileText />Terms</a></DropdownMenuItem>}
+                <DropdownMenuSeparator />
+              </>
+            )}
             <DropdownMenuItem onSelect={signOut}><LogOut />Sign out</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
