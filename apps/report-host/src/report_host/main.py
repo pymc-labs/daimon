@@ -31,6 +31,7 @@ from fastapi import FastAPI
 from report_host import reports_store, turns
 from report_host.admin import build_admin_router
 from report_host.config import Settings
+from report_host.headers import SecurityHeadersMiddleware
 from report_host.mcp_client import SeamClient
 from report_host.routes import build_reader_router, mount_viewer_assets
 from report_host.sweeps import (
@@ -120,6 +121,7 @@ def create_app(settings: Settings) -> FastAPI:
             await http_client.aclose()
 
     app = FastAPI(lifespan=lifespan)
+    app.add_middleware(SecurityHeadersMiddleware)
     app.include_router(
         build_reader_router(
             settings=settings, conn_factory=lambda: conn, seam=seam, now=now, run_turn=_run_turn

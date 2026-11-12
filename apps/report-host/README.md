@@ -82,6 +82,12 @@ than one.
   recipients and threads `retention_days` after its last update. A new
   revision, recipient or message each counts as an update. A report with a
   running thread is kept. Set `retention_days` to `0` to disable the sweep.
+- **Every page sends `Referrer-Policy: no-referrer`**, so a report link's
+  `?k=` token never reaches another site. HTML pages also carry a
+  Content-Security-Policy that allows only this host's own scripts, styles and
+  images. The PDF viewer ships its own copy of pdf.js (see
+  `viewer/vendor/README.md`), so a reader's browser makes no third-party
+  request.
 
 - **Bundle archives are reclaimed by daimon's scheduler, not by this host.**
   A bundle pushed at publish time is deleted upstream on a retention timer
