@@ -143,6 +143,7 @@ from daimon.core.memory_resource import (
     delete_personal_memory_stores_for_account,
     sweep_erased_personal_memory,
 )
+from daimon.core.stores import account_records as account_records_store
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_posts as agent_posts_store
 from daimon.core.stores import coding_key_claims as coding_key_claims_store
@@ -210,6 +211,10 @@ class PurgeReport(BaseModel):
     direct_message_conversations: int = 0
     tag_opt_outs: int = 0
     credential_requests: int = 0
+    task_continuations: int = 0
+    turn_outcomes: int = 0
+    thread_sessions: int = 0
+    switch_cards: int = 0
     wizard_sessions: int = 0
     message_feedback: int = 0
     support_escalations: int = 0
@@ -256,6 +261,10 @@ class PurgeReport(BaseModel):
             ),
             tag_opt_outs=self.tag_opt_outs + other.tag_opt_outs,
             credential_requests=self.credential_requests + other.credential_requests,
+            task_continuations=self.task_continuations + other.task_continuations,
+            turn_outcomes=self.turn_outcomes + other.turn_outcomes,
+            thread_sessions=self.thread_sessions + other.thread_sessions,
+            switch_cards=self.switch_cards + other.switch_cards,
             wizard_sessions=self.wizard_sessions + other.wizard_sessions,
             message_feedback=self.message_feedback + other.message_feedback,
             support_escalations=self.support_escalations + other.support_escalations,
@@ -654,6 +663,11 @@ async def _purge_account_transaction(
         )
     )
 
+    # Rows naming the account by id in any tenant, linked or not.
+    account_records = await account_records_store.delete_for_account(
+        session, account_id=account_id, platform_user_keys=platform_user_keys
+    )
+
     # slack_turn_contexts: keyed by (tenant_id, account_id), not
     # principal_id. Loop every tenant the account's principals belong to —
     # mirrors the upstream session-deletion loop below.
@@ -709,6 +723,11 @@ async def _purge_account_transaction(
             github_connect_click_intents=github_connect_click_intents_count,
             message_feedback=message_feedback_count,
             support_escalations=support_escalations_count,
+            credential_requests=account_records.credential_requests,
+            task_continuations=account_records.task_continuations,
+            turn_outcomes=account_records.turn_outcomes,
+            thread_sessions=account_records.thread_sessions,
+            switch_cards=account_records.switch_cards,
             user_configs=user_cfg_count,
             accounts=account_count,
             github_user_links=github_user_links_count,

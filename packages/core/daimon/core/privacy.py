@@ -26,6 +26,7 @@ from __future__ import annotations
 import uuid
 from typing import Final
 
+from daimon.core.stores import account_records as account_records_store
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_posts as agent_posts_store
 from daimon.core.stores import coding_key_claims as coding_key_claims_store
@@ -98,6 +99,10 @@ class PurgePreview(BaseModel):
     direct_message_conversations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     tag_opt_outs: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     credential_requests: PurgePreviewRow
+    task_continuations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    turn_outcomes: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    thread_sessions: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    switch_cards: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     wizard_sessions: PurgePreviewRow
     message_feedback: PurgePreviewRow
     support_escalations: PurgePreviewRow
@@ -142,6 +147,10 @@ def held_lines(preview: PurgePreview) -> list[str]:
         (preview.selfhosted_operations, "self-hosted retry record"),
         (preview.slack_user_tokens, "saved access token"),
         (preview.slack_turn_contexts, "temporary request record"),
+        (preview.task_continuations, "follow-up task"),
+        (preview.turn_outcomes, "reply record"),
+        (preview.thread_sessions, "conversation link"),
+        (preview.switch_cards, "pending model switch"),
         (preview.direct_message_conversations, "private conversation"),
         (preview.tag_opt_outs, "never-tag setting"),
         (preview.daimon_admins, "Daimon admin grants"),
@@ -394,6 +403,12 @@ async def collect_purge_preview(
                     tenant_id=key_tenant_id,
                 )
             )
+        account_records = await account_records_store.count_for_account(
+            session,
+            account_id=account_id,
+            platform_user_keys=[(pp.tenant_id, pp.external_id) for pp in pp_list],
+        )
+        credential_requests_total += account_records.credential_requests
         credential_requests = PurgePreviewRow(count=credential_requests_total, example=None)
 
         # 14. wizard_sessions — requester_platform_user_id-scoped, same shape as
@@ -542,6 +557,10 @@ async def collect_purge_preview(
         slack_user_tokens=slack_user_tokens,
         slack_turn_contexts=slack_turn_contexts,
         credential_requests=credential_requests,
+        task_continuations=PurgePreviewRow(count=account_records.task_continuations, example=None),
+        turn_outcomes=PurgePreviewRow(count=account_records.turn_outcomes, example=None),
+        thread_sessions=PurgePreviewRow(count=account_records.thread_sessions, example=None),
+        switch_cards=PurgePreviewRow(count=account_records.switch_cards, example=None),
         wizard_sessions=wizard_sessions,
         message_feedback=message_feedback,
         support_escalations=support_escalations,
