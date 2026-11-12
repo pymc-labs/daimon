@@ -17,6 +17,7 @@ from daimon.core._models import (
     CredentialRequest,
     GitHubAccessRequest,
     LongJobRecord,
+    McpOAuthFlow,
     MessageFeedback,
     PlatformChannelName,
     Routine,
@@ -44,8 +45,8 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.engine import CursorResult
-from sqlalchemy.sql.elements import ColumnClause
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnClause
 
 _FINISHED_JOB_STATES = ("succeeded", "failed", "timed_out", "cancelled", "lost", "over_budget")
 _CLOSED_CONTINUATIONS = ("delivered", "skipped", "cancelled")
@@ -134,11 +135,22 @@ async def clear_routine_results(session: AsyncSession, *, before: datetime, limi
 
 
 async def delete_credential_requests(session: AsyncSession, *, before: datetime, limit: int) -> int:
-    """Credential requests used or expired before the cutoff."""
+    """Credential requests used or expired before the cutoff.
+
+    A request whose MCP sign-in completed stays: its flow cascades from it, and a
+    completed flow is the lasting record of who signed in to which server.
+    """
     _check(before)
-    condition = or_(
-        CredentialRequest.used_at < before,
-        and_(CredentialRequest.used_at.is_(None), CredentialRequest.expires_at < before),
+    signed_in = exists().where(
+        McpOAuthFlow.request_token == CredentialRequest.token,
+        McpOAuthFlow.completed_at.is_not(None),
+    )
+    condition = and_(
+        or_(
+            CredentialRequest.used_at < before,
+            and_(CredentialRequest.used_at.is_(None), CredentialRequest.expires_at < before),
+        ),
+        ~signed_in,
     )
     return await _delete_batch(session, CredentialRequest, condition, limit)
 
