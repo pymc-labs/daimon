@@ -376,7 +376,10 @@ async def _pin_record_skills(
 ) -> None:
     """Pin `pins` on the record as `person`, so the catalog ties them to that person.
 
-    A pin replaces any other version of the same skill: one pin per skill.
+    A pin replaces any other version of the same skill: one pin per skill. A pin
+    the record already holds, whose copy the catalog could not read (its first
+    owner is gone), is dropped and pinned again, so the attachment is made anew as
+    `person`'s; the store keeps an unchanged pin's old attachment.
     """
     records = SelfHostedAgents(sessionmaker)
     ref = records.record_ref(person, record_id)
@@ -384,14 +387,22 @@ async def _pin_record_skills(
     held = current.spec.skills or ()
     ids = {pin.id for pin in pins}
     skills = (*(pin for pin in held if pin.id not in ids), *pins)
+    revision = current.revision
     if len(skills) == len(held) and all(pin in held for pin in pins):
-        return
+        unpinned = await records.update(
+            person,
+            ref,
+            AgentPatch(skills=tuple(pin for pin in held if pin not in pins)),
+            expected=revision,
+            key=f"convert-skills-unpin:{record_id}:{revision.local}",
+        )
+        revision = unpinned.revision
     await records.update(
         person,
         ref,
         AgentPatch(skills=skills),
-        expected=current.revision,
-        key=f"convert-skills:{record_id}:{current.revision.local}",
+        expected=revision,
+        key=f"convert-skills:{record_id}:{revision.local}",
     )
 
 

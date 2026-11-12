@@ -393,6 +393,55 @@ async def test_pinning_a_skill_again_replaces_its_other_version(
     )
 
 
+async def test_a_rerun_after_the_first_admin_is_deleted_attaches_the_copy_to_the_new_one(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unchanged pin's copy went with its admin: the rerun copies and attaches it again."""
+    from daimon.core.purge import purge_account
+
+    tenant = await make_tenant(db_session)
+    first = await make_account(db_session, tenant=tenant)
+    second = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    _downloads(monkeypatch)
+    router = _skill_router(tenant.id)
+    converted = await _to_daimon(db_session_factory, router, tenant.id, first.id)
+    await purge_account(sm=db_session_factory, account_id=first.id)
+    source = ma_agent(id="agent_ma1", name="analyst", tenant_id=tenant.id, skills=_SKILLS)
+
+    copied, kept, _ = await agent_convert._copy_skills_to_record(  # pyright: ignore[reportPrivateUsage]
+        build_fake_anthropic(router.dispatch),
+        db_session_factory,
+        tenant_id=tenant.id,
+        name="analyst",
+        source=source,
+        record_id=converted.agent.id,
+        account_id=second.id,
+    )
+
+    assert (copied, kept) == (("skill-a-v1", "skill-b-v2"), ()), "both are copied anew"
+    assert await _catalog_rows(db_session) == [
+        ("skill_a", "1", second.id),
+        ("skill_b", "2", second.id),
+    ], "the copies belong to the admin who converted"
+    scope = resource_scope(tenant_id=str(tenant.id))
+    record = await SelfHostedAgents(db_session_factory).resolve(scope, "analyst")
+    assert record.spec.skills == (
+        SkillRef(id="skill_a", version="1", source="custom"),
+        SkillRef(id="skill_b", version="2", source="custom"),
+    ), f"the pins are unchanged: {record.spec.skills}"
+    catalog = PostgresNeutralCatalog(
+        db_session_factory, provider="selfhosted", account_scope_id=str(tenant.id)
+    )
+    person_scope = resource_scope(tenant_id=str(tenant.id), account_id=str(second.id))
+    for pin in record.spec.skills or ():
+        assert await catalog.get_agent_skill(person_scope, record, pin) is not None, (
+            f"{pin.id} loads again through the new admin"
+        )
+
+
 async def test_a_converted_record_loads_its_skills_after_the_original_is_gone(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
