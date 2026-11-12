@@ -265,10 +265,18 @@ async def test_switch_back_converts_a_daimon_record_on_a_keyed_install(
     """A Daimon record has no Claude twin: an admin's press converts it instead."""
     tenant = await make_tenant(db_session)
     await db_session.commit()
-    names: list[str] = []
+    calls: list[tuple[str, object]] = []
+    person = uuid.uuid4()
 
-    async def fake_convert(*_args: object, name: str, **_kwargs: object) -> None:
-        names.append(name)
+    async def fake_convert(
+        *_args: object, name: str, account_id: object, **_kwargs: object
+    ) -> agent_convert.ConvertedAgent:
+        calls.append((name, account_id))
+        return agent_convert.ConvertedAgent(
+            SimpleNamespace(id="agent_new"),  # type: ignore[arg-type]
+            ("xlsx (built in)",),
+            ("report-style",),
+        )
 
     monkeypatch.setattr(agent_convert, "convert_agent_to_anthropic", fake_convert)
     said = await switch_back_to_claude(
@@ -277,13 +285,17 @@ async def test_switch_back_converts_a_daimon_record_on_a_keyed_install(
         tenant_id=tenant.id,
         platform="discord",
         channel_id="chan-3",
-        actor=SimpleNamespace(subject=build_subject(is_admin=True, platform_user_id="a")),  # type: ignore[arg-type]
+        actor=SimpleNamespace(  # type: ignore[arg-type]
+            subject=build_subject(is_admin=True, platform_user_id="a"), account_id=person
+        ),
         backend_actor=_actor(tenant.id),
         edit=SimpleNamespace(client=object(), public_url=None),  # type: ignore[arg-type]
         backends=None,
     )
-    assert said == "Moved analyst to Anthropic.", f"the press converts: {said}"
-    assert names == ["analyst"], "the record is converted once"
+    assert said == (
+        "Moved analyst to Anthropic. Skills copied: report-style. Skills left off: xlsx (built in)."
+    ), f"the press converts and names the skills: {said}"
+    assert calls == [("analyst", person)], "the record is converted once, as the person"
 
 
 async def test_switch_back_refuses_a_daimon_record_without_a_key(

@@ -30,7 +30,11 @@ from daimon.adapters.cli.tenant import (
     resolve_tenant_override,
 )
 from daimon.core import channel_backend
-from daimon.core.agent_convert import convert_agent_to_anthropic, convert_agent_to_daimon
+from daimon.core.agent_convert import (
+    convert_agent_to_anthropic,
+    convert_agent_to_daimon,
+    skill_receipt,
+)
 from daimon.core.agent_fork import copy_agent
 from daimon.core.agent_identity import ensure_agent_face
 from daimon.core.agent_lifecycle import archive_memory_store_best_effort, forget_archived_agent
@@ -1337,8 +1341,9 @@ async def agents_convert(
             provider=to,
         )
     console.print(f"[green]✓ converted agent {name!r} ({converted.agent.id})[/green]")
-    if converted.dropped_skills:
-        console.print(f"[yellow]Left off: {', '.join(converted.dropped_skills)}[/yellow]")
+    # Run as the operator: no person owns copied skills, so they are only listed.
+    for line in skill_receipt(converted):
+        console.print(f"[yellow]{line}[/yellow]")
 
 
 @agents_app.command(

@@ -54,9 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refused replies, switch cards and panels for an admin when the install has a
   Claude key. `daimon agents convert <name> [--to openai|gemini|anthropic]` moves
   an agent in either direction. To OpenAI or Gemini it keeps the name, owner and
-  rules, retires the Claude original and lists the skills it left off; back to
-  Claude it keeps owner, threads, routines, memory, settings and grants. Both are
-  safe to re-run after a failure. Both are refused while the agent has queued
+  rules and retires the Claude original; back to Claude it keeps owner, threads,
+  routines, memory, settings and grants. Both bring the agent's own skills along
+  as the admin's, and name any they couldn't carry; run from the CLI they are
+  only named. Both are safe to re-run after a failure. Both are refused while the agent has queued
   wakes, pending approvals or running jobs.
 
 - **Gemini works from the published image.** The image includes the Gemini SDK,

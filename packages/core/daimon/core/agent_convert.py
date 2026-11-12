@@ -10,11 +10,12 @@ Each step is safe to repeat, so a re-run after a crash finishes the move.
 from __future__ import annotations
 
 import uuid
+import zipfile
 from dataclasses import dataclass
 from uuid import uuid4
 
 import structlog
-from anthropic import AsyncAnthropic
+from anthropic import AnthropicError, AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsURLMCPServerParams
 from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_lifecycle import strip_credentialed_mcp_servers
@@ -23,21 +24,29 @@ from daimon.core.agent_record_ports import DAIMON_ID_PREFIXES
 from daimon.core.anthropic_guard import require_anthropic
 from daimon.core.authz import Subject
 from daimon.core.constants import DEFAULT_AGENT_MODEL
-from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
+from daimon.core.defaults.ma_index import download_skill_version, find_agents_by_daimon_tag
 from daimon.core.defaults.mcp_merge import merge_default_mcp_server, merge_default_mcp_toolset
-from daimon.core.defaults.metadata import MA_METADATA_KEY_CONVERTED_FROM
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_CONVERTED_FROM,
+    tenant_scoped_display_title,
+)
 from daimon.core.defaults.owned import create_owned_record, keyless_provider, owned_scope
-from daimon.core.errors import UserFacingError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
-from daimon.core.mux_compat import create_agent, legacy_call, source_agent_record
+from daimon.core.mux_compat import create_agent, legacy_call, retrieve_agent, source_agent_record
+from daimon.core.skills.add import add_agent_skill
+from daimon.core.skills.ingest import SkillIngestError, bundle_from_files, retained_archive_files
 from daimon.core.specs import merge_default_agent_toolset
 from daimon.core.stores import thread_models
 from daimon.core.stores.agent_rekey import open_agent_work, rekey_agent
+from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
+from daimon.core.turn.session_skills import latest_version
 from mux.contracts.config import DEFAULT_BACKEND
-from mux.contracts.ids import ModelRef, Provider
-from mux.contracts.resources import Agent
+from mux.contracts.errors import MuxError
+from mux.contracts.ids import ModelRef, Provider, Scope, SkillRef
+from mux.contracts.resources import Agent, AgentPatch
 from mux.errors import ProviderError
 from mux.profiles import selectable_models
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -45,12 +54,27 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 _log = structlog.get_logger(__name__)
 
 
+_NO_PERSON = "not copied: no person ran the move"
+_SKILL_ERRORS = (AnthropicError, DaimonError, MuxError, ValueError, zipfile.BadZipFile)
+
+
 @dataclass(frozen=True)
 class ConvertedAgent:
-    """The new record and the skill names it could not carry."""
+    """The new agent, the skills it carries over, and the ones left off with why."""
 
     agent: BetaManagedAgentsAgent
     dropped_skills: tuple[str, ...]
+    copied_skills: tuple[str, ...] = ()
+
+
+def skill_receipt(converted: ConvertedAgent) -> tuple[str, ...]:
+    """The lines telling the person which skills came along and which did not."""
+    lines: list[str] = []
+    if converted.copied_skills:
+        lines.append(f"Skills copied: {', '.join(converted.copied_skills)}.")
+    if converted.dropped_skills:
+        lines.append(f"Skills left off: {', '.join(converted.dropped_skills)}.")
+    return tuple(lines)
 
 
 async def convert_agent_to_daimon(
@@ -61,8 +85,13 @@ async def convert_agent_to_daimon(
     name: str,
     subject: Subject,
     provider: Provider | None = None,
+    account_id: uuid.UUID | None = None,
 ) -> ConvertedAgent:
-    """Move the MA agent `name` to a Daimon record on `provider` (default: first keyed)."""
+    """Move the MA agent `name` to a Daimon record on `provider` (default: first keyed).
+
+    Custom skills are copied into the records catalog as `account_id`'s, as if that
+    person had added them; with no person they are only listed.
+    """
     if not subject.is_admin:
         raise UserFacingError("Only an admin can convert an agent.")
     require_anthropic(anthropic)
@@ -113,6 +142,15 @@ async def convert_agent_to_daimon(
             tenant_id=tenant_id,
             key=f"convert:{source.id}",
         )
+        copied, dropped = await _copy_skills_to_record(
+            anthropic,
+            sessionmaker,
+            tenant_id=tenant_id,
+            name=name,
+            source=source,
+            record_id=created.id,
+            account_id=account_id,
+        )
         await _move_rows(
             sessionmaker, tenant_id=tenant_id, name=name, old_id=source.id, new_id=created.id
         )
@@ -131,11 +169,10 @@ async def convert_agent_to_daimon(
         metadata=created.metadata,
         default_agent_name=None,
     )
-    dropped = tuple(skill.skill_id for skill in source.skills or ())
     _log.info(
         "agent.converted", name=name, source_id=source.id, agent_id=created.id, provider=target
     )
-    return ConvertedAgent(created, dropped)
+    return ConvertedAgent(created, dropped, copied)
 
 
 async def convert_agent_to_anthropic(
@@ -146,11 +183,13 @@ async def convert_agent_to_anthropic(
     name: str,
     subject: Subject,
     public_url: str | None,
+    account_id: uuid.UUID | None = None,
 ) -> ConvertedAgent:
     """Move the Daimon record `name` back to a Managed Agents agent on Claude.
 
     The new agent carries a marker naming the record, so a re-run after a crash
-    adopts it instead of creating a second one.
+    adopts it instead of creating a second one. The record's catalog skills are
+    added to it as `account_id`'s; with no person they are only listed.
     """
     if not subject.is_admin:
         raise UserFacingError("Only an admin can convert an agent.")
@@ -175,6 +214,16 @@ async def convert_agent_to_anthropic(
             created = await create_agent(
                 anthropic, _anthropic_payload(record, public_url=public_url), scope=scope
             )
+        assert anthropic is not None  # require_anthropic refused a missing client
+        copied, dropped = await _copy_skills_to_claude(
+            anthropic,
+            sessionmaker,
+            tenant_id=tenant_id,
+            name=name,
+            record=record,
+            created=created,
+            account_id=account_id,
+        )
         await _move_rows(
             sessionmaker, tenant_id=tenant_id, name=name, old_id=record.ref.id, new_id=created.id
         )
@@ -189,8 +238,6 @@ async def convert_agent_to_anthropic(
         metadata=created.metadata,
         default_agent_name=None,
     )
-    # Daimon skills are not Claude skills; the person adds them back by name.
-    dropped = tuple(skill.id for skill in record.spec.skills or ())
     _log.info(
         "agent.converted",
         name=name,
@@ -198,7 +245,174 @@ async def convert_agent_to_anthropic(
         agent_id=created.id,
         provider=DEFAULT_BACKEND,
     )
-    return ConvertedAgent(created, dropped)
+    return ConvertedAgent(created, dropped, copied)
+
+
+async def _copy_skills_to_record(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    name: str,
+    source: BetaManagedAgentsAgent,
+    record_id: str,
+    account_id: uuid.UUID | None,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Copy `source`'s custom skills into the catalog and pin them: (copied, dropped)."""
+    dropped: list[str] = []
+    custom: list[tuple[str, str]] = []
+    for skill in source.skills or ():
+        if skill.type != "custom":
+            dropped.append(f"{skill.skill_id} (built in)")
+        elif account_id is None:
+            dropped.append(f"{skill.skill_id} ({_NO_PERSON})")
+        else:
+            custom.append((skill.skill_id, skill.version))
+    if account_id is None or not custom:
+        return (), tuple(dropped)
+    person = resource_scope(tenant_id=str(tenant_id), account_id=str(account_id))
+    catalog = PostgresNeutralCatalog(
+        sessionmaker, provider="selfhosted", account_scope_id=str(tenant_id)
+    )
+    copied: dict[str, SkillRef] = {}
+    for skill_id, version in custom:
+        outcome = await _copy_one_to_catalog(
+            anthropic, catalog, person, name=name, skill_id=skill_id, version=version
+        )
+        if isinstance(outcome, str):
+            dropped.append(f"{skill_id} ({outcome})")
+        else:
+            copied[outcome[0]] = outcome[1]
+    if not copied:
+        return (), tuple(dropped)
+    try:
+        await _pin_record_skills(sessionmaker, person, record_id, tuple(copied.values()))
+    except _SKILL_ERRORS as error:
+        _log.warning("agent.convert_skills_unpinned", name=name, error=type(error).__name__)
+        return (), (*dropped, *(f"{skill} (couldn't be added)" for skill in copied))
+    return tuple(copied), tuple(dropped)
+
+
+async def _copy_one_to_catalog(
+    anthropic: AsyncAnthropic,
+    catalog: PostgresNeutralCatalog,
+    person: Scope,
+    *,
+    name: str,
+    skill_id: str,
+    version: str,
+) -> tuple[str, SkillRef] | str:
+    """Copy one MA skill as `person`'s: (skill name, pin), or why it was left off."""
+    service = resource_scope(tenant_id=person.tenant_id)
+    try:
+        if version in ("", "latest"):
+            version = await latest_version(anthropic, service, SkillRef(id=skill_id))
+        data = await download_skill_version(
+            anthropic, skill_id=skill_id, version=version, scope=service
+        )
+    except _SKILL_ERRORS as error:
+        _log.warning("agent.convert_skill_skipped", skill_id=skill_id, error=type(error).__name__)
+        return "couldn't be downloaded"
+    try:
+        bundle = bundle_from_files(retained_archive_files(data))
+    except (SkillIngestError, zipfile.BadZipFile) as error:
+        _log.warning("agent.convert_skill_skipped", skill_id=skill_id, error=type(error).__name__)
+        return "too large" if "at most" in str(error) else "couldn't be read"
+    try:
+        await catalog.put_skill(
+            person,
+            skill_id=skill_id,
+            version=version,
+            agent_name=name,
+            display_title=tenant_scoped_display_title(
+                tenant_id=uuid.UUID(person.tenant_id), name=bundle.preview.name, agent_name=name
+            ),
+            bundle=bundle,
+        )
+    except _SKILL_ERRORS as error:
+        _log.warning("agent.convert_skill_skipped", skill_id=skill_id, error=type(error).__name__)
+        return "couldn't be copied"
+    return bundle.preview.name, SkillRef(id=skill_id, version=version, source="custom")
+
+
+async def _pin_record_skills(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    person: Scope,
+    record_id: str,
+    pins: tuple[SkillRef, ...],
+) -> None:
+    """Pin `pins` on the record as `person`, so the catalog ties them to that person."""
+    records = SelfHostedAgents(sessionmaker)
+    ref = records.record_ref(person, record_id)
+    current = await records.retrieve(person, ref)
+    held = current.spec.skills or ()
+    missing = tuple(pin for pin in pins if pin not in held)
+    if not missing:
+        return
+    await records.update(
+        person,
+        ref,
+        AgentPatch(skills=(*held, *missing)),
+        expected=current.revision,
+        key=f"convert-skills:{record_id}:{current.revision.local}",
+    )
+
+
+async def _no_recheck(_agent: BetaManagedAgentsAgent) -> None:
+    """The move was authorized as a whole and no one reaches the new agent yet."""
+
+
+async def _copy_skills_to_claude(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    name: str,
+    record: Agent,
+    created: BetaManagedAgentsAgent,
+    account_id: uuid.UUID | None,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Add the record's catalog skills to `created` as `account_id`'s: (copied, dropped)."""
+    copied: list[str] = []
+    dropped: list[str] = []
+    catalog = PostgresNeutralCatalog(
+        sessionmaker, provider="selfhosted", account_scope_id=str(tenant_id)
+    )
+    service = resource_scope(tenant_id=str(tenant_id))
+    for ref in record.spec.skills or ():
+        if ref.version is None:
+            dropped.append(f"{ref.id} (built in)")
+            continue
+        if account_id is None:
+            dropped.append(f"{ref.id} ({_NO_PERSON})")
+            continue
+        person = resource_scope(tenant_id=str(tenant_id), account_id=str(account_id))
+        try:
+            stored = await catalog.get_agent_skill(person, record, ref)
+        except _SKILL_ERRORS as error:
+            _log.warning("agent.convert_skill_skipped", skill_id=ref.id, error=type(error).__name__)
+            stored = None
+        if stored is None:
+            dropped.append(f"{ref.id} (couldn't be found)")
+            continue
+        try:
+            added = await add_agent_skill(
+                anthropic,
+                sessionmaker,
+                tenant_id=tenant_id,
+                agent=await retrieve_agent(anthropic, created.id, scope=service),
+                agent_name=name,
+                bundle=stored.bundle,
+                origin=f"moved from {name} on Daimon",
+                added_by_account_id=account_id,
+                recheck=_no_recheck,
+            )
+        except _SKILL_ERRORS as error:
+            _log.warning("agent.convert_skill_skipped", skill_id=ref.id, error=type(error).__name__)
+            dropped.append(f"{stored.bundle.preview.name} (couldn't be added)")
+            continue
+        copied.append(added.name)
+    return tuple(copied), tuple(dropped)
 
 
 def _anthropic_payload(record: Agent, *, public_url: str | None) -> dict[str, object]:

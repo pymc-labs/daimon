@@ -2,23 +2,34 @@
 
 import ast
 import inspect
+import io
 import re
+import uuid
+import zipfile
+from typing import Any
 
+import anthropic
 import httpx
 import pytest
 from daimon.core import agent_convert, agent_lifecycle
+from daimon.core._models import NeutralSkillVersion
 from daimon.core.access_policy import AgentRule, TenantAccessPolicy
-from daimon.core.agent_convert import convert_agent_to_daimon
+from daimon.core.agent_convert import convert_agent_to_anthropic, convert_agent_to_daimon
 from daimon.core.authz import Subject
+from daimon.core.defaults.ma_index import SkillVersionNotFoundError
 from daimon.core.defaults.metadata import MA_METADATA_KEY_CONVERTED_FROM
 from daimon.core.errors import UserFacingError
 from daimon.core.mux_backend import resource_scope
 from daimon.core.provider_keys import DEFAULT_KEY_ENV
+from daimon.core.skills.add import SkillAddResult
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
+from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
+from mux.contracts.ids import SkillRef
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -103,3 +114,212 @@ def test_convert_never_reaches_lifecycle_archive() -> None:
     names |= {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
     banned = {"forget_archived_agent", "archive_agent", "archive_agent_everywhere"}
     assert not names & banned, f"convert must not call lifecycle archive: {names & banned}"
+
+
+def _skill_zip(name: str) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            f"{name}/SKILL.md", f"---\nname: {name}\ndescription: Do {name}.\n---\nBody"
+        )
+    return buffer.getvalue()
+
+
+_SKILLS = (
+    {"type": "custom", "skill_id": "skill_a", "version": "1"},
+    {"type": "custom", "skill_id": "skill_b", "version": "2"},
+    {"type": "anthropic", "skill_id": "xlsx", "version": "latest"},
+)
+
+
+def _skill_router(tenant_id: uuid.UUID, *, fail_archive: int = 0) -> MARouter:
+    source = ma_agent(id="agent_ma1", name="analyst", tenant_id=tenant_id, skills=_SKILLS)
+    left = [fail_archive]
+
+    def archive(_req: httpx.Request, _match: re.Match[str]) -> httpx.Response:
+        if left[0]:
+            left[0] -= 1
+            return httpx.Response(400, json={"error": {"type": "invalid_request_error"}})
+        body = source.model_dump(mode="json") | {"archived_at": "2026-11-10T00:00:00Z"}
+        return httpx.Response(200, json=body)
+
+    router = MARouter()
+    router.add_agent_list(source)
+    router.add("POST", r"/v1/agents/([^/]+)/archive", archive)
+    return router
+
+
+def _downloads(monkeypatch: pytest.MonkeyPatch, *, refuse: str | None = None) -> None:
+    async def download(_client: object, *, skill_id: str, version: str, scope: object) -> bytes:
+        if skill_id == refuse:
+            raise SkillVersionNotFoundError(skill_id)
+        return _skill_zip(f"{skill_id.replace('_', '-')}-v{version}")
+
+    monkeypatch.setattr(agent_convert, "download_skill_version", download)
+
+
+async def _to_daimon(
+    sessions: async_sessionmaker[AsyncSession],
+    router: MARouter,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID | None,
+) -> agent_convert.ConvertedAgent:
+    return await convert_agent_to_daimon(
+        build_fake_anthropic(router.dispatch),
+        sessions,
+        tenant_id=tenant_id,
+        name="analyst",
+        subject=Subject(is_admin=True),
+        account_id=account_id,
+    )
+
+
+async def _catalog_rows(db: AsyncSession) -> list[tuple[str, str, uuid.UUID]]:
+    db.expire_all()
+    rows = await db.execute(
+        select(
+            NeutralSkillVersion.skill_id,
+            NeutralSkillVersion.version,
+            NeutralSkillVersion.account_id,
+        )
+    )
+    return sorted(tuple(row) for row in rows)
+
+
+async def test_convert_copies_custom_skills_as_the_person_and_survives_a_rerun(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Custom skills land in the catalog as the person's, pinned once even after a crash."""
+    tenant = await make_tenant(db_session)
+    person = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    _downloads(monkeypatch)
+    router = _skill_router(tenant.id, fail_archive=1)
+
+    with pytest.raises(anthropic.BadRequestError):
+        await _to_daimon(db_session_factory, router, tenant.id, person.id)
+    converted = await _to_daimon(db_session_factory, router, tenant.id, person.id)
+
+    assert converted.copied_skills == ("skill-a-v1", "skill-b-v2"), (
+        f"both custom skills are copied: {converted.copied_skills}"
+    )
+    assert converted.dropped_skills == ("xlsx (built in)",), (
+        f"the built-in one is named: {converted.dropped_skills}"
+    )
+    assert await _catalog_rows(db_session) == [
+        ("skill_a", "1", person.id),
+        ("skill_b", "2", person.id),
+    ], "one catalog copy each, owned by the person, after the re-run"
+    scope = resource_scope(tenant_id=str(tenant.id))
+    record = await SelfHostedAgents(db_session_factory).resolve(scope, "analyst")
+    assert record.spec.skills == (
+        SkillRef(id="skill_a", version="1", source="custom"),
+        SkillRef(id="skill_b", version="2", source="custom"),
+    ), f"the record pins each skill once: {record.spec.skills}"
+    catalog = PostgresNeutralCatalog(
+        db_session_factory, provider="selfhosted", account_scope_id=str(tenant.id)
+    )
+    pin = next(iter(record.spec.skills or ()))
+    person_scope = resource_scope(tenant_id=str(tenant.id), account_id=str(person.id))
+    stored = await catalog.get_agent_skill(person_scope, record, pin)
+    assert stored is not None, "the record's pin is attached, so its turns load the skill"
+
+
+async def test_convert_lists_a_skill_it_could_not_download(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One refused download is named; the others still copy and the move finishes."""
+    tenant = await make_tenant(db_session)
+    person = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    _downloads(monkeypatch, refuse="skill_b")
+
+    converted = await _to_daimon(db_session_factory, _skill_router(tenant.id), tenant.id, person.id)
+
+    assert converted.agent.id.startswith("dm_agent_"), "the move finishes"
+    assert converted.copied_skills == ("skill-a-v1",), f"the other copies: {converted}"
+    assert converted.dropped_skills == (
+        "xlsx (built in)",
+        "skill_b (couldn't be downloaded)",
+    ), f"the refused one is named in plain words: {converted.dropped_skills}"
+
+
+async def test_convert_without_a_person_only_lists_the_skills(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run as the operator, no one would own a copy: the skills are listed, not copied."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    _downloads(monkeypatch, refuse="skill_a")
+
+    converted = await _to_daimon(db_session_factory, _skill_router(tenant.id), tenant.id, None)
+
+    assert converted.copied_skills == (), "nothing is copied"
+    assert converted.dropped_skills == (
+        "skill_a (not copied: no person ran the move)",
+        "skill_b (not copied: no person ran the move)",
+        "xlsx (built in)",
+    ), f"each skill is listed with why: {converted.dropped_skills}"
+    assert await _catalog_rows(db_session) == [], "no catalog copy without an owner"
+    assert agent_convert.skill_receipt(converted)[-1].startswith("Skills left off: skill_a"), (
+        "the receipt names them"
+    )
+
+
+async def test_convert_back_adds_the_records_skills_to_claude_as_the_person(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Daimon to Claude: each catalog skill is added to the new agent, owned by the person."""
+    tenant = await make_tenant(db_session)
+    person = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    _downloads(monkeypatch, refuse="skill_b")
+    await _to_daimon(db_session_factory, _skill_router(tenant.id), tenant.id, person.id)
+    created = ma_agent(id="agent_ma2", name="analyst", tenant_id=tenant.id)
+    added: list[tuple[str, str, uuid.UUID | None]] = []
+
+    async def no_tagged(*_a: object, **_k: object) -> list[object]:
+        return []
+
+    async def create(*_a: object, **_k: object) -> object:
+        return created
+
+    async def retrieve(*_a: object, **_k: object) -> object:
+        return created
+
+    async def add(
+        *_a: object, agent: Any, bundle: Any, added_by_account_id: uuid.UUID | None, **_k: object
+    ) -> SkillAddResult:
+        added.append((agent.id, bundle.preview.name, added_by_account_id))
+        return SkillAddResult(
+            name=bundle.preview.name,
+            skill_id="skill_new",
+            version="1",
+            action="created",
+            newly_attached=True,
+        )
+
+    monkeypatch.setattr(agent_convert, "find_agents_by_daimon_tag", no_tagged)
+    monkeypatch.setattr(agent_convert, "create_agent", create)
+    monkeypatch.setattr(agent_convert, "retrieve_agent", retrieve)
+    monkeypatch.setattr(agent_convert, "add_agent_skill", add)
+    converted = await convert_agent_to_anthropic(
+        build_fake_anthropic(MARouter().dispatch),
+        db_session_factory,
+        tenant_id=tenant.id,
+        name="analyst",
+        subject=Subject(is_admin=True),
+        public_url=None,
+        account_id=person.id,
+    )
+
+    assert added == [("agent_ma2", "skill-a-v1", person.id)], f"added as the person: {added}"
+    assert converted.copied_skills == ("skill-a-v1",), f"the receipt names it: {converted}"

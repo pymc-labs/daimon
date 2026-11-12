@@ -196,7 +196,7 @@ async def _convert_record_to_claude(
     actor: AgentActor,
     edit: AgentEditDeps,
 ) -> str:
-    from daimon.core.agent_convert import convert_agent_to_anthropic
+    from daimon.core.agent_convert import convert_agent_to_anthropic, skill_receipt
     from daimon.core.agent_editing import AgentEditError
 
     if not anthropic_configured(edit.client):
@@ -206,14 +206,16 @@ async def _convert_record_to_claude(
     if not actor.subject.is_admin:
         raise AgentEditError("Only an admin can move this agent to Claude.", kind="forbidden")
     try:
-        await convert_agent_to_anthropic(
+        converted = await convert_agent_to_anthropic(
             edit.client,
             sessionmaker,
             tenant_id=agent.tenant_id,
             name=agent.name,
             subject=actor.subject,
             public_url=edit.public_url,
+            account_id=actor.account_id,
         )
     except UserFacingError as error:
         raise AgentEditError(str(error), kind="conflict") from error
-    return f"Moved {agent.name} to {provider_name(DEFAULT_BACKEND)}."
+    moved = f"Moved {agent.name} to {provider_name(DEFAULT_BACKEND)}."
+    return " ".join((moved, *skill_receipt(converted)))
