@@ -6224,6 +6224,40 @@ class AgentVersion(Base):
     )
 
 
+class PendingCarryOver(Base):
+    """A replacement session's framing, kept until its first message is sent (`turn.run`)."""
+
+    __tablename__ = "pending_carry_overs"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "session_id", name="uq_pending_carry_overs_session"),
+        Index("ix_pending_carry_overs_created_at", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_pending_carry_overs_tenants"),
+        nullable=False,
+    )
+    # The provider's id for the session that was never sent its framing.
+    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The framing quotes the person's earlier conversation: it goes with them.
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("accounts.id", ondelete="CASCADE", name="fk_pending_carry_overs_accounts"),
+        nullable=True,
+    )
+    user_prefix: Mapped[str] = mapped_column(Text, nullable=False)
+    system_blocks: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 def _install_erased_account_guards() -> None:
     """Create the guards (`_erasure_guards`) wherever the schema is built from the models.
 

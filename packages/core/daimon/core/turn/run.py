@@ -69,6 +69,11 @@ from daimon.core.session_snapshot import session_mcp_servers
 from daimon.core.stores.agent_notices import record_agent_notices, take_agent_notices
 from daimon.core.stores.domain import TaskContinuationRow, TransferKind
 from daimon.core.stores.gemini_runtime_state import complete
+from daimon.core.stores.pending_carry_overs import (
+    delete_pending_carry_over,
+    get_pending_carry_over,
+    record_pending_carry_over,
+)
 from daimon.core.stores.thread_session_lineage import link_replacement
 from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
@@ -1016,20 +1021,61 @@ async def _with_handoff_summary(
     return seeded, taken
 
 
-def _with_carry_over(
-    prepared: PreparedTurn, seeded: tuple[str, str] | None
-) -> tuple[str, str] | None:
-    """What a turn that never sends puts back: the hand-off summary it took, plus a
-    replacement's carry-over framing, which is otherwise held only in memory and lost
-    once the successor is bound."""
+async def _with_pending_carry_over(
+    deps: TurnDeps, prepared: PreparedTurn, *, tenant_id: uuid.UUID
+) -> tuple[PreparedTurn, bool]:
+    """The turn with a replacement's framing kept until its first send, and whether one waits.
+
+    The framing exists only on the turn that prepared the replacement: a retry reuses
+    the session and prepares none, so a turn that fails before sending would lose the
+    earlier conversation. Kept in the database on every path (chat, routines, watches,
+    wakes) and given back as it was, system blocks included.
+    """
     continuity = prepared.continuity
-    prefix = continuity.user_prefix if continuity.state == "replaced" else ""
-    if not prefix:
-        return seeded
-    if seeded is None:
-        return prepared.admission.agent.name, prefix
-    from_name, summary = seeded
-    return from_name, f"{summary}\n\n{prefix}"
+    framed = bool(continuity.user_prefix or continuity.system_blocks)
+    if framed and continuity.state != "replaced":
+        return prepared, False
+    # A Managed Agents session with a watermark has answered before: nothing waits.
+    if not framed and prepared.watermark is not None:
+        return prepared, False
+    try:
+        async with deps.sessionmaker.begin() as db:
+            if framed:
+                await record_pending_carry_over(
+                    db,
+                    tenant_id=tenant_id,
+                    session_id=prepared.ma_session_id,
+                    account_id=prepared.admission.account_id,
+                    user_prefix=continuity.user_prefix,
+                    system_blocks=continuity.system_blocks,
+                )
+                return prepared, True
+            pending = await get_pending_carry_over(
+                db, tenant_id=tenant_id, session_id=prepared.ma_session_id
+            )
+    except SQLAlchemyError as error:  # a lost framing must never block the turn itself
+        log.warning("turn.carry_over_keep_failed", error=type(error).__name__)
+        return prepared, False
+    if pending is None:
+        return prepared, False
+    log.info("turn.carry_over_restored", session_id=prepared.ma_session_id)
+    restored = replace(
+        continuity, user_prefix=pending.user_prefix, system_blocks=pending.system_blocks
+    )
+    return replace(prepared, continuity=restored), True
+
+
+async def _drop_pending_carry_over(
+    deps: TurnDeps, prepared: PreparedTurn, *, tenant_id: uuid.UUID
+) -> None:
+    """The first message was sent with the framing: it is no longer pending."""
+    try:
+        async with deps.sessionmaker.begin() as db:
+            await delete_pending_carry_over(
+                db, tenant_id=tenant_id, session_id=prepared.ma_session_id
+            )
+    except SQLAlchemyError as error:  # the sweep drops it; never mask the turn's outcome
+        log.warning("turn.carry_over_drop_failed", error=type(error).__name__)
 
 
 async def _restore_handoff_summary(
@@ -1190,6 +1236,9 @@ async def run_prepared_turn(
         or current_outcome.get()
         or TurnObservation(deps.sessionmaker, tenant_id, platform, thread_id=thread_id)
     )
+    prepared, carry_over_pending = await _with_pending_carry_over(
+        deps, prepared, tenant_id=tenant_id
+    )
     seeded: tuple[str, str] | None = None
     # Marked by the driver once the message is handed to the provider: a summary
     # goes back only if this turn never sent it (`_restore_handoff_summary`).
@@ -1204,7 +1253,6 @@ async def run_prepared_turn(
             thread_id=thread_id,
             user_message=user_message,
         )
-        seeded = _with_carry_over(prepared, seeded)
         user_message, reseed_user_message, taken_notices = await _with_agent_notices(
             deps,
             prepared,
@@ -1285,6 +1333,8 @@ async def run_prepared_turn(
                 )
     except BaseException as exc:
         observation.finish(error=exc)
+        if carry_over_pending and sent:
+            await _drop_pending_carry_over(deps, prepared, tenant_id=tenant_id)
         if seeded is not None and not sent:
             await _restore_handoff_summary(
                 deps, prepared, seeded, tenant_id=tenant_id, platform=platform, thread_id=thread_id
@@ -1319,6 +1369,8 @@ async def run_prepared_turn(
             structlog.contextvars.reset_contextvars(**bound)
     observation.session_id = result.ma_session_id
     observation.finish(state=result.state, recovered=result.recovered)
+    if carry_over_pending and sent:
+        await _drop_pending_carry_over(deps, prepared, tenant_id=tenant_id)
     if seeded is not None and not sent and result.state.error is not None:
         await _restore_handoff_summary(
             deps, prepared, seeded, tenant_id=tenant_id, platform=platform, thread_id=thread_id

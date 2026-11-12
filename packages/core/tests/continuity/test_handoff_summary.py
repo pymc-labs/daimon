@@ -257,6 +257,7 @@ async def test_a_summary_goes_back_only_when_its_turn_never_sent(
             backend_revision=None,
         ),
         ma_session_id="sess",
+        watermark="msg_answered",
         snapshot=None,
         _finalize=None,
         continuity=ContinuityOutcome(),
@@ -281,29 +282,6 @@ async def test_a_summary_goes_back_only_when_its_turn_never_sent(
         )
     assert restored == ([] if sent else [("daimon", "the summary")])
     assert SEND_ATTEMPTED.get() is None, "the mark ends with the turn"
-
-
-@pytest.mark.parametrize(
-    ("state", "seeded", "kept"),
-    [
-        ("replaced", None, ("daimon", "FRAMING")),
-        ("replaced", ("argon", "S"), ("argon", "S\n\nFRAMING")),
-        ("continued", ("argon", "S"), ("argon", "S")),
-        ("replaced_after_loss", None, None),
-    ],
-)
-def test_an_unsent_carry_over_is_kept_with_the_summary(
-    state: str, seeded: tuple[str, str] | None, kept: tuple[str, str] | None
-) -> None:
-    """A replacement's framing lives only in memory: a turn that never sends it puts it
-    back with the summary, so the retry still has the earlier conversation."""
-    from daimon.core.turn.run import _with_carry_over  # pyright: ignore[reportPrivateUsage]
-
-    prepared = SimpleNamespace(
-        continuity=ContinuityOutcome(state=state, user_prefix="FRAMING"),  # pyright: ignore[reportArgumentType]
-        admission=SimpleNamespace(agent=SimpleNamespace(name="daimon")),
-    )
-    assert _with_carry_over(prepared, seeded) == kept, state  # pyright: ignore[reportArgumentType]
 
 
 async def test_nothing_is_put_back_onto_an_archived_conversation(

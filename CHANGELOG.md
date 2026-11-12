@@ -37,7 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   do this; off, only the agent's owner or an admin can. A conversation moved to
   another provider keeps its recent messages in every direction, and its saved
   files where the new provider has a persistent workspace. It also carries them
-  over when the agent, model or plan behind it changes.
+  over when the agent, model or plan behind it changes, on routines and wakes
+  too, and keeps them for the next try when the first message fails.
 
 - **Every switch shows what changes first.** A pick on another provider shows
   what the move drops, the shared-thread limits, the price and what happens to

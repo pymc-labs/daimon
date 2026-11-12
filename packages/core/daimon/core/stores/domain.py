@@ -13,6 +13,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal, cast
 
+from anthropic.types.beta import BetaManagedAgentsSystemContentBlockParam
 from daimon.core.session_snapshot import SessionSnapshot
 from mux.contracts.config import CapabilityRequirement, ThreadMode
 from mux.contracts.ids import PROVIDERS, Provider, Scope, SkillRef
@@ -1965,3 +1966,12 @@ class WebMessageRow(BaseModel):
     feedback: Literal["up", "down"] | None
     seq: int
     created_at: datetime
+
+
+class PendingCarryOverRow(BaseModel):
+    """A replacement session's framing not yet sent (`stores.pending_carry_overs`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    user_prefix: str
+    system_blocks: tuple[BetaManagedAgentsSystemContentBlockParam, ...]

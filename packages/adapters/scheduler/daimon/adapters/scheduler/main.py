@@ -96,6 +96,7 @@ from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_session, retrieve_agent
 from daimon.core.observability import init_sentry
+from daimon.core.pending_carry_over_sweep import sweep_stale_pending_carry_overs
 from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
 from daimon.core.permissions import any_agent_rules, any_own_readers
 from daimon.core.pricing import MODEL_PRICING
@@ -1080,6 +1081,15 @@ async def _sweep_slack_event_dedup(sm: async_sessionmaker[AsyncSession]) -> None
 
 
 @scheduler_step
+async def _sweep_pending_carry_overs(sm: async_sessionmaker[AsyncSession]) -> None:
+    """Drop framing no session was sent within a week; database errors retry next tick."""
+    try:
+        await sweep_stale_pending_carry_overs(sm, now=datetime.now(UTC))
+    except SQLAlchemyError:
+        log.exception("scheduler.pending_carry_over_sweep.failed")
+
+
+@scheduler_step
 async def _sweep_retired_turn_card_intents(
     sm: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -2031,6 +2041,7 @@ async def run(
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)
             await _sweep_retired_turn_card_intents(sm)
+            await _sweep_pending_carry_overs(sm)
             await _sweep_hub_oauth_kv(sm)
             await _sweep_mcp_tokens(sm)
             await _sweep_lead_intake(sm)
@@ -2069,6 +2080,7 @@ async def run(
             await _sweep_wizard_sessions(sm)
             await _sweep_slack_event_dedup(sm)
             await _sweep_retired_turn_card_intents(sm)
+            await _sweep_pending_carry_overs(sm)
             await _sweep_hub_oauth_kv(sm)
             await _sweep_mcp_tokens(sm)
             await _sweep_lead_intake(sm)

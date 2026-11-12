@@ -168,6 +168,7 @@ async def _run(monkeypatch: pytest.MonkeyPatch, outcome: Any, *, sent: bool) -> 
             backend_revision=None,
         ),
         ma_session_id="sess",
+        watermark="msg_answered",
         snapshot=None,
         _finalize=None,
         continuity=CONTINUED,
