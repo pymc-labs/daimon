@@ -777,6 +777,8 @@ async def test_a_second_cancel_cannot_abandon_credential_revocation(monkeypatch)
             backend_revision=None,
         ),
         ma_session_id="session",
+        watermark=None,
+        reused=False,
         snapshot=None,
         _finalize=finalize,
     )
@@ -846,6 +848,8 @@ async def test_a_second_cancel_during_revocation_still_restores_the_callers_log_
             backend_revision=None,
         ),
         ma_session_id="session",
+        watermark=None,
+        reused=False,
         snapshot=None,
         _finalize=finalize,
     )
@@ -916,6 +920,8 @@ async def test_a_failing_revocation_still_restores_the_callers_log_fields(
             backend_revision=None,
         ),
         ma_session_id="session",
+        watermark=None,
+        reused=False,
         snapshot=None,
         _finalize=finalize,
     )
@@ -993,6 +999,8 @@ async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_i
             backend_revision=None,
         ),
         ma_session_id="session",
+        watermark=None,
+        reused=False,
         snapshot=None,
         _finalize=slow_failing_finalize,
     )
