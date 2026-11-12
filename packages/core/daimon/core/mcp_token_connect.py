@@ -76,7 +76,9 @@ async def connect_mcp_server_with_token(
         tenant_id=str(tenant_id),
         account_id=str(account_id),
     )
-    agent = await find_agent_by_derived_uuid(client, tenant_id=tenant_id, agent_id=agent_id)
+    agent = await find_agent_by_derived_uuid(
+        client, tenant_id=tenant_id, agent_id=agent_id, records=sessionmaker
+    )
     if agent is None:
         raise McpAgentGoneError("The agent this request was for no longer exists.")
     try:
@@ -92,12 +94,13 @@ async def connect_mcp_server_with_token(
                     replace_allowed=replace_allowed,
                     shares_token=True,
                     scope=scope,
+                    records=sessionmaker,
                 )
             except McpServerReplaceRefusedError:
                 raise
             except Exception as err:
                 raise McpAttachFailedError(type(err).__name__) from err
-            fresh = await retrieve_agent(client, agent.id, scope=scope)
+            fresh = await retrieve_agent(client, agent.id, scope=scope, records=sessionmaker)
             at_url = [s for s in fresh.mcp_servers or [] if same_mcp_url(s.url, mcp_server_url)]
             if not any(s.name == server_name for s in at_url) or (
                 not replace_allowed and any(s.name != server_name for s in at_url)

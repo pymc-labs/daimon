@@ -618,7 +618,9 @@ async def add_skill(
         principal = await get_or_create_cli_principal(
             session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
         )
-    agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=agent_name)
+    agent = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=agent_name, records=rt.sessionmaker
+    )
     if agent is None:
         raise StoreError(f"no agent named {agent_name!r} in {tenant_label}.")
 

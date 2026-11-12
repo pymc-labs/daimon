@@ -5,13 +5,14 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import parse_qs
 
 import httpx
 import pytest
 from anthropic.types.beta.vaults import BetaManagedAgentsCredential
 from daimon.core.credential_requests import mint_request_token
+from daimon.core.github_credentials import decrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_oauth.complete import (
     McpOAuthIncompleteFlowError,
@@ -19,6 +20,7 @@ from daimon.core.mcp_oauth.complete import (
     registered_client,
 )
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores import connector_tokens as connector_tokens_store
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.accounts import set_role
@@ -486,3 +488,53 @@ async def test_concurrent_server_replacement_withdraws_the_new_oauth_grant(
     assert not await flows_store.list_completed_grants(
         db_session, tenant_id=tenant_id, server_urls=[_MCP_URL]
     )
+
+
+@pytest.mark.parametrize("owner", ["ma", "daimon"])
+async def test_each_grant_has_one_refresh_owner(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    owner: Literal["ma", "daimon"],
+) -> None:
+    flow, tenant_id = await _flow(db_session, admin=True)
+    await db_session.commit()
+
+    def token_handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"access_token": "at", "refresh_token": "rt", "expires_in": 3600}
+        )
+
+    anthropic, created, updates = _fake_ma(
+        tenant_id, vault_id="vlt_me", account_id=flow.account_id, agent_id=flow.agent_id
+    )
+    fernet = make_fernet()
+    completion = await complete_mcp_oauth_flow(
+        httpx.AsyncClient(transport=httpx.MockTransport(token_handler)),
+        anthropic,
+        flow=flow,
+        code="code123",
+        fernet=fernet,
+        jwt_secret=b"x" * 32,
+        public_url=_PUBLIC_URL,
+        now=_NOW,
+        session_factory=db_session_factory,
+        default=DeploymentDefault(agent_name="daimon", environment_name="default"),
+        refresh_owner=owner,
+    )
+    row = await connector_tokens_store.get_connector_token(
+        db_session,
+        tenant_id=tenant_id,
+        account_id=flow.account_id,
+        agent_id=flow.agent_id,
+        server_url=_MCP_URL,
+    )
+    assert [s["name"] for s in updates[0]["mcp_servers"]] == ["notion"], "both owners attach"
+    if owner == "ma":
+        assert completion.vault_id == "vlt_me", "the MA vault holds an MA agent's grant"
+        assert len(created) == 1 and row is None, "an MA grant writes no Daimon token"
+        return
+    assert completion.vault_id is None and not created, "a Daimon grant never touches the vault"
+    assert row is not None and row.id == completion.connector_token_id, "the row is the grant"
+    assert decrypt_token(fernet, row.access_token_encrypted) == "at", "the token round-trips"
+    assert row.resource == "https://mcp.notion.com", "the resource the exchange used is kept"
+    assert row.refresh_owner == "daimon", "Daimon is the one refresh owner"

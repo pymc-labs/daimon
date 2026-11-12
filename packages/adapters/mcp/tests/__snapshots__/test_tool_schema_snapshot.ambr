@@ -754,8 +754,9 @@
         <blank line>
         It works for the same person in this conversation, with its own tools, keys and
         rules; nothing it writes is posted. Asking the same helper again continues its
-        conversation in this thread. While `status` is `queued` or `running`, call
-        `wait_for_helpers` with the `ask_id`. Helpers stop when your turn ends, so wait
+        conversation in this thread. `self`, when listed, is a fresh copy of you each time:
+        ask it several times without waiting to work in parallel. While `status` is
+        `queued` or `running`, call `wait_for_helpers` with the `ask_id`. Helpers stop when your turn ends, so wait
         for their replies before you answer.
         <blank line>
         To pass it files: for each, call `create_file_upload_url`, PUT the file with the
@@ -6094,6 +6095,115 @@
         'type': 'object',
       }),
     }),
+    'memory_create': dict({
+      'description': 'Save a new memory file at `path` (for example `/notes/project.md`).',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'content': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'path': dict({
+            'type': 'string',
+          }),
+          'personal': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+          'path',
+          'content',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'memory_delete': dict({
+      'description': 'Delete a memory file.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'path': dict({
+            'type': 'string',
+          }),
+          'personal': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+          'path',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'memory_str_replace': dict({
+      'description': 'Replace the one occurrence of `old_str` in a memory file with `new_str`.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'new_str': dict({
+            'type': 'string',
+          }),
+          'old_str': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'path': dict({
+            'type': 'string',
+          }),
+          'personal': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+          'path',
+          'old_str',
+          'new_str',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'memory_view': dict({
+      'description': '''
+        Read a memory file, or list the memory paths under a directory.
+        <blank line>
+        Memory persists across conversations. `personal` selects the caller's own
+        memory instead of the agent's shared memory.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'path': dict({
+            'default': '/',
+            'type': 'string',
+          }),
+          'personal': dict({
+            'default': False,
+            'type': 'boolean',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'microsoft_get': dict({
       'description': '''
         GET a Microsoft Graph v1.0 path as the person, e.g. /me/drive/root/children.
@@ -7558,7 +7668,9 @@
         The same tool states the agent's own settings: ``thread_mode`` ("shared"
         to share threads where the channel allows it, admins only; or "per_caller") and
         ``required_capabilities`` (a channel that can't give one refuses the turn).
-        Pass both together; an omitted one returns to the default. To change only
+        Pass both together; an omitted one returns to the default. ``effort``
+        (low, medium or high) sets the reasoning effort on OpenAI and Gemini; the
+        agent keeps its own effort unless you pass one. To change only
         settings, pass the agent's current target_backend and model.
       ''',
       'parameters': dict({
@@ -7580,6 +7692,22 @@
           }),
           'agent_name': dict({
             'type': 'string',
+          }),
+          'effort': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'low',
+                  'medium',
+                  'high',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'expected_revision': dict({
             'anyOf': list([
@@ -7800,6 +7928,65 @@
           'channel_id',
           'origin_context_id',
           'expected_ma_agent_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'request_channel_pin': dict({
+      'description': '''
+        Pin THIS channel to another provider's model, with admin confirmation. Admin-only.
+        <blank line>
+        Use when an admin asks to run every agent in this channel on one model, such as
+        "pin this channel to GPT-6". model is one from list_models on another provider
+        (`provider:id`). A pin makes every agent answer here on that model until it is
+        cleared with request_channel_pin_clear. First call without preview_digest and show
+        what the pin changes. Then call again with the returned model, expected_revision and
+        preview_digest: the requesting admin must Confirm on the card. Only this chat's
+        channel can be pinned. Pass this turn's origin_context_id. A stale preview changes
+        nothing.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'expected_revision': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'model': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'preview_digest': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'model',
         ]),
         'type': 'object',
       }),
@@ -9664,14 +9851,19 @@
     }),
     'set_thread_model': dict({
       'description': '''
-        Run this conversation on another model when the person asks in words: "use opus here", "think harder".
+        Run this conversation on another model when the person asks in words: "use opus here", "use GPT-5 here".
         <blank line>
         Only on the person's direct instruction in this conversation, never on
-        your own judgement or because a model is mentioned. "Think harder" or
-        "think as hard as you can" means ``opus``; ``default`` goes back to the
-        agent's own model. There is no effort setting. The conversation keeps
-        the choice for every later reply until someone changes it; the reply
-        in progress keeps its model. Other conversations are unaffected.
+        your own judgement or because a model is mentioned. ``model`` is
+        ``haiku``, ``sonnet``, ``opus``, ``default`` (the agent's own model) or
+        a model from ``list_models`` as ``provider:id``. "Think harder" means
+        ``opus``. There is no effort setting. The conversation keeps the choice
+        for every later reply until someone changes it; the reply in progress
+        keeps its model. Other conversations are unaffected.
+        <blank line>
+        A model on another provider returns ``changes`` and does nothing yet:
+        read them to the person, and only after they agree in a later message
+        call again with the same ``model``, ``digest`` and ``revision``.
         <blank line>
         ``origin_context_id`` must name this execution's attended origin;
         routines and other unattended runs are refused. Read the returned
@@ -9680,17 +9872,33 @@
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
-          'model': dict({
-            'enum': list([
-              'haiku',
-              'sonnet',
-              'opus',
-              'default',
+          'digest': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
             ]),
+            'default': None,
+          }),
+          'model': dict({
             'type': 'string',
           }),
           'origin_context_id': dict({
             'type': 'string',
+          }),
+          'revision': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
         }),
         'required': list([
@@ -9999,9 +10207,11 @@
     }),
     'update_agent': dict({
       'description': '''
-        Change an agent's instructions (system prompt), switch its model, or add existing
-        skills such as build-models. Scalar ``model``, ``description`` and ``system`` fields
-        replace.
+        Update an agent: change its instructions (system prompt), switch its model, or
+        add existing skills such as build-models. Scalar ``model``, ``description``
+        and ``system`` fields replace. Outside chat ``model`` may be any
+        ``list_models`` model, another provider's too; in chat move providers with
+        ``request_agent_backend_switch``.
         <blank line>
         Prefer current-generation ``claude-sonnet-5-5`` for Sonnet,
         ``claude-opus-5-5`` for Opus and ``claude-haiku-5-5`` for the cheapest
@@ -11278,6 +11488,36 @@
         'required': list([
           'origin_context_id',
           'ask_ids',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'web_fetch': dict({
+      'description': '''
+        Open a public https web page and return its text.
+        <blank line>
+        Long pages are cut short. Pages that are not text are refused.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'url': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'url',
         ]),
         'type': 'object',
       }),

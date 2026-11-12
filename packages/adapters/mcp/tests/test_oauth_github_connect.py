@@ -1281,7 +1281,9 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
             )
         raise AssertionError(path)
 
-    async def find_agent(_client: object, *, tenant_id: uuid.UUID, agent_id: uuid.UUID) -> object:
+    async def find_agent(
+        _client: object, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, records: object = None
+    ) -> object:
         return SimpleNamespace(name="Editor", metadata={})
 
     monkeypatch.setattr(oauth_github, "find_agent_by_derived_uuid", find_agent)
@@ -1723,7 +1725,9 @@ async def editor_env(
             )
         raise AssertionError(path)
 
-    async def find_agent(_client: object, *, tenant_id: uuid.UUID, agent_id: uuid.UUID) -> object:
+    async def find_agent(
+        _client: object, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, records: object = None
+    ) -> object:
         return SimpleNamespace(name="Editor", metadata={})
 
     monkeypatch.setattr(oauth_github, "find_agent_by_derived_uuid", find_agent)

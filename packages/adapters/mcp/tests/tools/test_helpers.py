@@ -396,3 +396,33 @@ async def test_an_ask_refuses_files_it_cannot_pass(
             wait=False,
             files=[handle],
         )
+
+
+async def test_an_agent_without_native_multiagent_asks_fresh_copies_of_itself(
+    db_session: AsyncSession, committing_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    world, auth, origin = await _setup(db_session, committing_sessionmaker, serving=False)
+    async with committing_sessionmaker.begin() as session:
+        await mark_serving_helpers(session, origin_id=origin.id, self_helpers=True)
+    runtime = world.runtime()
+
+    listed = await tool._list_helpers_impl(  # pyright: ignore[reportPrivateUsage]
+        runtime, auth, origin_context_id=str(origin.id)
+    )
+    asks = [
+        await tool._ask_helper_impl(  # pyright: ignore[reportPrivateUsage]
+            runtime, auth, origin_context_id=str(origin.id), helper="self", message=part, wait=False
+        )
+        for part in ("first half", "second half")
+    ]
+
+    assert [h.name for h in listed.helpers] == ["self", "argon"]
+    async with committing_sessionmaker() as session:
+        rows = await helper_asks.list_asks(
+            session,
+            tenant_id=auth.tenant_id,
+            origin_id=origin.id,
+            ids=[uuid.UUID(a.ask_id) for a in asks],
+        )
+    assert {(row.helper_agent_id, row.helper_name) for row in rows} == {("ag_lead", tool.COPY_NAME)}
+    assert len(rows) == 2

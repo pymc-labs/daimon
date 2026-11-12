@@ -390,14 +390,21 @@ async def project_session_resources(
     private_dm_id: str | None = None,
     origin_seal_ids: Collection[str] = (),
     extra_resources: Sequence[Resource] = (),
+    caller_resources_on_credential: bool = False,
 ) -> BackendAgent:
     """Read the existing composer's obligations without resolving or materializing secrets.
 
+    `caller_resources_on_credential`: the target host signs seals, Slack turn context
+    and private DM onto its per-turn credential, so they add no native obligation.
+
     The result describes source intent, never preservation or execution authority.
     Every target mapping remains unproven until the existing preparation seam proves it.
+
+    A ``hold`` names only the held channel's memory store, never the agent-wide
+    one, as MA's held session mounts it (`memory_hold`). The hold itself travels
+    on the provider turn's own Daimon credential, so the caller reference is the
+    ordinary one.
     """
-    if hold is not None:
-        raise ScopeViolation("source-preparation", "a held turn cannot capture an unheld source")
     _check_resource_source(
         source, agent, environment, tenant_id, agent_uuid, account_id, resource_scope
     )
@@ -440,8 +447,18 @@ async def project_session_resources(
             )
             else ()
         )
-        store_id = await agent_memory_stores.get_memory_store_id(
-            session, tenant_id=tenant_id, agent_id=agent_uuid
+        store_id = (
+            await agent_memory_stores.get_memory_store_id(
+                session, tenant_id=tenant_id, agent_id=agent_uuid
+            )
+            if hold is None
+            else await agent_memory_stores.get_channel_memory_store_id(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_uuid,
+                platform=hold.platform,
+                channel_id=hold.channel_id,
+            )
         )
     hidden = frozenset[str]()
     hiding_for = account_id if account_id is not None else hide_personal_for
@@ -504,8 +521,6 @@ async def project_session_resources(
         reference = f"{CALLER_VAULT_PREFIX}{tenant_id}:{account_id}:{agent_uuid}"
         if slack_turn_context_id is not None:
             reference += f":slack-turn:{slack_turn_context_id}"
-        if hold is not None:
-            reference += f":hold:{hold_key(hold)}"
         requirements.append(
             ResourceBinding(id=reference, kind="credential", credential_ref=reference)
         )
@@ -524,14 +539,14 @@ async def project_session_resources(
         requirements.append(
             ResourceBinding(id=f"{APP_SESSION_VAULT_PREFIX}{tenant_id}:{agent_uuid}", kind="native")
         )
+    carried_natively = not caller_resources_on_credential and (
+        slack_turn_context_id is not None or private_dm_id is not None or bool(origin_seal_ids)
+    )
     if (
         extra_resources
-        or slack_turn_context_id is not None
-        or (hold is not None and caller_vault)
-        or private_dm_id is not None
+        or carried_natively
         or app_session_unmapped
         or (requester_is_headless and app_mode)
-        or origin_seal_ids
         or (app_mode and agent_github_app is not None and repos)
     ):
         # Opaque carry resources and private credentials are not absent obligations.

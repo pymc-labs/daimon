@@ -151,6 +151,7 @@ async def _target_agent(
             thread_id=None,
             default=runtime.deployment_default,
             is_admin=True,
+            records=runtime.sessionmaker,
         )
     return next((row for row in roster.rows if row.name == name), None)
 

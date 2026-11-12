@@ -91,7 +91,9 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
         if len(parts) > 1:
             name = parts[1].strip()
-            agents = await list_agents_by_tenant(runtime.anthropic, tenant_id=tenant_id)
+            agents = await list_agents_by_tenant(
+                runtime.anthropic, tenant_id=tenant_id, records=runtime.sessionmaker
+            )
             matches = [row for row in agents if row.name.casefold() == name.casefold()]
             if len(matches) != 1:
                 await reply("Choose one current agent.")
@@ -108,6 +110,7 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
                     channel_id=channel_id,
                     thread_id=None,
                     default=runtime.deployment_default,
+                    records=runtime.sessionmaker,
                 )
             if roster.answering is None:
                 await reply("Choose an agent: /github connect [agent].", error=False)
@@ -211,6 +214,7 @@ async def _owns_target(
         runtime.anthropic,
         tenant_id=tenant_id,
         agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id),
+        records=runtime.sessionmaker,
     )
     if live is None or live.id != ma_agent_id:
         return False

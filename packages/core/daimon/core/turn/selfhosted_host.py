@@ -14,27 +14,47 @@ from daimon.core.mux_backend import (
     TurnBackend,
     TurnBackendRequest,
     TurnRuntime,
+    owner_turn_scope,
     register_turn_backend,
 )
 from daimon.core.pricing import ProviderPrice
+from daimon.core.session_compat import ChangeReason, ReplaceSession, UpdateInPlace
+from daimon.core.shared_threads import shared_owner
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import reauthorize
+from daimon.core.turn.carry_over import (
+    carry_on_adoption,
+    register_session_reader,
+    replaced_session,
+)
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
 from daimon.core.turn.io import TurnCodecRequest, TurnIO, register_turn_codec
 from daimon.core.turn.persistence import current_persistence
 from daimon.core.turn.prepare import (
+    CONTINUED,
     PreparedTurn,
     ProviderPreparationRequest,
     register_turn_preparation,
+)
+from daimon.core.turn.replace_binding import (
+    BindingFacts,
+    BindingField,
+    OldSession,
+    Replacement,
+    binding_decision,
+    end_session,
+    recorded_facts,
+    replace_binding,
 )
 from daimon.core.turn.selfhosted_codec import PROFILE
 from daimon.core.turn.selfhosted_io import SelfHostedTurnIO
 from daimon.core.turn.selfhosted_state import invocation_baseline, skipped_skill_notice
 from daimon.core.usage_recording import record_provider_usage
 from mux.contracts.config import ConfigRevision
+from mux.contracts.digest import digest_body
 from mux.contracts.ids import ResourceRef, Scope, ThreadRef
 from mux.contracts.ports import Agents, Environments
-from mux.contracts.resources import Agent, ProviderBinding, Session, SessionSpec
+from mux.contracts.resources import Agent, ProviderBinding, ResourceBinding, Session, SessionSpec
 from mux.contracts.usage import UsageObservation
 from mux.drivers.selfhosted import Authorization, SelfHostedDriver, ToolsResolver, Transport
 from mux.errors import BindingConflict, ContinuityLost, ScopeViolation, UnsupportedCapability
@@ -230,6 +250,8 @@ async def _pin_planned_agent(
 
 
 UPDATE_LEASE_TTL = timedelta(seconds=30)
+# What the harness applies to a live session: every turn carries the agent's pins.
+UPDATABLE_FIELDS: frozenset[BindingField] = frozenset({"config_revision", "model", "plan_digest"})
 
 
 @contextlib.asynccontextmanager
@@ -260,21 +282,11 @@ async def _hold_slot(store: StateStore, slot: Slot, now: datetime) -> AsyncItera
             await store.release_lease(lease)
 
 
-def _config_changed(
-    binding: ProviderBinding, revision: ConfigRevision, runtime: SelfHostedHostRuntime, digest: str
-) -> bool:
-    refs = binding.native_refs
-    return (
-        binding.config_revision != revision.local
-        or refs.get("model") != runtime.model
-        or refs.get("plan_digest") != digest
-    )
-
-
 async def _advance_binding(
     request: ProviderPreparationRequest,
     store: StateStore,
     *,
+    scope: Scope,
     backend: SelfHostedDriver,
     slot: Slot,
     binding: ProviderBinding,
@@ -282,8 +294,10 @@ async def _advance_binding(
     spec: SessionSpec,
     runtime: SelfHostedHostRuntime,
     digest: str,
-) -> ProviderBinding:
+) -> ProviderBinding | None:
     """Move an open thread's binding to the edited agent, on the same session.
+
+    None when the harness refuses the edit in place: the caller replaces the session.
 
     The agent's instructions, model, tools, skills and MCP servers travel on
     every harness turn, so the session (and its workspace) is kept and only
@@ -295,16 +309,14 @@ async def _advance_binding(
     async with _hold_slot(store, slot, now) as lease:
         ref = session.ref
         # Read the state again under the lease: a turn may have started since `session`.
-        if (await backend.sessions.retrieve(request.scope, ref)).state != "idle":
+        if (await backend.sessions.retrieve(scope, ref)).state != "idle":
             raise _busy(now, "session_active")
-        plan = await backend.sessions.plan_update(request.scope, ref, spec)
+        plan = await backend.sessions.plan_update(scope, ref, spec)
         if plan.action == "refuse":
-            raise ContinuityLost(binding.id, plan.unmet)
+            return None
         key = "selfhosted:update:" + str(uuid5(NAMESPACE_URL, binding.id + digest))
-        await backend.sessions.apply_update(
-            request.scope, plan, expected=plan.expected_revision, key=key
-        )
-        advanced = (await backend.sessions.retrieve(request.scope, ref)).binding
+        await backend.sessions.apply_update(scope, plan, expected=plan.expected_revision, key=key)
+        advanced = (await backend.sessions.retrieve(scope, ref)).binding
         successor = advanced.model_copy(
             update={
                 "generation": binding.generation + 1,
@@ -343,34 +355,32 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
     except BackendUnsupported as error:
         raise AdmissionDenied(reason="backend_unsupported") from error
     runtime = runtime_for(request.deps.turn_runtimes.get(PROFILE), revision)
+    # A shared thread binds the account-less slot and its session runs as the
+    # thread's own owner; the caller's relay credential hides personal sign-ins.
+    # An agent's own choice (an operator's per-agent grant) runs per caller only.
+    shared = request.admission.shared_owner
+    origin = request.admission.backend_revision_origin
     if (
         not request.deps.channel_backends
         or request.deps.turn_path != "mux"
-        or request.admission.shared_owner is not None
-        or request.admission.hold is not None
-        or request.admission.backend_revision_origin != "channel"
-        or revision.thread_mode != "per_caller"
-        or request.transfer is not None
+        or origin not in ("channel", "agent")
+        or (origin == "agent" and shared is not None)
+        or revision.thread_mode != ("shared" if shared is not None else "per_caller")
     ):
         raise AdmissionDenied(reason="backend_unsupported")
+    scope = owner_turn_scope(request.scope, str(shared) if shared is not None else None)
     if (
         revision.channel.tenant_id != request.scope.tenant_id
         or revision.channel.platform != request.platform
-        or request.scope.account_id != str(request.session_account_id)
+        or request.scope.account_id != str(request.admission.account_id)
+        or scope.account_id != str(request.session_account_id)
     ):
         raise ScopeViolation(request.thread_id, "self-hosted thread differs from admitted scope")
     if not runtime.price.current_on(request.now().date()):
         raise AdmissionDenied(reason="backend_unsupported")
+    # Seals and Slack context ride the turn credential (`mint_turn_mcp_authorization`).
+    # Publishing and rule asks pause in the harness (`host_tool_policy`) for host approval.
     current = await reauthorize(request.deps, request.admission)
-    if (
-        current.memory_read_only
-        or current.origin_seal_ids
-        or current.source_sealed
-        or current.asks_before_publishing
-        or current.slack_turn_context_id is not None
-        or current.daimon_rules_need_driver
-    ):
-        raise AdmissionDenied(reason="backend_unsupported")
     request = replace(request, admission=current)
     spec = await runtime.session_plan(request)
     if (
@@ -386,41 +396,45 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
             ref.provider != "selfhosted"
             or ref.kind != kind
             or ref.account_scope_id != runtime.account_scope_id
-            or ref.tenant_id != request.scope.tenant_id
-            or ref.account_id not in (None, request.scope.account_id)
+            or ref.tenant_id != scope.tenant_id
+            or ref.account_id not in (None, scope.account_id)
         ):
             raise ScopeViolation(ref.id, "self-hosted plan contains a foreign resource")
-    runtime = await _pin_planned_agent(runtime, request.scope, spec, request.now())
+    runtime = await _pin_planned_agent(runtime, scope, spec, request.now())
     store = request.deps.state_store or PostgresStateStore(request.deps.sessionmaker)
     await store.put_config_revision(revision)
     slot = Slot(
         thread=ThreadRef(channel=revision.channel, thread_id=request.thread_id),
-        account_id=request.scope.account_id,
+        account_id=None if shared is not None else scope.account_id,
     )
-    digest = request_digest({"spec": spec.model_dump(mode="json"), "model": runtime.model})
+    digest = request_digest({"spec": digest_body(spec), "model": runtime.model})
     binding = await store.get_binding(slot)
     reused = binding is not None
-    if binding is not None and (
-        not request.reuse_existing
-        or binding.profile != PROFILE
-        or binding.provider != "selfhosted"
-        or binding.native_refs.get("agent") != spec.agent.id
-        or binding.native_refs.get("environment") != spec.environment.id
-        or binding.native_refs.get("account_scope") != runtime.account_scope_id
-    ):
-        raise ContinuityLost(binding.id, ("bound self-hosted configuration changed",))
-    backend = driver(runtime, revision, request.scope, binding, store=store)
-    if binding is None:
-        # C3 has no session-create side effect: creation only verifies injected
-        # resource records and derives a stable identity. The first send creates
-        # harness history through its durable idempotency key.
-        native = await backend.sessions.create(
-            request.scope,
-            spec,
-            key="selfhosted:prepare:" + str(uuid5(NAMESPACE_URL, slot.model_dump_json() + digest)),
+    continuity = CONTINUED
+    environment_id = spec.environment.id
+    create_key = "selfhosted:prepare:" + str(uuid5(NAMESPACE_URL, slot.model_dump_json() + digest))
+
+    def session_ref(bound: ProviderBinding) -> ResourceRef:
+        return ResourceRef(
+            id=bound.native_refs["session"],
+            kind="session",
+            provider="selfhosted",
+            account_scope_id=runtime.account_scope_id,
+            tenant_id=scope.tenant_id,
+            account_id=scope.account_id,
         )
-        binding = ProviderBinding(
-            id=str(uuid5(NAMESPACE_URL, "selfhosted:binding:" + slot.model_dump_json())),
+
+    async def created(era: str) -> tuple[Session, ProviderBinding]:
+        # C3 has no session-create side effect: creation only verifies injected
+        # resource records and derives a stable identity from the key. The first
+        # send creates harness history through its durable idempotency key.
+        native = await driver(runtime, revision, scope, store=store).sessions.create(
+            scope, spec, key=create_key + era
+        )
+        return native, ProviderBinding(
+            id=str(shared)
+            if shared is not None
+            else str(uuid5(NAMESPACE_URL, "selfhosted:binding:" + slot.model_dump_json())),
             thread=slot.thread,
             provider="selfhosted",
             profile=PROFILE,
@@ -432,27 +446,95 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
             },
             generation=1,
             config_revision=revision.local,
-            legacy_account_id=request.scope.account_id,
+            legacy_account_id=None if shared is not None else scope.account_id,
         )
-        binding = await store.put_binding(binding, expected_generation=0)
-        backend = driver(runtime, revision, request.scope, binding, store=store)
-        ref = native.ref
-    else:
-        ref = ResourceRef(
-            id=binding.native_refs["session"],
-            kind="session",
-            provider="selfhosted",
-            account_scope_id=runtime.account_scope_id,
-            tenant_id=request.scope.tenant_id,
-            account_id=request.scope.account_id,
+
+    async def replaced(old: ProviderBinding, reasons: tuple[ChangeReason, ...]) -> Replacement:
+        # A session of another provider or account scope is not read with this one's driver.
+        readable = (
+            old.provider == "selfhosted"
+            and "session" in old.native_refs
+            and old.native_refs.get("account_scope") == runtime.account_scope_id
         )
-        native = await backend.sessions.retrieve(request.scope, ref)
-        if native.state == "terminated":
-            raise ContinuityLost(binding.id, ("self-hosted session terminated",))
-        if _config_changed(binding, revision, runtime, digest):
-            binding = await _advance_binding(
+        successors: list[Session] = []
+
+        async def successor(
+            era: str, resources: tuple[ResourceBinding, ...], lease: Lease
+        ) -> ProviderBinding:
+            native, published = await created(era)
+            successors.append(native)
+            return published
+
+        return await replace_binding(
+            store=store,
+            slot=slot,
+            scope=scope,
+            old=await replaced_session(
                 request,
                 store,
+                old,
+                OldSession(
+                    binding=old,
+                    ref=session_ref(old),
+                    backend=driver(runtime, revision, scope, old, store=store),
+                )
+                if readable
+                else None,
+            ),
+            reasons=reasons,
+            create=successor,
+            now=request.now(),
+            model_id=runtime.model,
+            agent_name=current.agent.name,
+            clock=request.now,
+            abandon=lambda lost: end_session(
+                scope,
+                driver(runtime, revision, scope, lost, store=store),
+                successors[-1].ref,
+                key=f"binding-abandon:{lost.id}",
+            ),
+        )
+
+    decision = (
+        None
+        if binding is None
+        else binding_decision(
+            recorded_facts(binding, environment=True),
+            BindingFacts(
+                profile=PROFILE,
+                provider="selfhosted",
+                config_revision=revision.local,
+                agent=spec.agent.id,
+                environment=environment_id,
+                account_scope=runtime.account_scope_id,
+                model=runtime.model,
+                plan_digest=digest,
+            ),
+            reuse_existing=request.reuse_existing and request.transfer is None,
+            updatable=UPDATABLE_FIELDS,
+        )
+    )
+    if binding is None:
+        carried = await carry_on_adoption(
+            request, store=store, slot=slot, model_id=runtime.model, agent_name=current.agent.name
+        )
+        if carried is not None:
+            continuity = carried.continuity
+        _, published = await created("")
+        binding = await store.put_binding(published, expected_generation=0)
+    elif isinstance(decision, ReplaceSession):
+        replacement = await replaced(binding, decision.reasons)
+        binding, continuity = replacement.binding, replacement.continuity
+    else:
+        backend = driver(runtime, revision, scope, binding, store=store)
+        native = await backend.sessions.retrieve(scope, session_ref(binding))
+        if native.state == "terminated":
+            raise ContinuityLost(binding.id, ("self-hosted session terminated",))
+        if isinstance(decision, UpdateInPlace):
+            advanced = await _advance_binding(
+                request,
+                store,
+                scope=scope,
                 backend=backend,
                 slot=slot,
                 binding=binding,
@@ -461,7 +543,13 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
                 runtime=runtime,
                 digest=digest,
             )
-            backend = driver(runtime, revision, request.scope, binding, store=store)
+            if advanced is None:
+                replacement = await replaced(binding, decision.reasons)
+                binding, continuity = replacement.binding, replacement.continuity
+            else:
+                binding = advanced
+    backend = driver(runtime, revision, scope, binding, store=store)
+    ref = session_ref(binding)
 
     async def record(*, observation: UsageObservation) -> bool:
         if observation.session != ref or observation.thread_id is not None:
@@ -496,10 +584,41 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
         backend=backend,
         session_ref=ref,
         runtime=runtime,
+        continuity=continuity,
+        _scope=scope if shared is not None else None,
+    )
+
+
+def _old_session(
+    runtime: TurnRuntime,
+    revision: ConfigRevision,
+    scope: Scope,
+    binding: ProviderBinding,
+    store: StateStore,
+) -> OldSession:
+    """A released self-hosted session, read after its thread moved to another provider."""
+    host = runtime_for(runtime, revision)
+    # Another harness's session is never read with this one's credential.
+    if binding.native_refs.get("account_scope", host.account_scope_id) != host.account_scope_id:
+        raise ScopeViolation(binding.id, "self-hosted session belongs to another account scope")
+    # An account-less binding is a shared thread's: its session is the thread owner's.
+    if binding.legacy_account_id is None:
+        scope = owner_turn_scope(scope, str(shared_owner(Slot(thread=binding.thread))))
+    ref = ResourceRef(
+        id=binding.native_refs["session"],
+        kind="session",
+        provider="selfhosted",
+        account_scope_id=host.account_scope_id,
+        tenant_id=scope.tenant_id,
+        account_id=scope.account_id,
+    )
+    return OldSession(
+        binding=binding, ref=ref, backend=driver(host, revision, scope, binding, store=store)
     )
 
 
 def register_host() -> None:
+    register_session_reader(PROFILE, _old_session)
     register_turn_backend(PROFILE, _backend, fallback=True)
     register_turn_codec(PROFILE, _codec, fallback=True)
     register_turn_preparation(PROFILE, prepare_selfhosted, fallback=True)

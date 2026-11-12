@@ -59,7 +59,7 @@ from daimon.core.stores.scoped_config_read import (
 from daimon.core.stores.scoped_config_write import set_fields, unset_fields
 from daimon.core.stores.thread_sessions import recorded_thread_parents
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 ENVIRONMENT_OPTION_INHERIT: Final = "inherit"
 """The picker option that hands a channel back to the default."""
@@ -274,7 +274,11 @@ def plan_environment_picker(
 
 
 async def list_environment_names(
-    client: AsyncAnthropic, *, tenant_id: uuid.UUID, hidden: frozenset[str] = frozenset()
+    client: AsyncAnthropic | None,
+    *,
+    tenant_id: uuid.UUID,
+    records: async_sessionmaker[AsyncSession] | None,
+    hidden: frozenset[str] = frozenset(),
 ) -> list[str]:
     """The names a scope may pick in this tenant, de-duplicated and sorted case-insensitively.
 
@@ -282,7 +286,7 @@ async def list_environment_names(
     save look up; an environment without one cannot be picked, so is left out,
     as is one in `hidden` (`load_hidden_environment_names`).
     """
-    environments = await list_environments_by_tenant(client, tenant_id=tenant_id)
+    environments = await list_environments_by_tenant(client, tenant_id=tenant_id, records=records)
     names = {name for env in environments if (name := env.metadata.get(MA_METADATA_KEY_NAME))}
     return sorted(names - hidden, key=str.casefold)
 
@@ -404,6 +408,16 @@ class EnvironmentPick:
         return self.environment.metadata.get(MA_METADATA_KEY_NAME)
 
 
+async def _on_session_connection(
+    session: AsyncSession, records: async_sessionmaker[AsyncSession] | None
+) -> async_sessionmaker[AsyncSession] | None:
+    """`records` read on `session`'s own connection: a caller holding a pooled connection
+    never waits on a second one, which deadlocks once the pool is spent."""
+    if records is None:
+        return None
+    return async_sessionmaker(bind=await session.connection(), expire_on_commit=False)
+
+
 async def authorize_environment_pick(
     session: AsyncSession,
     client: AsyncAnthropic,
@@ -413,6 +427,7 @@ async def authorize_environment_pick(
     channel_id: str | None,
     environment_name: str | None,
     default: DeploymentDefault,
+    records: async_sessionmaker[AsyncSession] | None,
     thread_id: str | None = None,
 ) -> EnvironmentPick:
     """Whether `subject` may set `channel_id`'s environment to `environment_name`.
@@ -427,6 +442,7 @@ async def authorize_environment_pick(
     workspace default that moves a sealed channel or thread onto one.
     """
     policy = await load_access_policy(session, tenant_id=tenant_id)
+    records = await _on_session_connection(session, records)
     if (
         channel_id is not None
         and thread_id is None
@@ -455,7 +471,7 @@ async def authorize_environment_pick(
     sealed = channel_id is not None and holds_limited_readers(policy, channel_id, place)
     if environment_name is not None:
         environment = await find_environment_by_daimon_tag(
-            client, tenant_id=tenant_id, name=environment_name
+            client, tenant_id=tenant_id, name=environment_name, records=records
         )
         if environment is None:
             return EnvironmentPick(decision=gate, missing=True)
@@ -480,7 +496,7 @@ async def authorize_environment_pick(
         moves = await _sealed_moves(
             session, policy, tenant_id=tenant_id, default=default, change=_workspace(None)
         )
-        open_network = await _any_open(client, tenant_id=tenant_id, names=moves)
+        open_network = await _any_open(client, tenant_id=tenant_id, names=moves, records=records)
         return EnvironmentPick(decision=gate, needs_confirm=open_network)
     if not sealed:
         return EnvironmentPick(decision=gate)
@@ -488,7 +504,10 @@ async def authorize_environment_pick(
         session, context=ScopeContext(tenant_id=tenant_id, channel_id=None), default=default
     )
     environment = await find_environment_by_daimon_tag(
-        client, tenant_id=tenant_id, name=fallback.environment_name or "default"
+        client,
+        tenant_id=tenant_id,
+        name=fallback.environment_name or "default",
+        records=records,
     )
     open_network = environment is None or has_open_network(environment)
     decision = decide(open_network=open_network)
@@ -591,10 +610,18 @@ async def _sealed_moves(
     )
 
 
-async def _any_open(client: AsyncAnthropic, *, tenant_id: uuid.UUID, names: Iterable[str]) -> bool:
+async def _any_open(
+    client: AsyncAnthropic | None,
+    *,
+    tenant_id: uuid.UUID,
+    names: Iterable[str],
+    records: async_sessionmaker[AsyncSession] | None,
+) -> bool:
     """Whether any of `names` has an open network; a missing one counts as open."""
     for name in names:
-        environment = await find_environment_by_daimon_tag(client, tenant_id=tenant_id, name=name)
+        environment = await find_environment_by_daimon_tag(
+            client, tenant_id=tenant_id, name=name, records=records
+        )
         if environment is None or has_open_network(environment):
             return True
     return False
@@ -644,11 +671,13 @@ async def archive_needs_confirm(
     tenant_id: uuid.UUID,
     environment_name: str,
     default: DeploymentDefault,
+    records: async_sessionmaker[AsyncSession] | None,
 ) -> bool:
     """Whether archiving `environment_name` drops a sealed channel that runs in it
     onto an environment with an open network, or none, so a server admin confirms
     it first."""
     policy = await load_access_policy(session, tenant_id=tenant_id)
+    records = await _on_session_connection(session, records)
     moves = await _sealed_moves(
         session,
         policy,
@@ -656,7 +685,7 @@ async def archive_needs_confirm(
         default=default,
         change=lambda picks: picks.without(environment_name),
     )
-    return await _any_open(client, tenant_id=tenant_id, names=moves)
+    return await _any_open(client, tenant_id=tenant_id, names=moves, records=records)
 
 
 LIMITED_OPEN_NETWORK_WARNING: Final = (
@@ -678,6 +707,7 @@ async def limited_readers_network_warning(
     tenant_id: uuid.UUID,
     channel_id: str,
     default: DeploymentDefault,
+    records: async_sessionmaker[AsyncSession] | None,
 ) -> str | None:
     """The warning for sealing `channel_id` while its own environment has an open network.
 
@@ -693,7 +723,7 @@ async def limited_readers_network_warning(
         return None
     try:
         environment = await find_environment_by_daimon_tag(
-            client, tenant_id=tenant_id, name=resolved.environment_name
+            client, tenant_id=tenant_id, name=resolved.environment_name, records=records
         )
     except anthropic.APIError:  # the seal is saved already; a lookup must not undo its reply
         return LIMITED_NETWORK_UNCHECKED_WARNING

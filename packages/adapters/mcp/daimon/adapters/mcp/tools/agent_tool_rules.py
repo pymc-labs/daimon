@@ -59,7 +59,9 @@ async def _channel(
 
 
 async def _agent(runtime: McpRuntime, auth: AuthIdentity, name: str) -> BetaManagedAgentsAgent:
-    agent = await find_agent_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
+    agent = await find_agent_by_daimon_tag(
+        runtime.client, tenant_id=auth.tenant_id, name=name, records=runtime.session_factory
+    )
     if agent is None:
         raise ToolError(f"No agent named {name!r} here.")
     return agent

@@ -154,6 +154,7 @@ class HereCog(commands.Cog):
                     if caller_perms
                     else None,
                     category_channels_bot_can_view=category_visible,
+                    records=runtime.sessionmaker,
                 )
             card = card.model_copy(
                 update={

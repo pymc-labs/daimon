@@ -11,7 +11,7 @@ A poll runs with nobody watching and may carry a credential, so every request:
   from the environment and never sends a cookie back;
 - refuses a compressed response before reading it, stops reading past
   `MAX_RESPONSE_BYTES` while it streams, and gives each request
-  `REQUEST_TIMEOUT_S`;
+  `REQUEST_TIMEOUT_S` (an attended relay call passes `INTERACTIVE_LIMITS`);
 - parses JSON strictly: no NaN or Infinity, no duplicate keys.
 
 A failure raises `McpCallError` carrying only a fixed class name. Nothing here
@@ -26,19 +26,26 @@ import json
 import socket
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Final, Literal, cast
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 import httpx
 from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_https_url
 from pydantic import JsonValue
 
 __all__ = [
+    "INTERACTIVE_LIMITS",
     "MAX_RESPONSE_BYTES",
     "REQUEST_TIMEOUT_S",
+    "WATCH_LIMITS",
+    "AddressRefusedError",
+    "Limits",
     "McpCallError",
     "McpToolSession",
+    "PinnedTransport",
     "mcp_tool_session",
+    "pinned_http_client",
     "resolve_public_address",
 ]
 
@@ -46,6 +53,20 @@ MAX_RESPONSE_BYTES: Final = 262144
 REQUEST_TIMEOUT_S: Final = 10.0
 MAX_CATALOGUE_PAGES: Final = 20
 PROTOCOL_VERSION: Final = "2025-06-18"
+MAX_SSE_MESSAGES: Final = 64
+
+
+@dataclass(frozen=True, slots=True)
+class Limits:
+    """One session's bounds: bytes read per response and seconds per request."""
+
+    max_response_bytes: int
+    timeout_s: float
+
+
+WATCH_LIMITS: Final = Limits(MAX_RESPONSE_BYTES, REQUEST_TIMEOUT_S)
+# A person waits on a relayed connector call: larger replies, slower tools.
+INTERACTIVE_LIMITS: Final = Limits(4 * 1024 * 1024, 60.0)
 
 CallFailure = Literal[
     "address", "redirect", "refused", "too_large", "timeout", "transport", "protocol", "tool_error"
@@ -95,6 +116,67 @@ async def resolve_public_address(host: str, port: int) -> str:
     return str(addresses[0])
 
 
+class AddressRefusedError(httpx.TransportError):
+    """A request named a host that is not public https, or that resolves to a private address."""
+
+
+class PinnedTransport(httpx.AsyncBaseTransport):
+    """Sends each request to the one public address its host resolved to, first time asked.
+
+    The check and the connection use the same address, so a name cannot answer
+    public for the check and private for the connection (DNS rebinding); TLS
+    and `Host` still name the URL's host. Every URL is refused unless public
+    https, so a redirect target or an endpoint a remote document names is
+    judged like the first URL.
+    """
+
+    def __init__(self, inner: httpx.AsyncBaseTransport | None = None, *, resolve: Resolver) -> None:
+        self._inner = inner if inner is not None else httpx.AsyncHTTPTransport()
+        self._resolve = resolve
+        self._pinned: dict[tuple[str, int], str] = {}
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        try:
+            assert_public_https_url(str(request.url), what="request URL")
+        except McpUrlError:
+            raise AddressRefusedError("address", request=request) from None
+        if not host or not host.isascii() or request.url.userinfo:
+            raise AddressRefusedError("address", request=request)
+        key = (host, request.url.port or 443)
+        address = self._pinned.get(key)
+        if address is None:
+            try:
+                address = await self._resolve(*key)
+            except McpCallError:
+                raise AddressRefusedError("address", request=request) from None
+            self._pinned[key] = address
+        request.url = request.url.copy_with(host=address)
+        request.extensions = {**request.extensions, "sni_hostname": host}
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+def pinned_http_client(
+    *,
+    resolve: Resolver = resolve_public_address,
+    transport: httpx.AsyncBaseTransport | None = None,
+    timeout: float = REQUEST_TIMEOUT_S,
+) -> httpx.AsyncClient:
+    """The one client for URLs a model or a remote server names: pinned, no redirects, no proxies.
+
+    `transport` is the wire under the pinning, for tests.
+    """
+    return httpx.AsyncClient(
+        transport=PinnedTransport(transport, resolve=resolve),
+        trust_env=False,
+        follow_redirects=False,
+        timeout=timeout,
+    )
+
+
 def _refuse_constant(_: str) -> object:
     raise ValueError("non-finite number")
 
@@ -120,12 +202,17 @@ def strict_json(text: str) -> JsonValue:
 
 
 def _sse_messages(text: str) -> list[JsonValue]:
-    """Each event's `data:` lines, joined as the SSE format says, parsed as JSON."""
+    """Each event's `data:` lines, joined as the SSE format says, parsed as JSON.
+
+    At most `MAX_SSE_MESSAGES` events: a stream of tiny events is refused, not parsed.
+    """
     messages: list[JsonValue] = []
     data: list[str] = []
     for line in [*text.splitlines(), ""]:
         if line == "":
             if data:
+                if len(messages) == MAX_SSE_MESSAGES:
+                    raise McpCallError("too_large")
                 messages.append(strict_json("\n".join(data)))
                 data = []
         elif line.startswith("data:"):
@@ -142,15 +229,13 @@ class McpToolSession:
         http: httpx.AsyncClient,
         *,
         target: str,
-        host_header: str,
-        sni_host: str,
         token: str | None,
+        max_response_bytes: int = MAX_RESPONSE_BYTES,
     ) -> None:
         self._http = http
         self._target = target
-        self._sni_host = sni_host
+        self._max_bytes = max_response_bytes
         self._headers = {
-            "Host": host_header,
             "Accept": "application/json, text/event-stream",
             # An encoded reply is refused unread; see `_post`.
             "Accept-Encoding": "identity",
@@ -167,10 +252,11 @@ class McpToolSession:
             self._target,
             content=json.dumps(body).encode(),
             headers=self._headers,
-            extensions={"sni_hostname": self._sni_host},
         )
         try:
             response = await self._http.send(request, stream=True, follow_redirects=False)
+        except AddressRefusedError:
+            raise McpCallError("address") from None
         except httpx.TimeoutException:
             raise McpCallError("timeout") from None
         except httpx.HTTPError:
@@ -187,7 +273,7 @@ class McpToolSession:
             try:
                 async for chunk in response.aiter_bytes():
                     size += len(chunk)
-                    if size > MAX_RESPONSE_BYTES:
+                    if size > self._max_bytes:
                         raise McpCallError("too_large")
                     chunks.append(chunk)
             except httpx.TimeoutException:
@@ -278,12 +364,18 @@ class McpToolSession:
             cursor = following
         raise McpCallError("too_large")
 
+    async def call_tool_result(
+        self, name: str, arguments: Mapping[str, JsonValue]
+    ) -> dict[str, JsonValue]:
+        """The `tools/call` result object as sent, for a relay to hand back unchanged."""
+        return await self._rpc("tools/call", {"name": name, "arguments": dict(arguments)})
+
     async def call_tool(self, name: str, arguments: Mapping[str, JsonValue]) -> JsonValue:
         """The tool's result: `structuredContent`, else its one text item (JSON when it parses).
 
         `isError` raises `McpCallError("tool_error")`; the error text is dropped.
         """
-        result = await self._rpc("tools/call", {"name": name, "arguments": dict(arguments)})
+        result = await self.call_tool_result(name, arguments)
         if result.get("isError") is True:
             raise McpCallError("tool_error")
         structured = result.get("structuredContent")
@@ -311,6 +403,7 @@ async def mcp_tool_session(
     *,
     resolve: Resolver = resolve_public_address,
     transport: httpx.AsyncBaseTransport | None = None,
+    limits: Limits = WATCH_LIMITS,
 ) -> AsyncIterator[McpToolSession]:
     """An initialised session with `url`, sending `token` (if any) to that URL only.
 
@@ -321,28 +414,16 @@ async def mcp_tool_session(
         assert_public_https_url(url, what="watch source")
         parts = urlsplit(url)
         host = parts.hostname
-        port = parts.port
+        _ = parts.port  # A malformed port raises ValueError here, not mid-request.
     except (McpUrlError, ValueError):
         raise McpCallError("address") from None
     if not host or not host.isascii() or parts.username or parts.password:
         raise McpCallError("address")
-    address = await resolve(host, port or 443)
-    literal = f"[{address}]" if ":" in address else address
-    target = urlunsplit(
-        ("https", literal if port is None else f"{literal}:{port}", parts.path, parts.query, "")
-    )
-    async with httpx.AsyncClient(
-        transport=transport,
-        trust_env=False,
-        follow_redirects=False,
-        timeout=REQUEST_TIMEOUT_S,
+    async with pinned_http_client(
+        resolve=resolve, transport=transport, timeout=limits.timeout_s
     ) as http:
         session = McpToolSession(
-            http,
-            target=target,
-            host_header=host if port is None else f"{host}:{port}",
-            sni_host=host,
-            token=token,
+            http, target=url, token=token, max_response_bytes=limits.max_response_bytes
         )
         await session.initialize()
         yield session

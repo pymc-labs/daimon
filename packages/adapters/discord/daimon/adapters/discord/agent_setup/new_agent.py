@@ -26,7 +26,7 @@ from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError, UserFacingError
-from daimon.core.models_catalog import list_model_choices
+from daimon.core.models_catalog import claude_model_choices
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.roster import load_roster
 
@@ -102,7 +102,7 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
                         description=choice.description,
                         default=choice.is_default,
                     )
-                    for choice in list_model_choices(default=DEFAULT_AGENT_MODEL)
+                    for choice in claude_model_choices(default=DEFAULT_AGENT_MODEL)
                 ],
                 min_values=1,
                 max_values=1,
@@ -160,6 +160,7 @@ class NewAgentModal(discord.ui.Modal, title="New agent"):
                     thread_id=self.state.thread_id,
                     default=self.state.deployment_default,
                     viewer=(viewer := await panel_viewer(session, self.runtime, state=self.state)),
+                    records=self.runtime.sessionmaker,
                 )
             if self._panel_render_seq != self.state.render_seq:
                 await interaction.followup.send(

@@ -23,7 +23,7 @@ from daimon.core.scope import (
 )
 from daimon.core.stores.identity import get_slack_principal_for_account
 from daimon.core.web_links import panel_links
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
     "coding_tools_available",
@@ -76,6 +76,7 @@ async def load_panel_roster(
     thread_id: str | None,
     default: DeploymentDefault,
     is_admin: bool,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> Roster:
     """The tenant's agents, answering-here first, for the Agents view.
 
@@ -101,7 +102,9 @@ async def load_panel_roster(
             platform="slack",
             default=default,
             thread_id=thread_id,
+            records=records,
         ),
+        records=records,
     )
 
 
@@ -142,6 +145,7 @@ async def load_panel_details(
         is_admin=is_admin,
         channel_label=f"<#{channel_id}>",
         web=panel_links(runtime.settings.web, tenant_id, admin=is_admin),
+        records=runtime.sessionmaker,
     )
 
 
@@ -153,6 +157,7 @@ async def load_panel_answering_map(
     default: DeploymentDefault,
     channel_id: str | None,
     is_admin: bool,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> AnsweringMap:
     """Every tier of this workspace's routing, for the Who-answers-where view.
 
@@ -171,6 +176,7 @@ async def load_panel_answering_map(
             is_admin=is_admin,
             platform="slack",
             default=default,
+            records=records,
         ),
     )
 

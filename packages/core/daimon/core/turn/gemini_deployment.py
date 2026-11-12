@@ -14,12 +14,15 @@ from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from daimon.core import pricing
+from daimon.core.auxiliary_calls import register_completions
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.infrastructure_cost import known_infrastructure_usd
 from daimon.core.mcp_auth import read_private_credential_bytes, resolve_agent_mcp_credential
 from daimon.core.mux_backend import TurnRuntime, register_turn_backend
 from daimon.core.neutral_resources import NeutralResourceHost
+from daimon.core.provider_keys import DEFAULT_KEY_ENV, provider_key_present
+from daimon.core.shared_threads import shared_owner
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
@@ -32,8 +35,9 @@ from daimon.core.turn.gemini import (
     compose_gemini_backend,
     compose_gemini_codec,
     gemini_backend,
+    gemini_turn_scope,
 )
-from daimon.core.turn.gemini_prepare import prepare_gemini_turn
+from daimon.core.turn.gemini_prepare import old_gemini_session, prepare_gemini_turn
 from daimon.core.turn.gemini_state import (
     PostgresFlashAccounting,
     PostgresGeminiStorage,
@@ -47,6 +51,7 @@ from daimon.core.turn.runtime_manifest import (
     ConfigurationGrant,
     SourceCapabilities,
     fixed_plan_origin_allowed,
+    host_memory_represented,
     materialize_root_counterpart,
     read_counterpart,
     represented_source,
@@ -54,8 +59,9 @@ from daimon.core.turn.runtime_manifest import (
     validate_counterpart_pins,
     validate_counterpart_request,
 )
+from mux.contracts.completions import Completions
 from mux.contracts.config import ConfigRevision
-from mux.contracts.ids import ModelRef, Scope
+from mux.contracts.ids import ModelRef, Scope, ThreadRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
 from mux.drivers.gemini import (
     FlashAccounting,
@@ -69,7 +75,8 @@ from mux.drivers.gemini import (
 )
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.profiles import selectable_models
-from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE
+from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE, InlineReuseId
+from mux.state.lease import Slot
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 Nonblank = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
@@ -97,7 +104,7 @@ def _private_storage_credential(
 class GeminiPlan(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    profile: Literal["gemini.inline_reuse"]
+    profile: InlineReuseId
     tenant_id: Nonblank
     platform: Nonblank
     channel_id: Nonblank
@@ -130,7 +137,7 @@ class GeminiPlan(BaseModel):
         default=False, strict=True, exclude_if=lambda value: not value
     )
     # A template's capability: "mcp" represents the source's Daimon MCP toolset
-    # (its live catalogue) with a per-turn caller credential; skills stay dropped.
+    # (its live catalogue) with a per-turn caller credential; skills attach per session.
     template_capabilities: Literal["mcp"] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -259,7 +266,10 @@ class GeminiPlan(BaseModel):
                 self.source_capabilities is not None
                 and self.source_capabilities.model.id != revision.model
             )
-            or "memory" not in target.declared_drops
+            or (
+                "memory" not in target.declared_drops
+                and not (represented is not None and host_memory_represented(target))
+            )
             or target.name != source.effective_spec.name
             or not source_instructions_preserved(source.effective_spec.system, target.system)
             or (full and represented is None)
@@ -368,7 +378,17 @@ def load_gemini_deployment(request: ProviderPreparationRequest) -> GeminiPlan:
 
 
 def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
-    revision, scope = request.admission.backend_revision, request.scope
+    revision = request.admission.backend_revision
+    shared = request.admission.shared_owner
+    # A shared thread's state is keyed by its derived owner, verified against the thread.
+    shared_slot = (
+        Slot(thread=ThreadRef(channel=revision.channel, thread_id=request.thread_id))
+        if shared is not None and revision is not None
+        else None
+    )
+    if shared_slot is not None and shared_owner(shared_slot) != shared:
+        raise ScopeViolation(request.thread_id, "shared Gemini thread differs from its owner")
+    scope = gemini_turn_scope(request.scope, shared)
     if (
         revision is None
         or revision.model not in selectable_models(INLINE_REUSE.provider)
@@ -394,7 +414,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         raise AdmissionDenied(reason="backend_unsupported")
     agent = AgentSpec(
         name=plan.agent_name,
-        model=ModelRef(provider="gemini", id=revision.model),
+        model=ModelRef(provider=INLINE_REUSE.provider, id=revision.model),
         system=plan.system,
         tools=plan.tools,
     )
@@ -404,7 +424,13 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         deployment = plan.deployment(request)
     else:
         try:
-            compile_agent(agent, max_output_tokens=plan.max_output_tokens)
+            compile_agent(
+                agent,
+                max_output_tokens=plan.max_output_tokens,
+                thinking_level=None
+                if revision.effort is None
+                else INLINE_REUSE.effort_map[revision.effort],
+            )
             compile_environment(plan.environment, model_only=plan.max_output_tokens is not None)
         except UnsupportedCapability as error:
             if plan.max_output_tokens is None:
@@ -468,7 +494,13 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             raise ScopeViolation("skill-deployment", "storage credential unavailable")
         return token
 
+    # The token resolved for Daimon's own server, reused for its relay URLs in the same
+    # request: mux resolves Daimon's destination first, then each relayed connector.
+    daimon_token: list[str] = []
+
     async def resolve_mcp(authorized: Scope, reference: str, destination: str) -> str:
+        from daimon.core.connector_relay import daimon_destination
+
         expected = f"caller-mcp:{scope.tenant_id}:{scope.account_id}:{plan.source_agent_id}"
         public_url = request.deps.mcp.public_url
         if (
@@ -476,12 +508,15 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             or authorized != scope
             or reference != expected
             or public_url is None
-            or destination.rstrip("/") != str(public_url).rstrip("/")
+            or (own := daimon_destination(destination, str(public_url))) is None
             or plan.mcp_credential_file is None
             or request.deps.mcp.jwt_secret is None
             or plan.source_agent_id is None
         ):
             raise ScopeViolation("mcp-credential", "MCP credential has no verified source binding")
+        if own.rstrip("/") != destination.rstrip("/") and daimon_token:
+            return daimon_token[-1]
+        admission = request.admission
         try:
             assert plan.source_capabilities is not None
             token = await resolve_agent_mcp_credential(
@@ -490,22 +525,34 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
                 secret=request.deps.mcp.jwt_secret.get_secret_value().encode(),
                 scope=scope,
                 agent_id=plan.source_agent_id,
-                destination=destination,
+                destination=own,
                 tools=plan.source_capabilities.mcp_tools,
                 chat_execution=True,
                 # A pinned OpenAI/Gemini turn has no confirmation card: its credential
                 # must be one the server refuses gated and publishing tools for.
                 surface="provider_turn",
                 now=request.now(),
+                memory_read_only=origin_read_only(admission),
             )
+            if needs_turn_credential(admission) or unattended_turn():
+                # The pinned file cannot carry this turn's hold, seals, Slack context or
+                # built-in leave: once proven, the turn runs on its own minted credential.
+                template_mcp.catalogue = frozenset(plan.source_capabilities.mcp_tools)
+                token = await template_mcp.mint(own, agent_id=plan.source_agent_id)
             await verify_storage()
+            daimon_token[:] = [token]
             return token
         except (OSError, ValueError):
             raise ScopeViolation("mcp-credential", "invalid scoped MCP credential") from None
 
     mcp_template = plan.template_capabilities == "mcp"
     from daimon.core.mcp_auth import NO_CONFIRMATION_LABEL
-    from daimon.core.turn.template_mcp import TemplateMCPCredential
+    from daimon.core.turn.template_mcp import (
+        TemplateMCPCredential,
+        needs_turn_credential,
+        origin_read_only,
+        unattended_turn,
+    )
 
     template_mcp = TemplateMCPCredential(request, scope, label=NO_CONFIRMATION_LABEL)
 
@@ -524,7 +571,10 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             configured_catalog_transport(api_key=secret)
             if request.admission.backend_revision_origin == "agent"
             else None,
-            mcp_secrets=resolve_mcp
+            # A shared thread has no caller to mint for: its session carries no MCP.
+            mcp_secrets=None
+            if shared is not None
+            else resolve_mcp
             if plan.source_capabilities is not None
             else template_mcp.resolve
             if mcp_template
@@ -594,7 +644,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     accounting: FlashAccounting
     if plan.storage_backend == "postgres":
         records = PostgresGeminiStorage(
-            request.deps.sessionmaker, scope=scope, project=plan.project
+            request.deps.sessionmaker, scope=scope, project=plan.project, shared_slot=shared_slot
         )
         accounting = PostgresFlashAccounting(
             request.deps.sessionmaker,
@@ -602,6 +652,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             project=plan.project,
             hold_usd=plan.hold_usd,
             cap_usd=plan.cap_usd,
+            shared_slot=shared_slot,
         )
     else:
         assert plan.records_path is not None and plan.holds_path is not None
@@ -623,7 +674,8 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         transport_factory=transport,
         read_agent_counterpart=read,
         materialize_root=materialize_root if plan.root_materialization else None,
-        end_of_turn=template_mcp.finalize if mcp_template else None,
+        # Revokes whatever the turn minted; nothing when it ran on the pinned file.
+        end_of_turn=template_mcp.finalize if shared is None else None,
         journal=GeminiJournal(
             records,
             request.deps.state_store,
@@ -637,13 +689,25 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     return runtime
 
 
+def _side_call_completions() -> Completions:
+    from mux.drivers.gemini import configured_completions
+
+    return configured_completions(
+        api_key=os.environ.get(DEFAULT_KEY_ENV[INLINE_REUSE.provider]) or ""
+    )
+
+
 def register_runtime() -> None:
     """Install the provider's host callbacks without transports or credential access."""
+    if provider_key_present(INLINE_REUSE.provider):
+        register_completions(INLINE_REUSE.provider, _side_call_completions)
+    from daimon.core.turn.carry_over import register_session_reader
     from daimon.core.turn.runtimes import register_channel_runtime
 
     register_turn_backend(PROFILE, compose_gemini_backend, fallback=True)
     register_turn_codec(PROFILE, compose_gemini_codec, fallback=True)
     register_turn_preparation(PROFILE, prepare_gemini_turn, fallback=True)
+    register_session_reader(PROFILE, old_gemini_session)
     register_channel_runtime(
         PROFILE,
         build_gemini_runtime,

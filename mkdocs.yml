@@ -18,6 +18,7 @@ nav:
   - Self-host:
       - Self-hosting: self-hosting.md
       - Model providers: providers.md
+      - Self-hosted harness: self-hosted-harness.md
       - Operations: operations.md
       - Fly compute: compute.md
   - Connect:

@@ -14,6 +14,7 @@ from daimon.core.output_ports_compat import (
     list_output_records,
     read_output_record,
 )
+from daimon.core.output_runtime import AnthropicOutputRuntime
 from mux.contracts.ids import ResourceRef
 from mux.drivers.anthropic.outputs import Outputs
 from mux.errors import ScopeViolation
@@ -263,8 +264,8 @@ async def test_public_sweep_preserves_partial_metadata_and_delivery(downloadable
             response = await legacy.beta.files.download("file_output", betas=[MA_BETA])
             assert await response.read() == b"abc"
             await legacy.beta.files.delete("file_output", betas=[MA_BETA])
-        count = await output_delivery.sweep_session_outputs(
-            client, session_id="sess_output", post=post, sleep=sleep, scope=SCOPE
+        count = await output_delivery.sweep_outputs(
+            AnthropicOutputRuntime(client, "sess_output", scope=SCOPE), post=post, sleep=sleep
         )
     assert count == int(downloadable)
     assert posted == (

@@ -387,7 +387,10 @@ async def _decide_key_replacement(
     if await is_guild_admin(interaction, action=None):  # pyright: ignore[reportArgumentType]  # discord.Interaction vs Interaction[commands.Bot]; is_guild_admin only reads user/guild
         return "allow"
     agent = await resolve_ma_agent_for_uuid(
-        runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+        runtime.anthropic,
+        tenant_id=row.tenant_id,
+        agent_id=row.agent_id,
+        records=runtime.sessionmaker,
     )
     if agent is None:
         # Fail closed: the target this replacement was authorized against is
@@ -428,7 +431,10 @@ async def _decide_mcp_connect_at_submit(
     consume, and nothing may be replaced for it.
     """
     agent = await find_agent_by_derived_uuid(
-        runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+        runtime.anthropic,
+        tenant_id=row.tenant_id,
+        agent_id=row.agent_id,
+        records=runtime.sessionmaker,
     )
     if agent is None or row.mcp_server_url is None:
         return McpConnectDecision(replaces=False, replace_allowed=False)
@@ -1450,7 +1456,10 @@ class SkillRepoModal(discord.ui.Modal):
         if not skill_ids:
             return None
         agent = await find_agent_by_derived_uuid(
-            self._runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id
+            self._runtime.anthropic,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            records=self._runtime.sessionmaker,
         )
         if agent is None:
             return "That agent no longer exists."
@@ -1479,6 +1488,7 @@ class SkillRepoModal(discord.ui.Modal):
                 version=fresh.version,
                 payload={"skills": merged},
                 scope=resource_scope(tenant_id=str(tenant_id)),
+                records=self._runtime.sessionmaker,
             )
 
         try:
@@ -1487,6 +1497,7 @@ class SkillRepoModal(discord.ui.Modal):
                 agent.id,
                 _apply,
                 scope=resource_scope(tenant_id=str(tenant_id)),
+                records=self._runtime.sessionmaker,
             )
         except (DaimonError, anthropic.APIStatusError, ScopeViolation) as err:
             _log.warning(

@@ -900,8 +900,8 @@ class DirectMessageCog(commands.Cog):
     ) -> None:
         """Send the turn's saved files to the DM, rechecking access before each one."""
         assert isinstance(message.channel, discord.DMChannel)
-        session_id = reply.session_id
-        if session_id is None:
+        outputs = reply.outputs
+        if outputs is None:
             return
         runtime = self.bot.runtime
         person = str(message.author.id)
@@ -921,7 +921,7 @@ class DirectMessageCog(commands.Cog):
             return True
 
         self.bot.schedule_dm_output_sweep(
-            message.channel, session_id, may_post=may_post, lifecycle=card
+            message.channel, outputs, may_post=may_post, lifecycle=card
         )
 
     async def _reply(

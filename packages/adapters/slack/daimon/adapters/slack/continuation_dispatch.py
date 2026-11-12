@@ -20,6 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 __all__ = ["RunFollowUp", "dispatch_pending_continuations"]
+
+_NO_HISTORY: frozenset[str] = frozenset({"timer", "watch_fired", "job_finished", "confirmed_call"})
 RunFollowUp = Callable[[TaskContinuationRow, str], Awaitable[None]]
 
 
@@ -84,6 +86,9 @@ async def dispatch_pending_continuations(
         )
 
     async def context(row: TaskContinuationRow) -> tuple[datetime | None, bool]:
+        # A wake Daimon scheduled answers no human message, so a later one supersedes nothing.
+        if row.reason in _NO_HISTORY:
+            return None, active_turn
         return await latest(row), active_turn
 
     async def post(row: TaskContinuationRow, text: str, reason: str) -> None:

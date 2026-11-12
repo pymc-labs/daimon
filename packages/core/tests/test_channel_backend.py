@@ -63,6 +63,7 @@ def test_an_unconfigured_channel_resolves_to_anthropic_managed_agents_unchanged(
         "model": None,
         "requires": {},
         "thread_mode": "per_caller",
+        "effort": None,
     }
     assert resolved.content_digest() == _DEFAULT_DIGEST
     assert resolve_default(BackendConfig()).content_digest() == _DEFAULT_DIGEST

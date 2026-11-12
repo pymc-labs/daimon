@@ -14,6 +14,7 @@ from typing import Any, Literal, cast
 
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.confirmed_call import card_satisfied
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import list_running_origins
 from daimon.adapters.mcp.tools._session_gate import session_card_gap
@@ -504,7 +505,7 @@ def _gate(
         return
     record_denial(f"reach_{verdict}" if verdict != "ok" else "reach_own_threads")
     log.info("reach.over_budget", key=scope.key, has_card=scope.origin is not None)
-    if scope.kind != "live" or auth.no_confirmation_surface:
+    if scope.kind != "live" or (auth.no_confirmation_surface and not card_satisfied(auth)):
         # No card can be shown (an outside client, or a backend without one): fail closed.
         raise ToolError(NO_CARD)
     if verdict == "ok":
@@ -556,7 +557,11 @@ async def approve_reach_impl(
 ) -> ReachApproved:
     """Record the approved plan once the card's Approve is proven; refuse where no card can show."""
     scope = await turn_scope(runtime, auth)
-    if scope.kind != "live" or scope.origin is None or auth.no_confirmation_surface:
+    if (
+        scope.kind != "live"
+        or scope.origin is None
+        or (auth.no_confirmation_surface and not card_satisfied(auth))
+    ):
         record_denial("reach_no_card")
         raise ToolError(NO_CARD)
     gap = await session_card_gap(runtime, auth, scope.origin, tool_name="approve_reach")

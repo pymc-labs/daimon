@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 import pytest
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import create_owned_environment
 from daimon.core.routine_sandbox import (
     SandboxPin,
     SandboxPinUnavailable,
@@ -15,11 +17,14 @@ from daimon.core.routine_sandbox import (
 )
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.routines import create_routine
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import MARouter
 from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.contracts.extensions import ExtensionConfig
+from mux.contracts.resources import EnvironmentSpec
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
 from mux.testing.drivers.anthropic.ma_models import ma_session
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 EDITED = "2026-10-02T09:00:00Z"
 
@@ -126,4 +131,40 @@ async def test_a_run_matches_only_the_exact_agent_version_and_environment(
             tenant_id=tenant_id if tenant else None,
         )
         is matches
+    )
+
+
+async def test_a_run_in_a_daimon_owned_environment_matches_its_pin(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    created = await create_owned_environment(
+        None,
+        EnvironmentSpec(
+            name="default",
+            execution="self_hosted",
+            native_config=ExtensionConfig(
+                namespace="selfhosted.environment",
+                version=1,
+                value={
+                    "harness_url": "https://harness.example",
+                    "auth_mode": "bearer_env",
+                    "auth_ref": "HARNESS_TOKEN",
+                },
+            ),
+        ),
+        scope=resource_scope(tenant_id=str(tenant.id), account_id=str(account.id)),
+        records=db_session_factory,
+    )
+    pin = SandboxPin("ag", 7, created.id, datetime.fromisoformat(created.updated_at))
+    session = ma_session(agent_id="ag", environment_id=created.id)
+    session = session.model_copy(update={"agent": session.agent.model_copy(update={"version": 7})})
+
+    assert await run_matches_pin(
+        _client(tenant.id), pin, session, tenant_id=tenant.id, records=db_session_factory
+    ), "the pinned environment is read from the records, not from Managed Agents"
+    assert not await run_matches_pin(_client(tenant.id), pin, session, tenant_id=tenant.id), (
+        "without the records the same id cannot be read and the run is a mismatch"
     )

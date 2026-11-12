@@ -22,6 +22,9 @@ dependencies = [
 # Operator deployments that offer Stripe top-ups install this extra so the
 # image carries `stripe`; self-hosters without billing skip it and stay lean.
 billing = ["daimon-adapter-mcp[billing]"]
+# Operator deployments that run agents on Gemini install this extra so the image
+# carries the Gemini SDK pin the driver needs.
+gemini = ["daimon-mux[gemini]"]
 
 [project.urls]
 Repository = "https://github.com/pymc-labs/daimon"
@@ -308,6 +311,7 @@ source_modules = [
     "daimon.core.panel_audit",
     "daimon.core.panel_operator_tokens",
     "daimon.core.participation_gates",
+    "daimon.core.pending_carry_over_sweep",
     "daimon.core.pending_file_sweeper",
     "daimon.core.permissions",
     "daimon.core.platform_names",
@@ -454,6 +458,24 @@ source_modules = [
     "daimon.core.skill_library",
     "daimon.core.skill_library_files",
     "daimon.core.workspace_settings",
+    "daimon.core.agent_convert",
+    "daimon.core.agent_record_facts",
+    "daimon.core.agent_record_ports",
+    "daimon.core.auxiliary_calls",
+    "daimon.core.auxiliary_models",
+    "daimon.core.backend_capture",
+    "daimon.core.backend_refusals",
+    "daimon.core.connector_relay",
+    "daimon.core.host_calls",
+    "daimon.core.host_memory",
+    "daimon.core.host_web_fetch",
+    "daimon.core.ma_metadata_keys",
+    "daimon.core.model_switch",
+    "daimon.core.output_runtime",
+    "daimon.core.self_helpers",
+    "daimon.core.thread_model_flow",
+    "daimon.core.thread_model_reask",
+    "daimon.core.thread_model_switch",
 ]
 forbidden_modules = ["daimon.core._models"]
 # Stores are the sanctioned abstraction layer between adapters and the ORM.

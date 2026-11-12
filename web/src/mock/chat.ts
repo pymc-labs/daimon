@@ -136,7 +136,8 @@ const find = (pid: string, sid: string) => mine(pid).find((s) => s.id === sid)
 type Kind = "mmm" | "pricing" | "general"
 const kindOf = (id: string): Kind => (id === "ag_mmm" ? "mmm" : id === "ag_pricing" ? "pricing" : "general")
 const scenarioOf = (t: string) =>
-  /refus|restricted|salary|confidential/i.test(t) ? "refusal"
+  /provider|openai|gpt/i.test(t) ? "provider"
+    : /refus|restricted|salary|confidential/i.test(t) ? "refusal"
     : /credential|api key|token|connect|hubspot/i.test(t) ? "credential"
       : /approv|send|email|publish/i.test(t) ? "approval" : "rich"
 
@@ -232,6 +233,13 @@ function scripted(pid: string, sid: string, text: string, ag: string) {
   const kind = kindOf(ag)
   const sc = scenarioOf(text)
   const name = agent(ag).name
+  if (sc === "provider") {
+    return turn(pid, sid, async function* (m) {
+      await sleep(500)
+      yield { type: "card", card: { id: `c_${uid()}`, kind: "refusal", title: "GPT-6 Luna can't answer right now.", body: `${name} can't run right now.`, help: "Switch back to Claude, or try again later.", action: me()?.capabilities.includes("people.manage") ? "switch_back_to_claude" : null } }
+      m.content = ""
+    }, 0)
+  }
   if (sc === "refusal") {
     return turn(pid, sid, async function* (m) {
       await sleep(500)
@@ -281,6 +289,13 @@ function continuation(pid: string, sid: string, card: Card, a: CardAnswer) {
   }
   return turn(pid, sid, async function* () { yield { type: "delta", text: "" } }, 0)
 }
+
+let chatPick: string | null = null
+const CHAT_MODELS = [
+  { value: "anthropic:claude-haiku-5-5", label: "Claude Haiku 5.5", price: "$1 / $5", provider: "anthropic" },
+  { value: "anthropic:claude-sonnet-5-5", label: "Claude Sonnet 5.5", price: "$3 / $15", provider: "anthropic" },
+  { value: "openai:gpt-6-luna", label: "GPT-6 Luna", price: "$2 / $10", provider: "openai" },
+]
 
 export const chatHandlers: HttpHandler[] = [
   http.get("/api/chat/agents", async () => {
@@ -370,6 +385,34 @@ export const chatHandlers: HttpHandler[] = [
     else if (c.kind === "credential") c.state = a.answer === "skip" ? "skipped" : "saved"
     await wait(150)
     return continuation(p.id, sid, c, a)
+  }),
+  http.post("/api/chat/sessions/:id/switch-back", async () => {
+    await sleep(300)
+    return HttpResponse.json({ line: "Claude answers here again." })
+  }),
+  http.get("/api/chat/sessions/:id/models", async () => {
+    await sleep(150)
+    return HttpResponse.json({ current: chatPick, choices: CHAT_MODELS })
+  }),
+  http.get("/api/chat/sessions/:id/model-preview", async ({ request }) => {
+    await sleep(150)
+    const value = new URL(request.url).searchParams.get("value") ?? ""
+    const base = { moves: false, allowed: true, skills: [], servers: [], capabilities: [], shared_limits: [], drops: [], cost: "", threads: "", digest: "", revision: 0, refusal: null }
+    if (value.startsWith("anthropic:")) return HttpResponse.json(base)
+    return HttpResponse.json({
+      ...base, moves: true, drops: ["memory"], skills: ["Pricing playbook"], cost: "Costs about the same per message",
+      threads: "This chat only.", digest: "d".repeat(64), revision: 4,
+    })
+  }),
+  http.put("/api/chat/sessions/:id/model", async ({ params, request }) => {
+    const p = session.user()
+    const s = p && find(p.id, String(params.id))
+    if (!s) return notFound()
+    const { value } = (await request.json()) as { value: string }
+    chatPick = value === "default" ? null : value
+    s.agent = { ...s.agent, model: chatPick ? (CHAT_MODELS.find((c) => c.value === chatPick)?.label ?? chatPick) : "Claude Sonnet 5.5" }
+    await sleep(200)
+    return HttpResponse.json({ model: chatPick, note: "This chat runs on that model from the next reply." })
   }),
   http.post("/api/chat/sessions/:id/stop", async ({ params }) => {
     stopping.add(String(params.id))

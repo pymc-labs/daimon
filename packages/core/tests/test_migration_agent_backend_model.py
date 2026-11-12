@@ -12,6 +12,13 @@ from daimon.core._models import Base
 from sqlalchemy import Connection, inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# Later revisions that add agent_backend_revision columns, oldest first.
+_LATER = (
+    "0119_agent_owner_settings",
+    "0198_agent_backend_effort",
+    "0202_agent_backend_environment",
+)
+
 
 def migration(name: str = "0118_agent_backend_model") -> ModuleType:
     path = Path(__file__).parents[1] / f"alembic/versions/{name}.py"
@@ -32,18 +39,20 @@ async def test_agent_backend_model_migration_down_up_matches_the_model(
 ) -> None:
     connection = await db_session.connection()
     module = migration()
-    # 0119 adds columns after this one; cycle it too so column order is the model's.
-    later = migration("0119_agent_owner_settings")
+    # Later revisions add columns after this one; cycle them too so column order is the model's.
+    later = [migration(name) for name in _LATER]
     table = "agent_backend_revision"
 
     def cycle(sync: Connection) -> None:
         here = sync.scalar(text("SELECT current_schema()"))
         with Operations.context(MigrationContext.configure(sync)):
-            later.downgrade()
+            for step in reversed(later):
+                step.downgrade()
             module.downgrade()
             assert "model" not in {c["name"] for c in inspect(sync).get_columns(table, schema=here)}
             module.upgrade()
-            later.upgrade()
+            for step in later:
+                step.upgrade()
             columns = [c["name"] for c in inspect(sync).get_columns(table, schema=here)]
             assert columns == list(Base.metadata.tables[table].columns.keys()), "column order"
             (model,) = [

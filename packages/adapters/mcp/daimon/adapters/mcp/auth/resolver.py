@@ -75,6 +75,8 @@ class AuthIdentity:
     slack_turn_context_id: uuid.UUID | None = None
     # Signed grant for one isolated provider session, never a tool argument.
     chat_session_id: str | None = None
+    # A provider turn's signed seals (`SEAL_CLAIM`): sealed sessions it reads stay inside them.
+    seal_ids: frozenset[str] = frozenset()
     # Set from the token's `mcp_tokens` row by the verifier; None for jti-less tokens.
     is_chat_execution: bool = False
     token_kind: McpTokenKind | None = None
@@ -89,6 +91,12 @@ class AuthIdentity:
     anthropic_disabled: bool = False
     # A provider turn with no confirmation card: confirmation-gated tools refuse.
     no_confirmation_surface: bool = False
+    # The one press-approved call this credential may run (`daimon.core.host_calls`).
+    confirmed_call_id: uuid.UUID | None = None
+    # Who asked in a shared thread; signed only on a shared thread's credential.
+    requester_account_id: uuid.UUID | None = None
+    # A provider turn's signed leave to run host built-ins when nobody attends.
+    host_builtins: bool = False
     # The daimon tools a chat agent enables by name (`stores.agent_daimon_tools`);
     # None when its toolset enables every tool.
     daimon_tools: frozenset[str] | None = None

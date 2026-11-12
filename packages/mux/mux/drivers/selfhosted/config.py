@@ -201,11 +201,15 @@ def _validate_mcp_policy(server: MCPConnection) -> None:
             raise ValueError("MCP policy cannot widen allowed_tools")
 
 
-def validate_resource_spec(spec: AgentSpec | EnvironmentSpec) -> None:
+def validate_resource_spec(
+    spec: AgentSpec | EnvironmentSpec, *, providers: frozenset[str] = frozenset({LOOP.provider})
+) -> None:
     """Reject credential-bearing or unsupported resource input with a mux error.
 
     Tool policies contain only closed permission labels and tool names;
     arbitrary dictionaries cannot bypass credential-reference validation.
+    `providers` widens the record store to host-owned agents on other model
+    providers; their environments carry no harness configuration.
     """
     try:
         _reject_credentials(dict(spec.metadata or {}))
@@ -215,7 +219,7 @@ def validate_resource_spec(spec: AgentSpec | EnvironmentSpec) -> None:
             )
         if isinstance(spec, AgentSpec):
             _reject_credentials(dict(spec.model.options or {}))
-            if spec.model.provider != LOOP.provider or spec.extensions:
+            if spec.model.provider not in providers or spec.extensions:
                 raise ValueError("selfhosted agents require their own model and no extensions")
             for server in spec.mcp_servers or ():
                 _reject_credentials(server.model_dump(mode="json", exclude={"name"}))
@@ -227,14 +231,18 @@ def validate_resource_spec(spec: AgentSpec | EnvironmentSpec) -> None:
                 _validate_mcp_policy(server)
         else:
             _reject_credentials(spec.model_dump(mode="json")["packages"])
-            if spec.execution != "self_hosted" or spec.native_config is None:
+            if spec.execution != "self_hosted" and providers != frozenset({LOOP.provider}):
+                if spec.native_config is not None:
+                    raise ValueError("hosted environments carry no harness configuration")
+            elif spec.execution != "self_hosted" or spec.native_config is None:
                 raise ValueError("selfhosted environments require harness configuration")
-            if (
+            elif (
                 spec.native_config.namespace != "selfhosted.environment"
                 or spec.native_config.version != 1
             ):
                 raise ValueError("unsupported environment configuration")
-            HarnessConfig.model_validate(dict(spec.native_config.value))
+            else:
+                HarnessConfig.model_validate(dict(spec.native_config.value))
             for source in spec.sources or ():
                 _reject_credentials(
                     {

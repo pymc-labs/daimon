@@ -83,6 +83,7 @@ from daimon.core.stores.thread_sessions import (
 )
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy, has_confirmation_gate
 from daimon.core.turn.admission import Admission
+from daimon.core.turn.carry_over import adoption_predecessor
 from daimon.core.turn.ceiling import TURN_CEILING_S
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import SessionAgentMismatch, SessionBusyError
@@ -99,6 +100,11 @@ from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
 from daimon.testing.membership import FixtureMembershipResolver
+from mux.contracts.ids import ChannelRef, ThreadRef
+from mux.contracts.resources import ProviderBinding
+from mux.state.lease import Slot
+from mux.state.memory import MemoryStateStore
+from mux.state.store import released_successor
 from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     MARouter,
@@ -1485,6 +1491,113 @@ async def test_a_fresh_start_retires_the_old_row_and_carries_nothing(
     assert retired.status == "retired", "a fresh start retires the old row, it is not superseded"
     assert retired.fresh_start_requested_at is None, "the request is cleared once honoured"
     assert second.continuity.applied == (), "a fresh start is not a configuration change"
+
+
+async def _released_openai(store: MemoryStateStore, slot: Slot, *, at: datetime) -> None:
+    old = ProviderBinding(
+        id=f"binding-{slot.thread.thread_id}",
+        thread=slot.thread,
+        provider="openai",
+        profile="openai.persistent_workspace",
+        native_refs={"session": f"openai-{slot.thread.thread_id}", "account_scope": "scope-1"},
+        generation=1,
+        config_revision=1,
+        legacy_account_id=slot.account_id,
+    )
+    await store.put_binding(old, expected_generation=0)
+    await store.put_binding(released_successor(old, released_at=at), expected_generation=1)
+
+
+def _carry_finder(
+    deps: TurnDeps, store: MemoryStateStore, slot: Slot, *, tenant: TenantRow, account: AccountRow
+) -> Any:
+    """A `find_carry_over` that looks the predecessor up as the bind does."""
+    request = SimpleNamespace(
+        deps=deps,
+        admission=SimpleNamespace(backend_revision=None),
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id=slot.thread.thread_id,
+        session_account_id=account.id,
+        reuse_existing=True,
+        now=lambda: datetime.now(UTC) + timedelta(hours=1),
+    )
+
+    async def find() -> Any:
+        found = await adoption_predecessor(cast(Any, request), store, slot)
+        if found is None:
+            return None
+
+        async def seed(session_id: str) -> ContinuityOutcome:
+            return ContinuityOutcome(
+                state="replaced", user_prefix=f"carried {found.native_refs['session']}"
+            )
+
+        return seed
+
+    return find
+
+
+async def test_a_move_back_to_claude_carries_the_earlier_provider_on_both_create_paths(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The predecessor is found before the new row commits: found after, the new row is
+    newer than the release and the move from OpenAI would carry nothing."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    deps = _deps(db_session_factory, _Transport())
+    admission = _admission(account=account)
+    store = MemoryStateStore()
+
+    def slot(thread_id: str) -> Slot:
+        channel = ChannelRef(tenant_id=str(tenant.id), platform="discord", channel_id="c")
+        return Slot(thread=ThreadRef(channel=channel, thread_id=thread_id), account_id="a")
+
+    await _released_openai(store, slot("thread-1"), at=datetime.now(UTC) - timedelta(minutes=1))
+    first = await prepare_session_for_turn(
+        deps,
+        admission,
+        ops=_OPS,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        thread_id="thread-1",
+        session_account_id=account.id,
+        reuse_existing=True,
+        now=lambda: _NOW,
+        find_carry_over=_carry_finder(
+            deps, store, slot("thread-1"), tenant=tenant, account=account
+        ),
+    )
+    assert isinstance(first, PreparedTurn), first
+    assert first.continuity.user_prefix == "carried openai-thread-1", "new thread carried nothing"
+
+    # A thread that ran on Claude, moved to OpenAI, and is now back: a fresh start.
+    earlier = await _prepare(deps, admission, tenant=tenant, account=account, thread_id="t-2")
+    assert isinstance(earlier, PreparedTurn), earlier
+    await _released_openai(store, slot("t-2"), at=datetime.now(UTC))
+    row = await _live_row(db_session_factory, tenant=tenant, account=account, thread_id="t-2")
+    assert row is not None, "the earlier Claude session is live"
+    async with db_session_factory() as session, session.begin():
+        await request_fresh_start(session, id=row.id, at=_NOW)
+    back = await prepare_session_for_turn(
+        deps,
+        admission,
+        ops=_OPS,
+        tenant_id=tenant.id,
+        platform="discord",
+        external_user_id="user-1",
+        thread_id="t-2",
+        session_account_id=account.id,
+        reuse_existing=True,
+        now=lambda: _NOW,
+        find_carry_over=_carry_finder(deps, store, slot("t-2"), tenant=tenant, account=account),
+    )
+    assert isinstance(back, PreparedTurn), back
+    assert back.ma_session_id != earlier.ma_session_id, "the fresh start makes a new session"
+    assert back.continuity.user_prefix == "carried openai-t-2", "fresh start carried nothing"
 
 
 async def test_a_marked_active_session_is_not_returned_for_reuse(

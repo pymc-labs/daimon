@@ -191,6 +191,17 @@ def test_factory_has_no_stripe_route_when_billing_absent() -> None:
     assert "/webhooks/stripe" not in route_paths, "stripe route absent when billing unconfigured"
 
 
+def test_connector_relay_is_served_where_relay_urls_point() -> None:
+    from daimon.core.connector_relay import relay_url
+    from starlette.routing import Route
+
+    settings = _settings(jwt_secret=SecretStr("a" * 32), public_url=HttpUrl("https://x/mcp"))
+    app = create_mcp_app(settings=settings)
+    route = next(r for r in app.routes if isinstance(r, Route) and "{server_key}" in r.path)
+    path = relay_url("https://x/mcp", "drive").removeprefix("https://x")
+    assert route.path_regex.fullmatch(path), f"{route.path} must serve {path}"
+
+
 class _WarningCollector(logging.Handler):
     """Collects log records emitted directly on the ``fastmcp`` logger.
 

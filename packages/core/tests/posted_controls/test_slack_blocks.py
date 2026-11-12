@@ -163,3 +163,25 @@ def test_notification_text_is_the_headline(kind: CardKind, state: CardState) -> 
         "the notification fallback is the card's headline"
     )
     assert card_notification_text(card).strip(), f"{kind}/{state} must have a non-empty fallback"
+
+
+@pytest.mark.parametrize("kind", ["call", "switch"])
+def test_a_control_card_routes_each_button_by_its_own_custom_id(kind: str) -> None:
+    """A call or switch press is answered in place, so the click carries the card id, no token."""
+    import datetime as dt
+    import uuid
+
+    from daimon.core.switch_cards import requested_switch_card
+
+    card = requested_switch_card(
+        uuid.uuid4(),
+        title="Change the model provider?",
+        facts=("Researcher moves to OpenAI.",),
+        requester_platform_user_id=REQUESTER,
+        expires_at=dt.datetime.now(dt.UTC) + dt.timedelta(hours=1),
+    ).model_copy(update={"kind": kind})
+    blocks = build_card_blocks(card)
+    (actions,) = [b for b in blocks if b["type"] == "actions"]
+    ids = [e["action_id"] for e in actions["elements"]]
+    assert ids == [b.custom_id for b in card.buttons], "each button routes by its custom id"
+    assert [e.get("style") for e in actions["elements"]] == ["primary", None], "one primary"

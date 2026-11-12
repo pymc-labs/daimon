@@ -141,7 +141,9 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
                     return
                 target_name, target_ma_id = selected.name, selected.ma_agent_id
             else:
-                agents = await list_agents_by_tenant(runtime.anthropic, tenant_id=tenant_id)
+                agents = await list_agents_by_tenant(
+                    runtime.anthropic, tenant_id=tenant_id, records=runtime.sessionmaker
+                )
                 matches = [row for row in agents if row.name.casefold() == agent.casefold()]
                 if len(matches) != 1:
                     await interaction.followup.send(
@@ -250,6 +252,7 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
             runtime.anthropic,
             tenant_id=tenant_id,
             agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ma_agent_id),
+            records=runtime.sessionmaker,
         )
         if live is None or live.id != ma_agent_id:
             return False

@@ -238,7 +238,9 @@ class RoutinesPanel:
     async def _form(
         self, actor: Actor, values: dict[str, str], error: str | None = None
     ) -> TaskModuleInvokeResponse:
-        agents = await list_agents_by_tenant(self._runtime.anthropic, tenant_id=actor.tenant_id)
+        agents = await list_agents_by_tenant(
+            self._runtime.anthropic, tenant_id=actor.tenant_id, records=self._runtime.sessionmaker
+        )
         names = (agent.metadata.get(MA_METADATA_KEY_NAME) for agent in agents)
         form = create_form(sorted(name for name in names if name), values, error)
         return dialog(NEW_ROUTINE, form)

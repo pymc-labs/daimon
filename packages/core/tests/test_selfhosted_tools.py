@@ -118,6 +118,33 @@ def test_reserved_server_and_configured_servers_are_credential_free() -> None:
     assert "Bearer" not in json.dumps([server.model_dump() for server in tools.mcp_servers])
 
 
+def test_relayed_connectors_mount_the_relay_with_the_turn_credential() -> None:
+    tools = build_turn_tools(
+        daimon_mcp_url="https://mcp.example/mcp",
+        tenant_id=TENANT,
+        platform="discord",
+        channel_id="channel",
+        agent_names=("agent",),
+        skill_bundles={},
+        mcp_servers=(
+            MCPConnection(name="notes", url="https://notes.example/mcp"),
+            MCPConnection(name="open", url="https://open.example/mcp"),
+        ),
+        mcp_credential_bindings=(),
+        single_tenant=False,
+        mcp_allowed_http_hosts=(),
+        agent_skills=(),
+        platform_skills=(),
+        channel_skills=(),
+        relayed=("notes",),
+    )
+    by_name = {server.name: server for server in tools.mcp_servers}
+    assert by_name["notes"].url == "https://mcp.example/mcp/connectors/notes"
+    assert by_name["notes"].headers_env == {"Authorization": DAIMON_MCP_AUTH_ENV}
+    assert by_name["open"].url == "https://open.example/mcp" and by_name["open"].headers_env == {}
+    assert tools.relayed == ("notes",)
+
+
 @pytest.mark.parametrize(
     "server",
     [
@@ -371,6 +398,31 @@ async def test_minted_token_is_registered_expiring_redacted_and_tenant_bound(
         now=NOW,
     )
     assert maximum.expires_at == NOW + dt.timedelta(hours=1)
+    from daimon.core.mcp_hold import HOLD_CLAIM, hold_claim
+    from daimon.core.turn_hold import TurnHold
+
+    hold = TurnHold(platform="discord", channel_id="C-SYN-1", client=True)
+    held = await mint_turn_mcp_authorization(
+        db_session_factory,
+        scope=scope,
+        agent=agent,
+        agents=agents,
+        deadline_s=300,
+        secret=b"t" * 32,
+        now=NOW,
+        hold=hold,
+    )
+    held_claims = jwt.decode(
+        held.header.get_secret_value().removeprefix("Bearer "),
+        b"t" * 32,
+        algorithms=["HS256"],
+        options={"verify_exp": False},
+    )
+    assert held_claims[HOLD_CLAIM] == hold_claim(hold), "a held turn's credential signs its hold"
+    async with db_session_factory() as session:
+        held_row = await get_mcp_token(session, jti=held.jti)
+    assert held_row is not None, "the held credential is registered"
+    assert (held_row.platform, held_row.channel_id) == ("discord", "C-SYN-1"), "row is bound"
     token = header.header.get_secret_value().removeprefix("Bearer ")
     assert token not in repr(header)
     claims = jwt.decode(token, b"t" * 32, algorithms=["HS256"], options={"verify_exp": False})
@@ -425,6 +477,119 @@ async def test_minted_token_is_registered_expiring_redacted_and_tenant_bound(
             secret=b"t" * 32,
             now=NOW,
         )
+
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.turn_origins import create_origin, get_active_origin
+    from daimon.core.turn_origin import current_execution_origin_id
+
+    with pytest.raises(ScopeViolation, match="origin"):
+        await mint_turn_mcp_authorization(
+            db_session_factory,
+            scope=scope,
+            agent=agent,
+            agents=agents,
+            deadline_s=300,
+            secret=b"t" * 32,
+            now=NOW,
+            memory_read_only=True,
+        )
+    async with db_session_factory() as session, session.begin():
+        origin = await create_origin(
+            session,
+            tenant_id=tenant.id,
+            account_id=principal.account_id,
+            platform="discord",
+            parent_channel_id="channel",
+            thread_id="thread",
+            responder_ma_agent_id=agent.id,
+            responder_name="Agent",
+            configuration_target_ma_agent_id=None,
+            configuration_target_name=None,
+            role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
+            now=NOW,
+            expires_at=NOW + dt.timedelta(minutes=10),
+        )
+    reset = current_execution_origin_id.set(origin.id)
+    try:
+        read_only = await mint_turn_mcp_authorization(
+            db_session_factory,
+            scope=scope,
+            agent=agent,
+            agents=agents,
+            deadline_s=300,
+            secret=b"t" * 32,
+            now=NOW,
+            memory_read_only=True,
+        )
+    finally:
+        current_execution_origin_id.reset(reset)
+    bound = jwt.decode(
+        read_only.header.get_secret_value().removeprefix("Bearer "),
+        b"t" * 32,
+        algorithms=["HS256"],
+        options={"verify_exp": False},
+    )
+    assert bound["chat_session_id"] == str(origin.id), "the credential names its turn's origin"
+    assert bound["jti"] == str(read_only.jti), "binding keeps the registered credential"
+    async with db_session_factory() as session:
+        stamped = await get_active_origin(
+            session,
+            origin_id=origin.id,
+            tenant_id=tenant.id,
+            account_id=principal.account_id,
+            platform="discord",
+            now=NOW,
+        )
+    assert stamped is not None and stamped.memory_read_only is True, "the server reads it read-only"
+    reset = current_execution_origin_id.set(origin.id)
+    try:
+        relayed = await mint_turn_mcp_authorization(
+            db_session_factory,
+            scope=scope,
+            agent=agent,
+            agents=agents,
+            deadline_s=300,
+            secret=b"t" * 32,
+            now=NOW,
+            bind_session=True,
+        )
+    finally:
+        current_execution_origin_id.reset(reset)
+    claims = jwt.decode(
+        relayed.header.get_secret_value().removeprefix("Bearer "),
+        b"t" * 32,
+        algorithms=["HS256"],
+        options={"verify_exp": False},
+    )
+    assert claims["chat_session_id"] == str(origin.id), "the relay credential names its origin"
+    assert "requester_account_id" not in claims, "a per-caller credential names no asker"
+    reset = current_execution_origin_id.set(origin.id)
+    try:
+        shared = await mint_turn_mcp_authorization(
+            db_session_factory,
+            scope=scope,
+            agent=agent,
+            agents=agents,
+            deadline_s=300,
+            secret=b"t" * 32,
+            now=NOW,
+            requester_account_id=principal.account_id,
+        )
+    finally:
+        current_execution_origin_id.reset(reset)
+    marked = jwt.decode(
+        shared.header.get_secret_value().removeprefix("Bearer "),
+        b"t" * 32,
+        algorithms=["HS256"],
+        options={"verify_exp": False},
+    )
+    # The relay reads this claim and hides personal sign-ins (`test_connector_relay_parity`).
+    assert marked["requester_account_id"] == str(principal.account_id), (
+        "a shared thread's credential names its asker"
+    )
+    assert marked["chat_session_id"] == str(origin.id)
 
 
 def test_skill_count_cap_and_identical_reference_deduplication() -> None:

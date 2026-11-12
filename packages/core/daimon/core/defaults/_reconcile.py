@@ -16,6 +16,7 @@ from pathlib import Path
 import structlog
 from anthropic import APIError, AsyncAnthropic
 from anthropic.types.beta import SkillListResponse
+from daimon.core.anthropic_guard import anthropic_configured
 from daimon.core.defaults.backfill_guidance import backfill_credential_guidance
 from daimon.core.defaults.loader import (
     load_agent_specs,
@@ -25,6 +26,7 @@ from daimon.core.defaults.loader import (
 )
 from daimon.core.defaults.ma_index import list_skills_strict
 from daimon.core.defaults.metadata import tenant_scoped_display_title
+from daimon.core.defaults.owned import reconcile_owned_environment
 from daimon.core.defaults.preflight import check_models_accepted
 from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.reconcile_environments import reconcile_environment
@@ -37,6 +39,7 @@ from daimon.core.defaults.sweep import (
 )
 from daimon.core.errors import DaimonError, DefaultsError
 from daimon.core.model_presets import model_choice_id
+from daimon.core.specs import AgentSpec, EnvironmentSpec
 from daimon.core.stores.channel_skills import list_channel_skill_ids
 from daimon.core.stores.seeded_skills import prune_seeded_skills
 from sqlalchemy import text
@@ -178,6 +181,18 @@ async def _reconcile_core(
                     f"agent {spec.name!r} references unknown skill {ref.skill_id!r}; "
                     "add defaults/skills/<name>/SKILL.md first."
                 )
+
+    if not anthropic_configured(client):
+        return await _reconcile_owned(
+            client,
+            session_factory,
+            agent_specs,
+            env_specs,
+            tenant_id=tenant_id,
+            account_id=account_id,
+            dry_run=dry_run,
+            public_url=public_url,
+        )
 
     # Pre-flight: verify MA accepts every unique agent model before any writes.
     # Catches MA whitelist drift. Skip in dry-run — dry-run must be 100% read-only.
@@ -321,3 +336,47 @@ async def _reconcile_core(
             lock_session, tenant_id=tenant_id, present_names=skill_names_present
         )
         return report
+
+
+async def _reconcile_owned(
+    client: AsyncAnthropic,
+    session_factory: async_sessionmaker[AsyncSession],
+    agent_specs: list[AgentSpec],
+    env_specs: list[EnvironmentSpec],
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID | None,
+    dry_run: bool,
+    public_url: str | None,
+) -> ApplyReport:
+    """No Anthropic key: seed the environments and agents as Daimon records.
+
+    No preflight, MA skill pass or sweep: those are Managed Agents resources.
+    Skills reach these agents through the neutral skill host at admission.
+    """
+    report = ApplyReport()
+    for env in env_specs:
+        await _run_per_resource(
+            report,
+            lambda env=env: reconcile_owned_environment(
+                session_factory, env, tenant_id=tenant_id, dry_run=dry_run, account_id=account_id
+            ),
+            kind="environment",
+            name=env.name,
+        )
+    for spec in agent_specs:
+        await _run_per_resource(
+            report,
+            lambda spec=spec: reconcile_agent(
+                client,
+                spec,
+                tenant_id=tenant_id,
+                dry_run=dry_run,
+                account_id=account_id,
+                public_url=public_url,
+                sessions=session_factory,
+            ),
+            kind="agent",
+            name=spec.name,
+        )
+    return report

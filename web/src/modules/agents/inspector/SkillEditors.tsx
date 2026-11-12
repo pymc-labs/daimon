@@ -10,10 +10,11 @@ import { cn } from "@/lib/utils"
 import { useConfirm } from "@/lib/confirm"
 import { pressProps } from "@/lib/filters"
 import { addServerSkill, saveSkillFiles, useApplyUpdate, useServerSkills, useSetFollow, useSkillFiles, useSkillFollows } from "../api"
-import { Dot, Pill } from "../bits"
+import { Dot, NotSupported, Pill } from "../bits"
 import { SkillFilesEditor } from "./SkillFilesEditor"
 import { SkillSource, SkillsRelease } from "../setup/SkillSource"
 import type { ServerSkillOption, Skill, SkillFollow } from "../types"
+import { NOTHING } from "../unsupported"
 import { Field, Section, type Props } from "./parts"
 import { menuEntries, skillBadge, titleOf } from "./server-skills"
 
@@ -26,6 +27,7 @@ function MirrorBadge({ follow, pinned }: { follow: SkillFollow; pinned: string }
 
 export function SkillsEditor(p: Props) {
   const { agent, config, catalog, ro, update, changed, select } = p
+  const lost = p.unsupported ?? NOTHING
   const qc = useQueryClient()
   const have = new Set(config.skills.map((s) => s.skill_id))
   const follows = useSkillFollows(agent.id).data ?? {}
@@ -54,8 +56,9 @@ export function SkillsEditor(p: Props) {
       <Section title={`Attached (${config.skills.length})`}>
         <div className="-mx-2">
           {config.skills.map((s) => (
-            <div key={s.skill_id} {...pressProps(() => select(`skill:${s.skill_id}`))} className="group flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-sm hover:bg-accent">
+            <div key={s.skill_id} {...pressProps(() => select(`skill:${s.skill_id}`))} className={cn("group flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-sm hover:bg-accent", lost.skills.has(s.skill_id) && "text-muted-foreground")}>
               <span className="truncate">{s.title}</span>
+              {lost.skills.has(s.skill_id) && <NotSupported />}
               {changed.has(`skill:${s.skill_id}`) && <Dot />}
               {follows[s.skill_id] ? <MirrorBadge follow={follows[s.skill_id]!} pinned={s.version} />
                 : <span className="truncate text-xs text-faint">{s.type === "anthropic" ? "Anthropic" : s.skill_id}</span>}

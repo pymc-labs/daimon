@@ -64,7 +64,10 @@ async def resolve_credential_target(
     """
     try:
         agent = await find_agent_by_derived_uuid(
-            runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+            runtime.anthropic,
+            tenant_id=row.tenant_id,
+            agent_id=row.agent_id,
+            records=runtime.sessionmaker,
         )
     except anthropic.APIError:
         structlog.get_logger().exception(

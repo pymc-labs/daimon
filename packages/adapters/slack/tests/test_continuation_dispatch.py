@@ -25,7 +25,7 @@ from daimon.core.continuity.wakes import (
     WAKE_RUN_LEASE,
     abandon_interrupted_wakes,
 )
-from daimon.core.stores.domain import TaskContinuationRow
+from daimon.core.stores.domain import ContinuationReason, TaskContinuationRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.task_continuations import get_continuation, list_pending_continuations
 from daimon.core.turn.errors import SessionBusyError
@@ -218,6 +218,7 @@ async def _seed_request(
     *,
     workspace_id: str,
     thread_id: str,
+    reason: ContinuationReason = "task_handoff",
 ) -> ContinuationRequest:
     tenant = await make_tenant(db_session, platform="slack", workspace_id=workspace_id)
     requester = await get_or_create_platform_principal(
@@ -234,7 +235,7 @@ async def _seed_request(
         target_ma_agent_id=_TARGET_AGENT_ID,
         target_name="receiving-agent",
         requested_work="please pick up the migration",
-        reason="task_handoff",
+        reason=reason,
         idempotency_key=uuid.uuid4(),
     )
     await record_continuation(db_session_factory, request)
@@ -534,3 +535,43 @@ async def test_skip_copy_reaches_only_a_thread_the_agent_may_post_in(
         assert posts, "an open thread still gets the skip copy"
     else:
         assert posts == [], f"{target} thread must receive nothing"
+
+
+async def test_a_timer_wake_runs_without_reading_the_threads_history(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wake Daimon scheduled answers no message, so a later one cannot supersede it (as on Discord)."""
+    thread_id = "9200000006.000001"
+    request = await _seed_request(
+        db_session,
+        db_session_factory,
+        workspace_id="T_TIMER_HISTORY",
+        thread_id=thread_id,
+        reason="timer",
+    )
+    anthropic = build_fake_anthropic(_fake_target_agent_handler(str(request.tenant_id)))
+
+    async def _no_history(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a timer wake must not read the thread's history")
+
+    monkeypatch.setattr(continuation_dispatch, "_latest_human_message_at", _no_history)
+    calls, run_follow_up = _recorder()
+
+    await dispatch_pending_continuations(
+        db_session_factory,
+        anthropic,
+        fake_slack_web_client.client,
+        tenant_id=request.tenant_id,
+        channel="C_CONT_DISPATCH",
+        thread_id=thread_id,
+        active_turn=False,
+        run_follow_up=run_follow_up,
+    )
+
+    assert len(calls) == 1, "the wake ran without a history read"
+    assert {"timer", "confirmed_call"} <= continuation_dispatch._NO_HISTORY, (  # pyright: ignore[reportPrivateUsage]
+        "a press-approved wake is exempt too"
+    )

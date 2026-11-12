@@ -27,13 +27,15 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from time import perf_counter
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import structlog
 from anthropic import APIError, APIStatusError
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from daimon.core import channel_backend
 from daimon.core.access_policy import TenantAccessPolicy, agent_invoker_roles
+from daimon.core.agent_record_ports import DAIMON_ID_PREFIXES
+from daimon.core.anthropic_guard import anthropic_configured
 from daimon.core.approval_gate import ApprovalGate, resolve_approval_gate
 from daimon.core.authz import (
     Action,
@@ -112,7 +114,7 @@ from daimon.core.stores import agent_backends, mux_state
 from daimon.core.stores.access_policy import PolicyBusyError, load_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.channel_skills import list_channel_skills
-from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, Role
+from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, Platform, Role
 from daimon.core.stores.identity import (
     find_platform_principal,
     get_or_create_platform_principal,
@@ -123,7 +125,7 @@ from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.shared_channels import is_channel_shared, mark_channel_shared
 from daimon.core.stores.thread_sessions import get_thread_session_at
-from daimon.core.thread_models import apply_thread_model, conversation_key
+from daimon.core.thread_models import apply_thread_model, conversation_key, thread_backend
 from daimon.core.thread_release import apply_thread_release, release_due, release_now
 from daimon.core.turn.approvals import daimon_rule_set_for
 from daimon.core.turn.deps import TurnDeps
@@ -241,6 +243,8 @@ async def _thread_follow(
     bound_model: str | None,
     shared: bool,
     enabled_backends: tuple[Provider, ...],
+    thread: channel_backend.ThreadBackend | None = None,
+    retained_local: int | None = None,
 ) -> ThreadFollow | None:
     """Whether this conversation must follow its agent's switch (M03).
 
@@ -253,12 +257,19 @@ async def _thread_follow(
     here, the slot moves on this message. `agent_ma_id` is the Anthropic source
     agent admission resolved, never a provider's own agent id. A shared
     conversation never moves ("stays"). Nothing is written here.
+
+    `thread`, the conversation's own model choice, stands in for the agent's.
+    A slot bound by an earlier choice (`retained_local`) that no longer holds
+    (cleared, changed, or its consent replaced) moves even to the same model.
     """
     from daimon.core.ma_identity import derive_agent_uuid
     from mux.profiles import backend_selection
 
-    preference = await channel_backend.current_agent_backend(
-        session, tenant_id, derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent_ma_id)
+    agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent_ma_id)
+    preference = (
+        thread.consent
+        if thread is not None
+        else await channel_backend.current_agent_backend(session, tenant_id, agent_id)
     )
     provider: Provider = (
         preference.backend
@@ -268,9 +279,23 @@ async def _thread_follow(
     if provider == LOOP.provider:
         return None
     model = _effective_model(provider, preference.model if preference is not None else None)
-    if bound_provider == provider and (
-        provider == MANAGED_AGENTS.provider
-        or _effective_model(bound_provider, bound_model) == model
+    pin = (
+        await mux_state.config_thread_pin(session, channel, retained_local)
+        if retained_local
+        else None
+    )
+    still_chosen = pin is None or (
+        thread is not None
+        and thread.consent is not None
+        and pin == (thread.thread_id, thread.consent.digest)
+    )
+    if (
+        still_chosen
+        and bound_provider == provider
+        and (
+            provider == MANAGED_AGENTS.provider
+            or _effective_model(bound_provider, bound_model) == model
+        )
     ):
         return None
     # Only toward a provider that can run here: an unavailable preference never
@@ -414,6 +439,9 @@ class Admission:
     backend_agent_revision: AgentBackendRevision | None = field(
         default=None, compare=False, repr=False
     )
+    # The conversation whose own model choice selected `backend_revision`; its
+    # consent is `backend_agent_revision`. None when the agent's own choice did.
+    backend_thread_id: str | None = field(default=None, compare=False, repr=False)
     # The model this conversation's people chose (`daimon.core.thread_models`),
     # already in `agent`; the session is created with it. None runs the agent's own.
     model_override: str | None = None
@@ -558,6 +586,19 @@ def _observe_admission(observer: AdmissionObserver, decision: AdmissionDecision)
         observer(decision)
     except Exception:
         _log.warning("turn.admission_observer_failed")
+
+
+def _refuse_managed_fallback(
+    *, daimon_record: bool, revision: AgentBackendRevision | ConfigRevision | None
+) -> None:
+    """A Daimon record never runs on Managed Agents: refuse rather than fall back."""
+    if not daimon_record or (revision is not None and revision.backend != MANAGED_AGENTS.provider):
+        return
+    raise AdmissionDenied(
+        reason="backend_unsupported",
+        cause="agent_backend",
+        provider=MANAGED_AGENTS.provider if revision is None else revision.backend,
+    )
 
 
 async def admit(
@@ -1144,9 +1185,9 @@ async def _admit_gates(
             environment_name_tier=config.environment_name_tier,
         )
 
-    # A legacy agent preference must be refused before resolving its source
-    # through Anthropic. The name lookup can only deny; it never selects a
-    # backend or grants authority to another resource with the same name.
+    # A self-hosted agent preference without its operator grant is refused before
+    # resolving its source through Anthropic. The name lookup can only deny; it never
+    # selects a backend or grants authority to another resource with the same name.
     if (
         selection_enabled
         and channel is not None
@@ -1162,9 +1203,17 @@ async def _admit_gates(
                         tenant_id=tenant_id, ma_agent_id=config.responder_ma_agent_id
                     ),
                 )
-                refused = preference is not None and preference.backend == LOOP.provider
+                refused = (
+                    preference is not None
+                    and preference.backend == LOOP.provider
+                    and not channel_backend.agent_grant_holds(tenant_id, preference)
+                )
             else:
-                refused = await agent_backends.has_backend_preference_by_name(
+                from daimon.core.turn.runtimes import has_agent_grants
+
+                refused = not has_agent_grants(
+                    LOOP.profile_id, str(tenant_id)
+                ) and await agent_backends.has_backend_preference_by_name(
                     session,
                     tenant_id=tenant_id,
                     agent_name=config.agent_name,
@@ -1195,22 +1244,73 @@ async def _admit_gates(
             policy.enabled_backends if selection_enabled else None,
         ) from err
 
-    selfhosted = backend_revision is not None and backend_revision.backend == LOOP.provider
-    if selfhosted:
+    # A channel's self-hosted pin runs a harness record; an agent's own choice runs its source.
+    selfhosted = (
+        backend_revision is not None
+        and backend_revision.backend == LOOP.provider
+        and backend_revision_origin == "channel"
+    )
+    keyed = anthropic_configured(deps.anthropic)
+    responder = config.responder_ma_agent_id
+    # A Daimon record: self-hosted, a `dm_` responder, a name a record holds, or any
+    # agent on a keyless install. Everything else is a Managed Agents agent, which needs the key.
+    record_scope = Scope(
+        tenant_id=str(tenant_id),
+        account_id=str(principal.account_id),
+        principal_id=external_user_id,
+        authorization_id="turn-admission",
+    )
+    daimon_record = (
+        selfhosted
+        or (responder is not None and responder.startswith(DAIMON_ID_PREFIXES))
+        or (not keyed and responder is None)
+    )
+    if not daimon_record and responder is None:
+        from daimon.core.turn.selfhosted_records import names_a_record
+
+        # A name a convert moved to a Daimon record means the record, not the archived copy.
+        daimon_record = await names_a_record(deps.sessionmaker, record_scope, config.agent_name)
+    if not daimon_record and not keyed:
+        raise AdmissionDenied(
+            reason="backend_unsupported",
+            cause="anthropic_unconfigured",
+            provider=MANAGED_AGENTS.provider,
+        )
+    if daimon_record:
         from daimon.core.turn.selfhosted_records import resolve_records
 
-        agent, environment = await resolve_records(
+        resolve = partial(
+            resolve_records,
             deps.sessionmaker,
-            Scope(
-                tenant_id=str(tenant_id),
-                account_id=str(principal.account_id),
-                principal_id=external_user_id,
-                authorization_id="turn-admission",
-            ),
+            record_scope,
             agent_name=config.agent_name,
             environment_name=config.environment_name,
-            responder_id=config.responder_ma_agent_id,
+            responder_id=responder,
         )
+        try:
+            agent, environment = await resolve()
+        except MAResolverMissError:
+            # A keyless install seeds its defaults as Daimon records on first use.
+            if selfhosted or keyed or dm_agent_name is not None:
+                raise
+            await reconcile_tenant_defaults(
+                deps.anthropic,
+                deps.sessionmaker,
+                deps.defaults_root,
+                tenant_id=tenant_id,
+                public_url=deps.public_url,
+            )
+            try:
+                agent, environment = await resolve()
+            except MAResolverMissError as miss:
+                if miss.kind != "agent":
+                    raise
+                # Not a Daimon record, so a Managed Agents one the key would reach.
+                raise AdmissionDenied(
+                    reason="backend_unsupported",
+                    cause="anthropic_unconfigured",
+                    provider=MANAGED_AGENTS.provider,
+                ) from miss
         agent_id, env_id = agent.id, environment.id
         if (observation := current_outcome.get()) is not None:
             observation.agent_id = agent.id
@@ -1258,10 +1358,12 @@ async def _admit_gates(
         # a thread whose task was handed to another agent answers as that agent,
         # which is an ordinary tenant-and-archive-checked retrieve.
         if config.thread_binding_kind in ("handoff", "owner", "web", "helper"):
-            agent = await get_setup_agent(deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id)
+            agent = await get_setup_agent(
+                deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id, records=deps.sessionmaker
+            )
         elif config.thread_binding_id is not None:
             agent = await get_setup_responder(
-                deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id
+                deps.anthropic, tenant_id=tenant_id, ma_agent_id=agent_id, records=deps.sessionmaker
             )
         else:
             try:
@@ -1279,7 +1381,7 @@ async def _admit_gates(
             observation.agent_id = agent.id
         try:
             environment = await retrieve_environment_cached(
-                deps.anthropic, deps.resolver_cache, tenant_id, env_id
+                deps.anthropic, deps.resolver_cache, tenant_id, env_id, records=deps.sessionmaker
             )
         except APIStatusError as err:
             if err.status_code not in (400, 404):
@@ -1297,13 +1399,17 @@ async def _admit_gates(
     # raise the existing resolver-miss error so the friendly copy at the four
     # adapter catch sites renders unchanged -- no new error taxonomy. ---
     if agent.archived_at is not None:
-        if not selfhosted:
+        if not daimon_record:
+            from daimon.core.turn.selfhosted_records import names_a_record
+
             deps.resolver_cache.pop((tenant_id, "agent", config.agent_name), None)
             deps.resolver_cache.agents.pop((tenant_id, agent_id), None)
-            async with deps.sessionmaker() as session, session.begin():
-                await clear_agent_references(
-                    session, tenant_id=tenant_id, agent_name=config.agent_name
-                )
+            # A convert archives the Managed Agents copy: the name's references are the record's.
+            if not await names_a_record(deps.sessionmaker, record_scope, config.agent_name):
+                async with deps.sessionmaker() as session, session.begin():
+                    await clear_agent_references(
+                        session, tenant_id=tenant_id, agent_name=config.agent_name
+                    )
         raise MAResolverMissError(kind="agent", tenant_id=tenant_id, daimon_tag=config.agent_name)
     if environment.archived_at is not None:
         deps.resolver_cache.pop((tenant_id, "environment", config.environment_name), None)
@@ -1381,6 +1487,54 @@ async def _admit_gates(
     stale_switch: Provider | None = None
     backend_switch_stale: Provider | None = None
 
+    # This conversation's own model choice, as the thread tier (`resolve_preference`).
+    thread_choice: channel_backend.ThreadBackend | None = None
+
+    def _thread_of(agent_revision: AgentBackendRevision | None) -> str | None:
+        """The conversation whose consent `agent_revision` is, if the thread tier's."""
+        chosen = thread_choice
+        if chosen is None or chosen.consent is None or agent_revision is not chosen.consent:
+            return None
+        return chosen.thread_id
+
+    def _ask_thread_again() -> bool:
+        """Post the conversation's model card again when its own consent went stale."""
+        chosen = thread_choice
+        notifier = deps.thread_reask_notifier
+        conversation = conversation_key(channel_id=channel_id, thread_id=thread_id, is_dm=is_dm)
+        if (
+            notifier is None
+            or chosen is None
+            or chosen.consent is None
+            or source_agent is None
+            or conversation is None
+        ):
+            return False
+        # Deferred: the model switch modules it imports reach `channel_rules`, whose
+        # import chain comes back through this package.
+        from daimon.core import thread_model_reask
+
+        thread_model_reask.spawn_thread_reask(
+            sessionmaker=deps.sessionmaker,
+            notifier=notifier,
+            stale=thread_model_reask.StaleThread(
+                deps=deps,
+                settings=deps.settings,
+                tenant_id=tenant_id,
+                platform=cast(Platform, platform),
+                channel_id=channel_id,
+                thread_id=thread_id,
+                conversation_id=conversation,
+                user_id=external_user_id,
+                admin=effective_admin,
+                source=source_agent,
+                ma_agent_id=agent.id,
+                agent_version=agent.version,
+                consent=chosen.consent,
+            ),
+        )
+        return True
+
     async def verify_origin(
         selection: ResolvedBackend,
         origin: Literal["channel", "agent"],
@@ -1422,6 +1576,7 @@ async def _admit_gates(
             backend_revision=revision,
             backend_revision_origin=origin,
             backend_agent_revision=agent_revision,
+            backend_thread_id=_thread_of(agent_revision),
         )
         request = ProviderPreparationRequest(
             deps=deps,
@@ -1450,6 +1605,8 @@ async def _admit_gates(
                 if error.cause is None:
                     # The agent's own backend: its runtime can't serve this agent here.
                     raise _backend_refusal(revision, "agent", None) from error
+                if error.cause == "channel_row_missing":
+                    raise error
                 if (
                     error.cause in ("re_confirm", "preparation_busy", "preparation_failed")
                     and error.provider is None
@@ -1470,10 +1627,22 @@ async def _admit_gates(
     async def resolve_preference() -> None:
         nonlocal backend_revision, backend_ever_shared, backend, backend_revision_origin
         nonlocal backend_footer_profile, source_agent, backend_switch_stale
-        nonlocal retained_revision, backend_follow, follow_generation
+        nonlocal retained_revision, backend_follow, follow_generation, thread_choice
         if selfhosted:
             return
         bound_before = retained_revision if backend_revision is None else None
+        if selection_enabled and channel is not None and not configured_channel:
+            async with deps.sessionmaker() as thread_session:
+                thread_choice = await thread_backend(
+                    thread_session,
+                    tenant_id=tenant_id,
+                    platform=platform,
+                    conversation_id=conversation_key(
+                        channel_id=channel_id, thread_id=thread_id, is_dm=is_dm
+                    ),
+                    agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id),
+                    daimon_record=daimon_record,
+                )
         if follow_eligible and channel is not None and retained_revision is not None:
             # M03: the conversation follows its (Anthropic source) agent's switch.
             async with deps.sessionmaker() as follow_session:
@@ -1490,6 +1659,8 @@ async def _admit_gates(
                     bound_model=backend_revision.model if backend_revision is not None else None,
                     shared=retained_shared,
                     enabled_backends=tuple(policy.enabled_backends),
+                    thread=thread_choice,
+                    retained_local=retained_revision,
                 )
             if backend_follow is not None and backend_follow.kind == "moved":
                 # Select as released now; the release is written only once this
@@ -1536,6 +1707,7 @@ async def _admit_gates(
                             validate_origin=(
                                 verify_origin if deps.agent_backends else _require_backend_origin
                             ),
+                            thread=thread_choice,
                         )
                         # Preparation uses another transaction. Publish the immutable
                         # effective revision and its origin before that transaction.
@@ -1579,7 +1751,9 @@ async def _admit_gates(
                 if stale is not None:
                     _log.info("turn.stale_switch_fallback", provider=stale)
                     backend_revision, backend, source = None, None, "default"
-                    backend_switch_stale = stale
+                    # The conversation's own pick posts its card again; the agent
+                    # offers no switch for it.
+                    backend_switch_stale = None if _ask_thread_again() else stale
                     if follow_generation is not None:
                         # Already on Anthropic: stay in that session, move nothing.
                         retained_revision, follow_generation, backend_follow = 0, None, None
@@ -1671,8 +1845,8 @@ async def _admit_gates(
         )
     )
 
-    if selfhosted:
-        # Self-hosted skills are record references, resolved by the harness's
+    if daimon_record:
+        # Daimon record skills are record references, resolved by the harness's
         # mount pipeline. Anthropic's platform/channel catalog is never queried.
         platform_skills: tuple[MaSkill, ...] = ()
         channel_skills: tuple[MaSkill, ...] = ()
@@ -1708,12 +1882,22 @@ async def _admit_gates(
 
     if deps.agent_backends:
         await resolve_preference()
+    _refuse_managed_fallback(daimon_record=daimon_record, revision=backend_revision)
     platform_skills = backend_platform_skills(
         platform_skills, None if backend_revision is None else backend_revision.profile
     )
     channel_skills = (*platform_skills, *channel_skills)
 
     # The model this conversation's people chose, read fresh for every turn.
+    backend_thread_id = _thread_of(backend_agent_revision) if backend_revision else None
+    chosen = thread_choice.consent if thread_choice is not None else None
+    thread_applied = (
+        chosen is not None
+        and backend_revision is not None
+        and backend_revision.backend == chosen.backend
+        and _effective_model(backend_revision.backend, backend_revision.model)
+        == _effective_model(backend_revision.backend, chosen.model)
+    )
     async with deps.sessionmaker() as session:
         thread_model = await apply_thread_model(
             session,
@@ -1724,6 +1908,7 @@ async def _admit_gates(
                 channel_id=channel_id, thread_id=thread_id, is_dm=is_dm
             ),
             anthropic_backend=backend_revision is None or backend_revision.model is None,
+            thread_applied=thread_applied,
         )
     agent = thread_model.agent
     mark("thread_model")
@@ -1735,6 +1920,7 @@ async def _admit_gates(
         backend_revision_origin=backend_revision_origin,
         backend_counterpart=backend_counterpart,
         backend_agent_revision=backend_agent_revision,
+        backend_thread_id=backend_thread_id,
         backend_footer_profile=backend_footer_profile,
         backend_follow=backend_follow,
         backend_ever_shared=backend_ever_shared,
@@ -2410,7 +2596,9 @@ async def capture_backend_source(
                 account_id=str(context.account_id),
                 authorization_id="backend-preview",
             )
-            actual = await retrieve_agent(deps.anthropic, source.source.ref.id, scope=scope)
+            actual = await retrieve_agent(
+                deps.anthropic, source.source.ref.id, scope=scope, records=deps.sessionmaker
+            )
             if explicit_target_name is not None:
                 await channel_backend.load_backend_agent(
                     deps.anthropic,
@@ -2423,6 +2611,7 @@ async def capture_backend_source(
                 deps.anthropic,
                 tenant_id=context.tenant_id,
                 name=config.environment_name,
+                records=deps.sessionmaker,
             )
             if environment is None or environment.archived_at is not None:
                 raise channel_backend.AgentBackendRefused(
@@ -2529,11 +2718,13 @@ async def capture_agent_source(
     *,
     account_id: uuid.UUID,
     subject: Subject,
+    external_user_id: str | None = None,
 ) -> BackendAgent:
     """Capture the named agent's own source: the requester's tenant and account, no channel.
 
     The agent-scoped form of `capture_backend_source`, for settings that belong to the
-    agent wherever it answers (provider and model).
+    agent wherever it answers (provider and model). `external_user_id` names a requester
+    whose account holds no principal on the tenant's own platform (a web person).
     """
     return await capture_backend_source(
         deps,
@@ -2544,6 +2735,7 @@ async def capture_agent_source(
         is_dm=False,
         slack_turn_context_id=None,
         private_dm_id=None,
+        external_user_id=external_user_id,
         explicit_target_name=source.name,
     )
 

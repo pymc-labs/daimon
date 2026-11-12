@@ -22,11 +22,13 @@ from mux.contracts.ports import MemoryStores as CoreMemoryStores
 from mux.contracts.ports import PlatformExport as CorePlatformExport
 from mux.contracts.ports import Vaults as CoreVaults
 from mux.contracts.profile import Profile
+from mux.drivers.anthropic.completions import AnthropicCompletions
 from mux.drivers.anthropic.core_admin import AnthropicCoreAdmin, CoreAdmin
 from mux.drivers.anthropic.credential_schemas import CredentialCreate, CredentialUpdate
 from mux.drivers.anthropic.normalize import EventNormalizer, object_json
 from mux.drivers.anthropic.outputs import AnthropicOutputs, Outputs
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
+from mux.drivers.anthropic.resources._native import NativeSnapshot
 from mux.drivers.anthropic.resources._secrets import CredentialFileUpload, SecretResolver
 from mux.drivers.anthropic.resources.agents import (
     AGENT_VERSIONS_NAMESPACE,
@@ -97,7 +99,18 @@ from mux.drivers.anthropic.transport import (
 from mux.drivers.anthropic.turn import AnthropicEventHistoryWalk, AnthropicEvents, EventHistoryWalk
 from mux.drivers.anthropic.usage import AnthropicUsage, UsageWalk, observation_from_event
 from mux.errors import ExtensionVersionError, UnsupportedCapability
-from mux.profiles.anthropic import MANAGED_AGENTS
+from mux.profiles.anthropic import (
+    AGENT_CREATE_NULLS_NAMESPACE,
+    ARTIFACTS_NAMESPACE,
+    ENVIRONMENT_CONFIG_NAMESPACE,
+    ENVIRONMENT_READS_NAMESPACE,
+    MANAGED_AGENTS,
+    MEMORY_STORES_NAMESPACE,
+    RESOURCE_WALK_NAMESPACE,
+    SESSION_RESOURCE_CREATE_NAMESPACE,
+    SKILLS_VERSIONS_NAMESPACE,
+    VAULTS_NAMESPACE,
+)
 
 
 def _required[T](port: T | None, name: str) -> T:
@@ -169,25 +182,25 @@ class AnthropicManagedAgents:
             (Outputs, "anthropic.outputs", 1): AnthropicOutputs(
                 client, self.account_scope_id, authorization, secrets
             ),
-            (EnvironmentReads, "anthropic.environment_reads", 1): self.environments,
+            (EnvironmentReads, ENVIRONMENT_READS_NAMESPACE, 1): self.environments,
             (AgentVersions, AGENT_VERSIONS_NAMESPACE, 1): self.agents,
-            (CoreMemoryStores, "anthropic.memory_stores", 1): native_memory,
-            (NativeMemoryStores, "anthropic.memory_stores", 1): native_memory,
-            (NativeArtifacts, "anthropic.artifacts", 1): native_artifacts,
-            (Vaults, "anthropic.vaults", 1): native_vaults,
-            (CoreVaults, "anthropic.vaults", 1): native_vaults,
+            (CoreMemoryStores, MEMORY_STORES_NAMESPACE, 1): native_memory,
+            (NativeMemoryStores, MEMORY_STORES_NAMESPACE, 1): native_memory,
+            (NativeArtifacts, ARTIFACTS_NAMESPACE, 1): native_artifacts,
+            (Vaults, VAULTS_NAMESPACE, 1): native_vaults,
+            (CoreVaults, VAULTS_NAMESPACE, 1): native_vaults,
             (SessionResources, "anthropic.session_resources", 1): self.session_admin,
             (NativeSessionResources, "anthropic.session_resources", 1): self.session_admin,
             (EventHistoryWalk, "anthropic.event_history", 1): AnthropicEventHistoryWalk(
                 client, self.account_scope_id, authorization
             ),
-            (ResourceWalk, "anthropic.resource_walk", 1): AnthropicResourceWalk(
+            (ResourceWalk, RESOURCE_WALK_NAMESPACE, 1): AnthropicResourceWalk(
                 self.agents, self.environments, native_skills, native_versions
             ),
             (PlatformExport, "anthropic.platform_export", 1): native_export,
             (CorePlatformExport, "anthropic.platform_export", 1): native_export,
-            (SkillVersions, "anthropic.skills_versions", 1): native_versions,
-            (NativeSkillVersions, "anthropic.skills_versions", 1): native_versions,
+            (SkillVersions, SKILLS_VERSIONS_NAMESPACE, 1): native_versions,
+            (NativeSkillVersions, SKILLS_VERSIONS_NAMESPACE, 1): native_versions,
             (UsageWalk, "anthropic.usage_walk", 1): native_usage,
         }
 
@@ -221,10 +234,10 @@ class AnthropicManagedAgents:
             (namespace, 1)
             for namespace in (
                 "anthropic.model_config",
-                "anthropic.environment_config",
-                "anthropic.agent_create_nulls",
+                ENVIRONMENT_CONFIG_NAMESPACE,
+                AGENT_CREATE_NULLS_NAMESPACE,
                 "anthropic.session_create",
-                "anthropic.session_resource_create",
+                SESSION_RESOURCE_CREATE_NAMESPACE,
                 "anthropic.session_update",
                 "anthropic.session_system_message",
             )
@@ -256,6 +269,7 @@ class AnthropicManagedAgents:
 
 
 __all__ = [
+    "AnthropicCompletions",
     "AGENT_TOOLS_NAMESPACE",
     "AgentModelConfig",
     "AgentToolsConfig",
@@ -294,6 +308,7 @@ __all__ = [
     "MemoryMount",
     "NativeArtifacts",
     "NativeMemoryStores",
+    "NativeSnapshot",
     "NativeSessionResources",
     "NativeSkillVersions",
     "Outputs",

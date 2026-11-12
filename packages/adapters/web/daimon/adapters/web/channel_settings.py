@@ -30,7 +30,8 @@ from daimon.adapters.web.routines import routine_title
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import routine_service
 from daimon.core.agent_pins import agent_pin_names
-from daimon.core.channel_changes import Expected
+from daimon.core.channel_backend import NO_CAPTURE, make_backend_service
+from daimon.core.channel_changes import ChannelChangeRefused, Expected
 from daimon.core.channel_directory import WEB_ROW_ID, ValueSource, load_channel_directory
 from daimon.core.channel_reads import (
     RoutineRelation,
@@ -48,6 +49,7 @@ from daimon.core.channel_settings import (
     remove_skill,
     retire_channel_copy,
     set_environment,
+    set_provider_pin,
     set_tool_rule,
     set_workspace_default_agent,
 )
@@ -58,16 +60,17 @@ from daimon.core.errors import SkillsListTruncatedError
 from daimon.core.features.registry import DEFAULT, Tier
 from daimon.core.features.service import TierSetting, read_features
 from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.models_catalog import list_model_choices
 from daimon.core.routine_service import RoutineCaller, RoutineRefused
 from daimon.core.stores import agent_tool_rules as tool_rules
 from daimon.core.stores.channel_changes import WORKSPACE_ID
 from daimon.core.stores.channel_skills import list_channel_skills
-from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.domain import RoutineRow, TenantBackendPolicy
 from daimon.core.stores.platform_names import get_channel_names, get_user_names
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.thread_models import model_label
 from fastapi import APIRouter, Depends, HTTPException
-from mux.contracts.config import ConfigRevision
+from mux.contracts.config import DEFAULT_BACKEND, ConfigRevision
 from pydantic import BaseModel
 
 ChannelViewer = Annotated[WebCaller, Depends(requires("channels.view"))]
@@ -133,6 +136,15 @@ class PinJson(BaseModel):
     local: int
 
 
+class PinChoiceJson(BaseModel):
+    """A model a channel can be pinned to: `value` is `provider:id`."""
+
+    value: str
+    label: str
+    provider: str
+    price: str | None
+
+
 class CopyJson(BaseModel):
     name: str
     agent_id: str
@@ -182,6 +194,8 @@ class ChannelSettingsJson(BaseModel):
     skills: list[SkillJson]
     tool_rules: ToolRulesJson
     provider_pin: PinJson | None
+    pin_choices: list[PinChoiceJson]
+    """Every model on another provider this workspace may pin; empty for a member."""
     channel_copy: CopyJson | None
     threads: list[ThreadJson]
     link: str | None
@@ -232,6 +246,13 @@ class ToolRuleChange(BaseModel):
 
 class PinClear(BaseModel):
     expected_local: int
+
+
+class PinSet(BaseModel):
+    value: str
+    """The model to pin, `provider:id`."""
+    expected_local: int | None
+    """The pin last read, None for none."""
 
 
 class CopyRetire(BaseModel):
@@ -364,6 +385,24 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
                 return agent
         raise HTTPException(422, _NO_AGENT)
 
+    async def backend_policy(tenant_id: uuid.UUID) -> TenantBackendPolicy | None:
+        """The workspace's provider allowlist, or None when choosing a provider is off here."""
+        service = make_backend_service(
+            runtime.sessionmaker, settings.turn, capture_source=NO_CAPTURE
+        )
+        return await service.tenant_policy(tenant_id) if service.enabled else None
+
+    async def pin_choices_of(tenant_id: uuid.UUID) -> list[PinChoiceJson]:
+        """The models a channel can be pinned to: every one on another provider."""
+        policy = await backend_policy(tenant_id)
+        return [
+            PinChoiceJson(
+                value=f"{c.provider}:{c.id}", label=c.label, provider=c.provider, price=c.price
+            )
+            for c in list_model_choices(tenant=policy, default=None)
+            if c.provider != DEFAULT_BACKEND
+        ]
+
     def tool_safety() -> bool:
         return settings.tool_safety.enabled and settings.tool_safety.agent_rules
 
@@ -439,6 +478,7 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
         participation = await switch_json("participation", tenant_id, platform, channel_id)
         plans = await switch_json("progress_plans", tenant_id, platform, channel_id)
         approvals = await approvals_json(caller, tenant_id, platform, channel_id)
+        pin_choices = await pin_choices_of(tenant_id) if is_admin(caller.role) else []
         copy = next(
             (a for a in listed if a.metadata.get(MA_METADATA_KEY_CHANNEL_COPY) == channel_id),
             None,
@@ -476,6 +516,7 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
                 ],
             ),
             provider_pin=_pin(pin) if pin is not None else None,
+            pin_choices=pin_choices,
             channel_copy=CopyJson(name=copy.name, agent_id=copy.id) if copy else None,
             threads=[
                 ThreadJson(
@@ -605,6 +646,29 @@ def channel_settings_router(runtime: WebRuntime) -> APIRouter:
                 rule=body.rule,
                 scope=body.scope,
                 expected_revision=body.expected_revision,
+            )
+        return await changed(caller, channel_id)
+
+    @router.post("/api/channels/{channel_id}/provider-pin")
+    async def post_pin_set(  # pyright: ignore[reportUnusedFunction]
+        caller: ChannelAdmin, channel_id: str, body: PinSet
+    ) -> ChangeResultJson:
+        platform = await platform_row(caller, channel_id)
+        policy = await backend_policy(caller.person.tenant_id)
+        with channel_refusals():
+            if policy is None:
+                raise ChannelChangeRefused(
+                    "Choosing a model provider is turned off here. Nothing was changed.",
+                    kind="invalid",
+                )
+            await set_provider_pin(
+                runtime.sessionmaker,
+                actor_of(caller, channel_id, platform, "provider_pin"),
+                platform=platform,
+                channel_id=channel_id,
+                value=body.value,
+                policy=policy,
+                expected_local=body.expected_local,
             )
         return await changed(caller, channel_id)
 

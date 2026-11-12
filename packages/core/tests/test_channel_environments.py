@@ -8,6 +8,7 @@ import httpx
 import pytest
 from anthropic.types.beta import BetaCloudConfig, BetaLimitedNetwork
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.agent_record_ports import DAIMON_ID_PREFIXES
 from daimon.core.answering_map import AnsweringMap, ChannelEnvironment
 from daimon.core.channel_environments import (
     ENVIRONMENT_OPTION_INHERIT,
@@ -28,6 +29,8 @@ from daimon.core.channel_environments import (
     save_scope_environment,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import create_owned_environment
 from daimon.core.rule_views import RuleViewer
 from daimon.core.scope import (
     ChannelConfigRow,
@@ -42,9 +45,11 @@ from daimon.core.stores.scoped_config_read import get_scope, resolve
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_environment
+from mux.contracts.extensions import ExtensionConfig
+from mux.contracts.resources import EnvironmentSpec
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from mux.testing.drivers.anthropic.ma_models import EMPTY_CLOUD_CONFIG
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 async def test_save_scope_environment_sets_replaces_and_clears_a_channel(
@@ -247,7 +252,9 @@ def test_the_picker_names_the_channels_own_pick_and_what_it_inherits() -> None:
     ), "nothing to pick and nothing to clear offers no picker"
 
 
-async def test_list_environment_names_reads_only_this_tenants_resolver_names() -> None:
+async def test_list_environment_names_reads_only_this_tenants_resolver_names(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
     tenant_id = uuid.uuid4()
     router = MARouter()
     router.add_environment_list(
@@ -260,7 +267,9 @@ async def test_list_environment_names_reads_only_this_tenants_resolver_names() -
         ),
     )
 
-    names = await list_environment_names(build_fake_anthropic(router.dispatch), tenant_id=tenant_id)
+    names = await list_environment_names(
+        build_fake_anthropic(router.dispatch), tenant_id=tenant_id, records=db_session_factory
+    )
 
     assert names == ["default", "Science"], (
         "deduplicated, case-insensitive order, this tenant only, and never a name a save "
@@ -304,6 +313,7 @@ def test_has_open_network_counts_any_allowed_host_as_open(
 
 async def test_sealed_network_warning_flags_only_a_channels_own_open_pick(
     db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """A channel's own open pick may predate its seal; a default is a server admin's own call."""
     tenant = await make_tenant(db_session)
@@ -317,7 +327,12 @@ async def test_sealed_network_warning_flags_only_a_channels_own_open_pick(
 
     async def warning(channel_id: str) -> str | None:
         return await limited_readers_network_warning(
-            db_session, client, tenant_id=tenant.id, channel_id=channel_id, default=default
+            db_session,
+            client,
+            tenant_id=tenant.id,
+            channel_id=channel_id,
+            default=default,
+            records=db_session_factory,
         )
 
     for channel_id, name in (("c_open", "open"), ("c_closed", "closed")):
@@ -332,7 +347,9 @@ async def test_sealed_network_warning_flags_only_a_channels_own_open_pick(
     assert await warning("c_inherits") is None, "the open default is a server admin's pick"
 
 
-async def test_sealed_network_warning_survives_a_failed_lookup(db_session: AsyncSession) -> None:
+async def test_sealed_network_warning_survives_a_failed_lookup(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
     """The seal is saved before the warning, so a lookup error says so instead of failing."""
     tenant = await make_tenant(db_session)
     router = MARouter()
@@ -354,6 +371,7 @@ async def test_sealed_network_warning_survives_a_failed_lookup(db_session: Async
         tenant_id=tenant.id,
         channel_id="c_open",
         default=DeploymentDefault(environment_name="open"),
+        records=db_session_factory,
     )
 
     assert warning == LIMITED_NETWORK_UNCHECKED_WARNING, "an unchecked pick still warns"
@@ -386,3 +404,39 @@ def test_only_names_isolated_channels_across_the_line_pick_are_hidden() -> None:
 
     assert hidden(None) == {"acme", "beta"}, "outside, both isolated channels' own names hide"
     assert hidden("c_acme") == {"beta"}, "inside one, only the other's own name hides"
+
+
+async def test_daimon_owned_environments_are_listed_and_pickable_without_anthropic(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    created = await create_owned_environment(
+        None,
+        EnvironmentSpec(
+            name="Science",
+            execution="self_hosted",
+            native_config=ExtensionConfig(
+                namespace="selfhosted.environment",
+                version=1,
+                value={
+                    "harness_url": "https://harness.example",
+                    "auth_mode": "bearer_env",
+                    "auth_ref": "HARNESS_TOKEN",
+                },
+            ),
+        ),
+        scope=resource_scope(tenant_id=str(tenant.id), account_id=str(account.id)),
+        records=db_session_factory,
+    )
+    assert created.id.startswith(DAIMON_ID_PREFIXES), (
+        "a Daimon-owned record, never a Managed Agents id"
+    )
+
+    names = await list_environment_names(None, tenant_id=tenant.id, records=db_session_factory)
+
+    assert names == ["Science"], "a keyless install still lists its own environments"
+    other = await list_environment_names(None, tenant_id=uuid.uuid4(), records=db_session_factory)
+    assert other == [], "another tenant sees none of them"

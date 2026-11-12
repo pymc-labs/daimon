@@ -58,6 +58,11 @@ features:
     - command: /privacy
       description: See, export or delete your data
       should_escape: false
+  shortcuts:
+    - name: Model
+      type: message
+      callback_id: thread_model
+      description: Pick the model for this conversation
 
 oauth_config:
   redirect_urls:

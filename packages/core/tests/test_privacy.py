@@ -37,6 +37,7 @@ from daimon.core.privacy import (
     summary_line,
 )
 from daimon.core.purge import PurgeReport, purge_account
+from daimon.core.stores import connector_tokens as connector_tokens_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
@@ -503,6 +504,45 @@ async def test_preview_and_purge_agree_on_microsoft_user_tokens(
     assert left == 0, "no refresh token may survive the purge"
 
 
+async def test_preview_and_purge_agree_on_connector_tokens(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    for owner in (account.id, None):
+        await connector_tokens_store.upsert_connector_token(
+            db_session,
+            tenant_id=tenant.id,
+            account_id=owner,
+            agent_id=uuid.uuid4(),
+            server_url="https://mcp.example.com/mcp",
+            access_token_encrypted=b"at",
+            refresh_token_encrypted=b"rt",
+            token_endpoint="https://auth.example.com/token",
+            client_id="client",
+            client_secret_encrypted=None,
+            token_endpoint_auth_method="none",
+            scope=None,
+            resource=None,
+            expires_at=None,
+            refresh_owner="daimon",
+            now=datetime.now(tz=UTC),
+        )
+    await db_session.commit()
+
+    preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
+    assert preview.connector_tokens.count == 1, "must count only the person's own sign-in"
+    assert "1 saved connector sign-in" in summary_line(preview), "the privacy card must list it"
+    report = await purge_account(sm=db_session_factory, account_id=account.id)
+    assert report.db.connector_tokens == 1, "purge must delete the sign-in it previewed"
+    async with db_session_factory() as session:
+        left = await connector_tokens_store.count_connector_tokens_for_account(
+            session, account_id=account.id
+        )
+    assert left == 0, "no connector token may survive the purge"
+
+
 async def test_preview_and_purge_agree_on_web_people_and_their_sessions(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -941,6 +981,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "github_user_links": "github_user_links",
         "mcp_tokens": "mcp_tokens",
         "tag_opt_outs": "tag_opt_outs",
+        "connector_tokens": "connector_tokens",
         "gemini_records": "gemini_records",
         "selfhosted_operations": "selfhosted_operations",
         "slack_user_tokens": "slack_user_tokens",
@@ -964,6 +1005,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "mux_leases": "mux_leases",
         "mux_release_requests": "mux_release_requests",
         "mux_operations": "mux_operations",
+        "host_call_cards": "host_call_cards",
     }
 
     uncovered = report_fields - set(mapping.keys())
@@ -1005,8 +1047,11 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "watch_credentials": "owner_account_id FK cascade; watches.delete_for_account deletes keys",
         "selfhosted_resource_operations": "account UUID stored as account_id text",
         "long_job": "accounts.id FK cascade; cancellation audit cascades from the job",
-        "neutral_agent_revisions": "accounts.id FK cascade",
-        "neutral_skill_versions": "accounts.id FK cascade",
+        "neutral_agent_revisions": "accounts.delete_account deletes rows (no FK)",
+        "neutral_skill_versions": "accounts.delete_account deletes rows (no FK)",
+        # Keyed to the asker: a shared thread's framing quoting another participant
+        # outlives that person until the 7-day pending carry-over sweep.
+        "pending_carry_overs": "accounts.id FK cascade (asker); others' words: 7-day sweep",
         "cli_principals": "account_id FK -> accounts.id",
         "platform_principals": "account_id FK -> accounts.id",
         "user_config": "account_id PK/FK -> accounts.id",
@@ -1014,6 +1059,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "github_connect_requests": "requester_account_id FK -> accounts.id",
         "github_connect_click_intents": "requester_account_id FK -> accounts.id",
         "mcp_tokens": "account_id FK -> accounts.id",
+        "connector_tokens": "account_id FK -> accounts.id; agent-wide rows (NULL) stay",
         "coding_key_claims": "account_id FK -> accounts.id; counted and deleted with mcp_tokens",
         "wizard_session": "account_id FK -> accounts.id",
         "message_feedback": "account_id FK -> accounts.id",
@@ -1073,6 +1119,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # Same shape: a previewed skill add waits at most 15 minutes for its
             # person's reply, holds only a content hash, and cascades with accounts.id.
             "pending_skill_adds",
+            # Same shape: a gated call waits at most a day for its requester's press,
+            # and its requester_account_id cascades with accounts.id.
+            "host_call_cards",
             # A tenant-wide channel budget; the only accounts.id FK is the admin
             # who set it, set_by_account_id with ON DELETE SET NULL.
             "channel_budgets",

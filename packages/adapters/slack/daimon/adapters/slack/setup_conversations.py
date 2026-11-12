@@ -80,7 +80,10 @@ async def create_setup_conversation(
         )
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
     responder, target = await resolve_setup_agents(
-        runtime.anthropic, tenant_id=tenant_id, target_ma_agent_id=target_ma_agent_id
+        runtime.anthropic,
+        tenant_id=tenant_id,
+        target_ma_agent_id=target_ma_agent_id,
+        records=runtime.sessionmaker,
     )
     auth = await client.auth_test()  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
     bot_user_id = str(auth.get("user_id") or "")

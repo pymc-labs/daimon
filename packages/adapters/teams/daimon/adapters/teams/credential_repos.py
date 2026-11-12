@@ -58,7 +58,7 @@ async def attach_imported_skills(
     if not skill_ids:
         return SkillAttach(note="Nothing new to attach.", attached=False, agent_name=None)
     agent = await find_agent_by_derived_uuid(
-        runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id
+        runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id, records=runtime.sessionmaker
     )
     if agent is None:
         return SkillAttach(note="That agent no longer exists.", attached=False, agent_name=None)
@@ -83,11 +83,16 @@ async def attach_imported_skills(
             version=fresh.version,
             payload={"skills": merged},
             scope=resource_scope(tenant_id=str(tenant_id)),
+            records=runtime.sessionmaker,
         )
 
     try:
         await update_agent_with_version_retry(
-            runtime.anthropic, agent.id, _apply, scope=resource_scope(tenant_id=str(tenant_id))
+            runtime.anthropic,
+            agent.id,
+            _apply,
+            scope=resource_scope(tenant_id=str(tenant_id)),
+            records=runtime.sessionmaker,
         )
     except (DaimonError, anthropic.APIStatusError, ScopeViolation) as err:
         log.warning("teams.credential.skill_attach_failed", err_type=type(err).__name__)

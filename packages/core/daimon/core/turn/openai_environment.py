@@ -16,9 +16,10 @@ again. Callers wait briefly for a create someone else is running, then refuse
 with `provider_setup_pending` ("try again shortly").
 
 The name carries the deployment (this host's GCP project id, from the metadata
-server, which no environment variable can change), so two deployments sharing one
-OpenAI project (and tenant ids) never adopt each other's environment; where it
-can't be read, nothing is created. Only a real turn's
+server, which no environment variable can change; off GCP, an id stamped once in
+the database), so two deployments sharing one OpenAI project (and tenant ids)
+never adopt each other's environment; where neither can be read, nothing is
+created. Only a real turn's
 preparation calls this; previews never do. Logs name the tenant, project and
 environment id, never the key.
 """
@@ -40,6 +41,7 @@ from mux.contracts.ids import Page, PageRequest, Scope
 from mux.contracts.resources import Environment, EnvironmentFilter, EnvironmentSpec
 from mux.state.operations import InvalidTransition, OperationRecord, SendClaimed, request_digest
 from mux.state.store import StateStore
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 
@@ -75,20 +77,27 @@ class EnvironmentPort(Protocol):
 
 
 async def deployment_id(
-    *, timeout_s: float = 2.0, transport: httpx.AsyncBaseTransport | None = None
+    *,
+    timeout_s: float = 2.0,
+    transport: httpx.AsyncBaseTransport | None = None,
+    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+    project: str | None = None,
 ) -> str | None:
-    """This host's GCP project id, from the metadata server; None off GCP or unreadable.
+    """This deployment's name part: its GCP project id, else its stored id.
 
-    It tells deployments apart (staging and production are different projects)
-    and no environment variable can change it. Kept once read; a miss is
-    remembered for `MISS_TTL`, then asked again.
+    On GCP the metadata server names the project (staging and production are
+    different projects) and no environment variable can change it. Off GCP, with
+    a `sessionmaker`, the id stamped once in the database stands in, joined to
+    `project` (the OpenAI project label) so a restored copy pointed at another
+    project names differently too. None where neither is readable. Each is kept
+    once read; a metadata miss is remembered for `MISS_TTL`, then asked again.
     """
     global _deployment, _missed_until
     if _deployment is not None:
         return _deployment
     checked_at = datetime.now(UTC)
     if _missed_until is not None and checked_at < _missed_until:
-        return None
+        return await _stored_id(sessionmaker, project)
     try:
         async with httpx.AsyncClient(
             timeout=timeout_s, trust_env=False, transport=transport
@@ -96,13 +105,30 @@ async def deployment_id(
             response = await http.get(METADATA_PROJECT_URL, headers={"Metadata-Flavor": "Google"})
     except (httpx.HTTPError, OSError):
         _missed_until = checked_at + MISS_TTL
-        return None
+        return await _stored_id(sessionmaker, project)
     value = response.text.strip() if response.status_code == 200 else ""
     if not _PROJECT_ID.fullmatch(value):
         _missed_until = checked_at + MISS_TTL
-        return None
+        return await _stored_id(sessionmaker, project)
     _deployment, _missed_until = value, None
     return value
+
+
+async def _stored_id(
+    sessionmaker: async_sessionmaker[AsyncSession] | None, project: str | None
+) -> str | None:
+    """The id this install stamped for itself, or None where no database was given.
+
+    Read each time, not kept: `daimon deployment reset-id` must take effect
+    without a restart that no other turn path needs.
+    """
+    if sessionmaker is None:
+        return None
+    from daimon.core.stores.deployment_identity import get_or_stamp_deployment_id
+
+    async with sessionmaker.begin() as session:
+        stamped = await get_or_stamp_deployment_id(session)
+    return f"{stamped.hex[:12]}-{project}" if project else stamped.hex[:12]
 
 
 def environment_name(deployment: str, tenant_id: str) -> str:

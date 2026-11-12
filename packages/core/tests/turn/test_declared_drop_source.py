@@ -792,3 +792,30 @@ def test_a_declared_credentials_loss_never_covers_a_credential_its_kept_connecti
         }
     )
     assert "credentials" in classify_source_obligations(source, retained, environment=None)
+
+
+def test_a_source_effort_is_carried_only_when_the_target_states_one(captured):
+    """Effort is dropped no longer when the target declares it; Fast stays dropped."""
+    spec = captured.effective_spec
+    extension = ExtensionConfig(
+        namespace="anthropic.model_config",
+        version=1,
+        value={"model": {"id": "claude-haiku-5-5", "effort": "low"}},
+    )
+    source = captured.model_copy(
+        update={"effective_spec": spec.model_copy(update={"extensions": (extension,)})}
+    )
+    ref = ModelRef(provider="openai", id="gpt-6-luna")
+    unstated = preview_source_drops(source, ref)
+    stated = preview_source_drops(source, ref, effort="low")
+    assert "model_controls" in unstated.declared_drops
+    assert "model_controls" not in stated.declared_drops
+    fast = ExtensionConfig(
+        namespace="anthropic.model_config",
+        version=1,
+        value={"model": {"id": "claude-haiku-5-5", "effort": "low", "speed": "fast"}},
+    )
+    still = source.model_copy(
+        update={"effective_spec": spec.model_copy(update={"extensions": (fast,)})}
+    )
+    assert "model_controls" in preview_source_drops(still, ref, effort="low").declared_drops

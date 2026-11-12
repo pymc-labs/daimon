@@ -158,7 +158,10 @@ async def _set_agent_default_impl(
         if any_agent_rules(policy):
             if agent is None:
                 agent = await find_agent_by_daimon_tag(
-                    runtime.client, tenant_id=auth.tenant_id, name=agent_name
+                    runtime.client,
+                    tenant_id=auth.tenant_id,
+                    name=agent_name,
+                    records=runtime.session_factory,
                 )
             require_bindable(policy, agent_name, agent=agent, channel_id=None)
 
@@ -166,7 +169,10 @@ async def _set_agent_default_impl(
     space = space_noun(auth.platform)
     if agent is None:
         agent = await find_agent_by_daimon_tag(
-            runtime.client, tenant_id=auth.tenant_id, name=agent_name
+            runtime.client,
+            tenant_id=auth.tenant_id,
+            name=agent_name,
+            records=runtime.session_factory,
         )
     if channel_id is not None:
         scope_label = note_scope = f"channel:{channel_id}"

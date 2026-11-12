@@ -862,7 +862,11 @@ async def sync_agent_skills(
 
     try:
         updated = await update_agent_with_version_retry(
-            anthropic_client, agent.id, _apply, scope=resource_scope(tenant_id=str(tenant_id))
+            anthropic_client,
+            agent.id,
+            _apply,
+            scope=resource_scope(tenant_id=str(tenant_id)),
+            records=sessionmaker,
         )
     except DefaultsError as err:
         # Mount-name collision (or truncated skills view) — uploads landed;

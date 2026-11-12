@@ -40,7 +40,11 @@ def test_declared_profiles_and_their_core_status() -> None:
 def test_legacy_rendering_declarations_round_trip(profile: Profile) -> None:
     assert profile.emits_legacy_events == (profile.provider == "anthropic")
     assert emits_legacy_events_for(profile.provider) is profile.emits_legacy_events
-    assert Profile.model_validate_json(profile.model_dump_json()) == profile
+    # The credential-carrier flag, effort map and skill limits are code-declared, never dumped.
+    restored = Profile.model_validate_json(profile.model_dump_json())
+    assert restored == profile.model_copy(
+        update={"carries_caller_resources": False, "effort_map": {}, "skill_limits": None}
+    )
     assert pickle.loads(pickle.dumps(profile)) == profile
 
 
@@ -59,6 +63,15 @@ def test_conflicting_rendering_declarations_are_refused(
     )
     with pytest.raises(InvalidConfig, match="unambiguous"):
         emits_legacy_events_for("openai")
+
+
+def test_caller_resources_ride_the_credential_off_managed_agents() -> None:
+    carriers = {
+        pid for pid, profile in profiles.PROFILES.items() if profile.carries_caller_resources
+    }
+    assert carriers == {pid for pid in profiles.PROFILES if not pid.startswith("anthropic.")}
+    # Excluded from every dump, so existing profile digests hold.
+    assert all("carries_caller_resources" not in p.model_dump() for p in profiles.PROFILES.values())
 
 
 def test_old_profile_defaults_to_normalized_rendering() -> None:
@@ -378,3 +391,21 @@ def test_selectable_models_list_the_default_first_and_never_pro() -> None:
     assert selectable_models("gemini") == ("gemini-3.8-flash", "gemini-4-argon")
     assert selectable_models("openai") == ("gpt-6-luna", "gpt-6-astra")
     assert not any("pro" in model for model in selectable_models("gemini"))
+
+
+@pytest.mark.parametrize("profile", [PERSISTENT_WORKSPACE, INLINE_REUSE, MANAGED_AGENTS])
+def test_only_openai_and_gemini_profiles_declare_effort(profile: Profile) -> None:
+    declared = profile.provider in ("openai", "gemini")
+    assert bool(profile.effort_map) is declared
+
+
+def test_resolved_backend_refuses_effort_the_profile_does_not_declare() -> None:
+    from mux.contracts.config import ResolvedBackend
+
+    ResolvedBackend(
+        backend="openai", profile="openai.persistent_workspace", model="m", effort="low"
+    )
+    with pytest.raises(InvalidConfig):
+        ResolvedBackend(
+            backend="anthropic", profile="anthropic.managed_agents", model=None, effort="low"
+        )

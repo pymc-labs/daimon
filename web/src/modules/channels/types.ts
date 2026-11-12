@@ -154,6 +154,8 @@ export type ChannelSettings = {
   /** `editable` is false while tool safety is off, or for members. */
   tool_rules: { editable: boolean; rules: ToolRule[] }
   provider_pin: { backend: string; model: string | null; model_label: string | null; local: number } | null
+  /** The models an admin may pin, `value` as `provider:id`; empty for a member. */
+  pin_choices: { value: string; label: string; provider: string; price: string | null }[]
   channel_copy: { name: string; agent_id: string } | null
   /** Threads with their own setting; `value` is the mode, "readers/writers", or the agent handed to. */
   threads: { thread_id: string; name: string | null; kind: ThreadOverrideKind; value: string }[]
@@ -171,6 +173,8 @@ export type EnvironmentChange = { environment: string | null; expected: string |
 export type SkillChange = { action: "add" | "remove"; skill: string; expected: string[] }
 /** PUT /:id/tool-rules. null rule clears; `expected_revision` is the rule's revision as read (0 when none). */
 export type ToolRuleChange = { agent: string; tool: string; rule: ToolRule["rule"]; scope?: ToolRule["scope"]; expected_revision: number }
+/** POST /:id/provider-pin. `expected_local` is the pin as read, null for none. */
+export type PinSet = { value: string; expected_local: number | null }
 /** POST /:id/provider-pin/clear. */
 export type PinClear = { expected_local: number }
 /** POST /:id/channel-copy/retire. */

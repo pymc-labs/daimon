@@ -598,7 +598,9 @@ async def switch_thread_on_request(
                 "Start a new conversation with the selected agent. Nothing was changed.",
             )
     try:
-        agent = await get_setup_agent(anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id)
+        agent = await get_setup_agent(
+            anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id, records=sessionmaker
+        )
     except DaimonError:
         return SwitchOutcome(
             switched=False,

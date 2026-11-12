@@ -41,6 +41,7 @@ from daimon.core.authz import (
     build_agent_ref,
     build_subject,
 )
+from daimon.core.channel_backend import backend_selection_enabled
 from daimon.core.continuity.messages import ConfigurationChange
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.errors import DaimonError
@@ -52,6 +53,7 @@ from daimon.core.mcp_oauth import (
     prepare_authorization,
 )
 from daimon.core.mcp_oauth.complete import McpOAuthWriteRefusedError
+from daimon.core.mcp_oauth.connector_tokens import agent_refresh_owner
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -252,6 +254,14 @@ def build_oauth_mcp_routes(
             if request_row is not None:
                 await _settle(request_row, outcome="declined", state="refused")
             return _error_page("pinned")
+        # One refresh owner per grant: the MA vault on MA, Daimon's store elsewhere.
+        async with runtime.session_factory() as session:
+            refresh_owner = await agent_refresh_owner(
+                session,
+                tenant_id=flow.tenant_id,
+                agent_id=flow.agent_id,
+                selection_enabled=backend_selection_enabled(settings.turn),
+            )
         try:
             async with http_client_factory() as http:
                 completion = await complete_mcp_oauth_flow(
@@ -267,6 +277,7 @@ def build_oauth_mcp_routes(
                     default=runtime.deployment_default,
                     may_write=lambda: _may_write(flow, request_row),
                     configured_client=configured,
+                    refresh_owner=refresh_owner,
                 )
         except McpOAuthWriteRefusedError:
             # A pin landed during the code exchange: nothing was stored.
@@ -315,7 +326,10 @@ def build_oauth_mcp_routes(
         """Whether the pinned-agent write rule refuses finishing this flow now."""
         try:
             agent = await find_agent_by_derived_uuid(
-                runtime.client, tenant_id=flow.tenant_id, agent_id=flow.agent_id
+                runtime.client,
+                tenant_id=flow.tenant_id,
+                agent_id=flow.agent_id,
+                records=runtime.session_factory,
             )
         except anthropic.APIError:
             agent = None

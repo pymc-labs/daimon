@@ -11,8 +11,8 @@ Served: Gemini agent and channel turns, and an OpenAI agent's own turn once its
 tenant's hosted environment is known
 (`request.openai_environment_id`). Both agent templates keep the agent's Daimon
 MCP tools (`template_capabilities: "mcp"`), with a per-turn caller credential.
-A channel pinned to OpenAI needs a native agent of its own, so it still needs an
-operator row.
+A channel pinned to OpenAI needs a native agent of its own, so it needs an
+operator row; without one the turn is refused with `channel_row_missing`.
 """
 
 from __future__ import annotations
@@ -20,7 +20,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from daimon.core.provider_keys import DEFAULT_KEY_ENV, provider_key_present
-from mux.profiles import INLINE_REUSE, PERSISTENT_WORKSPACE, selectable_models
+from mux.profiles import (
+    INLINE_REUSE,
+    PERSISTENT_WORKSPACE,
+    get_profile,
+    selectable_models,
+    shared_threads_available,
+)
 
 if TYPE_CHECKING:
     from daimon.core.turn.prepare import ProviderPreparationRequest
@@ -46,7 +52,9 @@ def _grant(profile: str, models: tuple[str, ...]) -> dict[str, JsonValue]:
     return {
         "profiles": [profile],
         "models": list(models),
-        "thread_modes": ["per_caller"],
+        "thread_modes": ["per_caller", "shared"]
+        if shared_threads_available(get_profile(profile).provider)
+        else ["per_caller"],
         "requires": {},
     }
 

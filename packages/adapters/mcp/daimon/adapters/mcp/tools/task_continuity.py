@@ -213,7 +213,9 @@ async def _hand_off_task_impl(
     # `require_turn_origin` already refused any non-chat platform.
     platform = cast(ChatPlatform, origin.platform)
 
-    agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    agents = await list_agents_by_tenant(
+        runtime.client, tenant_id=auth.tenant_id, records=runtime.session_factory
+    )
     # A thread under an isolated channel hands off only to that channel's own
     # agents; anywhere else, never to them.
     caller = await load_isolation_view(
@@ -531,10 +533,10 @@ async def _move_to_another_provider(
 ) -> str | None:
     """Move this caller's conversation to the destination's provider, if it differs.
 
-    The conversation itself can't cross providers, so the handing-off agent's
-    `summary` crosses instead (`set_handoff_summary`): this caller's slot is
-    released, and the destination's first turn here starts on its own provider
-    seeded with the summary. Returns the words for where it now runs, or None
+    This caller's slot is released, and the destination's first turn here starts
+    on its own provider with the conversation carried over
+    (`daimon.core.turn.carry_over`) and the handing-off agent's `summary`
+    (`set_handoff_summary`). Returns the words for where it now runs, or None
     when nothing moves. Refuses without a usable summary, and in a conversation
     shared with anyone else (a shared binding, or another participant's live
     session): moving would leave them on a provider this one no longer runs on.
@@ -588,8 +590,8 @@ async def _move_to_another_provider(
         )
     if summary is None:
         raise ToolError(
-            f"{destination_name} runs on {provider_name(target)}, so this conversation's "
-            f"history can't move to it. Nothing changed. Call hand_off_task again with "
+            f"{destination_name} runs on {provider_name(target)}, so this conversation "
+            f"moves there and needs a summary. Nothing changed. Call hand_off_task again with "
             f"`summary`: a short summary of this conversation for {destination_name} "
             "(what was asked, what was decided, what's still open), in plain words, with "
             "no secrets, keys or tool output."

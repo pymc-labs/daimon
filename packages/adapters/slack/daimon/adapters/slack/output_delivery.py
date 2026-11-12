@@ -1,6 +1,6 @@
 """Slack delivery of Managed Agents session output files.
 
-Thin adapter over :func:`daimon.core.output_delivery.sweep_session_outputs`:
+Thin adapter over :func:`daimon.core.output_delivery.sweep_outputs`:
 it contributes the Slack poster, the oversize skip notice, and the
 degrade-not-block handling for the two workspace-wide error codes
 (``missing_scope``, ``storage_limit_reached``). Everything else — polling,
@@ -18,7 +18,6 @@ from contextlib import asynccontextmanager
 from typing import Any, cast
 
 import structlog
-from anthropic import AsyncAnthropic
 from daimon.adapters.slack.blockkit import notice_attachments
 from daimon.core.media.filenames import display_filename_for
 from daimon.core.output_delivery import (
@@ -28,8 +27,9 @@ from daimon.core.output_delivery import (
     OutputPostingUnavailable,
     SkippedFile,
     render_oversize_notice,
-    sweep_session_outputs,
+    sweep_outputs,
 )
+from daimon.core.output_runtime import OutputRuntime
 from daimon.core.turn.output import authorize_output, output_is_guarded
 from slack_sdk.errors import SlackApiError, SlackRequestError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -259,10 +259,9 @@ def _build_skip_notice(
 
 
 async def deliver_session_outputs(
-    anthropic_client: AsyncAnthropic,
+    runtime: OutputRuntime,
     web_client: AsyncWebClient,
     *,
-    session_id: str,
     channel_id: str,
     thread_ts: str,
     notice_keys: NoticeKeys,
@@ -284,6 +283,7 @@ async def deliver_session_outputs(
     ``noticed_files`` records the kept oversize outputs already announced, so
     a file over the limit gets one notice rather than one per sweep.
     """
+    session_id = runtime.session_id
     mention = _SweepMention(requester_user_id, requester_label)
     post = build_output_poster(
         web_client, channel_id=channel_id, thread_ts=thread_ts, mention=mention
@@ -296,9 +296,8 @@ async def deliver_session_outputs(
         mention=mention,
     )
     try:
-        await sweep_session_outputs(
-            anthropic_client,
-            session_id=session_id,
+        await sweep_outputs(
+            runtime,
             post=post,
             on_skip=on_skip,
             sleep=sleep,

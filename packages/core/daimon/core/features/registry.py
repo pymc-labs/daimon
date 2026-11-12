@@ -29,6 +29,7 @@ replacement (system prompt, skills, memory). ``provision``: on the agent's next 
 Category = Literal["model_input", "chat", "capabilities", "limits", "guardrails"]
 Requirement = Literal[
     "platform_adapter",
+    "anthropic_key",
     "compute_setup",
     "notebook_host",
     "report_host",
@@ -373,9 +374,8 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         binds="session_identity",
         doc=(
             "The skills added to a channel. They need the read tool, so they are off wherever it "
-            "is. A conversation keeps what it started with until /new. Claude agents only."
+            "is. A conversation keeps what it started with until /new."
         ),
-        backend_tiers=_MANAGED_AGENTS_ONLY,
         platforms=EVERY_PLATFORM,
         depends_on=("tool.read",),
         authority=Authority(DelegatedAction.SKILLS),
@@ -391,10 +391,10 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         binds="session_identity",
         doc=(
             "Each person's own memory with the agent, in conversations only they can read. "
-            f"On never adds it anywhere else. {_KEPT} Off for Gemini and OpenAI agents."
+            f"On never adds it anywhere else. {_KEPT}"
         ),
-        backend_fixed={_GEMINI: "off", _OPENAI: "off"},
         platforms=EVERY_PLATFORM,
+        requires=("anthropic_key",),
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
     FeatureSpec(
@@ -412,6 +412,7 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         ),
         backend_fixed=_FIXED_ON,
         platforms=EVERY_PLATFORM,
+        requires=("anthropic_key",),
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
     FeatureSpec(
@@ -425,16 +426,17 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         binds="session_identity",
         doc=(
             "The memory a restricted channel keeps for itself in place of the shared one. Off "
-            f"leaves such a channel with no memory at all. {_KEPT} Claude agents only."
+            f"leaves such a channel with no memory at all. {_KEPT}"
         ),
-        backend_tiers=_MANAGED_AGENTS_ONLY,
         platforms=EVERY_PLATFORM,
+        requires=("anthropic_key",),
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
 )
 
 _DM_PLATFORMS: Final = frozenset({"discord", "slack"})
 _DISCORD: Final = frozenset({"discord"})
+_CALL_GATE_PLATFORMS: Final = frozenset({"discord", "slack", "teams", "web"})
 _SETTINGS: Final = Authority(DelegatedAction.AGENT_SETTINGS)
 # Long jobs spend money in the background: server admins only, no delegation, no owners.
 _SERVER_ADMIN: Final = Authority(None, agent_owner=False)
@@ -613,6 +615,38 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,
         legacy_env=("DAIMON_TOOL_SAFETY__ENABLED",),
+    ),
+    FeatureSpec(
+        key="host_call_gate",
+        name="Approve cards for OpenAI and Gemini",
+        category="guardrails",
+        effect="guardrail",
+        values=_OFF_ON,
+        default="on",
+        tiers=("deployment",),
+        binds="turn",
+        doc=(
+            "On an OpenAI or Gemini agent, a tool that needs approval posts an Approve card "
+            "and runs once the person presses it. Off refuses those tools there."
+        ),
+        platforms=_CALL_GATE_PLATFORMS,
+        authority=_ADMIN,
+    ),
+    FeatureSpec(
+        key="mcp_connector_relay",
+        name="Connectors on OpenAI and Gemini",
+        category="guardrails",
+        effect="guardrail",
+        values=_OFF_ON,
+        default="on",
+        tiers=("deployment",),
+        binds="turn",
+        doc=(
+            "An agent's own connectors work on OpenAI and Gemini agents: Daimon calls "
+            "them for the agent with the person's sign-in. Off leaves them out there."
+        ),
+        platforms=_CALL_GATE_PLATFORMS,
+        authority=_ADMIN,
     ),
     FeatureSpec(
         key="reach_budget",
@@ -798,6 +832,22 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "People can connect a Microsoft account and the agent can search, read, write and "
         "send with it. Off removes the Microsoft tools here.",
         requires=("microsoft_accounts",),
+    ),
+    FeatureSpec(
+        key="thread_providers",
+        name="Other providers per conversation",
+        category="chat",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("deployment", "workspace", "agent"),
+        binds="turn",
+        doc=(
+            "Anyone who can change a conversation's model may pick an OpenAI or Gemini model "
+            "for it. Off, only the agent's owner or an admin can."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_SETTINGS,
     ),
     FeatureSpec(
         key="support_escalation",

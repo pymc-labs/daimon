@@ -5,14 +5,47 @@ from contextlib import asynccontextmanager, contextmanager, nullcontext
 from contextvars import ContextVar
 from uuid import UUID
 
+from anthropic import AsyncAnthropic
 from daimon.core.errors import DaimonError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+ANTHROPIC_UNCONFIGURED_PLACEHOLDER = "sk-ant-unconfigured-openai-only-deployment"
+"""Never a valid credential. `AnthropicSettings.resolved_api_key()` returns
+this when no real key is configured, so every `AsyncAnthropic` client keeps
+its non-optional constructor; `anthropic_configured` tells the two apart."""
 
 _disabled: ContextVar[bool] = ContextVar("anthropic_disabled", default=False)
 
 
 class AnthropicDisabled(DaimonError):
     """An optional provider-specific operation is unavailable in this turn."""
+
+
+class AnthropicUnconfigured(AnthropicDisabled):
+    """No Anthropic key on this install, so Managed Agents records are unreachable."""
+
+
+def anthropic_configured(client: object) -> bool:
+    """Whether `client` carries a real key rather than the keyless placeholder.
+
+    A stand-in client that is not an `AsyncAnthropic` (a test double) counts as keyed.
+    """
+    if client is None:
+        return False
+    if not isinstance(client, AsyncAnthropic):
+        return True
+    return client.api_key not in (
+        None,
+        "",
+        ANTHROPIC_UNCONFIGURED_PLACEHOLDER,
+    )
+
+
+def require_anthropic(client: AsyncAnthropic | None) -> None:
+    """Refuse Managed Agents I/O in a self-hosted turn or on a keyless install."""
+    require_anthropic_allowed()
+    if not anthropic_configured(client):
+        raise AnthropicUnconfigured("No Anthropic key is configured on this Daimon install.")
 
 
 def anthropic_disabled() -> bool:

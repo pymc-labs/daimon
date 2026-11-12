@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Literal, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import structlog
@@ -27,7 +27,7 @@ from anthropic.types.beta.sessions import (
 )
 from daimon.core.errors import TurnError
 from daimon.core.ma import REPLAY_TIMEOUT_S
-from daimon.core.mux_backend import TurnBackend, TurnBackendRequest, TurnRuntime
+from daimon.core.mux_backend import TurnBackend, TurnBackendRequest, TurnRuntime, resource_scope
 from daimon.core.pricing import ProviderPrice
 from daimon.core.turn.io import (
     TurnCodecRequest,
@@ -74,7 +74,7 @@ from mux.drivers.gemini import (
     compile_environment,
 )
 from mux.errors import ContinuityLost, ProviderError, ScopeViolation, UnsupportedCapability
-from mux.profiles.gemini import ARGON_MODEL
+from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE
 from mux.state.store import StateStore
 from pydantic import JsonValue, TypeAdapter
 
@@ -157,6 +157,22 @@ def compose_gemini_backend(request: TurnBackendRequest) -> TurnBackend:
     )
 
 
+def gemini_turn_scope(scope: Scope, shared_owner: UUID | None) -> Scope:
+    """The scope a Gemini turn runs under.
+
+    The driver and its stored state belong to one account, so a shared thread runs as the
+    thread's own derived owner: every caller continues one session, and none of its
+    state is any caller's.
+    """
+    if shared_owner is None:
+        return scope
+    return resource_scope(
+        tenant_id=scope.tenant_id,
+        account_id=str(shared_owner),
+        authorization_id=scope.authorization_id,
+    )
+
+
 def gemini_backend(
     config: ConfigRevision,
     scope: Scope,
@@ -182,10 +198,15 @@ def gemini_backend(
         or deployment.agent.model != ModelRef(provider="gemini", id=required_model)
     ):
         raise UnsupportedCapability(("gemini_pinned_deployment",), PROFILE)
+    thinking_level = None if config.effort is None else INLINE_REUSE.effort_map[config.effort]
     if deployment.max_output_tokens is not None:
         if deployment.native_agent is not None:
             raise UnsupportedCapability(("model_interaction_resources",), PROFILE)
-        compile_agent(deployment.agent, max_output_tokens=deployment.max_output_tokens)
+        compile_agent(
+            deployment.agent,
+            max_output_tokens=deployment.max_output_tokens,
+            thinking_level=thinking_level,
+        )
         compile_environment(deployment.environment, model_only=True)
     supplied = runtime.transport_factory(config, scope)
     if not isinstance(supplied, GeminiTransportRuntime):
@@ -206,6 +227,7 @@ def gemini_backend(
         resource_catalog_transport=supplied.catalog_transport,
         native_agent=deployment.native_agent,
         max_output_tokens=deployment.max_output_tokens,
+        thinking_level=thinking_level,
         mcp_secrets=supplied.mcp_secrets,
         gcs_secrets=supplied.gcs_secrets,
         skill_bundle_publisher=supplied.skill_bundle_publisher,

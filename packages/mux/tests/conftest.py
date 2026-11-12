@@ -18,6 +18,7 @@ from mux.contracts.actions import (
     UserToolResult,
 )
 from mux.contracts.admission import Admission, FallbackApplied
+from mux.contracts.completions import CompletionResult, CompletionUsage
 from mux.contracts.config import (
     BackendConfig,
     CapabilityRequirement,
@@ -58,6 +59,7 @@ from mux.contracts.ids import (
     SkillRef,
     ThreadRef,
 )
+from mux.contracts.profile import SkillLimits
 from mux.contracts.receipts import (
     CancelReceipt,
     DeletionReceipt,
@@ -284,6 +286,8 @@ SAMPLES: tuple[BaseModel, ...] = (
     EnvironmentFilter(include_archived=True),
     ResourceBinding(id="r2", kind="native", native=EXT),
     SESSION_SPEC,
+    SESSION_SPEC.model_copy(update={"skills": (SkillRef(id="skill_1", version="2"),)}),
+    SkillLimits(total_bytes=10, file_bytes=5, files=2, text_only=True),
     CONTINUITY,
     BINDING,
     Session(
@@ -339,6 +343,12 @@ SAMPLES: tuple[BaseModel, ...] = (
         satisfied=("cancel",),
         fallbacks=(FallbackApplied(capability="steer", support="unknown", fallback="f"),),
     ),
+    CompletionResult(
+        text="t",
+        usage=CompletionUsage(input_tokens=3, output_tokens=2, cache_read_input_tokens=1),
+        refused=True,
+    ),
+    CompletionUsage(input_tokens=5, output_tokens=0),
 )
 
 

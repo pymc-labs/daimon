@@ -13,10 +13,11 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal, cast
 
+from anthropic.types.beta import BetaManagedAgentsSystemContentBlockParam
 from daimon.core.session_snapshot import SessionSnapshot
 from mux.contracts.config import CapabilityRequirement, ThreadMode
-from mux.contracts.ids import PROVIDERS, Provider, Scope
-from mux.contracts.profile import Capability
+from mux.contracts.ids import PROVIDERS, Provider, Scope, SkillRef
+from mux.contracts.profile import Capability, Effort
 from mux.contracts.resources import (
     Agent,
     AgentSpec,
@@ -55,6 +56,7 @@ ContinuationReason = Literal[
     "watch_fired",
     "job_finished",
     "watch_report",
+    "confirmed_call",
 ]
 #: Where a watch reports each fire.
 WatchDelivery = Literal["thread", "dm", "new_thread"]
@@ -98,6 +100,35 @@ class AccountIdentityRow(BaseModel):
     # platform_principals.foreign_home_id: the principal was verified to belong to another
     # organisation (sticky), so it is a client on every call, even with no running turn.
     foreign_home_id: str | None = None
+
+
+class SkillSizeRow(BaseModel):
+    """One source skill version's measured bundle."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    skill_id: str
+    version: str
+    name: str
+    total_bytes: int
+    largest_file_bytes: int
+    file_count: int
+    text_only: bool
+
+
+class SkillCopyRow(BaseModel):
+    """A source skill version's copy in one provider project."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    provider: str
+    account_scope_id: str
+    skill_id: str
+    version: str
+    copy_id: str
+    copy_version: str
 
 
 class ChannelSkillRow(BaseModel):
@@ -510,6 +541,35 @@ class MicrosoftUserTokenRow(BaseModel):
     user_id: str
     encrypted_refresh_token: bytes
     scopes: str
+    created_at: datetime
+    updated_at: datetime
+
+
+ConnectorRefreshOwner = Literal["ma", "daimon"]
+"""Who refreshes one connector grant: the Managed Agents vault, or Daimon's store."""
+
+
+class ConnectorTokenRow(BaseModel):
+    """One stored connector grant, ciphertext only; `account_id` None means agent-wide."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID | None
+    agent_id: uuid.UUID
+    server_url: str
+    access_token_encrypted: bytes
+    refresh_token_encrypted: bytes | None
+    token_endpoint: str
+    client_id: str
+    client_secret_encrypted: bytes | None
+    token_endpoint_auth_method: Literal["none", "client_secret_basic", "client_secret_post"]
+    scope: str | None
+    resource: str | None
+    expires_at: datetime | None
+    refresh_owner: ConnectorRefreshOwner
+    refresh_started_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
@@ -1333,13 +1393,15 @@ class TurnOriginRow(BaseModel):
     platform_message_id: str | None = None
     helper_of: uuid.UUID | None = None
     serves_helpers: bool = False
+    self_helpers: bool = False
+    helper_key: str | None = None
 
     @property
     def session_thread_id(self) -> str:
         """The thread key of this turn's session: a helper's own (`helper_thread_key`)."""
         if self.helper_of is None:
             return self.thread_id
-        return helper_thread_key(self.thread_id, self.responder_ma_agent_id)
+        return self.helper_key or helper_thread_key(self.thread_id, self.responder_ma_agent_id)
 
 
 HelperAskStatus = Literal["queued", "running", "done", "failed", "stopped"]
@@ -1395,6 +1457,9 @@ class SourceRepresentation(_Facts):
     # Whole capabilities a partial representation (an agent template) leaves out;
     # consent must declare each one.
     unavailable_capabilities: tuple[str, ...] = ()
+    # Source skills, at concrete versions, the target installs per session (not on
+    # its agent): every custom and channel skill within the profile's size limit.
+    session_skills: tuple[SkillRef, ...] = ()
 
 
 class BackendAgent(_Facts):
@@ -1471,6 +1536,8 @@ class AgentBackendRevision(_BackendConsentFacts):
     profile: str | None = None
     requires: dict[Capability, CapabilityRequirement] | None = None
     thread_mode: ThreadMode | None = None
+    effort: Effort | None = None
+    environment: str | None = Field(default=None, pattern=r"^sh_env_")
     agent_name: str
     preview_digest: str
     digest: str
@@ -1491,6 +1558,8 @@ class CompatibilityPreview(_BackendConsentFacts):
     cost_line: str
     allowed: bool
     digest: str
+    # Run by the host in place of the native feature, never lost (`source_translations`).
+    translated_capabilities: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     # Set only when an admin picked a model other than the provider default.
     target_model: str | None = Field(default=None, exclude_if=lambda value: value is None)
     # The agent's own profile, requirements and thread mode, only when any is set.
@@ -1831,6 +1900,8 @@ class WebRefusalCard(BaseModel):
     title: str
     body: str
     help: str
+    # The one button the card offers an admin; None for everyone else.
+    action: Literal["switch_back_to_claude"] | None = None
 
 
 class WebCredentialCard(BaseModel):
@@ -1895,3 +1966,12 @@ class WebMessageRow(BaseModel):
     feedback: Literal["up", "down"] | None
     seq: int
     created_at: datetime
+
+
+class PendingCarryOverRow(BaseModel):
+    """A replacement session's framing not yet sent (`stores.pending_carry_overs`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    user_prefix: str
+    system_blocks: tuple[BetaManagedAgentsSystemContentBlockParam, ...]

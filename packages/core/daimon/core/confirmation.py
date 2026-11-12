@@ -54,7 +54,7 @@ from daimon.core.tool_safety import (
 from daimon.core.tool_safety import backend_switch_tools as backend_switch_tools
 from mux.contracts.config import ThreadMode
 from mux.contracts.ids import ChannelRef, Provider
-from mux.contracts.profile import Capability
+from mux.contracts.profile import Capability, Effort
 from mux.contracts.resources import AgentSpec
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
@@ -129,6 +129,10 @@ class BackendSwitchReference(BaseModel):
     required_capabilities: tuple[Capability, ...] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    # The agent's reasoning effort and profile on the target provider, when settings are
+    # stated: what the agent runs with now unless the request changes it.
+    effort: Effort | None = Field(default=None, exclude_if=lambda value: value is None)
+    profile: str | None = Field(default=None, exclude_if=lambda value: value is None)
     # The person said the switch is for everyone: needed for the server's default agent.
     for_everyone: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
     # The person's answer to the uncommitted-work question, when the switch also hands
@@ -626,6 +630,22 @@ def prompt_for_tool_call(
             admin=True,
             configuration=reference,
         )
+    if call.tool_name == "request_channel_pin" and own_server:
+        reference = ConfigurationReference.model_validate(
+            {
+                "operation": "channel_pin",
+                "model": data.get("model"),
+                "expected_revision": data.get("expected_revision"),
+                "preview_digest": data.get("preview_digest"),
+            }
+        )
+        return ConfirmationPrompt(
+            title="Pin this channel to a model?",
+            requester_platform_user_id=requester_platform_user_id,
+            expires_at=now + timeout,
+            admin=True,
+            configuration=reference,
+        )
     if call.tool_name == "request_channel_pin_clear" and own_server:
         reference = ConfigurationReference.model_validate(
             {
@@ -917,18 +937,23 @@ async def confirmed_tools_for_tenant(deps: TurnDeps, tenant_id: uuid.UUID) -> fr
 
 
 def stated_settings(
-    thread_mode: ThreadMode | None, required_capabilities: tuple[Capability, ...] | None
+    thread_mode: ThreadMode | None,
+    required_capabilities: tuple[Capability, ...] | None,
+    effort: Effort | None = None,
+    profile: str | None = None,
 ) -> AgentSettings | None:
     """The settings a request states, or None to keep the agent's own."""
     from daimon.core.channel_backend import AgentSettings
     from mux.contracts.config import CapabilityRequirement
 
-    if thread_mode is None and required_capabilities is None:
+    if thread_mode is None and required_capabilities is None and effort is None:
         return None
     required = CapabilityRequirement(level="required")
     return AgentSettings(
+        profile=profile,
         requires={cap: required for cap in required_capabilities or ()} or None,
         thread_mode=thread_mode,
+        effort=effort,
     )
 
 
@@ -946,7 +971,12 @@ def _switch_model(backend: object, model: object) -> object:
 
 
 def reference_settings(reference: BackendSwitchReference) -> AgentSettings | None:
-    return stated_settings(reference.thread_mode, reference.required_capabilities)
+    return stated_settings(
+        reference.thread_mode,
+        reference.required_capabilities,
+        reference.effort,
+        reference.profile,
+    )
 
 
 #: Plain words for a declared loss on a provider-switch card.
@@ -974,6 +1004,8 @@ def drop_words(drops: Sequence[str]) -> str:
             words.append(f"the {tool} tool of {server}")
         elif drop.startswith("mcp_server:"):
             words.append(f"its {drop.removeprefix('mcp_server:')} connector")
+        elif drop.startswith("skill:"):
+            words.append(f"its {drop.removeprefix('skill:')} skill")
         else:
             words.append(_DROP_WORDS.get(drop, drop.replace("_", " ")))
     return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
@@ -990,6 +1022,8 @@ def settings_line(settings: Mapping[str, object]) -> str:
     if isinstance(requires, Mapping) and requires:
         names = cast(Mapping[str, object], requires)
         parts.append("requires " + ", ".join(sorted(names)))
+    if settings.get("effort"):
+        parts.append(f"{settings['effort']} effort")
     if settings.get("profile"):
         parts.append(f"profile {settings['profile']}")
     return "; ".join(parts) or "the model provider's defaults"
@@ -1174,7 +1208,36 @@ def backend_switch_callbacks(
             raise ValueError("This change needs a current workspace admin.")
         actor = BackendActor(tenant_id=tenant_id, account_id=account_id, subject=subject)
         try:
-            if reference.operation == "channel_pin_clear":
+            if reference.operation == "channel_pin":
+                # Only the chat this card is posted in: the reference names no channel.
+                if pin_channel is None or pin_channel.tenant_id != str(tenant_id):
+                    raise ValueError("This confirmation is unavailable. Preview again.")
+                from daimon.core.channel_changes import ChannelChangeRefused
+                from daimon.core.channel_settings import preview_provider_pin
+
+                assert reference.model is not None
+                if not service.enabled:
+                    raise ValueError(configuration_refusal("feature_disabled"))
+                policy = await service.tenant_policy(tenant_id)
+                try:
+                    async with sessionmaker() as session:
+                        shown = await preview_provider_pin(
+                            session,
+                            tenant_id=tenant_id,
+                            platform=pin_channel.platform,
+                            channel_id=pin_channel.channel_id,
+                            value=reference.model,
+                            policy=policy,
+                        )
+                except ChannelChangeRefused as exc:
+                    raise ValueError(str(exc)) from exc
+                if (
+                    shown.expected_local or 0
+                ) != reference.expected_revision or shown.digest != reference.preview_digest:
+                    raise StalePreview(STALE_SETTING_TEXT)
+                action = "Pin this channel to a model"
+                details = (f"Every agent answers here on {shown.named} until the pin is cleared.",)
+            elif reference.operation == "channel_pin_clear":
                 # Only the chat this card is posted in: the reference names no channel.
                 if pin_channel is None or pin_channel.tenant_id != str(tenant_id):
                     raise ValueError("This confirmation is unavailable. Preview again.")
@@ -1369,8 +1432,8 @@ def backend_switch_callbacks(
                     + conversations_follow_line(agent.name, preview.target_backend, before)
                     + (
                         f" This conversation moves to {provider} from your next message "
-                        "(unless it's shared or this channel pins its provider); earlier "
-                        "messages here aren't carried over."
+                        "(unless it's shared or this channel pins its provider) and keeps "
+                        "its earlier messages."
                         if answering == agent.name
                         else ""
                     )

@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 import pytest
@@ -24,9 +25,11 @@ from daimon.core.output_delivery import (
     SkippedFile,
     download_output_file,
     render_oversize_notice,
-    sweep_session_outputs,
+    sweep_outputs,
 )
+from daimon.core.output_runtime import AnthropicOutputRuntime
 from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
+from mux.contracts.ids import Scope
 from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     MARouter,
@@ -36,6 +39,11 @@ from mux.testing.drivers.anthropic.ma import (
 )
 
 NOW = datetime(2026, 8, 25, 12, 0, 0, tzinfo=UTC)
+
+
+async def _sweep(client: AsyncAnthropic, *, session_id: str, **kwargs: Any) -> int:
+    scope = Scope.legacy_host_authorized(call_site="test_output_delivery")
+    return await sweep_outputs(AnthropicOutputRuntime(client, session_id, scope=scope), **kwargs)
 
 
 async def test_sweep_posts_file_when_it_first_appears_on_second_poll() -> None:
@@ -88,7 +96,7 @@ async def test_sweep_posts_file_when_it_first_appears_on_second_poll() -> None:
     async def post(file: DeliverableFile) -> None:
         posted.append(file)
 
-    count = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+    count = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert count == 1, "the late-indexed file should be posted"
     assert [f.file_id for f in posted] == ["file_late"], "posted file must be the listed one"
@@ -135,9 +143,7 @@ async def test_quiet_time_counts_toward_the_settle_floor(
         pass
 
     client = build_fake_anthropic(router.dispatch)
-    count = await sweep_session_outputs(
-        client, session_id="sesn_1", post=post, sleep=sleep, quiet_s=quiet_s
-    )
+    count = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep, quiet_s=quiet_s)
 
     assert count == files and delays == expected
 
@@ -201,7 +207,7 @@ async def test_sweep_catches_straggler_when_new_file_appears_at_settle_floor() -
     async def post(file: DeliverableFile) -> None:
         posted.append(file.file_id)
 
-    count = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+    count = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert count == 2, "both the early file and the t=6 straggler should be posted"
     assert sorted(posted) == ["file_a", "file_b"], "both listed files must be posted"
@@ -224,7 +230,7 @@ async def test_sweep_returns_zero_when_every_poll_is_empty() -> None:
     async def post(file: DeliverableFile) -> None:
         raise AssertionError("nothing should be posted from an empty listing")
 
-    count = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+    count = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert count == 0, "an all-empty run posts nothing"
     assert delays == [2.0, 4.0], "empty sweep must give up at the t=6 poll, never reach t=14"
@@ -284,7 +290,7 @@ async def test_sweep_never_downloads_entry_when_downloadable_is_not_true() -> No
     async def post(file: DeliverableFile) -> None:
         posted.append(file.file_id)
 
-    count = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+    count = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert count == 1, "only the downloadable entry should be posted"
     assert posted == ["file_chart"], "the non-downloadable .env entry must never be posted"
@@ -345,7 +351,7 @@ async def test_sweep_posts_before_deleting_and_deleted_entry_leaves_listing() ->
     async def post(file: DeliverableFile) -> None:
         events.append(f"post:{file.file_id}")
 
-    first = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+    first = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert first == 2, "both files should be posted on the first sweep"
     for file_id in ("file_a", "file_b"):
@@ -353,7 +359,7 @@ async def test_sweep_posts_before_deleting_and_deleted_entry_leaves_listing() ->
             f"{file_id} must be posted before its listing entry is deleted"
         )
 
-    second = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+    second = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert second == 0, "a deleted entry must not appear in the next sweep's listing"
 
@@ -413,7 +419,7 @@ async def test_sweep_counts_post_when_delete_fails_afterwards() -> None:
     async def post(file: DeliverableFile) -> None:
         posted.append(file.file_id)
 
-    count = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+    count = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert count == 2, "a delete failure after a successful post must still count the post"
     assert posted == ["file_a", "file_b"], "the sweep must continue past the failed delete"
@@ -466,7 +472,7 @@ async def test_sweep_skips_oversize_file_with_notice_and_keeps_entry() -> None:
     async def post(file: DeliverableFile) -> None:
         raise AssertionError("an oversize file must never be posted")
 
-    count = await sweep_session_outputs(
+    count = await _sweep(
         client, session_id="sesn_1", post=post, on_skip=on_skip, sleep=sleep, max_bytes=10
     )
 
@@ -541,7 +547,7 @@ async def test_a_kept_oversize_file_is_announced_once_across_sweeps() -> None:
 
     noticed = NoticedFiles()
     for _ in range(2):
-        await sweep_session_outputs(
+        await _sweep(
             client,
             session_id="sesn_1",
             post=post,
@@ -572,7 +578,7 @@ async def test_without_a_ledger_every_sweep_repeats_the_notice() -> None:
         pass
 
     for _ in range(2):
-        await sweep_session_outputs(
+        await _sweep(
             client, session_id="sesn_1", post=post, on_skip=on_skip, sleep=sleep, max_bytes=10
         )
 
@@ -597,7 +603,7 @@ async def test_a_failed_notice_is_not_recorded_and_retries() -> None:
 
     noticed = NoticedFiles()
     for _ in range(3):
-        await sweep_session_outputs(
+        await _sweep(
             client,
             session_id="sesn_1",
             post=post,
@@ -623,7 +629,7 @@ async def test_discard_skipped_up_to_deletes_only_files_that_fit() -> None:
     async def post(file: DeliverableFile) -> None:
         raise AssertionError("nothing is posted when max_bytes is 0")
 
-    await sweep_session_outputs(
+    await _sweep(
         client, session_id="sesn_1", post=post, sleep=sleep, max_bytes=0, discard_skipped_up_to=10
     )
 
@@ -645,7 +651,7 @@ async def test_a_skipped_file_carries_its_mime_type() -> None:
     async def on_skip(file: SkippedFile) -> None:
         skipped.append(file)
 
-    await sweep_session_outputs(
+    await _sweep(
         _oversize_then_normal_client(deletes),
         session_id="sesn_1",
         post=post,
@@ -686,7 +692,7 @@ async def test_a_kept_original_stays_downloadable_byte_for_byte() -> None:
         posts.append(file.file_id)
 
     for _ in range(3):
-        await sweep_session_outputs(
+        await _sweep(
             client,
             session_id="sesn_k",
             post=post,
@@ -721,7 +727,7 @@ async def test_kept_files_filling_the_first_page_do_not_hide_a_later_file() -> N
     async def post(file: DeliverableFile) -> None:
         posts.append(file.file_id)
 
-    await sweep_session_outputs(
+    await _sweep(
         client,
         session_id="sesn_p",
         post=post,
@@ -802,7 +808,7 @@ async def test_sweep_keeps_oversize_entry_when_skip_notice_fails() -> None:
     async def post(file: DeliverableFile) -> None:
         posted.append(file.file_id)
 
-    count = await sweep_session_outputs(
+    count = await _sweep(
         client, session_id="sesn_1", post=post, on_skip=on_skip, sleep=sleep, max_bytes=10
     )
 
@@ -859,9 +865,7 @@ async def test_sweep_deletes_zero_byte_entry_without_download_or_notice() -> Non
     async def post(file: DeliverableFile) -> None:
         raise AssertionError("a 0-byte file must never be posted")
 
-    count = await sweep_session_outputs(
-        client, session_id="sesn_1", post=post, on_skip=on_skip, sleep=sleep
-    )
+    count = await _sweep(client, session_id="sesn_1", post=post, on_skip=on_skip, sleep=sleep)
 
     assert count == 0, "a 0-byte entry does not count as posted"
     assert downloads == [], "a 0-byte entry must never be downloaded"
@@ -920,7 +924,7 @@ async def test_sweep_continues_when_post_fails_for_one_file() -> None:
         if file.file_id == "file_bad":
             raise RuntimeError("upload exploded")
 
-    count = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+    count = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert count == 1, "only the successfully posted file counts"
     assert deletes == ["file_good"], (
@@ -979,7 +983,7 @@ async def test_sweep_leaves_deferred_file_listed_without_counting_it() -> None:
         if file.file_id == "file_offered":
             raise OutputDeliveryDeferred(file.file_id)
 
-    count = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+    count = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert count == 1, "a deferred file is not counted as posted"
     assert deletes == ["file_posted"], "the deferred file must stay listed"
@@ -1078,7 +1082,7 @@ async def test_sweep_aborts_and_deletes_nothing_when_posting_unavailable() -> No
         raise OutputPostingUnavailable("missing_scope")
 
     with pytest.raises(OutputPostingUnavailable):
-        await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+        await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert deletes == [], "an aborted sweep must delete nothing"
     assert downloads == ["file_first"], "the second file must never be downloaded after the abort"
@@ -1140,7 +1144,7 @@ async def test_sweep_skips_handoff_bundles_and_leaves_them_listed() -> None:
     async def post(file: DeliverableFile) -> None:
         posted.append(file.filename)
 
-    count = await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep)
+    count = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
 
     assert count == 1, "only the real output counts as posted"
     assert posted == ["report.csv"], "the handoff bundle must never be posted"
@@ -1193,7 +1197,7 @@ async def test_sweep_posts_handoff_bundle_when_exclusions_are_cleared() -> None:
     async def post(file: DeliverableFile) -> None:
         posted.append(file.filename)
 
-    count = await sweep_session_outputs(
+    count = await _sweep(
         client,
         session_id="sesn_1",
         post=post,
@@ -1250,7 +1254,7 @@ async def test_sweep_posts_in_the_order_the_caller_gives() -> None:
         posted.append(file.filename)
 
     client = build_fake_anthropic(router.dispatch)
-    await sweep_session_outputs(client, session_id="sesn_1", post=post, sleep=sleep, order=reverse)
+    await _sweep(client, session_id="sesn_1", post=post, sleep=sleep, order=reverse)
 
     assert seen == [names], "order sees the listed names"
     assert posted == ["second.png", "first.pdf"], "posted in the order given"

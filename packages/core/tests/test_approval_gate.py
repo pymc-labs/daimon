@@ -45,6 +45,11 @@ ADMIN_INPUTS: dict[str, dict[str, object]] = {
         "expected_revision": "policy-revision",
         "preview_digest": "a" * 64,
     },
+    "request_channel_pin": {
+        "model": "openai:gpt-6",
+        "expected_revision": 0,
+        "preview_digest": "a" * 64,
+    },
     "request_channel_pin_clear": {
         "expected_revision": 1,
         "preview_digest": "a" * 64,

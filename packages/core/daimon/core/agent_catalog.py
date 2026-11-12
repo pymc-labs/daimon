@@ -12,14 +12,19 @@ from collections.abc import Collection, Mapping, Sequence
 from anthropic.types.beta.skill_list_response import SkillListResponse
 from daimon.core.agent_model_names import AgentModel, model_name
 from daimon.core.agent_view import PlaceDoc, SkillDoc
+from daimon.core.channel_backend import NAMED_AGENT_BACKENDS
 from daimon.core.constants import MODEL_DISPLAY_NAMES
 from daimon.core.defaults.metadata import strip_tenant_prefix
 from daimon.core.platform_names import UNNAMED_CHANNEL
 from daimon.core.tenant_summary import ChannelSummary
-from mux.contracts.ids import Provider
+from mux.contracts.config import DEFAULT_BACKEND
+from mux.contracts.ids import ModelRef, Provider
+from mux.contracts.profile import Effort
+from mux.profiles import PROFILES, backend_selection
 from pydantic import BaseModel
 
 _FAST = "-fast"
+_EFFORT_ORDER: tuple[Effort, ...] = ("low", "medium", "high")
 
 
 class CatalogModel(BaseModel):
@@ -30,12 +35,31 @@ class CatalogModel(BaseModel):
     out_usd: float
     # A fast variant of the model exists; the editor offers it as a switch.
     fast: bool = False
+    # The efforts the model's profile declares; empty where it has none to set.
+    efforts: tuple[Effort, ...] = ()
+
+
+def provider_efforts(provider: Provider) -> tuple[Effort, ...]:
+    """The neutral efforts `provider`'s profile declares, lowest first; none where it has none.
+
+    Claude carries its own effort on the agent record, so it is not read from a profile;
+    a provider that runs the agent as its own named agent takes none.
+    """
+    if provider == DEFAULT_BACKEND or provider in NAMED_AGENT_BACKENDS:
+        return ()
+    profile = PROFILES.get(backend_selection(provider).profile)
+    if profile is None:
+        return ()
+    return tuple(e for e in _EFFORT_ORDER if e in profile.effort_map)
 
 
 def models_of(
-    entries: Sequence[AgentModel], *, providers: Collection[Provider], priced: Collection[str]
+    entries: Sequence[AgentModel], *, offered: Collection[ModelRef], priced: Collection[str]
 ) -> list[CatalogModel]:
-    """Every runnable model on a provider the workspace may use, in catalog order.
+    """Every priced model the workspace may run, in catalog order.
+
+    `offered` is the core catalog (`list_model_choices`): the one list every surface shares,
+    so a model one surface offers is offered by all.
 
     `priced` is every metered Anthropic id: a model with a `<id>-fast` row there is marked
     fast instead of being listed twice.
@@ -47,10 +71,11 @@ def models_of(
             backend=entry.model.provider,
             in_usd=entry.input_usd,
             out_usd=entry.output_usd,
-            fast=entry.model.id + _FAST in priced,
+            fast=entry.model.provider == DEFAULT_BACKEND and entry.model.id + _FAST in priced,
+            efforts=provider_efforts(entry.model.provider),
         )
         for entry in entries
-        if entry.model.provider in providers and not entry.model.id.endswith(_FAST)
+        if entry.model in offered and not entry.model.id.endswith(_FAST)
     ]
 
 

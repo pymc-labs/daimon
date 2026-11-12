@@ -7,6 +7,117 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **An agent can run on a self-hosted model.** Once an operator grants the
+  agent, its model picker lists the self-hosted model, and one preview and
+  confirm switches it. A channel pin still wins.
+- **Self-hosted channels can share a thread.** Everyone in it works in one
+  session, and each person's own sign-ins stay hidden from the others.
+- **Self-hosted agents attach the files they save.** Files a self-hosted
+  agent writes to its outputs folder are attached to its reply on Discord,
+  Slack and Teams, as on other providers. Operators must update their harness
+  to 0.2.0 to get this; an older harness attaches no files.
+- **Picking another provider's model switches the agent.** Every place that
+  picks a model lists one catalog: Claude's models plus the OpenAI and Gemini
+  models the workspace has enabled, each with its price and without unpriced or
+  expired ones. Discord has `/model`, Slack the Model message shortcut, Teams
+  the `model` command, and the web has the agent editor and the chat header; the
+  Discord, Slack and Teams agent panels have one model select, and the separate
+  provider step is gone. The `update_agent` tool and `daimon agents create|update
+  --model provider:id` (for example `openai:gpt-6-luna`, with `--yes` and
+  `--accept-drops`) do the same. Admins can pin a channel to such a model from
+  its web page or by asking in chat, and an OpenAI agent can carry a low,
+  medium or high reasoning effort; Gemini agents take none. An unset effort shows as the model's
+  default, and Claude's max or extra-high effort becomes the new provider's
+  highest level on a switch.
+
+- **One conversation can run on another provider's model.** `set_thread_model`
+  takes a model from `list_models`, and the chat shortcuts above do the same for
+  one thread; the agent keeps its own model everywhere else. The
+  `thread_providers` feature lets anyone who may change a conversation's model
+  do this; off, only the agent's owner or an admin can. A conversation moved to
+  another provider keeps its recent messages in every direction, and its saved
+  files where the new provider has a persistent workspace. It also carries them
+  over when the agent, model or plan behind it changes, on routines and wakes
+  too, and keeps them for the next try when the first message fails.
+
+- **Every switch shows what changes first.** A pick on another provider shows
+  what the move drops, the shared-thread limits, the price and what happens to
+  threads, then asks once. Confirming accepts those losses, from chat, a panel
+  or the web editor, so the next message does not ask again; an agent switched
+  before this asks once more, then keeps the answer. When an admin edits the
+  agent after someone chose a model for a conversation, the next message there
+  posts the card once. A refusal gives one plain line for its cause, such as a
+  provider that is off, a shared thread that needs an admin, a price window that
+  ended or a switch to confirm again, and nothing changes.
+
+- **Ask to go back to Claude from any provider.** "Switch back to Claude" is on
+  refused replies, switch cards and panels for an admin when the install has a
+  Claude key. `daimon agents convert <name> [--to openai|gemini|anthropic]` moves
+  an agent in either direction. To OpenAI or Gemini it keeps the name, owner and
+  rules and retires the Claude original; back to Claude it keeps owner, threads,
+  routines, memory, settings and grants. Both bring the agent's own skills along
+  as the admin's, and name any they couldn't carry; run from the CLI they are
+  only named. Both are safe to re-run after a failure. Both are refused while the agent has queued
+  wakes, pending approvals or running jobs.
+
+- **Gemini works from the published image.** The image includes the Gemini SDK,
+  so Gemini no longer needs a custom image.
+
+- **Daimon runs with only an OpenAI or Gemini key.** With no Anthropic key,
+  setup seeds the default agents on the keyed provider at its default model, and
+  agents you create live there too, pinned, so no reply falls back to Anthropic.
+  Lookups of routines, rules, rosters, agent details, skills, MCP connections,
+  forks and reports use Daimon's own agent records as well as Claude's. Thread
+  titles and participation checks use a small model from the active provider,
+  or another keyed provider's when that model has no known price.
+  Environment lists and checks show environments Daimon keeps itself. An agent
+  still on Anthropic gets a card offering a copy on another provider. A channel
+  pinned to OpenAI without a channel row says whoever runs Daimon must add one.
+  Off Google Cloud, hosted OpenAI environments use a stored id; `daimon
+  deployment reset-id` makes a new one.
+
+- **OpenAI and Gemini agents keep more of what a Claude agent has.** OpenAI
+  and Gemini agents attach their custom and channel skills, also on a
+  channel-set deployment, uploaded once per version. A skill over its size
+  limit, or one that cannot be read or uploaded, is left out and named: on the
+  switch card for an agent's own skills, and to the agent itself otherwise. Gemini skills are
+  text only, 2 MiB in all. An OpenAI conversation that gains skills moves once
+  to a new session, keeping its recent messages and, where the workspace
+  persists, its saved files. Both providers read and write shared, personal
+  and channel memory through Daimon's tools, which needs an Anthropic key.
+  They ask copies of themselves through `ask_helper`, sharing $10 per
+  message: the first copy runs alone, and later ones start only while their
+  share still fits. A refused copy says why, such as a model
+  with no known price. OpenAI, Gemini and self-hosted agents open public https
+  pages through Daimon's page reader, under the place's web page setting.
+  Files an agent produces are posted on Discord, Slack, Teams and the web on
+  OpenAI and Gemini, each once. A spend limit now stops an OpenAI reply; cache
+  writes are not metered, so the count can fall slightly under the bill.
+
+- **An agent's own connectors and confirmations work on OpenAI and
+  Gemini.** The provider calls connectors through Daimon with a credential for
+  that reply only, and Daimon calls the connector with the person's sign-in, which the
+  provider never sees. Daimon keeps and renews those sign-ins; personal
+  connectors need one Reconnect after a switch. A tool that needs a
+  confirmation posts an Approve and Deny card that only the asker answers, and
+  an approved call runs once. Routines, watch wakes and long jobs keep Daimon's
+  tools, running what their rules allow. Operators can turn these off with the
+  `mcp_connector_relay` and `host_call_gate` features. Self-hosted agents get
+  neither.
+
+- **Shared, held and sealed channels run on other providers.** OpenAI and Gemini
+  agents answer in shared threads, without Daimon's tools or any caller's
+  personal stores, and in Slack Connect and other held channels with only that
+  channel's memory. An agent that picks OpenAI itself keeps Daimon's tools in
+  a shared thread: each person acts as themselves, and nobody's personal
+  sign-ins are used. Sealed channels and Slack DM context also run on
+  self-hosted harnesses, and sessions a sealed reply starts stay sealed.
+  Self-hosted harnesses still refuse shared threads.
+
+- **`daimon selfhosted init` sets up the whole grant.** Beyond the agent and
+  environment, it writes a runtime-file row for each `--channel` and prints the
+  admission flag, the harness auth binding for the tenant and the model's rates.
+  `--input-usd` and `--output-usd` are required, so no price is assumed.
 - **The agent editor lays its cards on a ring round the agent.** Instructions, model, channels and people sit top
   left, setup, tools and skills top right, and connections below; each group takes the room its cards need and keeps
   a much wider gap from the next. The ring takes the window's shape: a tall oval in a half-width window, a wide

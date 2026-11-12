@@ -90,11 +90,13 @@ class AgentChoice:
 AgentLoader = Callable[[], Awaitable[Sequence[AgentChoice]]]
 
 
-def tenant_agents(client: AsyncAnthropic, tenant_id: uuid.UUID) -> AgentLoader:
+def tenant_agents(
+    client: AsyncAnthropic, tenant_id: uuid.UUID, records: Sessions | None = None
+) -> AgentLoader:
     """The agents a viewer may pick for the agent level: the workspace's own, by name."""
 
     async def load() -> Sequence[AgentChoice]:
-        agents = await list_agents_by_tenant(client, tenant_id=tenant_id)
+        agents = await list_agents_by_tenant(client, tenant_id=tenant_id, records=records)
         named = [AgentChoice(a.id, a.metadata.get(MA_METADATA_KEY_NAME) or a.name) for a in agents]
         return sorted(named, key=lambda agent: agent.name.lower())
 

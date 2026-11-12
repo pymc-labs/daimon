@@ -9,6 +9,7 @@ from mux.contracts.profile import AccountingMode, Profile
 LOOP = Profile(
     provider="selfhosted",
     profile_id="selfhosted.loop",
+    carries_caller_resources=True,
     schema_version="1",
     sdk_pin="daimon-harness/0",
     core=False,
@@ -25,6 +26,7 @@ LOOP = Profile(
         "reconcile": "native",
         "native_event_replay": "native",
         "event_previews": "native",
+        "artifacts": "native",
         "tool_confirmation": "native",
         "steer": "unsupported",
         "multiagent": "unsupported",

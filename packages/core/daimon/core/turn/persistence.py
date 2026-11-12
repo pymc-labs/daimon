@@ -201,6 +201,18 @@ class TurnPersistence:
         finally:
             current_persistence.reset(token)
 
+    @contextlib.contextmanager
+    def holding(self, lease: Lease) -> Iterator[None]:
+        """Activate under a slot lease the caller already holds, as a binding replacement does."""
+        if lease.slot != self._slot:
+            raise ScopeViolation(self.operation_key, "lease belongs to another slot")
+        self._lease = lease
+        try:
+            with self.activate():
+                yield
+        finally:
+            self._lease = None
+
     def check_session(self, scope: Scope, session: ResourceRef | None) -> None:
         if session is None:
             if scope != self.scope or self._binding is not None:

@@ -29,11 +29,13 @@ from typing import Final
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_posts as agent_posts_store
 from daimon.core.stores import coding_key_claims as coding_key_claims_store
+from daimon.core.stores import connector_tokens as connector_tokens_store
 from daimon.core.stores import credential_requests as credential_requests_store
 from daimon.core.stores import direct_messages as direct_messages_store
 from daimon.core.stores import gemini_runtime_state as gemini_state_store
 from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_links as github_links_store
+from daimon.core.stores import host_call_cards as host_call_cards_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import lead_intake as lead_intake_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
@@ -90,6 +92,7 @@ class PurgePreview(BaseModel):
     github_connect_requests: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     github_connect_click_intents: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     github_user_links: PurgePreviewRow
+    connector_tokens: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     gemini_records: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     selfhosted_operations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     mcp_tokens: PurgePreviewRow
@@ -118,11 +121,13 @@ class PurgePreview(BaseModel):
     mux_leases: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     mux_release_requests: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     mux_operations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    host_call_cards: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     # What stays, so the confirmation can say so: conversations other people share with
     # the person (and the person's requests in them), and settlement records.
     retained_shared_conversations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     retained_shared_operations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     retained_accounting_records: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    retained_shared_provider_records: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
 
 
 def held_lines(preview: PurgePreview) -> list[str]:
@@ -138,6 +143,7 @@ def held_lines(preview: PurgePreview) -> list[str]:
         (preview.github_connect_click_intents, "GitHub connect button"),
         (preview.github_user_links, "linked GitHub account"),
         (preview.mcp_tokens, "Daimon access token"),
+        (preview.connector_tokens, "saved connector sign-in"),
         (preview.gemini_records, "Gemini conversation record"),
         (preview.selfhosted_operations, "self-hosted retry record"),
         (preview.slack_user_tokens, "saved access token"),
@@ -153,6 +159,7 @@ def held_lines(preview: PurgePreview) -> list[str]:
         (preview.web_admin_grants, "web app admin role"),
         (preview.mux_slots, "saved conversation"),
         (preview.mux_journal_events, "saved conversation message"),
+        (preview.host_call_cards, "approval request"),
     )
     parts = [
         "saved settings"
@@ -324,6 +331,9 @@ async def collect_purge_preview(
         )
 
         gemini_records_count = await gemini_state_store.count_records_for_account(
+            session, account_id=account_id
+        )
+        connector_tokens_count = await connector_tokens_store.count_connector_tokens_for_account(
             session, account_id=account_id
         )
         selfhosted_operations_count = await selfhosted_store.count_operations_for_account(
@@ -504,6 +514,9 @@ async def collect_purge_preview(
         web_admin_grants_total = await web_roles_store.count_admin_grants_for_account(
             session, account_id=account_id
         )
+        host_call_cards_total = await host_call_cards_store.count_for_account(
+            session, account_id=account_id
+        )
         mux = await mux_erasure_store.inventory(
             session, account_id=account_id, principal_ids=[p.id for p in (*cli_list, *pp_list)]
         )
@@ -537,6 +550,7 @@ async def collect_purge_preview(
         ),
         github_user_links=github_user_links,
         mcp_tokens=mcp_tokens,
+        connector_tokens=PurgePreviewRow(count=connector_tokens_count, example=None),
         gemini_records=PurgePreviewRow(count=gemini_records_count, example=None),
         selfhosted_operations=PurgePreviewRow(count=selfhosted_operations_count, example=None),
         slack_user_tokens=slack_user_tokens,
@@ -561,6 +575,7 @@ async def collect_purge_preview(
         mux_leases=PurgePreviewRow(count=mux.erased.leases, example=None),
         mux_release_requests=PurgePreviewRow(count=mux.erased.release_requests, example=None),
         mux_operations=PurgePreviewRow(count=mux.erased.operations, example=None),
+        host_call_cards=PurgePreviewRow(count=host_call_cards_total, example=None),
         retained_shared_conversations=PurgePreviewRow(
             count=mux.retained.shared_conversations, example=None
         ),
@@ -569,5 +584,8 @@ async def collect_purge_preview(
         ),
         retained_accounting_records=PurgePreviewRow(
             count=mux.retained.accounting_records, example=None
+        ),
+        retained_shared_provider_records=PurgePreviewRow(
+            count=mux.retained.shared_provider_records, example=None
         ),
     )

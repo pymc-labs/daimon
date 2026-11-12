@@ -17,6 +17,7 @@ from decimal import Decimal, localcontext
 from types import MappingProxyType
 from typing import Protocol
 
+import structlog
 from mux.contracts.usage import UsageObservation
 from mux.profiles import (
     CONVERSATION_ONLY,
@@ -24,6 +25,8 @@ from mux.profiles import (
     PERSISTENT_WORKSPACE,
     meters_cache_writes_for,
 )
+
+_log = structlog.get_logger()
 
 
 class LegacyUsage(Protocol):
@@ -708,6 +711,17 @@ def provider_prices(profile: str) -> Mapping[tuple[str, str], ProviderPrice]:
     return MappingProxyType(_current_price(_PROVIDER_PRICING.get(profile, ()), on))
 
 
+def price_expiries() -> tuple[tuple[str, str, date], ...]:
+    """Every dated tariff that lapses: (profile, model, valid_before), soonest first."""
+    found = [
+        (profile, price.model, price.valid_before)
+        for profile, prices in _PROVIDER_PRICING.items()
+        for price in prices
+        if price.valid_before is not None
+    ]
+    return tuple(sorted(found, key=lambda each: each[2]))
+
+
 def provider_price_on(model: str, on: date) -> ProviderPrice | None:
     """The tariff usage of `model` on day `on` settled at, from any profile; None when none.
 
@@ -727,6 +741,33 @@ def _priced_input_limits() -> Mapping[str, int | None]:
                 # Stored rows are bucketed by one limit per model before a tariff is chosen.
                 raise ValueError(f"{price.model} tariffs disagree on the priced input limit")
     return MappingProxyType(limits)
+
+
+def side_call_rates(model: str, prompt_tokens: int = 0) -> ModelRates:
+    """Rates for a side call: the model's table row, else its sourced provider tariff today.
+
+    A prompt over the tariff's priced input limit takes its long-context multipliers,
+    or the base rate as a floor when none is sourced. Raises KeyError when neither
+    prices the model, so a side call never runs unmetered.
+    """
+    if model in MODEL_PRICING:
+        return MODEL_PRICING[model]
+    price = provider_price_on(model, datetime.now(UTC).date())
+    if price is None:
+        raise KeyError(model)
+    incoming = outgoing = Decimal(1)
+    limit = price.max_priced_input_tokens
+    if limit is not None and prompt_tokens > limit:
+        if price.long_context_multipliers is None:
+            _log.warning("side_call.priced_at_base_rate", model=model, prompt_tokens=prompt_tokens)
+        else:
+            incoming, outgoing = price.long_context_multipliers
+    return ModelRates(
+        input=float(price.input * incoming),
+        output=float(price.output * outgoing),
+        cache_write=float((price.cache_write or 0) * incoming),
+        cache_read=float(price.cache_read * incoming),
+    )
 
 
 #: Every provider-priced model and its tariff's priced input limit (None: no limit).

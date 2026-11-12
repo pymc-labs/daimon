@@ -42,9 +42,11 @@ def register_model_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         is accepted wherever a model is named. Prices are list prices per million
         tokens, before this server's markup.
         """
-        from daimon.core.channel_backend import make_backend_service
+        from daimon.core.channel_backend import NO_CAPTURE, make_backend_service
 
         auth = await _auth(ctx)
-        service = make_backend_service(runtime.session_factory, runtime.settings.turn)
+        service = make_backend_service(
+            runtime.session_factory, runtime.settings.turn, capture_source=NO_CAPTURE
+        )
         policy = await service.tenant_policy(auth.tenant_id)
         return _list_models_impl(tuple(policy.enabled_backends))

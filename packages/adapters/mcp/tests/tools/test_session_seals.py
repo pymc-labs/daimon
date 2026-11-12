@@ -250,6 +250,22 @@ async def test_sealed_transcript_is_readable_from_inside_its_channel(world: _Wor
     assert _SEALED_TOPIC in _events_text(page)
 
 
+async def test_a_sealed_provider_turn_reads_inside_its_signed_seals_only(world: _World) -> None:
+    """A provider turn names no origin: its credential's seals are its inside."""
+    await world.seal(_SEALED, "chan-other")
+    world.add_session("ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1")
+    world.add_session("ses_other", daimon_channel="chan-other", daimon_thread="thr-o")
+    sealed = world.auth(seal_ids=frozenset({_SEALED}))
+
+    page = await _list_session_events_impl(world.runtime(), sealed, "ses_acme", None, None, None)
+    assert _SEALED_TOPIC in _events_text(page), "its own seal's conversation is readable"
+    with pytest.raises(ToolError, match="read only from inside"):
+        await _list_session_events_impl(world.runtime(), sealed, "ses_other", None, None, None)
+    with pytest.raises(ToolError, match="read only from inside"):
+        # Without signed seals or an origin (MA's path) nothing sealed is read.
+        await _list_session_events_impl(world.runtime(), world.auth(), "ses_acme", None, None, None)
+
+
 async def test_list_sessions_hides_sealed_conversations_outside_their_channel(
     world: _World,
 ) -> None:

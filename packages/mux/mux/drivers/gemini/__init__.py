@@ -11,6 +11,7 @@ from mux.contracts.resources import Agent
 from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini.catalog import GeminiCatalogAdapter
 from mux.drivers.gemini.catalog_transport import AgentCatalogTransport
+from mux.drivers.gemini.completions import GeminiCompletions
 from mux.drivers.gemini.core import (
     Base,
     GeminiAgents,
@@ -23,6 +24,7 @@ from mux.drivers.gemini.core import (
 )
 from mux.drivers.gemini.deployment import (
     configured_catalog_transport,
+    configured_completions,
     configured_transport,
     downscoped_storage_token,
 )
@@ -34,7 +36,7 @@ from mux.drivers.gemini.flash import (
     FlashAttempt,
     FlashTransport,
 )
-from mux.drivers.gemini.mcp_auth import GCSSecretResolver, MCPSecretResolver
+from mux.drivers.gemini.mcp_auth import GCSSecretResolver, MCPSecretResolver, native_server_name
 from mux.drivers.gemini.resources import GeminiArtifacts, GeminiSkills
 from mux.drivers.gemini.skill_deployment import (
     GCSBundleDeployment,
@@ -93,10 +95,13 @@ class GeminiManagedAgents:
         resource_catalog_transport: AgentCatalogTransport | None = None,
         native_agent: Agent | None = None,
         max_output_tokens: int | None = None,
+        thinking_level: str | None = None,
     ) -> None:
         if type(resource_catalog_enabled) is not bool:
             raise ValueError("resource catalog capability must be an explicit bool")
-        if max_output_tokens is not None and (native_agent is not None or resource_catalog_enabled):
+        if (max_output_tokens is not None or thinking_level is not None) and (
+            native_agent is not None or resource_catalog_enabled
+        ):
             raise UnsupportedCapability(("model_interaction_resources",), PROFILE.profile_id)
         self.catalog_adapter: GeminiCatalogAdapter | None = None
         if resource_catalog_enabled:
@@ -124,6 +129,7 @@ class GeminiManagedAgents:
             native_agent=native_agent,
             gcs_secrets=gcs_secrets,
             max_output_tokens=max_output_tokens,
+            thinking_level=thinking_level,
         )
         self.events = GeminiEvents(
             transport,
@@ -135,6 +141,7 @@ class GeminiManagedAgents:
             gcs_secrets=gcs_secrets,
             mcp_secrets=mcp_secrets,
             max_output_tokens=max_output_tokens,
+            thinking_level=thinking_level,
         )
         self.usage = GeminiUsage(transport, storage, account_scope_id)
         self.artifacts = GeminiArtifacts(transport, storage, account_scope_id)
@@ -159,6 +166,7 @@ class GeminiManagedAgents:
 
 
 __all__ = [
+    "GeminiCompletions",
     "NO_TOOLS_FUNCTION",
     "NO_TOOLS_TOOL",
     "ATTEMPT_MODELS",
@@ -189,7 +197,9 @@ __all__ = [
     "compile_agent",
     "compile_environment",
     "configured_catalog_transport",
+    "configured_completions",
     "configured_transport",
     "downscoped_storage_token",
+    "native_server_name",
     "verify_retained_deployments",
 ]

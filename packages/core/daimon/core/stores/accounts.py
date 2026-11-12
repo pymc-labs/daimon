@@ -181,7 +181,10 @@ async def count_user_config_for_account(session: AsyncSession, *, account_id: uu
 async def delete_account(session: AsyncSession, *, account_id: uuid.UUID) -> int:
     """Delete the account row by id. Returns rowcount; never raises on 0."""
     from daimon.core._models import RepoMemory
+    from daimon.core.stores.neutral_catalog import delete_account_rows
 
+    # The neutral catalogue keeps no account key (shared owners have no row).
+    await delete_account_rows(session, account_id=account_id)
     await session.execute(
         delete(RepoMemory).where(
             RepoMemory.created_by_account_id == account_id, RepoMemory.scope == "user"

@@ -103,21 +103,3 @@ async def test_j9_a_never_seen_tenant_previews_a_switch_with_zero_setup(fresh_ch
     )
     assert preview.status == "preview" and preview.preview_digest
     assert preview.target_backend == backend
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="a channel pinned to OpenAI needs a native agent of its own, so an operator row"
-    " (runtime_defaults.py module docstring) - nc-defaults",
-)
-def test_j9_a_channel_pinned_to_openai_runs_from_the_code_defaults(monkeypatch):
-    from daimon.core.turn.runtime_defaults import default_rows
-
-    monkeypatch.setenv(DEFAULT_KEY_ENV["openai"], "offline")
-    rows = default_rows(str(uuid.uuid4()))
-    assert any(
-        row["profile"] == "openai.persistent_workspace"
-        and not row.get("root_materialization")
-        and not row.get("worker_materialization")
-        for row in rows
-    )

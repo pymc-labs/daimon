@@ -41,6 +41,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent, retrieve_environment
 from mux.errors import ScopeViolation
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
 
@@ -149,7 +150,12 @@ async def retrieve_agent_cached(
 
 
 async def retrieve_environment_cached(
-    client: AsyncAnthropic, cache: ResolverCache, tenant_id: uuid.UUID, environment_id: str
+    client: AsyncAnthropic,
+    cache: ResolverCache,
+    tenant_id: uuid.UUID,
+    environment_id: str,
+    *,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaEnvironment:
     backend_scope = resource_scope(tenant_id=str(tenant_id))
     key = (tenant_id, environment_id)
@@ -158,7 +164,9 @@ async def retrieve_environment_cached(
             cache.environments,
             cache.environment_retrieves,
             key,
-            lambda: retrieve_environment(client, environment_id, scope=backend_scope),
+            lambda: retrieve_environment(
+                client, environment_id, scope=backend_scope, records=records
+            ),
         )
     except ScopeViolation:
         cache.environments.pop(key, None)
@@ -204,7 +212,10 @@ async def list_skills_lenient_cached(
 
 
 async def _list_derived_agents(
-    client: AsyncAnthropic, cache: ResolverCache, tenant_id: uuid.UUID
+    client: AsyncAnthropic,
+    cache: ResolverCache,
+    tenant_id: uuid.UUID,
+    records: async_sessionmaker[AsyncSession] | None,
 ) -> _DerivedAgents:
     """The tenant's live agents by derived uuid, one listing for concurrent callers."""
     task = cache.derived_agent_listings.get(tenant_id)
@@ -213,7 +224,9 @@ async def _list_derived_agents(
         async def load() -> _DerivedAgents:
             agents = {
                 derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id): agent
-                for agent in await list_agents_by_tenant(client, tenant_id=tenant_id)
+                for agent in await list_agents_by_tenant(
+                    client, tenant_id=tenant_id, records=records
+                )
             }
             # Publish before the task completes, as `_retrieve_shared` does.
             for derived, agent in agents.items():
@@ -234,7 +247,12 @@ async def _list_derived_agents(
 
 
 async def find_agent_by_derived_uuid_cached(
-    client: AsyncAnthropic, cache: ResolverCache, *, tenant_id: uuid.UUID, agent_id: uuid.UUID
+    client: AsyncAnthropic,
+    cache: ResolverCache,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaManagedAgentsAgent | None:
     """`find_agent_by_derived_uuid` without listing every agent in the org per call.
 
@@ -247,10 +265,10 @@ async def find_agent_by_derived_uuid_cached(
     key = (tenant_id, agent_id)
     ma_agent_id = cache.derived_agent_ids.get(key)
     if ma_agent_id is None:
-        return (await _list_derived_agents(client, cache, tenant_id)).get(agent_id)
+        return (await _list_derived_agents(client, cache, tenant_id, records)).get(agent_id)
     try:
         agent = await retrieve_agent(
-            client, ma_agent_id, scope=resource_scope(tenant_id=str(tenant_id))
+            client, ma_agent_id, scope=resource_scope(tenant_id=str(tenant_id)), records=records
         )
     except ScopeViolation:
         return None  # the agent is stamped for another tenant now

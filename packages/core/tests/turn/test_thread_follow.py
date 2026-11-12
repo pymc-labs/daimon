@@ -146,3 +146,46 @@ async def test_release_now_moves_only_from_the_generation_it_read():
         now=datetime.now(UTC),
     )
     assert moved is False and written == []
+
+
+def _chosen(provider: str, model: str | None, digest: str = "chosen"):
+    from daimon.core.channel_backend import ThreadBackend
+
+    consent = SimpleNamespace(backend=provider, model=model, digest=digest)
+    return ThreadBackend("thread", consent)  # pyright: ignore[reportArgumentType]
+
+
+async def follow_thread(monkeypatch, bound, thread, *, pin=None, retained=None):
+    async def thread_pin(session, channel, local):
+        return pin
+
+    monkeypatch.setattr(admission.mux_state, "config_thread_pin", thread_pin)
+    return await admission._thread_follow(  # pyright: ignore[reportPrivateUsage]
+        None,  # pyright: ignore[reportArgumentType]
+        tenant_id=TENANT,
+        channel=CHANNEL,
+        agent_ma_id="agent_daimon",
+        bound_provider=bound[0],
+        bound_model=bound[1],
+        shared=False,
+        enabled_backends=ALL,  # pyright: ignore[reportArgumentType]
+        thread=thread,
+        retained_local=retained,
+    )
+
+
+async def test_a_conversations_own_pick_carries_it_to_the_new_provider(prefer, monkeypatch):
+    """The thread's choice stands in for the agent's, which stays on Claude."""
+    asked = prefer(None)
+    moved = await follow_thread(monkeypatch, ("anthropic", None), _chosen("openai", "gpt-6-luna"))
+    assert moved == admission.ThreadFollow("moved", "openai", "gpt-6-luna")
+    assert asked == [], "the agent's own preference is not read"
+
+
+async def test_a_replaced_consent_moves_even_to_the_same_model(prefer, monkeypatch):
+    thread = _chosen("openai", "gpt-6-luna", digest="new")
+    bound = ("openai", "gpt-6-luna")
+    held = await follow_thread(monkeypatch, bound, thread, pin=("thread", "new"), retained=3)
+    assert held is None
+    moved = await follow_thread(monkeypatch, bound, thread, pin=("thread", "old"), retained=3)
+    assert moved == admission.ThreadFollow("moved", "openai", "gpt-6-luna")

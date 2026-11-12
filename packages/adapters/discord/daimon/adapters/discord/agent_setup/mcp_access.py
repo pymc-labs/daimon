@@ -121,6 +121,7 @@ async def send_coding_tools_access(
                 runtime.anthropic,
                 tenant_id=tenant_id,
                 ma_agent_id=card_agent.ma_agent_id,
+                records=runtime.sessionmaker,
             )
         except DaimonError:
             await interaction.response.send_message(
@@ -137,6 +138,7 @@ async def send_coding_tools_access(
             runtime.anthropic,
             tenant_id=tenant_id,
             name=selected.name,
+            records=runtime.sessionmaker,
         )
     if ma_agent is None:
         log.info("agent_setup.coding_tools.agent_missing", agent_name=selected.name)

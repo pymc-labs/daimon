@@ -626,7 +626,7 @@ async def run_turn_impl(
         sandbox_tools = False
         if sandbox is not None:
             sandbox_tools = await run_matches_pin(
-                anthropic, sandbox.pin, session, tenant_id=tenant_id
+                anthropic, sandbox.pin, session, tenant_id=tenant_id, records=session_factory
             )
             if not sandbox_tools:
                 log.warning(

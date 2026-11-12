@@ -836,6 +836,7 @@ async def _watch_server_url(
         runtime.client,
         origin.responder_ma_agent_id,
         scope=resource_scope(tenant_id=str(auth.tenant_id)),
+        records=runtime.session_factory,
     )
     if server.lower().startswith("https://"):
         return ascii_mcp_url(server), ma_agent

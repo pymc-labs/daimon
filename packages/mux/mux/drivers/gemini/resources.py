@@ -336,6 +336,8 @@ class GeminiArtifacts(Base):
                             "sha": sha,
                         }
                     )
+                    if id_ in records.delivered_artifacts:
+                        continue
                     artifact = Artifact(
                         ref=self._ref(scope, id_, "artifact"),
                         filename=path,
@@ -422,7 +424,14 @@ class GeminiArtifacts(Base):
                 return prior
             record = self._artifact(records, scope, ref)
             if record.body is None:
-                refuse("workspace_artifact_delete")
+                # A workspace file cannot be removed: record it as delivered so
+                # later listings leave it out (the host's post-then-delete ledger).
+                if record.artifact.session is None:
+                    refuse("workspace_artifact_delete")
+                records.delivered_artifacts[ref.id] = record.artifact.session.id
+                receipt = DeletionReceipt(operation_id=key, deleted=(ref,))
+                records.deletions[(*owner(scope), key)] = scope.principal_id, digest, receipt
+                return receipt
             if any(
                 source.artifact == ref
                 for env in records.environments.values()

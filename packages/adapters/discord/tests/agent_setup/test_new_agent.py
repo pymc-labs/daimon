@@ -27,7 +27,7 @@ from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.models_catalog import list_model_choices
+from daimon.core.models_catalog import claude_model_choices
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import AgentSpec
@@ -222,7 +222,7 @@ def test_new_agent_modal_model_select_options_match_catalog(account_id: uuid.UUI
     model_field = modal.model_label.component
     assert isinstance(model_field, discord.ui.Select), "Model field must be a Select"
 
-    expected = list_model_choices(default=DEFAULT_AGENT_MODEL)
+    expected = claude_model_choices(default=DEFAULT_AGENT_MODEL)
     assert len(model_field.options) == len(expected), (
         "the Select must offer exactly the catalog's choices"
     )

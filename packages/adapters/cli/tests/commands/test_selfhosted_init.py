@@ -1,6 +1,7 @@
 """Postgres-only initialization is repeatable and never constructs a provider client."""
 
 import asyncio
+import re
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,19 @@ from mux.contracts.ids import Scope
 from mux.drivers.selfhosted.config import HarnessConfig
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from typer.testing import CliRunner
+
+REQUIRED = [
+    "--channel",
+    "discord:1",
+    "--account-id",
+    "acct",
+    "--input-usd",
+    "1",
+    "--output-usd",
+    "2",
+    "--manifest",
+    "/tmp/selfhosted-init-test-runtime.json",
+]
 
 
 async def test_init_reuses_matching_records_and_refuses_drift(db_session, db_session_factory):
@@ -49,7 +63,7 @@ async def test_init_reuses_matching_records_and_refuses_drift(db_session, db_ses
         ("foundry_invocations", "https://harness.example", False),
     ],
 )
-def test_cli_prints_only_ids_without_anthropic(
+def test_cli_writes_the_grant_and_prints_the_settings_without_anthropic(
     db_nullpool_engine,
     db_clean,
     monkeypatch,
@@ -58,6 +72,8 @@ def test_cli_prints_only_ids_without_anthropic(
     harness_url,
     insecure,
 ):
+    import json
+
     monkeypatch.delenv("DAIMON_ANTHROPIC__API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
@@ -85,6 +101,18 @@ def test_cli_prints_only_ids_without_anthropic(
         str(system),
         "--transport",
         transport,
+        "--channel",
+        "discord:111",
+        "--channel",
+        "slack:C222",
+        "--account-id",
+        "acct-1",
+        "--input-usd",
+        "2.5",
+        "--output-usd",
+        "10",
+        "--manifest",
+        str(tmp_path / "runtime.json"),
     ]
     if insecure:
         args += ["--allow-insecure-http"]
@@ -102,11 +130,35 @@ def test_cli_prints_only_ids_without_anthropic(
     runner = CliRunner()
     result = runner.invoke(app, args)
     assert result.exit_code == 0, result.output
-    ids = result.stdout.splitlines()
-    assert len(ids) == 2 and ids[0].startswith("sh_agent_") and ids[1].startswith("sh_env_")
+    ids = result.stdout.splitlines()[:2]
+    assert ids[0].startswith("sh_agent_") and ids[1].startswith("sh_env_")
+    settings = dict(line.split("=", 1) for line in result.stdout.splitlines()[2:])
+    assert settings["DAIMON_SELFHOSTED__ADMISSION_ENABLED"] == "true"
+    assert json.loads(settings["DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS"]) == {
+        "gpt-6-luna": "gpt-6-luna"
+    }
+    price = json.loads(settings["DAIMON_BILLING__SELFHOSTED__MODELS"])["gpt-6-luna"][0]
+    assert (price["input"], price["output"], price["cache_read"]) == ("2.5", "10", "2.5"), (
+        "the cached price follows the input price when none is given"
+    )
+    if harness_url.startswith("https://"):
+        binding = json.loads(settings["DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS"])
+        assert binding[0]["tenants"] == [str(tenant.id)]
+    else:
+        assert "DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS" not in settings
+    rows = json.loads((tmp_path / "runtime.json").read_text())
+    assert sorted((row["platform"], row["channel_id"]) for row in rows) == [
+        ("discord", "111"),
+        ("slack", "C222"),
+    ]
+    assert {row["agent_id"] for row in rows} == {ids[0]}
+    assert {row["environment_id"] for row in rows} == {ids[1]}
     repeated = runner.invoke(app, args)
     assert repeated.exit_code == 0, repeated.output
     assert repeated.stdout == result.stdout
+    assert json.loads((tmp_path / "runtime.json").read_text()) == rows, (
+        "a repeat replaces the same rows, never adds more"
+    )
 
     async def check():
         scope = Scope(
@@ -199,6 +251,7 @@ def test_cli_invalid_config_does_not_echo_credentials(option):
     args = [
         "selfhosted",
         "init",
+        *REQUIRED,
         "--model",
         "gpt-6-luna",
         "--tenant-id",
@@ -234,6 +287,7 @@ def test_main_invalid_database_url_never_echoes_password(monkeypatch, capsys, da
             "daimon",
             "selfhosted",
             "init",
+            *REQUIRED,
             "--model",
             "gpt-6-luna",
             "--tenant-id",
@@ -271,6 +325,7 @@ def test_cli_unexpected_engine_construction_errors_do_not_echo_input(
             "daimon",
             "selfhosted",
             "init",
+            *REQUIRED,
             "--model",
             "gpt-6-luna",
             "--tenant-id",
@@ -313,6 +368,7 @@ def test_main_expected_initialization_failures_are_friendly(monkeypatch, capsys,
             "daimon",
             "selfhosted",
             "init",
+            *REQUIRED,
             "--model",
             "gpt-6-luna",
             "--tenant-id",
@@ -340,3 +396,90 @@ def test_production_model_default_is_sol_without_calling_a_model():
         inspect.signature(selfhosted.selfhosted_init_command).parameters["model"].default
         == "gpt-6.1-sol"
     )
+
+
+@pytest.mark.parametrize("missing", ["--input-usd", "--output-usd"])
+def test_cli_refuses_to_run_without_a_price(monkeypatch, tmp_path: Path, missing):
+    args = [
+        "selfhosted",
+        "init",
+        "--tenant-id",
+        "00000000-0000-0000-0000-000000000001",
+        "--harness-url",
+        "https://harness.example",
+        "--database-url",
+        "postgresql+asyncpg://localhost/test",
+        "--channel",
+        "discord:111",
+        "--account-id",
+        "acct-1",
+        "--manifest",
+        str(tmp_path / "runtime.json"),
+        "--input-usd",
+        "2.5",
+        "--output-usd",
+        "10",
+    ]
+    at = args.index(missing)
+    del args[at : at + 2]
+
+    result = CliRunner().invoke(app, args)
+
+    # Typer forces rich styling under CI (GITHUB_ACTIONS), which splits the option name.
+    output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert result.exit_code != 0 and missing in output, "no default price is assumed"
+    assert not (tmp_path / "runtime.json").exists()
+
+
+def test_channel_rows_bind_the_default_config_digest_and_replace_repeats():
+    import uuid
+    from decimal import Decimal
+
+    from mux.contracts.config import ResolvedBackend
+
+    tenant = uuid.uuid4()
+    kwargs = dict(
+        tenant_id=tenant,
+        model="gpt-6-luna",
+        agent_id="sh_agent_1",
+        environment_id="sh_env_1",
+        account_id="acct-1",
+        infrastructure_usd=Decimal("0"),
+    )
+    first = selfhosted.channel_rows(**kwargs, channels=[("discord", "1")])
+    other = [{"profile": "gemini", "tenant_id": "x"}]
+    again = selfhosted.channel_rows(
+        **{**kwargs, "agent_id": "sh_agent_2"}, channels=[("discord", "1")]
+    )
+
+    merged = selfhosted.merge_rows([*other, *first], again)
+
+    assert merged == [*other, *again], "the same channel is replaced and other rows are kept"
+    assert (
+        first[0]["config_digest"]
+        == ResolvedBackend(
+            backend="selfhosted", profile="selfhosted.loop", model="gpt-6-luna"
+        ).content_digest()
+    ), "the row matches what a channel on this model resolves to"
+
+
+def test_agent_rows_grant_the_agent_anywhere_and_replace_only_themselves():
+    import uuid
+    from decimal import Decimal
+
+    tenant, agent = uuid.uuid4(), uuid.uuid4()
+    common = dict(
+        tenant_id=tenant,
+        model="gpt-6-luna",
+        agent_id="sh_agent_x",
+        environment_id="sh_env_x",
+        infrastructure_usd=Decimal(0),
+    )
+    channel = selfhosted.channel_rows(**common, account_id="acct-1", channels=[("slack", "C1")])
+    granted = selfhosted.channel_rows(**common, account_id=None, channels=[], agents=[agent])
+    assert [(r["platform"], r["channel_id"], r["account_id"]) for r in granted] == [("*", "*", "*")]
+    assert granted[0]["source_agent_id"] == str(agent) and channel[0]["source_agent_id"] is None
+    assert granted[0]["config_digest"] == channel[0]["config_digest"]
+    merged = selfhosted.merge_rows(channel, granted)
+    assert merged == [*channel, *granted], "an agent row never replaces a channel row"
+    assert selfhosted.merge_rows(merged, granted) == merged

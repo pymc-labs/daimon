@@ -31,9 +31,10 @@ from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
 from daimon.core.agent_ownership import agent_name_lock, owns_agent, record_agent_creator
 from daimon.core.agent_pins import agent_pin_names
+from daimon.core.anthropic_guard import anthropic_configured
 from daimon.core.authz import Action, AgentReach, Subject, Surface, authorize
 from daimon.core.channel_rules import ChannelRuleRefused, set_agent_rule
-from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP, ALLOWED_MODEL_IDS
+from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.defaults.mcp_merge import DAIMON_MCP_SERVER_NAME, get_reserved_mcp_rejection
 from daimon.core.defaults.metadata import (
@@ -61,6 +62,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import ResolverCache
 from daimon.core.mcp_attach import replaced_server_url
 from daimon.core.model_presets import ModelSelection, model_choice_id
+from daimon.core.models_catalog import is_priced_claude_model, priced_claude_ids
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent, retrieve_agent
 from daimon.core.mux_compat import update_agent as ma_update_agent
@@ -328,8 +330,8 @@ def unknown_model_refusal(model: ModelSelection) -> str | None:
     None for a model it has no rates for, so the turn would be recorded as free.
     """
     choice_id = model_choice_id(model)
-    if choice_id not in ALLOWED_MODEL_IDS:
-        allowed = ", ".join(ALLOWED_MODEL_IDS)
+    if not is_priced_claude_model(choice_id):
+        allowed = ", ".join(priced_claude_ids())
         return f"Model '{choice_id}' is not available. Choose one of: {allowed}"
     return None
 
@@ -520,7 +522,12 @@ async def write_agent_patch(
             if turned_on:
                 raise AgentEditError(forbidden_builtins_message(turned_on), kind="forbidden")
         return await ma_update_agent(
-            deps.client, fresh.id, version=fresh.version, payload=body, scope=actor.scope()
+            deps.client,
+            fresh.id,
+            version=fresh.version,
+            payload=body,
+            scope=actor.scope(),
+            records=deps.session_factory,
         )
 
     # An MCP server change is serialized with the token forms' attach-then-publish
@@ -537,7 +544,7 @@ async def write_agent_patch(
     try:
         async with mcp_lock:
             updated = await update_agent_with_version_retry(
-                deps.client, agent.id, _apply, scope=actor.scope()
+                deps.client, agent.id, _apply, scope=actor.scope(), records=deps.session_factory
             )
     except anthropic.ConflictError as exc:
         raise AgentEditError(
@@ -577,11 +584,12 @@ async def write_builtin_tool(
             version=fresh.version,
             payload={"tools": tools},
             scope=actor.scope(),
+            records=deps.session_factory,
         )
 
     try:
         updated = await update_agent_with_version_retry(
-            deps.client, ma_agent_id, _apply, scope=actor.scope()
+            deps.client, ma_agent_id, _apply, scope=actor.scope(), records=deps.session_factory
         )
     except anthropic.ConflictError as exc:
         raise AgentEditError(
@@ -640,7 +648,9 @@ async def load_tenant_agent(
 ) -> BetaManagedAgentsAgent:
     """The tenant's live agent ``ma_agent_id``, for reading."""
     try:
-        agent = await retrieve_agent(deps.client, ma_agent_id, scope=actor.scope())
+        agent = await retrieve_agent(
+            deps.client, ma_agent_id, scope=actor.scope(), records=deps.session_factory
+        )
     except (anthropic.NotFoundError, ScopeViolation) as exc:
         raise AgentEditError("No such agent.", kind="not_found") from exc
     if agent.archived_at is not None or agent.metadata.get(MA_METADATA_KEY_TENANT) != str(
@@ -860,14 +870,20 @@ async def reject_name_taken(deps: AgentEditDeps, *, tenant_id: uuid.UUID, name: 
 
     Tenant-scoped, as the resolver's (daimon_tenant, daimon_name) identity is.
     """
-    if await find_agents_by_daimon_tag(deps.client, tenant_id=tenant_id, name=name):
+    if not anthropic_configured(deps.client):
+        return  # Daimon records: the create-only reconcile refuses a taken name.
+    if await find_agents_by_daimon_tag(
+        deps.client, tenant_id=tenant_id, name=name, records=deps.session_factory
+    ):
         raise AgentNameTakenError(name)
 
 
 async def discard_created(deps: AgentEditDeps, actor: AgentActor, ma_agent_id: str) -> bool:
     """Archive an agent this create made and couldn't finish; False when that failed too."""
     try:
-        await archive_agent(deps.client, ma_agent_id, scope=actor.scope())
+        await archive_agent(
+            deps.client, ma_agent_id, scope=actor.scope(), records=deps.session_factory
+        )
     except Exception as exc:  # boundary: the caller reports the original failure either way
         log.error(
             "create_agent.discard_failed",

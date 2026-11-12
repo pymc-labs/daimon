@@ -185,6 +185,8 @@ _MAY_NAME: dict[str, frozenset[str]] = {
     "packages/adapters/mcp/daimon/adapters/mcp/oauth_microsoft.py": frozenset({"teams"}),
     "packages/adapters/mcp/daimon/adapters/mcp/oauth_slack.py": frozenset({"slack"}),
     "packages/adapters/mcp/daimon/adapters/mcp/tools/_channel_target.py": frozenset({"slack"}),
+    # Reached only on a Teams origin, like the other Teams-not-configured refusals.
+    "packages/adapters/mcp/daimon/adapters/mcp/tools/_own_card.py": frozenset({"teams"}),
     "packages/adapters/mcp/daimon/adapters/mcp/tools/credential_requests.py": frozenset({"teams"}),
     "packages/adapters/mcp/daimon/adapters/mcp/tools/direct_messages.py": frozenset(
         {"discord", "slack"}

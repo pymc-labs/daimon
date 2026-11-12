@@ -50,7 +50,7 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
 
     import httpx
     from daimon.core.authz import Subject
-    from daimon.core.channel_backend import BackendActor, make_backend_service
+    from daimon.core.channel_backend import NO_CAPTURE, BackendActor, make_backend_service
     from daimon.core.config import McpSettings, Settings, TurnSettings
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.scope import DeploymentDefault
@@ -193,7 +193,7 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
             chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_owned"),
             chat_session_id="test-session",
         )
-        service = make_backend_service(sessions, settings.turn)
+        service = make_backend_service(sessions, settings.turn, capture_source=NO_CAPTURE)
         policy = await service.tenant_policy(tenant.id)
         await service.set_tenant_allowlist(
             tenant.id,
@@ -623,6 +623,56 @@ async def test_chat_switch_to_a_named_model_previews_and_applies_that_model(acti
     current = await service.current(actual)
     assert (current.backend, current.model) == ("gemini", "gemini-4-argon")
     assert not trace.violations
+
+
+async def test_a_switch_states_an_effort_and_a_later_settings_change_keeps_it(active_chat):
+    from daimon.core.channel_backend import load_backend_agent
+
+    runtime, auth, origin, service, _trace, payload, _, gate, agent, _ = active_chat
+    _without_own_tools(payload)
+    base = {
+        "agent_name": "Researcher",
+        "target_backend": "openai",
+        "origin_context_id": str(origin.id),
+    }
+
+    async def confirm(**stated):
+        gate()
+        agent()
+        preview = await _request_agent_backend_switch_impl(runtime, auth, **base, **stated)
+        gate()
+        agent()
+        agent()
+        done = await _request_agent_backend_switch_impl(
+            runtime,
+            auth,
+            **base,
+            **stated,
+            expected_revision=preview.expected_revision,
+            preview_digest=preview.preview_digest,
+            accepted_drops=preview.declared_drops,
+        )
+        assert done.status == "changed"
+        agent()
+        source = await load_backend_agent(
+            runtime.client,
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            agent_name="Researcher",
+        )
+        return await service.current(source)
+
+    first = await confirm(effort="high")
+    assert first.effort == "high", "the call states the effort"
+    second = await confirm(thread_mode="per_caller")
+    assert second.effort == "high", "stating other settings keeps the effort the agent has"
+    gate()
+    agent()
+    with pytest.raises(ToolError, match="isn't an effort") as refused:
+        await _request_agent_backend_switch_impl(
+            runtime, auth, **{**base, "target_backend": "gemini"}, effort="high"
+        )
+    assert "Nothing changed" in str(refused.value), "a Gemini agent takes no effort"
 
 
 @pytest.mark.parametrize(("backend", "model"), [("gemini", "gemini-3.8-pro"), ("openai", "x")])
@@ -1086,7 +1136,7 @@ async def test_switching_the_agent_answering_here_moves_this_conversation(active
         accepted_drops=preview.declared_drops,
     )
     assert "This conversation moves to Gemini from the next message" in changed.summary
-    assert "aren't carried over" in changed.summary
+    assert "keeps its earlier messages" in changed.summary, changed.summary
     ((channel, thread, account, _),) = await _release_rows(runtime, auth)
     assert (channel, thread, account) == ("channel", "thread", str(auth.account_id))
 

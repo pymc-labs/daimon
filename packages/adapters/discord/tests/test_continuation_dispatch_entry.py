@@ -14,10 +14,11 @@ controls the follow-up runs with, not the session-preparation pipeline.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
@@ -31,9 +32,11 @@ from daimon.core.continuity.continuation import (
     ResponderChanged,
 )
 from daimon.core.continuity.wakes import enqueue_wake, poll_wakes_once
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
+from daimon.core.stores import host_call_cards as host_cards
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.accounts import get_account, set_role
 from daimon.core.stores.domain import ContinuationReason, Role, TaskContinuationRow
@@ -697,8 +700,12 @@ async def _seed_due_wake(
     workspace_id: str,
     funded: bool,
     reason: ContinuationReason = "task_handoff",
+    approved_call: bool = False,
 ) -> tuple[uuid.UUID, uuid.UUID]:
-    """Seed one wake already due in `_THREAD_ID`; return (tenant_id, key)."""
+    """Seed one wake already due in `_THREAD_ID`; return (tenant_id, key).
+
+    `approved_call` also leaves one press-approved host call in the thread for the target.
+    """
     async with db_session_factory() as session, session.begin():
         tenant = await make_tenant(session, platform="discord", workspace_id=workspace_id)
         if funded:
@@ -710,6 +717,33 @@ async def _seed_due_wake(
                 idempotency_key=f"trial:{tenant.id}",
             )
         account = await make_account(session, tenant=tenant)
+        if approved_call:
+            created = await host_cards.create_card(
+                session,
+                tenant_id=tenant.id,
+                origin_id=uuid.uuid4(),
+                requester_account_id=account.id,
+                requester_platform_user_id="555",
+                platform="discord",
+                channel_id=str(_THREAD_ID - 1),
+                thread_id=str(_THREAD_ID),
+                executing_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_target"),
+                executing_ma_agent_id="ag_target",
+                agent_name="target-agent",
+                tool_name="delete_allowance",
+                args_digest="d1",
+                reference={"args": {"allowance_id": "a1"}},
+                expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            )
+            assert created is not None, "the call is recorded"
+            claimed = await host_cards.claim(
+                session,
+                tenant_id=tenant.id,
+                card_id=created.row.id,
+                to="approved",
+                now=datetime.now(UTC),
+            )
+            assert claimed is not None, "the press approves it"
     request = ContinuationRequest(
         tenant_id=tenant.id,
         platform="discord",
@@ -1098,3 +1132,174 @@ async def test_job_wake_refuses_revoked_private_thread_before_preparation(
     rests[0].http.get_thread_member.assert_awaited_once()
     admit_spy.assert_not_awaited()
     card_spy.assert_not_awaited()
+
+
+async def _run_wake(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    workspace_id: str,
+    reason: ContinuationReason,
+    approved_call: bool,
+    mcp: McpSettings | None = None,
+) -> tuple[AsyncMock, list[object], uuid.UUID, uuid.UUID]:
+    """Poll one due wake with the turn faked; the fake, the send-prefix hooks it saw, the ids."""
+    from daimon.core.turn.mutation_gate import initial_send_prefix
+
+    tenant_id, key = await _seed_due_wake(
+        db_session_factory,
+        workspace_id=workspace_id,
+        funded=True,
+        reason=reason,
+        approved_call=approved_call,
+    )
+    bot, thread = _wake_bot(db_session_factory, tenant_id)
+    if mcp is not None:
+        bot.runtime.settings.mcp = mcp
+    bot.get_channel = MagicMock(return_value=thread)  # pyright: ignore[reportAttributeAccessIssue]
+    hooks: list[object] = []
+
+    async def run(*_: object, **__: object) -> RunOutcome:
+        hooks.append(initial_send_prefix.get())
+        return RunOutcome(
+            state=TurnState(), ma_session_id="sess_test", mapping_id=None, recovered=False
+        )
+
+    p_config, p_agent, p_env, p_bind, p_run = _admission_patches()
+    with (
+        p_config as resolve_config,
+        p_agent as resolve_agent,
+        p_env as resolve_env,
+        p_bind as bind,
+        p_run as run_turn,
+    ):
+        resolve_config.return_value = ResolvedConfig(
+            agent_name="test-agent",
+            agent_name_tier="tenant",
+            environment_name="test-env",
+            environment_name_tier="tenant",
+        )
+        resolve_agent.return_value = "ag_target"
+        resolve_env.return_value = "env_test"
+        bind.return_value = _make_prepared_turn(account_id=uuid.uuid4())
+        run_turn.side_effect = run
+        await poll_wakes_once(
+            db_session_factory,
+            platform="discord",
+            open_thread=bot._open_wake_thread,  # pyright: ignore[reportPrivateUsage]
+            now=datetime.now(UTC),
+        )
+        for task in list(bot._bg_tasks):  # pyright: ignore[reportPrivateUsage]
+            await task
+    return run_turn, hooks, tenant_id, key
+
+
+_MCP = McpSettings(public_url="https://mcp.example.com/mcp", jwt_secret="s" * 32)  # pyright: ignore[reportArgumentType]
+
+
+async def test_a_confirmed_call_wake_runs_its_turn_with_the_approved_calls_hook(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The wake that has an approved call sends its results ahead of the first message."""
+    run_turn, hooks, _, key = await _run_wake(
+        db_session_factory,
+        workspace_id="710000020",
+        reason="confirmed_call",
+        approved_call=True,
+        mcp=_MCP,
+    )
+
+    run_turn.assert_awaited_once()
+    assert len(hooks) == 1 and callable(hooks[0]), "the turn carries the once-only prefix hook"
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None and row.status == "delivered", f"the wake ran: {row}"
+
+
+async def test_a_confirmed_call_wake_with_nothing_approved_runs_no_turn(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An earlier wake already ran the calls, so this one must not spend a turn."""
+    run_turn, hooks, _, key = await _run_wake(
+        db_session_factory,
+        workspace_id="710000021",
+        reason="confirmed_call",
+        approved_call=False,
+        mcp=_MCP,
+    )
+
+    run_turn.assert_not_awaited()
+    assert hooks == [], "no turn means no hook"
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None and row.status == "skipped", f"the wake is settled: {row}"
+    assert row.skip_reason == "skip_superseded", f"nothing left to run: {row.skip_reason}"
+
+
+async def test_other_wakes_carry_no_confirmed_call_hook(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Only a confirmed-call wake runs approved calls."""
+    run_turn, hooks, _, _ = await _run_wake(
+        db_session_factory,
+        workspace_id="710000022",
+        reason="task_handoff",
+        approved_call=True,
+        mcp=_MCP,
+    )
+
+    run_turn.assert_awaited_once()
+    assert hooks == [None], "a handoff turn sends nothing ahead of its message"
+
+
+async def test_a_confirmed_call_wake_without_the_mcp_server_has_no_hook(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """With no MCP url or secret the gate never posted a card, so there is nothing to run."""
+    _, hooks, _, _ = await _run_wake(
+        db_session_factory,
+        workspace_id="710000023",
+        reason="confirmed_call",
+        approved_call=True,
+    )
+
+    assert hooks == [None], "no server, no hook"
+
+
+async def test_the_confirmed_call_hook_runs_the_threads_calls_once(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hook runs this thread's and agent's approved calls, and a resend runs nothing."""
+    from daimon.core import host_calls
+
+    runners: list[host_calls.ConfirmedCallRunner] = []
+
+    async def run_calls(runner: host_calls.ConfirmedCallRunner) -> str:
+        runners.append(runner)
+        return "ran"
+
+    monkeypatch.setattr(host_calls, "run_confirmed_calls", run_calls)
+    _, hooks, tenant_id, _ = await _run_wake(
+        db_session_factory,
+        workspace_id="710000024",
+        reason="confirmed_call",
+        approved_call=True,
+        mcp=_MCP,
+    )
+    hook = cast("Callable[[], Awaitable[str]]", hooks[0])
+    assert callable(hook), "the turn carries the hook"
+
+    first = await hook()
+    again = await hook()
+
+    assert (first, again) == ("ran", "ran"), "a resend reuses the first result"
+    assert len(runners) == 1, "the calls run once however often the send is retried"
+    runner = runners[0]
+    assert (runner.tenant_id, runner.platform, runner.thread_id) == (
+        tenant_id,
+        "discord",
+        str(_THREAD_ID),
+    ), "scoped to this wake's tenant and thread"
+    assert runner.executing_agent_id == derive_agent_uuid(
+        tenant_id=tenant_id, ma_agent_id="ag_target"
+    ), "scoped to the agent the wake runs"

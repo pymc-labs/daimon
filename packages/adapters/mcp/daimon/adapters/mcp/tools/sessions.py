@@ -155,7 +155,10 @@ async def _verify_caller_owns_session(
     except ScopeViolation:
         raise ToolError("conversation not found") from None
     tenant_agent_ids = {
-        a.id for a in await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+        a.id
+        for a in await list_agents_by_tenant(
+            runtime.client, tenant_id=auth.tenant_id, records=runtime.session_factory
+        )
     }
     if s.agent.id not in tenant_agent_ids:
         raise ToolError("conversation not found")
@@ -174,7 +177,10 @@ async def _list_sessions_impl(
 ) -> list[SessionInfo]:
     if agent_name is not None:
         agent = await find_agent_by_daimon_tag(
-            runtime.client, tenant_id=auth.tenant_id, name=agent_name
+            runtime.client,
+            tenant_id=auth.tenant_id,
+            name=agent_name,
+            records=runtime.session_factory,
         )
         if agent is None:
             raise ToolError(f"agent {agent_name!r} not found")
@@ -192,7 +198,9 @@ async def _list_sessions_impl(
     # Unfiltered: drain across every tenant agent. Cross-agent cursors are
     # not coherent, so we ignore the caller's `page` arg in this branch.
     del page
-    agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    agents = await list_agents_by_tenant(
+        runtime.client, tenant_id=auth.tenant_id, records=runtime.session_factory
+    )
     owned_all: list[BetaManagedAgentsSession] = []
     for agent in agents:
         async for s in walk_sessions(runtime.client, agent_id=agent.id, scope=mcp_scope(auth)):

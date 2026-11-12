@@ -1,12 +1,13 @@
 import { Check, CircleAlert, KeyRound, ShieldCheck, ShieldQuestion, ShieldX, UserRound, type LucideIcon } from "lucide-react"
 import { useState } from "react"
+import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import type { Card, CardAnswer } from "./types"
 
-type Props = { card: Card; busy: boolean; onAnswer: (a: CardAnswer) => void }
+type Props = { card: Card; busy: boolean; onAnswer: (a: CardAnswer) => void; onSwitchBack?: () => Promise<string> }
 
 function Icon({ icon: I, className }: { icon: LucideIcon; className?: string }) {
   return (
@@ -90,8 +91,16 @@ function Credential({ card, busy, onAnswer }: Props & { card: Extract<Card, { ki
   )
 }
 
-/** A reply that did not start: it says what happened and who can help. */
-function Refusal({ card }: { card: Extract<Card, { kind: "refusal" }> }) {
+/** A reply that did not start: it says what happened and who can help. An admin may be offered the way back to Claude. */
+function Refusal({ card, onSwitchBack }: { card: Extract<Card, { kind: "refusal" }>; onSwitchBack?: () => Promise<string> }) {
+  const [back, setBack] = useState<{ pending: boolean; line: string | null }>({ pending: false, line: null })
+  const go = async () => {
+    setBack({ pending: true, line: null })
+    try { setBack({ pending: false, line: await onSwitchBack!() }) } catch (e) {
+      setBack({ pending: false, line: null })
+      toast.error(e instanceof Error ? e.message : "Couldn't switch back.")
+    }
+  }
   return (
     <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4">
       <div className="flex gap-3">
@@ -100,6 +109,13 @@ function Refusal({ card }: { card: Extract<Card, { kind: "refusal" }> }) {
           <div className="text-sm font-medium">{card.title}</div>
           <p className="mt-0.5 text-sm text-muted-foreground">{card.body}</p>
           {card.help && <p className="mt-2.5 flex items-center gap-1.5 text-sm font-medium"><UserRound className="size-4 text-muted-foreground" />{card.help}</p>}
+          {card.action === "switch_back_to_claude" && onSwitchBack && (
+            back.line ? <p className="mt-3 text-sm">{back.line}</p> : (
+              <div className="mt-3 flex justify-end max-sm:[&>button]:flex-1">
+                <Button size="sm" disabled={back.pending} onClick={() => void go()}>Switch back to Claude</Button>
+              </div>
+            )
+          )}
         </div>
       </div>
     </div>
@@ -110,6 +126,6 @@ export function CardView(p: Props) {
   const c = p.card
   return c.kind === "approval" ? <Approval {...p} card={c} />
     : c.kind === "credential" ? <Credential {...p} card={c} />
-      : <Refusal card={c} />
+      : <Refusal card={c} onSwitchBack={p.onSwitchBack} />
 }
 export { Refusal }

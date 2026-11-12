@@ -153,6 +153,6 @@ async def resolve_agent_and_environment(
     # full SDK objects so downstream code (create_session, name printing) has
     # access to fields beyond .id. Small TOCTOU window is acceptable for the CLI.
     scope = resource_scope(tenant_id=str(tenant_id), account_id=str(account_id))
-    agent = await retrieve_agent(anthropic, agent_id, scope=scope)
-    env = await retrieve_environment(anthropic, env_id, scope=scope)
+    agent = await retrieve_agent(anthropic, agent_id, scope=scope, records=session_factory)
+    env = await retrieve_environment(anthropic, env_id, scope=scope, records=session_factory)
     return agent, env

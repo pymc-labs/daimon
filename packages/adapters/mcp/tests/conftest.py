@@ -18,6 +18,8 @@ import pytest
 import pytest_asyncio
 from daimon.testing.db import (  # noqa: F401
     db_clean,
+    db_committing_engine,
+    db_committing_pool,
     db_engine,
     db_nullpool_engine,
     db_schema,
@@ -88,6 +90,19 @@ async def committing_sessionmaker(
     schema mapping is needed here.
     """
     return async_sessionmaker(bind=db_engine, expire_on_commit=False)
+
+
+@pytest_asyncio.fixture
+async def pooled_sessionmaker(
+    db_committing_engine: AsyncEngine,  # noqa: F811
+    db_clean: None,  # noqa: F811
+) -> async_sessionmaker[AsyncSession]:
+    """Like `committing_sessionmaker` on the production-sized pool.
+
+    For code that opens a second session while one is open (a records read inside
+    a transaction): the two-connection engine behind `db_session` has no room.
+    """
+    return async_sessionmaker(bind=db_committing_engine, expire_on_commit=False)
 
 
 @pytest.fixture(autouse=True)

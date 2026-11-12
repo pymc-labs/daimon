@@ -16,6 +16,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.mux_backend import TurnRuntime
 from daimon.core.pricing import ProviderPrice
 from daimon.core.scope import DeploymentDefault, ResolvedConfig
+from daimon.core.shared_threads import shared_owner
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission
@@ -41,7 +42,7 @@ from mux.contracts.ids import ChannelRef, ModelRef, Scope, ThreadRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec
 from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAttempt
 from mux.drivers.gemini.transport import Object
-from mux.errors import ContinuityLost, ScopeViolation
+from mux.errors import ScopeViolation
 from mux.state.lease import Slot
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from mux.testing.drivers.gemini.fake import MemoryStorage
@@ -181,7 +182,7 @@ async def test_explicit_registered_preparation_reuses_authorized_persisted_bindi
     assert not host.transport.requests and not host.ancillary.requests
 
 
-async def test_fresh_preparation_creates_empty_slot_but_cannot_replace_binding(host: Host) -> None:
+async def test_fresh_preparation_creates_empty_slot_then_replaces_binding(host: Host) -> None:
     first = await prepare(host, reuse_existing=False)
     assert not first.reused
     assert first.backend is not None and first.session_ref is not None
@@ -189,17 +190,13 @@ async def test_fresh_preparation_creates_empty_slot_but_cannot_replace_binding(h
     retained = await host.journal.state_store.get_binding(slot)
     assert retained is not None
 
-    def forbidden(config: ConfigRevision, scope: Scope) -> object:
-        raise AssertionError("fresh request for existing binding allocated a transport")
-
-    runtime = host.deps.turn_runtimes[PROFILE]
-    host.deps = replace(
-        host.deps, turn_runtimes={PROFILE: replace(runtime, transport_factory=forbidden)}
-    )
-    with pytest.raises(ContinuityLost):
-        await prepare(host, reuse_existing=False)
-    assert await host.journal.state_store.get_binding(slot) == retained
-    assert not host.transport.requests and not host.ancillary.requests
+    second = await prepare(host, reuse_existing=False)
+    replaced = await host.journal.state_store.get_binding(slot)
+    assert replaced is not None and not second.reused
+    assert (replaced.id, replaced.generation) == (retained.id, retained.generation + 1)
+    assert second.session_ref != first.session_ref
+    assert second.continuity.state in {"replaced", "replaced_after_loss"}
+    assert "summar" not in second.continuity.user_prefix
 
 
 def _causes(error: BaseException) -> list[tuple[str, ...]]:
@@ -213,7 +210,7 @@ def _causes(error: BaseException) -> list[tuple[str, ...]]:
     return found
 
 
-@pytest.mark.parametrize("failure", ["runtime", "deployment", "tenant", "sealed", "revision"])
+@pytest.mark.parametrize("failure", ["runtime", "deployment", "tenant", "revision"])
 async def test_missing_or_foreign_dependencies_refuse_before_provider_factory(
     host: Host,
     failure: str,
@@ -248,8 +245,6 @@ async def test_missing_or_foreign_dependencies_refuse_before_provider_factory(
                 }
             ),
         )
-    elif failure == "sealed":
-        admission = replace(admission, origin_seal_ids=frozenset({"sealed"}))
     else:
         admission = replace(
             admission,
@@ -261,7 +256,7 @@ async def test_missing_or_foreign_dependencies_refuse_before_provider_factory(
                 ),
             ),
         )
-    if failure in {"tenant", "sealed", "revision"}:
+    if failure in {"tenant", "revision"}:
         host.deps = replace(host.deps, turn_runtimes={PROFILE: runtime})
     with pytest.raises((ScopeViolation, AdmissionDenied)):
         await prepare(host, admission)
@@ -327,7 +322,69 @@ async def test_two_host_turns_bill_actual_interactions_and_journal_under_fence(h
     ] == ["first", "second"]
 
 
-@pytest.mark.parametrize("failure", ["runtime", "model", "shared", "publishing", "daimon_rules"])
+async def test_a_shared_thread_binds_once_and_a_second_caller_continues_it(host: Host) -> None:
+    """Both callers reach one shared-owner session; no caller credential is minted."""
+    owner = shared_owner(Slot(thread=ThreadRef(channel=CHANNEL, thread_id="thread")))
+    other = uuid.UUID(int=12003)
+    revision = ConfigRevision.create(
+        CHANNEL,
+        1,
+        resolve_default(
+            BackendConfig(
+                backend="gemini", profile=PROFILE, model=FLASH_PRIMARY, thread_mode="shared"
+            )
+        ),
+    )
+    shared = replace(
+        host.admission,
+        backend_revision=revision,
+        backend=check_backend(revision),
+        shared_owner=owner,
+    )
+    runtime = host.deps.turn_runtimes[PROFILE]
+    deployment = replace(
+        host.journal.deployment, config_digest=revision.digest, config_revision=revision.local
+    )
+    host.deps = replace(
+        host.deps,
+        turn_runtimes={
+            PROFILE: replace(runtime, journal=replace(host.journal, deployment=deployment))
+        },
+    )
+
+    async def as_caller(account: uuid.UUID, admission: Admission) -> PreparedTurn:
+        return await bind_session_impl(
+            host.deps,
+            replace(admission, account_id=account),
+            tenant_id=TENANT,
+            platform="slack",
+            external_user_id=str(account),
+            thread_id="thread",
+            session_account_id=owner,
+            reuse_existing=True,
+        )
+
+    first = await as_caller(ACCOUNT, shared)
+    second = await as_caller(other, shared)
+    assert first.session_ref == second.session_ref and second.reused and not first.reused
+    assert first.session_ref is not None and first.session_ref.account_id == str(owner)
+    assert first._scope is not None and first._scope.account_id == str(owner)  # pyright: ignore[reportPrivateUsage]
+    store = host.journal.state_store
+    thread = ThreadRef(channel=CHANNEL, thread_id="thread")
+    binding = await store.get_binding(Slot(thread=thread, account_id=None))
+    assert binding is not None, "the shared slot holds the binding"
+    assert binding.id == str(owner) and binding.legacy_account_id is None
+    for account in (ACCOUNT, other):
+        assert await store.get_binding(Slot(thread=thread, account_id=str(account))) is None, (
+            "no per-caller slot is bound for a shared thread"
+        )
+    assert first._finalize is None, "a shared turn mints no per-caller credential"  # pyright: ignore[reportPrivateUsage]
+    agent_origin = replace(shared, backend_revision_origin="agent")
+    with pytest.raises(AdmissionDenied):
+        await as_caller(other, agent_origin)
+
+
+@pytest.mark.parametrize("failure", ["runtime", "model", "daimon_rules"])
 async def test_unsupported_host_configuration_is_visible_refusal_before_factory(
     host: Host, failure: str
 ) -> None:
@@ -342,17 +399,12 @@ async def test_unsupported_host_configuration_is_visible_refusal_before_factory(
     admission = host.admission
     if failure == "runtime":
         host.deps = replace(host.deps, turn_runtimes={})
-    elif failure in ("model", "shared"):
+    elif failure == "model":
         revision = ConfigRevision.create(
             CHANNEL,
             1,
             resolve_default(
-                BackendConfig(
-                    backend="gemini",
-                    profile=PROFILE,
-                    model="gemini-3.5-pro" if failure == "model" else FLASH_PRIMARY,
-                    thread_mode="shared" if failure == "shared" else "per_caller",
-                )
+                BackendConfig(backend="gemini", profile=PROFILE, model="gemini-3.5-pro")
             ),
         )
         with pytest.raises(BackendUnsupported):
@@ -360,15 +412,13 @@ async def test_unsupported_host_configuration_is_visible_refusal_before_factory(
         # Independently prove the preparation boundary also refuses a stale or
         # manually supplied admission, rather than relying on the first gate.
         admission = replace(admission, backend_revision=revision)
-    elif failure == "daimon_rules":
+    else:
         # A rule that makes daimon's own tools ask is a gate this backend cannot hold.
         admission = replace(
             admission,
             daimon_rule_tools=frozenset({"get_session"}),
             daimon_rules_need_driver=True,
         )
-    else:
-        admission = replace(admission, asks_before_publishing=True)
     with pytest.raises(AdmissionDenied) as refusal:
         await prepare(host, admission)
     assert refusal.value.reason == "backend_unsupported"

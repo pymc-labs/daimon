@@ -265,3 +265,16 @@ async def test_reply_uploads_go_once_their_asks_links_expire(db_session: AsyncSe
     assert {f.id for f in kept} == {passed_on.id, fresh.id, unrelated.id}, (
         "a live ask's file, one passed on to a live ask, and others stay"
     )
+
+
+async def test_asks_to_the_agents_own_copies_all_run_at_once(db_session: AsyncSession) -> None:
+    origin = await _origin(db_session)
+    copies = [await _ask(db_session, origin, "agent_lead", at) for at in range(3)]
+    helper = await _ask(db_session, origin, "agent_a", 3)
+    await _ask(db_session, origin, "agent_a", 4)
+
+    claimed = await helper_asks.claim_queued(
+        db_session, origin_id=origin.id, skip_helpers=(), limit=4, parallel_helper="agent_lead"
+    )
+
+    assert [ask.id for ask in claimed] == [*(c.id for c in copies), helper.id]

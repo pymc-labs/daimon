@@ -137,6 +137,7 @@ async def _require_pick_allowed(
                 thread_id=target.thread_id,
                 environment_name=environment_name,
                 default=runtime.deployment_default,
+                records=runtime.session_factory,
             )
         except AccessPolicyUnreadable as exc:
             raise ToolError(POLICY_UNREADABLE_REFUSAL) from exc

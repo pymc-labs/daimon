@@ -49,7 +49,9 @@ async def may_edit_avatar(
         client, user_id=user_id, host_team_id=team_id, action=DelegatedAction.AGENT_SETTINGS
     ):
         return False
-    agent = await find_agent_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=agent_name)
+    agent = await find_agent_by_daimon_tag(
+        runtime.anthropic, tenant_id=tenant_id, name=agent_name, records=runtime.sessionmaker
+    )
     return agent is not None and not is_builtin_agent(
         name=agent.name,
         metadata=agent.metadata,

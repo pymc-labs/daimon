@@ -37,6 +37,7 @@ async def create_origin(
     platform_channel_id: str | None = None,
     platform_message_id: str | None = None,
     helper_of: uuid.UUID | None = None,
+    helper_key: str | None = None,
 ) -> TurnOriginRow:
     await session.execute(delete(TurnOrigin).where(TurnOrigin.expires_at <= now))
     origin = TurnOrigin(
@@ -61,6 +62,7 @@ async def create_origin(
         platform_channel_id=platform_channel_id,
         platform_message_id=platform_message_id,
         helper_of=helper_of,
+        helper_key=helper_key,
     )
     session.add(origin)
     await session.flush()
@@ -87,6 +89,26 @@ async def get_active_origin(
     if for_update:
         statement = statement.with_for_update()
     origin = await session.scalar(statement)
+    return TurnOriginRow.model_validate(origin) if origin is not None else None
+
+
+async def get_live_origin(
+    session: AsyncSession,
+    *,
+    origin_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    platform: str,
+    now: datetime,
+) -> TurnOriginRow | None:
+    """A live origin by its server-side id alone; callers take the account from the row."""
+    origin = await session.scalar(
+        select(TurnOrigin).where(
+            TurnOrigin.id == origin_id,
+            TurnOrigin.tenant_id == tenant_id,
+            TurnOrigin.platform == platform,
+            TurnOrigin.expires_at > now,
+        )
+    )
     return TurnOriginRow.model_validate(origin) if origin is not None else None
 
 
@@ -181,9 +203,13 @@ async def update_origin_target(
     return TurnOriginRow.model_validate(origin)
 
 
-async def mark_serving_helpers(session: AsyncSession, *, origin_id: uuid.UUID) -> None:
+async def mark_serving_helpers(
+    session: AsyncSession, *, origin_id: uuid.UUID, self_helpers: bool = False
+) -> None:
     await session.execute(
-        update(TurnOrigin).where(TurnOrigin.id == origin_id).values(serves_helpers=True)
+        update(TurnOrigin)
+        .where(TurnOrigin.id == origin_id)
+        .values(serves_helpers=True, self_helpers=self_helpers)
     )
 
 
