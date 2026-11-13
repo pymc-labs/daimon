@@ -49,6 +49,12 @@ def upgrade() -> None:
     op.execute(f"ALTER TABLE long_job_cancel_audit DROP CONSTRAINT IF EXISTS {FK}")
     op.execute("ALTER TABLE watches ADD COLUMN IF NOT EXISTS last_fired_at timestamptz")
     op.execute(FUNCTION.format(schema=schema))
+    # A trigger needs EXECUTE only when it is created, so nobody keeps the right to call
+    # this definer function: the sidecar audit rejects any it can run beyond its own.
+    op.execute(
+        f"REVOKE ALL ON FUNCTION {schema}.note_watch_firing() "
+        "FROM PUBLIC,daimon_sidecar,daimon_watch_ingress_owner"
+    )
     op.execute("DROP TRIGGER IF EXISTS note_watch_firing ON watch_firings")
     op.execute(
         "CREATE TRIGGER note_watch_firing AFTER INSERT ON watch_firings "
