@@ -224,7 +224,7 @@ function Detail({ d }: { d: InboxDetail }) {
       )}
       {d.form && !done && <PanelSection title={d.kind === "question" ? "Answer" : "Edit before sending"}><FormFields d={d} vals={vals} set={(k, v) => setVals((x) => ({ ...x, [k]: v }))} off={decide.isPending} /></PanelSection>}
       {!done && (
-        <div className="sticky bottom-0 mt-auto space-y-3 border-t bg-popover px-5 py-3">
+        <div className="sticky bottom-0 mt-auto space-y-3 border-t bg-popover px-5 py-4">
           {ask && (
             <div className="space-y-1.5">
               <Label htmlFor="ib-comment">Comment</Label>

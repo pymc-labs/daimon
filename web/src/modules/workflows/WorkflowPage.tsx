@@ -13,12 +13,13 @@ import { useConfirm } from "@/lib/confirm"
 import { NotFound } from "@/pages/Status"
 import { useCreate, useDelete, useDraft, usePatch, useWorkflow } from "./api"
 import { Design } from "./Design"
-import { PublishStrip } from "./PublishStrip"
+import { MigrationStrip, PublishStrip } from "./PublishStrip"
 import { RunDialog } from "./RunDialog"
 import { RunsTab } from "./run/RunsTable"
-import { AccessTab, VersionsTab } from "./tabs"
+import { AccessTab } from "./Access"
 import { TriggersTab } from "./Triggers"
 import { StatusBadge } from "./ui"
+import { VersionsTab, VersionView } from "./Versions"
 import { toYaml } from "./yaml"
 
 const ICON_ON_PHONE = "max-sm:w-7 max-sm:px-0"
@@ -38,7 +39,7 @@ export function WorkflowPage() {
   const crumbs = [{ label: "Workflows", to: "/workflows" }, { label: draft?.spec.name ?? wf?.name ?? "" }]
   if (!wf) return <Page crumbs={crumbs}>{query.isError && <ErrorState error={error} onRetry={() => void query.refetch()} />}</Page>
   const b = `/workflows/${id}`
-  const design = rest === ""
+  const design = rest === "" || /^versions\/\d+$/.test(rest)
   const exportYaml = () => {
     const a = document.createElement("a")
     a.href = URL.createObjectURL(new Blob([toYaml(wf.spec)], { type: "text/yaml" }))
@@ -81,12 +82,14 @@ export function WorkflowPage() {
       )}
     >
       <PublishStrip wf={wf} />
+      {design && rest === "" && <MigrationStrip wf={wf} />}
       <Routes>
         <Route index element={<ReactFlowProvider><Design wf={wf} /></ReactFlowProvider>} />
         <Route path="runs" element={<RunsTab wf={wf} />} />
         <Route path="triggers" element={<TriggersTab wf={wf} />} />
         <Route path="access" element={<AccessTab wf={wf} />} />
         <Route path="versions" element={<VersionsTab wf={wf} />} />
+        <Route path="versions/:n" element={<ReactFlowProvider><VersionView wf={wf} /></ReactFlowProvider>} />
         <Route path="*" element={<NotFound />} />
       </Routes>
       <RunDialog id={id} spec={wf.spec} open={run} onOpenChange={setRun} />

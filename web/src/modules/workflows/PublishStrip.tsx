@@ -4,6 +4,7 @@ import { Link } from "react-router"
 import { Ago } from "@/components/common"
 import { Button } from "@/components/ui/button"
 import type { Workflow } from "./types"
+import { RunBadge } from "./ui"
 
 /** The publish state across the page: a request waiting for an admin, or the version just published. */
 export function PublishStrip({ wf }: { wf: Workflow }) {
@@ -25,6 +26,29 @@ export function PublishStrip({ wf }: { wf: Workflow }) {
       <span className="min-w-0 truncate text-muted-foreground">
         by {p.by.name}, <Ago iso={p.at} />{p.approved_by && `, approved by ${p.approved_by.name}`}{p.note && `, ${p.note}`}
       </span>
+    </div>
+  )
+}
+
+/** Where a migrated workflow came from, and the routine's last result before the move. */
+export function MigrationStrip({ wf }: { wf: Workflow }) {
+  const m = wf.migration
+  if (!m) return null
+  return (
+    <div className="shrink-0 border-b bg-popover px-4 py-3 lg:px-6">
+      <dl className="grid max-w-3xl grid-cols-[160px_1fr] gap-x-3 gap-y-1.5 text-sm max-sm:grid-cols-1 max-sm:gap-y-0.5 [&>dt]:text-muted-foreground max-sm:[&>dd:not(:last-child)]:mb-1.5">
+        <dt>Migrated from routine</dt>
+        <dd className="flex flex-wrap items-center gap-x-2"><Link to="/routines" className="text-link hover:underline">{m.routine.name}</Link><span className="text-muted-foreground"><Ago iso={m.migrated_at} /></span></dd>
+        {m.last && (
+          <>
+            <dt>Before migration</dt>
+            <dd className="min-w-0 space-y-0.5">
+              <span className="flex flex-wrap items-center gap-x-2"><RunBadge status={m.last.status} /><span className="text-muted-foreground"><Ago iso={m.last.at} /></span></span>
+              <span className="block">{m.last.text}</span>
+            </dd>
+          </>
+        )}
+      </dl>
     </div>
   )
 }

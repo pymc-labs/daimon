@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label"
 import { cn } from "@/lib/utils"
 import { useCatalog, usePublish, useRequestPublish } from "./api"
 import { EFFECT, GRANT, KIND, TRIGGER } from "./kinds"
-import { newGrants, reviewCount, reviewDiff, type FieldChange, type Line } from "./review"
+import { newGrants, reviewCount, reviewDiff, type FieldChange, type Line, type Review } from "./review"
 import { titleOf } from "./spec"
 import type { Draft, Problem, Workflow } from "./types"
 
@@ -33,7 +33,7 @@ export function ChangeRows({ rows }: { rows: FieldChange[] }) {
   return (
     <dl className="space-y-1 text-sm">
       {rows.map((c) => (
-        <div key={c.label} className="grid grid-cols-[112px_1fr] gap-3 max-sm:grid-cols-1 max-sm:gap-0.5">
+        <div key={c.label} className="grid grid-cols-[168px_1fr] gap-3 max-sm:grid-cols-1 max-sm:gap-0.5">
           <dt className="truncate text-muted-foreground" title={c.label}>{c.label}</dt>
           <dd className="flex min-w-0 flex-wrap items-center gap-x-1.5 break-words">
             {c.from != null && <span className={cn(c.to != null ? "text-muted-foreground" : "")}>{c.to != null ? c.from : <><span className="line-through decoration-destructive/50">{c.from}</span><span className="sr-only"> removed</span></>}</span>}
@@ -50,21 +50,11 @@ function Heading({ children, n }: { children: React.ReactNode; n?: number }) {
   return <h3 className="mb-2 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">{children}{n != null && <span className="tabular">{n}</span>}</h3>
 }
 
-/** What a draft changes against the live version, in the doc's order: note, nodes, triggers, access, grants, runs as. */
-export function ReviewBody({ wf, draft, note, setNote }: { wf: Workflow; draft: Draft; note: string; setNote: (s: string) => void }) {
-  const { data: catalog } = useCatalog()
-  const live = wf.live_version ? wf.spec : null
-  const r = useMemo(() => reviewDiff(live, draft.spec, { channel: (id) => `#${catalog?.channels.find((c) => c.id === id)?.name ?? id}` }), [live, draft.spec, catalog])
-  const grants = useMemo(() => newGrants(live, draft.spec), [live, draft.spec])
-  const errors = draft.validation.errors
-  const next = (wf.live_version ?? 0) + 1
+/** Steps, triggers and settings that differ, then "No changes" when none do. */
+export function ReviewSections({ r }: { r: Review }) {
   const settings = [...r.workflow, ...r.access]
   return (
-    <div className="max-h-[62vh] space-y-5 overflow-y-auto px-5 py-4">
-      <div className="space-y-1.5">
-        <Label htmlFor="note" className="text-xs font-medium text-muted-foreground">Version note</Label>
-        <Input id="note" value={note} onChange={(e) => setNote(e.target.value)} placeholder="What changed and why" className="h-8" />
-      </div>
+    <>
       {r.nodes.length > 0 && (
         <section>
           <Heading n={r.nodes.length}>Steps</Heading>
@@ -104,6 +94,25 @@ export function ReviewBody({ wf, draft, note, setNote }: { wf: Workflow; draft: 
       )}
       {settings.length > 0 && <section><Heading>Access and settings</Heading><ChangeRows rows={settings} /></section>}
       {reviewCount(r) === 0 && <p className="text-sm text-muted-foreground">No changes</p>}
+    </>
+  )
+}
+
+/** What a draft changes against the live version, in the doc's order: note, nodes, triggers, access, grants, runs as. */
+export function ReviewBody({ wf, draft, note, setNote }: { wf: Workflow; draft: Draft; note: string; setNote: (s: string) => void }) {
+  const { data: catalog } = useCatalog()
+  const live = wf.live_version ? wf.spec : null
+  const r = useMemo(() => reviewDiff(live, draft.spec, { channel: (id) => `#${catalog?.channels.find((c) => c.id === id)?.name ?? id}` }), [live, draft.spec, catalog])
+  const grants = useMemo(() => newGrants(live, draft.spec), [live, draft.spec])
+  const errors = draft.validation.errors
+  const next = (wf.live_version ?? 0) + 1
+  return (
+    <div className="max-h-[62vh] space-y-5 overflow-y-auto px-5 py-4">
+      <div className="space-y-1.5">
+        <Label htmlFor="note" className="text-xs font-medium text-muted-foreground">Version note</Label>
+        <Input id="note" value={note} onChange={(e) => setNote(e.target.value)} placeholder="What changed and why" className="h-8" />
+      </div>
+      <ReviewSections r={r} />
       {grants.length > 0 && (
         <section>
           <Heading n={grants.length}>Grants needing an admin</Heading>

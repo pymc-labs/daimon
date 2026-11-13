@@ -300,7 +300,7 @@ function Webhook({ t, c }: { t: Trigger; c: Ctx }) {
                 {rows.map((d) => {
                   const O = OUTCOME[d.outcome]
                   return (
-                    <TableRow key={d.id}>
+                    <TableRow key={d.id} className="h-12">
                       <TableCell className="pl-3" title={absolute(d.received_at, true)}><Ago iso={d.received_at} /></TableCell>
                       <TableCell className="max-md:hidden"><span className="flex items-center gap-1.5"><Mono className="text-xs">{d.id}</Mono>{isTest(d) && <Tag>Test</Tag>}</span></TableCell>
                       <TableCell className="max-sm:hidden"><span className="inline-flex items-center gap-1.5 whitespace-nowrap">{d.verified ? <ShieldCheck className="size-3.5 text-success" /> : <ShieldX className="size-3.5 text-destructive" />}{d.verified ? "Verified" : "Not verified"}</span></TableCell>

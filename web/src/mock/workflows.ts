@@ -116,12 +116,21 @@ export const mkDraft = (w: Stored, spec: Spec, revision: number, by: Person = w.
   w.draft = mkDraft(w, s, 3, P.maya!, 1.2)
 }
 
+// Meeting follow-up: files the issues without asking first, so the draft needs an admin grant.
+{
+  const w = W.find((x) => x.id === "wf_meeting")!, s = clone(SPECS.meeting)
+  s.nodes.file!.instructions = "Create one Linear issue per action item in the client's project, owner set from the transcript. Skip items already filed."
+  s.nodes.file!.writes = "allow"
+  s.nodes.file!.untrusted_waiver = "Transcripts come from our own recorder"
+  w.draft = mkDraft(w, s, 2, P.maya!, 3)
+}
+
 const NOTES = ["Tighter research instructions", "Approval times out after two days", "Reply drafts propose a call", "Adds HubSpot reads", "First version"]
 export const versionsOf = (w: Stored): Version[] => !w.version ? [] : Array.from({ length: w.version }, (_, i) => {
   const n = w.version! - i
   const by = i % 3 === 1 && w.editors[0] ? w.editors[0] : w.owner
   return { number: n, published_by: by, published_at: ago(24 * (i * 6 + 3)), note: n === 1 ? "First version" : NOTES[i % (NOTES.length - 1)]!,
-    grants: n === w.version && w.id === "wf_triage" ? ["builtins", "untrusted_waiver"] : [], runs: i === 0 ? 40 + w.ticks.length * 3 : 12 - Math.min(i, 8), live: i === 0 }
+    grants: n === w.version && w.id === "wf_triage" ? ["builtins", "untrusted_waiver"] : w.id === "wf_content" && n === 3 ? ["unattended_write"] : [], runs: i === 0 ? 40 + w.ticks.length * 3 : 12 - Math.min(i, 8), live: i === 0 }
 })
 
 // ---------- runs: ticks are a pattern, oldest first (s succeeded, f failed, w waiting, r running, c cancelled, t timed out, u unknown, T test) ----------
