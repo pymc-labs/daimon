@@ -21,6 +21,7 @@ const VIEWS: Record<string, { label: string; keep: (w: WorkflowSummary) => boole
   shared: { label: "Shared with me", keep: (w) => w.shared_with_me },
   failing: { label: "Failing", keep: (w) => w.failing },
   paused: { label: "Paused", keep: (w) => w.status === "paused" },
+  routines: { label: "Routines", keep: (w) => !!w.source_routine },
 }
 
 export function WorkflowList() {

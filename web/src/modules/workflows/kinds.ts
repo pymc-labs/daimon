@@ -1,9 +1,10 @@
 import {
   Bot, CircleCheck, CircleDashed, CircleHelp, CircleMinus, CircleSlash, CircleX, Clock, Code, Flag, Hand, Hourglass, LoaderCircle, Repeat, Shuffle, Split, TimerOff, UserCheck, Webhook,
-  Workflow as WorkflowIcon, Wrench, Zap, type LucideIcon,
+  Minus, Pencil, Plus, Workflow as WorkflowIcon, Wrench, Zap, type LucideIcon,
 } from "lucide-react"
 
-import type { Catalog, Kind, Node, RunStatus, Spec, StepStatus, Trigger, TriggerKind } from "./types"
+import type { Effect } from "./review"
+import type { Catalog, GrantKind, Kind, Node, RunStatus, Spec, StepStatus, Trigger, TriggerKind } from "./types"
 
 /** Each step kind: its icon, name and color (a strip on the card, the icon tint). */
 export const KIND: Record<Kind, { icon: LucideIcon; label: string; strip: string; text: string }> = {
@@ -82,4 +83,12 @@ export function factsOf(n: Node, spec: Spec, catalog?: Catalog): string[] {
       return [n.outcome === "failed" ? "Fail" : "Succeed", ...(to ? [channel ? `#${channel}` : to] : [])]
     }
   }
+}
+
+export const GRANT: Record<GrantKind, string> = {
+  unattended_write: "Writes without approval", builtins: "Built-in tools", code_network: "Code with network", unverified_webhook: "Unverified webhook",
+  budget_over_default: "Budget over default", untrusted_waiver: "Untrusted input waiver",
+}
+export const EFFECT: Record<Effect, { icon: typeof Plus; cls: string; label: string }> = {
+  added: { icon: Plus, cls: "text-success", label: "Added" }, changed: { icon: Pencil, cls: "text-muted-foreground", label: "Changed" }, removed: { icon: Minus, cls: "text-destructive", label: "Removed" },
 }

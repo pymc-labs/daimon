@@ -7,6 +7,8 @@ export type NavItem = {
   to: string; label: string; icon: LucideIcon; cap?: Capability; g?: string; end?: boolean
   /** Beyond the capability: whether the page would hold anything for this person. */
   show?: (me: Me) => boolean
+  /** A live count shown at the row's end. */
+  badge?: React.ComponentType
 }
 
 /** A module: its nav, its routes (mounted behind a gate on `key`) and its palette actions. */

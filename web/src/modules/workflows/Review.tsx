@@ -1,4 +1,4 @@
-import { ArrowRight, KeyRound, Minus, Pencil, Plus } from "lucide-react"
+import { ArrowRight, KeyRound } from "lucide-react"
 import { useMemo, useState } from "react"
 
 import { Button } from "@/components/ui/button"
@@ -7,18 +7,11 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { cn } from "@/lib/utils"
 import { useCatalog, usePublish, useRequestPublish } from "./api"
-import { KIND, TRIGGER } from "./kinds"
-import { newGrants, reviewCount, reviewDiff, type Effect, type FieldChange, type Line } from "./review"
+import { EFFECT, GRANT, KIND, TRIGGER } from "./kinds"
+import { newGrants, reviewCount, reviewDiff, type FieldChange, type Line } from "./review"
 import { titleOf } from "./spec"
-import type { Draft, GrantKind, Problem, Workflow } from "./types"
+import type { Draft, Problem, Workflow } from "./types"
 
-export const GRANT: Record<GrantKind, string> = {
-  unattended_write: "Writes without approval", builtins: "Built-in tools", code_network: "Code with network", unverified_webhook: "Unverified webhook",
-  budget_over_default: "Budget over default", untrusted_waiver: "Untrusted input waiver",
-}
-export const EFFECT: Record<Effect, { icon: typeof Plus; cls: string; label: string }> = {
-  added: { icon: Plus, cls: "text-success", label: "Added" }, changed: { icon: Pencil, cls: "text-muted-foreground", label: "Changed" }, removed: { icon: Minus, cls: "text-destructive", label: "Removed" },
-}
 
 /** Instruction lines with their +/- marks, so the diff reads without color. */
 export function LineDiff({ lines }: { lines: Line[] }) {
