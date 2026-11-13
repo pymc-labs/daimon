@@ -283,11 +283,14 @@ guard against application mistakes, not against a database administrator.
 The scheduler deletes operational records past their age every day. Each
 `DAIMON_RETENTION__*` setting in [the configuration reference](configuration.md#daimon_retention__security_audit_days)
 sets one age in days, and `0` keeps that record. [How Daimon handles data](https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md)
-lists every record and its default.
+lists every record and its default. Conversation history is the
+[Conversation history kept](features.md#conversation-history-kept) feature, on
+at one year; `DAIMON_FEATURES__CONVERSATION_RETENTION=0` turns it off.
 
 Report and notebook hosts delete on their own: reports after
 [`DAIMON_REPORT__RETENTION_DAYS`](configuration.md#daimon_report__retention_days),
-notebooks at their expiry. Database backups, log storage and object-store
+notebooks at their expiry. Blogs have no expiry. Charts in artifacts are not
+purged, so give their bucket a lifecycle rule. Database backups, log storage and object-store
 buckets sit outside Daimon, so give each its own expiry and keep it no longer
 than the shortest age you promise users.
 
