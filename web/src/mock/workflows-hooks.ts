@@ -33,7 +33,7 @@ function rows(w: Stored): DeliveryRow[] {
   const first = base[0]!
   const bad: DeliveryRow = { id: "dlv_8c01f2a9d4", received_at: new Date(Date.parse(first.received_at) - 3 * 3_600_000).toISOString(), verified: false, outcome: "rejected", status: 401, run: null,
     headers: { ...first.headers, "webhook-id": "dlv_8c01f2a9d4", "webhook-signature": "v1,invalid" }, payload: first.payload }
-  const dup: DeliveryRow = { ...base[1] ?? first, id: base[1]?.id ?? first.id, outcome: "duplicate", status: 200, run: null, received_at: new Date(Date.parse(first.received_at) - 5 * 3_600_000).toISOString() }
+  const dup: DeliveryRow = { ...base[1] ?? first, id: "dlv_b71d03e5a8", outcome: "duplicate", status: 200, run: null, received_at: new Date(Date.parse(first.received_at) - 5 * 3_600_000).toISOString() }
   return [...h.extra, ...base, bad, dup].sort((a, b) => b.received_at.localeCompare(a.received_at))
 }
 

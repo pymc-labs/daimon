@@ -18,7 +18,7 @@ import { StepIcon } from "./parts"
 
 type Open = { open: boolean; onOpenChange: (o: boolean) => void }
 
-function Shell({ title, open, onOpenChange, children, footer, error, wide }: Open & {
+export function Shell({ title, open, onOpenChange, children, footer, error, wide }: Open & {
   title: string; children: React.ReactNode; footer: React.ReactNode; error?: string | null; wide?: boolean
 }) {
   return (
