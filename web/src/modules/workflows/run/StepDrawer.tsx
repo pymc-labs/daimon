@@ -58,7 +58,7 @@ export function StepView({ run, events, stepKey, now }: { run: RunDetail; events
       <PanelSection>
         <Facts rows={[
           ["Agent", q.data?.agent],
-          ["Model", q.data?.model && <Mono key="m">{q.data.model}</Mono>],
+          ["Model", q.data?.model],
           ["Started", s.started_at && <Ago key="a" iso={s.started_at} />],
           ["Duration", took != null && <span key="d" className="tabular">{duration(took)}</span>],
           ["Cost", (a?.cost_usd ?? s.cost_usd) > 0 && <Money key="c" usd={a?.cost_usd ?? s.cost_usd} />],

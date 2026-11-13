@@ -5,7 +5,6 @@ import { Link, useNavigate, useParams } from "react-router"
 import { toast } from "sonner"
 
 import { Ago, Money } from "@/components/common"
-import { Drawer } from "@/components/Drawer"
 import { PanelMenu, Tag } from "@/components/panel"
 import { ErrorState } from "@/components/QueryState"
 import { Page } from "@/components/shell/Page"
@@ -28,6 +27,7 @@ import { nodeOf, stepTitle, until, useOverlay } from "./lib"
 import { Fact } from "./parts"
 import { ApprovalDialog, ForkDialog, SkipDialog } from "./RunDialogs"
 import { StepView } from "./StepDrawer"
+import { StepPanel } from "./StepPanel"
 import { StepsPanel } from "./Steps"
 
 const ICON_ON_PHONE = "max-sm:w-7 max-sm:px-0"
@@ -76,6 +76,7 @@ export function RunPage() {
     URL.revokeObjectURL(a.href)
   }
   const verify = () => void api.get<{ ok: boolean; events: number }>(`/api/workflows/runs/${run.id}/verify`).then((v) => v.ok ? toast(`Verified ${v.events} events`) : toast.error("Chain broken"))
+  const keys = run.steps.map((s) => s.key)
   const select = (key: string) => { setStep(key); if (key !== run.current_step) setFollow(false) }
   const steps = (
     <StepsPanel run={run} overlay={overlay} now={now} selected={stepKey || null} select={select} follow={follow} setFollow={setFollow}
@@ -110,16 +111,19 @@ export function RunPage() {
           <ToggleGroupItem value="graph" className="text-xs">Graph</ToggleGroupItem>
         </ToggleGroup>
       </div>
-      <div className="flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 flex-1">
         <div className={cn("relative min-w-0 flex-1 bg-muted/40", pane !== "graph" && "max-sm:hidden")}>
-          <ReactFlowProvider><RunGraph run={run} overlay={overlay} selected={stepKey ? nodeOf(stepKey) : null} select={(node) => { const k = overlay.nodes[node]?.key; if (k) select(k) }} /></ReactFlowProvider>
+          <ReactFlowProvider><RunGraph run={run} overlay={overlay} panel={!!stepKey} selected={stepKey ? nodeOf(stepKey) : null} select={(node) => { const k = overlay.nodes[node]?.key; if (k) select(k) }} /></ReactFlowProvider>
         </div>
         {steps}
+        {stepKey && (
+          <StepPanel title={`Run ${run.number}`} index={keys.indexOf(stepKey)} count={keys.includes(stepKey) ? keys.length : 0} close={() => setStep(null)}
+            step={(d) => { const k = keys[keys.indexOf(stepKey) + d]; if (k) select(k) }}>
+            <StepView run={run} events={live.events} stepKey={stepKey} now={now} />
+          </StepPanel>
+        )}
       </div>
       <Ledger run={run} events={live.events} fresh={live.fresh} select={select} open={ledger} setOpen={setLedger} />
-      <Drawer param="step" title={`Run ${run.number}`} wide ids={run.steps.map((s) => s.key)}>
-        {(k) => <StepView run={run} events={live.events} stepKey={k} now={now} />}
-      </Drawer>
       {approval && <ApprovalDialog run={run} stepKey={waitingStep.key} open={dialog === "approve"} onOpenChange={(o) => setDialog(o ? "approve" : null)} onDone={live.follow} />}
       {dialog === "skip" && <SkipDialog run={run} open onOpenChange={(o) => !o && setDialog(null)} onDone={live.follow} />}
       {dialog === "fork" && <ForkDialog run={run} step={stepKey || undefined} open onOpenChange={(o) => !o && setDialog(null)} />}
@@ -128,10 +132,10 @@ export function RunPage() {
   )
 }
 
-export function RunGraph({ run, overlay, selected, select }: { run: RunDetail; overlay: RunOverlay; selected: string | null; select: (node: string) => void }) {
+export function RunGraph({ run, overlay, selected, select, panel = false }: { run: RunDetail; overlay: RunOverlay; selected: string | null; select: (node: string) => void; panel?: boolean }) {
   const [none] = useState(() => new Set<string>())
   return (
-    <Canvas spec={run.spec} changed={none} flash={none} selected={selected} ro select={(n) => n && select(n)} add={noop} remove={noop} duplicate={noop} panel={false} run={overlay} />
+    <Canvas spec={run.spec} changed={none} flash={none} selected={selected} ro select={(n) => n && select(n)} add={noop} remove={noop} duplicate={noop} panel={panel} overlap={64} run={overlay} />
   )
 }
 

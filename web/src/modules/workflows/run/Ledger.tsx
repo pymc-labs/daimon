@@ -1,4 +1,4 @@
-import { ChevronDown, LoaderCircle, ShieldCheck, ShieldX } from "lucide-react"
+import { ChevronDown, LoaderCircle, Play, ShieldCheck, ShieldX } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 
 import { Mono } from "@/components/common"
@@ -103,9 +103,9 @@ function Compact({ run, events, fresh, select }: { run: RunDetail; events: RunEv
           <button key={g.events[0]!.seq} onClick={() => s && select(s.key)} disabled={!s}
             className={cn("grid h-8 w-full grid-cols-[72px_minmax(0,200px)_1fr_auto] items-center gap-3 px-4 text-left hover:bg-accent disabled:hover:bg-transparent max-sm:grid-cols-[minmax(0,140px)_1fr_auto]", last.seq > fresh && NEW)}>
             <span className="text-muted-foreground tabular max-sm:hidden">{clock(g.events[0]!.at)}</span>
-            <span className="flex min-w-0 items-center gap-2 text-sm">{s ? <StepIcon status={s.status} /> : <span className="size-3.5 shrink-0" />}<span className="truncate">{title}</span></span>
+            <span className="flex min-w-0 items-center gap-2 text-sm">{s ? <StepIcon status={s.status} /> : <Play className="size-3.5 shrink-0 text-muted-foreground" />}<span className="truncate">{title}</span></span>
             <span className="truncate text-muted-foreground">{last.detail}</span>
-            <span className="text-faint tabular">{g.events.length}</span>
+            <span className="text-faint tabular">{g.events.length} {g.events.length === 1 ? "event" : "events"}</span>
           </button>
         )
       })}

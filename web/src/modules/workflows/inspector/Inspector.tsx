@@ -3,7 +3,7 @@ import { CircleAlert, TriangleAlert, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useKey } from "@/lib/hooks"
 import { cn } from "@/lib/utils"
-import { PANEL_W } from "../Canvas"
+import { PANEL } from "../Canvas"
 import { problemsAt, titleOf } from "../spec"
 import type { Validation } from "../types"
 import { KIND } from "../kinds"
@@ -23,7 +23,7 @@ export function Inspector({ close, validation, ...p }: EditorProps & { close: ()
   const [title, setTitle] = useLocal(titleOf(p.id, p.n), (v) => p.set((x) => { x.title = v || undefined }, 500))
   const probs = problemsAt(validation, p.id)
   return (
-    <aside aria-label="Step inspector" style={{ width: PANEL_W }} className="absolute inset-y-0 right-0 z-20 flex max-w-full flex-col border-l bg-popover shadow-[-12px_0_32px_rgb(12_31_64/0.06)]">
+    <aside aria-label="Step inspector" className={PANEL}>
       <div className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
         <span className={cn("flex size-6 items-center justify-center rounded-md border bg-background", K.text)}><K.icon className="size-3.5" /></span>
         <span className="text-xs font-medium text-muted-foreground">{K.label}</span>

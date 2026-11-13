@@ -4,6 +4,7 @@ import { allEdges, ancestors, edgeKey, edgesOf, outputFields, titleOf, toolWrite
 import type {
   ActivityLine, EventType, Field, Node, Person, Proposal, RunDetail, RunEvent, RunSummary, RunTest, Spec, StepDetail, TriggerKind, WaitKind,
 } from "@/modules/workflows/types"
+import { AGENTS } from "./world"
 import { CATALOG } from "./workflows"
 
 const S = 1000, M = 60 * S, H = 60 * M
@@ -211,7 +212,7 @@ function pause(c: Ctx, id: string, key: string, n: Node, v: number, t: number, e
   const what = approval ? `Approval from ${to.map((p) => p.name).join(", ")}` : kind === "event" ? `Waiting for ${n.event!.source}` : "Waiting for a time"
   emit(c, t, "step.started", key, "Engine", "Started", { attempt: 1 })
   emit(c, t, "wait.opened", key, "Engine", what, { kind, addressees: to, expires_at: after ? iso(t + after) : null })
-  emit(c, t, "run.waiting", null, "Engine", what, { reason: kind })
+  emit(c, t, "run.waiting", null, "Engine", approval ? "Waiting for approval" : what, { reason: kind })
   if (end === "wait") return void (c.stop = t)
   if (end === "timeout") {
     emit(c, t + 2 * H, "wait.timed_out", key, "Engine", "Timed out")
@@ -482,7 +483,7 @@ export function stepDetail(run: Run, key: string, attempt: number | null, now = 
     text, status: prog >= (i + 1) / 4 ? "done" as const : prog >= i / 4 ? "active" as const : "todo" as const,
   })) : []
   return {
-    key, attempt: a?.n ?? 0, agent: agent ? agentName(agent) : null, model: agent ? n.model ?? "Default model" : null,
+    key, attempt: a?.n ?? 0, agent: agent ? agentName(agent) : null, model: agent ? n.model ?? AGENTS.find((a) => a.id === CATALOG.agents.find((x) => x.key === agent)?.id)?.model ?? null : null,
     summary: agent && done ? summaryText(st.node, output) : null, route: st.route ? { name: st.route, reason } : null,
     files: st.node === "synthesise" && done ? [{ name: "comparison.md", size: 4812 }] : [],
     input, output, untrusted,

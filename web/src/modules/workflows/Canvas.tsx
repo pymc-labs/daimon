@@ -22,6 +22,8 @@ import { duration } from "@/lib/format"
 import { useWheelZoom } from "./zoom"
 
 export const PANEL_W = 440
+/** Side panel over a canvas: a full-height sheet on phones, a docked column from `sm`. */
+export const PANEL = "fixed inset-0 z-50 flex flex-col bg-popover sm:absolute sm:inset-y-0 sm:left-auto sm:z-20 sm:w-[440px] sm:border-l sm:shadow-[-12px_0_32px_rgb(12_31_64/0.06)]"
 const MIN_ZOOM = 0.3, MAX_ZOOM = 1.5
 export type InsertAt = { from: string | null; slot?: string; to?: string }
 /** A run's state over the graph: status per node, taken edges, and whether the trigger fired. */
@@ -231,9 +233,9 @@ function FlowEdge({ id, data }: EdgeProps<Edge<LaidEdge & { maxVisits?: number }
 const NODE_TYPES = { step: StepCard, triggers: TriggerChips, leaf: Leaf }
 const EDGE_TYPES = { flow: FlowEdge }
 
-export type CanvasProps = Omit<Ctx, "hover" | "setHover" | "menu" | "setMenu"> & { panel: boolean; tools?: React.ReactNode }
+export type CanvasProps = Omit<Ctx, "hover" | "setHover" | "menu" | "setMenu"> & { panel: boolean; /** Pixels of the canvas the open panel covers. */ overlap?: number; tools?: React.ReactNode }
 
-export function Canvas({ panel, tools, ...props }: CanvasProps) {
+export function Canvas({ panel, overlap = PANEL_W, tools, ...props }: CanvasProps) {
   const { spec, select, selected } = props
   const { resolved } = useTheme()
   const rf = useReactFlow()
@@ -272,7 +274,7 @@ export function Canvas({ panel, tools, ...props }: CanvasProps) {
       const zoom = Math.min(1, Math.max(MIN_ZOOM, (width - 24) / laid.width))
       return void rf.setViewport({ x: (width - laid.width * zoom) / 2, y: 64, zoom }, { duration })
     }
-    const room = width - (panel ? PANEL_W : 0)
+    const room = width - (panel ? overlap : 0)
     const vp = getViewportForBounds({ x: -40, y: -20, width: laid.width + 80, height: laid.height + 40 }, room, height - 72, MIN_ZOOM, 1, 0.04)
     const floor = runView ? 0.5 : 0.72 // a run reads best whole
     const zoom = Math.max(floor, vp.zoom)
@@ -289,7 +291,7 @@ export function Canvas({ panel, tools, ...props }: CanvasProps) {
     if (!b) return
     const vp = rf.getViewport()
     const left = b.x * vp.zoom + vp.x, right = left + b.w * vp.zoom, top = b.y * vp.zoom + vp.y, bottom = top + b.h * vp.zoom
-    const room = width - PANEL_W - 24
+    const room = width - overlap - 24
     const dx = right > room ? Math.max(room - right, 24 - left) : left < 24 ? 24 - left : 0
     const dy = bottom > height - 80 ? height - 80 - bottom : top < 64 ? 64 - top : 0
     if (dx || dy) void rf.setViewport({ ...vp, x: vp.x + dx, y: vp.y + dy }, { duration: 250 })
@@ -317,7 +319,7 @@ export function Canvas({ panel, tools, ...props }: CanvasProps) {
         style={{ background: "transparent" }}
       >
         <Background variant={BackgroundVariant.Dots} gap={20} size={1.2} color="var(--border-strong)" />
-        <Zoom fit={() => frame(200)} right={panel ? PANEL_W + 16 : 16} tools={tools} />
+        <Zoom fit={() => frame(200)} right={panel ? overlap + 16 : 16} tools={tools} />
       </ReactFlow>
     </C.Provider>
   )

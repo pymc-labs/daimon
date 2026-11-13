@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
-import { PANEL_W } from "./Canvas"
+import { PANEL } from "./Canvas"
 import { titleOf } from "./spec"
 import type { AskMessage, Spec } from "./types"
 import { KIND } from "./kinds"
@@ -21,7 +21,7 @@ export function AskDaimon({ spec, messages, pending, send, select, close }: {
   useEffect(() => { end.current?.scrollIntoView({ block: "end" }) }, [messages.length, pending])
   const go = (t: string) => { if (!t.trim() || pending) return; send(t.trim()); setText("") }
   return (
-    <aside aria-label="Ask Daimon" style={{ width: PANEL_W }} className="absolute inset-y-0 right-0 z-20 flex max-w-full flex-col border-l bg-popover shadow-[-12px_0_32px_rgb(12_31_64/0.06)]">
+    <aside aria-label="Ask Daimon" className={PANEL}>
       <div className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
         <span className="flex size-6 items-center justify-center rounded-md border bg-background text-link"><Sparkles className="size-3.5" /></span>
         <span className="text-sm font-medium">Ask Daimon</span>
