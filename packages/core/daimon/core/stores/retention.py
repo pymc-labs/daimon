@@ -17,6 +17,7 @@ from daimon.core._models import (
     ChannelChange,
     ComputeTaskRecord,
     CredentialRequest,
+    DirectMessageConversation,
     GitHubAccessRequest,
     JournalSession,
     LongJobCancelAuditRecord,
@@ -175,13 +176,14 @@ async def delete_channel_changes(
 async def delete_turn_outcomes(
     session: AsyncSession,
     *,
-    tenant_id: uuid.UUID,
+    tenant_id: uuid.UUID | None,
     before: datetime,
     limit: int,
     cursor: Position | None = None,
 ) -> int:
     """A tenant's turn outcomes from before the conversation cutoff, once their
-    conversation is gone and their session has no settle pending.
+    conversation is gone and their session has no settle pending. `tenant_id`
+    None selects outcomes no tenant owns (command-line turns).
 
     Outcomes attribute usage, date an agent's last use and name the sessions
     a settle reads, so they go with the conversation, never ahead of it.
@@ -199,8 +201,11 @@ async def delete_turn_outcomes(
             SessionSettleState.settle_requested_at.is_not(None),
         ),
     )
+    owner = (
+        TurnOutcome.tenant_id.is_(None) if tenant_id is None else TurnOutcome.tenant_id == tenant_id
+    )
     condition = and_(
-        TurnOutcome.tenant_id == tenant_id,
+        owner,
         TurnOutcome.started_at < before,
         or_(session_id.is_(None), ~live),
     )
@@ -419,6 +424,56 @@ async def delete_idle_thread_sessions(
     )
     return await _delete_batch(
         session, ThreadSession, condition, limit, order=ThreadSession.last_turn_at, cursor=cursor
+    )
+
+
+async def delete_idle_web_threads(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    before: datetime,
+    limit: int,
+    cursor: Position | None = None,
+) -> int:
+    """A tenant's web chats not deleted by their owner and untouched since the cutoff,
+    with their messages by cascade. Deleted chats keep their own, shorter clock."""
+    _check(before)
+    condition = and_(
+        WebThread.tenant_id == tenant_id,
+        WebThread.deleted_at.is_(None),
+        WebThread.updated_at < before,
+    )
+    return await _delete_batch(
+        session, WebThread, condition, limit, order=WebThread.updated_at, cursor=cursor
+    )
+
+
+async def delete_idle_dm_conversations(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    before: datetime,
+    limit: int,
+    cursor: Position | None = None,
+) -> int:
+    """A tenant's private conversations with no activity since the cutoff and no reply
+    running; the person's next /dm-me starts a new one."""
+    _check(before)
+    condition = and_(
+        DirectMessageConversation.tenant_id == tenant_id,
+        DirectMessageConversation.updated_at < before,
+        or_(
+            DirectMessageConversation.active_until.is_(None),
+            DirectMessageConversation.active_until < before,
+        ),
+    )
+    return await _delete_batch(
+        session,
+        DirectMessageConversation,
+        condition,
+        limit,
+        order=DirectMessageConversation.updated_at,
+        cursor=cursor,
     )
 
 

@@ -19,8 +19,8 @@ from datetime import datetime, timedelta
 
 import structlog
 from daimon.core.config import Settings
-from daimon.core.features.registry import limit_int
-from daimon.core.features.snapshot import FeaturePlace, feature_in
+from daimon.core.features.registry import FEATURES, limit_int
+from daimon.core.features.snapshot import FeaturePlace, feature_in, resolve_one
 from daimon.core.stores import (
     agent_posts,
     file_uploads,
@@ -126,6 +126,13 @@ async def conversation_days(
     return limit_int((await feature_in(session, settings, place, "conversation_retention")).value)
 
 
+def deployment_conversation_days(settings: Settings) -> int:
+    """The deployment's `conversation_retention` in days, for records no workspace owns."""
+    place = FeaturePlace(uuid.UUID(int=0), "cli")
+    value = resolve_one(FEATURES["conversation_retention"], settings, place, ()).value
+    return limit_int(value)
+
+
 async def _each_conversation_cutoff(
     sm: async_sessionmaker[AsyncSession],
     settings: Settings,
@@ -160,6 +167,12 @@ async def _conversations(
             totals["journal.deleted"] += erased.journal_events
             if erased.slots < BATCH:
                 break
+        totals["web_threads.idle_deleted"] += await _drain(
+            sm, retention.delete_idle_web_threads, tenant_id=tenant_id, before=cutoff
+        )
+        totals["direct_messages.deleted"] += await _drain(
+            sm, retention.delete_idle_dm_conversations, tenant_id=tenant_id, before=cutoff
+        )
         # After the conversations, whose existence keeps an outcome.
         totals["turn_outcomes.deleted"] += await _drain(
             sm, retention.delete_turn_outcomes, tenant_id=tenant_id, before=cutoff
@@ -167,6 +180,15 @@ async def _conversations(
 
     try:
         await _each_conversation_cutoff(sm, settings, now, tenant)
+        # Outcomes no tenant owns follow the deployment's setting.
+        days = deployment_conversation_days(settings)
+        if days > 0:
+            totals["turn_outcomes.deleted"] += await _drain(
+                sm,
+                retention.delete_turn_outcomes,
+                tenant_id=None,
+                before=now - timedelta(days=days),
+            )
     finally:
         for event, count in totals.items():
             if count:

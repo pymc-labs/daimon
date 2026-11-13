@@ -6,13 +6,26 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from daimon.core._models import RetentionRun, Tenant, ThreadSession, WebAudit
+from daimon.core._models import (
+    DirectMessageConversation,
+    RetentionRun,
+    Tenant,
+    ThreadSession,
+    TurnOutcome,
+    WebAudit,
+    WebThread,
+)
 from daimon.core.config import Settings, load_settings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.retention import sweep
 from daimon.core.stores import retention as retention_store
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import (
+    make_account,
+    make_dm_conversation,
+    make_tenant,
+    make_web_person,
+)
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -211,3 +224,82 @@ async def test_batches_continue_past_rows_a_rule_keeps(
     assert sizes == [2, 2, 1], "each batch takes the next idle rows, oldest first"
     left = set(await db_session.scalars(select(ThreadSession.thread_id)))
     assert left == {"busy0", "busy1", "busy2"}, "rows the rule keeps are never deleted"
+
+
+def _cli_outcome(session_id: str, started_at: datetime) -> TurnOutcome:
+    return TurnOutcome(
+        id=uuid.uuid4(),
+        tenant_id=None,
+        platform="cli",
+        session_id=session_id,
+        origin="routine",
+        reason="completed",
+        started_at=started_at,
+        ended_at=started_at,
+        duration_ms=0,
+        recovered=False,
+        release="test",
+        usage_refs=[],
+    )
+
+
+async def test_conversation_clock_covers_private_chats_web_threads_and_cli_outcomes(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+) -> None:
+    """Past `conversation_retention` (30 days here) idle DMs, live web chats and
+    tenantless outcomes go; recent, running and owner-deleted ones keep their own rules."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    person = await make_web_person(db_session, tenant=tenant, account=account)
+    old, recent = NOW - timedelta(days=31), NOW - timedelta(days=2)
+    for route in ("dm-old", "dm-new", "dm-running"):
+        await make_dm_conversation(
+            db_session, tenant=tenant, account_id=account.id, route_key=route, scope_id=route
+        )
+    for route, stamp, active in (
+        ("dm-old", old, None),
+        ("dm-new", recent, None),
+        ("dm-running", old, NOW + timedelta(minutes=5)),
+    ):
+        await db_session.execute(
+            update(DirectMessageConversation)
+            .where(DirectMessageConversation.route_key == route)
+            .values(updated_at=stamp, active_until=active)
+        )
+    db_session.add_all(
+        WebThread(
+            tenant_id=tenant.id,
+            person_id=person.id,
+            agent_id="a",
+            agent_name="a",
+            title=title,
+            updated_at=stamp,
+            deleted_at=deleted,
+        )
+        for title, stamp, deleted in (
+            ("old", old, None),
+            ("new", recent, None),
+            ("old-but-deleted-lately", old, NOW - timedelta(days=5)),
+        )
+    )
+    outcomes = [("cli-old", old), ("cli-new", recent)]
+    for name, stamp in outcomes:
+        record = _cli_outcome(name, stamp)
+        db_session.add(record)
+    await db_session.flush()
+
+    await sweep(db_session_factory, settings, now=NOW)
+
+    db_session.expire_all()
+    dms = set(await db_session.scalars(select(DirectMessageConversation.route_key)))
+    assert dms == {"dm-new", "dm-running"}, (
+        "an idle private chat goes; a recent or running one stays"
+    )
+    titles = set(await db_session.scalars(select(WebThread.title)))
+    assert titles == {"new", "old-but-deleted-lately"}, (
+        "an idle live web chat goes; a recent one, and one deleted within its own window, stay"
+    )
+    left = set(await db_session.scalars(select(TurnOutcome.session_id)))
+    assert left == {"cli-new"}, "an old outcome no tenant owns goes with the deployment clock"

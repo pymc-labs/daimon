@@ -121,7 +121,7 @@ async def start_conversation(
     )
     if row is not None and row.active_until is not None and row.active_until > now:
         raise DirectMessageBusy("Wait for the current DM reply before starting a new conversation.")
-    values = conversation.model_dump()
+    values = {**conversation.model_dump(), "updated_at": now}
     if row is None:
         session.add(DirectMessageConversation(**values))
     else:
@@ -158,6 +158,7 @@ async def claim_message(
             "A reply is still running. Please send your message again after it finishes."
         )
     row.active_until = active_until
+    row.updated_at = now
     row.recent_message_ids = [*row.recent_message_ids[-49:], message_id]
     await session.flush()
     return DirectMessageRow.model_validate(row)
@@ -203,6 +204,7 @@ async def finish_message(
     if row is None or row.active_until != conversation.active_until:
         return
     row.active_until = None
+    row.updated_at = func.now()
     if history is not None:
         row.history = history
     await session.flush()

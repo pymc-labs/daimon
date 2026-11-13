@@ -3899,6 +3899,7 @@ class DirectMessageConversation(Base):
     """One user's selected workspace for a private platform conversation."""
 
     __tablename__ = "direct_message_conversations"
+    __table_args__ = (Index("ix_dm_conversations_tenant_updated", "tenant_id", "updated_at"),)
     platform: Mapped[str] = mapped_column(Text, primary_key=True)
     route_key: Mapped[str] = mapped_column(Text, primary_key=True)
     external_user_id: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -3923,6 +3924,10 @@ class DirectMessageConversation(Base):
     history: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
     recent_message_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
     active_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Last start, claimed message or finished reply: the `conversation_retention` clock.
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class PlatformUserName(Base):

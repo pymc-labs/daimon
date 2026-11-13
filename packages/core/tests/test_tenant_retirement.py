@@ -25,6 +25,7 @@ from daimon.core.config import Settings, load_settings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.stores import slack_bot_tokens, tenant_ledger, tenants
 from daimon.core.stores import tenant_retirement as store
+from daimon.core.stores.domain import TenantRow
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import (
     make_account,
@@ -226,7 +227,7 @@ async def test_purge_leaves_no_row_in_any_purged_table(
     assert Decimal(0) <= await tenant_ledger.get_balance(db_session, tenant_id=tenant_id)
 
 
-async def _slack_world(db_session: AsyncSession) -> tuple[Tenant, Tenant]:
+async def _slack_world(db_session: AsyncSession) -> tuple[TenantRow, TenantRow]:
     """Two Slack workspaces; A's user and a stranger hold tokens in A's team, B has its own."""
     a = await make_tenant(db_session, platform="slack", workspace_id="T_A")
     b = await make_tenant(db_session, platform="slack", workspace_id="T_B")

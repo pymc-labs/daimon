@@ -159,6 +159,7 @@ TAIL = (
     "0194_tenant_retirement",
     "0195_retention_runs",
     "0196_audit_clocks",
+    "0197_dm_activity",
 )
 HEAD = TAIL[-1]
 
@@ -232,6 +233,8 @@ RETENTION_INDEXES = {
     "ix_web_threads_tenant_updated",
     # Added by 0196, with the watches.last_fired_at column.
     "ix_long_job_cancel_audit_requested_at",
+    # Added by 0197, with direct_message_conversations.updated_at.
+    "ix_dm_conversations_tenant_updated",
 }
 
 
@@ -435,6 +438,13 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             expected != HEAD
             and kind == "foreign_key_constraint"
             and name == "long_job_cancel_audit_id_fkey"
+        ):
+            return False
+        if (
+            expected != HEAD
+            and kind == "column"
+            and name == "updated_at"
+            and getattr(getattr(obj, "table", None), "name", None) == "direct_message_conversations"
         ):
             return False
         # 0187: tenants gains feature_revision and loses cost_footer; the scope index goes.
