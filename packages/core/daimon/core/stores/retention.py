@@ -2,13 +2,15 @@
 
 Each function removes at most `limit` rows in the caller's transaction and returns
 how many it removed, so a sweep can loop in short transactions until a batch
-comes back short. Every cutoff is exclusive and timezone-aware.
+comes back short. Every cutoff is exclusive and timezone-aware. A rule that blanks
+a column needs no cursor: a cleared row leaves its condition, so no batch rereads it.
 """
 
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, cast
 
 from daimon.core._models import (
@@ -21,6 +23,7 @@ from daimon.core._models import (
     McpOAuthFlow,
     MessageFeedback,
     PlatformChannelName,
+    RetentionRun,
     Routine,
     SessionSettleState,
     SupportEscalation,
@@ -47,15 +50,17 @@ from sqlalchemy import (
     select,
     update,
 )
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
 from sqlalchemy.sql.elements import ColumnClause
 
 _FINISHED_JOB_STATES = ("succeeded", "failed", "timed_out", "cancelled", "lost", "over_budget")
 _CLOSED_CONTINUATIONS = ("delivered", "skipped", "cancelled")
 _OPEN_CONTINUATIONS = ("pending", "claimed")
 _LIVE_WATCHES = ("active", "paused")
-_CLOSED_ACCESS_REQUESTS = ("cancelled", "declined", "expired")
+_FINISHED_ACCESS_REQUESTS = ("ready", "cancelled", "declined", "expired")
 
 
 def _check(before: datetime) -> None:
@@ -63,13 +68,37 @@ def _check(before: datetime) -> None:
         raise ValueError("cutoff must include a timezone")
 
 
+@dataclass
+class Position:
+    """Where a drain's next batch starts in the rule's cutoff order.
+
+    Rows a rule keeps (a thread with work pending, a request behind a sign-in) match the
+    cutoff but not the rest of the condition. Without a cursor every batch would scan
+    them again from the oldest; with one, a batch starts at the last row it deleted.
+    """
+
+    after: Any = None
+
+
 async def _delete_batch(
-    session: AsyncSession, model: type[Any], condition: ColumnElement[bool], limit: int
+    session: AsyncSession,
+    model: type[Any],
+    condition: ColumnElement[bool],
+    limit: int,
+    *,
+    order: ColumnElement[Any] | InstrumentedAttribute[Any],
+    cursor: Position | None = None,
 ) -> int:
+    """Delete up to `limit` rows in `order`, oldest first, from where `cursor` left off."""
     ctid: ColumnClause[Any] = literal_column("ctid")
-    batch = select(ctid).select_from(model).where(condition).limit(limit)
-    result = await session.execute(delete(model).where(ctid.in_(batch)))
-    return cast(CursorResult[Any], result).rowcount
+    query = select(ctid).select_from(model).where(condition)
+    if cursor is not None and cursor.after is not None:
+        query = query.where(order >= cursor.after)
+    statement = delete(model).where(ctid.in_(query.order_by(order).limit(limit))).returning(order)
+    gone = list((await session.execute(statement)).scalars())
+    if cursor is not None and gone:
+        cursor.after = max(gone)
+    return len(gone)
 
 
 async def _update_batch(
@@ -85,24 +114,70 @@ async def _update_batch(
     return cast(CursorResult[Any], result).rowcount
 
 
+async def claim_rule(
+    session: AsyncSession, *, rule: str, now: datetime, every: timedelta, retry: timedelta
+) -> bool:
+    """Take a rule's turn if it last succeeded over `every` ago and last started over `retry` ago.
+
+    The claim is one statement, so two sweeps never both run a rule, and a rule that
+    keeps failing is retried every `retry`, not on every pass.
+    """
+    _check(now)
+    due = and_(
+        or_(RetentionRun.last_success_at.is_(None), RetentionRun.last_success_at <= now - every),
+        RetentionRun.last_attempt_at <= now - retry,
+    )
+    statement = insert(RetentionRun).values(rule=rule, last_attempt_at=now)
+    statement = statement.on_conflict_do_update(
+        index_elements=[RetentionRun.rule], set_={"last_attempt_at": now}, where=due
+    ).returning(RetentionRun.rule)
+    return (await session.execute(statement)).scalar_one_or_none() is not None
+
+
+async def finish_rule(session: AsyncSession, *, rule: str, now: datetime) -> None:
+    """Record that a rule ran to the end."""
+    _check(now)
+    await session.execute(
+        update(RetentionRun).where(RetentionRun.rule == rule).values(last_success_at=now)
+    )
+
+
 async def tenant_places(session: AsyncSession) -> list[tuple[uuid.UUID, str]]:
     """Every tenant with its platform, for sweeps that apply a per-tenant policy."""
     rows = await session.execute(select(Tenant.id, Tenant.platform).order_by(Tenant.id))
     return [(row[0], row[1]) for row in rows]
 
 
-async def delete_web_audit(session: AsyncSession, *, before: datetime, limit: int) -> int:
+async def delete_web_audit(
+    session: AsyncSession, *, before: datetime, limit: int, cursor: Position | None = None
+) -> int:
     _check(before)
-    return await _delete_batch(session, WebAudit, WebAudit.at < before, limit)
+    return await _delete_batch(
+        session, WebAudit, WebAudit.at < before, limit, order=WebAudit.at, cursor=cursor
+    )
 
 
-async def delete_channel_changes(session: AsyncSession, *, before: datetime, limit: int) -> int:
+async def delete_channel_changes(
+    session: AsyncSession, *, before: datetime, limit: int, cursor: Position | None = None
+) -> int:
     _check(before)
-    return await _delete_batch(session, ChannelChange, ChannelChange.at < before, limit)
+    return await _delete_batch(
+        session,
+        ChannelChange,
+        ChannelChange.at < before,
+        limit,
+        order=ChannelChange.at,
+        cursor=cursor,
+    )
 
 
 async def delete_turn_outcomes(
-    session: AsyncSession, *, tenant_id: uuid.UUID, before: datetime, limit: int
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    before: datetime,
+    limit: int,
+    cursor: Position | None = None,
 ) -> int:
     """A tenant's turn outcomes from before the conversation cutoff, once their
     conversation is gone and their session has no settle pending.
@@ -128,43 +203,59 @@ async def delete_turn_outcomes(
         TurnOutcome.started_at < before,
         or_(session_id.is_(None), ~live),
     )
-    return await _delete_batch(session, TurnOutcome, condition, limit)
+    return await _delete_batch(
+        session, TurnOutcome, condition, limit, order=TurnOutcome.started_at, cursor=cursor
+    )
 
 
-async def delete_task_continuations(session: AsyncSession, *, before: datetime, limit: int) -> int:
+async def delete_task_continuations(
+    session: AsyncSession, *, before: datetime, limit: int, cursor: Position | None = None
+) -> int:
     """Closed continuations, aged from when they closed."""
     _check(before)
     closed_at = func.coalesce(
         TaskContinuation.delivered_at, TaskContinuation.claimed_at, TaskContinuation.created_at
     )
     condition = and_(TaskContinuation.status.in_(_CLOSED_CONTINUATIONS), closed_at < before)
-    return await _delete_batch(session, TaskContinuation, condition, limit)
+    return await _delete_batch(
+        session, TaskContinuation, condition, limit, order=closed_at, cursor=cursor
+    )
 
 
-async def delete_long_jobs(session: AsyncSession, *, before: datetime, limit: int) -> int:
+async def delete_long_jobs(
+    session: AsyncSession, *, before: datetime, limit: int, cursor: Position | None = None
+) -> int:
     """Finished background jobs, with their dependent rows by cascade."""
     _check(before)
     condition = and_(
         LongJobRecord.state.in_(_FINISHED_JOB_STATES), LongJobRecord.finished_at < before
     )
-    return await _delete_batch(session, LongJobRecord, condition, limit)
+    return await _delete_batch(
+        session, LongJobRecord, condition, limit, order=LongJobRecord.finished_at, cursor=cursor
+    )
 
 
-async def clear_compute_output(session: AsyncSession, *, before: datetime, limit: int) -> int:
+async def clear_compute_output(
+    session: AsyncSession, *, before: datetime, limit: int, cursor: Position | None = None
+) -> int:
     """Blank the output kept from finished compute tasks."""
     _check(before)
     condition = and_(ComputeTaskRecord.finished_at < before, ComputeTaskRecord.output_tail != "")
     return await _update_batch(session, ComputeTaskRecord, condition, {"output_tail": ""}, limit)
 
 
-async def clear_routine_results(session: AsyncSession, *, before: datetime, limit: int) -> int:
+async def clear_routine_results(
+    session: AsyncSession, *, before: datetime, limit: int, cursor: Position | None = None
+) -> int:
     """Blank a routine's last result once its last run is old."""
     _check(before)
     condition = and_(Routine.last_finished_at < before, Routine.last_result_tail.is_not(None))
     return await _update_batch(session, Routine, condition, {"last_result_tail": None}, limit)
 
 
-async def delete_credential_requests(session: AsyncSession, *, before: datetime, limit: int) -> int:
+async def delete_credential_requests(
+    session: AsyncSession, *, before: datetime, limit: int, cursor: Position | None = None
+) -> int:
     """Credential requests used or expired before the cutoff.
 
     A request whose MCP sign-in completed stays: its flow cascades from it, and a
@@ -175,53 +266,93 @@ async def delete_credential_requests(session: AsyncSession, *, before: datetime,
         McpOAuthFlow.request_token == CredentialRequest.token,
         McpOAuthFlow.completed_at.is_not(None),
     )
-    condition = and_(
-        or_(
-            CredentialRequest.used_at < before,
-            and_(CredentialRequest.used_at.is_(None), CredentialRequest.expires_at < before),
-        ),
-        ~signed_in,
+    closed_at = func.coalesce(CredentialRequest.used_at, CredentialRequest.expires_at)
+    condition = and_(closed_at < before, ~signed_in)
+    return await _delete_batch(
+        session, CredentialRequest, condition, limit, order=closed_at, cursor=cursor
     )
-    return await _delete_batch(session, CredentialRequest, condition, limit)
 
 
 async def delete_github_access_requests(
-    session: AsyncSession, *, before: datetime, limit: int
+    session: AsyncSession, *, before: datetime, limit: int, cursor: Position | None = None
 ) -> int:
-    """Access requests closed, or past their expiry, before the cutoff."""
+    """Access requests that finished before the cutoff and that nothing still needs.
+
+    An open or waiting request stays whatever its expiry: the expiry poller moves it
+    to `expired`, and an expired one stays until its channel has had the final notice.
+    """
     _check(before)
-    condition = or_(
-        and_(
-            GitHubAccessRequest.status.in_(_CLOSED_ACCESS_REQUESTS),
-            GitHubAccessRequest.updated_at < before,
+    condition = and_(
+        GitHubAccessRequest.status.in_(_FINISHED_ACCESS_REQUESTS),
+        GitHubAccessRequest.updated_at < before,
+        or_(
+            GitHubAccessRequest.status != "expired",
+            GitHubAccessRequest.expiry_notice_sent_at.is_not(None),
         ),
-        GitHubAccessRequest.expires_at < before,
     )
-    return await _delete_batch(session, GitHubAccessRequest, condition, limit)
+    return await _delete_batch(
+        session,
+        GitHubAccessRequest,
+        condition,
+        limit,
+        order=GitHubAccessRequest.updated_at,
+        cursor=cursor,
+    )
 
 
-async def delete_deleted_web_threads(session: AsyncSession, *, before: datetime, limit: int) -> int:
+async def delete_deleted_web_threads(
+    session: AsyncSession, *, before: datetime, limit: int, cursor: Position | None = None
+) -> int:
     """Web threads deleted before the cutoff, with their messages by cascade."""
     _check(before)
-    return await _delete_batch(session, WebThread, WebThread.deleted_at < before, limit)
+    return await _delete_batch(
+        session,
+        WebThread,
+        WebThread.deleted_at < before,
+        limit,
+        order=WebThread.deleted_at,
+        cursor=cursor,
+    )
 
 
-async def delete_feedback(session: AsyncSession, *, before: datetime, limit: int) -> int:
+async def delete_feedback(
+    session: AsyncSession, *, before: datetime, limit: int, cursor: Position | None = None
+) -> int:
     _check(before)
-    return await _delete_batch(session, MessageFeedback, MessageFeedback.created_at < before, limit)
+    return await _delete_batch(
+        session,
+        MessageFeedback,
+        MessageFeedback.created_at < before,
+        limit,
+        order=MessageFeedback.created_at,
+        cursor=cursor,
+    )
 
 
-async def delete_support_escalations(session: AsyncSession, *, before: datetime, limit: int) -> int:
+async def delete_support_escalations(
+    session: AsyncSession, *, before: datetime, limit: int, cursor: Position | None = None
+) -> int:
     _check(before)
     condition = SupportEscalation.created_at < before
-    return await _delete_batch(session, SupportEscalation, condition, limit)
+    return await _delete_batch(
+        session,
+        SupportEscalation,
+        condition,
+        limit,
+        order=SupportEscalation.created_at,
+        cursor=cursor,
+    )
 
 
-async def delete_channel_names(session: AsyncSession, *, before: datetime, limit: int) -> int:
+async def delete_channel_names(
+    session: AsyncSession, *, before: datetime, limit: int, cursor: Position | None = None
+) -> int:
     """Channel names not seen since the cutoff."""
     _check(before)
     seen = func.coalesce(PlatformChannelName.last_seen_at, PlatformChannelName.updated_at)
-    return await _delete_batch(session, PlatformChannelName, seen < before, limit)
+    return await _delete_batch(
+        session, PlatformChannelName, seen < before, limit, order=seen, cursor=cursor
+    )
 
 
 def _same_thread(model: type[TaskContinuation] | type[Watch]) -> ColumnElement[bool]:
@@ -233,7 +364,12 @@ def _same_thread(model: type[TaskContinuation] | type[Watch]) -> ColumnElement[b
 
 
 async def delete_idle_thread_sessions(
-    session: AsyncSession, *, tenant_id: uuid.UUID, before: datetime, limit: int
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    before: datetime,
+    limit: int,
+    cursor: Position | None = None,
 ) -> int:
     """A tenant's thread mappings with no turn since the cutoff and none running.
 
@@ -265,10 +401,14 @@ async def delete_idle_thread_sessions(
         ~watch,
         ~routine,
     )
-    return await _delete_batch(session, ThreadSession, condition, limit)
+    return await _delete_batch(
+        session, ThreadSession, condition, limit, order=ThreadSession.last_turn_at, cursor=cursor
+    )
 
 
-async def delete_unreferenced_logins(session: AsyncSession, *, before: datetime, limit: int) -> int:
+async def delete_unreferenced_logins(
+    session: AsyncSession, *, before: datetime, limit: int, cursor: Position | None = None
+) -> int:
     """Sign-in records made before the cutoff that no web session uses and whose
     provider accounts no longer match any workspace identity."""
     _check(before)
@@ -283,4 +423,6 @@ async def delete_unreferenced_logins(session: AsyncSession, *, before: datetime,
         .correlate(WebLogin)
     )
     condition = and_(WebLogin.created_at < before, ~in_session, ~linked)
-    return await _delete_batch(session, WebLogin, condition, limit)
+    return await _delete_batch(
+        session, WebLogin, condition, limit, order=WebLogin.created_at, cursor=cursor
+    )

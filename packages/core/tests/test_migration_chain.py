@@ -157,6 +157,7 @@ TAIL = (
     "0192_reset_allow_writes",
     "0193_retention_activity",
     "0194_tenant_retirement",
+    "0195_retention_runs",
 )
 HEAD = TAIL[-1]
 
@@ -207,6 +208,27 @@ AFTER_MERGE_COLUMNS = {
     ("turn_origins", "helper_of"),
     ("turn_origins", "serves_helpers"),
     ("mcp_tokens", "client"),
+}
+
+
+# Indexes and the run table added by 0195, absent from every earlier head.
+RETENTION_INDEXES = {
+    "ix_thread_sessions_tenant_last_turn",
+    "ix_credential_requests_closed_at",
+    "ix_agent_posted_messages_tenant_posted",
+    "ix_message_feedback_created_at",
+    "ix_support_escalations_created_at",
+    "ix_task_continuations_closed_at",
+    "ix_long_job_finished_at",
+    "ix_compute_tasks_finished_at",
+    "ix_routines_last_finished_at",
+    "ix_github_access_requests_updated_at",
+    "ix_platform_channel_names_seen",
+    "ix_channel_changes_at",
+    "ix_web_audit_at",
+    "ix_web_logins_created_at",
+    "ix_web_threads_deleted_at",
+    "ix_web_threads_tenant_updated",
 }
 
 
@@ -346,7 +368,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
         else {name for name in TABLES if not name.startswith("lead_")}
     )
     if expected != HEAD:
-        compared_tables = compared_tables - {"web_logins", "web_login_accounts"}
+        compared_tables = compared_tables - {"web_logins", "web_login_accounts", "retention_runs"}
     else:
         # 0187 folds progress_plan_scopes (no longer modelled) into feature_values.
         compared_tables = compared_tables | {"feature_values"}
@@ -402,6 +424,8 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             }
             and expected not in TOP
         ):
+            return False
+        if expected != HEAD and kind == "index" and name in RETENTION_INDEXES:
             return False
         # 0187: tenants gains feature_revision and loses cost_footer; the scope index goes.
         if kind == "index" and name == "ix_progress_plan_scopes_parent":

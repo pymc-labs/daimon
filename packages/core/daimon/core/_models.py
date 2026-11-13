@@ -434,6 +434,7 @@ class DaimonAdmin(Base):
 class Routine(Base):
     __tablename__ = "routines"
     __table_args__ = (
+        Index("ix_routines_last_finished_at", "last_finished_at"),
         UniqueConstraint("tenant_id", "source_routine_id", name="uq_routines_tenant_source_id"),
         Index(
             "routines_due_idx",
@@ -598,6 +599,7 @@ class RoutineSandboxHistoryRecord(Base):
 class ThreadSession(Base):
     __tablename__ = "thread_sessions"
     __table_args__ = (
+        Index("ix_thread_sessions_tenant_last_turn", "tenant_id", "last_turn_at"),
         Index("thread_sessions_lookup_idx", "tenant_id", "platform", "thread_id"),
         Index("thread_sessions_tenant_idx", "tenant_id"),
         Index(
@@ -1540,6 +1542,16 @@ class PrivacySessionDelete(Base):
     )
 
 
+class RetentionRun(Base):
+    """When a retention rule last started and last finished, so a restart does not rerun it."""
+
+    __tablename__ = "retention_runs"
+
+    rule: Mapped[str] = mapped_column(Text, primary_key=True)
+    last_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class TenantRetirement(Base):
     """Provider and host cleanup a retired tenant still owes; survives tenant deletion."""
 
@@ -2186,6 +2198,9 @@ class CredentialRequest(Base):
 
     __tablename__ = "credential_requests"
     __table_args__ = (
+        Index(
+            "ix_credential_requests_closed_at", func.coalesce(text("used_at"), text("expires_at"))
+        ),
         CheckConstraint(
             "kind IN ('env', 'env_file', 'mcp', 'mcp_oauth', 'repo', 'skill_repo', "
             "'watch_credential')",
@@ -2319,6 +2334,7 @@ class MessageFeedback(Base):
 
     __tablename__ = "message_feedback"
     __table_args__ = (
+        Index("ix_message_feedback_created_at", "created_at"),
         UniqueConstraint(
             "tenant_id",
             "message_id",
@@ -2522,6 +2538,7 @@ class SupportEscalation(Base):
 
     __tablename__ = "support_escalations"
     __table_args__ = (
+        Index("ix_support_escalations_created_at", "created_at"),
         Index(
             "support_escalations_tenant_user_idx",
             "tenant_id",
@@ -3030,6 +3047,11 @@ class TaskContinuation(Base):
 
     __tablename__ = "task_continuations"
     __table_args__ = (
+        Index(
+            "ix_task_continuations_closed_at",
+            func.coalesce(text("delivered_at"), text("claimed_at"), text("created_at")),
+            postgresql_where=text("status IN ('delivered', 'skipped', 'cancelled')"),
+        ),
         CheckConstraint(
             "reason IN ('task_handoff', 'private_input_applied', 'timer', "
             "'github_access_ready', 'watch_fired', 'job_finished', 'watch_report')",
@@ -3405,6 +3427,7 @@ class GitHubAccessRequest(Base):
 
     __tablename__ = "github_access_requests"
     __table_args__ = (
+        Index("ix_github_access_requests_updated_at", "updated_at"),
         Index(
             "uq_github_access_request_open_thread_asker_agent",
             "tenant_id",
@@ -3770,6 +3793,7 @@ class AgentPostedMessage(Base):
             "role IN ('status', 'answer', 'notice', 'controls', 'routine')",
             name="ck_agent_posted_messages_role",
         ),
+        Index("ix_agent_posted_messages_tenant_posted", "tenant_id", "posted_at"),
         Index(
             "ix_agent_posted_messages_delivery",
             "delivery_id",
@@ -3947,6 +3971,10 @@ class PlatformChannelName(Base):
 
     __tablename__ = "platform_channel_names"
     __table_args__ = (
+        Index(
+            "ix_platform_channel_names_seen",
+            func.coalesce(text("last_seen_at"), text("updated_at")),
+        ),
         PrimaryKeyConstraint(
             "tenant_id", "platform", "channel_id", name="pk_platform_channel_names"
         ),
@@ -3988,6 +4016,7 @@ class ChannelChange(Base):
 
     __tablename__ = "channel_changes"
     __table_args__ = (
+        Index("ix_channel_changes_at", "at"),
         Index("ix_channel_changes_tenant_channel_at", "tenant_id", "channel_id", "at"),
         CheckConstraint(
             "surface IN ('web', 'chat', 'panel', 'cli')", name="ck_channel_changes_surface"
@@ -5131,6 +5160,7 @@ class LongJobPolicyHistory(Base):
 class LongJobRecord(Base):
     __tablename__ = "long_job"
     __table_args__ = (
+        Index("ix_long_job_finished_at", "finished_at"),
         UniqueConstraint(
             "tenant_id", "parent_session_id", "tool_use_id", name="uq_long_job_registration"
         ),
@@ -5330,6 +5360,7 @@ class RepoMemorySession(Base):
 class ComputeTaskRecord(Base):
     __tablename__ = "compute_tasks"
     __table_args__ = (
+        Index("ix_compute_tasks_finished_at", "finished_at"),
         UniqueConstraint("tenant_id", "request_key", name="uq_compute_task_request"),
         CheckConstraint(
             "state IN ('starting','running','succeeded','failed','timed_out','lost','cancelled')",
@@ -5467,6 +5498,7 @@ class WebLogin(Base):
     """The accounts one member connected, across platforms (`WebLoginAccount`)."""
 
     __tablename__ = "web_logins"
+    __table_args__ = (Index("ix_web_logins_created_at", "created_at"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
@@ -5731,7 +5763,10 @@ class WebAudit(Base):
     """
 
     __tablename__ = "web_audit"
-    __table_args__ = (Index("ix_web_audit_tenant_at", "tenant_id", "at"),)
+    __table_args__ = (
+        Index("ix_web_audit_tenant_at", "tenant_id", "at"),
+        Index("ix_web_audit_at", "at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
@@ -5858,7 +5893,21 @@ class WebThread(Base):
     """One web chat: a person's conversation with the agent it was started with."""
 
     __tablename__ = "web_threads"
-    __table_args__ = (Index("ix_web_threads_person_updated", "person_id", "updated_at"),)
+    __table_args__ = (
+        Index("ix_web_threads_person_updated", "person_id", "updated_at"),
+        # The retention sweep's two clocks: a deleted chat's, and a live chat's idleness.
+        Index(
+            "ix_web_threads_deleted_at",
+            "deleted_at",
+            postgresql_where=text("deleted_at IS NOT NULL"),
+        ),
+        Index(
+            "ix_web_threads_tenant_updated",
+            "tenant_id",
+            "updated_at",
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()

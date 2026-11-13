@@ -2954,6 +2954,50 @@ async def test_run_loops_keeps_ticking_while_privacy_upstream_is_slow() -> None:
     assert cancelled
 
 
+async def test_run_loops_keeps_ticking_and_settling_while_retention_runs_long() -> None:
+    """The retention sweep has its own loop: a long sweep delays neither the tick nor usage."""
+    stop = asyncio.Event()
+    retention_started = asyncio.Event()
+    ticks = settles = 0
+    cancelled = False
+
+    async def tick() -> None:
+        nonlocal ticks
+        await retention_started.wait()
+        ticks += 1
+        if ticks == 3:
+            stop.set()
+
+    async def usage() -> None:
+        nonlocal settles
+        settles += 1
+
+    async def slow_retention() -> None:
+        nonlocal cancelled
+        retention_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    async with asyncio.timeout(5):
+        await _run_loops(
+            tick=tick,
+            usage_sweep=usage,
+            privacy_sweep=unittest.mock.AsyncMock(),
+            retention_sweep=slow_retention,
+            compute_sweep=unittest.mock.AsyncMock(),
+            compute_task_poll=unittest.mock.AsyncMock(),
+            interval_s=0.01,
+            stop_event=stop,
+        )
+
+    assert ticks == 3, "ticks continued while the retention sweep was running"
+    assert settles >= 1, "usage settlement ran while the retention sweep was running"
+    assert cancelled, "stopping cancels the sweep in flight"
+
+
 @pytest.mark.parametrize(
     ("policy_sql", "expected_error"),
     [

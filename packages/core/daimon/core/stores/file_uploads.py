@@ -21,6 +21,7 @@ from typing import Any, cast
 
 from daimon.core._models import FileUpload, WebMessage
 from daimon.core.stores.domain import FileUploadRow, UploadedFile
+from daimon.core.stores.retention import Position
 from sqlalchemy import (
     CursorResult,
     Select,
@@ -275,18 +276,30 @@ async def delete_unreferenced_web_uploads(
 
 
 async def delete_stale_unowned_uploads(
-    session: AsyncSession, *, created_before: datetime, limit: int
+    session: AsyncSession,
+    *,
+    created_before: datetime,
+    limit: int,
+    cursor: Position | None = None,
 ) -> int:
     """Delete up to `limit` files with no web person (MCP and tool uploads) made
-    before the cutoff and carried by no message; returns how many."""
-    stale = (
-        select(FileUpload.id)
-        .where(
-            FileUpload.person_id.is_(None),
-            FileUpload.created_at < created_before,
-            ~_carrying_message().exists(),
-        )
-        .limit(limit)
+    before the cutoff and carried by no message; returns how many.
+
+    A file a message still carries stays, so with a `cursor` a batch starts after
+    the last one deleted instead of reading those again.
+    """
+    stale = select(FileUpload.id).where(
+        FileUpload.person_id.is_(None),
+        FileUpload.created_at < created_before,
+        ~_carrying_message().exists(),
     )
-    result = await session.execute(delete(FileUpload).where(FileUpload.id.in_(stale)))
-    return cast(CursorResult[Any], result).rowcount
+    if cursor is not None and cursor.after is not None:
+        stale = stale.where(FileUpload.created_at >= cursor.after)
+    oldest = stale.order_by(FileUpload.created_at).limit(limit)
+    result = await session.execute(
+        delete(FileUpload).where(FileUpload.id.in_(oldest)).returning(FileUpload.created_at)
+    )
+    gone = list(result.scalars())
+    if cursor is not None and gone:
+        cursor.after = max(gone)
+    return len(gone)
