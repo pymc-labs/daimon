@@ -75,6 +75,7 @@ ingress:
   className: ""
   annotations: {}
   mcpAnnotations: {}
+  # An empty host skips that Ingress, keeping the service inside the cluster.
   teamsHost: teams.example.invalid
   mcpHost: mcp.example.invalid
   tls: []
