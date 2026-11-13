@@ -467,6 +467,17 @@ class HostConfigurationTests(unittest.TestCase):
                     "networkPolicy.teamsEgress.enabled=true",
                     "networkPolicy.teamsEgress.cidrs={" + cidr + "}",
                 )
+        # An empty list would render "to:" with no peers, which admits every address.
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml") as values:
+            values.write("networkPolicy: {teamsEgress: {enabled: true, cidrs: []}}\n")
+            values.flush()
+            result = subprocess.run(
+                ["helm", "template", "acme", str(CHART), "-f", values.name],
+                capture_output=True,
+                text=True,
+            )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("teamsEgress.cidrs must contain", result.stderr)
 
     def test_priority_names_differ_by_namespace(self):
         first = {r["metadata"]["name"] for r in render() if r["kind"] == "PriorityClass"}
