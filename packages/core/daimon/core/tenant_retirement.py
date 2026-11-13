@@ -17,6 +17,7 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.core.config import Settings
+from daimon.core.errors import SettlePending
 from daimon.core.ma import delete_skill_and_versions
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import archive_vault, delete_memory_store, legacy_call
@@ -42,15 +43,25 @@ async def retire(
     *,
     tenant_id: uuid.UUID,
     archived_before: datetime | None = None,
+    force: bool = False,
 ) -> bool:
     """Retire the tenant now, in short transactions so a large tenant never holds locks
     for long. False when it does not exist, is not due (`archived_before`, the sweep's
-    rule), or a reinstall stopped it. An interrupted retirement resumes on the next call.
+    rule, which also waits out usage still settling), or a reinstall stopped it. Without
+    `archived_before`, usage still settling raises `SettlePending` unless `force`.
+    An interrupted retirement resumes on the next call.
     """
-    async with sm() as session, session.begin():
-        archived_at = await store.begin_retirement(
-            session, tenant_id=tenant_id, archived_before=archived_before
-        )
+    try:
+        async with sm() as session, session.begin():
+            archived_at = await store.begin_retirement(
+                session, tenant_id=tenant_id, archived_before=archived_before, force=force
+            )
+    except SettlePending:
+        if archived_before is None:
+            raise
+        # Not due yet: the next sweep tries again once the usage settles.
+        log.info("tenant_retirement.deferred", tenant_id=str(tenant_id), reason="settle_pending")
+        return False
     if archived_at is None:
         return False
     for table in store.purge_tables():

@@ -30,6 +30,7 @@ from daimon.core._models import (
 )
 from daimon.core.config import Settings, load_settings
 from daimon.core.defaults.provisioning import provision_tenant
+from daimon.core.errors import SettlePending
 from daimon.core.stores import slack_bot_tokens, tenant_ledger, tenants
 from daimon.core.stores import tenant_retirement as store
 from daimon.core.stores.domain import TenantRow
@@ -347,14 +348,16 @@ async def test_the_sweep_waits_for_a_pending_settle(
     old = datetime(2020, 1, 1, tzinfo=UTC)
     await _archive(db_session, tenant_id, old)
     db_session.add(SessionSettleState(managed_session_id="sesn_a", settle_requested_at=old))
-    await db_session.flush()
+    await db_session.commit()  # The deferral rolls its own transaction back, not the seed.
     cutoff = datetime(2021, 1, 1, tzinfo=UTC)
     accounts = select(func.count()).select_from(Account).where(Account.tenant_id == tenant_id)
     before = await db_session.scalar(accounts)
 
-    assert not await tenant_retirement.retire(
-        db_session_factory, tenant_id=tenant_id, archived_before=cutoff
-    ), "a pending settle defers retirement"
+    with structlog.testing.capture_logs() as logs:
+        assert not await tenant_retirement.retire(
+            db_session_factory, tenant_id=tenant_id, archived_before=cutoff
+        ), "a pending settle defers retirement"
+    assert [e["event"] for e in logs] == ["tenant_retirement.deferred"], "the deferral is logged"
     db_session.expire_all()
     assert await db_session.scalar(accounts) == before, "nothing is purged"
 
@@ -572,3 +575,23 @@ async def test_a_permanent_client_error_is_dropped_and_a_broken_kind_is_isolated
     assert any(e["event"] == "tenant_retirement.kind_failed" for e in logs), (
         "the broken kind is logged"
     )
+
+
+async def test_retiring_at_once_refuses_settling_usage_unless_forced(
+    own_connections: async_sessionmaker[AsyncSession],
+) -> None:
+    sm = own_connections
+    tenant_id = (await provision_tenant(sm, platform="discord", workspace_id="now-guild")).tenant_id
+    async with sm() as session, session.begin():
+        tenant = await get_tenant(session, tenant_id)
+        assert tenant is not None
+        await make_usage_event(session, tenant=tenant, managed_session_id="sesn_now")
+        session.add(
+            SessionSettleState(managed_session_id="sesn_now", settle_requested_at=datetime.now(UTC))
+        )
+    with pytest.raises(SettlePending):
+        await tenant_retirement.retire(sm, tenant_id=tenant_id)
+    async with sm() as session:
+        tenant = await get_tenant(session, tenant_id)
+    assert tenant is not None and tenant.archived_at is None, "a refused retirement changes nothing"
+    assert await tenant_retirement.retire(sm, tenant_id=tenant_id, force=True), "force goes ahead"

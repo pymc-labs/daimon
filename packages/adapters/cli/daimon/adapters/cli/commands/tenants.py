@@ -24,7 +24,7 @@ from daimon.core.access_policy import (
 )
 from daimon.core.billing import credit_note_slug, manual_credit
 from daimon.core.config import load_settings
-from daimon.core.errors import StoreError
+from daimon.core.errors import SettlePending, StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.native_admins import verify_backend_actor
 from daimon.core.permissions import (
@@ -297,6 +297,11 @@ async def tenants_list(
     )
 
 
+FORCE_OPTION = typer.Option(
+    "--force", help="Retire even while usage is still settling; that usage goes unbilled."
+)
+
+
 @tenants_app.command("delete")
 def tenants_delete_command(
     platform: str,
@@ -304,6 +309,7 @@ def tenants_delete_command(
     cascade: Annotated[
         bool, typer.Option("--cascade", help="Delete even when dependents exist.")
     ] = False,
+    force: Annotated[bool, FORCE_OPTION] = False,
     yes: Annotated[bool, YES_OPTION] = False,
 ) -> None:
     settings = load_settings()
@@ -318,6 +324,7 @@ def tenants_delete_command(
                 external_id=external_id,
                 cascade=cascade,
                 yes=yes,
+                force=force,
             )
 
     run_cli(_with_defaults(), console=console)
@@ -331,6 +338,7 @@ async def tenants_delete(
     external_id: str,
     cascade: bool,
     yes: bool,
+    force: bool = False,
 ) -> None:
     validated_platform = _validate_platform(platform)
     tenant_id = derive_tenant_uuid(platform=validated_platform, workspace_id=external_id)
@@ -366,9 +374,10 @@ async def tenants_delete(
             f"channel_config={counts.channel_config}"
         )
 
+    await _warn_before_retiring(rt, console, tenant_id, force=force, kept=False)
     confirm_or_abort(console, f"delete tenant {platform}:{external_id}?", yes=yes)
 
-    left = await _retire_and_clean(rt, tenant_id)
+    left = await _retire_and_clean(rt, tenant_id, force=force)
     async with rt.sessionmaker() as session, session.begin():
         await delete_tenant(session, tenant_id=tenant_id)
 
@@ -376,9 +385,28 @@ async def tenants_delete(
     _report_left(console, left)
 
 
-async def _retire_and_clean(rt: CliRuntime, tenant_id: uuid.UUID) -> int:
+async def _warn_before_retiring(
+    rt: CliRuntime, console: Console, tenant_id: uuid.UUID, *, force: bool, kept: bool
+) -> None:
+    """Refuse while usage is settling (unless forced) and show the balance at stake."""
+    async with rt.sessionmaker() as session:
+        settling = await tenant_retirement_store.has_pending_settle(session, tenant_id=tenant_id)
+        balance = await tenant_ledger.get_balance(session, tenant_id=tenant_id)
+    if settling and not force:
+        raise SettlePending(
+            f"tenant {tenant_id} has usage waiting to settle; retry once it settles, "
+            "or pass --force to go ahead and leave it unbilled"
+        )
+    if settling:
+        console.print("[yellow]usage still settling will go unbilled[/yellow]")
+    if balance:
+        fate = "is kept with the retired tenant" if kept else "is lost with the tenant"
+        console.print(f"[yellow]balance ${balance:.2f} {fate}[/yellow]")
+
+
+async def _retire_and_clean(rt: CliRuntime, tenant_id: uuid.UUID, *, force: bool) -> int:
     """Retire the tenant, then try its upstream cleanup once. Returns what is left."""
-    if not await tenant_retirement.retire(rt.sessionmaker, tenant_id=tenant_id):
+    if not await tenant_retirement.retire(rt.sessionmaker, tenant_id=tenant_id, force=force):
         raise StoreError(f"tenant {tenant_id} not found")
     async with httpx.AsyncClient() as http:
         deleters = tenant_retirement.deleters(rt.anthropic, rt.settings, http, tenant_id)
@@ -402,6 +430,7 @@ def _report_left(console: Console, left: int) -> None:
 def tenants_retire_command(
     platform: str,
     external_id: str,
+    force: Annotated[bool, FORCE_OPTION] = False,
     yes: Annotated[bool, YES_OPTION] = False,
 ) -> None:
     """Delete a tenant's data and keep its billing records and balance."""
@@ -411,20 +440,32 @@ def tenants_retire_command(
     async def _run() -> None:
         async with build_runtime(settings) as rt:
             await tenants_retire(
-                rt=rt, console=console, platform=platform, external_id=external_id, yes=yes
+                rt=rt,
+                console=console,
+                platform=platform,
+                external_id=external_id,
+                yes=yes,
+                force=force,
             )
 
     run_cli(_run(), console=console)
 
 
 async def tenants_retire(
-    *, rt: CliRuntime, console: Console, platform: str, external_id: str, yes: bool
+    *,
+    rt: CliRuntime,
+    console: Console,
+    platform: str,
+    external_id: str,
+    yes: bool,
+    force: bool = False,
 ) -> None:
     tenant_id = derive_tenant_uuid(platform=_validate_platform(platform), workspace_id=external_id)
+    await _warn_before_retiring(rt, console, tenant_id, force=force, kept=True)
     confirm_or_abort(
         console, f"retire tenant {platform}:{external_id}? Its data is deleted.", yes=yes
     )
-    left = await _retire_and_clean(rt, tenant_id)
+    left = await _retire_and_clean(rt, tenant_id, force=force)
     console.print(f"[green]✓ retired tenant {platform}:{external_id}[/green]")
     _report_left(console, left)
 

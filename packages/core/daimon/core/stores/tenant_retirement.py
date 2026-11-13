@@ -34,6 +34,7 @@ from daimon.core._models import (
     UsageEvent,
     UserSkill,
 )
+from daimon.core.errors import SettlePending
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import mux_erasure
 from daimon.core.stores.security_audit import erase_tenant
@@ -185,16 +186,20 @@ async def _scrub(session: AsyncSession, tenant_id: uuid.UUID) -> None:
 
 
 async def begin_retirement(
-    session: AsyncSession, *, tenant_id: uuid.UUID, archived_before: datetime | None = None
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    archived_before: datetime | None = None,
+    force: bool = False,
 ) -> datetime | None:
     """Start retiring a tenant: archive it, queue its upstream cleanup, and drop the
     small, shared-key and settlement rows that cannot be purged by tenant in batches.
 
     Returns the tenant's archive time, which later steps must find unchanged (a reinstall
     restarts or clears it). None when the tenant does not exist, or, with `archived_before`
-    (the sweep), when it is not archived since before that time, is already retired, or
-    still has usage waiting to settle (retried on the next sweep). Safe to run again
-    after an interruption.
+    (the sweep), when it is not archived since before that time or is already retired.
+    Raises `SettlePending` while usage still waits to settle, unless `force`, which
+    leaves that usage unbilled. Safe to run again after an interruption.
     """
     if archived_before is not None and archived_before.utcoffset() is None:
         raise ValueError("archived_before must include a timezone")
@@ -205,9 +210,10 @@ async def begin_retirement(
         tenant.retired_at is not None
         or tenant.archived_at is None
         or tenant.archived_at >= archived_before
-        or await has_pending_settle(session, tenant_id=tenant_id)
     ):
         return None
+    if not force and await has_pending_settle(session, tenant_id=tenant_id):
+        raise SettlePending(f"tenant {tenant_id} has usage waiting to settle")
     # Archived first: a reinstall in the middle restarts or clears it, which stops the purge.
     archived_at = tenant.archived_at = tenant.archived_at or datetime.now(UTC)
     await _queue(session, tenant_id, await collect_upstream(session, tenant_id=tenant_id))

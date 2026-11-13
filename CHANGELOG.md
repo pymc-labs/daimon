@@ -19,8 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A workspace uninstalled for 30 days is retired in short batches, so a large one holds no long lock and an
   interrupted run resumes at the next sweep: its data, provider sessions, memory, vaults, skills, reports and
   notebooks are deleted, while billing records and the balance stay, so a reinstall gets no second trial. A workspace
-  whose usage has not settled yet is retired once it has. `daimon tenants retire` does the same at once. Retirement
-  and tenant deletion also remove that workspace's Slack tokens and settlement progress, and erasing a person also
+  whose usage has not settled yet is retired once it has. `daimon tenants retire` retires one at once and shows the
+  balance it keeps; it and `daimon tenants delete` refuse while usage is still settling unless `--force` is given,
+  which leaves that usage unbilled. Retirement and tenant deletion also remove that workspace's Slack tokens and settlement progress, and erasing a person also
   removes their follow-up tasks, turn records, conversation links, model-switch cards and credential requests in every
   workspace. Job cancel records age with the audit events, not with their job; a watch keeps its last-fired time; a
   GitHub access request is kept until it has finished and its expiry notice has gone out.

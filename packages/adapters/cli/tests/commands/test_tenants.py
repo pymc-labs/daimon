@@ -23,9 +23,11 @@ from daimon.adapters.cli.commands.tenants import (
     tenants_credit,
     tenants_delete,
     tenants_list,
+    tenants_retire,
     tenants_turn_cap,
 )
 from daimon.core import allowance_limits
+from daimon.core._models import SessionSettleState
 from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
     AgentRule,
@@ -34,7 +36,7 @@ from daimon.core.access_policy import (
 )
 from daimon.core.config import NotebookSettings, ReportHostSettings
 from daimon.core.defaults.provisioning import provision_tenant
-from daimon.core.errors import StoreError
+from daimon.core.errors import SettlePending, StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import TenantScopeRef
 from daimon.core.stores import scoped_config_write, spend_allowances, tenant_ledger
@@ -44,7 +46,7 @@ from daimon.core.stores.access_policy import (
     set_access_policy,
 )
 from daimon.core.stores.tenants import get_tenant, get_turn_cap
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_tenant, make_usage_event
 from rich.console import Console
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -277,6 +279,73 @@ async def test_tenants_delete_cascade_deletes_tenant_when_dependents_exist(
     async with db_session_factory() as s, s.begin():
         row = await get_tenant(s, tenant_id)
     assert row is None, "tenant should be deleted (DB cascade removes dependents)"
+
+
+async def _settling_tenant(sm: async_sessionmaker[AsyncSession], workspace: str) -> uuid.UUID:
+    tenant_id = (await provision_tenant(sm, platform="discord", workspace_id=workspace)).tenant_id
+    async with sm() as s, s.begin():
+        tenant = await get_tenant(s, tenant_id)
+        assert tenant is not None
+        await make_usage_event(s, tenant=tenant, managed_session_id="sesn_settling")
+        s.add(
+            SessionSettleState(
+                managed_session_id="sesn_settling", settle_requested_at=datetime.now(UTC)
+            )
+        )
+        await tenant_ledger.insert_entry(
+            s, tenant_id=tenant_id, delta_usd=Decimal("7.50"), reason="manual", idempotency_key="k"
+        )
+    return tenant_id
+
+
+@pytest.mark.parametrize("command", ["retire", "delete"])
+async def test_retiring_waits_for_settling_usage_unless_forced(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    stub_anthropic: AsyncAnthropic,
+    command: str,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, anthropic=stub_anthropic, settings=_FakeSettings())
+    console = _make_console()
+    tenant_id = await _settling_tenant(db_session_factory, "settling-guild")
+
+    async def run(*, force: bool) -> None:
+        if command == "retire":
+            await tenants_retire(
+                rt=rt,
+                console=console,
+                platform="discord",
+                external_id="settling-guild",
+                yes=True,
+                force=force,
+            )
+        else:
+            await tenants_delete(
+                rt=rt,
+                console=console,
+                platform="discord",
+                external_id="settling-guild",
+                cascade=True,
+                yes=True,
+                force=force,
+            )
+
+    with pytest.raises(SettlePending, match="--force"):
+        await run(force=False)
+    async with db_session_factory() as s:
+        row = await get_tenant(s, tenant_id)
+    assert row is not None and row.retired_at is None, "a refused run changes nothing"
+
+    await run(force=True)
+    out = cast(StringIO, console.file).getvalue()
+    assert "unbilled" in out, f"forcing says the settling usage goes unbilled: {out}"
+    fate = "kept" if command == "retire" else "lost"
+    assert f"balance $7.50 is {fate}" in out, f"the balance at stake is shown: {out}"
+    async with db_session_factory() as s:
+        row = await get_tenant(s, tenant_id)
+    if command == "retire":
+        assert row is not None and row.retired_at is not None, "forced retire goes ahead"
+    else:
+        assert row is None, "forced delete goes ahead"
 
 
 @pytest.mark.asyncio

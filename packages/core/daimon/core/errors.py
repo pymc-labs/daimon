@@ -77,6 +77,10 @@ class StoreError(DaimonError):
     """DB constraint violation, expected row missing, uniqueness violation."""
 
 
+class SettlePending(StoreError):
+    """A tenant still has usage waiting to settle; retiring it now leaves that unbilled."""
+
+
 class RoutineAlreadyRunning(StoreError):
     """An enabled routine cannot be resumed and rescheduled again."""
 
