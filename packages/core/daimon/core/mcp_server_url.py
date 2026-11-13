@@ -19,7 +19,6 @@ GITHUB_COPILOT_MCP_URL = "https://api.githubcopilot.com/mcp"
 GITHUB_ROUTER_PATH = "/github/mcp"
 
 
-
 def ascii_mcp_url(url: str) -> str:
     """`canonical_mcp_url` with an internationalised host in its punycode form.
 
