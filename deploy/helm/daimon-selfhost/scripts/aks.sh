@@ -8,6 +8,7 @@ chart=deploy/helm/daimon-selfhost
 : "${AKS:?export AKS}" "${AOAI:?export AOAI}"
 : "${AKS_STATE:?export AKS_STATE to a private mktemp -d directory}"
 [[ -d "$AKS_STATE" ]] || { echo 'AKS_STATE must exist' >&2; exit 1; }
+source "$chart/scripts/release.sh"
 if [[ -z ${TAG:-} ]]; then
   if [[ ${1:-} == bootstrap ]]; then
     TAG="$(git rev-parse --short HEAD)-$(date -u +%Y%m%d%H%M%S%N)"
@@ -93,10 +94,10 @@ bootstrap)
   fi
   ;;
 install)
-  kubectl create namespace daimon --dry-run=client -o yaml | kubectl apply -f -
+  kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
   # Explicit pilot admission exception. Obtain IT approval before running.
-  kubectl label namespace daimon pod-security.kubernetes.io/enforce=privileged --overwrite
-  python3 - "$AKS_STATE" "$RG" "$AOAI" "$ACR" "$TAG" <<'PY'
+  kubectl label namespace "$NAMESPACE" pod-security.kubernetes.io/enforce=privileged --overwrite
+  python3 - "$AKS_STATE" "$RG" "$AOAI" "$ACR" "$TAG" "$PREFIX" "$SECRET_PREFIX" <<'PY'
 import base64
 import json
 import os
@@ -106,7 +107,7 @@ import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
-state, rg, aoai, acr, tag = sys.argv[1:]
+state, rg, aoai, acr, tag, prefix, secret_prefix = sys.argv[1:]
 p = Path(state)
 def azure(*args):
     return subprocess.check_output(['az', *args, '-o', 'tsv'], text=True).strip()
@@ -119,13 +120,13 @@ if not (p/'pg.env').exists():
     (p/'pg.env').write_text('POSTGRES_PASSWORD='+password+'\n')
     (p/'harness.env').write_text('HARNESS_TOKEN='+token+'\n')
     (p/'host.env').write_text(
-        'DAIMON_DATABASE__URL=postgresql+asyncpg://daimon:'+password+'@acme-daimon-postgres:5432/daimon\n'
+        'DAIMON_DATABASE__URL=postgresql+asyncpg://daimon:'+password+'@'+prefix+'-postgres:5432/daimon\n'
         'DAIMON_MCP__JWT_SECRET='+secrets.token_hex(32)+'\n'
         'DAIMON_CRYPTO__KEYS='+base64.urlsafe_b64encode(os.urandom(32)).decode()+'\n'
         'DAIMON_MCP__PUBLIC_URL=https://mcp.example.invalid\n'
         'DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY='+token+'\n')
 # Upgrade saved operator state too: envFrom requires the dedicated variable to
-# be an actual daimon-host Secret key, not a Helm value or secretKeyRef mapping.
+# be an actual key of the host Secret, not a Helm value or secretKeyRef mapping.
 host_env = p/'host.env'
 if not any(line.startswith('DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY=')
            for line in host_env.read_text().splitlines()):
@@ -148,8 +149,9 @@ def merge(target, updates):
 merge(values, {
     'images': {'registry': acr+'.azurecr.io', 'host': {'tag':tag}, 'harness': {'tag':tag}},
     'azureOpenAI': {'endpoint':endpoint, 'deployment':values.get('azureOpenAI', {}).get('deployment', os.environ['AOAI_DEPLOYMENT']),
-                    'apiKeySecretRef':{'name':'daimon-aoai','key':'AZURE_OPENAI_API_KEY'}},
-    'services': {'teams':{'enabled':values.get('services', {}).get('teams', {}).get('enabled', False)}},
+                    'apiKeySecretRef':{'name':secret_prefix+'-aoai','key':'AZURE_OPENAI_API_KEY'}},
+    'secrets': {'host':secret_prefix+'-host', 'harness':secret_prefix+'-harness'},
+    'postgres': {'existingSecret':secret_prefix+'-postgres'},
     'host': {'env': {'DAIMON_ANTHROPIC__BASE_URL':'http://127.0.0.1:9'}},
     'networkPolicy': {'azureOpenAICidrs':ips},
 })
@@ -157,30 +159,30 @@ merge(values, {
 (p/'aoai-host').write_text(host)
 PY
   for pair in postgres:pg host:host harness:harness aoai:aoai; do
-    kubectl -n daimon create secret generic "daimon-${pair%:*}" \
+    kubectl -n "$NAMESPACE" create secret generic "$SECRET_PREFIX-${pair%:*}" \
       --from-env-file="$AKS_STATE/${pair#*:}.env" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   done
   runtime_secret=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("host", {}).get("runtimeSecret", ""))' "$AKS_STATE/aks-values.json")
   if [[ -n $runtime_secret ]]; then
     [[ -f "$AKS_STATE/runtime.json" ]] || { echo 'Saved registration requires AKS_STATE/runtime.json' >&2; exit 1; }
-    kubectl -n daimon create secret generic "$runtime_secret" \
+    kubectl -n "$NAMESPACE" create secret generic "$runtime_secret" \
       --from-file=runtime.json="$AKS_STATE/runtime.json" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   fi
-  helm upgrade --install acme "$chart" -n daimon -f "$AKS_STATE/aks-values.json" \
+  helm upgrade --install "$RELEASE" "$chart" -n "$NAMESPACE" "${HELM_VALUES[@]}" \
     --wait --wait-for-jobs --timeout 15m
-  kubectl -n daimon rollout status statefulset/acme-daimon-harness --timeout=300s
-  kubectl -n daimon rollout status deployment --timeout=300s
-  kubectl -n daimon rollout status statefulset --timeout=300s
+  kubectl -n "$NAMESPACE" rollout status statefulset/"$PREFIX-harness" --timeout=300s
+  kubectl -n "$NAMESPACE" rollout status deployment --timeout=300s
+  kubectl -n "$NAMESPACE" rollout status statefulset --timeout=300s
   mcp_port=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("services", {}).get("mcp", {}).get("port", 8765))' "$AKS_STATE/aks-values.json")
-  kubectl -n daimon exec deployment/acme-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon python -c \
-    'import ssl,sys,urllib.request; ctx=ssl.create_default_context(); assert urllib.request.urlopen(sys.argv[1], context=ctx).status == 200; print("MCP HTTPS healthy")' "https://acme-daimon-mcp:$mcp_port/healthz"
+  kubectl -n "$NAMESPACE" exec deployment/"$PREFIX-mcp" -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon python -c \
+    'import ssl,sys,urllib.request; ctx=ssl.create_default_context(); assert urllib.request.urlopen(sys.argv[1], context=ctx).status == 200; print("MCP HTTPS healthy")' "https://$PREFIX-mcp:$mcp_port/healthz"
   ;;
 register)
   bash "$chart/scripts/register.sh"
   ;;
 turn)
   tenant=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tenant_id"])' "$AKS_STATE/registration.json")
-  kubectl -n daimon exec deployment/acme-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon daimon selfhosted turn \
+  kubectl -n "$NAMESPACE" exec deployment/"$PREFIX-mcp" -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon daimon selfhosted turn \
     --tenant-id "$tenant" --thread aks-proof --message "${MESSAGE:?export MESSAGE}"
   ;;
 probe)
@@ -190,7 +192,7 @@ probe)
   fi
   verify_aoai_model
   bind_aks
-  kubectl -n daimon exec -i deployment/acme-daimon-mcp -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon env AOAI_VERIFIED_MODEL="$AOAI_VERIFIED_MODEL" AOAI_DEPLOYMENT="$AOAI_DEPLOYMENT" SELFHOSTED_MODEL="$SELFHOSTED_MODEL" python - < "$chart/scripts/live-c3.py"
+  kubectl -n "$NAMESPACE" exec -i deployment/"$PREFIX-mcp" -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon env HARNESS_URL="https://$PREFIX-harness:8088" AOAI_VERIFIED_MODEL="$AOAI_VERIFIED_MODEL" AOAI_DEPLOYMENT="$AOAI_DEPLOYMENT" SELFHOSTED_MODEL="$SELFHOSTED_MODEL" python - < "$chart/scripts/live-c3.py"
   ;;
 egress-start)
   kubectl -n kube-system create configmap coredns-custom --from-literal=log.override=log \
@@ -198,7 +200,7 @@ egress-start)
   kubectl -n kube-system rollout restart deployment/coredns
   kubectl -n kube-system rollout status deployment/coredns --timeout=120s
   date -u +%Y-%m-%dT%H:%M:%SZ > "$AKS_STATE/turn-start"
-  kubectl -n daimon exec acme-daimon-harness-0 -- python -c \
+  kubectl -n "$NAMESPACE" exec "$PREFIX-harness-0" -- python -c \
     'import socket,sys; socket.getaddrinfo(sys.argv[1],443)' "$(cat "$AKS_STATE/aoai-host")"
   echo 'DNS evidence window started. Run the real Daimon turns now, then egress-check.'
   ;;
@@ -217,33 +219,38 @@ for q in queries:
 print('Turn-window DNS log has AOAI canary and no Anthropic/OpenAI.com lookups')
 PY
   # Negative probe runs AFTER the evidence snapshot to avoid polluting its window.
-  denied_ip=$(kubectl -n daimon exec acme-daimon-harness-0 -- python -c \
+  denied_ip=$(kubectl -n "$NAMESPACE" exec "$PREFIX-harness-0" -- python -c \
     'import socket; print(socket.gethostbyname("api.anthropic.com"))')
-  host_pod=$(kubectl -n daimon get pods -l app=acme-daimon-mcp -o jsonpath='{.items[0].metadata.name}')
-  for pod in acme-daimon-harness-0 "$host_pod"; do
+  host_pod=$(kubectl -n "$NAMESPACE" get pods -l app="$PREFIX-mcp" -o jsonpath='{.items[0].metadata.name}')
+  for pod in "$PREFIX-harness-0" "$host_pod"; do
     probe="egress-proof-$(date +%s)"
-    kubectl -n daimon debug "pod/$pod" --image=curlimages/curl:8.16.0 \
+    kubectl -n "$NAMESPACE" debug "pod/$pod" --image=curlimages/curl:8.16.0 \
       --container="$probe" --attach=false -- curl --noproxy '*' --connect-timeout 5 --max-time 10 \
       --resolve "api.anthropic.com:443:$denied_ip" -sS -o /dev/null https://api.anthropic.com
-    kubectl -n daimon wait "pod/$pod" --timeout=90s \
+    kubectl -n "$NAMESPACE" wait "pod/$pod" --timeout=90s \
       --for="jsonpath={.status.ephemeralContainerStatuses[?(@.name=='$probe')].state.terminated.exitCode}=28"
-    kubectl -n daimon logs "$pod" -c "$probe"
+    kubectl -n "$NAMESPACE" logs "$pod" -c "$probe"
     echo "curl in $pod timed out; no TLS/auth failure accepted"
   done
-  for pod in acme-daimon-harness-0 "$host_pod"; do
+  for pod in "$PREFIX-harness-0" "$host_pod"; do
     probe="imds-proof-$(date +%s)"
-    kubectl -n daimon debug "pod/$pod" --image=curlimages/curl:8.16.0 \
+    kubectl -n "$NAMESPACE" debug "pod/$pod" --image=curlimages/curl:8.16.0 \
       --container="$probe" --attach=false -- curl --noproxy '*' --connect-timeout 5 --max-time 10 \
       -H Metadata:true -sS -o /dev/null 'http://169.254.169.254/metadata/instance?api-version=2021-02-01'
-    kubectl -n daimon wait "pod/$pod" --timeout=90s \
+    kubectl -n "$NAMESPACE" wait "pod/$pod" --timeout=90s \
       --for="jsonpath={.status.ephemeralContainerStatuses[?(@.name=='$probe')].state.terminated.exitCode}=28"
     echo "IMDS curl in $pod timed out"
   done
   ;;
 teardown)
   # Destructive pilot reset: delete app, all namespace PVCs, and AKS/node RG.
-  helm uninstall acme -n daimon --ignore-not-found
-  kubectl delete namespace daimon --wait=true --ignore-not-found
+  helm uninstall "$RELEASE" -n "$NAMESPACE" --ignore-not-found
+  kubectl delete namespace "$NAMESPACE" --wait=true --ignore-not-found
+  # Other releases may share the cluster: deleting it needs its name typed again.
+  if [[ ${DELETE_AKS:-} != "$AKS" ]]; then
+    echo "Release $RELEASE and namespace $NAMESPACE removed; cluster $AKS kept. Set DELETE_AKS=$AKS to delete it too." >&2
+    exit 0
+  fi
   az aks show -g "$RG" -n "$AKS" --query nodeResourceGroup -o tsv > "$AKS_STATE/node-rg"
   az aks delete -g "$RG" -n "$AKS" --yes -o none
   [[ $(az group exists -n "$(cat "$AKS_STATE/node-rg")" -o tsv) == false ]] || {
@@ -260,6 +267,10 @@ reinstall)
   ;;
 remove)
   # Deletes the budget too. Check RG is dedicated before selecting this action.
+  [[ ${DELETE_RG:-} == "$RG" ]] || {
+    echo "remove deletes resource group $RG and everything in it; set DELETE_RG=$RG to confirm" >&2
+    exit 1
+  }
   az group delete -n "$RG" --yes -o none
   ;;
 *) echo 'Usage: aks.sh bootstrap|install|register|turn|probe|egress-start|egress-check|teardown|reinstall|remove' >&2; exit 2 ;;

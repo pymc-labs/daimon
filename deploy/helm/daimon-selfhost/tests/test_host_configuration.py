@@ -792,7 +792,11 @@ elif name == 'az' and args[:2] == ['group','exists']:
         for field in ("fqdn", "privateFqdn", "azurePortalFqdn"):
             with self.subTest(field=field):
                 result, operations = self.run_cluster_command(
-                    "teardown", {"AKS_METADATA": json.dumps({field: "pilot.example.invalid"})}
+                    "teardown",
+                    {
+                        "AKS_METADATA": json.dumps({field: "pilot.example.invalid"}),
+                        "DELETE_AKS": "offline",
+                    },
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(operations[0]["tool"], "helm")
@@ -800,6 +804,25 @@ elif name == 'az' and args[:2] == ['group','exists']:
                 self.assertEqual(operations[1]["tool"], "kubectl")
                 self.assertEqual(operations[1]["args"][:3], ["delete", "namespace", "daimon"])
                 self.assertTrue(any(c["args"][:2] == ["aks", "delete"] for c in operations))
+
+    def test_teardown_keeps_a_shared_cluster_unless_its_name_is_confirmed(self):
+        for confirmation in (None, "", "another-cluster"):
+            with self.subTest(confirmation=confirmation):
+                overrides = {
+                    "RELEASE": "daimon-teams",
+                    "NAMESPACE": "daimon-teams",
+                    "DELETE_AKS": confirmation,
+                }
+                result, operations = self.run_cluster_command(
+                    "teardown", {k: v for k, v in overrides.items() if v is not None}
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    operations[0]["args"][:4], ["uninstall", "daimon-teams", "-n", "daimon-teams"]
+                )
+                self.assertEqual(operations[1]["args"][:3], ["delete", "namespace", "daimon-teams"])
+                self.assertEqual(len(operations), 2, operations)
+                self.assertIn("cluster offline kept", result.stderr)
 
     def test_teardown_refuses_missing_metadata_insecure_server_and_credential_failure(self):
         for overrides in (

@@ -13,7 +13,7 @@ model = os.environ.get("SELFHOSTED_MODEL", deployment)
 if "sol" in model.lower() or "sol" in deployment.lower() or model != deployment:
     raise SystemExit("Probe requires the configured AOAI_DEPLOYMENT; Sol models are refused")
 
-base = "https://acme-daimon-harness:8088"
+base = os.environ.get("HARNESS_URL", "https://acme-daimon-harness:8088")
 token = os.environ["DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY"]
 session = "aks-preflight-" + uuid4().hex
 marker = "daimon-aks-proof-" + uuid4().hex
