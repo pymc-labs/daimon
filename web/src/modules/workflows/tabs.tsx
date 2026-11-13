@@ -2,46 +2,12 @@ import { Ago, Avatar, Money, Mono } from "@/components/common"
 import { Facts, Tag } from "@/components/panel"
 import { QueryState } from "@/components/QueryState"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { absolute, duration } from "@/lib/format"
-import { useRuns, useVersions } from "./api"
+import { absolute } from "@/lib/format"
+import { useVersions } from "./api"
 import type { Person, Trigger, Workflow } from "./types"
 import { cronLabel, TRIGGER } from "./kinds"
-import { RunBadge } from "./ui"
 
 const H = "pl-4 lg:pl-6", T = "pr-4 text-right lg:pr-6"
-
-export function RunsTab({ wf }: { wf: Workflow }) {
-  const query = useRuns(wf.id)
-  const trig = Object.fromEntries(wf.spec.triggers?.map((t) => [t.id, t]) ?? [])
-  return (
-    <QueryState query={query} className="px-6 pt-6" isEmpty={(r) => !r.length} empty="No runs">{(runs) => (
-      <Table>
-        <TableHeader>
-          <TableRow className="hover:bg-transparent">
-            <TableHead className={`w-36 ${H}`}>Status</TableHead><TableHead className="w-20">Run</TableHead><TableHead>Trigger</TableHead>
-            <TableHead>Started</TableHead><TableHead className="max-sm:hidden">Duration</TableHead><TableHead className="max-md:hidden">Version</TableHead><TableHead className={T}>Cost</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {runs.map((r) => {
-            const t = TRIGGER[trig[r.trigger.id]?.kind ?? r.trigger.kind]
-            return (
-              <TableRow key={r.id}>
-                <TableCell className={H}><RunBadge status={r.status} /></TableCell>
-                <TableCell className="tabular"><span className="flex items-center gap-2">#{r.number}{r.test && <Tag>Test</Tag>}</span></TableCell>
-                <TableCell><span className="flex items-center gap-1.5 text-muted-foreground"><t.icon className="size-3.5" />{r.label ?? t.label}</span></TableCell>
-                <TableCell><Ago iso={r.started_at} /></TableCell>
-                <TableCell className="tabular max-sm:hidden">{r.duration_ms == null ? <span className="text-faint">–</span> : duration(r.duration_ms)}</TableCell>
-                <TableCell className="tabular max-md:hidden">v{r.version}</TableCell>
-                <TableCell className={T}><Money usd={r.cost_usd} /></TableCell>
-              </TableRow>
-            )
-          })}
-        </TableBody>
-      </Table>
-    )}</QueryState>
-  )
-}
 
 function triggerFacts(t: Trigger): [string, React.ReactNode][] {
   switch (t.kind) {

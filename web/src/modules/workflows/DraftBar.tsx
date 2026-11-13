@@ -10,7 +10,7 @@ import { useConfirm } from "@/lib/confirm"
 import { cn } from "@/lib/utils"
 import { discardDraft, usePublish } from "./api"
 import { PANEL_W } from "./Canvas"
-import { RunDialog } from "./RunDialog"
+import { TestRunSheet } from "./run/TestRun"
 import { titleOf } from "./spec"
 import type { Draft, GrantKind, Problem, Workflow } from "./types"
 import { KIND } from "./kinds"
@@ -41,7 +41,7 @@ export function DraftTools({ wf, draft, ask }: { wf: Workflow; draft: Draft; ask
     <>
       <Button variant="outline" size="sm" className="bg-popover shadow-xs" onClick={ask}><Sparkles />Ask Daimon</Button>
       <Button variant="outline" size="sm" className="bg-popover shadow-xs" onClick={() => setTest(true)}><FlaskConical />Test run</Button>
-      <RunDialog id={wf.id} spec={draft.spec} test open={test} onOpenChange={setTest} />
+      <TestRunSheet wf={wf} draft={draft} open={test} onOpenChange={setTest} />
     </>
   )
 }
@@ -89,7 +89,7 @@ export function DraftBar({ wf, draft, shift, select, ask, adopt }: {
           <Button size="sm" onClick={() => setReview(true)}>Review</Button>
         </span>
       </div>
-      <RunDialog id={wf.id} spec={draft.spec} test open={test} onOpenChange={setTest} />
+      <TestRunSheet wf={wf} draft={draft} open={test} onOpenChange={setTest} />
       <Review wf={wf} draft={draft} open={review} onOpenChange={setReview} />
     </>
   )

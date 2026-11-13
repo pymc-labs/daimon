@@ -14,19 +14,24 @@ import { cn } from "@/lib/utils"
 import { badgesOf, type BadgeKind, type CardBadge, cardHeight, MAX_BADGES } from "./cards"
 import { layout, NODE_W, pathOf, TRIGGERS, type LaidEdge, type Layout } from "./layout"
 import { titleOf } from "./spec"
+import type { EdgeState, NodeRun } from "./runs"
 import { Dot } from "./ui"
 import { KINDS, type Catalog, type Kind, type Spec, type Validation } from "./types"
-import { factsOf, KIND, TRIGGER, triggerText } from "./kinds"
+import { factsOf, KIND, STEP, TRIGGER, triggerText } from "./kinds"
+import { duration } from "@/lib/format"
 import { useWheelZoom } from "./zoom"
 
 export const PANEL_W = 440
 const MIN_ZOOM = 0.3, MAX_ZOOM = 1.5
 export type InsertAt = { from: string | null; slot?: string; to?: string }
+/** A run's state over the graph: status per node, taken edges, and whether the trigger fired. */
+export type RunOverlay = { nodes: Record<string, NodeRun>; edges: Record<string, EdgeState>; started: boolean; ended?: boolean }
 
 type Ctx = {
   spec: Spec; validation?: Validation; catalog?: Catalog; changed: Set<string>; flash: Set<string>; selected: string | null; ro: boolean
   select: (id: string | null) => void; add: (at: InsertAt, kind: Kind) => void; remove: (id: string) => void; duplicate: (id: string) => void
   hover: string | null; setHover: (id: string | null) => void; menu: string | null; setMenu: (k: string | null) => void
+  run?: RunOverlay
 }
 const C = createContext<Ctx>(null!)
 
@@ -57,19 +62,24 @@ function Badges({ items }: { items: CardBadge[] }) {
 }
 
 function StepCard({ id }: NodeProps) {
-  const { spec, validation, catalog, changed, flash, selected, ro, remove, duplicate } = useContext(C)
+  const { spec, validation, catalog, changed, flash, selected, ro, remove, duplicate, run } = useContext(C)
   const n = spec.nodes[id]!
   const K = KIND[n.kind]
-  const badges = badgesOf(id, n, validation)
+  const badges = run ? [] : badgesOf(id, n, validation)
+  const r = run?.nodes[id]
+  const st = run ? r?.status ?? "pending" : null
+  const missed = !!run?.ended && !r
   return (
     <div
       style={{ width: NODE_W, height: cardHeight(badges) }}
       className={cn(
         "group relative flex cursor-pointer flex-col justify-center overflow-hidden rounded-xl border bg-card py-2.5 pr-2 pl-4 shadow-[0_1px_3px_rgb(0_0_0/0.05)] transition-[border-color,box-shadow,background-color] duration-500 hover:border-border-strong",
+        st && (missed ? "border-dashed opacity-50" : RING[st]),
         selected === id && "border-ring ring-3 ring-ring/15 hover:border-ring",
         flash.has(id) && "border-link bg-link/5 ring-4 ring-link/25 duration-150",
       )}
     >
+      {st === "running" && <span className="pointer-events-none absolute inset-0 animate-pulse rounded-xl ring-4 ring-link/30 ring-inset" />}
       <Handle type="target" position={Position.Top} className="!pointer-events-none !opacity-0" />
       <span className={cn("absolute inset-y-0 left-0 w-1", K.strip)} />
       <span className="flex h-6 min-w-0 shrink-0 items-center gap-2">
@@ -91,12 +101,34 @@ function StepCard({ id }: NodeProps) {
           </DropdownMenu>
         )}
       </span>
-      <span className="mt-0.5 flex h-4 min-w-0 shrink-0 items-center gap-2.5 pl-6 text-xs text-muted-foreground">
-        {factsOf(n, spec, catalog).map((f, i) => <span key={i} className={cn(i === 0 ? "truncate" : "shrink-0 text-faint")}>{f}</span>)}
-      </span>
+      {missed ? <span className="mt-0.5 h-4 pl-6 text-xs text-faint">Not reached</span> : st ? <RunLine st={st} r={r} /> : (
+        <span className="mt-0.5 flex h-4 min-w-0 shrink-0 items-center gap-2.5 pl-6 text-xs text-muted-foreground">
+          {factsOf(n, spec, catalog).map((f, i) => <span key={i} className={cn(i === 0 ? "truncate" : "shrink-0 text-faint")}>{f}</span>)}
+        </span>
+      )}
       {badges.length > 0 && <Badges items={badges} />}
       <Handle type="source" position={Position.Bottom} className="!pointer-events-none !opacity-0" />
     </div>
+  )
+}
+
+/** Card treatment per step status; the status line carries icon and text, so color is never alone. */
+const RING: Record<NodeRun["status"], string> = {
+  pending: "border-dashed bg-card/70", ready: "border-dashed", running: "border-link", waiting: "border-warning ring-3 ring-warning/15",
+  succeeded: "", failed: "border-destructive ring-3 ring-destructive/15", unknown: "border-destructive ring-3 ring-destructive/15",
+  skipped: "border-dashed opacity-60", cancelled: "opacity-70",
+}
+
+function RunLine({ st, r }: { st: NodeRun["status"]; r?: NodeRun }) {
+  const S = STEP[st]
+  return (
+    <span className="mt-0.5 flex h-4 min-w-0 shrink-0 items-center gap-2.5 pl-6 text-xs text-muted-foreground">
+      <span className={cn("flex items-center gap-1", S.cls)}><S.icon className="size-3" /><span className="text-foreground">{S.label}</span></span>
+      {r?.progress && <span className="tabular">{r.progress.done} of {r.progress.total}</span>}
+      {r && r.visits > 1 && <span className="tabular" title={`${r.visits} visits`}>×{r.visits}</span>}
+      {r?.reused && <span className="text-faint">{r.reused === "pinned" ? "Pinned" : "Reused"}</span>}
+      {r?.ms != null && !r.reused && <span className="ml-auto shrink-0 pr-1 text-faint tabular">{duration(r.ms)}</span>}
+    </span>
   )
 }
 
@@ -153,27 +185,32 @@ function Leaf({ data }: NodeProps<FlowNode<{ from: string }>>) {
 }
 
 function FlowEdge({ id, data }: EdgeProps<Edge<LaidEdge & { maxVisits?: number }>>) {
-  const { ro, hover, setHover, menu } = useContext(C)
+  const { ro, hover, setHover, menu, run } = useContext(C)
   const e = data!
+  const state: EdgeState | null = !run ? null : e.from === TRIGGERS ? (run.started ? "taken" : "pending") : run.edges[id] ?? "pending"
   const pts = e.points
   const a = pts.at(-2)!, b = pts.at(-1)!
   const dx = Math.sign(b.x - a.x), dy = Math.sign(b.y - a.y)
   const tip = `M${b.x},${b.y} L${b.x - dy * 4 - dx * 7},${b.y - dx * 4 - dy * 7} L${b.x + dy * 4 - dx * 7},${b.y + dx * 4 - dy * 7} Z`
-  const stroke = e.kind === "error" ? "var(--destructive)" : "var(--border-strong)"
+  const stroke = e.kind === "error" ? "var(--destructive)" : state === "taken" ? "var(--muted-foreground)" : "var(--border-strong)"
+  const faint = state === "not_taken"
   const k = `edge:${id}`
   const showPlus = !ro && !e.back && (hover === id || menu === k)
   const at: InsertAt = e.from === TRIGGERS ? { from: null, to: e.to } : { from: e.from, slot: e.slot, to: e.to }
   return (
     <>
-      <path d={pathOf(pts)} fill="none" stroke={stroke} strokeWidth={1.5} strokeDasharray={e.back ? "5 4" : e.kind === "error" ? "3 3" : undefined} />
-      <path d={tip} fill={stroke} />
+      <g opacity={faint ? 0.4 : 1} className="transition-opacity duration-500">
+        <path d={pathOf(pts)} fill="none" stroke={stroke} strokeWidth={state === "taken" ? 2 : 1.5} className="transition-[stroke] duration-500"
+          strokeDasharray={e.back || faint ? "5 4" : e.kind === "error" ? "3 3" : undefined} />
+        <path d={tip} fill={stroke} />
+      </g>
       <path d={pathOf(pts)} fill="none" stroke="transparent" strokeWidth={18} onMouseEnter={() => setHover(id)} onMouseLeave={() => setHover(null)} />
       <EdgeLabelRenderer>
         {e.labelAt && (e.label || e.back) && (
           <span
             style={{ transform: `translate(-50%,-50%) translate(${e.labelAt.x}px,${e.labelAt.y}px)` }}
             className={cn("absolute flex h-5 items-center rounded border bg-popover px-1.5 text-[11px] font-medium whitespace-nowrap text-muted-foreground",
-              e.back && "border-dashed", e.kind === "error" && "text-destructive")}
+              e.back && "border-dashed", e.kind === "error" && "text-destructive", faint && "opacity-50", state === "taken" && "border-border-strong text-foreground")}
           >
             {e.label}
             {e.label && e.back && <span className="mx-1.5 h-3 w-px bg-border" />}
@@ -212,10 +249,11 @@ export function Canvas({ panel, tools, ...props }: CanvasProps) {
   }
   const chipKey = (spec.triggers ?? []).map(triggerText).join("\n")
   const { validation } = props
+  const runView = !!props.run
   const laid: Layout = useMemo(() => {
-    const heights = Object.fromEntries(Object.entries(spec.nodes).map(([id, n]) => [id, cardHeight(badgesOf(id, n, validation))]))
+    const heights = Object.fromEntries(Object.entries(spec.nodes).map(([id, n]) => [id, cardHeight(runView ? [] : badgesOf(id, n, validation))]))
     return layout(spec, chipKey ? chipKey.split("\n") : [], heights)
-  }, [spec, chipKey, validation])
+  }, [spec, chipKey, validation, runView])
   const nodes = useMemo<FlowNode[]>(() => [
     ...laid.nodes.map((b) => ({ id: b.id, type: b.id === TRIGGERS ? "triggers" : "step", position: { x: b.x, y: b.y }, data: {}, width: b.w, height: b.h, ...(b.id === TRIGGERS && { style: { width: b.w } }) })),
     ...laid.leaves.map((l) => ({ id: `leaf:${l.id}`, type: "leaf", position: { x: l.at.x - 12, y: l.at.y - 24 }, data: { from: l.id }, width: 24, height: 36, selectable: false })),
@@ -236,16 +274,17 @@ export function Canvas({ panel, tools, ...props }: CanvasProps) {
     }
     const room = width - (panel ? PANEL_W : 0)
     const vp = getViewportForBounds({ x: -40, y: -20, width: laid.width + 80, height: laid.height + 40 }, room, height - 72, MIN_ZOOM, 1, 0.04)
-    const zoom = Math.max(0.72, vp.zoom)
+    const floor = runView ? 0.5 : 0.72 // a run reads best whole
+    const zoom = Math.max(floor, vp.zoom)
     const x = (room - laid.width * zoom) / 2
-    const y = vp.zoom < 0.72 ? 64 : Math.max(64, (height - laid.height * zoom) / 2 - 8)
+    const y = vp.zoom < floor ? 64 : Math.max(64, (height - laid.height * zoom) / 2 - 8)
     void rf.setViewport({ x, y, zoom }, { duration })
   }
   useEffect(() => { if (!framed.current && width) { frame(); framed.current = true } }, [width, height, laid]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep the selected step clear of the panel.
   useEffect(() => {
-    if (!selected || !width) return
+    if (!selected || !width || !panel) return
     const b = laid.nodes.find((n) => n.id === selected)
     if (!b) return
     const vp = rf.getViewport()

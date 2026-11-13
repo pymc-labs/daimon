@@ -6,6 +6,8 @@ import { askDaimon, useCatalog, useDraft, useDraftEditor } from "./api"
 import { AskDaimon, type AskTurn } from "./AskDaimon"
 import { Canvas, type InsertAt } from "./Canvas"
 import { DraftBar, DraftTools } from "./DraftBar"
+import { useTestRun } from "./run/lib"
+import { SplitRun } from "./run/TestRun"
 import { Inspector } from "./inspector/Inspector"
 import { clone, duplicateNode, insertNode, removeNode, validate } from "./spec"
 import { SpecView } from "./SpecView"
@@ -17,7 +19,8 @@ export function Design({ wf }: { wf: Workflow }) {
   const { data: catalog } = useCatalog()
   const editor = useDraftEditor(wf, draft)
   const [params, setParams] = useSearchParams()
-  const node = params.get("node") ?? "", view = params.get("view"), ask = params.get("ask")
+  const node = params.get("node") ?? "", view = params.get("view"), ask = params.get("ask"), runN = params.get("run") ?? ""
+  const test = useTestRun(wf.id, runN)
   // One navigation per change: separate setters in one tick would drop all but the last.
   const put = (next: Record<string, string | null>) => setParams((p) => {
     for (const [k, v] of Object.entries(next)) if (v) p.set(k, v); else p.delete(k)
@@ -64,26 +67,29 @@ export function Design({ wf }: { wf: Workflow }) {
 
   return (
     <>
-      <ToggleGroup type="single" variant="segmented" size="sm" value={view || "canvas"} onValueChange={(v) => v && put({ view: v === "canvas" ? null : v })}
-        className="absolute top-4 left-4 z-10 bg-popover shadow-xs">
-        <ToggleGroupItem value="canvas" className="px-3 text-xs">Canvas</ToggleGroupItem>
-        <ToggleGroupItem value="spec" className="px-3 text-xs">Spec</ToggleGroupItem>
-      </ToggleGroup>
-      {view === "spec" ? (
-        <>
-          <SpecView spec={spec} validation={validation} ro={ro} onChange={(s) => editor.save(s, 0)} />
-          {tools && <div className="absolute top-4 right-4 z-10 flex items-center gap-2">{tools}</div>}
-        </>
-      ) : (ro || !isPending) && (
-        // Wait for the draft, so the canvas frames the graph it will show.
-        <Canvas spec={spec} validation={validation} catalog={catalog} changed={changed} flash={flash} selected={node || null} ro={ro}
-          select={select} add={add} remove={remove} duplicate={duplicate} panel={panel} tools={tools} />
-      )}
-      {n && node && <Inspector key={node} id={node} n={n} spec={spec} catalog={catalog} ro={ro} set={set} validation={validation} close={() => select(null)} />}
-      {!n && ask && !ro && (
-        <AskDaimon spec={spec} messages={turns} pending={pending} send={(t) => void send(t)} select={select} close={() => put({ ask: null })} />
-      )}
-      {draft && !ro && <DraftBar wf={wf} draft={draft} shift={panel} select={(id) => put({ view: null, node: id, ask: null })} ask={() => put({ node: null, ask: "1" })} adopt={editor.adopt} />}
+      <div className="relative min-h-0 flex-1">
+        <ToggleGroup type="single" variant="segmented" size="sm" value={view || "canvas"} onValueChange={(v) => v && put({ view: v === "canvas" ? null : v })}
+          className="absolute top-4 left-4 z-10 bg-popover shadow-xs">
+          <ToggleGroupItem value="canvas" className="px-3 text-xs">Canvas</ToggleGroupItem>
+          <ToggleGroupItem value="spec" className="px-3 text-xs">Spec</ToggleGroupItem>
+        </ToggleGroup>
+        {view === "spec" ? (
+          <>
+            <SpecView spec={spec} validation={validation} ro={ro} onChange={(s) => editor.save(s, 0)} />
+            {tools && <div className="absolute top-4 right-4 z-10 flex items-center gap-2">{tools}</div>}
+          </>
+        ) : (ro || !isPending) && (
+          // Wait for the draft, so the canvas frames the graph it will show.
+          <Canvas spec={spec} validation={validation} catalog={catalog} changed={changed} flash={flash} selected={node || null} ro={ro}
+            select={select} add={add} remove={remove} duplicate={duplicate} panel={panel} tools={tools} run={test.overlay} />
+        )}
+        {n && node && <Inspector key={node} id={node} n={n} spec={spec} catalog={catalog} ro={ro} set={set} validation={validation} close={() => select(null)} />}
+        {!n && ask && !ro && (
+          <AskDaimon spec={spec} messages={turns} pending={pending} send={(t) => void send(t)} select={select} close={() => put({ ask: null })} />
+        )}
+        {draft && !ro && <DraftBar wf={wf} draft={draft} shift={panel} select={(id) => put({ view: null, node: id, ask: null })} ask={() => put({ node: null, ask: "1" })} adopt={editor.adopt} />}
+      </div>
+      {runN && <SplitRun wf={wf} live={test} />}
     </>
   )
 }

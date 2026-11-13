@@ -202,7 +202,7 @@ export function validate(spec: Spec): Validation {
 const boundBy = (spec: Spec, id: string) =>
   Object.entries(spec.nodes).find(([, n]) => n.kind === "approval" && [n.binds ?? []].flat().includes(id))?.[0]
 
-const writes = (n: Node) => (n.kind === "action" && toolWrites(n.tool)) || (n.kind === "agent" && n.writes === "allow")
+export const writes = (n: Node) => (n.kind === "action" && toolWrites(n.tool)) || (n.kind === "agent" && n.writes === "allow")
 
 /** Rule of Two classes per step and the grants the spec needs. */
 export function safety(spec: Spec) {

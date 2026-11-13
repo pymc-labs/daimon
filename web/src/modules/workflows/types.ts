@@ -100,17 +100,86 @@ export type DraftPut = { base_revision: number; spec: Spec }
 
 export type Version = { number: number; published_by: Person; published_at: string; note: string; grants: GrantKind[]; runs: number; live: boolean }
 
+export type WaitingReason = "approval" | "question" | "timer" | "event" | "blocked" | "unknown"
 export type RunSummary = {
   id: string; number: number; status: RunStatus; label: string | null; trigger: { kind: TriggerKind; id: string }
   started_at: string; duration_ms: number | null; current_step: string | null; cost_usd: number; version: number; test: boolean
+  /** Title of the current step, or of the step a failed run ended on. */
+  step_title: string | null
+  workflow: { id: string; name: string }; waiting_reason: WaitingReason | null; triggered_by: Person | null
+  /** Set once Retry from failure ran on this run. */
+  redriven: boolean
 }
-/** Milestone B: the run page. Stubbed by the mock. */
+
+// ---------- Run page ----------
+
+export type ErrorClass = "retryable" | "gate" | "contract" | "agent" | "unknown" | "fatal"
+export type AttemptStatus = "running" | "succeeded" | "failed" | "abandoned"
+export type Attempt = {
+  n: number; status: AttemptStatus; started_at: string; duration_ms: number | null; cost_usd: number
+  session: string | null; error: { class: ErrorClass; message: string } | null
+}
+export type WaitKind = "approval" | "question" | "timer" | "event"
+export type RunWait = {
+  kind: WaitKind; status: "waiting" | "completed" | "timed_out" | "cancelled"; addressees: Person[]
+  opened_at: string; expires_at: string | null; closed_at: string | null; decision: string | null; decider: Person | null
+}
+/** One visit of a node, or one For each item. `key` is `node`, `node#2` for a later visit, `node[3]` for an item. */
 export type StepRun = {
-  node: string; visit: number; status: StepStatus; started_at: string | null; duration_ms: number | null; cost_usd: number
-  route: string | null; summary: string | null; output: unknown
+  key: string; node: string; visit: number; item: { index: number; label: string } | null
+  status: StepStatus; started_at: string | null; ended_at: string | null; cost_usd: number
+  route: string | null; attempts: Attempt[]; wait: RunWait | null; lane: string | null
+  /** For each: items done and in all. */
+  progress: { done: number; total: number } | null
+  /** Why it failed or waits for a decision. */
+  reason: string | null
+  /** Edge keys (`from:slot`) that led here. */
+  via: string[]
+  /** Reused from an earlier run (Run from here) or a pinned output (test run). */
+  reused: "fork" | "pinned" | null
 }
-export type RunDetail = RunSummary & { inputs: Record<string, unknown>; steps: StepRun[]; triggered_by: Person | null }
-export type RunEvent = { seq: number; at: string; type: string; node?: string; data?: Record<string, unknown> }
+export type Lane = { id: string; agent: string; session: string }
+export type RunFailure = { reason: string; message: string; step: string | null }
+/** What the ledger projects onto the run; the stream's events update it. */
+export type RunState = {
+  status: RunStatus; waiting_reason: WaitingReason | null; failure: RunFailure | null; outcome: "completed" | "nothing_to_do" | null
+  ended_at: string | null; cost_usd: number; steps: StepRun[]; lanes: Lane[]; current_step: string | null
+}
+export type RunTest = { live_writes: boolean; pinned: string[] }
+export type RunDetail = RunSummary & RunState & {
+  spec: Spec; inputs: Record<string, unknown>; untrusted_inputs: boolean; parent: { id: string; number: number } | null
+  delivery: string | null; test_options: RunTest | null; budget_usd: number; deadline_at: string | null
+  events: number; head_hash: string
+}
+export type EventType =
+  | "run.queued" | "run.started" | "run.waiting" | "run.resumed" | "run.succeeded" | "run.failed" | "run.cancelled" | "run.timed_out" | "run.redriven" | "run.forked_from"
+  | "step.ready" | "step.skipped" | "step.started" | "step.brief_sent" | "step.question_asked" | "step.output_recorded" | "step.route_chosen"
+  | "step.contract_rejected" | "step.nudged" | "step.retry_scheduled" | "step.succeeded" | "step.failed" | "step.cancelled" | "step.unknown" | "step.resolved_by"
+  | "proposal.recorded" | "proposal.decided" | "proposal.sent" | "wait.opened" | "wait.reminded" | "wait.decided" | "wait.timed_out"
+  | "budget.checked" | "budget.exceeded" | "delivery.queued" | "delivery.sent" | "delivery.skipped" | "delivery.refused"
+/** One ledger row. `data` carries what the projection needs; `hash` chains it to the row before. */
+export type RunEvent = {
+  seq: number; at: string; type: EventType; step: string | null; actor: string; detail: string
+  data: Record<string, unknown>; hash: string
+}
+
+export type Proposal = { id: string; tool: string; summary: string; status: "proposed" | "approved" | "rejected" | "sent" | "would_send" }
+export type ActivityLine = { at: string; kind: "message" | "tool" | "note"; text: string; tool?: string }
+export type StepDetail = {
+  key: string; attempt: number; agent: string | null; model: string | null
+  summary: string | null; route: { name: string; reason: string } | null; files: { name: string; size: number }[]
+  input: unknown; output: unknown
+  /** JSON paths under `input` or `output` that came from an untrusted source, such as `input.lead.message`. */
+  untrusted: string[]
+  rejections: { attempt: number; errors: string[] }[]; proposals: Proposal[]
+  activity: ActivityLine[]; plan: { text: string; status: "done" | "active" | "todo" }[]
+}
+
+export type AttentionKind = "failed" | "unknown" | "approval" | "question" | "needs_owner" | "needs_review"
+export type AttentionItem = {
+  kind: AttentionKind; workflow: { id: string; name: string }; run: { id: string; number: number } | null
+  step: string | null; since: string; expires_at: string | null; detail: string
+}
 
 export type Template = { id: string; name: string; trigger: TriggerKind; kinds: Kind[] }
 export type NewWorkflow =
@@ -124,3 +193,4 @@ export type Catalog = {
 
 export type AskMessage = { role: "user" | "assistant"; text: string }
 export type AskReply = { reply: string; draft: Draft; changed: string[] }
+export type Delivery = { id: string; received_at: string; inputs: Record<string, unknown> }

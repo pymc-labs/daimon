@@ -1,9 +1,9 @@
 import {
-  Bot, CircleCheck, CircleDashed, CircleSlash, CircleX, Clock, Code, Flag, Hand, Hourglass, LoaderCircle, Repeat, Shuffle, Split, TimerOff, UserCheck, Webhook,
+  Bot, CircleCheck, CircleDashed, CircleHelp, CircleMinus, CircleSlash, CircleX, Clock, Code, Flag, Hand, Hourglass, LoaderCircle, Repeat, Shuffle, Split, TimerOff, UserCheck, Webhook,
   Workflow as WorkflowIcon, Wrench, Zap, type LucideIcon,
 } from "lucide-react"
 
-import type { Catalog, Kind, Node, RunStatus, Spec, Trigger, TriggerKind } from "./types"
+import type { Catalog, Kind, Node, RunStatus, Spec, StepStatus, Trigger, TriggerKind } from "./types"
 
 /** Each step kind: its icon, name and color (a strip on the card, the icon tint). */
 export const KIND: Record<Kind, { icon: LucideIcon; label: string; strip: string; text: string }> = {
@@ -46,6 +46,18 @@ export const RUN: Record<RunStatus, { icon: LucideIcon; label: string; cls: stri
   failed: { icon: CircleX, label: "Failed", cls: "text-destructive" },
   cancelled: { icon: CircleSlash, label: "Cancelled", cls: "text-muted-foreground" },
   timed_out: { icon: TimerOff, label: "Timed out", cls: "text-destructive" },
+}
+
+export const STEP: Record<StepStatus, { icon: LucideIcon; label: string; cls: string }> = {
+  pending: { icon: CircleDashed, label: "Pending", cls: "text-faint" },
+  ready: { icon: CircleDashed, label: "Ready", cls: "text-muted-foreground" },
+  running: RUN.running,
+  waiting: RUN.waiting,
+  succeeded: RUN.succeeded,
+  failed: RUN.failed,
+  skipped: { icon: CircleMinus, label: "Skipped", cls: "text-faint" },
+  cancelled: RUN.cancelled,
+  unknown: { icon: CircleHelp, label: "Unknown", cls: "text-destructive" },
 }
 
 /** The facts on the line under a card's title: what the step does, in a few words. */

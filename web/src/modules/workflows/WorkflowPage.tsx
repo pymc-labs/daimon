@@ -14,7 +14,8 @@ import { NotFound } from "@/pages/Status"
 import { useCreate, useDelete, useDraft, usePatch, useWorkflow } from "./api"
 import { Design } from "./Design"
 import { RunDialog } from "./RunDialog"
-import { AccessTab, RunsTab, TriggersTab, VersionsTab } from "./tabs"
+import { RunsTab } from "./run/RunsTable"
+import { AccessTab, TriggersTab, VersionsTab } from "./tabs"
 import { StatusBadge } from "./ui"
 import { toYaml } from "./yaml"
 
@@ -52,7 +53,7 @@ export function WorkflowPage() {
     <Page
       crumbs={crumbs}
       flush
-      className={design ? "relative overflow-hidden bg-muted/40" : undefined}
+      className={design ? "relative flex flex-col overflow-hidden bg-muted/40" : undefined}
       tabs={[
         { label: "Design", to: b, end: true }, { label: "Runs", to: `${b}/runs` }, { label: "Triggers", to: `${b}/triggers` },
         { label: "Access", to: `${b}/access` }, { label: "Versions", to: `${b}/versions` },

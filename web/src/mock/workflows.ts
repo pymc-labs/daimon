@@ -1,14 +1,18 @@
 // Workflows: live specs, one draft each, versions and runs. Validation runs the same spec logic as the canvas.
 import { http, HttpResponse, type HttpHandler } from "msw"
 
-import { clone, diff, insertNode, validate } from "@/modules/workflows/spec"
+import { allEdges, clone, diff, insertNode, titleOf, toolWrites, validate } from "@/modules/workflows/spec"
+import { ACTIVE_RUN, project } from "@/modules/workflows/runs"
 import type {
-  AskReply, Catalog, Draft, DraftPut, NewWorkflow, Person, RunDetail, RunStatus, RunSummary, Spec, Status, Template, Tick, Version, Workflow,
+  AskReply, AttentionItem, Catalog, Draft, DraftPut, NewWorkflow, Person, RunTest, Spec, Status, Template, Tick, Version, Workflow,
   WorkflowPatch, WorkflowSummary,
 } from "@/modules/workflows/types"
 import { fromYaml } from "@/modules/workflows/yaml"
-import { notFound, unauthorized, wait } from "./util"
+import { notFound, sleep, unauthorized, wait } from "./util"
 import { me } from "./world"
+import {
+  cancel, chain, decideUnknown, decideWait, detailOf, redrive, start, stepDetail, summaryOf, verify, visible as released, type Decision, type Run, type Script,
+} from "./workflows-runs"
 import { SPECS, TEMPLATE_SPECS } from "./workflows-specs"
 
 const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
@@ -49,14 +53,11 @@ const TEMPLATES: Template[] = [
 type Stored = {
   id: string; status: Status; owner: Person; live: Spec | null; version: number | null; draft: Draft | null
   ticks: string; spend: number; failing?: boolean; next_h: number | null; editors: Person[]; runners: Person[]
-  source_routine?: { id: string; name: string }; labels?: string[]; runs?: RunSummary[]; cap?: number
+  source_routine?: { id: string; name: string }; labels?: string[]; cap?: number
 }
 
-/** Ticks from a pattern, oldest first: s succeeded, f failed, w waiting, r running, c cancelled. */
-const CODE: Record<string, RunStatus> = { s: "succeeded", f: "failed", w: "waiting", r: "running", c: "cancelled", t: "timed_out" }
-
 const W: Stored[] = [
-  { id: "wf_lead", status: "live", owner: P.maya!, live: SPECS.lead, version: 7, draft: null, ticks: "ssssfsssws", spend: 18.4, next_h: null,
+  { id: "wf_lead", status: "live", owner: P.maya!, live: SPECS.lead, version: 7, draft: null, ticks: "ssfssTsswr", spend: 18.4, next_h: null,
     editors: [P.jonas!], runners: [P.priya!], labels: ["ana@brightwave.example", "lee@tidewater.example", "sam@larkspur.example", "info@cobalt.example", "jo@northwind.example"] },
   { id: "wf_digest", status: "live", owner: P.jonas!, live: SPECS.digest, version: 3, draft: null, ticks: "ssssssssss", spend: 2.15, next_h: 62, editors: [P.maya!], runners: [] },
   { id: "wf_meeting", status: "live", owner: P.maya!, live: SPECS.meeting, version: 5, draft: null, ticks: "sssssfssss", spend: 9.8, next_h: null, editors: [], runners: [P.jonas!],
@@ -64,10 +65,10 @@ const W: Stored[] = [
   { id: "wf_profit", status: "live", owner: P.jonas!, live: SPECS.profit, version: 2, draft: null, ticks: "ssssss", spend: 1.2, next_h: 450, editors: [P.maya!], runners: [] },
   { id: "wf_triage", status: "live", owner: P.priya!, live: SPECS.triage, version: 11, draft: null, ticks: "ssssssscss", spend: 24.65, next_h: null, editors: [P.jonas!], runners: [],
     labels: ["Adstock decay ignores lag", "Docs: install on Windows", "Support Python 3.14", "Prior predictive fails"] },
-  { id: "wf_research", status: "needs_review", owner: P.maya!, live: SPECS.research, version: 2, draft: null, ticks: "sss", spend: 6.3, next_h: null, editors: [], runners: [] },
+  { id: "wf_research", status: "needs_review", owner: P.maya!, live: SPECS.research, version: 2, draft: null, ticks: "sssr", spend: 6.3, next_h: null, editors: [], runners: [] },
   { id: "wf_content", status: "live", owner: P.priya!, live: SPECS.content, version: 4, draft: null, ticks: "ssfsssw", spend: 7.9, next_h: null, editors: [P.maya!], runners: [P.maya!],
     labels: ["Priors for media mix", "Why Bayesian pricing", "Adstock in practice"] },
-  { id: "wf_onboard", status: "live", owner: P.jonas!, live: SPECS.onboard, version: 6, draft: null, ticks: "ssssw", spend: 4.4, next_h: null, editors: [P.maya!], runners: [P.priya!],
+  { id: "wf_onboard", status: "live", owner: P.jonas!, live: SPECS.onboard, version: 6, draft: null, ticks: "ssssu", spend: 4.4, next_h: null, editors: [P.maya!], runners: [P.priya!],
     labels: ["Brightwave Telecom", "Tidewater Foods", "Larkspur Retail"] },
   { id: "wf_alert", status: "live", owner: P.jonas!, live: SPECS.alert, version: 9, draft: null, ticks: "ssfsffsftf", spend: 12.75, failing: true, next_h: null, editors: [P.maya!], runners: [],
     labels: ["api-latency-p99", "worker-queue-depth", "db-cpu"] },
@@ -106,21 +107,118 @@ const versionsOf = (w: Stored): Version[] => !w.version ? [] : Array.from({ leng
     grants: n === w.version && w.id === "wf_triage" ? ["builtins", "untrusted_waiver"] : [], runs: i === 0 ? 40 + w.ticks.length * 3 : 12 - Math.min(i, 8), live: i === 0 }
 })
 
-const DUR: Record<string, number> = { s: 95_000, f: 41_000, c: 12_000, t: 3_600_000 }
-function runsOf(w: Stored): RunSummary[] {
-  if (w.runs) return w.runs
-  const trig = w.live?.triggers?.[0] ?? { id: "manual", kind: "manual" as const }
-  const nodes = Object.keys(w.live?.nodes ?? {})
-  const n = w.ticks.length
-  w.runs = [...w.ticks].reverse().map((c, i) => ({
-    id: `${w.id}_run${n - i}`, number: 120 + n - i, status: CODE[c]!, label: w.labels ? w.labels[i % w.labels.length]! : null, trigger: { kind: trig.kind, id: trig.id },
-    started_at: ago(i * 19 + 1.5), duration_ms: c === "w" || c === "r" ? null : DUR[c]! + ((i * 7919) % 60_000), cost_usd: Math.round((0.12 + ((i * 37) % 50) / 100) * 100) / 100,
-    current_step: c === "w" ? nodes.find((k) => w.live!.nodes[k]!.kind === "approval" || w.live!.nodes[k]!.kind === "wait") ?? null : c === "f" ? nodes[1] ?? null : null,
-    version: w.version ?? 0, test: false,
-  }))
-  return w.runs
+// ---------- runs: ticks are a pattern, oldest first (s succeeded, f failed, w waiting, r running, c cancelled, t timed out, u unknown, T test) ----------
+
+const T0 = Date.now()
+const RUNS = new Map<string, Run[]>()
+const COMPETITORS = ["Northwind", "Cobalt", "Tidewater", "Larkspur", "Brightwave", "Fernhill", "Juniper", "Halcyon", "Meridian", "Quarry", "Sable", "Wren"]
+const INPUT: Record<string, unknown> = {
+  name: "Ana Souza", message: "Hi, we run 40 stores and want to forecast promotions before Q1. Could we talk next week?", contact_email: "ops@brightwave.example",
+  kickoff_date: "2026-11-20", competitors: COMPETITORS, audience: "Marketing leads", repo: "pymc-labs/pymc-marketing",
 }
-const ticksOf = (w: Stored): Tick[] => runsOf(w).slice(0, 10).reverse().map((r) => ({ number: r.number, status: r.status, at: r.started_at }))
+function inputsFor(spec: Spec, label: string | null): Record<string, unknown> {
+  const labelled = spec.label?.match(/inputs\.(\w+)/)?.[1]
+  return Object.fromEntries(Object.entries(spec.inputs?.properties ?? {}).map(([k, f]) => [k,
+    k === labelled && label ? label : k in INPUT ? INPUT[k] : f.type === "array" ? ["First", "Second"] : f.format === "email" ? "ana@brightwave.example" : `Sample ${k}`]))
+}
+/** Nodes in the order a default run meets them. */
+function order(spec: Spec) {
+  const out: string[] = [], seen = new Set<string>(), q = [spec.start]
+  while (q.length) {
+    const id = q.shift()!
+    if (seen.has(id) || !spec.nodes[id]) continue
+    seen.add(id)
+    out.push(id)
+    q.push(...allEdges(spec).filter((e) => e.from === id).map((e) => e.to))
+  }
+  return out
+}
+function scriptFor(w: Stored, spec: Spec, code: string, i: number): Script {
+  const ids = order(spec)
+  const first = (...kinds: string[]) => ids.find((id) => kinds.includes(spec.nodes[id]!.kind)) ?? spec.start
+  const writes = ids.find((id) => spec.nodes[id]!.kind === "action" && toolWrites(spec.nodes[id]!.tool)) ?? first("action", "agent")
+  const choose: Script["choose"] = w.id === "wf_content" ? { critique: ["routes.revise", "routes.accept"] }
+    : w.id === "wf_digest" && i % 3 === 2 ? { risky: ["else"] } : w.id === "wf_lead" && i === 4 ? { research: ["routes.unqualified"] } : undefined
+  const end: Script["end"] = code === "f" ? { node: w.id === "wf_lead" ? "draft_reply" : first("agent", "code", "action"), as: "fail" }
+    : code === "w" ? { node: first("approval", "wait"), as: "wait", visit: 1 }
+    : code === "c" ? { node: first("agent", "action"), as: "cancel" }
+    : code === "t" ? { node: first("wait", "agent"), as: "timeout" }
+    : code === "u" ? { node: writes, as: "unknown" } : undefined
+  return { choose, end }
+}
+function runsOf(w: Stored): Run[] {
+  const have = RUNS.get(w.id)
+  if (have) return have
+  const spec = w.live
+  const n = w.ticks.length
+  const trig = spec?.triggers?.[0] ?? { id: "manual", kind: "manual" as const }
+  const runs = !spec ? [] : [...w.ticks].reverse().map((code, i) => {
+    const number = 119 + n - i
+    const label = spec.label && w.labels ? w.labels[i % w.labels.length]! : null
+    const run: Run = {
+      id: `${w.id}_run${number}`, wf: { id: w.id, name: spec.name }, number, spec, version: code === "T" ? w.version! : w.version! - (i > 6 ? 1 : 0), inputs: inputsFor(spec, label),
+      label, trigger: code === "T" ? { kind: "manual", id: "manual" } : { kind: trig.kind, id: trig.id },
+      delivery: trig.kind === "webhook" && code !== "T" ? `dlv_${chain("", w.id + number).slice(0, 10)}` : null, by: code === "T" ? P.maya! : null, owner: w.owner,
+      test: code === "T" ? { live_writes: false, pinned: [] } : null, parent: null, script: scriptFor(w, spec, code, i), events: [],
+    }
+    const at = code === "r" ? T0 - (w.id === "wf_research" ? 75_000 : 25_000) : T0 - (i * 19 + 1.5) * 3_600_000
+    start(run, at)
+    return run
+  })
+  RUNS.set(w.id, runs)
+  return runs
+}
+const ticksOf = (w: Stored): Tick[] => runsOf(w).filter((r) => !r.test).slice(0, 10).reverse().map((r) => {
+  const s = summaryOf(r)
+  return { number: r.number, status: s.status, at: s.started_at }
+})
+const allRuns = () => visible().flatMap((w) => runsOf(w))
+const findRun = (id: unknown) => allRuns().find((r) => r.id === id)
+
+/** Releases ledger rows as their time comes; resumes after `Last-Event-ID`. */
+function runStream(run: Run, after: number) {
+  const enc = new TextEncoder()
+  let closed = false
+  const body = new ReadableStream({
+    async start(ctrl) {
+      let seq = after
+      while (!closed) {
+        for (const e of released(run).filter((x) => x.seq > seq)) {
+          ctrl.enqueue(enc.encode(`id: ${e.seq}\ndata: ${JSON.stringify(e)}\n\n`))
+          seq = e.seq
+        }
+        if (!ACTIVE_RUN.includes(project(released(run)).status) && seq >= run.events.length) break
+        await sleep(400)
+      }
+      if (!closed) ctrl.close()
+    },
+    cancel() { closed = true },
+  })
+  return new HttpResponse(body, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-store" } })
+}
+
+function attention(): AttentionItem[] {
+  const m = me()!
+  const out: AttentionItem[] = []
+  for (const w of visible()) {
+    const name = specOf(w).name
+    if (w.status === "needs_owner" || w.status === "needs_review")
+      out.push({ kind: w.status, workflow: { id: w.id, name }, run: null, step: null, since: ago(30), expires_at: null, detail: w.status === "needs_owner" ? `${w.owner.name} left` : "Changed grants" })
+    for (const r of runsOf(w)) {
+      const d = detailOf(r)
+      const run = { id: r.id, number: r.number }
+      if (d.status === "failed" && !d.redriven && r === runsOf(w).find((x) => !x.test && summaryOf(x).status !== "running"))
+        out.push({ kind: "failed", workflow: { id: w.id, name }, run, step: d.failure?.step ?? null, since: d.ended_at!, expires_at: null, detail: d.failure?.message ?? "" })
+      const open = d.steps.find((s) => s.status === "unknown" || (s.wait?.status === "waiting" && s.wait.kind === "approval" && s.wait.addressees.some((p) => p.id === m.id)))
+      if (!open || d.status !== "waiting") continue
+      out.push({
+        kind: open.status === "unknown" ? "unknown" : "approval", workflow: { id: w.id, name }, run, step: open.key, since: open.wait?.opened_at ?? open.started_at!,
+        expires_at: open.wait?.expires_at ?? null, detail: open.status === "unknown" ? open.reason ?? "" : titleOf(open.node, r.spec.nodes[open.node]),
+      })
+    }
+  }
+  return out.sort((a, b) => b.since.localeCompare(a.since))
+}
 
 const specOf = (w: Stored) => w.live ?? w.draft!.spec
 function summary(w: Stored): WorkflowSummary {
@@ -330,34 +428,110 @@ export const workflowsHandlers: HttpHandler[] = [
   http.get("/api/workflows/:id/runs", async ({ params }) => {
     await wait()
     const w = find(params.id)
-    return w ? HttpResponse.json(runsOf(w)) : notFound()
+    return w ? HttpResponse.json(runsOf(w).map((r) => summaryOf(r))) : notFound()
   }),
   http.post("/api/workflows/:id/runs", async ({ params, request }) => {
     await wait(300)
     const w = find(params.id)
     if (!w) return notFound()
-    const b = (await request.json()) as { inputs: Record<string, unknown>; test?: boolean }
+    const b = (await request.json()) as { inputs: Record<string, unknown>; test?: RunTest | null }
     const runs = runsOf(w)
-    const spec = specOf(w)
-    const r: RunSummary = {
-      id: `${w.id}_run${Date.now()}`, number: (runs[0]?.number ?? 0) + 1, status: "running", label: spec.label ? String(Object.values(b.inputs)[0] ?? "") || null : null,
-      trigger: { kind: "manual", id: "manual" }, started_at: new Date().toISOString(), duration_ms: null, current_step: spec.start, cost_usd: 0,
-      version: w.version ?? 0, test: !!b.test,
+    const spec = b.test ? draftOf(w).spec : specOf(w)
+    const m = me()!
+    const label = spec.label?.match(/inputs\.(\w+)/)?.[1]
+    const run: Run = {
+      id: `${w.id}_run${(runs[0]?.number ?? 119) + 1}`, wf: { id: w.id, name: spec.name }, number: (runs[0]?.number ?? 119) + 1, spec, version: w.version ?? 0,
+      inputs: b.inputs, label: label ? String(b.inputs[label] ?? "") || null : null, trigger: { kind: "manual", id: "manual" }, delivery: null,
+      by: { id: m.id, name: m.name }, owner: w.owner, test: b.test ?? null, parent: null, script: { pace: b.test ? 0.15 : 0.4, decide_after: 2 }, events: [],
     }
-    runs.unshift(r)
-    return HttpResponse.json(r, { status: 201 })
+    start(run, Date.now())
+    runs.unshift(run)
+    return HttpResponse.json(summaryOf(run), { status: 201 })
   }),
-  // Milestone B: the run page. A summary with inputs and no step detail yet.
-  http.get("/api/workflows/:id/runs/:run", async ({ params }) => {
+  http.get("/api/workflows/:id/deliveries/last", async ({ params }) => {
+    await wait(250)
+    const w = find(params.id)
+    const r = w && runsOf(w).find((x) => x.delivery)
+    return r ? HttpResponse.json({ id: r.delivery, received_at: r.events[0]!.at, inputs: r.inputs }) : notFound()
+  }),
+  http.get("/api/workflows/:id/runs/:n", async ({ params }) => {
     await wait()
     const w = find(params.id)
-    const r = w && runsOf(w).find((x) => x.id === params.run)
-    if (!r) return notFound()
-    const body: RunDetail = { ...r, inputs: {}, steps: [], triggered_by: null }
-    return HttpResponse.json(body)
+    const r = w && runsOf(w).find((x) => String(x.number) === params.n)
+    return r ? HttpResponse.json(detailOf(r)) : notFound()
   }),
-  http.get("/api/workflows/:id/runs/:run/events", async () => {
+]
+
+const runOps: Record<string, (r: Run, body: Record<string, unknown>, by: Person) => Run | boolean | void> = {
+  cancel: (r, _, by) => cancel(r, by),
+  redrive: (r, _, by) => redrive(r, by),
+  decide: (r, b, by) => decideUnknown(r, b as Decision, by),
+  approve: (r, b, by) => decideWait(r, String(b.step), String(b.route), by),
+  rerun: (r, b, by) => fork(r, by, b),
+  fork: (r, b, by) => fork(r, by, b),
+}
+/** Run again (no step) or Run from here: a new run on the chosen version, sharing the parent's finished upstream steps. */
+function fork(r: Run, by: Person, b: Record<string, unknown>) {
+  const w = W.find((x) => x.id === r.wf.id)!
+  const runs = runsOf(w)
+  const spec = b.version === "draft" ? draftOf(w).spec : b.version === "live" ? specOf(w) : r.spec
+  const number = runs[0]!.number + 1
+  const run: Run = {
+    ...r, id: `${w.id}_run${number}`, number, spec, version: b.version === "live" ? w.version ?? r.version : r.version, inputs: (b.inputs as Record<string, unknown>) ?? r.inputs,
+    trigger: { kind: "manual", id: "manual" }, delivery: null, by, test: b.version === "draft" || r.test ? r.test ?? { live_writes: false, pinned: [] } : null,
+    parent: b.step ? { id: r.id, number: r.number } : null, script: { pace: 0.4, decide_after: 2 }, events: [],
+  }
+  start(run, Date.now(), b.step ? { parent: r, from: String(b.step) } : undefined)
+  runs.unshift(run)
+  return run
+}
+
+/** Run handlers go before `/api/workflows/:id`, which would match `/api/workflows/runs`. */
+export const workflowRunsHandlers: HttpHandler[] = [
+  http.get("/api/workflows/runs", async () => {
     await wait()
-    return HttpResponse.json([])
+    if (!me()) return unauthorized()
+    const rows = allRuns().map((r) => summaryOf(r)).sort((a, b) => b.started_at.localeCompare(a.started_at))
+    return HttpResponse.json(rows)
+  }),
+  http.get("/api/workflows/attention", async () => {
+    await wait()
+    return me() ? HttpResponse.json(attention()) : unauthorized()
+  }),
+  http.get("/api/workflows/runs/:run", async ({ params }) => {
+    await wait()
+    const r = findRun(params.run)
+    return r ? HttpResponse.json(detailOf(r)) : notFound()
+  }),
+  http.get("/api/workflows/runs/:run/events", async ({ params }) => {
+    await wait()
+    const r = findRun(params.run)
+    return r ? HttpResponse.json(released(r)) : notFound()
+  }),
+  http.get("/api/workflows/runs/:run/verify", async ({ params }) => {
+    await wait(500)
+    const r = findRun(params.run)
+    return r ? HttpResponse.json({ ok: verify(released(r)), events: released(r).length }) : notFound()
+  }),
+  http.get("/api/workflows/runs/:run/stream", ({ params, request }) => {
+    const r = findRun(params.run)
+    return r ? runStream(r, Number(request.headers.get("Last-Event-ID")) || 0) : notFound()
+  }),
+  http.get("/api/workflows/runs/:run/steps/:key", async ({ params, request }) => {
+    await wait(120)
+    const r = findRun(params.run)
+    const a = Number(new URL(request.url).searchParams.get("attempt")) || null
+    const d = r && stepDetail(r, decodeURIComponent(String(params.key)), a)
+    return d ? HttpResponse.json(d) : notFound()
+  }),
+  http.post("/api/workflows/runs/:run/:op", async ({ params, request }) => {
+    await wait(300)
+    const r = findRun(params.run)
+    const op = runOps[String(params.op)]
+    if (!r || !op) return notFound()
+    const m = me()!
+    const out = op(r, (await request.json().catch(() => ({}))) as Record<string, unknown>, { id: m.id, name: m.name })
+    if (out === false) return HttpResponse.json({ detail: "This step is no longer waiting." }, { status: 409 })
+    return HttpResponse.json(summaryOf(typeof out === "object" ? out : r))
   }),
 ]
