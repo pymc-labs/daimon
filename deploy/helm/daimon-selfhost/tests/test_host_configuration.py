@@ -451,7 +451,19 @@ class HostConfigurationTests(unittest.TestCase):
             for r in resources
             if r["kind"] == "NetworkPolicy" and r["metadata"]["name"].endswith("-teams-egress")
         )["spec"]
-        self.assertEqual(policy["podSelector"], {"matchLabels": {"app": "acme-daimon-teams"}})
+        # The bot, MCP tools and scheduled runs all send to Teams; the harness never does.
+        self.assertEqual(
+            policy["podSelector"],
+            {
+                "matchExpressions": [
+                    {
+                        "key": "app",
+                        "operator": "In",
+                        "values": ["acme-daimon-teams", "acme-daimon-mcp", "acme-daimon-scheduler"],
+                    }
+                ]
+            },
+        )
         self.assertEqual(
             policy["egress"],
             [

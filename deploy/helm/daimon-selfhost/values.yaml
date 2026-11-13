@@ -86,7 +86,7 @@ networkPolicy:
   blobCidrs: []
   # External PG only: explicit IPv4 /32 destinations for the host pods.
   hostPostgresCidrs: []
-  # Host Teams pod only; never selects the harness. Resolve Bot Framework/Entra
+  # Teams, MCP and scheduler host pods; never the harness. Resolve Bot Framework/Entra
   # endpoint IPs and keep the /32 list current before enabling Teams delivery.
   teamsEgress: {enabled: false, cidrs: []}
   # Federation needs Entra HTTPS in the proxy pod too.

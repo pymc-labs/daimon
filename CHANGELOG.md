@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unless `RELEASE` and `NAMESPACE` are exported, and `teardown` needs
   `DELETE_NAMESPACE` set to the namespace it deletes.
 
+- Let the AKS chart's MCP and scheduler pods reach Teams too, so agent tools and
+  scheduled runs can post there; the harness still cannot.
+
 - Fail the AKS chart render when Teams egress is on with no destinations; it
   allowed the Teams pod HTTPS to any address.
 

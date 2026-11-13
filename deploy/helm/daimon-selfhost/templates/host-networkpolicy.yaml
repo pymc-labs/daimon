@@ -49,7 +49,16 @@ kind: NetworkPolicy
 metadata:
   name: {{ include "d.name" . }}-teams-egress
 spec:
-  podSelector: {matchLabels: {app: {{ include "d.name" . }}-teams}}
+  # Every host process with the Teams settings may call Teams: the bot replies,
+  # MCP tools and scheduled runs post. The harness never gets this rule.
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          {{- range $name := list "teams" "mcp" "scheduler" }}
+          - {{ include "d.name" $ }}-{{ $name }}
+          {{- end }}
   policyTypes: [Egress]
   egress:
     - to:

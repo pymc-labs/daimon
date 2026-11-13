@@ -135,8 +135,8 @@ Teams defaults off. Enable `services.teams.enabled` and configure its external
 dependencies before attempting delivery. Teams has its own
 `networkPolicy.teamsEgress.enabled` toggle and `cidrs` list:
 resolve the Bot Framework and Entra endpoint addresses to explicit `/32`s and
-keep them current. This policy selects only the Teams host pod, preserving the
-harness lockdown; never turn off the global policy to enable Teams. Avoid broad
+keep them current. This policy selects the Teams, MCP and scheduler host pods,
+which all send to Teams, and never the harness; never turn off the global policy to enable Teams. Avoid broad
 policies: Kubernetes unions egress allowances across matching policies.
 
 NetworkPolicy defaults to deny harness egress except cluster DNS and the MCP
