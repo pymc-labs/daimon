@@ -82,7 +82,8 @@ Conversation history is on by default. An operator turns it off with
 `DAIMON_FEATURES__CONVERSATION_RETENTION=0`, and a workspace admin can shorten
 it in `/settings`.
 
-Billing and usage records are kept for accounting, without who used them, so a
+When a workspace is retired, its billing and usage records are kept for
+accounting without the person, account or thread they came from, so a
 reinstalled workspace keeps its balance. Notebooks keep the expiry
 they were published with, at most 365 days.
 

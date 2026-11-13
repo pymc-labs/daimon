@@ -20,6 +20,7 @@ from typing import Any, cast
 from daimon.core._models import (
     Account,
     AccountGitHubLink,
+    AccountingOutbox,
     AgentChannelMemoryStore,
     AgentMemoryStore,
     AgentPersonalMemoryStore,
@@ -51,6 +52,7 @@ from sqlalchemy import (
     literal_column,
     not_,
     null,
+    or_,
     select,
     text,
     update,
@@ -81,7 +83,15 @@ PERSON_COLUMNS: dict[str, tuple[str, ...]] = {
     "promo_redemptions": ("redeemed_by_account_id",),
     "promo_channel_redemptions": ("redeemed_by_account_id",),
     "accounting_outbox": ("row",),
+    "usage_observation": ("applied",),
 }
+# Person paths inside a kept observation. The outbox row and the usage revision hold the
+# same observation, compared for equality on replay, so both are cleared alike.
+_OBSERVATION_PERSON_PATHS = (
+    "{observation,thread_id}",
+    "{observation,turn_id}",
+    "{observation,session,account_id}",
+)
 
 # Purged through their own helper rather than a plain delete.
 _OWN_HELPER = {"security_audit_events"}
@@ -173,10 +183,11 @@ async def _scrub(session: AsyncSession, tenant_id: uuid.UUID) -> None:
                 # NOT NULL and part of a unique key: a stable pseudonym replaces it.
                 col = cast(Column[str], table.c[column])
                 values[column] = literal("retired:") + func.md5(col)
-            elif column == "row":
-                values[column] = func.jsonb_set(
-                    table.c.row, text("'{observation,thread_id}'"), text("'null'::jsonb")
-                )
+            elif column in ("row", "applied"):
+                value: Any = table.c[column]
+                for path in _OBSERVATION_PERSON_PATHS:
+                    value = func.jsonb_set(value, text(f"'{path}'"), text("'null'::jsonb"))
+                values[column] = value
             else:
                 values[column] = null()
         stmt = update(table).where(table.c.tenant_id == tenant_id).values(**values)
@@ -296,18 +307,17 @@ async def finish_retirement(
 
 
 async def has_pending_settle(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
-    """Whether any of the tenant's provider sessions still has usage waiting to settle."""
+    """Whether any of the tenant's provider sessions still has usage waiting to settle,
+    or a settlement record is not yet applied."""
     ids = tenant_session_ids(tenant_id).subquery()
-    return bool(
-        await session.scalar(
-            select(
-                exists().where(
-                    SessionSettleState.managed_session_id.in_(select(ids)),
-                    SessionSettleState.settle_requested_at.is_not(None),
-                )
-            )
-        )
+    settling = exists().where(
+        SessionSettleState.managed_session_id.in_(select(ids)),
+        SessionSettleState.settle_requested_at.is_not(None),
     )
+    unapplied = exists().where(
+        AccountingOutbox.tenant_id == tenant_id, AccountingOutbox.applied_at.is_(None)
+    )
+    return bool(await session.scalar(select(or_(settling, unapplied))))
 
 
 async def list_work(session: AsyncSession) -> list[tuple[uuid.UUID, dict[str, list[str]]]]:

@@ -16,6 +16,7 @@ import structlog
 from daimon.core import tenant_retirement
 from daimon.core._models import (
     Account,
+    AccountingOutbox,
     AgentMemoryStore,
     Base,
     SessionSettleState,
@@ -26,6 +27,7 @@ from daimon.core._models import (
     TenantRetirement,
     ThreadSession,
     UsageEvent,
+    UsageObservation,
     UserSkill,
 )
 from daimon.core.config import Settings, load_settings
@@ -44,6 +46,8 @@ from daimon.testing.factories import (
     make_thread_session,
     make_usage_event,
 )
+from mux.contracts.ids import ResourceRef
+from mux.contracts.usage import UsageObservation as Observation
 from pydantic import SecretStr
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -595,3 +599,52 @@ async def test_retiring_at_once_refuses_settling_usage_unless_forced(
         tenant = await get_tenant(session, tenant_id)
     assert tenant is not None and tenant.archived_at is None, "a refused retirement changes nothing"
     assert await tenant_retirement.retire(sm, tenant_id=tenant_id, force=True), "force goes ahead"
+
+
+def _observation(tenant_id: uuid.UUID) -> dict[str, Any]:
+    session = ResourceRef(
+        id="sesn_a",
+        kind="session",
+        provider="anthropic",
+        account_scope_id="deployment",
+        tenant_id=str(tenant_id),
+        account_id="acct-person",
+    )
+    return Observation(
+        id="obs",
+        revision=1,
+        session=session,
+        turn_id="turn-1",
+        thread_id="thread-1",
+        grain="turn",
+        basis="cumulative",
+        completeness="measured",
+        observed_at=datetime(2026, 1, 1, tzinfo=UTC),
+    ).model_dump(mode="json")
+
+
+async def test_kept_settlement_records_lose_who_and_where_but_stay_equal(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant_id = await _seed(db_session, db_session_factory, "outbox-guild")
+    observation = _observation(tenant_id)
+    keys = {"binding_id": "bind", "observation_id": "obs", "revision": 1, "tenant_id": tenant_id}
+    db_session.add(AccountingOutbox(**keys, row={"observation": observation}))
+    db_session.add(UsageObservation(**keys, applied={"observation": observation}))
+    await db_session.commit()
+    assert await store.has_pending_settle(db_session, tenant_id=tenant_id), (
+        "an unapplied settlement record counts as usage still settling"
+    )
+    await db_session.execute(update(AccountingOutbox).values(applied_at=func.now()))
+    await db_session.commit()
+
+    assert await tenant_retirement.retire(db_session_factory, tenant_id=tenant_id)
+
+    db_session.expire_all()
+    row = (await db_session.scalars(select(AccountingOutbox.row))).one()["observation"]
+    applied = (await db_session.scalars(select(UsageObservation.applied))).one()["observation"]
+    for kept in (row, applied):
+        assert (kept["turn_id"], kept["thread_id"]) == (None, None), "no turn or thread is kept"
+        assert kept["session"]["account_id"] is None, "nor the account that used it"
+    assert row == applied, "both copies change alike, so a replay still finds them equal"
+    assert Observation.model_validate(row).session.id == "sesn_a", "the record stays valid"
