@@ -65,7 +65,12 @@ async def list_teams_installations(
 async def record_teams_chat(
     session: AsyncSession, *, tenant_id: uuid.UUID, conversation_id: str
 ) -> None:
-    """Note a 1:1 or group chat the bot is in, so the organisation counts as installed."""
+    """Note a 1:1 or group chat the bot is in, so the organisation counts as installed.
+
+    Takes the tenant row lock, as removal does, so a removal that archived first is seen
+    by the caller, which clears the archive after recording.
+    """
+    await session.execute(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update())
     await record_teams_installation(
         session,
         tenant_id=tenant_id,

@@ -26,6 +26,7 @@ from .conftest import (
     TeamsApiFake,
     build_teams_runtime,
     make_channel_activity,
+    make_message_activity,
     patched_turns,
     post_activity,
     running_service,
@@ -253,3 +254,17 @@ async def test_activity_from_an_archived_organisation_clears_the_archive(
             await post_activity(service, make_channel_activity())
             await service.turns.drain(timeout=30)
     assert not await _archived(db_session_factory), "inbound activity clears the archive"
+
+
+async def test_a_chat_recorded_after_the_last_removal_archived_clears_the_archive(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """A new chat's first message racing the last removal: the removal archives first, the
+    chat row lands after it, and the tenant must not stay archived while the chat is live."""
+    async with running_service(build_teams_runtime(db_session_factory), teams_api_fake) as service:
+        await post_activity(service, _installation("add"))  # the live check has just run
+        await set_provision_status(db_session_factory, tenant_id=TENANT, archive=True)
+        with patched_turns():
+            await post_activity(service, make_message_activity(conversation_id="a:1new-chat"))
+            await service.turns.drain(timeout=30)
+    assert not await _archived(db_session_factory), "a chat recorded after the archive clears it"

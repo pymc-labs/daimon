@@ -167,6 +167,7 @@ class TeamInstalls:
             log.warning("teams.installation.record_failed", error=type(err).__name__)
             return
         self._chats.add(conversation.id)
+        await self.restore()  # a removal of the last installation may have archived first
 
     async def on_install(self, ctx: ActivityContext[InstalledActivity]) -> None:
         """Record a team install and welcome whoever installed the bot."""
