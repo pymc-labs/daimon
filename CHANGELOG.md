@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Let AKS registration grant selfhosted model replies in Teams: set `TEAMS_GRANTS`
+  to map Teams channel or chat IDs to the Entra object IDs of the people allowed there.
+
 - Install the AKS chart as a second release on a shared cluster. The AKS scripts
   take `RELEASE`, `NAMESPACE`, `SECRET_PREFIX` and `VALUES_FILE`. An empty
   `ingress.mcpHost` or `ingress.teamsHost` skips that Ingress. `teardown` keeps

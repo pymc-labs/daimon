@@ -634,6 +634,25 @@ bash deploy/helm/daimon-selfhost/scripts/aks.sh turn
 bash deploy/helm/daimon-selfhost/scripts/aks.sh egress-check
 ```
 
+### Grant Teams model replies
+
+Teams turns get model replies only where registration granted them. Set
+`TEAMS_GRANTS` before `register` to a JSON object that maps each Teams
+conversation to the Entra object IDs of the people allowed there:
+
+```sh
+export TEAMS_GRANTS='{"19:abc123@thread.tacv2": ["<entra-object-id>", "<entra-object-id>"]}'
+bash deploy/helm/daimon-selfhost/scripts/aks.sh register
+```
+
+A conversation is a channel ID (from the channel link), a group chat ID, or a
+person's 1:1 chat ID. A refused turn logs `selfhosted.grant_missing` in the Teams
+host log with its `channel_id`, which is how to find a 1:1 chat ID. The tenant
+is the Teams host's `DAIMON_TEAMS__TENANT_ID` setting.
+Each person gets one grant row per conversation, and the Teams tenant joins the
+harness binding. Anyone else, or any other conversation, is refused. Re-run
+`register` with the full map to add people; it restarts the Teams host.
+
 `register` is implemented in [`scripts/register.sh`](scripts/register.sh) and
 [`scripts/provision.py`](scripts/provision.py), the lane-15 production setup flow.
 It sets `DAIMON_TURN__PATH=mux`, channel backends and selfhosted admission on;
