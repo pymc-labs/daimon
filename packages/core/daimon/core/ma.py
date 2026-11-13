@@ -41,7 +41,7 @@ from daimon.core.mux_compat import (
     retrieve_agent,
 )
 from mux.contracts.ids import Scope
-from mux.drivers.anthropic import CoreAdmin, LegacyTurnTransport
+from mux.drivers.anthropic import AnthropicManagedAgents, CoreAdmin, LegacyTurnTransport
 
 log = structlog.get_logger()
 
@@ -243,7 +243,7 @@ async def interrupt_orphaned_session(
     if timeout_s is None:
         timeout_s = ORPHAN_INTERRUPT_TIMEOUT_S
     backend = managed_agents(anthropic, scope=scope, resources=frozenset({("session", session_id)}))
-    port = backend.extension(CoreAdmin, namespace="anthropic.core_admin", version=1)
+    port = core_admin_port(backend)
     try:
         await asyncio.wait_for(
             legacy_call(
@@ -348,10 +348,15 @@ WORKSPACE_NOT_DISPOSABLE_MESSAGE = (
 )
 
 
+def core_admin_port(backend: AnthropicManagedAgents) -> CoreAdmin:
+    """The provider admin port of a backend; the one place that names its namespace."""
+    return backend.extension(CoreAdmin, namespace="anthropic.core_admin", version=1)
+
+
 def _workspace_admin_port(client: AsyncAnthropic, scope: Scope) -> CoreAdmin:
     """The workspace-wide admin port. Each caller builds and audits its own platform scope."""
     backend = managed_agents(client, scope=scope)
-    return backend.extension(CoreAdmin, namespace="anthropic.core_admin", version=1)
+    return core_admin_port(backend)
 
 
 _SENTINEL_REASON = "sentinel cleanup: explicit destructive opt-in, enumerates all tenants"
@@ -536,7 +541,7 @@ async def delete_sessions_for_account(
     backend = managed_agents(
         client, scope=scope, resources=frozenset(("agent", agent.id) for agent in agents)
     )
-    port = backend.extension(CoreAdmin, namespace="anthropic.core_admin", version=1)
+    port = core_admin_port(backend)
 
     target_ids: set[str] = set()
     for agent in agents:
@@ -558,7 +563,7 @@ async def delete_sessions_for_account(
         scope=scope,
         resources=frozenset(("session", session_id) for session_id in target_ids),
     )
-    port = backend.extension(CoreAdmin, namespace="anthropic.core_admin", version=1)
+    port = core_admin_port(backend)
     for session_id in target_ids:
         try:
             await legacy_call(

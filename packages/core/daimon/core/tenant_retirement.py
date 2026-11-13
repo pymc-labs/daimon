@@ -20,7 +20,7 @@ from anthropic import AsyncAnthropic
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import list_agents_by_tenant, list_environments_by_tenant
 from daimon.core.errors import SettlePending
-from daimon.core.ma import delete_skill_and_versions
+from daimon.core.ma import core_admin_port, delete_skill_and_versions
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import (
     archive_agent,
@@ -32,7 +32,6 @@ from daimon.core.mux_compat import (
 )
 from daimon.core.stores import tenant_retirement as store
 from mux.contracts.ids import Scope
-from mux.drivers.anthropic import CoreAdmin
 from mux.errors import ProviderError
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -96,7 +95,7 @@ def _session_deleter(client: AsyncAnthropic, scope: Scope) -> Deleter:
         backend = managed_agents(
             client, scope=scope, resources=frozenset({("session", session_id)})
         )
-        port = backend.extension(CoreAdmin, namespace="anthropic.core_admin", version=1)
+        port = core_admin_port(backend)
         await legacy_call(
             port.delete_session(scope, resource_ref(backend, "session", session_id, scope=scope))
         )
