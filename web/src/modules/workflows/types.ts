@@ -80,8 +80,17 @@ export type Workflow = WorkflowSummary & {
   /** The live spec, or the draft's when nothing is live. */
   spec: Spec; home_name: string; editors: Person[]; runners: Person[]; viewers: Person[]
   monthly_cap_usd: number | null; can_edit: boolean; can_run: boolean; updated_at: string
+  /** Admins approve new grants. Owners are not admins by that role. */
+  is_admin: boolean
+  pending_request: PublishRequest | null
+  /** The last publish in this session, shown on the page until the next edit. */
+  published: { version: number; by: Person; at: string; note: string; approved_by: Person | null } | null
+  /** One-step workflows migrated from a routine: its last result before the move. */
+  migration: { routine: { id: string; name: string }; migrated_at: string; last: { at: string; status: RunStatus; text: string } | null } | null
+  /** Run budget per run, from the spec. */
+  run_budget_usd: number | null
 }
-export type WorkflowPatch = Partial<Pick<Workflow, "name" | "visibility">> & { paused?: boolean }
+export type WorkflowPatch = Partial<Pick<Workflow, "name" | "visibility" | "monthly_cap_usd">> & { paused?: boolean; editors?: string[]; runners?: string[] }
 
 export type Severity = "error" | "warning"
 export type Problem = { severity: Severity; code: string; message: string; node?: string }
@@ -194,3 +203,43 @@ export type Catalog = {
 export type AskMessage = { role: "user" | "assistant"; text: string }
 export type AskReply = { reply: string; draft: Draft; changed: string[] }
 export type Delivery = { id: string; received_at: string; inputs: Record<string, unknown> }
+
+
+// ---------- Publish and inbox ----------
+
+export type RequestStatus = "pending" | "approved" | "rejected"
+export type PublishRequest = {
+  id: string; workflow: { id: string; name: string }; version: number; note: string; by: Person; at: string; revision: number
+  grants: Grant[]; status: RequestStatus; decided_by: Person | null; decided_at: string | null; comment: string | null
+}
+export type PublishBody = { note: string }
+
+export type InboxKind = "approval" | "question" | "proposals" | "publish"
+export type Decision = { route: string; label: string; by: Person; at: string; comment: string | null; selected: string[] | null }
+export type InboxItem = {
+  id: string; kind: InboxKind; title: string; workflow: { id: string; name: string }; run: { id: string; number: number } | null
+  step: string | null; asked_by: string; since: string; expires_at: string | null; decision: Decision | null
+}
+export type InboxRoute = { name: string; label: string; primary: boolean; comment: boolean }
+export type Bound = { tool: string; label: string; step: string; args: Record<string, unknown> }
+export type InboxProposal = { id: string; tool: string; title: string; detail: string }
+export type InboxDetail = InboxItem & {
+  show: string | null; bound: Bound[]; proposals: InboxProposal[]; question: string | null
+  form: ObjectSchema | null; values: Record<string, unknown>; routes: InboxRoute[]; publish: PublishRequest | null
+}
+export type InboxDecide = { route: string; comment?: string; selected?: string[]; values?: Record<string, unknown> }
+
+// ---------- Triggers ----------
+
+export type DeliveryOutcome = "accepted" | "rejected" | "duplicate"
+export type DeliveryRow = {
+  id: string; received_at: string; verified: boolean; outcome: DeliveryOutcome; status: number; run: { id: string; number: number } | null
+  headers: Record<string, string>; payload: unknown
+}
+export type WebhookInfo = {
+  live_url: string; test_url: string; secret_hint: string; secret_created_at: string; previous_expires_at: string | null
+  listening_until: string | null
+}
+export type Secret = { secret: string; created_at: string; previous_expires_at: string | null }
+
+export type VersionSpec = { version: Version; spec: Spec }

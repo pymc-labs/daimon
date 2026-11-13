@@ -6,8 +6,8 @@ import { ApiError, api, stream } from "@/lib/api"
 import { ACTIVE_RUN, project } from "./runs"
 import { diff, validate } from "./spec"
 import type {
-  AskReply, AttentionItem, Catalog, Draft, NewWorkflow, RunDetail, RunEvent, RunSummary, RunTest, Spec, StepDetail, Template, Version, Workflow,
-  WorkflowPatch, WorkflowSummary,
+  AskReply, AttentionItem, Catalog, DeliveryRow, Draft, InboxDecide, InboxDetail, InboxItem, NewWorkflow, RunDetail, RunEvent, RunSummary, RunTest, Secret, Spec,
+  StepDetail, Template, Version, VersionSpec, WebhookInfo, Workflow, WorkflowPatch, WorkflowSummary,
 } from "./types"
 
 const base = (id: string) => `/api/workflows/${id}`
@@ -157,7 +157,9 @@ export function useDraftEditor(wf: Workflow | undefined, draft: Draft | undefine
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const pending = useRef<Spec | null>(null)
   useEffect(() => () => clearTimeout(timer.current), [])
-  useEffect(() => { if (draft && rev.current == null) rev.current = draft.revision }, [draft])
+  const inflight = useRef(0)
+  // Follow the server's revision when nothing of ours is on its way (a publish or restore resets it).
+  useEffect(() => { if (draft && (rev.current == null || (!pending.current && !inflight.current))) rev.current = draft.revision }, [draft])
   const live = wf?.live_version ? wf.spec : null
 
   const local = (spec: Spec): Draft => ({
@@ -168,11 +170,14 @@ export function useDraftEditor(wf: Workflow | undefined, draft: Draft | undefine
     const spec = pending.current
     if (!spec || !wf) return
     pending.current = null
+    inflight.current++
     chain.current = chain.current.then(() => api.put<Draft>(`${base(wf.id)}/draft`, { base_revision: rev.current, spec }).then((d) => {
+      inflight.current--
       rev.current = d.revision
       if (!pending.current) qc.setQueryData(key, d)
       void qc.invalidateQueries({ queryKey: ["workflows"], exact: true })
     }, (e) => {
+      inflight.current--
       if (e instanceof ApiError && e.status === 409) {
         rev.current = null
         toast.error("Someone else changed this draft")
@@ -194,14 +199,98 @@ export function useDraftEditor(wf: Workflow | undefined, draft: Draft | undefine
 export const askDaimon = (id: string, text: string) => api.post<AskReply>(`${base(id)}/draft/ask`, { text })
 export const discardDraft = (id: string) => api.del<Draft>(`${base(id)}/draft`)
 
+/** Publishing or requesting leaves the draft behind, so the caches the page reads are refreshed. */
+function afterPublish(qc: ReturnType<typeof useQueryClient>, id: string, w: Workflow) {
+  qc.setQueryData(["workflows", id], w)
+  void qc.invalidateQueries({ queryKey: ["workflows"] })
+  void qc.invalidateQueries({ queryKey: ["workflow-inbox"] })
+}
+
 export function usePublish(id: string) {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (note: string) => api.post<Workflow>(`${base(id)}/draft/publish`, { note }),
-    onSuccess: (w) => {
-      qc.setQueryData(["workflows", id], w)
+    onSuccess: (w) => { afterPublish(qc, id, w); toast(`Published v${w.live_version}`) },
+  })
+}
+
+export function useRequestPublish(id: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (note: string) => api.post<Workflow>(`${base(id)}/draft/request`, { note }),
+    onSuccess: (w) => { afterPublish(qc, id, w); toast("Approval requested") },
+  })
+}
+
+// ---------- inbox ----------
+
+export const useInbox = () => useQuery({ queryKey: ["workflow-inbox"], queryFn: () => api.get<InboxItem[]>("/api/workflows/inbox"), refetchInterval: 8000 })
+export const useInboxItem = (id: string | null) => useQuery({ queryKey: ["workflow-inbox", id], queryFn: () => api.get<InboxDetail>(`/api/workflows/inbox/${id}`), enabled: !!id })
+
+export function useDecide(id: string, after?: () => void) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (b: InboxDecide) => api.post<InboxItem>(`/api/workflows/inbox/${id}/decide`, b),
+    onSuccess: (i) => {
+      void qc.invalidateQueries({ queryKey: ["workflow-inbox"] })
+      void qc.invalidateQueries({ queryKey: ["workflow-runs"] })
+      void qc.invalidateQueries({ queryKey: ["workflow-run"] })
       void qc.invalidateQueries({ queryKey: ["workflows"] })
-      toast(`Published v${w.live_version}`)
+      toast(`${i.decision?.label ?? "Decided"} by ${i.decision?.by.name.split(" ")[0] ?? ""}`.trim())
+      after?.()
+    },
+  })
+}
+
+// ---------- webhook ----------
+
+export const useWebhook = (id: string, enabled: boolean, poll: boolean) =>
+  useQuery({ queryKey: ["workflows", id, "webhook"], queryFn: () => api.get<WebhookInfo>(`${base(id)}/webhook`), enabled, refetchInterval: poll ? 1200 : false })
+export const useDeliveries = (id: string, enabled: boolean, poll: boolean) =>
+  useQuery({ queryKey: ["workflows", id, "deliveries"], queryFn: () => api.get<DeliveryRow[]>(`${base(id)}/deliveries`), enabled, refetchInterval: poll ? 1200 : false })
+
+export function useListen(id: string) {
+  const qc = useQueryClient()
+  const done = (w: WebhookInfo) => qc.setQueryData(["workflows", id, "webhook"], w)
+  return {
+    start: useMutation({ mutationFn: () => api.post<WebhookInfo>(`${base(id)}/webhook/listen`, {}), onSuccess: done }),
+    stop: useMutation({ mutationFn: () => api.del<WebhookInfo>(`${base(id)}/webhook/listen`), onSuccess: done }),
+  }
+}
+export function useRotate(id: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (overlap: string) => api.post<Secret>(`${base(id)}/webhook/rotate`, { overlap }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["workflows", id, "webhook"] }),
+  })
+}
+export function useReplay(id: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (delivery: string) => api.post<DeliveryRow>(`${base(id)}/deliveries/${delivery}/replay`, {}),
+    onSuccess: (d) => {
+      void qc.invalidateQueries({ queryKey: ["workflows", id, "deliveries"] })
+      void qc.invalidateQueries({ queryKey: ["workflows", id, "runs"] })
+      void qc.invalidateQueries({ queryKey: ["workflow-runs"] })
+      toast(`Replayed as run ${d.run?.number ?? ""}`.trim())
+    },
+    onError: (e) => toast.error(e.message),
+  })
+}
+
+// ---------- versions ----------
+
+export const useVersionSpec = (id: string, n: number | null) =>
+  useQuery({ queryKey: ["workflows", id, "versions", n], queryFn: () => api.get<VersionSpec>(`${base(id)}/versions/${n}`), enabled: n != null && n > 0 })
+
+export function useRestore(id: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (n: number) => api.post<Draft>(`${base(id)}/versions/${n}/restore`, {}),
+    onSuccess: (d, n) => {
+      qc.setQueryData(["workflows", id, "draft"], d)
+      void qc.invalidateQueries({ queryKey: ["workflows"] })
+      toast(`Copied v${n} into the draft`)
     },
     onError: (e) => toast.error(e.message),
   })

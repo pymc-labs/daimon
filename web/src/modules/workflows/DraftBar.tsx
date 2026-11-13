@@ -1,26 +1,18 @@
-import { CircleAlert, CircleCheck, FlaskConical, KeyRound, Minus, Pencil, Plus, Sparkles, TriangleAlert } from "lucide-react"
+import { CircleAlert, CircleCheck, FlaskConical, Sparkles, TriangleAlert } from "lucide-react"
 import { useState } from "react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { useConfirm } from "@/lib/confirm"
 import { cn } from "@/lib/utils"
-import { discardDraft, usePublish } from "./api"
+import { discardDraft } from "./api"
 import { PANEL_W } from "./Canvas"
+import { ReviewDialog } from "./Review"
 import { TestRunSheet } from "./run/TestRun"
 import { titleOf } from "./spec"
-import type { Draft, GrantKind, Problem, Workflow } from "./types"
-import { KIND } from "./kinds"
+import type { Draft, Problem, Workflow } from "./types"
 import { Dot } from "./ui"
-
-const GRANT: Record<GrantKind, string> = {
-  unattended_write: "Writes without approval", builtins: "Built-in tools", code_network: "Code with network", unverified_webhook: "Unverified webhook",
-  budget_over_default: "Budget over default", untrusted_waiver: "Untrusted input waiver",
-}
-const EFFECT = { added: { icon: Plus, cls: "text-success" }, changed: { icon: Pencil, cls: "text-muted-foreground" }, removed: { icon: Minus, cls: "text-destructive" } }
 
 function ProblemRow({ p, draft, onSelect }: { p: Problem; draft: Draft; onSelect?: () => void }) {
   const Icon = p.severity === "error" ? CircleAlert : TriangleAlert
@@ -90,63 +82,7 @@ export function DraftBar({ wf, draft, shift, select, ask, adopt }: {
         </span>
       </div>
       <TestRunSheet wf={wf} draft={draft} open={test} onOpenChange={setTest} />
-      <Review wf={wf} draft={draft} open={review} onOpenChange={setReview} />
+      <ReviewDialog wf={wf} draft={draft} open={review} onOpenChange={setReview} />
     </>
-  )
-}
-
-function Review({ wf, draft, open, onOpenChange }: { wf: Workflow; draft: Draft; open: boolean; onOpenChange: (o: boolean) => void }) {
-  const [note, setNote] = useState("")
-  const publish = usePublish(wf.id)
-  const errors = draft.validation.errors
-  const next = (wf.live_version ?? 0) + 1
-  const label = (node: string | null, field?: string) => {
-    if (!node) return <span className="font-medium">{field ? field.charAt(0).toUpperCase() + field.slice(1) : "Workflow"}</span>
-    const s = draft.spec.nodes[node]
-    const K = s ? KIND[s.kind] : null
-    return <span className="flex items-center gap-1.5 font-medium">{K && <K.icon className={cn("size-3.5", K.text)} />}{titleOf(node, s)}</span>
-  }
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="gap-0 p-0 sm:max-w-xl">
-        <DialogHeader className="border-b px-5 py-4"><DialogTitle>Publish v{next}</DialogTitle></DialogHeader>
-        <div className="max-h-[60vh] space-y-5 overflow-y-auto px-5 py-4">
-          <section>
-            <h3 className="mb-2 text-xs font-medium text-muted-foreground">Changes</h3>
-            {draft.changes.map((c, i) => {
-              const E = EFFECT[c.effect]
-              return <div key={i} className="flex h-8 items-center gap-2 text-sm"><E.icon className={cn("size-3.5", E.cls)} />{label(c.node, c.field)}<span className="ml-auto text-xs text-muted-foreground capitalize">{c.effect}</span></div>
-            })}
-          </section>
-          {draft.validation.grants.length > 0 && (
-            <section>
-              <h3 className="mb-2 text-xs font-medium text-muted-foreground">Grants</h3>
-              {draft.validation.grants.map((g, i) => (
-                <div key={i} className="flex h-8 items-center gap-2 text-sm">
-                  <KeyRound className="size-3.5 text-warning" /><span className="font-medium">{GRANT[g.kind]}</span>
-                  <span className="ml-auto truncate text-xs text-muted-foreground">{g.node ? titleOf(g.node, draft.spec.nodes[g.node]) : g.detail}</span>
-                </div>
-              ))}
-            </section>
-          )}
-          {errors.length > 0 && (
-            <section>
-              <h3 className="mb-1 text-xs font-medium text-muted-foreground">Problems</h3>
-              <div className="-mx-2">{errors.map((p, i) => <ProblemRow key={i} p={p} draft={draft} />)}</div>
-            </section>
-          )}
-        </div>
-        <DialogFooter className="m-0 flex-col items-stretch gap-2 border-t px-5 py-3 sm:flex-col sm:justify-start">
-          <div className="flex items-center gap-2 max-sm:flex-col max-sm:items-stretch">
-            <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note" className="h-8 sm:flex-1" />
-            <div className="flex gap-2 max-sm:[&>*]:flex-1">
-              <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
-              <Button disabled={errors.length > 0 || publish.isPending} onClick={() => publish.mutate(note, { onSuccess: () => onOpenChange(false) })}>Publish</Button>
-            </div>
-          </div>
-          {errors.length > 0 && <p className="text-right text-sm text-destructive">{errors.length === 1 ? "Fix 1 problem to publish" : `Fix ${errors.length} problems to publish`}</p>}
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   )
 }

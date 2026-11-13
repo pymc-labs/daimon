@@ -13,6 +13,7 @@ import { useConfirm } from "@/lib/confirm"
 import { NotFound } from "@/pages/Status"
 import { useCreate, useDelete, useDraft, usePatch, useWorkflow } from "./api"
 import { Design } from "./Design"
+import { PublishStrip } from "./PublishStrip"
 import { RunDialog } from "./RunDialog"
 import { RunsTab } from "./run/RunsTable"
 import { AccessTab, TriggersTab, VersionsTab } from "./tabs"
@@ -78,6 +79,7 @@ export function WorkflowPage() {
         </>
       )}
     >
+      <PublishStrip wf={wf} />
       <Routes>
         <Route index element={<ReactFlowProvider><Design wf={wf} /></ReactFlowProvider>} />
         <Route path="runs" element={<RunsTab wf={wf} />} />

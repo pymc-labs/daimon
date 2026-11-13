@@ -4,19 +4,20 @@ import { http, HttpResponse, type HttpHandler } from "msw"
 import { allEdges, clone, diff, insertNode, titleOf, toolWrites, validate } from "@/modules/workflows/spec"
 import { ACTIVE_RUN, project } from "@/modules/workflows/runs"
 import type {
-  AskReply, AttentionItem, Catalog, Draft, DraftPut, NewWorkflow, Person, RunTest, Spec, Status, Template, Tick, Version, Workflow,
+  AskReply, AttentionItem, Catalog, Draft, DraftPut, NewWorkflow, Person, RunStatus, RunTest, Spec, Status, Template, Tick, Version, Workflow,
   WorkflowPatch, WorkflowSummary,
 } from "@/modules/workflows/types"
 import { fromYaml } from "@/modules/workflows/yaml"
 import { notFound, sleep, unauthorized, wait } from "./util"
+import { pendingOf } from "./workflows-store"
 import { me } from "./world"
 import {
   cancel, chain, decideUnknown, decideWait, detailOf, redrive, start, stepDetail, summaryOf, verify, visible as released, type Decision, type Run, type Script,
 } from "./workflows-runs"
 import { SPECS, TEMPLATE_SPECS } from "./workflows-specs"
 
-const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
-const P: Record<string, Person> = {
+export const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
+export const P: Record<string, Person> = {
   maya: { id: "p_maya", name: "Maya Lindqvist" }, jonas: { id: "p_jonas", name: "Jonas Weber" },
   priya: { id: "p_priya", name: "Priya Raman" }, alex: { id: "p_alex", name: "Alex Morgan" },
 }
@@ -50,13 +51,14 @@ const TEMPLATES: Template[] = [
   { id: "onboarding", name: "Onboarding", trigger: "manual", kinds: ["transform", "action", "wait"] },
 ]
 
-type Stored = {
+export type Stored = {
   id: string; status: Status; owner: Person; live: Spec | null; version: number | null; draft: Draft | null
   ticks: string; spend: number; failing?: boolean; next_h: number | null; editors: Person[]; runners: Person[]
   source_routine?: { id: string; name: string }; labels?: string[]; cap?: number
+  published?: Workflow["published"]; before?: { at: string; status: RunStatus; text: string }
 }
 
-const W: Stored[] = [
+export const W: Stored[] = [
   { id: "wf_lead", status: "live", owner: P.maya!, live: SPECS.lead, version: 7, draft: null, ticks: "ssfssTsswr", spend: 18.4, next_h: null,
     editors: [P.jonas!], runners: [P.priya!], labels: ["ana@brightwave.example", "lee@tidewater.example", "sam@larkspur.example", "info@cobalt.example", "jo@northwind.example"] },
   { id: "wf_digest", status: "live", owner: P.jonas!, live: SPECS.digest, version: 3, draft: null, ticks: "ssssssssss", spend: 2.15, next_h: 62, editors: [P.maya!], runners: [] },
@@ -73,16 +75,19 @@ const W: Stored[] = [
   { id: "wf_alert", status: "live", owner: P.jonas!, live: SPECS.alert, version: 9, draft: null, ticks: "ssfsffsftf", spend: 12.75, failing: true, next_h: null, editors: [P.maya!], runners: [],
     labels: ["api-latency-p99", "worker-queue-depth", "db-cpu"] },
   { id: "wf_readout", status: "live", owner: P.maya!, live: SPECS.readout, version: 1, draft: null, ticks: "ssss", spend: 0.85, next_h: 60, editors: [], runners: [],
-    source_routine: { id: "r1", name: "Weekly channel readout" } },
+    source_routine: { id: "r1", name: "Weekly channel readout" },
+    before: { at: ago(24 * 10), status: "succeeded", text: "Posted to #mmm-larkspur. Paid social moved from 31% to 34% of spend, widest interval 14%." } },
   { id: "wf_price", status: "live", owner: P.priya!, live: SPECS.price, version: 1, draft: null, ticks: "sssssff", spend: 1.6, failing: true, next_h: 14, editors: [], runners: [],
-    source_routine: { id: "r2", name: "Overnight price test" } },
+    source_routine: { id: "r2", name: "Overnight price test" },
+    before: { at: ago(24 * 9 + 6), status: "failed", text: "The price feed timed out after 3 attempts." } },
   { id: "wf_prs", status: "paused", owner: P.priya!, live: SPECS.prs, version: 1, draft: null, ticks: "sss", spend: 0.3, next_h: null, editors: [], runners: [],
-    source_routine: { id: "r3", name: "Stale pull requests" } },
+    source_routine: { id: "r3", name: "Stale pull requests" },
+    before: { at: ago(24 * 11), status: "succeeded", text: "3 pull requests open more than a week. Posted to #eng-review." } },
   { id: "wf_board", status: "draft", owner: P.maya!, live: null, version: null, draft: null, ticks: "", spend: 0, next_h: null, editors: [], runners: [] },
   { id: "wf_renewal", status: "needs_owner", owner: P.alex!, live: SPECS.renewal, version: 3, draft: null, ticks: "ssssssssss", spend: 3.1, next_h: 20, editors: [], runners: [] },
 ]
 
-const mkDraft = (w: Stored, spec: Spec, revision: number, by: Person = w.owner, h = 2): Draft => ({
+export const mkDraft = (w: Stored, spec: Spec, revision: number, by: Person = w.owner, h = 2): Draft => ({
   revision, base_version: w.version, spec, changes: diff(w.live, spec), validation: validate(spec), updated_at: ago(h), updated_by: by,
 })
 
@@ -99,8 +104,20 @@ const mkDraft = (w: Stored, spec: Spec, revision: number, by: Person = w.owner, 
   board.draft = mkDraft(board, SPECS.board, 2, P.maya!, 30)
 }
 
+// Weekly digest: a clearer write step, one more output, the nothing-risky branch posts anyway, an earlier fire. No new grant.
+{
+  const w = W.find((x) => x.id === "wf_digest")!, s = clone(SPECS.digest)
+  s.nodes.write!.instructions = "Write a short digest for the sales channel.\nRisky deals first, one line each with the reason and a next step.\nEnd with the total open pipeline.\n"
+  s.nodes.collect!.output = { ...(s.nodes.collect!.output as Record<string, never>), count: { type: "number" } as never }
+  s.nodes.risky!.else = "done"
+  s.triggers![0]!.cron = "0 8 * * 1"
+  s.limits = { deadline: "20m" }
+  s.home = { channel: "C0LEADS" }
+  w.draft = mkDraft(w, s, 3, P.maya!, 1.2)
+}
+
 const NOTES = ["Tighter research instructions", "Approval times out after two days", "Reply drafts propose a call", "Adds HubSpot reads", "First version"]
-const versionsOf = (w: Stored): Version[] => !w.version ? [] : Array.from({ length: w.version }, (_, i) => {
+export const versionsOf = (w: Stored): Version[] => !w.version ? [] : Array.from({ length: w.version }, (_, i) => {
   const n = w.version! - i
   const by = i % 3 === 1 && w.editors[0] ? w.editors[0] : w.owner
   return { number: n, published_by: by, published_at: ago(24 * (i * 6 + 3)), note: n === 1 ? "First version" : NOTES[i % (NOTES.length - 1)]!,
@@ -146,7 +163,7 @@ function scriptFor(w: Stored, spec: Spec, code: string, i: number): Script {
     : code === "u" ? { node: writes, as: "unknown" } : undefined
   return { choose, end }
 }
-function runsOf(w: Stored): Run[] {
+export function runsOf(w: Stored): Run[] {
   const have = RUNS.get(w.id)
   if (have) return have
   const spec = w.live
@@ -173,7 +190,7 @@ const ticksOf = (w: Stored): Tick[] => runsOf(w).filter((r) => !r.test).slice(0,
   return { number: r.number, status: s.status, at: s.started_at }
 })
 const allRuns = () => visible().flatMap((w) => runsOf(w))
-const findRun = (id: unknown) => allRuns().find((r) => r.id === id)
+export const findRun = (id: unknown) => allRuns().find((r) => r.id === id)
 
 /** Releases ledger rows as their time comes; resumes after `Last-Event-ID`. */
 function runStream(run: Run, after: number) {
@@ -220,7 +237,7 @@ function attention(): AttentionItem[] {
   return out.sort((a, b) => b.since.localeCompare(a.since))
 }
 
-const specOf = (w: Stored) => w.live ?? w.draft!.spec
+export const specOf = (w: Stored) => w.live ?? w.draft!.spec
 function summary(w: Stored): WorkflowSummary {
   const m = me()!
   const spec = specOf(w)
@@ -233,7 +250,7 @@ function summary(w: Stored): WorkflowSummary {
     failing: !!w.failing, steps: Object.keys(spec.nodes).length, source_routine: w.source_routine ?? null,
   }
 }
-function detail(w: Stored): Workflow {
+export function detail(w: Stored): Workflow {
   const m = me()!
   const spec = specOf(w)
   const admin = m.role === "owner" || m.role === "admin"
@@ -242,15 +259,17 @@ function detail(w: Stored): Workflow {
     editors: w.editors, runners: w.runners, viewers: spec.visibility === "shared" ? CATALOG.people.filter((p) => p.id !== w.owner.id && !w.editors.includes(p)) : [],
     monthly_cap_usd: w.cap ?? 50, can_edit: admin || w.owner.id === m.id || w.editors.some((e) => e.id === m.id),
     can_run: admin || w.owner.id === m.id || [...w.editors, ...w.runners].some((e) => e.id === m.id), updated_at: w.draft?.updated_at ?? ago(30),
+    is_admin: m.role === "admin", pending_request: pendingOf(w.id), published: w.published ?? null, run_budget_usd: spec.limits?.budget_usd ?? null,
+    migration: w.source_routine ? { routine: w.source_routine, migrated_at: ago(24 * 9), last: w.before ?? null } : null,
   }
 }
-const visible = () => {
+export const visible = () => {
   const m = me()
   if (!m) return []
   return W.filter((w) => m.role === "owner" || m.role === "admin" || w.owner.id === m.id || specOf(w).visibility === "shared")
 }
-const find = (id: unknown) => visible().find((w) => w.id === id)
-const draftOf = (w: Stored): Draft => w.draft ?? mkDraft(w, clone(w.live!), 0)
+export const find = (id: unknown) => visible().find((w) => w.id === id)
+export const draftOf = (w: Stored): Draft => w.draft ?? mkDraft(w, clone(w.live!), 0)
 
 // ---------- Ask Daimon: one canned edit per prompt ----------
 
@@ -328,6 +347,23 @@ function create(body: NewWorkflow): { w: Stored; reply?: string } | { error: str
   return { w, reply }
 }
 
+/** Starts a run now; a webhook replay passes the trigger and delivery. */
+export function launch(w: Stored, inputs: Record<string, unknown>, test: RunTest | null, via?: { trigger: Run["trigger"]; delivery: string }): Run {
+  const runs = runsOf(w)
+  const spec = test ? draftOf(w).spec : specOf(w)
+  const m = me()!
+  const label = spec.label?.match(/inputs\.(\w+)/)?.[1]
+  const number = (runs[0]?.number ?? 119) + 1
+  const run: Run = {
+    id: `${w.id}_run${number}`, wf: { id: w.id, name: spec.name }, number, spec, version: w.version ?? 0,
+    inputs, label: label ? String(inputs[label] ?? "") || null : null, trigger: via?.trigger ?? { kind: "manual", id: "manual" }, delivery: via?.delivery ?? null,
+    by: via ? null : { id: m.id, name: m.name }, owner: w.owner, test, parent: null, script: { pace: test ? 0.15 : 0.4, decide_after: 2 }, events: [],
+  }
+  start(run, Date.now())
+  runs.unshift(run)
+  return run
+}
+
 export const workflowsHandlers: HttpHandler[] = [
   http.get("/api/workflows", async () => {
     await wait()
@@ -361,6 +397,9 @@ export const workflowsHandlers: HttpHandler[] = [
     const b = (await request.json()) as WorkflowPatch
     if (b.paused != null && w.live) w.status = b.paused ? "paused" : "live"
     if (b.name) (w.live ?? w.draft!.spec).name = b.name
+    if (b.editors) w.editors = b.editors.map((id) => CATALOG.people.find((p) => p.id === id)!).filter(Boolean)
+    if (b.runners) w.runners = b.runners.map((id) => CATALOG.people.find((p) => p.id === id)!).filter(Boolean)
+    if (b.monthly_cap_usd !== undefined) w.cap = b.monthly_cap_usd ?? undefined
     return HttpResponse.json(detail(w))
   }),
   http.delete("/api/workflows/:id", async ({ params }) => {
@@ -403,17 +442,6 @@ export const workflowsHandlers: HttpHandler[] = [
     const body: AskReply = { reply: r.reply, draft: draftOf(w), changed: r.changed }
     return HttpResponse.json(body)
   }),
-  http.post("/api/workflows/:id/draft/publish", async ({ params }) => {
-    await wait(600)
-    const w = find(params.id)
-    if (!w?.draft) return notFound()
-    if (w.draft.validation.errors.length) return HttpResponse.json({ detail: "Fix the problems first." }, { status: 422 })
-    w.live = w.draft.spec
-    w.version = (w.version ?? 0) + 1
-    w.draft = null
-    if (w.status === "draft") w.status = "live"
-    return HttpResponse.json(detail(w))
-  }),
   http.post("/api/workflows/:id/validate", async ({ params, request }) => {
     await wait(60)
     if (!find(params.id)) return notFound()
@@ -435,17 +463,7 @@ export const workflowsHandlers: HttpHandler[] = [
     const w = find(params.id)
     if (!w) return notFound()
     const b = (await request.json()) as { inputs: Record<string, unknown>; test?: RunTest | null }
-    const runs = runsOf(w)
-    const spec = b.test ? draftOf(w).spec : specOf(w)
-    const m = me()!
-    const label = spec.label?.match(/inputs\.(\w+)/)?.[1]
-    const run: Run = {
-      id: `${w.id}_run${(runs[0]?.number ?? 119) + 1}`, wf: { id: w.id, name: spec.name }, number: (runs[0]?.number ?? 119) + 1, spec, version: w.version ?? 0,
-      inputs: b.inputs, label: label ? String(b.inputs[label] ?? "") || null : null, trigger: { kind: "manual", id: "manual" }, delivery: null,
-      by: { id: m.id, name: m.name }, owner: w.owner, test: b.test ?? null, parent: null, script: { pace: b.test ? 0.15 : 0.4, decide_after: 2 }, events: [],
-    }
-    start(run, Date.now())
-    runs.unshift(run)
+    const run = launch(w, b.inputs, b.test ?? null)
     return HttpResponse.json(summaryOf(run), { status: 201 })
   }),
   http.get("/api/workflows/:id/deliveries/last", async ({ params }) => {
