@@ -9,8 +9,10 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+import anthropic
 import httpx
 import pytest
+import structlog
 from daimon.core import tenant_retirement
 from daimon.core._models import (
     Account,
@@ -496,3 +498,77 @@ async def test_a_reinstall_waits_for_the_running_delete_then_stops_the_rest(
         assert await store.get_work(session, tenant_id=tenant_id) is None, "the queue is dropped"
         tenant = await session.get(Tenant, tenant_id)
         assert tenant is not None and tenant.retired_at is None, "the tenant is back"
+
+
+async def test_only_provider_sessions_are_queued(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant_id = await _seed(db_session, db_session_factory, "billing-guild")
+    tenant = await get_tenant(db_session, tenant_id)
+    assert tenant is not None
+    for synthetic in ("classifier", "thread-naming", "gemini"):
+        await make_usage_event(
+            db_session, tenant=tenant, managed_session_id=f"{synthetic}:{uuid.uuid4()}"
+        )
+    await db_session.flush()
+    found = await store.collect_upstream(db_session, tenant_id=tenant_id)
+    assert found["sessions"] == ["sesn_a"], (
+        f"synthetic billing ids are not queued: {found['sessions']}"
+    )
+
+
+def _status(code: int) -> Exception:
+    request = httpx.Request("DELETE", "https://api.example/v1/x")
+    response = httpx.Response(code, request=request)
+    if code == 422:
+        return httpx.HTTPStatusError("bad", request=request, response=response)
+    return anthropic.APIStatusError("bad", response=response, body=None)
+
+
+async def test_a_permanent_client_error_is_dropped_and_a_broken_kind_is_isolated(
+    own_connections: async_sessionmaker[AsyncSession],
+) -> None:
+    """On their own connections: the failed item's rollback must not reach the seed."""
+    sm = own_connections
+    tenant_id = uuid.uuid4()
+    async with sm() as session, session.begin():
+        session.add(
+            TenantRetirement(
+                tenant_id=tenant_id,
+                pending={
+                    "sessions": ["bad_request", "rate_limited", "unprocessable"],
+                    "memory_stores": ["boom"],
+                    "hosts": ["reports"],
+                },
+            )
+        )
+    errors = {
+        "bad_request": _status(400),
+        "rate_limited": _status(429),
+        "unprocessable": _status(422),
+    }
+    deleted: list[str] = []
+
+    async def delete(item: str) -> None:
+        if item == "boom":
+            raise RuntimeError("unexpected")
+        if item in errors:
+            raise errors[item]
+        deleted.append(item)
+
+    with structlog.testing.capture_logs() as logs:
+        await tenant_retirement.clean_upstream(
+            sm,
+            tenant_id=tenant_id,
+            deleters=dict.fromkeys(store.PENDING_KINDS, delete),
+        )
+    async with sm() as session:
+        work = await store.get_work(session, tenant_id=tenant_id) or {}
+    assert work["sessions"] == ["rate_limited"], "a rate limit is retried; 400 and 422 are dropped"
+    assert work["memory_stores"] == ["boom"], "an unexpected failure keeps its item"
+    assert deleted == ["reports"], "a kind that blew up does not stop the next kind"
+    dropped = [e for e in logs if e["event"] == "tenant_retirement.upstream_dropped"]
+    assert len(dropped) == 2, f"each dropped item is logged once: {dropped}"
+    assert any(e["event"] == "tenant_retirement.kind_failed" for e in logs), (
+        "the broken kind is logged"
+    )

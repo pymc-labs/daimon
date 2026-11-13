@@ -87,6 +87,9 @@ _OWN_HELPER = {"security_audit_events"}
 
 PENDING_KINDS = ("sessions", "memory_stores", "vaults", "skills", "hosts")
 HOSTS = ("reports", "notebooks")
+# Only provider sessions can be deleted upstream. Usage rows also name synthetic billing
+# ids (`classifier:<uuid>`, `gemini:<uuid>`) and other providers' sessions.
+SESSION_ID_PREFIX = "sesn_"
 
 
 def is_tenant_scoped(table: Table) -> bool:
@@ -118,7 +121,7 @@ async def collect_upstream(session: AsyncSession, *, tenant_id: uuid.UUID) -> di
     """Provider resources the tenant's rows name, read before those rows go."""
     ids = tenant_session_ids(tenant_id).subquery()
     sources: dict[str, list[Any]] = {
-        "sessions": [select(ids.c[0]).where(ids.c[0].is_not(None))],
+        "sessions": [select(ids.c[0]).where(ids.c[0].startswith(SESSION_ID_PREFIX))],
         "memory_stores": [
             _owned(m.memory_store_id, m.tenant_id, tenant_id)
             for m in (AgentMemoryStore, AgentChannelMemoryStore, AgentPersonalMemoryStore)

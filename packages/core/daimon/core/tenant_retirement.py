@@ -129,6 +129,24 @@ def deleters(
     }
 
 
+# Client errors a retry cannot fix. Auth and permission errors are left out: a bad key
+# would otherwise drop the whole queue.
+_RETRYABLE_CLIENT_ERRORS = {401, 403, 408, 409, 429}
+
+
+def _permanent(error: Exception) -> bool:
+    """Whether an upstream failure is about the item itself, so retrying is pointless."""
+    if isinstance(error, ProviderError):
+        return error.category == "invalid_request"
+    if isinstance(error, anthropic_errors.APIStatusError):
+        status = error.status_code
+    elif isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+    else:
+        return False
+    return 400 <= status < 500 and status not in _RETRYABLE_CLIENT_ERRORS
+
+
 async def _clean_item(
     sm: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
@@ -145,13 +163,12 @@ async def _clean_item(
         except anthropic_errors.NotFoundError:
             pass
         except (anthropic_errors.APIError, ProviderError, httpx.HTTPError) as error:
-            log.warning(
-                "tenant_retirement.upstream_failed",
-                tenant_id=str(tenant_id),
-                kind=kind,
-                error=type(error).__name__,
-            )
-            return True
+            fields = {"tenant_id": str(tenant_id), "kind": kind, "error": type(error).__name__}
+            if not _permanent(error):
+                log.warning("tenant_retirement.upstream_failed", **fields)
+                return True
+            # Logged once: the item leaves the queue, so it is never retried.
+            log.warning("tenant_retirement.upstream_dropped", **fields)
         await store.remove_done(session, tenant_id=tenant_id, kind=kind, done={item})
     return True
 
@@ -165,10 +182,18 @@ async def clean_upstream(
         pending = await store.get_work(session, tenant_id=tenant_id)
     if pending is None:
         return True
-    queued = [(kind, item) for kind in store.PENDING_KINDS for item in pending.get(kind, [])]
-    for kind, item in queued:
-        if not await _clean_item(sm, tenant_id, kind, item, deleters[kind]):
-            break
+    for kind in store.PENDING_KINDS:
+        try:
+            for item in pending.get(kind, []):
+                if not await _clean_item(sm, tenant_id, kind, item, deleters[kind]):
+                    return await _finished(sm, tenant_id)
+        # Boundary: one kind failing in an unforeseen way must not starve the others.
+        except Exception:
+            log.exception("tenant_retirement.kind_failed", tenant_id=str(tenant_id), kind=kind)
+    return await _finished(sm, tenant_id)
+
+
+async def _finished(sm: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID) -> bool:
     async with sm() as session:
         return await store.get_work(session, tenant_id=tenant_id) is None
 
