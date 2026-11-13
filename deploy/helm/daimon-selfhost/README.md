@@ -199,7 +199,9 @@ not a complete prevention mechanism.
 ## Secrets
 
 Create these separately in the release namespace, using protected files and
-`kubectl create secret generic ... --from-env-file=/secure/file`:
+`kubectl create secret generic ... --from-env-file=/secure/file`. The names below
+are the defaults; `secrets.host`, `secrets.harness` and `postgres.existingSecret`
+change them (see [Second release on a shared cluster](#second-release-on-a-shared-cluster)):
 
 | Secret | Keys |
 | --- | --- |
@@ -413,7 +415,9 @@ generates PG password, bearer, MCP signing and Fernet keys, and writes env files
 under the private `AKS_STATE` directory (umask 077). It never prints their values.
 Install retries preserve registration settings and restore the saved runtime Secret
 before Helm if one is configured; retain `runtime.json` with `aks-values.json`.
-It creates `daimon-postgres`, `daimon-host`, `daimon-harness`, `daimon-aoai` Secrets:
+It creates `daimon-postgres`, `daimon-host`, `daimon-harness`, `daimon-aoai` Secrets
+(`$SECRET_PREFIX-*` when set). Keys in `$AKS_STATE/host-extra.env`, such as
+`DAIMON_TEAMS__CLIENT_SECRET`, are added to the host Secret. The default names do this:
 
 ```sh
 az aks get-credentials -g "$RG" -n "$AKS" --overwrite-existing -o none
@@ -551,10 +555,11 @@ ACR/storage and AOAI usage remain billable. It checks the managed node RG was
 removed. An incomplete deletion is a failed teardown, not a passing result.
 
 ```sh
-bash deploy/helm/daimon-selfhost/scripts/aks.sh teardown
+DELETE_AKS="$AKS" bash deploy/helm/daimon-selfhost/scripts/aks.sh teardown
 ```
 
-The helper verifies its dedicated kubeconfig's API server before uninstalling
+Without `DELETE_AKS` set to the cluster's name, `teardown` removes only the release
+and its namespace and keeps the cluster. The helper verifies its dedicated kubeconfig's API server before uninstalling
 the release, deleting the namespace or deleting AKS. Use the `teardown` helper
 above so the target check runs before any destructive command.
 
@@ -579,11 +584,11 @@ no rebuild or AOAI recreation. It does not pretend to restore deleted PG/PVC dat
 For complete removal (also deletes the budget), run only on this dedicated RG:
 
 ```sh
-bash deploy/helm/daimon-selfhost/scripts/aks.sh remove
+DELETE_RG="$RG" bash deploy/helm/daimon-selfhost/scripts/aks.sh remove
 rm -r "$AKS_STATE"
 ```
 
-`remove` runs `az group delete -n "$RG" --yes -o none`. Verify no retained
+`remove` refuses unless `DELETE_RG` repeats the resource group's name, then runs `az group delete -n "$RG" --yes -o none`. Verify no retained
 node/data-disk resource group remains before saying billing has stopped. Avoid
 reusing a deleted AOAI name without handling its Azure soft-delete reservation.
 For overnight shutdown use teardown; a system node pool cannot generally scale to
@@ -658,6 +663,50 @@ provider receipts and matching Postgres usage/ledger rows for independent token
 reconciliation. The direct `probe` helper is an optional paid C3 diagnostic and
 does not replace these two application turns. No real inference is performed by
 this lane's local tests. The recipe uses gpt-5.4-mini for every model turn.
+
+## Second release on a shared cluster
+
+Every chart resource is named `<release>-daimon-*`, and the cluster-wide
+PriorityClasses add the namespace. Secret names come from values. So a second
+release in its own namespace shares nothing with the first, once its Secret
+names and Ingress host differ. The scripts read these variables:
+
+| Variable | Default | `daimon-teams` example |
+| --- | --- | --- |
+| `RELEASE` | `acme` | `daimon-teams` |
+| `NAMESPACE` | `daimon` | `daimon-teams` |
+| `SECRET_PREFIX` | `daimon` | `daimon-teams` |
+| `VALUES_FILE` | none | `$HOME/daimon-teams.yaml` |
+
+The scripts create `<SECRET_PREFIX>-host`, `-harness`, `-postgres`, `-aoai` and
+`-runtime`. Helm reads `VALUES_FILE` first and the generated `aks-values.json`
+second, so the image tag, Azure OpenAI endpoint and CIDRs, Secret names and
+registration grants always match what the scripts created.
+
+A release that serves only Teams enables `services.teams` and the Ingress, sets
+`ingress.teamsHost` and leaves `ingress.mcpHost` empty, which skips the MCP
+Ingress. Rendering fails until `networkPolicy.teamsEgress.cidrs` lists the Bot
+Framework and Entra /32s.
+
+On a cluster other releases use, run only `install`, `register`, `turn`, `probe`
+and `teardown` (which keeps the cluster). `bootstrap` and `reinstall` create a
+cluster, and `egress-start` restarts the cluster's CoreDNS. `install` creates and
+labels the namespace, and Helm creates cluster-wide PriorityClasses, so the
+installer needs cluster rights for both.
+
+```sh
+export RG=<resource-group> LOCATION=<region> ACR=<registry> AKS=<cluster> AOAI=<aoai-account>
+export RELEASE=daimon-teams NAMESPACE=daimon-teams SECRET_PREFIX=daimon-teams
+export VALUES_FILE=$HOME/daimon-teams.yaml
+export AKS_STATE=$(mktemp -d) TAG="$(git rev-parse --short HEAD)-$(date -u +%Y%m%d%H%M%S)"
+bash deploy/helm/daimon-selfhost/scripts/build-images.sh
+printf 'DAIMON_TEAMS__CLIENT_SECRET=%s\n' "$(cat /secure/bot-secret)" > "$AKS_STATE/host-extra.env"
+bash deploy/helm/daimon-selfhost/scripts/aks.sh install
+```
+
+Then run `register` as in [Register and run a real selfhosted turn](#register-and-run-a-real-selfhosted-turn).
+The images go to the registry's `daimon` and `daimon-harness` repositories under
+the unique tag, next to other releases' tags.
 
 ## Local validation
 

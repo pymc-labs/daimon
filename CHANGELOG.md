@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Install the AKS chart as a second release on a shared cluster. The AKS scripts
+  take `RELEASE`, `NAMESPACE`, `SECRET_PREFIX` and `VALUES_FILE`. An empty
+  `ingress.mcpHost` or `ingress.teamsHost` skips that Ingress. `teardown` keeps
+  the cluster unless `DELETE_AKS` names it, and `remove` needs `DELETE_RG`.
+
+- Fail the AKS chart render when Teams egress is on with no destinations; it
+  allowed the Teams pod HTTPS to any address.
+
 - Remove client-specific install materials and use neutral self-hosting examples.
 
 - Cap each Postgres import CLI call at 180 seconds within the total retry budget;

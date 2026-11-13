@@ -219,6 +219,17 @@ serving apps. Endpoints are public (MCP can be kept private), and private networ
 implemented. Parameters, commands, roles and limitations are in the
 [Azure deployment guide](https://github.com/pymc-labs/daimon/blob/main/deploy/azure/README.md).
 
+## Deploy on AKS
+
+The Helm chart in `deploy/helm/daimon-selfhost/` runs Daimon on Azure Kubernetes
+Service. It deploys the MCP and scheduler processes, optional Teams, Discord and
+Slack processes, one persistent harness and a bundled PostgreSQL. The harness
+calls Azure OpenAI with a key from a Secret. The chart creates no Azure resources.
+
+Several releases can share one cluster. Give each its own namespace, Secret names
+and Ingress host. Install steps, Secrets, network policy and teardown are in the
+[AKS chart guide](https://github.com/pymc-labs/daimon/blob/main/deploy/helm/daimon-selfhost/README.md).
+
 ## Connect more
 
 - [Model providers](providers.md): OpenAI, Gemini and the self-hosted harness.
