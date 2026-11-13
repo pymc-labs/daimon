@@ -73,6 +73,7 @@ Where each feature can be set, and its default.
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Long job dollar cap | `long_jobs_max_usd` | Limit | $5 | ✓ | ✓ | ✓ |  |  |  |
 | Long job time limit | `long_jobs_max_deadline` | Limit | 70 minutes | ✓ | ✓ | ✓ |  |  |  |
+| Conversation history kept | `conversation_retention` | Limit | 1 year | ✓ | ✓ |  |  |  |  |
 | New threads per reply | `outbound_threads` | Limit | 2 threads | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Places per reply | `outbound_places` | Limit | 2 places | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | People tagged per reply | `outbound_people` | Limit | 5 people | ✓ | ✓ | ✓ | ✓ | ✓ |  |
@@ -783,6 +784,18 @@ The longest one long job may run. The smallest setting wins.
 | Levels | Deployment, Workspace, Agent |
 | Combines | Lowest wins |
 | Deprecated | `DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES` |
+
+## Conversation history kept
+
+How long Daimon keeps its copy of a conversation after its last message, in channel threads, private chats and web threads. A conversation idle past this starts over at its next message. On by default at 1 year; 0 for the whole server turns it off and keeps conversations until they are deleted. The smallest setting wins.
+
+| | |
+| --- | --- |
+| Key | `conversation_retention` |
+| Values | `365` (1 year), `180` (180 days), `90` (90 days), `30` (30 days) |
+| Default | `365` |
+| Levels | Deployment, Workspace |
+| Combines | Lowest wins |
 
 ## Posting to others
 

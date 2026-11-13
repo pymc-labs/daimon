@@ -14,9 +14,10 @@ from daimon.core._models import Account, SecurityAuditEvent, Tenant
 from daimon.core.cursor import Cursor
 from daimon.core.security_audit import GitHubTokenAuditKind
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, func, literal, select, text, tuple_, update
+from sqlalchemy import and_, delete, func, literal, literal_column, select, text, tuple_, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnClause
 
 
 class SecurityAuditEntry(BaseModel):
@@ -350,17 +351,35 @@ async def erase_tenant(session: AsyncSession, *, tenant_id: uuid.UUID) -> int:
     return cast(CursorResult[Any], result).rowcount
 
 
-async def prune_events(session: AsyncSession, *, tenant_id: uuid.UUID, older_than: datetime) -> int:
-    """Operator retention purge, strictly before the timezone-aware cutoff."""
+async def prune_events(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    older_than: datetime,
+    limit: int | None = None,
+) -> int:
+    """Operator retention purge, strictly before the timezone-aware cutoff.
+
+    With `limit` it removes at most that many, oldest first, for a batched sweep.
+    """
     if older_than.utcoffset() is None:
         raise ValueError("older_than must include a timezone")
-    async with _maintenance(session):
-        result = await session.execute(
-            delete(SecurityAuditEvent).where(
-                SecurityAuditEvent.tenant_id == tenant_id,
-                SecurityAuditEvent.occurred_at < older_than,
-            )
+    condition = and_(
+        SecurityAuditEvent.tenant_id == tenant_id, SecurityAuditEvent.occurred_at < older_than
+    )
+    statement = delete(SecurityAuditEvent).where(condition)
+    if limit is not None:
+        ctid: ColumnClause[Any] = literal_column("ctid")
+        oldest = (
+            select(ctid)
+            .select_from(SecurityAuditEvent)
+            .where(condition)
+            .order_by(SecurityAuditEvent.occurred_at)
+            .limit(limit)
         )
+        statement = delete(SecurityAuditEvent).where(ctid.in_(oldest))
+    async with _maintenance(session):
+        result = await session.execute(statement)
     return cast(CursorResult[Any], result).rowcount
 
 

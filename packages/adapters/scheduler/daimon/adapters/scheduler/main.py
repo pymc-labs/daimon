@@ -39,6 +39,7 @@ import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from cryptography.fernet import MultiFernet
 from daimon.adapters.scheduler.settings import SchedulerSettings
+from daimon.core import tenant_retirement
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import (
     Action,
@@ -101,6 +102,7 @@ from daimon.core.permissions import any_agent_rules, any_own_readers
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.promo_settlement import settle_promo_credit
 from daimon.core.purge import sweep_privacy_session_deletes
+from daimon.core.retention import sweep as retention_sweep
 from daimon.core.routine_delivery import (
     DirectPost,
     agent_posted_to,
@@ -1012,13 +1014,17 @@ async def _sweep_pending_files(
 
 @scheduler_step
 async def _sweep_privacy_deletes(
-    client: AsyncAnthropic, sm: async_sessionmaker[AsyncSession]
+    client: AsyncAnthropic, sm: async_sessionmaker[AsyncSession], settings: Settings
 ) -> None:
-    """Retain failed MA erasures for the next tick."""
+    """Retry failed account erasures and retired tenants' upstream cleanup."""
     try:
         await sweep_privacy_session_deletes(client, sm)
     except Exception:
         log.exception("scheduler.privacy_delete_sweep.failed")
+    try:
+        await tenant_retirement.sweep(client, sm, settings)
+    except Exception:
+        log.exception("scheduler.tenant_retirement_sweep.failed")
 
 
 @scheduler_step
@@ -1175,6 +1181,28 @@ async def _sweep_github_issued_tokens(
         await sweep_closed_github_issued_tokens(sm, now=current)
     except SQLAlchemyError:
         log.exception("scheduler.github_issued_token_sweep.failed")
+
+
+# How often the loop asks which rules are due; each rule's own day is kept in the database.
+_RETENTION_POLL = timedelta(minutes=10)
+_last_retention_poll: dict[str, datetime] = {}
+
+
+@scheduler_step
+async def _sweep_retention(
+    sm: async_sessionmaker[AsyncSession], settings: Settings, *, now: datetime | None = None
+) -> None:
+    """Run the retention rules that are due. Boundary catch: a database failure is
+    logged and the loop goes on; each rule's own failure is handled in the sweep."""
+    current = now or datetime.now(UTC)
+    last = _last_retention_poll.get("started")
+    if last is not None and current - last < _RETENTION_POLL:
+        return
+    _last_retention_poll["started"] = current
+    try:
+        await retention_sweep(sm, settings, now=current)
+    except SQLAlchemyError:
+        log.exception("scheduler.retention.failed")
 
 
 # Each run lists every vault, and live sessions once a relay vault is old enough.
@@ -1833,6 +1861,7 @@ async def _run_loops(
     compute_task_poll: Callable[[], Awaitable[None]],
     interval_s: float,
     stop_event: asyncio.Event,
+    retention_sweep: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     """Run ticks and upstream sweeps on separate loops until stopped.
 
@@ -1842,6 +1871,9 @@ async def _run_loops(
     it has no total sweep timeout, so growing inventory cannot starve cleanup.
     Background command polling has its own loop, so a slow machine delays
     neither cleanup nor dispatch.
+
+    The retention sweep has its own loop too: it deletes in batches and can run long,
+    and usage settlement and routine claims must not wait on it.
 
     A usage pass settles whole session histories and can outlast many ticks;
     inline, routine claims waited for it. On stop the passes in flight are
@@ -1862,6 +1894,14 @@ async def _run_loops(
                 )
             ),
         ]
+        if retention_sweep is not None:
+            background.append(
+                loops.create_task(
+                    _repeat_until_stopped(
+                        retention_sweep, interval_s=interval_s, stop_event=stop_event
+                    )
+                )
+            )
         if usage_sweep is not None:
             background.append(
                 loops.create_task(
@@ -2020,7 +2060,7 @@ async def run(
             await _poll_compute_tasks(compute)
             await _drain_pending_usage(sm, markup=settings.billing.markup)
             await _sweep_pending_files(client, sm)
-            await _sweep_privacy_deletes(client, sm)
+            await _sweep_privacy_deletes(client, sm, settings)
             await _usage_sweep_once(
                 enabled=scheduler_settings.usage_sweep_enabled,
                 sweep=lambda: _sweep_headless_usage(client, sm, markup=settings.billing.markup),
@@ -2033,6 +2073,7 @@ async def run(
             await _sweep_lead_intake(sm)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
+            await _sweep_retention(sm, settings)
             await _archive_idle_relay_vaults(client)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(
@@ -2091,7 +2132,10 @@ async def run(
             await _sweep_headless_usage(client, sm, markup=settings.billing.markup)
 
         async def privacy_sweep() -> None:
-            await _sweep_privacy_deletes(client, sm)
+            await _sweep_privacy_deletes(client, sm, settings)
+
+        async def retention_sweep_loop() -> None:
+            await _sweep_retention(sm, settings)
 
         async with runtime_health(
             "scheduler", engine, settings.observability.health_interval_s, current_turn_counts
@@ -2102,6 +2146,7 @@ async def run(
                 tick=tick,
                 usage_sweep=usage_sweep if scheduler_settings.usage_sweep_enabled else None,
                 privacy_sweep=privacy_sweep,
+                retention_sweep=retention_sweep_loop,
                 compute_sweep=lambda: _sweep_compute(compute),
                 compute_task_poll=lambda: _poll_compute_tasks(compute),
                 interval_s=scheduler_settings.tick_interval_s,

@@ -16,7 +16,7 @@ from pydantic import BaseModel, JsonValue
 
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope
 from mux.contracts.ports import Vaults as CoreVaults
-from mux.contracts.receipts import Operation
+from mux.contracts.receipts import DeletionReceipt, Operation
 from mux.contracts.resources import CredentialBinding, CredentialInfo, Vault
 from mux.drivers.anthropic.credential_schemas import CredentialCreate, CredentialUpdate
 from mux.drivers.anthropic.resources._authorization import (
@@ -58,6 +58,7 @@ class Vaults(CoreVaults, Protocol):
     def walk(self, scope: Scope) -> AsyncIterator[VaultRecord]: ...
     async def retrieve(self, scope: Scope, vault: ResourceRef) -> VaultRecord: ...
     async def create(self, scope: Scope, display_name: str, *, key: str) -> VaultRecord: ...
+    async def delete(self, scope: Scope, vault: ResourceRef, *, key: str) -> DeletionReceipt: ...
     def credential_walk(
         self, scope: Scope, vault: ResourceRef
     ) -> AsyncIterator[CredentialRecord]: ...
@@ -353,3 +354,10 @@ class AnthropicVaults:
         check_ref(scope, vault, self._account_scope_id, "vault")
         await provider_call(self._client.beta.vaults.archive(vault.id))
         return operation(vault, key, "archive_vault")
+
+    async def delete(self, scope: Scope, vault: ResourceRef, *, key: str) -> DeletionReceipt:
+        """Delete the vault and its credentials for good, unlike `archive`."""
+        authorize(self._authorization, scope, "vault", vault.id)
+        check_ref(scope, vault, self._account_scope_id, "vault")
+        await provider_call(self._client.beta.vaults.delete(vault.id))
+        return DeletionReceipt(operation_id=key, deleted=(vault,))

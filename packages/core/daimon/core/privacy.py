@@ -24,8 +24,9 @@ scope and erases those rows.
 from __future__ import annotations
 
 import uuid
-from typing import Final
+from typing import TYPE_CHECKING, Final, NamedTuple
 
+from daimon.core.stores import account_records as account_records_store
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_posts as agent_posts_store
 from daimon.core.stores import coding_key_claims as coding_key_claims_store
@@ -57,6 +58,9 @@ from daimon.core.stores import wizard_session as wizard_session_store
 from daimon.core.stores.domain import CliPrincipalRow, PlatformPrincipalRow
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    from daimon.core.config import Settings
 
 
 class PurgePreviewRow(BaseModel):
@@ -98,6 +102,10 @@ class PurgePreview(BaseModel):
     direct_message_conversations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     tag_opt_outs: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     credential_requests: PurgePreviewRow
+    task_continuations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    turn_outcomes: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    thread_sessions: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    switch_cards: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     wizard_sessions: PurgePreviewRow
     message_feedback: PurgePreviewRow
     support_escalations: PurgePreviewRow
@@ -142,6 +150,10 @@ def held_lines(preview: PurgePreview) -> list[str]:
         (preview.selfhosted_operations, "self-hosted retry record"),
         (preview.slack_user_tokens, "saved access token"),
         (preview.slack_turn_contexts, "temporary request record"),
+        (preview.task_continuations, "follow-up task"),
+        (preview.turn_outcomes, "reply record"),
+        (preview.thread_sessions, "conversation link"),
+        (preview.switch_cards, "pending model switch"),
         (preview.direct_message_conversations, "private conversation"),
         (preview.tag_opt_outs, "never-tag setting"),
         (preview.daimon_admins, "Daimon admin grants"),
@@ -187,6 +199,26 @@ DELETE_PAUSED: Final[str] = (
     "Deleting your account is paused during the event.\n\n"
     "Ask the team running Daimon if you need it deleted now."
 )
+
+
+class LegalLinks(NamedTuple):
+    """The deployment's own legal pages; `terms` is None until the operator sets one."""
+
+    privacy: str
+    terms: str | None
+
+
+def legal_links(settings: Settings) -> LegalLinks:
+    """Where every surface sends people for the policy and the terms.
+
+    One rule for the web app and each chat platform's privacy panel: the
+    privacy link is always there, the terms link only when
+    `DAIMON_TERMS_URL` is set.
+    """
+    return LegalLinks(
+        privacy=str(settings.privacy_policy_url),
+        terms=None if settings.terms_url is None else str(settings.terms_url),
+    )
 
 
 def privacy_lines(display_name: str) -> tuple[str, str]:
@@ -394,6 +426,12 @@ async def collect_purge_preview(
                     tenant_id=key_tenant_id,
                 )
             )
+        account_records = await account_records_store.count_for_account(
+            session,
+            account_id=account_id,
+            platform_user_keys=[(pp.tenant_id, pp.external_id) for pp in pp_list],
+        )
+        credential_requests_total += account_records.credential_requests
         credential_requests = PurgePreviewRow(count=credential_requests_total, example=None)
 
         # 14. wizard_sessions — requester_platform_user_id-scoped, same shape as
@@ -542,6 +580,10 @@ async def collect_purge_preview(
         slack_user_tokens=slack_user_tokens,
         slack_turn_contexts=slack_turn_contexts,
         credential_requests=credential_requests,
+        task_continuations=PurgePreviewRow(count=account_records.task_continuations, example=None),
+        turn_outcomes=PurgePreviewRow(count=account_records.turn_outcomes, example=None),
+        thread_sessions=PurgePreviewRow(count=account_records.thread_sessions, example=None),
+        switch_cards=PurgePreviewRow(count=account_records.switch_cards, example=None),
         wizard_sessions=wizard_sessions,
         message_feedback=message_feedback,
         support_escalations=support_escalations,

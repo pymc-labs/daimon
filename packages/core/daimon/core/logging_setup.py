@@ -88,6 +88,29 @@ def _line_stamps() -> list[structlog.typing.Processor]:
     ]
 
 
+ERROR_TEXT_LIMIT = 500
+
+
+def cap_error_text(
+    logger: structlog.typing.WrappedLogger,
+    method_name: str,
+    event_dict: structlog.typing.EventDict,
+) -> structlog.typing.EventDict:
+    """structlog processor: shorten a long `error` field to `ERROR_TEXT_LIMIT` chars.
+
+    Exception text can quote user content (a prompt, a request body, a file
+    path), so no log line carries more of it than a person needs to tell what
+    failed. Run it after redaction, so a cut never splits a secret the
+    redactor would have caught whole. The structured `exception` array is a
+    separate field and is not touched.
+    """
+    del logger, method_name
+    error = event_dict.get("error")
+    if isinstance(error, str) and len(error) > ERROR_TEXT_LIMIT:
+        event_dict["error"] = error[:ERROR_TEXT_LIMIT] + "..."
+    return event_dict
+
+
 def _render_json() -> list[structlog.typing.Processor]:
     """Exception to structured data, redact, render one line, redact that line."""
     return [
@@ -96,6 +119,7 @@ def _render_json() -> list[structlog.typing.Processor]:
         ),
         # Exception text and string fields can quote a credential.
         redact_log_event,
+        cap_error_text,
         structlog.processors.JSONRenderer(),
         # Last: redact the rendered line itself.
         redact_rendered,

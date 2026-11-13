@@ -2803,17 +2803,80 @@ def get_repo_memory_settings(settings: object) -> RepoMemorySettings:
     return value if isinstance(value, RepoMemorySettings) else RepoMemorySettings()
 
 
-class Settings(BaseSettings):
-    compute: ComputeSettings = Field(default_factory=ComputeSettings)
-    long_jobs: LongJobsSettings = Field(default_factory=LongJobsSettings)
-    security_audit_retention_days: int = Field(
+class RetentionSettings(BaseModel):
+    """How long the scheduler keeps operational records, in days. 0 keeps them forever.
+
+    Conversation history (thread sessions, private chats, web threads, turn records
+    and Daimon's journal copy) is the `conversation_retention` feature instead, so a
+    workspace can shorten it. It is on at 1 year; `DAIMON_FEATURES__CONVERSATION_RETENTION=0`
+    turns it off.
+    """
+
+    security_audit_days: int = Field(
         default=90,
         ge=0,
         description=(
-            "Security audit retention age in days, default 90. Operators must schedule "
-            "`daimon audit prune TENANT_UUID` for each tenant (for example daily). "
-            "The command deletes older events. Set 0 to explicitly retain events forever; "
-            "privacy erasure and tenant deletion still apply."
+            "Days to keep security audit events and the record of messages the agent posted. "
+            "The scheduler deletes older ones; `daimon audit prune` does the same for one "
+            "tenant. Privacy erasure and tenant deletion still apply when this is 0."
+        ),
+    )
+    admin_history_days: int = Field(
+        default=90, ge=0, description="Days to keep the web admin audit and channel changes."
+    )
+    task_continuations_days: int = Field(
+        default=30,
+        ge=0,
+        description="Days to keep a delivered, skipped or cancelled task continuation.",
+    )
+    job_output_days: int = Field(
+        default=90,
+        ge=0,
+        description=(
+            "Days to keep finished long jobs, and the output tails of finished background "
+            "commands and routine runs."
+        ),
+    )
+    access_requests_days: int = Field(
+        default=90,
+        ge=0,
+        description="Days to keep credential and GitHub access requests once resolved or expired.",
+    )
+    deleted_threads_days: int = Field(
+        default=30,
+        ge=0,
+        description="Days before a web thread the user deleted is removed for good.",
+    )
+    feedback_days: int = Field(
+        default=365, ge=0, description="Days to keep message feedback and support escalations."
+    )
+    channel_names_days: int = Field(
+        default=365,
+        ge=0,
+        description="Days to keep a channel's last known name after it was last seen.",
+    )
+    archived_tenants_days: int = Field(
+        default=30,
+        ge=0,
+        description=(
+            "Days after a tenant is archived (its app uninstalled) before it is retired: its "
+            "data, provider sessions, memory, vaults, skills, reports and notebooks are "
+            "deleted, and only billing records and the balance stay. Reinstalling before "
+            "then keeps everything."
+        ),
+    )
+
+
+class Settings(BaseSettings):
+    compute: ComputeSettings = Field(default_factory=ComputeSettings)
+    long_jobs: LongJobsSettings = Field(default_factory=LongJobsSettings)
+    retention: RetentionSettings = Field(default_factory=RetentionSettings)
+    security_audit_retention_days: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Deprecated: use `DAIMON_RETENTION__SECURITY_AUDIT_DAYS`. When set, and that "
+            "variable is not, it is used as the security audit retention."
         ),
     )
     completion_pings: dict[uuid.UUID, bool] = Field(
@@ -2862,8 +2925,17 @@ class Settings(BaseSettings):
     privacy_policy_url: HttpUrl = Field(
         default=HttpUrl("https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md"),
         description=(
-            "URL rendered on the privacy panels' Policy button. "
+            "URL of the privacy policy, linked from the web app and the privacy "
+            "panels' Policy button. "
             "Override via DAIMON_PRIVACY_POLICY_URL if you host your own policy page."
+        ),
+    )
+    terms_url: HttpUrl | None = Field(
+        default=None,
+        description=(
+            "URL of the terms page. Set DAIMON_TERMS_URL to show a Terms link beside "
+            "the privacy policy in the web app and the privacy panels; unset, no "
+            "Terms link appears."
         ),
     )
     privacy: PrivacySettings = Field(default_factory=PrivacySettings)
@@ -3002,6 +3074,14 @@ class Settings(BaseSettings):
             if isinstance(values, dict)
             else values
         )
+
+    @model_validator(mode="after")
+    def _legacy_audit_retention(self) -> Settings:
+        """`DAIMON_SECURITY_AUDIT_RETENTION_DAYS` still sets the audit retention."""
+        legacy = self.security_audit_retention_days
+        if legacy is not None and "security_audit_days" not in self.retention.model_fields_set:
+            self.retention = self.retention.model_copy(update={"security_audit_days": legacy})
+        return self
 
     @model_validator(mode="after")
     def _tool_safety_feature(self) -> Settings:

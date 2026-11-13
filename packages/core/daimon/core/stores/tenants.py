@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Collection
+from datetime import datetime
 from typing import Any, cast
 
 from daimon.core._models import (
@@ -16,19 +17,26 @@ from daimon.core._models import (
     AgentFile,
     AgentGitHubGrant,
     ChannelConfig,
+    JournalSession,
     PaymentEvent,
+    ProviderBindingSlot,
     Routine,
+    SessionSettleState,
     Tenant,
     TenantConfig,
     TenantLedger,
+    TenantRetirement,
     TenantUserCap,
+    ThreadSession,
+    TurnOutcome,
     UsageEvent,
 )
 from daimon.core.errors import StoreError
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores.domain import FundingMode, Platform, TenantDependentCounts, TenantRow
 from daimon.core.stores.security_audit import erase_tenant
-from sqlalchemy import delete, func, select, update
+from daimon.core.stores.slack_user_tokens import delete_workspace_tokens
+from sqlalchemy import CompoundSelect, delete, func, select, union, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -139,6 +147,15 @@ async def set_provision_status(
         return
     async with session_factory() as session, session.begin():
         await session.execute(update(Tenant).where(Tenant.id == tenant_id).values(**values))
+        if clear_archive:
+            await drop_retirement_queue(session, tenant_id=tenant_id)
+
+
+async def drop_retirement_queue(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+    """A reinstall stops a retirement: provider cleanup not yet done is abandoned, since
+    the tenant may use those resources again. Call it holding the tenant row lock;
+    upstream cleanup re-checks under that lock before each delete."""
+    await session.execute(delete(TenantRetirement).where(TenantRetirement.tenant_id == tenant_id))
 
 
 async def list_tenants_by_platform(
@@ -153,6 +170,32 @@ async def list_tenants_by_platform(
             stmt = stmt.where(Tenant.platform == platform)
         rows = (await session.execute(stmt)).scalars().all()
         return [TenantRow.model_validate(r) for r in rows]
+
+
+def tenant_session_ids(tenant_id: uuid.UUID) -> CompoundSelect[tuple[str | None]]:
+    """Every provider session id the tenant's rows name.
+
+    Usage events are kept for accounting and every billed session has one, so
+    the set does not depend on conversation rows the retention sweep prunes.
+    """
+    return union(
+        select(ThreadSession.ma_session_id).where(ThreadSession.tenant_id == tenant_id),
+        select(TurnOutcome.session_id).where(
+            TurnOutcome.tenant_id == tenant_id, TurnOutcome.session_id.is_not(None)
+        ),
+        select(UsageEvent.managed_session_id).where(UsageEvent.tenant_id == tenant_id),
+        select(JournalSession.session_id)
+        .join(ProviderBindingSlot, ProviderBindingSlot.binding_id == JournalSession.binding_id)
+        .where(ProviderBindingSlot.tenant_id == tenant_id),
+    )
+
+
+async def delete_settle_state(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+    """Settlement progress, keyed by provider session, of the tenant's sessions."""
+    ids = tenant_session_ids(tenant_id).subquery()
+    await session.execute(
+        delete(SessionSettleState).where(SessionSettleState.managed_session_id.in_(select(ids)))
+    )
 
 
 async def delete_tenant(
@@ -171,6 +214,11 @@ async def delete_tenant(
             .where(Account.tenant_id == tenant_id)
         )
     )
+    tenant = await session.get(Tenant, tenant_id)
+    if tenant is not None and tenant.platform == "slack":
+        # Tokens are keyed by Slack team, not tenant, so no cascade reaches them.
+        await delete_workspace_tokens(session, tenant_id=tenant_id, team_id=tenant.external_id)
+    await delete_settle_state(session, tenant_id=tenant_id)
     await erase_tenant(session, tenant_id=tenant_id)
     stmt = delete(Tenant).where(Tenant.id == tenant_id)
     result = await session.execute(stmt)
@@ -179,6 +227,19 @@ async def delete_tenant(
     await session.flush()
     for github_user_id in github_user_ids:
         await github_links_store.delete_unlinked_user(session, github_user_id=github_user_id)
+
+
+async def list_expired_archived_tenants(
+    session: AsyncSession, *, archived_before: datetime, limit: int
+) -> list[uuid.UUID]:
+    """Tenants archived (uninstalled) before the cutoff and not yet retired, oldest first."""
+    rows = await session.scalars(
+        select(Tenant.id)
+        .where(Tenant.archived_at < archived_before, Tenant.retired_at.is_(None))
+        .order_by(Tenant.archived_at)
+        .limit(limit)
+    )
+    return list(rows)
 
 
 async def get_tenant_dependent_counts(

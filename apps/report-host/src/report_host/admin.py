@@ -12,11 +12,9 @@ instead and lives in a separate module — the two authorisation mechanisms
 never mix in one place.
 """
 
-import asyncio
 import hmac
 import re
 import secrets
-import shutil
 import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -27,6 +25,7 @@ from pydantic import BaseModel
 
 from report_host import reports_store
 from report_host.config import Settings
+from report_host.locks import SlugLocks
 
 # Lowercase alphanumerics and hyphens only, no leading/trailing hyphen, bounded
 # length. The slug becomes both a directory name and a URL segment, so a
@@ -95,11 +94,16 @@ class DeleteResponse(BaseModel):
     deleted: bool
 
 
+class DeleteTenantResponse(BaseModel):
+    deleted: int
+
+
 def build_admin_router(
     *,
     settings: Settings,
     conn_factory: Callable[[], sqlite3.Connection],
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    locks: SlugLocks | None = None,
 ) -> APIRouter:
     """Build the admin router: publish (create-or-update), delete, revoke.
 
@@ -114,14 +118,7 @@ def build_admin_router(
     """
     conn = conn_factory()
     require_admin = _bearer_dep(settings)
-    slug_locks: dict[str, asyncio.Lock] = {}
-
-    def lock_for(slug: str) -> asyncio.Lock:
-        lock = slug_locks.get(slug)
-        if lock is None:
-            lock = asyncio.Lock()
-            slug_locks[slug] = lock
-        return lock
+    lock_for = locks if locks is not None else SlugLocks()
 
     router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -196,14 +193,26 @@ def build_admin_router(
             if existing is not None and existing.tenant_id != tenant_id:
                 raise HTTPException(status.HTTP_403_FORBIDDEN, detail=_TENANT_MISMATCH_MESSAGE)
             deleted = reports_store.delete_report(conn, slug=validated_slug)
-            report_dir = settings.data_dir / validated_slug
-            # A validated slug can never escape data_dir, but this is the
-            # one place that removes a directory tree, so it re-asserts the
-            # containment it depends on rather than trusting validation
-            # alone.
-            if report_dir.parent == settings.data_dir:
-                shutil.rmtree(report_dir, ignore_errors=True)
+            reports_store.remove_report_dir(settings.data_dir, validated_slug)
         return DeleteResponse(deleted=deleted)
+
+    @router.delete("/admin/tenants/{tenant_id}/reports")
+    async def delete_tenant_reports_route(tenant_id: str) -> DeleteTenantResponse:  # pyright: ignore[reportUnusedFunction]
+        """Delete every report of one tenant, files included, and count them.
+
+        For tenant deletion: the report host is its own store, so daimon's
+        database purge cannot reach it. Deleting a tenant with no reports
+        is not an error. Slugs are processed one at a time under their own
+        locks, so a publish racing this call either lands before its slug
+        is reached (and is deleted) or after (and is a fresh report).
+        """
+        deleted = 0
+        for slug in reports_store.list_slugs_for_tenant(conn, tenant_id=tenant_id):
+            async with lock_for(slug):
+                if reports_store.delete_report(conn, slug=slug):
+                    deleted += 1
+                reports_store.remove_report_dir(settings.data_dir, slug)
+        return DeleteTenantResponse(deleted=deleted)
 
     @router.delete("/admin/reports/{slug}/recipients/{token}")
     async def delete_recipient_route(slug: str, token: str) -> DeleteResponse:  # pyright: ignore[reportUnusedFunction]

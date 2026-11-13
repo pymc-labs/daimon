@@ -180,3 +180,31 @@ async def install_poll_ports(session: AsyncSession) -> None:
             text(f"GRANT EXECUTE ON FUNCTION {quoted}.{signature} TO daimon_sidecar")
         )
     await session.execute(text(f"REVOKE CREATE ON SCHEMA {quoted} FROM daimon_watch_ingress_owner"))
+    await install_firing_trigger(session)
+
+
+async def install_firing_trigger(session: AsyncSession) -> None:
+    """Install 0196's trigger that stamps a watch with its latest firing time.
+
+    ``install_poll_ports`` calls it, so every watch test keeps ``last_fired_at`` current.
+    """
+    schema = await session.scalar(text("SELECT current_schema()"))
+    if not isinstance(schema, str) or not schema.startswith("test_"):
+        raise ValueError("Watch fixtures require an owned test schema")
+    quoted = '"' + schema + '"'
+    migration = runpy.run_path(
+        str(Path(__file__).resolve().parents[3] / "core/alembic/versions/0196_audit_clocks.py")
+    )
+    await session.execute(text(cast(str, migration["FUNCTION"]).format(schema=quoted)))
+    await session.execute(
+        text(
+            f"REVOKE ALL ON FUNCTION {quoted}.note_watch_firing() "
+            "FROM PUBLIC,daimon_sidecar,daimon_watch_ingress_owner"
+        )
+    )
+    await session.execute(
+        text(
+            f"CREATE OR REPLACE TRIGGER note_watch_firing AFTER INSERT ON {quoted}.watch_firings "
+            f"FOR EACH ROW EXECUTE FUNCTION {quoted}.note_watch_firing()"
+        )
+    )

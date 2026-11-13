@@ -154,6 +154,7 @@ def build_privacy_main_container(
     is_slack_connected: bool,
     slack_connect_url: str | None,
     policy_url: str,
+    terms_url: str | None = None,
     display_name: str = "daimon",
     delete_enabled: bool = True,
 ) -> dict[str, Any]:
@@ -168,8 +169,9 @@ def build_privacy_main_container(
     neither rather than a dead button.
 
     ``policy_url`` is the operator-configured privacy policy URL (from
-    ``Settings.privacy_policy_url``). Pure function — caller passes the
-    value in rather than importing config here (functional core).
+    ``Settings.privacy_policy_url``) and ``terms_url`` the terms page, shown
+    only when set. Pure function — caller passes the values in rather than
+    importing config here (functional core).
 
     Returned dict is passed directly to views.update(view=...).
     """
@@ -180,12 +182,23 @@ def build_privacy_main_container(
             "text": {"type": "plain_text", "text": "📄 Policy"},
             "url": policy_url,
         },
+    ]
+    if terms_url is not None:
+        action_elements.append(
+            {
+                "type": "button",
+                "action_id": "privacy_terms",
+                "text": {"type": "plain_text", "text": "📜 Terms"},
+                "url": terms_url,
+            }
+        )
+    action_elements.append(
         {
             "type": "button",
             "action_id": "privacy_export",
             "text": {"type": "plain_text", "text": "📤 Export"},
-        },
-    ]
+        }
+    )
     if delete_enabled:
         action_elements.append(
             {

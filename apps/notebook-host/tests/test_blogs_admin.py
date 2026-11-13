@@ -161,3 +161,55 @@ def test_delete_notebook_route_also_unregisters_a_blog(
         "the notebooks route must drop the blog record too, or the sweep respawns it"
     )
     assert "pre-radar" not in state.processes, "delete must drop the tracked process"
+
+
+def test_tenant_delete_removes_what_a_request_published_under_that_tenant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A publish that names a tenant is found by the tenant delete; others are not."""
+    from notebook_host.blogs_store import load_blogs
+
+    client, state, _calls = _make_blog_app(tmp_path, monkeypatch)
+    mine, other = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
+    source = "import marimo as mo\napp = mo.App()"
+    client.put(
+        "/admin/blogs/mine",
+        json={"source": source, "tenant": mine},
+        headers={"Authorization": AUTH},
+    )
+    client.put(
+        "/admin/notebooks/scratch",
+        json={"source": source, "tenant": mine},
+        headers={"Authorization": AUTH},
+    )
+    client.put(
+        "/admin/blogs/theirs",
+        json={"source": source, "tenant": other},
+        headers={"Authorization": AUTH},
+    )
+    client.put("/admin/blogs/untagged", json={"source": source}, headers={"Authorization": AUTH})
+
+    r = client.delete(f"/admin/tenants/{mine.upper()}/notebooks", headers={"Authorization": AUTH})
+
+    assert r.json() == {"deleted": 2}, "an upper-case id still names the tenant"
+    assert set(load_blogs(tmp_path / "blogs.json")) == {"theirs", "untagged"}
+    assert set(state.processes) == {"theirs", "untagged"}, "the stopped processes are dropped"
+    assert not get_slug_paths(tmp_path, "mine").notebook.exists()
+
+
+def test_tenant_delete_needs_the_bearer_and_a_tenant_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _state, _calls = _make_blog_app(tmp_path, monkeypatch)
+
+    assert (
+        client.delete("/admin/tenants/11111111-1111-4111-8111-111111111111/notebooks").status_code
+        == 401
+    )
+    bad = client.delete("/admin/tenants/not-a-uuid/notebooks", headers={"Authorization": AUTH})
+    assert bad.status_code == 422, "a malformed id is refused, never treated as a match-all"
+    empty = client.delete(
+        "/admin/tenants/11111111-1111-4111-8111-111111111111/notebooks",
+        headers={"Authorization": AUTH},
+    )
+    assert empty.json() == {"deleted": 0}

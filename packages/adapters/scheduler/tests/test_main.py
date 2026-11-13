@@ -95,12 +95,16 @@ async def test_privacy_sweep_boundary_retries_after_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sweep = unittest.mock.AsyncMock(side_effect=[RuntimeError("temporary"), None])
+    retire = unittest.mock.AsyncMock(side_effect=[RuntimeError("temporary"), None])
     monkeypatch.setattr("daimon.adapters.scheduler.main.sweep_privacy_session_deletes", sweep)
+    monkeypatch.setattr("daimon.adapters.scheduler.main.tenant_retirement.sweep", retire)
     client = unittest.mock.Mock()
     sm = unittest.mock.Mock()
-    await _sweep_privacy_deletes(client, sm)
-    await _sweep_privacy_deletes(client, sm)
-    assert sweep.await_count == 2
+    settings = unittest.mock.Mock()
+    await _sweep_privacy_deletes(client, sm, settings)
+    await _sweep_privacy_deletes(client, sm, settings)
+    assert sweep.await_count == 2, "account erasures are retried after a failure"
+    assert retire.await_count == 2, "tenant retirement cleanup is retried after a failure"
 
 
 async def test_app_vault_archive_retries_after_failure(
@@ -2948,6 +2952,50 @@ async def test_run_loops_keeps_ticking_while_privacy_upstream_is_slow() -> None:
 
     assert ticks == 3
     assert cancelled
+
+
+async def test_run_loops_keeps_ticking_and_settling_while_retention_runs_long() -> None:
+    """The retention sweep has its own loop: a long sweep delays neither the tick nor usage."""
+    stop = asyncio.Event()
+    retention_started = asyncio.Event()
+    ticks = settles = 0
+    cancelled = False
+
+    async def tick() -> None:
+        nonlocal ticks
+        await retention_started.wait()
+        ticks += 1
+        if ticks == 3:
+            stop.set()
+
+    async def usage() -> None:
+        nonlocal settles
+        settles += 1
+
+    async def slow_retention() -> None:
+        nonlocal cancelled
+        retention_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    async with asyncio.timeout(5):
+        await _run_loops(
+            tick=tick,
+            usage_sweep=usage,
+            privacy_sweep=unittest.mock.AsyncMock(),
+            retention_sweep=slow_retention,
+            compute_sweep=unittest.mock.AsyncMock(),
+            compute_task_poll=unittest.mock.AsyncMock(),
+            interval_s=0.01,
+            stop_event=stop,
+        )
+
+    assert ticks == 3, "ticks continued while the retention sweep was running"
+    assert settles >= 1, "usage settlement ran while the retention sweep was running"
+    assert cancelled, "stopping cancels the sweep in flight"
 
 
 @pytest.mark.parametrize(

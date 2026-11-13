@@ -27,9 +27,10 @@ from daimon.core.stores.domain import Platform
 from daimon.core.stores.slack_bot_tokens import delete_slack_bot_token, get_slack_bot_token
 from daimon.core.stores.slack_connect_prompts import delete_connect_prompts_for_team
 from daimon.core.stores.slack_event_dedup import delete_event_dedup_for_team
+from daimon.core.stores.tenants import drop_retirement_queue
 from daimon.core.stores.workspace_members import clear_members
 from pydantic import BaseModel
-from sqlalchemy import select, update
+from sqlalchemy import case, func, null, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -104,7 +105,19 @@ async def provision_tenant(
             await s.execute(
                 pg_insert(Tenant)
                 .values(id=tenant_id, platform=platform, external_id=workspace_id)
-                .on_conflict_do_nothing(index_elements=[Tenant.id])
+                # An archived tenant being installed again restarts its archive clock
+                # under the row lock, so the archived-tenant sweep cannot delete it
+                # before the install clears the archive.
+                .on_conflict_do_update(
+                    index_elements=[Tenant.id],
+                    set_={
+                        "archived_at": case(
+                            (Tenant.archived_at.is_not(None), func.now()), else_=null()
+                        ),
+                        # A retired tenant comes back with its balance; the trial stays spent.
+                        "retired_at": null(),
+                    },
+                )
             )
         except IntegrityError as exc:
             # asyncpg's error, under the DB-API wrapper, names the violated index.
@@ -116,6 +129,8 @@ async def provision_tenant(
                 "begins with the same 8 characters as an existing tenant's, and skill titles "
                 "name a tenant by those characters"
             ) from exc
+        # Under the row lock the upsert took, so no queued delete can start after this.
+        await drop_retirement_queue(s, tenant_id=tenant_id)
         await s.flush()
 
         # Step 2: Account upsert — derived id makes ON CONFLICT DO NOTHING work

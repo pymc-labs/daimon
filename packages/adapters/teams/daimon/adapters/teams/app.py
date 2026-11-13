@@ -830,6 +830,10 @@ class TeamsApp:
             self._unfenced.extend(items)
             return []
 
+    def reprovision(self) -> None:
+        """Provision the tenant again in the background, as after an install clears its archive."""
+        self.spawn(self._provision(), name="teams.provision")
+
     async def _provision(self) -> None:
         settings = self.runtime.settings
         public_url = str(settings.mcp.public_url) if settings.mcp.public_url else None

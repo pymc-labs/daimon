@@ -42,7 +42,9 @@ def _make_preview(**overrides: Any) -> PurgePreview:
 
 
 def _make_runtime(
-    *, privacy_policy_url: str = "https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md"
+    *,
+    privacy_policy_url: str = "https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md",
+    terms_url: str | None = None,
 ) -> DiscordRuntime:
     """Return a MagicMock spec'd against DiscordRuntime for view construction.
 
@@ -59,6 +61,7 @@ def _make_runtime(
     runtime.anthropic = MagicMock(spec=AsyncAnthropic, name="anthropic")
     runtime.settings = MagicMock(name="settings")
     runtime.settings.privacy_policy_url = HttpUrl(privacy_policy_url)
+    runtime.settings.terms_url = None if terms_url is None else HttpUrl(terms_url)
     return runtime
 
 

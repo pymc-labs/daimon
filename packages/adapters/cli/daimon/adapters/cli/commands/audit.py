@@ -76,11 +76,11 @@ def audit_list_command(
 
 @audit_app.command("prune")
 def audit_prune_command(tenant: uuid.UUID) -> None:
-    """Expire this tenant's events and channel post records using
-    security_audit_retention_days (default 90)."""
+    """Expire this tenant's events and channel post records now, using
+    DAIMON_RETENTION__SECURITY_AUDIT_DAYS (default 90). The scheduler also does this daily."""
     settings = load_settings()
     console = Console(highlight=False)
-    days = settings.security_audit_retention_days
+    days = settings.retention.security_audit_days
     if days == 0:
         console.print("Audit retention is indefinite; no events removed.")
         return

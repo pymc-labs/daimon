@@ -39,6 +39,15 @@ class RedactAccessToken(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
+        # The client address is personal data nothing here needs; uvicorn's
+        # AccessFormatter reads ``record.args`` by position, so the slot
+        # holds "-" instead of going away.
+        if (
+            record.name == "uvicorn.access"
+            and isinstance(record.args, tuple)
+            and len(record.args) >= 3
+        ):
+            record.args = ("-", *record.args[1:])
         # Arg-wise first: uvicorn's AccessFormatter reads ``record.args`` by
         # position, so its records must keep their args.
         if isinstance(record.args, tuple):

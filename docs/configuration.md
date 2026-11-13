@@ -18,6 +18,7 @@ typo is silent — check the spelling here.
 - [Core](#core)
 - [Compute](#compute)
 - [Long Jobs](#long-jobs)
+- [Retention](#retention)
 - [Database](#database)
 - [Anthropic](#anthropic)
 - [Privacy](#privacy)
@@ -73,12 +74,10 @@ section below is a nested block on this model, reached with the `__` delimiter.
 
 ### `DAIMON_SECURITY_AUDIT_RETENTION_DAYS`
 
-`int` · optional · default `90`
+`int | None` · optional · default unset
 
-Security audit retention age in days, default 90. Operators must schedule `daimon audit
-prune TENANT_UUID` for each tenant (for example daily). The command deletes older
-events. Set 0 to explicitly retain events forever; privacy erasure and tenant deletion
-still apply.
+Deprecated: use `DAIMON_RETENTION__SECURITY_AUDIT_DAYS`. When set, and that variable is
+not, it is used as the security audit retention.
 
 ### `DAIMON_COMPLETION_PINGS`
 
@@ -122,8 +121,15 @@ true. Set DAIMON_TABLE_RENDERING to a JSON object.
 
 `HttpUrl` · optional · default `https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md`
 
-URL rendered on the privacy panels' Policy button. Override via
-DAIMON_PRIVACY_POLICY_URL if you host your own policy page.
+URL of the privacy policy, linked from the web app and the privacy panels' Policy
+button. Override via DAIMON_PRIVACY_POLICY_URL if you host your own policy page.
+
+### `DAIMON_TERMS_URL`
+
+`HttpUrl | None` · optional · default unset
+
+URL of the terms page. Set DAIMON_TERMS_URL to show a Terms link beside the privacy
+policy in the web app and the privacy panels; unset, no Terms link appears.
 
 ### `DAIMON_FEATURES`
 
@@ -239,6 +245,76 @@ Maximum launching and running long jobs per tenant.
 `int` · optional · default `2`
 
 Maximum launching and running long jobs per owner within a tenant.
+
+## Retention
+
+Read from `daimon.core.config.RetentionSettings`. Prefix `DAIMON_RETENTION__`.
+
+How long the scheduler keeps operational records, in days. 0 keeps them forever.
+
+Conversation history (thread sessions, private chats, web threads, turn records and
+Daimon's journal copy) is the `conversation_retention` feature instead, so a workspace
+can shorten it. It is on at 1 year; `DAIMON_FEATURES__CONVERSATION_RETENTION=0` turns it
+off.
+
+### `DAIMON_RETENTION__SECURITY_AUDIT_DAYS`
+
+`int` · optional · default `90`
+
+Days to keep security audit events and the record of messages the agent posted. The
+scheduler deletes older ones; `daimon audit prune` does the same for one tenant. Privacy
+erasure and tenant deletion still apply when this is 0.
+
+### `DAIMON_RETENTION__ADMIN_HISTORY_DAYS`
+
+`int` · optional · default `90`
+
+Days to keep the web admin audit and channel changes.
+
+### `DAIMON_RETENTION__TASK_CONTINUATIONS_DAYS`
+
+`int` · optional · default `30`
+
+Days to keep a delivered, skipped or cancelled task continuation.
+
+### `DAIMON_RETENTION__JOB_OUTPUT_DAYS`
+
+`int` · optional · default `90`
+
+Days to keep finished long jobs, and the output tails of finished background commands
+and routine runs.
+
+### `DAIMON_RETENTION__ACCESS_REQUESTS_DAYS`
+
+`int` · optional · default `90`
+
+Days to keep credential and GitHub access requests once resolved or expired.
+
+### `DAIMON_RETENTION__DELETED_THREADS_DAYS`
+
+`int` · optional · default `30`
+
+Days before a web thread the user deleted is removed for good.
+
+### `DAIMON_RETENTION__FEEDBACK_DAYS`
+
+`int` · optional · default `365`
+
+Days to keep message feedback and support escalations.
+
+### `DAIMON_RETENTION__CHANNEL_NAMES_DAYS`
+
+`int` · optional · default `365`
+
+Days to keep a channel's last known name after it was last seen.
+
+### `DAIMON_RETENTION__ARCHIVED_TENANTS_DAYS`
+
+`int` · optional · default `30`
+
+Days after a tenant is archived (its app uninstalled) before it is retired: its data,
+provider sessions, memory, vaults, skills, reports and notebooks are deleted, and only
+billing records and the balance stay. Reinstalling before then keeps everything.
 
 ## Database
 
@@ -2442,6 +2518,13 @@ How long a per-recipient link remains valid before expiring.
 `int` · optional · default `24`
 
 A thread idle longer than this is archived by the host's sweep.
+
+### `DAIMON_REPORT__RETENTION_DAYS`
+
+`int` · optional · default `365`
+
+A report is deleted, with its PDFs, revisions and comment threads, this many days after
+its last update. 0 keeps reports until an admin deletes them.
 
 ## Billing (Stripe)
 

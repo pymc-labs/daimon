@@ -55,6 +55,7 @@ def _mint(
     ttl: int = 300,
     secret: str = _SECRET,
     notebook_ttl_seconds: int | None = None,
+    tenant: str | None = None,
 ) -> str:
     payload: dict[str, object] = {
         "slug": slug,
@@ -66,6 +67,8 @@ def _mint(
     }
     if notebook_ttl_seconds is not None:
         payload["notebook_ttl_seconds"] = notebook_ttl_seconds
+    if tenant is not None:
+        payload["tenant"] = tenant
     payload_b64 = _b64(json.dumps(payload, separators=(",", ":")).encode())
     sig = hmac.new(secret.encode(), payload_b64.encode(), hashlib.sha256).digest()
     return f"{payload_b64}.{_b64(sig)}"
@@ -261,3 +264,28 @@ def test_upload_rejects_body_over_host_ceiling_under_token_max(
     assert not get_slug_paths(tmp_path, "ceil").notebook.exists(), (
         "no file written when over the host ceiling"
     )
+
+
+def test_upload_records_the_tenant_named_in_the_token_and_the_tenant_delete_finds_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An upload's token names its tenant, so the tenant delete finds it."""
+    from notebook_host.blogs_store import load_blogs
+
+    client, _ = _make_app(tmp_path, monkeypatch)
+    mine, other = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
+    for slug, tenant, jti in (("mine-blog", mine, "b"), ("theirs", other, "c")):
+        r = client.put(f"/upload/{_mint('blog', slug, jti=jti, tenant=tenant)}", content=b"# nb\n")
+        assert r.status_code == 200, r.text
+
+    r = client.delete(
+        f"/admin/tenants/{mine}/notebooks", headers={"Authorization": f"Bearer {_SECRET}"}
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.json() == {"deleted": 1}, "only the named tenant's upload goes"
+    assert set(load_blogs(tmp_path / "blogs.json")) == {"theirs"}, "another tenant's is untouched"
+    assert not get_slug_paths(tmp_path, "mine-blog").notebook.exists(), (
+        "the blog's source is removed"
+    )
+    assert get_slug_paths(tmp_path, "theirs").notebook.exists(), "the other tenant's source stays"

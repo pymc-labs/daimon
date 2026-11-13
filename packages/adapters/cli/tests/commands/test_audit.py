@@ -93,7 +93,9 @@ async def test_prune_command_uses_configured_age_and_tenant(
 
     monkeypatch.setattr(audit, "build_runtime", runtime)
     monkeypatch.setattr(
-        audit, "load_settings", lambda: SimpleNamespace(security_audit_retention_days=7)
+        audit,
+        "load_settings",
+        lambda: SimpleNamespace(retention=SimpleNamespace(security_audit_days=7)),
     )
     result = await asyncio.to_thread(CliRunner().invoke, app, ["audit", "prune", str(tenant)])
     assert result.exit_code == 0, result.output
@@ -105,7 +107,9 @@ async def test_prune_command_uses_configured_age_and_tenant(
 
 def test_prune_indefinite_retention_skips_runtime(monkeypatch):
     monkeypatch.setattr(
-        audit, "load_settings", lambda: SimpleNamespace(security_audit_retention_days=0)
+        audit,
+        "load_settings",
+        lambda: SimpleNamespace(retention=SimpleNamespace(security_audit_days=0)),
     )
 
     def forbidden(_settings):

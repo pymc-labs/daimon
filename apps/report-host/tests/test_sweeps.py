@@ -9,6 +9,7 @@ end.
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import AbstractAsyncContextManager
@@ -20,6 +21,7 @@ from typing import Any
 import pytest
 from report_host import reports_store, sweeps, threads_store
 from report_host.config import Settings, load_settings
+from report_host.locks import SlugLocks
 from report_host.mcp_client import SeamClient
 from starlette.types import Receive, Scope, Send
 
@@ -496,3 +498,212 @@ def test_prune_expired_recipients_removes_only_expired_rows(
     assert removed == 1
     remaining = reports_store.list_recipients(conn, slug="acme")
     assert [r.token for r in remaining] == ["live-1"]
+
+
+# --------------------------------------------------------------------------
+# prune_stale_reports
+# --------------------------------------------------------------------------
+
+
+def _seed_report_dir(settings: Settings, slug: str) -> Path:
+    report_dir = settings.data_dir / slug
+    report_dir.mkdir(parents=True)
+    (report_dir / "report.pdf").write_bytes(b"%PDF-1.4")
+    return report_dir
+
+
+async def test_prune_stale_reports_deletes_idle_report_with_children_and_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path=tmp_path, monkeypatch=monkeypatch, retention_days=30)
+    conn = reports_store.connect(settings.data_dir)
+    old = NOW - timedelta(days=31)
+    reports_store.save_report(
+        conn,
+        slug="old",
+        title="Old",
+        tenant_id="t",
+        agent_name="a",
+        cap_usd=Decimal(1),
+        agent_token="tok",
+        now=old,
+    )
+    reports_store.add_revision(conn, slug="old", name="r1.pdf", by_thread=None, note=None, now=old)
+    thread = threads_store.create_thread(
+        conn, slug="old", recipient_token="rcpt", title="Q", now=old
+    )
+    threads_store.add_message(
+        conn,
+        thread_id=thread.id,
+        role="user",
+        text="private question",
+        now=old,
+        bundle_sha256=None,
+        pdf_revision=None,
+    )
+    report_dir = _seed_report_dir(settings, "old")
+
+    removed = await sweeps.prune_stale_reports(
+        conn=conn, settings=settings, now=lambda: NOW, locks=SlugLocks()
+    )
+
+    assert removed == 1, "the idle report should be deleted"
+    assert reports_store.load_report(conn, slug="old") is None
+    assert not report_dir.exists(), "PDFs and archives must go with the row"
+    for table in ("revisions", "threads", "messages"):
+        count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        assert count == 0, f"{table} rows should cascade away"
+
+
+async def test_prune_stale_reports_keeps_report_with_recent_activity_of_any_kind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path=tmp_path, monkeypatch=monkeypatch, retention_days=30)
+    conn = reports_store.connect(settings.data_dir)
+    old = NOW - timedelta(days=90)
+    recent = NOW - timedelta(days=5)
+    for slug in ("by-message", "by-revision", "by-recipient", "untouched"):
+        reports_store.save_report(
+            conn,
+            slug=slug,
+            title=slug,
+            tenant_id="t",
+            agent_name="a",
+            cap_usd=Decimal(1),
+            agent_token="tok",
+            now=old,
+        )
+    thread = threads_store.create_thread(
+        conn, slug="by-message", recipient_token="rcpt", title="Q", now=old
+    )
+    threads_store.add_message(
+        conn,
+        thread_id=thread.id,
+        role="user",
+        text="hi",
+        now=recent,
+        bundle_sha256=None,
+        pdf_revision=None,
+    )
+    reports_store.add_revision(
+        conn, slug="by-revision", name="r2.pdf", by_thread=None, note=None, now=recent
+    )
+    reports_store.add_recipient(
+        conn, slug="by-recipient", name="J", label="r", token="k", now=recent, ttl_days=90
+    )
+
+    removed = await sweeps.prune_stale_reports(
+        conn=conn, settings=settings, now=lambda: NOW, locks=SlugLocks()
+    )
+
+    assert removed == 1, "only the report with no later activity is stale"
+    assert reports_store.load_report(conn, slug="untouched") is None
+    for slug in ("by-message", "by-revision", "by-recipient"):
+        assert reports_store.load_report(conn, slug=slug) is not None, f"{slug} had recent activity"
+
+
+async def test_prune_stale_reports_keeps_report_with_a_running_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path=tmp_path, monkeypatch=monkeypatch, retention_days=30)
+    conn = reports_store.connect(settings.data_dir)
+    old = NOW - timedelta(days=90)
+    reports_store.save_report(
+        conn,
+        slug="busy",
+        title="Busy",
+        tenant_id="t",
+        agent_name="a",
+        cap_usd=Decimal(10),
+        agent_token="tok",
+        now=old,
+    )
+    thread = threads_store.create_thread(
+        conn, slug="busy", recipient_token="rcpt", title="Q", now=old
+    )
+    assert threads_store.begin_turn(
+        conn,
+        thread_id=thread.id,
+        reserved_usd=Decimal("0.6"),
+        deadline_at=NOW + timedelta(minutes=5),
+        now=old,
+    )
+
+    removed = await sweeps.prune_stale_reports(
+        conn=conn, settings=settings, now=lambda: NOW, locks=SlugLocks()
+    )
+
+    assert removed == 0, "a running turn is activity"
+    assert reports_store.load_report(conn, slug="busy") is not None
+
+
+async def test_prune_stale_reports_waits_for_the_slug_lock_and_keeps_a_report_updated_meanwhile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path=tmp_path, monkeypatch=monkeypatch, retention_days=30)
+    conn = reports_store.connect(settings.data_dir)
+    old = NOW - timedelta(days=31)
+    for slug in ("republished", "untouched"):
+        reports_store.save_report(
+            conn,
+            slug=slug,
+            title=slug,
+            tenant_id="t",
+            agent_name="a",
+            cap_usd=Decimal(1),
+            agent_token="tok",
+            now=old,
+        )
+        _seed_report_dir(settings, slug)
+    locks = SlugLocks()
+
+    async with locks("republished"):
+        sweep = asyncio.create_task(
+            sweeps.prune_stale_reports(conn=conn, settings=settings, now=lambda: NOW, locks=locks)
+        )
+        await asyncio.sleep(0.05)
+        assert not sweep.done(), "the sweep must wait for a publish holding the slug lock"
+        reports_store.add_recipient(
+            conn, slug="republished", name="n", label="x", token="fresh", now=NOW, ttl_days=30
+        )
+    removed = await sweep
+
+    assert removed == 1, "only the report nobody touched is deleted"
+    assert reports_store.load_report(conn, slug="republished") is not None, (
+        "a report updated while the sweep waited is stale no more"
+    )
+    assert (settings.data_dir / "republished").exists(), "its files stay with it"
+    assert reports_store.load_report(conn, slug="untouched") is None
+
+
+async def test_prune_stale_reports_keeps_everything_when_retention_is_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path=tmp_path, monkeypatch=monkeypatch, retention_days=0)
+    conn = reports_store.connect(settings.data_dir)
+    reports_store.save_report(
+        conn,
+        slug="ancient",
+        title="Ancient",
+        tenant_id="t",
+        agent_name="a",
+        cap_usd=Decimal(1),
+        agent_token="tok",
+        now=NOW - timedelta(days=3650),
+    )
+
+    removed = await sweeps.prune_stale_reports(
+        conn=conn, settings=settings, now=lambda: NOW, locks=SlugLocks()
+    )
+
+    assert removed == 0, "0 means keep"
+    assert reports_store.load_report(conn, slug="ancient") is not None
+
+
+def test_retention_days_defaults_to_a_year_and_rejects_negatives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    assert settings.retention_days == 365, "reports expire a year after their last update"
+    with pytest.raises(ValueError, match="retention_days"):
+        Settings.model_validate({**settings.model_dump(), "retention_days": -1})

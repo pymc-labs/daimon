@@ -5,7 +5,7 @@ import { MemoryRouter } from "react-router"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { api } from "@/lib/api"
-import type { Me } from "@/lib/types"
+import type { Legal, Me } from "@/lib/types"
 import { UserMenu } from "./Sidebar"
 
 vi.mock("@/lib/api", () => ({ api: { get: vi.fn(), post: vi.fn() } }))
@@ -17,8 +17,10 @@ const me = (over: Partial<Me> = {}) => ({
   ...over,
 }) as unknown as Me
 
-const open = async (m: Me) => {
-  vi.mocked(api.get).mockImplementation(async (path: string) => (path === "/api/me" ? m : [
+const LEGAL = { privacy: "https://example.com/privacy", terms: "https://example.com/terms" }
+
+const open = async (m: Me, legal: Legal = LEGAL) => {
+  vi.mocked(api.get).mockImplementation(async (path: string) => (path === "/api/me" ? m : path === "/auth/legal" ? legal : [
     { id: "discord", label: "Discord", kind: "redirect" },
     { id: "slack", label: "Slack", kind: "redirect" },
     { id: "microsoft", label: "Microsoft", kind: "redirect" },
@@ -61,5 +63,17 @@ describe("UserMenu", () => {
   it("hides the menu from guests", async () => {
     await open(me({ role: "visitor" }))
     expect(screen.queryByText("Connect account")).toBeNull()
+  })
+
+  it("links the privacy policy and the terms", async () => {
+    await open(me())
+    expect(screen.getByRole("menuitem", { name: "Privacy" }).getAttribute("href")).toBe(LEGAL.privacy)
+    expect(screen.getByRole("menuitem", { name: "Terms" }).getAttribute("href")).toBe(LEGAL.terms)
+  })
+
+  it("leaves out Terms until the operator sets one", async () => {
+    await open(me(), { privacy: LEGAL.privacy, terms: null })
+    expect(screen.getByRole("menuitem", { name: "Privacy" }), "privacy is always linked").toBeTruthy()
+    expect(screen.queryByRole("menuitem", { name: "Terms" })).toBeNull()
   })
 })

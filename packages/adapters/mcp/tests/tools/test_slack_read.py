@@ -46,7 +46,9 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.slack_turn_contexts import create_slack_turn_context
 from daimon.core.stores.slack_user_tokens import upsert_slack_user_token
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.untrusted import UNTRUSTED_NOTE
+from daimon.testing import make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from slack_sdk.errors import SlackApiError
@@ -160,6 +162,9 @@ async def _seed_turn_context(
     channel_id: str,
 ) -> None:
     async with committing_sessionmaker() as session:
+        # A context row cascades with its tenant, so the tenant must exist first.
+        if await get_tenant(session, auth.tenant_id) is None:
+            await make_tenant(session, platform="slack", id=auth.tenant_id)
         await create_slack_turn_context(
             session,
             tenant_id=auth.tenant_id,

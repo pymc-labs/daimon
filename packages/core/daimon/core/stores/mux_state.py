@@ -706,7 +706,11 @@ async def append_events(
     await session.execute(
         update(JournalSession)
         .where(JournalSession.session_id == target.id)
-        .values(next_sequence=head.next_sequence + len(planned), projection=_json(projection))
+        .values(
+            next_sequence=head.next_sequence + len(planned),
+            projection=_json(projection),
+            last_appended_at=now,
+        )
     )
     return JournalAppend.model_validate(
         _json(JournalAppend(appended=appended, duplicates=duplicates, projection=projection))

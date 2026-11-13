@@ -43,7 +43,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
-from daimon.core.privacy import summary_line
+from daimon.core.privacy import legal_links, summary_line
 from daimon.core.slack_oauth import build_slack_connect_url
 from daimon.core.stores.slack_user_tokens import delete_slack_user_token, get_slack_user_token
 from slack_sdk.errors import SlackApiError
@@ -147,12 +147,14 @@ async def handle_privacy_command(
             if is_slack_connected
             else _mint_connect_url(runtime, team_id=team_id, slack_user_id=user_id)
         )
+        legal = legal_links(runtime.settings)
         await web_client.views_update(  # pyright: ignore[reportUnknownMemberType]
             view_id=view_id,
             view=build_privacy_main_container(
                 is_slack_connected=is_slack_connected,
                 slack_connect_url=connect_url,
-                policy_url=str(runtime.settings.privacy_policy_url),
+                policy_url=legal.privacy,
+                terms_url=legal.terms,
                 display_name=resolve_bot_display_name(runtime.settings),
                 delete_enabled=runtime.settings.privacy.delete_enabled,
             ),

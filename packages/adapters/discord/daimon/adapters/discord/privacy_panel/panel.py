@@ -11,7 +11,7 @@ import uuid
 from daimon.adapters.discord import layout
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.privacy import DELETE_PAUSED, PRIVACY_TITLE, privacy_lines
+from daimon.core.privacy import DELETE_PAUSED, PRIVACY_TITLE, legal_links, privacy_lines
 
 import discord
 
@@ -61,10 +61,11 @@ class PrivacyPanelView(discord.ui.LayoutView):
         )
 
         # Programmatic buttons — decorator pattern does not work on LayoutView subclasses
+        legal = legal_links(runtime.settings)
         policy_btn: discord.ui.Button[PrivacyPanelView] = discord.ui.Button(
             label="📄 Policy",
             style=discord.ButtonStyle.link,
-            url=str(runtime.settings.privacy_policy_url),
+            url=legal.privacy,
         )
         export_btn: discord.ui.Button[PrivacyPanelView] = discord.ui.Button(
             label="📤 Export",
@@ -79,6 +80,11 @@ class PrivacyPanelView(discord.ui.LayoutView):
         done_btn.callback = self._on_done  # type: ignore[method-assign]
 
         buttons = [policy_btn, export_btn]
+        if legal.terms is not None:
+            terms_btn: discord.ui.Button[PrivacyPanelView] = discord.ui.Button(
+                label="📜 Terms", style=discord.ButtonStyle.link, url=legal.terms
+            )
+            buttons.insert(1, terms_btn)
         if runtime.settings.privacy.delete_enabled:
             delete_btn: discord.ui.Button[PrivacyPanelView] = discord.ui.Button(
                 label="🗑 Delete…",

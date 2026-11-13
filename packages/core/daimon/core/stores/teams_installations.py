@@ -1,15 +1,26 @@
-"""Teams the bot is installed in: upserted from activities, deleted on removal."""
+"""Teams the bot is installed in: upserted from activities, deleted on removal.
+
+Removing the last installation of any kind archives the tenant; installing again, or
+any activity from the organisation, clears it. A 1:1 or group chat is recorded as an
+installation too, under a `chat:`-prefixed id that team listings never return, so an
+organisation that only uses chats, or whose teams were never recorded, is not
+archived while it is in use.
+"""
 
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any, cast
 
-from daimon.core._models import TeamsInstallation
+from daimon.core._models import TeamsInstallation, Tenant
 from daimon.core.stores.domain import TeamsInstallationRow
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+
+CHAT_PREFIX = "chat:"
 
 
 async def record_teams_installation(
@@ -42,10 +53,31 @@ async def list_teams_installations(
 ) -> list[TeamsInstallationRow]:
     rows = await session.scalars(
         select(TeamsInstallation)
-        .where(TeamsInstallation.tenant_id == tenant_id)
+        .where(
+            TeamsInstallation.tenant_id == tenant_id,
+            ~TeamsInstallation.team_id.startswith(CHAT_PREFIX),
+        )
         .order_by(TeamsInstallation.name, TeamsInstallation.team_id)
     )
     return [TeamsInstallationRow.model_validate(row) for row in rows]
+
+
+async def record_teams_chat(
+    session: AsyncSession, *, tenant_id: uuid.UUID, conversation_id: str
+) -> None:
+    """Note a 1:1 or group chat the bot is in, so the organisation counts as installed.
+
+    Takes the tenant row lock, as removal does, so a removal that archived first is seen
+    by the caller, which clears the archive after recording.
+    """
+    await session.execute(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update())
+    await record_teams_installation(
+        session,
+        tenant_id=tenant_id,
+        team_id=CHAT_PREFIX + conversation_id,
+        group_id="",
+        name=None,
+    )
 
 
 async def get_teams_installation(
@@ -57,9 +89,23 @@ async def get_teams_installation(
 
 async def delete_teams_installation(
     session: AsyncSession, *, tenant_id: uuid.UUID, team_id: str
-) -> None:
+) -> bool:
+    """Forget a team or chat; archive the tenant when no installation of any kind is left.
+    True when this archived it.
+
+    The tenant row lock serializes two removals, so the last one always sees nothing left.
+    """
+    await session.execute(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update())
     await session.execute(
         delete(TeamsInstallation).where(
             TeamsInstallation.tenant_id == tenant_id, TeamsInstallation.team_id == team_id
         )
     )
+    if await session.scalar(select(exists().where(TeamsInstallation.tenant_id == tenant_id))):
+        return False
+    archived = await session.execute(
+        update(Tenant)
+        .where(Tenant.id == tenant_id, Tenant.archived_at.is_(None))
+        .values(archived_at=func.now())
+    )
+    return cast(CursorResult[Any], archived).rowcount > 0

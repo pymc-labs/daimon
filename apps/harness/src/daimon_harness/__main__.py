@@ -10,4 +10,6 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8088,
         timeout_graceful_shutdown=10,
+        # Access lines carry the caller's address, which nothing here needs.
+        access_log=False,
     )

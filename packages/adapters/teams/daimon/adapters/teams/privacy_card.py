@@ -55,13 +55,21 @@ def _spaced(*lines: str) -> list[CardElement]:
 
 
 def panel_card(
-    *, bot: str, policy_url: str, delete_enabled: bool = True, microsoft_connected: bool = False
+    *,
+    bot: str,
+    policy_url: str,
+    terms_url: str | None = None,
+    delete_enabled: bool = True,
+    microsoft_connected: bool = False,
 ) -> AdaptiveCard:
-    """Who stores what, with Policy, Export and Delete; the detail is the policy's."""
-    actions: list[Action] = [
-        OpenUrlAction(title="📄 Policy", url=policy_url),
-        button(VERB, "📤 Export", "export"),
-    ]
+    """Who stores what, with Policy, Terms, Export and Delete; the detail is the policy's.
+
+    Terms is left out until the operator sets a terms page.
+    """
+    actions: list[Action] = [OpenUrlAction(title="📄 Policy", url=policy_url)]
+    if terms_url is not None:
+        actions.append(OpenUrlAction(title="📜 Terms", url=terms_url))
+    actions.append(button(VERB, "📤 Export", "export"))
     if microsoft_connected:
         actions.append(button(VERB, "🔌 Disconnect Microsoft", "disconnect_microsoft"))
     if delete_enabled:

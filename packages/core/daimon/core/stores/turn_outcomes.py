@@ -9,13 +9,13 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from daimon.core._models import TurnOutcome
+from daimon.core._models import ThreadSession, TurnOutcome
 from daimon.core.context_prompt import TurnContext
 
 if TYPE_CHECKING:
     from daimon.core.turn.termination import TerminationReason
 from pydantic import JsonValue
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -52,10 +52,26 @@ class OutcomeRecord:
 
 
 async def record(session: AsyncSession, outcome: OutcomeRecord) -> None:
+    """Store the outcome and mark its conversation used.
+
+    Every turn kind (chat, MCP, watch, continuation, routine, job) records an
+    outcome, so this is where a thread mapping's `last_turn_at`, the clock
+    conversation retention ages from, moves forward.
+    """
     await session.execute(
         insert(TurnOutcome)
         .values(**asdict(outcome))
         .on_conflict_do_nothing(index_elements=[TurnOutcome.id])
+    )
+    if outcome.tenant_id is None or outcome.session_id is None:
+        return
+    await session.execute(
+        update(ThreadSession)
+        .where(
+            ThreadSession.tenant_id == outcome.tenant_id,
+            ThreadSession.ma_session_id == outcome.session_id,
+        )
+        .values(last_turn_at=func.greatest(ThreadSession.last_turn_at, outcome.ended_at))
     )
 
 
