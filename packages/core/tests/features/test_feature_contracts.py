@@ -445,6 +445,8 @@ _CONFIG_SWITCHES: dict[str, str] = {
     "GithubSettings.mcp_router": _SERVICE,
     "CryptoSettings.allow_plaintext": _OPS,
     "HarnessAuthBinding.auth_mode": _SHAPE,
+    "HarnessAuthBinding.allow_insecure_http": _OPS,
+    "SelfhostedBillingSettings.allow_test_tariffs": _OPS,
     "SelfHostedSettings.admission_enabled": _OPS,
     "SelfHostedSettings.single_tenant": _OPS,
     "NotebookSettings.allow_editable": _OPS,
