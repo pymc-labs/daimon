@@ -3,8 +3,8 @@
 `retention_runs` keeps a rule's last attempt and success, so a restart does not rerun a
 sweep that finished that day. The indexes cover the cutoff each rule ages records by,
 which the batched deletes scan in order. They are built concurrently, outside the
-migration transaction, so writes continue; a run cut off mid-build leaves an invalid
-index, which a retried run drops and builds again.
+migration transaction, so writes continue; a run cut off mid-build leaves the table and
+an invalid index, which a retried run keeps and drops and builds again.
 
 Revision ID: 0195_retention_runs
 Revises: 0194_tenant_retirement
@@ -48,11 +48,12 @@ INDEXES: dict[str, str] = {
 
 def upgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
-    op.create_table(
-        "retention_runs",
-        sa.Column("rule", sa.Text(), primary_key=True),
-        sa.Column("last_attempt_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("last_success_at", sa.DateTime(timezone=True), nullable=True),
+    # IF NOT EXISTS: the index block below commits this, so a retried run finds the table.
+    op.execute(
+        "CREATE TABLE IF NOT EXISTS retention_runs ("
+        "rule text PRIMARY KEY, "
+        "last_attempt_at timestamptz NOT NULL, "
+        "last_success_at timestamptz)"
     )
     with op.get_context().autocommit_block():
         for name, definition in INDEXES.items():
@@ -70,4 +71,4 @@ def downgrade() -> None:
     with op.get_context().autocommit_block():
         for name in INDEXES:
             op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
-    op.drop_table("retention_runs")
+    op.execute("DROP TABLE IF EXISTS retention_runs")
