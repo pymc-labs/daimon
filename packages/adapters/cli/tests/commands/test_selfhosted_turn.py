@@ -95,6 +95,7 @@ async def test_real_admission_refuses_disabled_selection_or_retained_anthropic_t
         make_thread_session,
     )
     from daimon.testing.turn_fakes import deps_for
+    from daimon.testing.turn_leg import MUX_LEG
     from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 
     class ForbiddenAnthropic:
@@ -137,7 +138,8 @@ async def test_real_admission_refuses_disabled_selection_or_retained_anthropic_t
         )
     await db_session.commit()
     built = replace(
-        deps_for(ForbiddenAnthropic(), db_session_factory), channel_backends=channel_backends
+        deps_for(ForbiddenAnthropic(), db_session_factory, leg=MUX_LEG),
+        channel_backends=channel_backends,
     )
     monkeypatch.setattr(deps, "build_turn_deps", lambda *a, **kw: built)
     monkeypatch.setenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", "true")

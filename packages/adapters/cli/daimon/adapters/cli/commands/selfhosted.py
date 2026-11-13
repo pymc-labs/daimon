@@ -227,6 +227,7 @@ async def operator_turn(
     from daimon.core.channel_backend import channel_ref, current_backend
     from daimon.core.turn import admit, bind_session, run_prepared_turn
     from daimon.core.turn.deps import build_turn_deps
+    from daimon.core.turn_hold import RequesterOrg
 
     async with rt.sessionmaker() as db:
         revision = await current_backend(db, channel_ref(tenant_id, "cli", channel))
@@ -257,6 +258,8 @@ async def operator_turn(
             channel_id=channel,
             thread_id=thread,
             now=datetime.now(UTC),
+            requester_org=RequesterOrg.HOST,
+            origin="chat",
         )
         if admitted.backend_revision is None or admitted.backend_revision.backend != "selfhosted":
             raise ValueError("Admission must select selfhosted")
