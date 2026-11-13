@@ -23,6 +23,7 @@ from daimon.core._models import (
     TenantRetirement,
     ThreadSession,
     UsageEvent,
+    UserSkill,
 )
 from daimon.core.config import Settings, load_settings
 from daimon.core.defaults.provisioning import provision_tenant
@@ -380,3 +381,35 @@ async def test_a_reinstall_during_retirement_stops_the_purge(
     assert await db_session.scalar(
         select(func.count()).select_from(Account).where(Account.tenant_id == tenant_id)
     ), "the reinstalled tenant keeps the rows it has"
+
+
+def _skill(tenant_id: uuid.UUID, name: str, anthropic_id: str | None) -> UserSkill:
+    return UserSkill(
+        tenant_id=tenant_id,
+        principal_id=uuid.uuid4(),
+        agent_name="agent",
+        name=name,
+        source_repo_url="",
+        content_hash="h",
+        anthropic_id=anthropic_id,
+    )
+
+
+async def test_a_null_id_in_another_tenant_does_not_hide_owned_ids(
+    db_session: AsyncSession,
+) -> None:
+    a = await make_tenant(db_session, platform="discord", workspace_id="owner-guild")
+    b = await make_tenant(db_session, platform="discord", workspace_id="other-guild")
+    db_session.add_all(
+        [
+            _skill(a.id, "mine", "skill_mine"),
+            _skill(a.id, "shared", "skill_shared"),
+            _skill(b.id, "shared", "skill_shared"),
+            _skill(b.id, "unsynced", None),
+        ]
+    )
+    await db_session.flush()
+    found = await store.collect_upstream(db_session, tenant_id=a.id)
+    assert found["skills"] == ["skill_mine"], (
+        "an owned skill is queued despite a NULL id elsewhere; a shared one is not"
+    )

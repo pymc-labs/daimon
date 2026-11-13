@@ -57,7 +57,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import QueryableAttribute
+from sqlalchemy.orm import QueryableAttribute, aliased
 from sqlalchemy.sql.elements import ColumnClause
 
 # What a retired tenant keeps, and why. Everything else tenant-scoped is deleted.
@@ -105,9 +105,13 @@ def _owned(
     tenant: QueryableAttribute[uuid.UUID],
     tenant_id: uuid.UUID,
 ) -> Select[tuple[str | None]]:
-    """Ids this tenant's rows name and no other tenant's row does."""
-    shared = select(column).where(tenant != tenant_id)
-    return select(column).where(tenant == tenant_id, column.is_not(None), column.not_in(shared))
+    """Ids this tenant's rows name and no other tenant's row does. NOT EXISTS, not
+    NOT IN: one NULL id in another tenant's rows would make NOT IN match nothing."""
+    other = aliased(column.class_)
+    other_column = getattr(other, column.key)
+    other_tenant = getattr(other, tenant.key)
+    shared = exists().where(other_column == column, other_tenant != tenant_id)
+    return select(column).where(tenant == tenant_id, column.is_not(None), ~shared)
 
 
 async def collect_upstream(session: AsyncSession, *, tenant_id: uuid.UUID) -> dict[str, list[str]]:
