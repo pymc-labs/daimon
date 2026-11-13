@@ -787,7 +787,7 @@ The longest one long job may run. The smallest setting wins.
 
 ## Conversation history kept
 
-How long Daimon keeps its copy of a conversation after its last message, in channel threads, private chats and web threads. An idle conversation past this starts a fresh session on its next message. On by default at 1 year; 0 at the deployment turns it off and keeps conversations until they are deleted. The smallest setting wins.
+How long Daimon keeps its copy of a conversation after its last message, in channel threads, private chats and web threads. A conversation idle past this starts over at its next message. On by default at 1 year; 0 for the whole server turns it off and keeps conversations until they are deleted. The smallest setting wins.
 
 | | |
 | --- | --- |

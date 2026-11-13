@@ -852,10 +852,10 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "conversation_retention",
         "Conversation history kept",
         "How long Daimon keeps its copy of a conversation after its last message, in "
-        "channel threads, private chats and web threads. An idle conversation past this "
-        "starts a fresh session on its next message. On by default at 1 year; 0 at the "
-        "deployment turns it off and keeps conversations until they are deleted. The "
-        "smallest setting wins.",
+        "channel threads, private chats and web threads. A conversation idle past this "
+        "starts over at its next message. On by default at 1 year; 0 for the whole server "
+        "turns it off and keeps conversations until they are deleted. The smallest "
+        "setting wins.",
         {"365": "1 year", "180": "180 days", "90": "90 days", "30": "30 days"},
         tiers=("deployment", "workspace"),
         authority=_SERVER_ADMIN,
