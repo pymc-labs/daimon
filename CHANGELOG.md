@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removes their follow-up tasks, turn records, conversation links, model-switch cards and credential requests in every
   workspace. `DAIMON_SECURITY_AUDIT_RETENTION_DAYS` still works.
 
+- **Removing the Teams app from its last team uninstalls the workspace.** Its tenant is archived like a removed
+  Discord server or Slack workspace; adding the app to a team again restores it.
+
 - **The report and notebook hosts keep less, and send fewer details out.** Reports are deleted 365 days after they are
   made (`DAIMON_REPORT__RETENTION_DAYS`, `0` keeps them), and both hosts take an admin call that deletes one workspace's
   reports or notebooks. Notebooks keep their expiry of at most 365 days; blogs stay until deleted. The report viewer

@@ -1,14 +1,19 @@
-"""Teams the bot is installed in: upserted from activities, deleted on removal."""
+"""Teams the bot is installed in: upserted from activities, deleted on removal.
+
+Removing the last team archives the tenant; installing again clears it.
+"""
 
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any, cast
 
-from daimon.core._models import TeamsInstallation
+from daimon.core._models import TeamsInstallation, Tenant
 from daimon.core.stores.domain import TeamsInstallationRow
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -57,9 +62,22 @@ async def get_teams_installation(
 
 async def delete_teams_installation(
     session: AsyncSession, *, tenant_id: uuid.UUID, team_id: str
-) -> None:
+) -> bool:
+    """Forget a team; archive the tenant when no team is left. True when this archived it.
+
+    The tenant row lock serializes two removals, so the last one always sees no team left.
+    """
+    await session.execute(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update())
     await session.execute(
         delete(TeamsInstallation).where(
             TeamsInstallation.tenant_id == tenant_id, TeamsInstallation.team_id == team_id
         )
     )
+    if await session.scalar(select(exists().where(TeamsInstallation.tenant_id == tenant_id))):
+        return False
+    archived = await session.execute(
+        update(Tenant)
+        .where(Tenant.id == tenant_id, Tenant.archived_at.is_(None))
+        .values(archived_at=func.now())
+    )
+    return cast(CursorResult[Any], archived).rowcount > 0

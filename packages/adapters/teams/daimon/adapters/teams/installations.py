@@ -5,13 +5,16 @@ activity records its team (once per process, or again when its name changes)
 in `teams_installations`, with the Entra group Graph addresses it by. An
 install posts a welcome, to the team's General channel or the 1:1 chat (a
 group chat gets none); a
-removal from a team deletes its row, so channel reads stop finding it.
+removal from a team deletes its row, so channel reads stop finding it, and
+removal from the last team archives the tenant. An install, or a team seen for
+the first time, clears that archive and provisions the tenant again.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Callable
 
 import structlog
 from daimon.adapters.teams.card import notice_card
@@ -22,6 +25,7 @@ from daimon.core.stores.teams_installations import (
     delete_teams_installation,
     record_teams_installation,
 )
+from daimon.core.stores.tenants import get_tenant, set_provision_status
 from daimon.core.teams_graph import GraphUnavailable, TeamGroups
 from microsoft_teams.api import (
     ActivityBase,
@@ -84,12 +88,14 @@ class TeamInstalls:
         tenant_id: uuid.UUID,
         entra_tenant_id: str,
         alert_url: SecretStr | None = None,
+        reprovision: Callable[[], None] | None = None,
     ) -> None:
         self._sessionmaker = sessionmaker
         self._groups = groups
         self._tenant_id = tenant_id
         self._entra_tenant_id = canonical_uuid(entra_tenant_id)
         self._alert_url = alert_url
+        self._reprovision = reprovision
         # Team id -> the name last recorded (None when the activity named none).
         self._recorded: dict[str, str | None] = {}
 
@@ -126,6 +132,7 @@ class TeamInstalls:
         self._recorded[team.id] = team.name or self._recorded.get(team.id)
         if new:
             log.info("teams.installation.recorded", team_id=team.id)
+            await self.restore()
         return new
 
     async def on_install(self, ctx: ActivityContext[InstalledActivity]) -> None:
@@ -133,6 +140,7 @@ class TeamInstalls:
         activity = ctx.activity
         if not self.is_ours(activity):
             return
+        await self.restore()
         kind = activity.conversation.conversation_type
         if kind == "groupChat":
             return  # no welcome there yet
@@ -154,17 +162,41 @@ class TeamInstalls:
         except TEAMS_SEND_ERRORS as err:
             log.warning("teams.welcome.send_failed", error=type(err).__name__)
 
+    async def restore(self) -> None:
+        """Clear the tenant's archive and provision it again; a live tenant is left alone."""
+        try:
+            async with self._sessionmaker() as session:
+                tenant = await get_tenant(session, self._tenant_id)
+            if tenant is None or tenant.archived_at is None:
+                return
+            await set_provision_status(
+                self._sessionmaker, tenant_id=self._tenant_id, clear_archive=True
+            )
+        except SQLAlchemyError as err:
+            log.warning("teams.tenant.restore_failed", error=type(err).__name__)
+            return
+        log.info("teams.tenant.restored", tenant_id=str(self._tenant_id))
+        if self._reprovision is not None:
+            self._reprovision()
+
     async def on_uninstall(self, ctx: ActivityContext[UninstalledActivity]) -> None:
-        """Forget a team the bot was removed from; a 1:1 uninstall keeps nothing to clean."""
+        """Forget a team the bot was removed from, archiving the tenant with the last one.
+
+        A 1:1 uninstall keeps nothing to clean.
+        """
         activity = ctx.activity
         team = activity.channel_data.team if activity.channel_data else None
         if team is None or not team.id or not self.is_ours(activity):
             return
         try:
             async with self._sessionmaker.begin() as session:
-                await delete_teams_installation(session, tenant_id=self._tenant_id, team_id=team.id)
+                archived = await delete_teams_installation(
+                    session, tenant_id=self._tenant_id, team_id=team.id
+                )
         except SQLAlchemyError as err:
             log.warning("teams.installation.forget_failed", error=type(err).__name__)
             return
         self._recorded.pop(team.id, None)
         log.info("teams.installation.removed", team_id=team.id)
+        if archived:
+            log.warning("teams.tenant.archived", tenant_id=str(self._tenant_id))

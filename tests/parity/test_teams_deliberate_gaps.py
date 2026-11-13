@@ -20,9 +20,7 @@ team-scoped permission reaches SharePoint; a dialog has no file input, so a `.en
 rather than uploaded; and once a dialog closes nothing private reaches the
 requester, so a GitHub token is checked against its repo before the request is
 spent (Discord and Slack spend it first, then say so privately; the Teams
-adapter's credential tests assert the unspent request). Removing the app from a
-team forgets that team and archives no tenant: a deployment serves one
-organisation. A completion ping is an @mention plus Discord's 👀 and ✅ on the
+adapter's credential tests assert the unspent request). A completion ping is an @mention plus Discord's 👀 and ✅ on the
 asker's message, and Ask a person is a button on the card below the answer (and
 the `support` form); a post_wizard form has no step images. An agent edits or deletes its own
 posts but closes no thread (`delete_thread`, `archive_thread`), never in a group chat,
@@ -68,7 +66,7 @@ from daimon.adapters.mcp.tools import github_connect as connect_tool
 from daimon.adapters.mcp.tools.discord import _tidy as discord_tidy
 from daimon.adapters.mcp.tools.teams import _tidy as teams_tidy
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
-from daimon.adapters.teams import here, installations, memory
+from daimon.adapters.teams import here, memory
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.attachments import (
     ChannelMedia,
@@ -81,7 +79,6 @@ from daimon.adapters.teams.context import render_user_message
 from daimon.adapters.teams.credential_requests import credential_form
 from daimon.adapters.teams.help import COMMAND_HELP
 from daimon.adapters.teams.identity import TeamsInbound, parse_inbound
-from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
 from daimon.adapters.teams.private_replies import IN_THREAD
 from daimon.adapters.teams.thread_reader import ThreadReader
@@ -94,7 +91,6 @@ from daimon.core.teams_threads import conversation_of, new_setup_thread_id
 from daimon.core.turn.state import TextBlock, TurnState
 from fastmcp.exceptions import ToolError
 from microsoft_teams.api import MessageActivity, MessageActivityInput, SentActivity
-from microsoft_teams.api.activities.install_update import UninstalledActivity
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TENANT = "00000000-0000-0000-0000-000000000001"
@@ -359,33 +355,6 @@ async def test_an_unprompted_teams_turn_shows_no_running_card() -> None:
     assert sent == [], "no card while it runs, so no Cancel button"
     await lifecycle.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="Done.")]))
     assert [a.text for a in sent] == ["Done.", None], "the answer, then its controls card"
-
-
-async def test_removing_the_teams_app_forgets_the_team_and_archives_nothing() -> None:
-    removal = UninstalledActivity.model_validate(
-        {
-            "type": "installationUpdate",
-            "action": "remove",
-            "id": "a-1",
-            "channelId": "msteams",
-            "from": {"id": "29:u"},
-            "recipient": {"id": "28:bot"},
-            "conversation": {"id": "19:general@thread.tacv2", "tenantId": TENANT},
-            "channelData": {"team": {"id": "19:general@thread.tacv2"}, "tenant": {"id": TENANT}},
-        }
-    )
-    session = AsyncMock()
-    sessionmaker = MagicMock()
-    sessionmaker.begin.return_value.__aenter__.return_value = session
-    installs = TeamInstalls(
-        sessionmaker, MagicMock(), tenant_id=uuid.uuid4(), entra_tenant_id=TENANT
-    )
-    with patch.object(installations, "delete_teams_installation", new_callable=AsyncMock) as forget:
-        await installs.on_uninstall(cast(Any, SimpleNamespace(activity=removal)))
-    forget.assert_awaited_once()
-    assert session.method_calls == [], (
-        "only the team's row goes; if removal ever archives, run the uninstall parity scenario"
-    )
 
 
 async def test_a_teams_connect_github_link_goes_to_the_requesters_one_to_one_chat() -> None:

@@ -293,6 +293,7 @@ def create_teams_http_service(
         tenant_id=teams_tenant,
         entra_tenant_id=settings.tenant_id,
         alert_url=runtime.settings.ops.alert_webhook_url,
+        reprovision=lambda: turns.reprovision(),  # Built below.
     )
 
     files = ChannelFiles(SharePoint(graph), groups)
