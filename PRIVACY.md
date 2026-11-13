@@ -76,7 +76,9 @@ the setting linked in the table; `0` keeps the records.
 A workspace whose app is uninstalled (on Teams, from its last team and chat)
 is retired after that time: its data, Anthropic sessions, memory, credentials,
 skills, reports and notebooks are deleted, in batches that an interrupted run
-resumes. Reinstalling first keeps everything. Usage not yet settled delays it.
+resumes. Usage not yet settled delays it. Reinstalling before then keeps
+everything. Reinstalling during a retirement stops it: what was not yet
+deleted is kept, and the Anthropic cleanup still queued is abandoned.
 
 Conversation history is on by default. An operator turns it off with
 `DAIMON_FEATURES__CONVERSATION_RETENTION=0`, and a workspace admin can shorten
@@ -116,8 +118,9 @@ with `/memory mine` and clear it with `/memory forget-mine`.
 
 ## What stays after deletion
 
-- **Billing and usage records.** They can still hold your platform user ID and
-  conversation ID.
+- **Billing and usage records.** Deleting your account leaves them as they are,
+  so they can still hold your platform user ID and conversation ID. They lose
+  them only when the whole workspace is retired.
 - **Shared conversations.** Messages you wrote in a thread other people still
   use, and the requests you made there. The panel counts them before you
   confirm.
