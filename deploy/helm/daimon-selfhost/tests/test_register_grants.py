@@ -20,6 +20,8 @@ with open(os.environ['STUB_LOG'], 'a') as output:
     output.write(json.dumps([name, *args]) + '\n')
 if name == 'kubectl' and 'exec' in args and args[-2:] == ['python', '-']:
     print(os.environ['STUB_REGISTRATION'])
+elif name == 'kubectl' and args[2:3] == ['get']:
+    sys.exit(0 if os.environ['STUB_TEAMS'] == 'true' and args[3].endswith('-teams') else 1)
 elif name == 'kubectl' and 'init' in args:
     tenant = args[args.index('--tenant-id') + 1]
     print(f'sh_agent_{tenant[:4]} sh_env_{tenant[:4]}')
@@ -44,8 +46,7 @@ class RegisterGrantsTest(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         state = Path(directory.name)
-        values = {"services": {"teams": {"enabled": teams}}}
-        (state / "aks-values.json").write_text(json.dumps(values))
+        (state / "aks-values.json").write_text("{}")
         stub = state / "stub"
         stub.write_text(STUB)
         stub.chmod(0o755)
@@ -63,6 +64,7 @@ class RegisterGrantsTest(unittest.TestCase):
             SELFHOSTED_MODEL="gpt-5.4-mini",
             SELFHOSTED_MODELS=json.dumps({"gpt-5.4-mini-TEST": []}),
             ALLOW_TEST_TARIFFS="true",
+            STUB_TEAMS="true" if teams else "false",
             TEAMS_GRANTS=json.dumps({"19:pilot@thread.tacv2": ["p"]}) if teams else "",
         )
         subprocess.run(

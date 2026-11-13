@@ -62,8 +62,8 @@ helm upgrade --install --atomic "$RELEASE" "$chart" -n "$NAMESPACE" "${HELM_VALU
   "${postrender_args[@]}" --wait --wait-for-jobs --timeout 15m
 # Secret volumes update eventually; force a fresh mount and cached runtime factory.
 hosts=(mcp scheduler)
-teams=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("services", {}).get("teams", {}).get("enabled", False))' "$AKS_STATE/aks-values.json")
-if [[ $teams == True ]]; then hosts+=(teams); fi
+# Teams may be enabled by any values file; restart it whenever the release runs it.
+if kubectl -n "$NAMESPACE" get "deploy/$PREFIX-teams" >/dev/null 2>&1; then hosts+=(teams); fi
 kubectl rollout restart -n "$NAMESPACE" "${hosts[@]/#/deploy/$PREFIX-}"
 for host in "${hosts[@]}"; do
   kubectl rollout status -n "$NAMESPACE" "deploy/$PREFIX-$host" --timeout=300s
