@@ -20,10 +20,13 @@ organisation a Teams deployment serves), Daimon stores:
   maps to which Managed Agents session, so conversations continue.
 - **Shared conversation journal.** Daimon's own copy of conversations on its
   provider-neutral path, including stored messages and tool results.
+- **Private chat context.** When an admin enables DM conversations, an excerpt
+  of the conversation and the 12 most recent private messages, up to 16,000
+  characters each. `/dm-me` replaces that copy.
 - **Names.** The display name and username each platform last sent for a
   person, and the last name of each channel.
 - **Teams installations.** The ID, group ID and name of each team the app is
-  added to. Channel history is read through Microsoft Graph when a turn needs
+  added to, and the ID of each 1:1 or group chat it is added to. Channel history is read through Microsoft Graph when a turn needs
   it and sent to the agent with that turn. Daimon keeps no copy.
 - **Usage and billing.** Turn counts and credit records that enforce the
   operator's limits. Promo code redemptions record the redeeming account.
@@ -34,12 +37,12 @@ organisation a Teams deployment serves), Daimon stores:
   encrypted at rest.
 - **Feedback and support notes**, and **uploads** you attach to a chat.
 - **Hosted artifacts.** Reports and notebooks an agent publishes. Blogs are
-  public pages that stay until someone deletes them.
+  public pages that stay until someone deletes them. Charts in an
+  artifact are kept in the operator's object storage.
 
-Conversation content itself lives in Anthropic's Managed Agents service.
-When an admin enables DM conversations, Daimon also stores an excerpt of the
-conversation and the 12 most recent private messages, up to 16,000 characters
-each. `/dm-me` replaces that copy.
+The conversations themselves run in Anthropic's Managed Agents service, which
+holds the full transcript. Daimon's own copies are the journal and private
+chat context above.
 
 ## What the agent's tools receive
 
@@ -61,18 +64,33 @@ the setting linked in the table; `0` keeps the records.
 | Web audit and channel changes | 90 days | [`DAIMON_RETENTION__ADMIN_HISTORY_DAYS`](docs/configuration.md#daimon_retention__admin_history_days) |
 | Finished jobs, compute and routine output | 90 days | [`DAIMON_RETENTION__JOB_OUTPUT_DAYS`](docs/configuration.md#daimon_retention__job_output_days) |
 | Resolved credential and GitHub access requests | 90 days | [`DAIMON_RETENTION__ACCESS_REQUESTS_DAYS`](docs/configuration.md#daimon_retention__access_requests_days) |
-| Thread mappings, turn outcomes and the shared journal | 365 days after last activity | [Conversation history kept](docs/features.md) |
+| Thread mappings, turn outcomes, the shared journal, private chat context and web threads | 365 days after last activity | [Conversation history kept](docs/features.md#conversation-history-kept) |
 | Deleted web threads | 30 days | [`DAIMON_RETENTION__DELETED_THREADS_DAYS`](docs/configuration.md#daimon_retention__deleted_threads_days) |
 | Finished task requests | 30 days | [`DAIMON_RETENTION__TASK_CONTINUATIONS_DAYS`](docs/configuration.md#daimon_retention__task_continuations_days) |
 | Uploads with no owner | 24 hours | Fixed |
 | Feedback and support notes | 365 days | [`DAIMON_RETENTION__FEEDBACK_DAYS`](docs/configuration.md#daimon_retention__feedback_days) |
 | Channel names | 365 days after last seen | [`DAIMON_RETENTION__CHANNEL_NAMES_DAYS`](docs/configuration.md#daimon_retention__channel_names_days) |
-| Reports | 365 days | [`DAIMON_REPORT__RETENTION_DAYS`](docs/configuration.md#daimon_report__retention_days) |
-| A workspace's data after uninstall | 30 days | [`DAIMON_RETENTION__ARCHIVED_TENANTS_DAYS`](docs/configuration.md#daimon_retention__archived_tenants_days) |
+| Reports | 365 days after last update | [`DAIMON_REPORT__RETENTION_DAYS`](docs/configuration.md#daimon_report__retention_days) |
+| A workspace's data after uninstall | 30 days after uninstall | [`DAIMON_RETENTION__ARCHIVED_TENANTS_DAYS`](docs/configuration.md#daimon_retention__archived_tenants_days) |
+
+A workspace whose app is uninstalled (on Teams, from its last team and chat)
+is retired after that time: its data, Anthropic sessions, memory, credentials,
+skills, reports and notebooks are deleted, in batches that an interrupted run
+resumes. Reinstalling first keeps everything. Usage not yet settled delays it.
+
+Conversation history is on by default. An operator turns it off with
+`DAIMON_FEATURES__CONVERSATION_RETENTION=0`, and a workspace admin can shorten
+it in `/settings`.
 
 Billing and usage records are kept for accounting, without who used them, so a
 reinstalled workspace keeps its balance. Notebooks keep the expiry
-they were published with, at most 365 days. Blogs have none.
+they were published with, at most 365 days.
+
+Blogs are public pages someone published on purpose, so they have no expiry.
+They stay until deleted, or until the workspace that published them is
+retired, if the host recorded it. Charts in an artifact sit in the operator's
+object storage, which Daimon does not purge. Operators should set a lifecycle
+rule on that bucket to match their retention.
 
 ## Your rights via `/privacy`
 
@@ -107,7 +125,8 @@ with `/memory mine` and clear it with `/memory forget-mine`.
 - **Anthropic.** Uploaded skill files stay. Transcripts remain if deletion
   fails.
 - **Hosted artifacts.** Reports and notebooks expire on their own schedule.
-  Blogs stay until deleted.
+  Blogs stay until deleted. Charts stay in the operator's object storage until
+  its lifecycle rule removes them.
 - **GitHub.** The authorization stays on your GitHub account. Revoke it in
   GitHub.
 - **Feedback and help requests** from a workspace not linked to your account.
