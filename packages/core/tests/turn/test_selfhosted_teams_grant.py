@@ -31,6 +31,7 @@ from daimon.core.turn.selfhosted_deployment import (
 )
 from mux.drivers.selfhosted.config import HarnessConfig
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 SCRIPTS = Path(__file__).resolve().parents[4] / "deploy/helm/daimon-selfhost/scripts"
 MODEL = "gpt-5.4-mini"
@@ -144,13 +145,17 @@ async def test_teams_grant_admits_only_the_granted_person_in_the_granted_channel
 ) -> None:
     sf = db_session_factory
     registration = await script("provision").provision(
-        sf, environ({CHANNEL + ";messageid=1700000000000": [PERSON.upper()]})
+        sf,
+        environ(
+            {CHANNEL + ";messageid=1700000000000": [PERSON.upper()], OTHER_CHANNEL: [OTHER_PERSON]}
+        ),
     )
     ids = ids_for(registration)
     rows = script("runtime_grants").rows(registration, ids)
     assert [(row["platform"], row["channel_id"]) for row in rows] == [
         ("cli", "selfhosted-operator"),
         ("teams", CHANNEL),
+        ("teams", OTHER_CHANNEL),
     ]
 
     granted = await teams_turn(
@@ -158,8 +163,13 @@ async def test_teams_grant_admits_only_the_granted_person_in_the_granted_channel
     )
     assert granted.model == MODEL
 
+    # Each person is granted only their own conversation; the refusal names the
+    # place and account so an operator can grant it.
     for channel_id, person in ((CHANNEL, OTHER_PERSON), (OTHER_CHANNEL, PERSON)):
-        with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        with (
+            capture_logs() as logs,
+            pytest.raises(AdmissionDenied, match="backend_unsupported"),
+        ):
             await teams_turn(
                 sf,
                 rows,
@@ -169,6 +179,8 @@ async def test_teams_grant_admits_only_the_granted_person_in_the_granted_channel
                 tmp_path=tmp_path,
                 monkeypatch=monkeypatch,
             )
+        missing = [log for log in logs if log["event"] == "selfhosted.grant_missing"]
+        assert [(log["platform"], log["channel_id"]) for log in missing] == [("teams", channel_id)]
 
     teams_tenant = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT)
     async with sf() as session:

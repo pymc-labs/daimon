@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import httpx
+import structlog
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.prepare import ProviderPreparationRequest
 from daimon.core.turn.selfhosted_codec import PROFILE
@@ -206,6 +207,16 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         and deployment.config_digest == revision.content_digest()
     )
     if len(matches) != 1:
+        # IDs only, so an operator can grant this exact place and person
+        # (a Teams 1:1 chat ID appears nowhere else).
+        structlog.get_logger(__name__).warning(
+            "selfhosted.grant_missing",
+            tenant_id=scope.tenant_id,
+            platform=request.platform,
+            channel_id=revision.channel.channel_id,
+            account_id=scope.account_id,
+            matches=len(matches),
+        )
         raise AdmissionDenied(reason="backend_unsupported")
     deployment = matches[0]
     if (
