@@ -16,7 +16,7 @@ from daimon.adapters.cli.flags import JSON_OPTION, YES_OPTION
 from daimon.adapters.cli.output import emit_rows, render_json
 from daimon.adapters.cli.prompt import confirm_or_abort
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
-from daimon.core import allowance_limits, channel_backend
+from daimon.core import allowance_limits, channel_backend, tenant_retirement
 from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
     TenantAccessPolicy,
@@ -34,6 +34,7 @@ from daimon.core.permissions import (
     agent_permissions,
 )
 from daimon.core.stores import tenant_ledger
+from daimon.core.stores import tenant_retirement as tenant_retirement_store
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
     clear_access_policy,
@@ -367,10 +368,65 @@ async def tenants_delete(
 
     confirm_or_abort(console, f"delete tenant {platform}:{external_id}?", yes=yes)
 
+    left = await _retire_and_clean(rt, tenant_id)
     async with rt.sessionmaker() as session, session.begin():
         await delete_tenant(session, tenant_id=tenant_id)
 
     console.print(f"[green]✓ deleted tenant {platform}:{external_id}[/green]")
+    _report_left(console, left)
+
+
+async def _retire_and_clean(rt: CliRuntime, tenant_id: uuid.UUID) -> int:
+    """Retire the tenant, then try its upstream cleanup once. Returns what is left."""
+    if not await tenant_retirement.retire(rt.sessionmaker, tenant_id=tenant_id):
+        raise StoreError(f"tenant {tenant_id} not found")
+    async with httpx.AsyncClient() as http:
+        deleters = tenant_retirement.deleters(rt.anthropic, rt.settings, http, tenant_id)
+        await tenant_retirement.clean_upstream(
+            rt.sessionmaker, tenant_id=tenant_id, deleters=deleters
+        )
+    async with rt.sessionmaker() as session:
+        pending = await tenant_retirement_store.get_work(session, tenant_id=tenant_id)
+    return sum(len(items) for items in (pending or {}).values())
+
+
+def _report_left(console: Console, left: int) -> None:
+    if left:
+        console.print(
+            f"[yellow]{left} provider or host resources are still to delete; "
+            "the scheduler retries them.[/yellow]"
+        )
+
+
+@tenants_app.command("retire")
+def tenants_retire_command(
+    platform: str,
+    external_id: str,
+    yes: Annotated[bool, YES_OPTION] = False,
+) -> None:
+    """Delete a tenant's data and keep its billing records and balance."""
+    settings = load_settings()
+    console = Console(highlight=False)
+
+    async def _run() -> None:
+        async with build_runtime(settings) as rt:
+            await tenants_retire(
+                rt=rt, console=console, platform=platform, external_id=external_id, yes=yes
+            )
+
+    run_cli(_run(), console=console)
+
+
+async def tenants_retire(
+    *, rt: CliRuntime, console: Console, platform: str, external_id: str, yes: bool
+) -> None:
+    tenant_id = derive_tenant_uuid(platform=_validate_platform(platform), workspace_id=external_id)
+    confirm_or_abort(
+        console, f"retire tenant {platform}:{external_id}? Its data is deleted.", yes=yes
+    )
+    left = await _retire_and_clean(rt, tenant_id)
+    console.print(f"[green]✓ retired tenant {platform}:{external_id}[/green]")
+    _report_left(console, left)
 
 
 @tenants_app.command("funding-mode")

@@ -155,6 +155,8 @@ TAIL = (
     "0190_long_job_features",
     "0191_drop_dev_toggle_values",
     "0192_reset_allow_writes",
+    "0193_retention_activity",
+    "0194_tenant_retirement",
 )
 HEAD = TAIL[-1]
 

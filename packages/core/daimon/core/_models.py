@@ -114,6 +114,8 @@ class Tenant(Base):
     )
     last_reconcile_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Data deleted, accounting kept (`stores.tenant_retirement`).
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     registered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -1533,6 +1535,18 @@ class PrivacySessionDelete(Base):
     account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     tenant_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     pending_session_ids: Mapped[dict[str, list[str]]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class TenantRetirement(Base):
+    """Provider and host cleanup a retired tenant still owes; survives tenant deletion."""
+
+    __tablename__ = "tenant_retirements"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    pending: Mapped[dict[str, list[str]]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

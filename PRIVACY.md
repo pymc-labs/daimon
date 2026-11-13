@@ -68,9 +68,10 @@ the setting linked in the table; `0` keeps the records.
 | Feedback and support notes | 365 days | [`DAIMON_RETENTION__FEEDBACK_DAYS`](docs/configuration.md#daimon_retention__feedback_days) |
 | Channel names | 365 days after last seen | [`DAIMON_RETENTION__CHANNEL_NAMES_DAYS`](docs/configuration.md#daimon_retention__channel_names_days) |
 | Reports | 365 days | [`DAIMON_REPORT__RETENTION_DAYS`](docs/configuration.md#daimon_report__retention_days) |
-| A workspace after uninstall | 30 days | [`DAIMON_RETENTION__ARCHIVED_TENANTS_DAYS`](docs/configuration.md#daimon_retention__archived_tenants_days) |
+| A workspace's data after uninstall | 30 days | [`DAIMON_RETENTION__ARCHIVED_TENANTS_DAYS`](docs/configuration.md#daimon_retention__archived_tenants_days) |
 
-Billing and usage records are kept for accounting. Notebooks keep the expiry
+Billing and usage records are kept for accounting, without who used them, so a
+reinstalled workspace keeps its balance. Notebooks keep the expiry
 they were published with, at most 365 days. Blogs have none.
 
 ## Your rights via `/privacy`

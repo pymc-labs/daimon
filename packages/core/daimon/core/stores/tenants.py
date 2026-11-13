@@ -224,33 +224,14 @@ async def delete_tenant(
 async def list_expired_archived_tenants(
     session: AsyncSession, *, archived_before: datetime, limit: int
 ) -> list[uuid.UUID]:
-    """Tenants archived (uninstalled) before the cutoff, oldest first."""
+    """Tenants archived (uninstalled) before the cutoff and not yet retired, oldest first."""
     rows = await session.scalars(
         select(Tenant.id)
-        .where(Tenant.archived_at < archived_before)
+        .where(Tenant.archived_at < archived_before, Tenant.retired_at.is_(None))
         .order_by(Tenant.archived_at)
         .limit(limit)
     )
     return list(rows)
-
-
-async def delete_archived_tenant(
-    session: AsyncSession, *, tenant_id: uuid.UUID, archived_before: datetime
-) -> bool:
-    """Delete the tenant if it is still archived since before the cutoff.
-
-    Locks the row first, so a reinstall that restarted or cleared the archive in the
-    meantime keeps the tenant. Returns whether it was deleted.
-    """
-    if archived_before.utcoffset() is None:
-        raise ValueError("archived_before must include a timezone")
-    archived_at = await session.scalar(
-        select(Tenant.archived_at).where(Tenant.id == tenant_id).with_for_update()
-    )
-    if archived_at is None or archived_at >= archived_before:
-        return False
-    await delete_tenant(session, tenant_id=tenant_id)
-    return True
 
 
 async def get_tenant_dependent_counts(

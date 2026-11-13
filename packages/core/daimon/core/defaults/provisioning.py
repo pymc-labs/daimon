@@ -112,7 +112,9 @@ async def provision_tenant(
                     set_={
                         "archived_at": case(
                             (Tenant.archived_at.is_not(None), func.now()), else_=null()
-                        )
+                        ),
+                        # A retired tenant comes back with its balance; the trial stays spent.
+                        "retired_at": null(),
                     },
                 )
             )

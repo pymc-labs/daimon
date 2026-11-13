@@ -95,12 +95,16 @@ async def test_privacy_sweep_boundary_retries_after_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sweep = unittest.mock.AsyncMock(side_effect=[RuntimeError("temporary"), None])
+    retire = unittest.mock.AsyncMock(side_effect=[RuntimeError("temporary"), None])
     monkeypatch.setattr("daimon.adapters.scheduler.main.sweep_privacy_session_deletes", sweep)
+    monkeypatch.setattr("daimon.adapters.scheduler.main.tenant_retirement.sweep", retire)
     client = unittest.mock.Mock()
     sm = unittest.mock.Mock()
-    await _sweep_privacy_deletes(client, sm)
-    await _sweep_privacy_deletes(client, sm)
-    assert sweep.await_count == 2
+    settings = unittest.mock.Mock()
+    await _sweep_privacy_deletes(client, sm, settings)
+    await _sweep_privacy_deletes(client, sm, settings)
+    assert sweep.await_count == 2, "account erasures are retried after a failure"
+    assert retire.await_count == 2, "tenant retirement cleanup is retried after a failure"
 
 
 async def test_app_vault_archive_retries_after_failure(

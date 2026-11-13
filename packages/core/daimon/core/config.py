@@ -2857,8 +2857,10 @@ class RetentionSettings(BaseModel):
         default=30,
         ge=0,
         description=(
-            "Days after a tenant is archived (its app uninstalled) before it and all its "
-            "data are deleted. Reinstalling before then keeps everything."
+            "Days after a tenant is archived (its app uninstalled) before it is retired: its "
+            "data, provider sessions, memory, vaults, skills, reports and notebooks are "
+            "deleted, and only billing records and the balance stay. Reinstalling before "
+            "then keeps everything."
         ),
     )
 

@@ -39,6 +39,7 @@ import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from cryptography.fernet import MultiFernet
 from daimon.adapters.scheduler.settings import SchedulerSettings
+from daimon.core import tenant_retirement
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import (
     Action,
@@ -1013,13 +1014,17 @@ async def _sweep_pending_files(
 
 @scheduler_step
 async def _sweep_privacy_deletes(
-    client: AsyncAnthropic, sm: async_sessionmaker[AsyncSession]
+    client: AsyncAnthropic, sm: async_sessionmaker[AsyncSession], settings: Settings
 ) -> None:
-    """Retain failed MA erasures for the next tick."""
+    """Retry failed account erasures and retired tenants' upstream cleanup."""
     try:
         await sweep_privacy_session_deletes(client, sm)
     except Exception:
         log.exception("scheduler.privacy_delete_sweep.failed")
+    try:
+        await tenant_retirement.sweep(client, sm, settings)
+    except Exception:
+        log.exception("scheduler.tenant_retirement_sweep.failed")
 
 
 @scheduler_step
@@ -2042,7 +2047,7 @@ async def run(
             await _poll_compute_tasks(compute)
             await _drain_pending_usage(sm, markup=settings.billing.markup)
             await _sweep_pending_files(client, sm)
-            await _sweep_privacy_deletes(client, sm)
+            await _sweep_privacy_deletes(client, sm, settings)
             await _usage_sweep_once(
                 enabled=scheduler_settings.usage_sweep_enabled,
                 sweep=lambda: _sweep_headless_usage(client, sm, markup=settings.billing.markup),
@@ -2115,7 +2120,7 @@ async def run(
             await _sweep_headless_usage(client, sm, markup=settings.billing.markup)
 
         async def privacy_sweep() -> None:
-            await _sweep_privacy_deletes(client, sm)
+            await _sweep_privacy_deletes(client, sm, settings)
 
         async with runtime_health(
             "scheduler", engine, settings.observability.health_interval_s, current_turn_counts

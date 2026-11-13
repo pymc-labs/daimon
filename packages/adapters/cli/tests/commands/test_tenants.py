@@ -32,6 +32,7 @@ from daimon.core.access_policy import (
     ChannelRule,
     TenantAccessPolicy,
 )
+from daimon.core.config import NotebookSettings, ReportHostSettings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -60,6 +61,8 @@ class _FakeCli:
 
 class _FakeSettings:
     cli = _FakeCli()
+    report_host = ReportHostSettings()
+    notebook = NotebookSettings()
 
 
 def _make_console() -> Console:

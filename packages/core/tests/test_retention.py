@@ -83,7 +83,7 @@ async def test_zero_keeps_records_forever(
     assert await db_session.scalar(select(WebAudit.target)) == "t", "0 turns the rule off"
 
 
-async def test_archived_tenant_is_deleted_unless_installed_again(
+async def test_archived_tenant_is_retired_unless_installed_again(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
@@ -102,6 +102,6 @@ async def test_archived_tenant_is_deleted_unless_installed_again(
 
     await sweep(db_session_factory, settings, now=datetime.now(UTC))
 
-    remaining = set(await db_session.scalars(select(Tenant.id)))
-    assert gone.id not in remaining, "a tenant archived past the window is deleted"
-    assert back.id in remaining, "a tenant being installed again is kept"
+    retired = dict((await db_session.execute(select(Tenant.id, Tenant.retired_at))).tuples().all())
+    assert retired[gone.id] is not None, "a tenant archived past the window is retired, not deleted"
+    assert retired[back.id] is None, "a tenant being installed again is kept"

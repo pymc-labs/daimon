@@ -310,8 +310,9 @@ Days to keep a channel's last known name after it was last seen.
 
 `int` · optional · default `30`
 
-Days after a tenant is archived (its app uninstalled) before it and all its data are
-deleted. Reinstalling before then keeps everything.
+Days after a tenant is archived (its app uninstalled) before it is retired: its data,
+provider sessions, memory, vaults, skills, reports and notebooks are deleted, and only
+billing records and the balance stay. Reinstalling before then keeps everything.
 
 ## Database
 

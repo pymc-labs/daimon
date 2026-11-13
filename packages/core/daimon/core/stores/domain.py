@@ -168,6 +168,7 @@ class TenantRow(BaseModel):
     turn_cap: int | None = None
     last_reconcile_error: str | None = None
     archived_at: datetime | None = None
+    retired_at: datetime | None = None
     registered_at: datetime
     created_at: datetime
 

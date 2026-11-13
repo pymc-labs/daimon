@@ -16,7 +16,14 @@ import structlog
 from daimon.core.config import Settings
 from daimon.core.features.registry import limit_int
 from daimon.core.features.snapshot import FeaturePlace, feature_in
-from daimon.core.stores import agent_posts, file_uploads, mux_erasure, retention, security_audit
+from daimon.core.stores import (
+    agent_posts,
+    file_uploads,
+    mux_erasure,
+    retention,
+    security_audit,
+    tenant_retirement,
+)
 from daimon.core.stores import tenants as tenants_store
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -121,14 +128,14 @@ async def _archived_tenants(sm: async_sessionmaker[AsyncSession], days: int, now
         candidates = await tenants_store.list_expired_archived_tenants(
             session, archived_before=cutoff, limit=BATCH
         )
-    deleted = 0
+    retired = 0
     for tenant_id in candidates:
         async with sm() as session, session.begin():
-            deleted += await tenants_store.delete_archived_tenant(
+            retired += await tenant_retirement.retire_archived_tenant(
                 session, tenant_id=tenant_id, archived_before=cutoff
             )
-    if deleted:
-        log.info("tenants.deleted", count=deleted, days=days)
+    if retired:
+        log.info("tenants.retired", count=retired, days=days)
 
 
 async def sweep(sm: async_sessionmaker[AsyncSession], settings: Settings, *, now: datetime) -> None:

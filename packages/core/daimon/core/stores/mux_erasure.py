@@ -337,6 +337,11 @@ async def _detach_accounting(session: AsyncSession, slots: ColumnElement[bool]) 
     )
 
 
+async def detach_tenant_accounting(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+    """`_detach_accounting` for every slot of a tenant being retired."""
+    await _detach_accounting(session, ProviderBindingSlot.tenant_id == tenant_id)
+
+
 async def _delete(session: AsyncSession, statement: Delete) -> int:
     return cast(CursorResult[Any], await session.execute(statement)).rowcount
 
