@@ -533,6 +533,8 @@ elif name == 'az' and 'key1' in sys.argv:
             log = state / "calls.jsonl"
             env = dict(
                 os.environ,
+                RELEASE="acme",
+                NAMESPACE="daimon",
                 PATH=str(state) + os.pathsep + os.environ["PATH"],
                 RG="offline",
                 LOCATION="offline",
@@ -624,6 +626,8 @@ elif 'key1' in args:
                 log = state / "calls.jsonl"
                 env = dict(
                     os.environ,
+                    RELEASE="acme",
+                    NAMESPACE="daimon",
                     PATH=str(state) + os.pathsep + os.environ["PATH"],
                     RG="offline",
                     LOCATION="offline",
@@ -706,6 +710,9 @@ elif name == 'az' and args[:2] == ['group','exists']:
                 (state / name).symlink_to(stub)
             env = dict(
                 os.environ,
+                RELEASE="acme",
+                NAMESPACE="daimon",
+                DELETE_NAMESPACE="daimon",
                 HOME=str(home),
                 KUBECONFIG=str(ambient),
                 HELM_KUBEAPISERVER="https://foreign.example.invalid",
@@ -811,6 +818,7 @@ elif name == 'az' and args[:2] == ['group','exists']:
                 overrides = {
                     "RELEASE": "daimon-teams",
                     "NAMESPACE": "daimon-teams",
+                    "DELETE_NAMESPACE": "daimon-teams",
                     "DELETE_AKS": confirmation,
                 }
                 result, operations = self.run_cluster_command(

@@ -1,6 +1,16 @@
 # Sourced by aks.sh and register.sh: the one place that names the Helm release,
 # its namespace, the Secrets the scripts create and the values files Helm reads.
 # Defaults keep the original pilot names (release acme in namespace daimon).
+# Commands that change a release refuse the defaults unless both names were
+# exported: on a shared cluster a missed export would target release acme.
+RELEASE_NAMES_EXPORTED=
+[[ -n ${RELEASE:-} && -n ${NAMESPACE:-} ]] && RELEASE_NAMES_EXPORTED=1
+require_release_names() {
+  [[ -n $RELEASE_NAMES_EXPORTED ]] || {
+    echo "$1 changes a release: export RELEASE and NAMESPACE first" >&2
+    exit 1
+  }
+}
 RELEASE=${RELEASE:-acme}
 NAMESPACE=${NAMESPACE:-daimon}
 SECRET_PREFIX=${SECRET_PREFIX:-daimon}

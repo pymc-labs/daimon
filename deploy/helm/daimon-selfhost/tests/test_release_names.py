@@ -299,6 +299,52 @@ class TeamsReleaseScriptTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(any(c[:3] == ["az", "group", "delete"] for c in calls))
 
+    def test_changing_commands_refuse_the_default_release_names(self):
+        # On a shared cluster a missed export must not reach release acme in namespace daimon.
+        for script, command in (
+            ("aks.sh", ["install"]),
+            ("aks.sh", ["register"]),
+            ("aks.sh", ["reinstall"]),
+            ("aks.sh", ["teardown"]),
+            ("register.sh", []),
+        ):
+            for missing in ("RELEASE", "NAMESPACE"):
+                with (
+                    self.subTest(script=script, command=command, missing=missing),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    state = Path(directory)
+                    result, calls = self.run_script(
+                        script, command, state, {missing: "", "DELETE_NAMESPACE": "daimon"}
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("export RELEASE and NAMESPACE first", result.stderr)
+                    self.assertEqual(calls, [])
+
+    def test_teardown_needs_the_namespace_name(self):
+        for confirmation in (None, "", "daimon", "another-namespace"):
+            with (
+                self.subTest(confirmation=confirmation),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                state = Path(directory)
+                overrides = {} if confirmation is None else {"DELETE_NAMESPACE": confirmation}
+                result, calls = self.run_script("aks.sh", ["teardown"], state, overrides)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("set DELETE_NAMESPACE=daimon-teams", result.stderr)
+                self.assertEqual(calls, [])
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            result, calls = self.run_script(
+                "aks.sh", ["teardown"], state, {"DELETE_NAMESPACE": "daimon-teams"}
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                ["helm", "uninstall", "daimon-teams", "-n", "daimon-teams", "--ignore-not-found"],
+                calls,
+            )
+            self.assertFalse(any(c[:3] == ["az", "aks", "delete"] for c in calls))
+
     def test_names_must_be_dns_labels(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)

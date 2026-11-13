@@ -295,6 +295,7 @@ references, URLs and resolved endpoint IPs go into generated Helm values.
 export RG=daimon-selfhost LOCATION=eastus2
 export ACR=daimonacme12345 AKS=daimon-acme AOAI=daimon-acme-12345
 export AOAI_DEPLOYMENT=gpt-5.4-mini
+export RELEASE=acme NAMESPACE=acme
 export AKS_STATE=$(mktemp -d)
 bash deploy/helm/daimon-selfhost/scripts/aks.sh bootstrap
 ```
@@ -417,21 +418,21 @@ Install retries preserve registration settings and restore the saved runtime Sec
 before Helm if one is configured; retain `runtime.json` with `aks-values.json`.
 It creates `daimon-postgres`, `daimon-host`, `daimon-harness`, `daimon-aoai` Secrets
 (`$SECRET_PREFIX-*` when set). Keys in `$AKS_STATE/host-extra.env`, such as
-`DAIMON_TEAMS__CLIENT_SECRET`, are added to the host Secret. The default names do this:
+`DAIMON_TEAMS__CLIENT_SECRET`, are added to the host Secret. With the names from step 1 it runs:
 
 ```sh
 az aks get-credentials -g "$RG" -n "$AKS" --overwrite-existing -o none
-kubectl create namespace daimon --dry-run=client -o yaml | kubectl apply -f -
-kubectl label namespace daimon pod-security.kubernetes.io/enforce=privileged --overwrite
+kubectl create namespace acme --dry-run=client -o yaml | kubectl apply -f -
+kubectl label namespace acme pod-security.kubernetes.io/enforce=privileged --overwrite
 for pair in postgres:pg host:host harness:harness aoai:aoai; do
-  kubectl -n daimon create secret generic "daimon-${pair%:*}" \
+  kubectl -n acme create secret generic "daimon-${pair%:*}" \
     --from-env-file="$AKS_STATE/${pair#*:}.env" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 done
-helm upgrade --install acme deploy/helm/daimon-selfhost -n daimon -f "$AKS_STATE/aks-values.json" \
+helm upgrade --install acme deploy/helm/daimon-selfhost -n acme -f "$AKS_STATE/aks-values.json" \
   --wait --wait-for-jobs --timeout 15m
-kubectl -n daimon rollout status statefulset/acme-daimon-harness --timeout=300s
-kubectl -n daimon rollout status deployment --timeout=300s
-kubectl -n daimon rollout status statefulset --timeout=300s
+kubectl -n acme rollout status statefulset/acme-daimon-harness --timeout=300s
+kubectl -n acme rollout status deployment --timeout=300s
+kubectl -n acme rollout status statefulset --timeout=300s
 ```
 
 The Job and every host Deployment first run a bounded `pg_isready` init
@@ -533,7 +534,7 @@ or capability is added to the service. Azure NetworkPolicy applies to the whole
 pod. The command is equivalent to:
 
 ```sh
-kubectl -n daimon debug pod/acme-daimon-harness-0 --image=curlimages/curl:8.16.0 \
+kubectl -n acme debug pod/acme-daimon-harness-0 --image=curlimages/curl:8.16.0 \
   --container="$probe" --attach=false -- curl --noproxy '*' --connect-timeout 5 --max-time 10 \
   --resolve "api.anthropic.com:443:$denied_ip" -sS -o /dev/null https://api.anthropic.com
 ```
@@ -555,10 +556,11 @@ ACR/storage and AOAI usage remain billable. It checks the managed node RG was
 removed. An incomplete deletion is a failed teardown, not a passing result.
 
 ```sh
-DELETE_AKS="$AKS" bash deploy/helm/daimon-selfhost/scripts/aks.sh teardown
+DELETE_NAMESPACE="$NAMESPACE" DELETE_AKS="$AKS" bash deploy/helm/daimon-selfhost/scripts/aks.sh teardown
 ```
 
-Without `DELETE_AKS` set to the cluster's name, `teardown` removes only the release
+`teardown` refuses unless `DELETE_NAMESPACE` names the namespace.
+Without `DELETE_AKS` set to the cluster's name, it removes only the release
 and its namespace and keeps the cluster. The helper verifies its dedicated kubeconfig's API server before uninstalling
 the release, deleting the namespace or deleting AKS. Use the `teardown` helper
 above so the target check runs before any destructive command.
@@ -690,7 +692,9 @@ Framework and Entra /32s.
 
 On a cluster other releases use, run only `install`, `register`, `turn`, `probe`
 and `teardown` (which keeps the cluster). `bootstrap` and `reinstall` create a
-cluster, and `egress-start` restarts the cluster's CoreDNS. `install` creates and
+cluster, and `egress-start` restarts the cluster's CoreDNS. `install`, `register`,
+`reinstall` and `teardown` refuse the defaults unless `RELEASE` and `NAMESPACE`
+are both exported, so a missed export cannot reach another release. `install` creates and
 labels the namespace, and Helm creates cluster-wide PriorityClasses, so the
 installer needs cluster rights for both.
 

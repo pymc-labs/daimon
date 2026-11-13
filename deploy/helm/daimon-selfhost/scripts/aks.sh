@@ -9,6 +9,15 @@ chart=deploy/helm/daimon-selfhost
 : "${AKS_STATE:?export AKS_STATE to a private mktemp -d directory}"
 [[ -d "$AKS_STATE" ]] || { echo 'AKS_STATE must exist' >&2; exit 1; }
 source "$chart/scripts/release.sh"
+case ${1:-} in
+install|register|reinstall|teardown) require_release_names "${1}" ;;
+esac
+# The namespace holds the database, so teardown needs its name typed again,
+# checked before any cluster call.
+if [[ ${1:-} == teardown && ${DELETE_NAMESPACE:-} != "$NAMESPACE" ]]; then
+  echo "teardown deletes namespace $NAMESPACE and its data; set DELETE_NAMESPACE=$NAMESPACE to confirm" >&2
+  exit 1
+fi
 if [[ -z ${TAG:-} ]]; then
   if [[ ${1:-} == bootstrap ]]; then
     TAG="$(git rev-parse --short HEAD)-$(date -u +%Y%m%d%H%M%S%N)"

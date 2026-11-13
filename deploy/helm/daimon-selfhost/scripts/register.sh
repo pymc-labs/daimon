@@ -5,6 +5,7 @@ umask 077
 : "${ALLOW_TEST_TARIFFS:?set true for TEST rates, false for verified production rates}" "${AKS_STATE:?}" "${SELFHOSTED_MODEL:?}" "${SELFHOSTED_MODELS:?JSON tariff catalogue required}"
 chart=deploy/helm/daimon-selfhost
 source "$chart/scripts/release.sh"
+require_release_names register
 kubectl -n "$NAMESPACE" exec -i "deploy/$PREFIX-mcp" -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon \
   env SELFHOSTED_MODEL="$SELFHOSTED_MODEL" python - < "$chart/scripts/provision.py" > "$AKS_STATE/registration.json"
 tenant=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tenant_id"])' "$AKS_STATE/registration.json")

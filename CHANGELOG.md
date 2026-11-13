@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ingress.mcpHost` or `ingress.teamsHost` skips that Ingress. `teardown` keeps
   the cluster unless `DELETE_AKS` names it, and `remove` needs `DELETE_RG`.
 
+- The AKS scripts' `install`, `register`, `reinstall` and `teardown` refuse to run
+  unless `RELEASE` and `NAMESPACE` are exported, and `teardown` needs
+  `DELETE_NAMESPACE` set to the namespace it deletes.
+
 - Fail the AKS chart render when Teams egress is on with no destinations; it
   allowed the Teams pod HTTPS to any address.
 
