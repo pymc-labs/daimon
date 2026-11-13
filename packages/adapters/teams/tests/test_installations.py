@@ -11,8 +11,11 @@ from daimon.adapters.teams.installations import (
     welcome_text,
 )
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.stores.teams_installations import get_teams_installation
-from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.teams_installations import (
+    get_teams_installation,
+    list_teams_installations,
+)
+from daimon.core.stores.tenants import get_tenant, set_provision_status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -205,3 +208,48 @@ async def test_a_channel_mention_records_a_team_installed_before_tracking(
             await service.turns.drain(timeout=30)
     row = await _row(db_session_factory)
     assert row is not None and row.group_id == TEAM_GROUP_ID, "resolved via team details"
+
+
+def _chat_install(action: str, chat: str) -> dict[str, object]:
+    install = _installation(action)
+    install["conversation"] = {
+        "id": chat,
+        "conversationType": "personal",
+        "tenantId": ENTRA_TENANT_ID,
+    }
+    install["channelData"] = {"tenant": {"id": ENTRA_TENANT_ID}}
+    return install
+
+
+async def test_a_one_to_one_chat_keeps_the_tenant_unarchived_until_it_is_removed_too(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    chat = "a:1personal-chat"
+    async with running_service(build_teams_runtime(db_session_factory), teams_api_fake) as service:
+        await post_activity(service, _installation("add"))
+        await post_activity(service, _chat_install("add", chat))
+        await post_activity(service, _installation("remove"))
+        assert not await _archived(db_session_factory), "a 1:1 chat still has the app"
+        async with db_session_factory() as session:
+            assert await list_teams_installations(session, tenant_id=TENANT) == [], (
+                "a chat is never listed as a team"
+            )
+
+        await post_activity(service, _chat_install("remove", chat))
+        assert await _archived(db_session_factory), "removing the last installation archives"
+
+
+async def test_activity_from_an_archived_organisation_clears_the_archive(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """A tenant archived while still in use (nothing recorded for it) comes back on its
+    next message, before the archive can age into retirement."""
+    await set_provision_status(db_session_factory, tenant_id=TENANT, archive=True)
+    assert await _archived(db_session_factory), "the tenant starts archived"
+    with patched_turns():
+        async with running_service(
+            build_teams_runtime(db_session_factory), teams_api_fake
+        ) as service:
+            await post_activity(service, make_channel_activity())
+            await service.turns.drain(timeout=30)
+    assert not await _archived(db_session_factory), "inbound activity clears the archive"
