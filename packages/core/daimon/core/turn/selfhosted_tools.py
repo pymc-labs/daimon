@@ -80,7 +80,7 @@ class _SkillHolder:
 
 
 def _mcp_url(url: str, *, credential: bool = False) -> str:
-    from mux.drivers.selfhosted.config import reject_metadata_url
+    from mux.drivers.selfhosted import reject_metadata_url
 
     reject_metadata_url(url)
     parsed = urlsplit(url)
@@ -109,7 +109,7 @@ def _check_http_destination(url: str, *, allowed_hosts: Sequence[str]) -> None:
     The harness network boundary must also prevent DNS rebinding and redirects
     into private networks. An operator exception authorizes an exact hostname.
     """
-    from mux.drivers.selfhosted.config import reject_metadata_url
+    from mux.drivers.selfhosted import reject_metadata_url
 
     reject_metadata_url(url)
     parsed = urlsplit(url)

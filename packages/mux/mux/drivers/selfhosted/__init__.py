@@ -18,6 +18,7 @@ from mux.contracts.profile import Profile
 from mux.drivers.selfhosted.config import (
     SESSION_POOL_AUDIENCE,
     HarnessConfig,
+    reject_metadata_url,
     validate_resource_spec,
 )
 from mux.drivers.selfhosted.context import Authorization, BindingLookup, Context
@@ -61,6 +62,7 @@ __all__ = [
     "Transport",
     "TurnTools",
     "agent_tool_policy",
+    "reject_metadata_url",
     "validate_resource_spec",
 ]
 
