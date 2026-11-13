@@ -299,11 +299,11 @@ prints a receipt (JSON with `--json`) and writes no files, so keep the output.
 ## Self-hosted and Azure models
 
 A self-hosted harness, such as Azure, is billed from measured token counts per
-request. Configure `DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS` to map deployment
-names to underlying models. Configure `DAIMON_BILLING__SELFHOSTED__MODELS` with
-each model's tariff history ([deployments](configuration.md#daimon_billing__selfhosted__deployments),
-[models](configuration.md#daimon_billing__selfhosted__models)). There is no
-built-in Azure tariff, so supply your own verified rates.
+request, compaction included. Map deployment names to underlying models with
+[`DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS`](configuration.md#daimon_billing__selfhosted__deployments),
+and give each model's tariff history in
+[`DAIMON_BILLING__SELFHOSTED__MODELS`](configuration.md#daimon_billing__selfhosted__models).
+Azure has no built-in tariff; supply your own verified rates.
 
 Usage Daimon cannot measure stays pending and is never charged as zero. List
 pending items with:
@@ -318,12 +318,7 @@ Each row carries a reason such as `usage_unknown`, `infrastructure_unknown`,
 runtime repairs gaps by replaying the harness's measured usage, and a tariff
 added after a request cannot repair it. Never treat pending turns as free.
 
-Every provider request, including compaction, journals `model_request_started`
-before model I/O and exactly one closing outcome under the same request ID:
-measured `usage` or unknown `usage_unavailable`. Compaction usage follows the
-same accounting and reconciliation rules as ordinary requests.
-
-Selfhosted tariff model and deployment names with a normalized `-test`, `_test`, or ` test` suffix, or bare `test`, are refused at
-startup by default. Classification strips surrounding whitespace and ignores case. An explicit test installation can set
-`DAIMON_BILLING__SELFHOSTED__ALLOW_TEST_TARIFFS=true`; startup logs a warning
-that these rates are not production prices. Keep this disabled for production.
+Startup refuses tariff and deployment names ending in `-test`, `_test` or
+` test`, or named `test`, in any case.
+[`ALLOW_TEST_TARIFFS`](configuration.md#daimon_billing__selfhosted__allow_test_tariffs)
+allows them for test installations, with a startup warning.
