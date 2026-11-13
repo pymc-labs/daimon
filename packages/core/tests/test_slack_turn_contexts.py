@@ -5,16 +5,24 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from daimon.core.stores.slack_turn_contexts import (
     create_slack_turn_context,
     delete_slack_turn_context,
     get_slack_turn_channels,
 )
+from daimon.testing import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
 TENANT = uuid.uuid4()
 ACCOUNT = uuid.uuid4()
 NOW = datetime(2026, 7, 2, 12, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+async def _tenant(db_session: AsyncSession) -> None:
+    """A context row cascades with its tenant, so the tenant must exist."""
+    await make_tenant(db_session, platform="slack", id=TENANT)
 
 
 async def test_create_then_get_returns_channel(db_session: AsyncSession) -> None:
