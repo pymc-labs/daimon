@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import httpx
 import pytest
@@ -13,6 +15,7 @@ from daimon.core._models import (
     Account,
     AgentMemoryStore,
     Base,
+    SessionSettleState,
     SlackBotToken,
     SlackUserToken,
     Tenant,
@@ -37,7 +40,7 @@ from daimon.testing.factories import (
     make_usage_event,
 )
 from pydantic import SecretStr
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # Tenant tables with a money column that are purged anyway, and why.
@@ -99,7 +102,9 @@ async def test_retirement_keeps_the_balance_and_the_spent_trial(
     balance = await tenant_ledger.get_balance(db_session, tenant_id=tenant_id)
     ledger_rows = await db_session.scalar(select(func.count()).select_from(TenantLedger))
 
-    assert await store.retire_tenant(db_session, tenant_id=tenant_id), "the tenant exists"
+    assert await tenant_retirement.retire(db_session_factory, tenant_id=tenant_id), (
+        "the tenant exists"
+    )
 
     tenant = await db_session.get(Tenant, tenant_id, populate_existing=True)
     assert tenant is not None and tenant.retired_at is not None, "the tenants row stays, retired"
@@ -216,7 +221,7 @@ async def test_purge_leaves_no_row_in_any_purged_table(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant_id = await _seed(db_session, db_session_factory, "purged-guild")
-    await store.retire_tenant(db_session, tenant_id=tenant_id)
+    await tenant_retirement.retire(db_session_factory, tenant_id=tenant_id)
     for table in store.tenant_tables():
         if table.name in store.KEEP_FOR_ACCOUNTING:
             continue
@@ -255,12 +260,14 @@ async def _slack_tokens(db_session: AsyncSession) -> tuple[set[tuple[str, str]],
 
 @pytest.mark.parametrize("how", ["retire", "delete"])
 async def test_slack_tokens_go_only_for_the_leaving_workspace(
-    db_session: AsyncSession, how: str
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], how: str
 ) -> None:
     a, _b = await _slack_world(db_session)
 
     if how == "retire":
-        assert await store.retire_tenant(db_session, tenant_id=a.id), "the tenant exists"
+        assert await tenant_retirement.retire(db_session_factory, tenant_id=a.id), (
+            "the tenant exists"
+        )
     else:
         await tenants.delete_tenant(db_session, tenant_id=a.id)
 
@@ -270,3 +277,106 @@ async def test_slack_tokens_go_only_for_the_leaving_workspace(
     assert ("T_B", "U_B") in users, "another workspace's user token stays"
     assert "T_B" in bots, "another workspace's bot token stays"
     assert ("T_A", "U_STRANGER") in users, "a token for someone this tenant never knew stays"
+
+
+async def _archive(db_session: AsyncSession, tenant_id: uuid.UUID, at: datetime) -> None:
+    await db_session.execute(update(Tenant).where(Tenant.id == tenant_id).values(archived_at=at))
+    await db_session.flush()
+
+
+async def test_retirement_is_batched_and_resumes_after_an_interruption(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rows go a few at a time; a crash part-way leaves the tenant archived, and the
+    next attempt finishes the job without losing what was already queued upstream."""
+    tenant_id = await _seed(db_session, db_session_factory, "big-guild")
+    tenant = await get_tenant(db_session, tenant_id=tenant_id)
+    assert tenant is not None
+    for _ in range(5):
+        await make_account(db_session, tenant=tenant)
+    monkeypatch.setattr(tenant_retirement, "PURGE_BATCH", 2)
+    real, calls = store.purge_batch, 0
+
+    async def crash_after_a_few(*args: Any, **kwargs: Any) -> int | None:
+        nonlocal calls
+        calls += 1
+        if calls == 4:
+            raise RuntimeError("interrupted")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "purge_batch", crash_after_a_few)
+    with pytest.raises(RuntimeError):
+        await tenant_retirement.retire(db_session_factory, tenant_id=tenant_id)
+    monkeypatch.setattr(store, "purge_batch", real)
+
+    db_session.expire_all()
+    row = await db_session.get(Tenant, tenant_id, populate_existing=True)
+    assert row is not None and row.retired_at is None, "an interrupted retirement is not final"
+    assert row.archived_at is not None, "it stays archived, so the sweep picks it up again"
+    queued = await store.get_work(db_session, tenant_id=tenant_id)
+    assert queued is not None and queued["sessions"] == ["sesn_a"], "upstream work was queued first"
+
+    assert await tenant_retirement.retire(db_session_factory, tenant_id=tenant_id), "it resumes"
+
+    db_session.expire_all()
+    for table in store.purge_tables():
+        left = await db_session.scalar(
+            select(func.count()).select_from(table).where(table.c.tenant_id == tenant_id)
+        )
+        assert left == 0, f"{table.name} is empty after the resumed retirement"
+    row = await db_session.get(Tenant, tenant_id, populate_existing=True)
+    assert row is not None and row.retired_at is not None, "the resumed retirement finishes"
+    queued = await store.get_work(db_session, tenant_id=tenant_id)
+    assert queued is not None and queued["sessions"] == ["sesn_a"], "the queue survives the resume"
+
+
+async def test_the_sweep_waits_for_a_pending_settle(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Usage still waiting to settle defers retirement; once settled, the next sweep retires."""
+    tenant_id = await _seed(db_session, db_session_factory, "settling-guild")
+    old = datetime(2020, 1, 1, tzinfo=UTC)
+    await _archive(db_session, tenant_id, old)
+    db_session.add(SessionSettleState(managed_session_id="sesn_a", settle_requested_at=old))
+    await db_session.flush()
+    cutoff = datetime(2021, 1, 1, tzinfo=UTC)
+    accounts = select(func.count()).select_from(Account).where(Account.tenant_id == tenant_id)
+    before = await db_session.scalar(accounts)
+
+    assert not await tenant_retirement.retire(
+        db_session_factory, tenant_id=tenant_id, archived_before=cutoff
+    ), "a pending settle defers retirement"
+    db_session.expire_all()
+    assert await db_session.scalar(accounts) == before, "nothing is purged"
+
+    await db_session.execute(update(SessionSettleState).values(settle_requested_at=None))
+    await db_session.flush()
+    assert await tenant_retirement.retire(
+        db_session_factory, tenant_id=tenant_id, archived_before=cutoff
+    ), "settled usage no longer defers it"
+
+
+async def test_a_reinstall_during_retirement_stops_the_purge(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id = await _seed(db_session, db_session_factory, "back-guild")
+    real = store.purge_batch
+
+    async def reinstalled(*args: Any, **kwargs: Any) -> int | None:
+        await provision_tenant(db_session_factory, platform="discord", workspace_id="back-guild")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "purge_batch", reinstalled)
+    assert not await tenant_retirement.retire(db_session_factory, tenant_id=tenant_id), (
+        "a reinstall stops the retirement"
+    )
+    db_session.expire_all()
+    row = await db_session.get(Tenant, tenant_id, populate_existing=True)
+    assert row is not None and row.retired_at is None, "the reinstalled tenant is not retired"
+    assert await db_session.scalar(
+        select(func.count()).select_from(Account).where(Account.tenant_id == tenant_id)
+    ), "the reinstalled tenant keeps the rows it has"

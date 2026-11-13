@@ -1,5 +1,9 @@
 """Retire a tenant: delete its data, keep its accounting, queue its upstream cleanup.
 
+Retirement runs as steps, each its own transaction (`daimon.core.tenant_retirement`):
+`begin_retirement`, `purge_batch` per table until empty, then `finish_retirement`.
+Interrupted, the tenant stays archived and the next sweep resumes it.
+
 Tenant tables come from `Base.metadata` (a `tenant_id` column or a foreign key to
 `tenants`), so a new table is purged unless `KEEP_FOR_ACCOUNTING` names it with a
 reason. Kept rows lose the person identifiers `PERSON_COLUMNS` lists. Provider
@@ -10,7 +14,7 @@ resources and hosted artifacts the deleted rows named are queued in
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from daimon.core._models import (
@@ -24,6 +28,7 @@ from daimon.core._models import (
     NeutralSkillVersion,
     SeededSkill,
     ServerSkill,
+    SessionSettleState,
     Tenant,
     TenantRetirement,
     UsageEvent,
@@ -39,8 +44,10 @@ from sqlalchemy import (
     Select,
     Table,
     delete,
+    exists,
     func,
     literal,
+    literal_column,
     not_,
     null,
     select,
@@ -48,8 +55,10 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import QueryableAttribute
+from sqlalchemy.sql.elements import ColumnClause
 
 # What a retired tenant keeps, and why. Everything else tenant-scoped is deleted.
 KEEP_FOR_ACCOUNTING: dict[str, str] = {
@@ -168,39 +177,124 @@ async def _scrub(session: AsyncSession, tenant_id: uuid.UUID) -> None:
         await session.execute(stmt)
 
 
-async def retire_tenant(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
-    """Retire the tenant in the caller's transaction. False when it does not exist."""
+async def begin_retirement(
+    session: AsyncSession, *, tenant_id: uuid.UUID, archived_before: datetime | None = None
+) -> datetime | None:
+    """Start retiring a tenant: archive it, queue its upstream cleanup, and drop the
+    small, shared-key and settlement rows that cannot be purged by tenant in batches.
+
+    Returns the tenant's archive time, which later steps must find unchanged (a reinstall
+    restarts or clears it). None when the tenant does not exist, or, with `archived_before`
+    (the sweep), when it is not archived since before that time, is already retired, or
+    still has usage waiting to settle (retried on the next sweep). Safe to run again
+    after an interruption.
+    """
+    if archived_before is not None and archived_before.utcoffset() is None:
+        raise ValueError("archived_before must include a timezone")
     tenant = await session.scalar(select(Tenant).where(Tenant.id == tenant_id).with_for_update())
     if tenant is None:
-        return False
+        return None
+    if archived_before is not None and (
+        tenant.retired_at is not None
+        or tenant.archived_at is None
+        or tenant.archived_at >= archived_before
+        or await has_pending_settle(session, tenant_id=tenant_id)
+    ):
+        return None
+    # Archived first: a reinstall in the middle restarts or clears it, which stops the purge.
+    archived_at = tenant.archived_at = tenant.archived_at or datetime.now(UTC)
     await _queue(session, tenant_id, await collect_upstream(session, tenant_id=tenant_id))
-    github_user_ids = set(
-        await session.scalars(
-            select(AccountGitHubLink.github_user_id)
-            .join(Account, Account.id == AccountGitHubLink.account_id)
-            .where(Account.tenant_id == tenant_id)
-        )
+    links = await session.scalars(
+        select(AccountGitHubLink.github_user_id)
+        .join(Account, Account.id == AccountGitHubLink.account_id)
+        .where(Account.tenant_id == tenant_id)
     )
+    github_user_ids = set(links)
     if tenant.platform == "slack":
         # Keyed by Slack team, not tenant, so no tenant delete reaches them.
         await delete_workspace_tokens(session, tenant_id=tenant_id, team_id=tenant.external_id)
     await mux_erasure.detach_tenant_accounting(session, tenant_id=tenant_id)
     await delete_settle_state(session, tenant_id=tenant_id)
     await erase_tenant(session, tenant_id=tenant_id)
-    for table in tenant_tables():
-        if table.name in KEEP_FOR_ACCOUNTING or table.name in _OWN_HELPER:
-            continue
-        await session.execute(delete(table).where(table.c.tenant_id == tenant_id))
-    await _scrub(session, tenant_id)
     await session.execute(
-        update(Tenant)
-        .where(Tenant.id == tenant_id)
-        .values(retired_at=func.now(), archived_at=func.coalesce(Tenant.archived_at, func.now()))
+        delete(AccountGitHubLink).where(
+            AccountGitHubLink.account_id.in_(
+                select(Account.id).where(Account.tenant_id == tenant_id)
+            )
+        )
     )
-    await session.flush()
     for github_user_id in github_user_ids:
         await github_links_store.delete_unlinked_user(session, github_user_id=github_user_id)
+    return archived_at
+
+
+def purge_tables() -> list[Table]:
+    """The tables `purge_batch` empties, children before parents."""
+    return [
+        t
+        for t in tenant_tables()
+        if t.name not in KEEP_FOR_ACCOUNTING and t.name not in _OWN_HELPER
+    ]
+
+
+async def _still_retiring(
+    session: AsyncSession, tenant_id: uuid.UUID, archived_at: datetime
+) -> bool:
+    """Lock the tenant row; false once a reinstall moved or cleared the archive time."""
+    row = (
+        await session.execute(
+            select(Tenant.archived_at, Tenant.retired_at)
+            .where(Tenant.id == tenant_id)
+            .with_for_update()
+        )
+    ).first()
+    return row is not None and row.archived_at == archived_at and row.retired_at is None
+
+
+async def purge_batch(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    archived_at: datetime,
+    table: Table,
+    limit: int,
+) -> int | None:
+    """Delete up to `limit` of a retiring tenant's rows from `table`; None if the
+    retirement was stopped by a reinstall, so the caller leaves the new rows alone."""
+    if not await _still_retiring(session, tenant_id, archived_at):
+        return None
+    ctid: ColumnClause[Any] = literal_column("ctid")
+    batch = select(ctid).select_from(table).where(table.c.tenant_id == tenant_id).limit(limit)
+    result = await session.execute(delete(table).where(ctid.in_(batch)))
+    return cast(CursorResult[Any], result).rowcount
+
+
+async def finish_retirement(
+    session: AsyncSession, *, tenant_id: uuid.UUID, archived_at: datetime
+) -> bool:
+    """Scrub the person identifiers kept rows still hold and mark the tenant retired."""
+    if not await _still_retiring(session, tenant_id, archived_at):
+        return False
+    await _scrub(session, tenant_id)
+    await session.execute(
+        update(Tenant).where(Tenant.id == tenant_id).values(retired_at=func.now())
+    )
     return True
+
+
+async def has_pending_settle(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
+    """Whether any of the tenant's provider sessions still has usage waiting to settle."""
+    ids = tenant_session_ids(tenant_id).subquery()
+    return bool(
+        await session.scalar(
+            select(
+                exists().where(
+                    SessionSettleState.managed_session_id.in_(select(ids)),
+                    SessionSettleState.settle_requested_at.is_not(None),
+                )
+            )
+        )
+    )
 
 
 async def list_work(session: AsyncSession) -> list[tuple[uuid.UUID, dict[str, list[str]]]]:
@@ -230,23 +324,3 @@ async def remove_done(
         return True
     row.pending = pending
     return False
-
-
-async def retire_archived_tenant(
-    session: AsyncSession, *, tenant_id: uuid.UUID, archived_before: datetime
-) -> bool:
-    """Retire the tenant if it is still archived since before the cutoff and not yet retired."""
-    if archived_before.utcoffset() is None:
-        raise ValueError("archived_before must include a timezone")
-    row = (
-        await session.execute(
-            select(Tenant.archived_at, Tenant.retired_at)
-            .where(Tenant.id == tenant_id)
-            .with_for_update()
-        )
-    ).first()
-    if row is None or row.archived_at is None or row.archived_at >= archived_before:
-        return False
-    if row.retired_at is not None:
-        return False
-    return await retire_tenant(session, tenant_id=tenant_id)

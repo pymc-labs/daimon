@@ -18,6 +18,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 
 import structlog
+from daimon.core import tenant_retirement
 from daimon.core.config import Settings
 from daimon.core.features.registry import FEATURES, limit_int
 from daimon.core.features.snapshot import FeaturePlace, feature_in, resolve_one
@@ -27,7 +28,6 @@ from daimon.core.stores import (
     mux_erasure,
     retention,
     security_audit,
-    tenant_retirement,
 )
 from daimon.core.stores import tenants as tenants_store
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -204,10 +204,9 @@ async def _archived_tenants(sm: async_sessionmaker[AsyncSession], days: int, now
     retired = failed = 0
     for tenant_id in candidates:
         try:
-            async with sm() as session, session.begin():
-                retired += await tenant_retirement.retire_archived_tenant(
-                    session, tenant_id=tenant_id, archived_before=cutoff
-                )
+            retired += await tenant_retirement.retire(
+                sm, tenant_id=tenant_id, archived_before=cutoff
+            )
         except Exception:
             failed += 1
             log.exception("retention.tenant_failed", tenant_id=str(tenant_id))

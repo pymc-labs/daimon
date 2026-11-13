@@ -1,6 +1,6 @@
 """Retire a tenant, then delete what it left with the provider and the hosts.
 
-`retire` deletes the tenant's data in one transaction and queues the provider
+`retire` deletes the tenant's data in batches and queues the provider
 sessions, memory stores, vaults and skills its rows named, plus its report and
 notebook host content. `clean_upstream` works one tenant's queue off and keeps
 whatever failed; the scheduler retries every queue through `sweep`.
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 
 import anthropic as anthropic_errors
 import httpx
@@ -33,10 +34,41 @@ _HOST_TIMEOUT_SECONDS = 30.0
 Deleter = Callable[[str], Awaitable[None]]
 
 
-async def retire(sm: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID) -> bool:
-    """Retire the tenant now. False when it does not exist."""
+PURGE_BATCH = 500
+
+
+async def retire(
+    sm: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    archived_before: datetime | None = None,
+) -> bool:
+    """Retire the tenant now, in short transactions so a large tenant never holds locks
+    for long. False when it does not exist, is not due (`archived_before`, the sweep's
+    rule), or a reinstall stopped it. An interrupted retirement resumes on the next call.
+    """
     async with sm() as session, session.begin():
-        return await store.retire_tenant(session, tenant_id=tenant_id)
+        archived_at = await store.begin_retirement(
+            session, tenant_id=tenant_id, archived_before=archived_before
+        )
+    if archived_at is None:
+        return False
+    for table in store.purge_tables():
+        while True:
+            async with sm() as session, session.begin():
+                removed = await store.purge_batch(
+                    session,
+                    tenant_id=tenant_id,
+                    archived_at=archived_at,
+                    table=table,
+                    limit=PURGE_BATCH,
+                )
+            if removed is None:
+                return False
+            if removed < PURGE_BATCH:
+                break
+    async with sm() as session, session.begin():
+        return await store.finish_retirement(session, tenant_id=tenant_id, archived_at=archived_at)
 
 
 def _session_deleter(client: AsyncAnthropic, scope: Scope) -> Deleter:
