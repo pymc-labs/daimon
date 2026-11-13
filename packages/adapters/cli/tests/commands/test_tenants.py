@@ -27,7 +27,6 @@ from daimon.adapters.cli.commands.tenants import (
     tenants_turn_cap,
 )
 from daimon.core import allowance_limits
-from daimon.core._models import SessionSettleState
 from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
     AgentRule,
@@ -39,7 +38,12 @@ from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import SettlePending, StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import TenantScopeRef
-from daimon.core.stores import scoped_config_write, spend_allowances, tenant_ledger
+from daimon.core.stores import (
+    scoped_config_write,
+    session_settle_state,
+    spend_allowances,
+    tenant_ledger,
+)
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
     load_access_policy,
@@ -287,11 +291,7 @@ async def _settling_tenant(sm: async_sessionmaker[AsyncSession], workspace: str)
         tenant = await get_tenant(s, tenant_id)
         assert tenant is not None
         await make_usage_event(s, tenant=tenant, managed_session_id="sesn_settling")
-        s.add(
-            SessionSettleState(
-                managed_session_id="sesn_settling", settle_requested_at=datetime.now(UTC)
-            )
-        )
+        await session_settle_state.request_settle(s, managed_session_id="sesn_settling")
         await tenant_ledger.insert_entry(
             s, tenant_id=tenant_id, delta_usd=Decimal("7.50"), reason="manual", idempotency_key="k"
         )
