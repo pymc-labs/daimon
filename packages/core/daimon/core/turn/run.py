@@ -103,6 +103,7 @@ from daimon.core.turn.ceiling import (
     turn_deadline,
 )
 from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.drain import drained
 from daimon.core.turn.driver import SEND_ATTEMPTED, run_turn, unattended_sends
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
 from daimon.core.turn.io import LegacyTurnIO, TurnIO, turn_io
@@ -2329,7 +2330,7 @@ async def run_prepared_turn_impl(
             finally:
                 if not mirror_task.done():
                     mirror_task.cancel()
-                    with contextlib.suppress(BaseException):
+                    with drained():
                         await mirror_task
         except Exception as exc:
             if (observation := current_outcome.get()) is not None:

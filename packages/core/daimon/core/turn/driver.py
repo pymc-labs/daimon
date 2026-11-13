@@ -87,6 +87,7 @@ from daimon.core.turn.approvals import (
 )
 from daimon.core.turn.ceiling import ceiling_error, current_turn_deadline, remaining_s
 from daimon.core.turn.degraded import degraded_failure_message
+from daimon.core.turn.drain import drained
 from daimon.core.turn.io import (
     LegacyTurnIO,
     TrackedLegacyTurnIO,
@@ -487,7 +488,7 @@ async def _send_decision_batch(
                 raise _InterruptInConsume() from None
             finally:
                 cancel_task.cancel()
-                with _suppress_task_exc():
+                with drained():
                     await cancel_task
             if cancel.is_set():
                 raise _InterruptInConsume()
@@ -738,7 +739,7 @@ async def _await_or_cancel[T](
     same idiom the consume loop already uses for `stream.__anext__()`.
 
     On a cancel win: if the work task had NOT yet finished, cancel + drain
-    it (`_suppress_task_exc()`). If it HAD already finished with a real
+    it (`drained()`). If it HAD already finished with a real
     result despite losing the race — a genuine tie, e.g. the stream opened
     right as cancel fired — `on_cancel_win_result` (when given) is awaited
     with that result so the caller can release it (close the stream) before
@@ -767,14 +768,14 @@ async def _await_or_cancel[T](
         # same reasons.
         if not work_task.done():
             work_task.cancel()
-            with _suppress_task_exc():
+            with drained():
                 await work_task
         elif (
             not work_task.cancelled()
             and work_task.exception() is None
             and on_cancel_win_result is not None
         ):
-            with _suppress_task_exc():
+            with drained():
                 await on_cancel_win_result(work_task.result())
         raise
     if cancel_task in done:
@@ -787,7 +788,7 @@ async def _await_or_cancel[T](
                 await on_cancel_win_result(work_task.result())
         else:
             work_task.cancel()
-            with _suppress_task_exc():
+            with drained():
                 await work_task
         raise _InterruptedDuringRecovery(phase=phase)
     return work_task.result()
@@ -1177,11 +1178,14 @@ async def _interrupt_and_settle(
             {recovery, stop}, timeout=_UNWEDGE_SETTLE_S, return_when=asyncio.FIRST_COMPLETED
         )
     finally:
-        for task in (recovery, stop):
-            if not task.done():
-                task.cancel()
-                with contextlib.suppress(BaseException):
-                    await task
+        recovery.cancel()
+        stop.cancel()
+        try:
+            with drained():
+                await recovery
+        finally:
+            with drained():
+                await stop
     if stop in done:
         log.info("turn.session_unwedge_cancelled", session_id=session_id)
         return "cancelled"
@@ -1269,7 +1273,7 @@ async def _pump(
         # open-ended (discord.HTTPException, Slack API errors, whatever a
         # future adapter raises). `Exception`, not `BaseException` --
         # CancelledError must still propagate so the render task stays
-        # cancellable; `_suppress_task_exc()` remains the sole
+        # cancellable; `drained()` remains the sole
         # BaseException drain site in this module.
         #
         # On failure: log and return WITHOUT advancing `prev_cell[0]`. The
@@ -1308,10 +1312,12 @@ async def _pump(
         stop_rendering(lifecycle)
         render_task.cancel()
         silence_task.cancel()
-        with _suppress_task_exc():
-            await render_task
-        with _suppress_task_exc():
-            await silence_task
+        try:
+            with drained():
+                await render_task
+        finally:
+            with drained():
+                await silence_task
 
     # Two-level reconnect structure:
     #
@@ -2061,7 +2067,7 @@ async def _consume_with_reconnect(
                 raise _EventlessCycle(reason="read_timeout")
             if cancel_task in done:
                 next_task.cancel()
-                with _suppress_task_exc():
+                with drained():
                     await next_task
                 raise _InterruptInConsume()
             fetched, next_task = next_task, None
@@ -2224,26 +2230,32 @@ async def _consume_with_reconnect(
             if stop is not None:
                 return
     finally:
-        if not cancel_task.done():
-            cancel_task.cancel()
-            with _suppress_task_exc():
-                await cancel_task
-        if next_task is not None and not next_task.done():
-            next_task.cancel()
-            with _suppress_task_exc():
-                await next_task
-        if opened_stream is not None:
-            # Unconditional close of any stream this attempt opened, on
-            # every exit path -- clean close, read timeout, mid-consume
-            # cancel, and (new) a ceiling `wait_for` cancellation landing
-            # here all leave an open SSE response otherwise.
-            # `httpx.Response.aclose()` is idempotent, so this is safe even
-            # when an explicit path above already closed it. Cleanup
-            # boundary (guideline:architecture): a transport that is
-            # already broken must not replace the real exception with a
-            # close failure.
-            with contextlib.suppress(Exception):
-                await opened_stream.close()
+        # A ceiling cancellation landing on a drain below is raised by `drained`;
+        # the nested `finally`s still reap the read and close the stream.
+        try:
+            if not cancel_task.done():
+                cancel_task.cancel()
+                with drained():
+                    await cancel_task
+        finally:
+            try:
+                if next_task is not None and not next_task.done():
+                    next_task.cancel()
+                    with drained():
+                        await next_task
+            finally:
+                if opened_stream is not None:
+                    # Unconditional close of any stream this attempt opened, on
+                    # every exit path -- clean close, read timeout, mid-consume
+                    # cancel, and a ceiling `wait_for` cancellation landing
+                    # here all leave an open SSE response otherwise.
+                    # `httpx.Response.aclose()` is idempotent, so this is safe even
+                    # when an explicit path above already closed it. Cleanup
+                    # boundary (guideline:architecture): a transport that is
+                    # already broken must not replace the real exception with a
+                    # close failure.
+                    with contextlib.suppress(Exception):
+                        await opened_stream.close()
 
 
 # --- Finalizers ----------------------------------------------------------
@@ -2592,18 +2604,6 @@ async def _handle_interrupt_in_consume(
 
 
 # --- Misc helpers --------------------------------------------------------
-
-
-@contextlib.contextmanager
-def _suppress_task_exc():
-    """Swallow any exception (including CancelledError) raised while
-    awaiting a cancelled task. Used only to drain the render task.
-
-    This is the sole permitted drain point for
-    `BaseException` in the driver.
-    """
-    with contextlib.suppress(BaseException):
-        yield
 
 
 def _compute_rate_limit(

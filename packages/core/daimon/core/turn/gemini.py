@@ -12,7 +12,6 @@ import json
 import random
 from collections import deque
 from collections.abc import AsyncIterator, Mapping, Sequence
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -29,6 +28,7 @@ from daimon.core.errors import TurnError
 from daimon.core.ma import REPLAY_TIMEOUT_S
 from daimon.core.mux_backend import TurnBackend, TurnBackendRequest, TurnRuntime
 from daimon.core.pricing import ProviderPrice
+from daimon.core.turn.drain import drained
 from daimon.core.turn.io import (
     TurnCodecRequest,
     TurnConnectionLost,
@@ -981,13 +981,15 @@ class _LazyStream(AsyncIterator[TurnEvent]):
         self._closed = True
         self._gate.set()
         reader = self._reader
-        if reader is not None and reader is not asyncio.current_task():
-            reader.cancel()
-            with suppress(asyncio.CancelledError, StopAsyncIteration):
-                await reader
-        source, self._source = self._source, None
-        if source is not None:
-            close = getattr(source, "aclose", None)
-            if close is not None:
-                await close()
-        self.io.forget_stream(self)
+        try:
+            if reader is not None and reader is not asyncio.current_task():
+                reader.cancel()
+                with drained(asyncio.CancelledError, StopAsyncIteration):
+                    await reader
+        finally:
+            source, self._source = self._source, None
+            if source is not None:
+                close = getattr(source, "aclose", None)
+                if close is not None:
+                    await close()
+            self.io.forget_stream(self)

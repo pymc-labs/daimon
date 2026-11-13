@@ -929,10 +929,8 @@ async def test_reconnect_on_reused_session_two_turn_log_renders_only_current_tur
 
 
 def test_driver_source_contains_no_except_cancelled_error() -> None:
-    """Driver contains no `except asyncio.CancelledError`. The only acceptable
-    pattern is `_suppress_task_exc`'s `except BaseException:` when draining
-    the cancelled render task.
-    """
+    """Driver contains no `except asyncio.CancelledError`. A cancelled helper
+    task is drained through `daimon.core.turn.drain.drained` instead."""
     import pathlib
 
     path = pathlib.Path("packages/core/daimon/core/turn/driver.py")
