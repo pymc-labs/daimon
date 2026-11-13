@@ -247,6 +247,23 @@ class TeamsReleaseScriptTests(unittest.TestCase):
             files = [helm[i + 1] for i, arg in enumerate(helm) if arg == "-f"]
             self.assertEqual(files, [str(state / "values.yaml"), str(state / "aks-values.json")])
 
+    def test_install_adds_operator_held_host_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            extra = state / "host-extra.env"
+            for present in (False, True):
+                if present:
+                    extra.write_text("DAIMON_TEAMS__CLIENT_SECRET=offline-placeholder\n")
+                result, calls = self.run_script("aks.sh", ["install"], state)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                host = next(c for c in calls if "generic" in c and "daimon-teams-host" in c)
+                files = [a.split("=", 1)[1] for a in host if a.startswith("--from-env-file=")]
+                expected = [str(state / "host.env")] + ([str(extra)] if present else [])
+                self.assertEqual(files, expected)
+                # The extra keys reach the Secret, never the generated values or host.env.
+                self.assertNotIn("CLIENT_SECRET", (state / "host.env").read_text())
+                self.assertNotIn("CLIENT_SECRET", (state / "aks-values.json").read_text())
+
     def test_probe_targets_the_release_harness(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)

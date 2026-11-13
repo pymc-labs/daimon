@@ -159,8 +159,13 @@ merge(values, {
 (p/'aoai-host').write_text(host)
 PY
   for pair in postgres:pg host:host harness:harness aoai:aoai; do
+    env_files=(--from-env-file="$AKS_STATE/${pair#*:}.env")
+    # Operator-held host keys, such as DAIMON_TEAMS__CLIENT_SECRET, stay out of host.env.
+    if [[ ${pair%:*} == host && -s "$AKS_STATE/host-extra.env" ]]; then
+      env_files+=(--from-env-file="$AKS_STATE/host-extra.env")
+    fi
     kubectl -n "$NAMESPACE" create secret generic "$SECRET_PREFIX-${pair%:*}" \
-      --from-env-file="$AKS_STATE/${pair#*:}.env" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+      "${env_files[@]}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   done
   runtime_secret=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("host", {}).get("runtimeSecret", ""))' "$AKS_STATE/aks-values.json")
   if [[ -n $runtime_secret ]]; then
