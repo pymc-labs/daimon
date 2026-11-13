@@ -223,7 +223,7 @@ implemented. Parameters, commands, roles and limitations are in the
 
 The Helm chart in `deploy/helm/daimon-selfhost/` runs Daimon on Azure Kubernetes
 Service. It deploys the MCP and scheduler processes, optional Teams, Discord and
-Slack processes, one persistent harness and a bundled PostgreSQL. The harness
+Slack processes, one persistent harness and, by default, a bundled PostgreSQL. The harness
 calls Azure OpenAI with a key from a Secret. The chart creates no Azure resources.
 
 Several releases can share one cluster. Give each its own namespace, Secret names

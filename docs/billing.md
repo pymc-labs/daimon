@@ -299,11 +299,11 @@ prints a receipt (JSON with `--json`) and writes no files, so keep the output.
 ## Self-hosted and Azure models
 
 A self-hosted harness, such as Azure, is billed from measured token counts per
-request, compaction included. Map deployment names to underlying models with
+request, compaction included. Map deployment names to models with
 [`DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS`](configuration.md#daimon_billing__selfhosted__deployments),
 and give each model's tariff history in
 [`DAIMON_BILLING__SELFHOSTED__MODELS`](configuration.md#daimon_billing__selfhosted__models).
-Azure has no built-in tariff; supply your own verified rates.
+Azure has no built-in tariff; supply your verified rates.
 
 Usage Daimon cannot measure stays pending and is never charged as zero. List
 pending items with:
@@ -320,5 +320,5 @@ added after a request cannot repair it. Never treat pending turns as free.
 
 Startup refuses tariff and deployment names ending in `-test`, `_test` or
 ` test`, or named `test`, in any case.
-[`ALLOW_TEST_TARIFFS`](configuration.md#daimon_billing__selfhosted__allow_test_tariffs)
-allows them for test installations, with a startup warning.
+[`DAIMON_BILLING__SELFHOSTED__ALLOW_TEST_TARIFFS`](configuration.md#daimon_billing__selfhosted__allow_test_tariffs)
+allows them with a startup warning. Keep it off in production.
