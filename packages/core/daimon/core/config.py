@@ -2806,8 +2806,10 @@ def get_repo_memory_settings(settings: object) -> RepoMemorySettings:
 class RetentionSettings(BaseModel):
     """How long the scheduler keeps operational records, in days. 0 keeps them forever.
 
-    Conversation history (thread sessions and Daimon's journal copy) is the
-    `conversation_retention` feature instead, so a workspace can shorten it.
+    Conversation history (thread sessions, private chats, web threads, turn records
+    and Daimon's journal copy) is the `conversation_retention` feature instead, so a
+    workspace can shorten it. It is on at 1 year; `DAIMON_FEATURES__CONVERSATION_RETENTION=0`
+    turns it off.
     """
 
     security_audit_days: int = Field(

@@ -252,8 +252,10 @@ Read from `daimon.core.config.RetentionSettings`. Prefix `DAIMON_RETENTION__`.
 
 How long the scheduler keeps operational records, in days. 0 keeps them forever.
 
-Conversation history (thread sessions and Daimon's journal copy) is the
-`conversation_retention` feature instead, so a workspace can shorten it.
+Conversation history (thread sessions, private chats, web threads, turn records and
+Daimon's journal copy) is the `conversation_retention` feature instead, so a workspace
+can shorten it. It is on at 1 year; `DAIMON_FEATURES__CONVERSATION_RETENTION=0` turns it
+off.
 
 ### `DAIMON_RETENTION__SECURITY_AUDIT_DAYS`
 
