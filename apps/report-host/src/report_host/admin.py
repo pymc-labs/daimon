@@ -12,7 +12,6 @@ instead and lives in a separate module — the two authorisation mechanisms
 never mix in one place.
 """
 
-import asyncio
 import hmac
 import re
 import secrets
@@ -26,6 +25,7 @@ from pydantic import BaseModel
 
 from report_host import reports_store
 from report_host.config import Settings
+from report_host.locks import SlugLocks
 
 # Lowercase alphanumerics and hyphens only, no leading/trailing hyphen, bounded
 # length. The slug becomes both a directory name and a URL segment, so a
@@ -103,6 +103,7 @@ def build_admin_router(
     settings: Settings,
     conn_factory: Callable[[], sqlite3.Connection],
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    locks: SlugLocks | None = None,
 ) -> APIRouter:
     """Build the admin router: publish (create-or-update), delete, revoke.
 
@@ -117,14 +118,7 @@ def build_admin_router(
     """
     conn = conn_factory()
     require_admin = _bearer_dep(settings)
-    slug_locks: dict[str, asyncio.Lock] = {}
-
-    def lock_for(slug: str) -> asyncio.Lock:
-        lock = slug_locks.get(slug)
-        if lock is None:
-            lock = asyncio.Lock()
-            slug_locks[slug] = lock
-        return lock
+    lock_for = locks if locks is not None else SlugLocks()
 
     router = APIRouter(dependencies=[Depends(require_admin)])
 

@@ -9,6 +9,7 @@ end.
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import AbstractAsyncContextManager
@@ -20,6 +21,7 @@ from typing import Any
 import pytest
 from report_host import reports_store, sweeps, threads_store
 from report_host.config import Settings, load_settings
+from report_host.locks import SlugLocks
 from report_host.mcp_client import SeamClient
 from starlette.types import Receive, Scope, Send
 
@@ -510,7 +512,7 @@ def _seed_report_dir(settings: Settings, slug: str) -> Path:
     return report_dir
 
 
-def test_prune_stale_reports_deletes_idle_report_with_children_and_files(
+async def test_prune_stale_reports_deletes_idle_report_with_children_and_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     settings = _settings(tmp_path=tmp_path, monkeypatch=monkeypatch, retention_days=30)
@@ -541,7 +543,9 @@ def test_prune_stale_reports_deletes_idle_report_with_children_and_files(
     )
     report_dir = _seed_report_dir(settings, "old")
 
-    removed = sweeps.prune_stale_reports(conn=conn, settings=settings, now=lambda: NOW)
+    removed = await sweeps.prune_stale_reports(
+        conn=conn, settings=settings, now=lambda: NOW, locks=SlugLocks()
+    )
 
     assert removed == 1, "the idle report should be deleted"
     assert reports_store.load_report(conn, slug="old") is None
@@ -551,7 +555,7 @@ def test_prune_stale_reports_deletes_idle_report_with_children_and_files(
         assert count == 0, f"{table} rows should cascade away"
 
 
-def test_prune_stale_reports_keeps_report_with_recent_activity_of_any_kind(
+async def test_prune_stale_reports_keeps_report_with_recent_activity_of_any_kind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     settings = _settings(tmp_path=tmp_path, monkeypatch=monkeypatch, retention_days=30)
@@ -588,7 +592,9 @@ def test_prune_stale_reports_keeps_report_with_recent_activity_of_any_kind(
         conn, slug="by-recipient", name="J", label="r", token="k", now=recent, ttl_days=90
     )
 
-    removed = sweeps.prune_stale_reports(conn=conn, settings=settings, now=lambda: NOW)
+    removed = await sweeps.prune_stale_reports(
+        conn=conn, settings=settings, now=lambda: NOW, locks=SlugLocks()
+    )
 
     assert removed == 1, "only the report with no later activity is stale"
     assert reports_store.load_report(conn, slug="untouched") is None
@@ -596,7 +602,7 @@ def test_prune_stale_reports_keeps_report_with_recent_activity_of_any_kind(
         assert reports_store.load_report(conn, slug=slug) is not None, f"{slug} had recent activity"
 
 
-def test_prune_stale_reports_keeps_report_with_a_running_turn(
+async def test_prune_stale_reports_keeps_report_with_a_running_turn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     settings = _settings(tmp_path=tmp_path, monkeypatch=monkeypatch, retention_days=30)
@@ -623,13 +629,54 @@ def test_prune_stale_reports_keeps_report_with_a_running_turn(
         now=old,
     )
 
-    removed = sweeps.prune_stale_reports(conn=conn, settings=settings, now=lambda: NOW)
+    removed = await sweeps.prune_stale_reports(
+        conn=conn, settings=settings, now=lambda: NOW, locks=SlugLocks()
+    )
 
     assert removed == 0, "a running turn is activity"
     assert reports_store.load_report(conn, slug="busy") is not None
 
 
-def test_prune_stale_reports_keeps_everything_when_retention_is_zero(
+async def test_prune_stale_reports_waits_for_the_slug_lock_and_keeps_a_report_updated_meanwhile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path=tmp_path, monkeypatch=monkeypatch, retention_days=30)
+    conn = reports_store.connect(settings.data_dir)
+    old = NOW - timedelta(days=31)
+    for slug in ("republished", "untouched"):
+        reports_store.save_report(
+            conn,
+            slug=slug,
+            title=slug,
+            tenant_id="t",
+            agent_name="a",
+            cap_usd=Decimal(1),
+            agent_token="tok",
+            now=old,
+        )
+        _seed_report_dir(settings, slug)
+    locks = SlugLocks()
+
+    async with locks("republished"):
+        sweep = asyncio.create_task(
+            sweeps.prune_stale_reports(conn=conn, settings=settings, now=lambda: NOW, locks=locks)
+        )
+        await asyncio.sleep(0.05)
+        assert not sweep.done(), "the sweep must wait for a publish holding the slug lock"
+        reports_store.add_recipient(
+            conn, slug="republished", name="n", label="x", token="fresh", now=NOW, ttl_days=30
+        )
+    removed = await sweep
+
+    assert removed == 1, "only the report nobody touched is deleted"
+    assert reports_store.load_report(conn, slug="republished") is not None, (
+        "a report updated while the sweep waited is stale no more"
+    )
+    assert (settings.data_dir / "republished").exists(), "its files stay with it"
+    assert reports_store.load_report(conn, slug="untouched") is None
+
+
+async def test_prune_stale_reports_keeps_everything_when_retention_is_zero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     settings = _settings(tmp_path=tmp_path, monkeypatch=monkeypatch, retention_days=0)
@@ -645,7 +692,9 @@ def test_prune_stale_reports_keeps_everything_when_retention_is_zero(
         now=NOW - timedelta(days=3650),
     )
 
-    removed = sweeps.prune_stale_reports(conn=conn, settings=settings, now=lambda: NOW)
+    removed = await sweeps.prune_stale_reports(
+        conn=conn, settings=settings, now=lambda: NOW, locks=SlugLocks()
+    )
 
     assert removed == 0, "0 means keep"
     assert reports_store.load_report(conn, slug="ancient") is not None

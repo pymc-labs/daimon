@@ -323,19 +323,22 @@ def list_slugs_for_tenant(conn: sqlite3.Connection, *, tenant_id: str) -> list[s
     return [row["slug"] for row in rows]
 
 
-def list_stale_report_slugs(conn: sqlite3.Connection, *, cutoff: datetime) -> list[str]:
+def list_stale_report_slugs(
+    conn: sqlite3.Connection, *, cutoff: datetime, slug: str | None = None
+) -> list[str]:
     """Slugs of reports with no activity since ``cutoff`` and no turn running.
 
     A report's last update is the latest of its creation, any recipient link
     issued (a re-publish mints new ones), any revision, and any thread or
     message under it. Timestamps are UTC ISO-8601 text, so comparing and
     taking the maximum as text agrees with chronological order. A report
-    with a running turn is never stale: that turn is the activity.
+    with a running turn is never stale: that turn is the activity. ``slug``
+    narrows the check to one report.
     """
     rows = conn.execute(
         """
         SELECT r.slug FROM reports r
-        WHERE max(
+        WHERE (:slug IS NULL OR r.slug = :slug) AND max(
             r.created_at,
             COALESCE((SELECT MAX(created_at) FROM recipients WHERE slug = r.slug), ''),
             COALESCE((SELECT MAX(created_at) FROM revisions WHERE slug = r.slug), ''),
@@ -352,7 +355,7 @@ def list_stale_report_slugs(conn: sqlite3.Connection, *, cutoff: datetime) -> li
         )
         ORDER BY r.slug
         """,
-        {"cutoff": dt_to_text(cutoff)},
+        {"cutoff": dt_to_text(cutoff), "slug": slug},
     ).fetchall()
     return [row["slug"] for row in rows]
 
