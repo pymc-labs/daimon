@@ -9,7 +9,7 @@ whatever failed; the scheduler retries every queue through `sweep`.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
 
 import anthropic as anthropic_errors
@@ -129,34 +129,48 @@ def deleters(
     }
 
 
-async def clean_upstream(
-    sm: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, deleters: dict[str, Deleter]
+async def _clean_item(
+    sm: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    kind: str,
+    item: str,
+    delete: Deleter,
 ) -> bool:
-    """Delete one tenant's queued upstream resources. True when nothing is left."""
+    """Delete one queued item under the tenant lock. False when the tenant came back."""
+    async with sm() as session, session.begin():
+        if not await store.lock_item(session, tenant_id=tenant_id, kind=kind, item=item):
+            return False
+        try:
+            await delete(item)
+        except anthropic_errors.NotFoundError:
+            pass
+        except (anthropic_errors.APIError, ProviderError, httpx.HTTPError) as error:
+            log.warning(
+                "tenant_retirement.upstream_failed",
+                tenant_id=str(tenant_id),
+                kind=kind,
+                error=type(error).__name__,
+            )
+            return True
+        await store.remove_done(session, tenant_id=tenant_id, kind=kind, done={item})
+    return True
+
+
+async def clean_upstream(
+    sm: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, deleters: Mapping[str, Deleter]
+) -> bool:
+    """Delete one tenant's queued upstream resources, one transaction per item, each
+    re-checking that the tenant is still retired. True when nothing is left."""
     async with sm() as session:
         pending = await store.get_work(session, tenant_id=tenant_id)
     if pending is None:
         return True
-    finished = False
-    for kind in store.PENDING_KINDS:
-        done: set[str] = set()
-        for item in pending.get(kind, []):
-            try:
-                await deleters[kind](item)
-            except anthropic_errors.NotFoundError:
-                pass
-            except (anthropic_errors.APIError, ProviderError, httpx.HTTPError) as error:
-                log.warning(
-                    "tenant_retirement.upstream_failed",
-                    tenant_id=str(tenant_id),
-                    kind=kind,
-                    error=type(error).__name__,
-                )
-                continue
-            done.add(item)
-        async with sm() as session, session.begin():
-            finished = await store.remove_done(session, tenant_id=tenant_id, kind=kind, done=done)
-    return finished
+    queued = [(kind, item) for kind in store.PENDING_KINDS for item in pending.get(kind, [])]
+    for kind, item in queued:
+        if not await _clean_item(sm, tenant_id, kind, item, deleters[kind]):
+            break
+    async with sm() as session:
+        return await store.get_work(session, tenant_id=tenant_id) is None
 
 
 async def sweep(

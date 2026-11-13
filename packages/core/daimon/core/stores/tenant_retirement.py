@@ -312,6 +312,25 @@ async def get_work(session: AsyncSession, *, tenant_id: uuid.UUID) -> dict[str, 
     )
 
 
+async def lock_item(session: AsyncSession, *, tenant_id: uuid.UUID, kind: str, item: str) -> bool:
+    """Whether `item` may be deleted upstream now. Holds the tenant row (shared) and the
+    queue row until the transaction ends, so a reinstall waits for the delete and then
+    drops the rest. False once the tenant is back (not retired) or the item is gone."""
+    tenant = (
+        await session.execute(
+            select(Tenant.retired_at).where(Tenant.id == tenant_id).with_for_update(read=True)
+        )
+    ).first()
+    if tenant is not None and tenant.retired_at is None:
+        return False
+    pending = await session.scalar(
+        select(TenantRetirement.pending)
+        .where(TenantRetirement.tenant_id == tenant_id)
+        .with_for_update()
+    )
+    return pending is not None and item in pending.get(kind, [])
+
+
 async def remove_done(
     session: AsyncSession, *, tenant_id: uuid.UUID, kind: str, done: set[str]
 ) -> bool:

@@ -25,6 +25,7 @@ from daimon.core._models import (
     Tenant,
     TenantConfig,
     TenantLedger,
+    TenantRetirement,
     TenantUserCap,
     ThreadSession,
     TurnOutcome,
@@ -146,6 +147,15 @@ async def set_provision_status(
         return
     async with session_factory() as session, session.begin():
         await session.execute(update(Tenant).where(Tenant.id == tenant_id).values(**values))
+        if clear_archive:
+            await drop_retirement_queue(session, tenant_id=tenant_id)
+
+
+async def drop_retirement_queue(session: AsyncSession, *, tenant_id: uuid.UUID) -> None:
+    """A reinstall stops a retirement: provider cleanup not yet done is abandoned, since
+    the tenant may use those resources again. Call it holding the tenant row lock;
+    upstream cleanup re-checks under that lock before each delete."""
+    await session.execute(delete(TenantRetirement).where(TenantRetirement.tenant_id == tenant_id))
 
 
 async def list_tenants_by_platform(

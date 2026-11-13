@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -42,7 +43,7 @@ from daimon.testing.factories import (
 )
 from pydantic import SecretStr
 from sqlalchemy import func, select, update
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 # Tenant tables with a money column that are purged anyway, and why.
 PURGED_DESPITE_MONEY = {
@@ -134,6 +135,9 @@ async def test_retirement_keeps_the_balance_and_the_spent_trial(
     assert await tenant_ledger.get_balance(db_session, tenant_id=tenant_id) == balance
     tenant = await db_session.get(Tenant, tenant_id, populate_existing=True)
     assert tenant is not None and tenant.retired_at is None, "a reinstall ends the retirement"
+    assert await store.get_work(db_session, tenant_id=tenant_id) is None, (
+        "a reinstall drops the provider cleanup queue"
+    )
 
 
 async def test_upstream_cleanup_keeps_what_failed_until_a_retry(
@@ -413,3 +417,82 @@ async def test_a_null_id_in_another_tenant_does_not_hide_owned_ids(
     assert found["skills"] == ["skill_mine"], (
         "an owned skill is queued despite a NULL id elsewhere; a shared one is not"
     )
+
+
+def _recording(deleted: list[str]) -> dict[str, tenant_retirement.Deleter]:
+    def deleter(kind: str) -> tenant_retirement.Deleter:
+        async def delete(item: str) -> None:
+            deleted.append(f"{kind}:{item}")
+
+        return delete
+
+    return {kind: deleter(kind) for kind in store.PENDING_KINDS}
+
+
+@pytest.mark.parametrize("how", ["provision", "restore"])
+async def test_a_reinstall_before_cleanup_deletes_nothing_upstream(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], how: str
+) -> None:
+    tenant_id = await _seed(db_session, db_session_factory, "returning-guild")
+    assert await tenant_retirement.retire(db_session_factory, tenant_id=tenant_id)
+    assert await store.get_work(db_session, tenant_id=tenant_id), "retirement queued work"
+
+    if how == "provision":
+        await provision_tenant(
+            db_session_factory, platform="discord", workspace_id="returning-guild"
+        )
+    else:
+        await tenants.set_provision_status(
+            db_session_factory, tenant_id=tenant_id, clear_archive=True
+        )
+
+    deleted: list[str] = []
+    assert await tenant_retirement.clean_upstream(
+        db_session_factory, tenant_id=tenant_id, deleters=_recording(deleted)
+    ), "nothing is left to clean"
+    assert deleted == [], f"a reinstalled tenant's provider resources stay: {deleted}"
+
+
+@pytest.fixture
+def own_connections(db_engine: AsyncEngine, db_clean: None) -> async_sessionmaker[AsyncSession]:
+    """Sessions on their own connections, so row locks really block one another."""
+    return async_sessionmaker(bind=db_engine, expire_on_commit=False)
+
+
+async def test_a_reinstall_waits_for_the_running_delete_then_stops_the_rest(
+    own_connections: async_sessionmaker[AsyncSession],
+) -> None:
+    sm = own_connections
+    tenant_id = (
+        await provision_tenant(sm, platform="discord", workspace_id="racing-guild")
+    ).tenant_id
+    async with sm() as session, session.begin():
+        await session.execute(
+            update(Tenant)
+            .where(Tenant.id == tenant_id)
+            .values(archived_at=func.now(), retired_at=func.now())
+        )
+        session.add(TenantRetirement(tenant_id=tenant_id, pending={"sessions": ["s1", "s2"]}))
+
+    deleted: list[str] = []
+    reinstall: list[asyncio.Task[Any]] = []
+
+    async def delete(item: str) -> None:
+        if not reinstall:
+            reinstall.append(
+                asyncio.create_task(
+                    provision_tenant(sm, platform="discord", workspace_id="racing-guild")
+                )
+            )
+            await asyncio.sleep(0.5)
+            assert not reinstall[0].done(), "the reinstall waits for the running delete"
+        deleted.append(item)
+
+    deleters = {kind: delete for kind in store.PENDING_KINDS}
+    assert await tenant_retirement.clean_upstream(sm, tenant_id=tenant_id, deleters=deleters)
+    await reinstall[0]
+    assert deleted == ["s1"], f"only the delete already running finishes: {deleted}"
+    async with sm() as session:
+        assert await store.get_work(session, tenant_id=tenant_id) is None, "the queue is dropped"
+        tenant = await session.get(Tenant, tenant_id)
+        assert tenant is not None and tenant.retired_at is None, "the tenant is back"
