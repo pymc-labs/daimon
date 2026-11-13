@@ -96,8 +96,20 @@ _OBSERVATION_PERSON_PATHS = (
 # Purged through their own helper rather than a plain delete.
 _OWN_HELPER = {"security_audit_events"}
 
-PENDING_KINDS = ("sessions", "memory_stores", "vaults", "skills", "hosts")
+# Agents go before the skills they use; sessions before both.
+PENDING_KINDS = (
+    "sessions",
+    "agents",
+    "environments",
+    "memory_stores",
+    "vaults",
+    "skills",
+    "hosts",
+)
 HOSTS = ("reports", "notebooks")
+# Agents and environments have no row of their own: the one item stands for every one
+# stamped with the tenant's id, listed from the provider when it is cleaned.
+TAGGED = "tagged"
 # Only provider sessions can be deleted upstream. Usage rows also name synthetic billing
 # ids (`classifier:<uuid>`, `gemini:<uuid>`) and other providers' sessions.
 SESSION_ID_PREFIX = "sesn_"
@@ -153,6 +165,7 @@ async def collect_upstream(session: AsyncSession, *, tenant_id: uuid.UUID) -> di
         for query in queries:
             values.update(str(v) for v in await session.scalars(query))
         found[kind] = sorted(values)
+    found["agents"] = found["environments"] = [TAGGED]
     found["hosts"] = list(HOSTS)
     return found
 

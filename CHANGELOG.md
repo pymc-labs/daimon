@@ -17,8 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversation starts a fresh session on its next message. To keep conversations, set the feature to 0 for the
   deployment: `DAIMON_FEATURES__CONVERSATION_RETENTION=0`, or the same in `/settings`.
   A workspace uninstalled for 30 days is retired in short batches, so a large one holds no long lock and an
-  interrupted run resumes at the next sweep: its data, provider sessions, memory, vaults, skills, reports and
-  notebooks are deleted, while billing records and the balance stay, so a reinstall gets no second trial. A reinstall
+  interrupted run resumes at the next sweep: its data, provider sessions, environments, memory, vaults, skills, reports
+  and notebooks are deleted and its provider agents archived, while billing records and the balance stay, so a reinstall gets no second trial. A reinstall
   during a retirement stops it and keeps what was not yet deleted. A workspace whose usage has not settled yet is
   retired once it has. `daimon tenants retire` retires one at once and shows the
   balance it keeps; it and `daimon tenants delete` refuse while usage is still settling unless `--force` is given,

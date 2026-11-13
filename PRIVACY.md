@@ -74,9 +74,10 @@ the setting linked in the table; `0` keeps the records.
 | A workspace's data after uninstall | 30 days after uninstall | [`DAIMON_RETENTION__ARCHIVED_TENANTS_DAYS`](docs/configuration.md#daimon_retention__archived_tenants_days) |
 
 A workspace whose app is uninstalled (on Teams, from its last team and chat)
-is retired after that time: its data, Anthropic sessions, memory, credentials,
-skills, reports and notebooks are deleted, in batches that an interrupted run
-resumes. Usage not yet settled delays it. Reinstalling before then keeps
+is retired after that time: its data, Anthropic sessions, environments,
+memory, credentials, skills, reports and notebooks are deleted, in batches
+that an interrupted run resumes. Its Anthropic agents are archived, as
+Anthropic offers no way to delete them. Usage not yet settled delays it. Reinstalling before then keeps
 everything. Reinstalling during a retirement stops it: what was not yet
 deleted is kept, and the Anthropic cleanup still queued is abandoned.
 

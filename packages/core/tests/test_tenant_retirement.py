@@ -46,8 +46,11 @@ from daimon.testing.factories import (
     make_thread_session,
     make_usage_event,
 )
+from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.ids import ResourceRef
 from mux.contracts.usage import UsageObservation as Observation
+from mux.testing.drivers.anthropic.ma import MARouter
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from pydantic import SecretStr
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -132,6 +135,9 @@ async def test_retirement_keeps_the_balance_and_the_spent_trial(
     assert work is not None and work["sessions"] == ["sesn_a"], "the session is queued upstream"
     assert work["memory_stores"] == ["memstore_a"], "the memory store is queued upstream"
     assert work["hosts"] == ["notebooks", "reports"], "both hosts are queued"
+    assert work["agents"] == work["environments"] == [store.TAGGED], (
+        "the tenant's stamped agents and environments are queued"
+    )
 
     await provision_tenant(db_session_factory, platform="discord", workspace_id="retired-guild")
 
@@ -648,3 +654,51 @@ async def test_kept_settlement_records_lose_who_and_where_but_stay_equal(
         assert kept["session"]["account_id"] is None, "nor the account that used it"
     assert row == applied, "both copies change alike, so a replay still finds them equal"
     assert Observation.model_validate(row).session.id == "sesn_a", "the record stays valid"
+
+
+async def test_only_the_tenants_stamped_agents_and_environments_go_and_vaults_are_deleted(
+    settings: Settings,
+) -> None:
+    tenant_id = uuid.uuid4()
+    stamped, created = {"daimon_tenant": str(tenant_id)}, datetime(2026, 1, 1, tzinfo=UTC)
+    agents = [
+        ma_agent(id="agent_mine", metadata=stamped, created_at=created),
+        ma_agent(id="agent_shared", metadata={}, created_at=created),
+        ma_agent(id="agent_theirs", metadata={"daimon_tenant": "other"}, created_at=created),
+    ]
+    environments = [
+        ma_environment(id="env_mine", metadata=stamped),
+        ma_environment(id="env_busy", metadata=stamped),
+        ma_environment(id="env_shared", metadata={}),
+    ]
+    calls: list[tuple[str, str]] = []
+
+    def reply(request: httpx.Request, _match: object) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.method == "DELETE" and request.url.path.endswith("env_busy"):
+            error = {"type": "conflict_error", "message": "in use"}
+            return httpx.Response(409, json={"type": "error", "error": error})
+        if request.method == "DELETE":
+            return httpx.Response(200, json={"id": request.url.path.rsplit("/", 1)[1]})
+        kind, name = request.url.path.split("/")[2:4]
+        found = agents if kind == "agents" else environments
+        record = next(r for r in found if r.id == name)
+        return httpx.Response(200, json=record.model_dump(mode="json"))
+
+    router = MARouter()
+    router.add_agent_list(*agents)
+    router.add_environment_list(*environments)
+    router.add("POST", r"/v1/(agents|environments)/[^/]+/archive", reply)
+    router.add("DELETE", r"/v1/(environments|vaults)/[^/]+", reply)
+    async with ScriptedTransport(router=router).client() as client, httpx.AsyncClient() as http:
+        delete = tenant_retirement.deleters(client, settings, http, tenant_id)
+        await delete["agents"](store.TAGGED)
+        await delete["environments"](store.TAGGED)
+        await delete["vaults"]("vlt_a")
+    assert calls == [
+        ("POST", "/v1/agents/agent_mine/archive"),
+        ("DELETE", "/v1/environments/env_mine"),
+        ("DELETE", "/v1/environments/env_busy"),
+        ("POST", "/v1/environments/env_busy/archive"),
+        ("DELETE", "/v1/vaults/vlt_a"),
+    ], "only stamped resources are touched; an environment in use is archived; vaults deleted"

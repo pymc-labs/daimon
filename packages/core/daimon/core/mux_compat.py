@@ -421,6 +421,19 @@ async def archive_environment(client: AsyncAnthropic, environment_id: str, *, sc
     )
 
 
+async def delete_environment(client: AsyncAnthropic, environment_id: str, *, scope: Scope) -> None:
+    backend = managed_agents(
+        client, scope=scope, resources=frozenset({("environment", environment_id)})
+    )
+    await legacy_call(
+        backend.environments.delete(
+            scope,
+            resource_ref(backend, "environment", environment_id, scope=scope),
+            key=str(uuid4()),
+        )
+    )
+
+
 async def create_environment(
     client: AsyncAnthropic, payload: Mapping[str, object], *, scope: Scope
 ) -> BetaEnvironment:
@@ -699,6 +712,13 @@ async def archive_vault(client: AsyncAnthropic, vault_id: str, *, scope: Scope) 
     backend, port = _vault_port(client, scope=scope, vault_id=vault_id)
     await legacy_call(
         port.archive(scope, resource_ref(backend, "vault", vault_id, scope=scope), key=str(uuid4()))
+    )
+
+
+async def delete_vault(client: AsyncAnthropic, vault_id: str, *, scope: Scope) -> None:
+    backend, port = _vault_port(client, scope=scope, vault_id=vault_id)
+    await legacy_call(
+        port.delete(scope, resource_ref(backend, "vault", vault_id, scope=scope), key=str(uuid4()))
     )
 
 

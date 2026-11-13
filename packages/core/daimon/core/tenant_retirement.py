@@ -1,9 +1,10 @@
 """Retire a tenant, then delete what it left with the provider and the hosts.
 
 `retire` deletes the tenant's data in batches and queues the provider
-sessions, memory stores, vaults and skills its rows named, plus its report and
-notebook host content. `clean_upstream` works one tenant's queue off and keeps
-whatever failed; the scheduler retries every queue through `sweep`.
+sessions, memory stores, vaults and skills its rows named, the agents and
+environments stamped with its id, plus its report and notebook host content.
+`clean_upstream` works one tenant's queue off and keeps whatever failed; the
+scheduler retries every queue through `sweep`.
 """
 
 from __future__ import annotations
@@ -17,10 +18,18 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.core.config import Settings
+from daimon.core.defaults.ma_index import list_agents_by_tenant, list_environments_by_tenant
 from daimon.core.errors import SettlePending
 from daimon.core.ma import delete_skill_and_versions
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
-from daimon.core.mux_compat import archive_vault, delete_memory_store, legacy_call
+from daimon.core.mux_compat import (
+    archive_agent,
+    archive_environment,
+    delete_environment,
+    delete_memory_store,
+    delete_vault,
+    legacy_call,
+)
 from daimon.core.stores import tenant_retirement as store
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic import CoreAdmin
@@ -126,13 +135,28 @@ def deleters(
         await delete_memory_store(client, store_id, scope=scope)
 
     async def vault(vault_id: str) -> None:
-        await archive_vault(client, vault_id, scope=scope)
+        await delete_vault(client, vault_id, scope=scope)
 
     async def skill(skill_id: str) -> None:
         await delete_skill_and_versions(client, skill_id, scope=scope)
 
+    async def agents(_tagged: str) -> None:
+        # The provider can only archive an agent. Only agents stamped with this tenant
+        # are listed, so deployment-wide ones are never touched.
+        for agent in await list_agents_by_tenant(client, tenant_id=tenant_id):
+            await archive_agent(client, agent.id, scope=scope)
+
+    async def environments(_tagged: str) -> None:
+        for environment in await list_environments_by_tenant(client, tenant_id=tenant_id):
+            try:
+                await delete_environment(client, environment.id, scope=scope)
+            except anthropic_errors.ConflictError:  # still used by a session: archive it
+                await archive_environment(client, environment.id, scope=scope)
+
     return {
         "sessions": _session_deleter(client, scope),
+        "agents": agents,
+        "environments": environments,
         "memory_stores": memory_store,
         "vaults": vault,
         "skills": skill,
