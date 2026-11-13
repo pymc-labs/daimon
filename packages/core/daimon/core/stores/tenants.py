@@ -22,7 +22,6 @@ from daimon.core._models import (
     ProviderBindingSlot,
     Routine,
     SessionSettleState,
-    SlackUserToken,
     Tenant,
     TenantConfig,
     TenantLedger,
@@ -35,6 +34,7 @@ from daimon.core.errors import StoreError
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores.domain import FundingMode, Platform, TenantDependentCounts, TenantRow
 from daimon.core.stores.security_audit import erase_tenant
+from daimon.core.stores.slack_user_tokens import delete_workspace_tokens
 from sqlalchemy import CompoundSelect, delete, func, select, union, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -206,10 +206,8 @@ async def delete_tenant(
     )
     tenant = await session.get(Tenant, tenant_id)
     if tenant is not None and tenant.platform == "slack":
-        # Person tokens are keyed by Slack team, not tenant, so no cascade reaches them.
-        await session.execute(
-            delete(SlackUserToken).where(SlackUserToken.team_id == tenant.external_id)
-        )
+        # Tokens are keyed by Slack team, not tenant, so no cascade reaches them.
+        await delete_workspace_tokens(session, tenant_id=tenant_id, team_id=tenant.external_id)
     await delete_settle_state(session, tenant_id=tenant_id)
     await erase_tenant(session, tenant_id=tenant_id)
     stmt = delete(Tenant).where(Tenant.id == tenant_id)

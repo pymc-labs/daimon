@@ -13,6 +13,8 @@ from daimon.core._models import (
     Account,
     AgentMemoryStore,
     Base,
+    SlackBotToken,
+    SlackUserToken,
     Tenant,
     TenantLedger,
     TenantRetirement,
@@ -21,12 +23,15 @@ from daimon.core._models import (
 )
 from daimon.core.config import Settings, load_settings
 from daimon.core.defaults.provisioning import provision_tenant
-from daimon.core.stores import tenant_ledger
+from daimon.core.stores import slack_bot_tokens, tenant_ledger, tenants
 from daimon.core.stores import tenant_retirement as store
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import (
     make_account,
     make_agent_memory_store,
+    make_platform_principal,
+    make_slack_user_token,
+    make_tenant,
     make_thread_session,
     make_usage_event,
 )
@@ -219,3 +224,48 @@ async def test_purge_leaves_no_row_in_any_purged_table(
         )
         assert left == 0, f"{table.name} keeps rows of a retired tenant"
     assert Decimal(0) <= await tenant_ledger.get_balance(db_session, tenant_id=tenant_id)
+
+
+async def _slack_world(db_session: AsyncSession) -> tuple[Tenant, Tenant]:
+    """Two Slack workspaces; A's user and a stranger hold tokens in A's team, B has its own."""
+    a = await make_tenant(db_session, platform="slack", workspace_id="T_A")
+    b = await make_tenant(db_session, platform="slack", workspace_id="T_B")
+    await make_platform_principal(db_session, platform="slack", external_id="U_A", tenant=a)
+    await make_platform_principal(db_session, platform="slack", external_id="U_B", tenant=b)
+    await make_slack_user_token(db_session, team_id="T_A", slack_user_id="U_A")
+    await make_slack_user_token(db_session, team_id="T_A", slack_user_id="U_STRANGER")
+    await make_slack_user_token(db_session, team_id="T_B", slack_user_id="U_B")
+    for team in ("T_A", "T_B"):
+        await slack_bot_tokens.upsert_slack_bot_token(
+            db_session, team_id=team, encrypted_token=b"bot"
+        )
+    await db_session.flush()
+    return a, b
+
+
+async def _slack_tokens(db_session: AsyncSession) -> tuple[set[tuple[str, str]], set[str]]:
+    db_session.expire_all()
+    users = {
+        (r.team_id, r.slack_user_id) for r in (await db_session.scalars(select(SlackUserToken)))
+    }
+    bots = {r.team_id for r in (await db_session.scalars(select(SlackBotToken)))}
+    return users, bots
+
+
+@pytest.mark.parametrize("how", ["retire", "delete"])
+async def test_slack_tokens_go_only_for_the_leaving_workspace(
+    db_session: AsyncSession, how: str
+) -> None:
+    a, _b = await _slack_world(db_session)
+
+    if how == "retire":
+        assert await store.retire_tenant(db_session, tenant_id=a.id), "the tenant exists"
+    else:
+        await tenants.delete_tenant(db_session, tenant_id=a.id)
+
+    users, bots = await _slack_tokens(db_session)
+    assert ("T_A", "U_A") not in users, "the leaving tenant's own user token goes"
+    assert "T_A" not in bots, "the leaving tenant's bot token goes"
+    assert ("T_B", "U_B") in users, "another workspace's user token stays"
+    assert "T_B" in bots, "another workspace's bot token stays"
+    assert ("T_A", "U_STRANGER") in users, "a token for someone this tenant never knew stays"

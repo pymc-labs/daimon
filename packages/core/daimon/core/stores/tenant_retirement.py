@@ -24,8 +24,6 @@ from daimon.core._models import (
     NeutralSkillVersion,
     SeededSkill,
     ServerSkill,
-    SlackBotToken,
-    SlackUserToken,
     Tenant,
     TenantRetirement,
     UsageEvent,
@@ -34,6 +32,7 @@ from daimon.core._models import (
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import mux_erasure
 from daimon.core.stores.security_audit import erase_tenant
+from daimon.core.stores.slack_user_tokens import delete_workspace_tokens
 from daimon.core.stores.tenants import delete_settle_state, tenant_session_ids
 from sqlalchemy import (
     Column,
@@ -184,8 +183,7 @@ async def retire_tenant(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
     )
     if tenant.platform == "slack":
         # Keyed by Slack team, not tenant, so no tenant delete reaches them.
-        for model in (SlackUserToken, SlackBotToken):
-            await session.execute(delete(model).where(model.team_id == tenant.external_id))
+        await delete_workspace_tokens(session, tenant_id=tenant_id, team_id=tenant.external_id)
     await mux_erasure.detach_tenant_accounting(session, tenant_id=tenant_id)
     await delete_settle_state(session, tenant_id=tenant_id)
     await erase_tenant(session, tenant_id=tenant_id)

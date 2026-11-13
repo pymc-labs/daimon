@@ -6,12 +6,13 @@ ciphertext and scopes. Pure ciphertext-bytes in/out; never sees the Fernet key.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from daimon.core._models import SlackUserToken
+from daimon.core._models import PlatformPrincipal, SlackBotToken, SlackUserToken, Tenant
 from daimon.core.stores.domain import SlackUserTokenRow
-from sqlalchemy import CursorResult, delete
+from sqlalchemy import CursorResult, delete, exists, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -79,3 +80,30 @@ async def delete_slack_user_token(
     rowcount = cast(CursorResult[Any], result).rowcount
     await session.flush()
     return rowcount
+
+
+async def delete_workspace_tokens(
+    session: AsyncSession, *, tenant_id: uuid.UUID, team_id: str
+) -> int:
+    """Delete a Slack tenant's bot token and its own people's user tokens.
+
+    Both tables are keyed by workspace id with no tenant column, so the id alone is not
+    proof a row is this tenant's (Enterprise Grid orgs share people and ids across
+    workspaces). A user token goes only when its user is one of this tenant's Slack
+    principals, and the bot token only while this tenant is the one that owns `team_id`.
+    """
+    people = select(PlatformPrincipal.external_id).where(
+        PlatformPrincipal.tenant_id == tenant_id, PlatformPrincipal.platform == "slack"
+    )
+    users = await session.execute(
+        delete(SlackUserToken).where(
+            SlackUserToken.team_id == team_id, SlackUserToken.slack_user_id.in_(people)
+        )
+    )
+    owner = exists().where(
+        Tenant.id == tenant_id, Tenant.platform == "slack", Tenant.external_id == team_id
+    )
+    bots = await session.execute(
+        delete(SlackBotToken).where(SlackBotToken.team_id == team_id, owner)
+    )
+    return cast(CursorResult[Any], users).rowcount + cast(CursorResult[Any], bots).rowcount
