@@ -158,6 +158,7 @@ TAIL = (
     "0193_retention_activity",
     "0194_tenant_retirement",
     "0195_retention_runs",
+    "0196_audit_clocks",
 )
 HEAD = TAIL[-1]
 
@@ -229,6 +230,8 @@ RETENTION_INDEXES = {
     "ix_web_logins_created_at",
     "ix_web_threads_deleted_at",
     "ix_web_threads_tenant_updated",
+    # Added by 0196, with the watches.last_fired_at column.
+    "ix_long_job_cancel_audit_requested_at",
 }
 
 
@@ -427,6 +430,13 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             return False
         if expected != HEAD and kind == "index" and name in RETENTION_INDEXES:
             return False
+        # 0196 drops the cancel audit's key to long_job; earlier heads still have it.
+        if (
+            expected != HEAD
+            and kind == "foreign_key_constraint"
+            and name == "long_job_cancel_audit_id_fkey"
+        ):
+            return False
         # 0187: tenants gains feature_revision and loses cost_footer; the scope index goes.
         if kind == "index" and name == "ix_progress_plan_scopes_parent":
             return False
@@ -438,6 +448,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
                 "feature_revision",
                 "cost_footer",
                 "eval_key",
+                "last_fired_at",
             }
         ):
             return False

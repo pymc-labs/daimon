@@ -4717,6 +4717,8 @@ class Watch(Base):
     fire_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     rate_window_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     rate_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # Set by a trigger on each firing, so it outlives the firing rows the wake clock removes.
+    last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -5228,7 +5230,10 @@ class LongJobRecord(Base):
 
 
 class LongJobCancelAuditRecord(Base):
+    """A cancel request, kept on the audit clock; the job it names may be long gone."""
+
     __tablename__ = "long_job_cancel_audit"
+    __table_args__ = (Index("ix_long_job_cancel_audit_requested_at", "requested_at"),)
 
     audit_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -5236,9 +5241,7 @@ class LongJobCancelAuditRecord(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
     )
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("long_job.id", ondelete="CASCADE"), nullable=False
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     state: Mapped[str] = mapped_column(Text, nullable=False)
     owner_account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     requested_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)

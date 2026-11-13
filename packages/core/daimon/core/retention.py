@@ -225,6 +225,11 @@ def rules(settings: Settings) -> list[tuple[str, int, Run]]:
         ("channel_changes", keep.admin_history_days, retention.delete_channel_changes),
         ("task_continuations", keep.task_continuations_days, retention.delete_task_continuations),
         ("long_jobs", keep.job_output_days, retention.delete_long_jobs),
+        (
+            "long_job_cancel_audit",
+            keep.security_audit_days,
+            retention.delete_long_job_cancel_audit,
+        ),
         ("compute_output", keep.job_output_days, retention.clear_compute_output),
         ("routine_results", keep.job_output_days, retention.clear_routine_results),
         ("credential_requests", keep.access_requests_days, retention.delete_credential_requests),

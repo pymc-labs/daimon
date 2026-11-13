@@ -14,11 +14,12 @@ from typing import Any, cast
 from daimon.core._models import (
     BackendSwitchCard,
     CredentialRequest,
+    LongJobCancelAuditRecord,
     TaskContinuation,
     ThreadSession,
     TurnOutcome,
 )
-from sqlalchemy import ColumnElement, and_, delete, func, not_, select, tuple_
+from sqlalchemy import ColumnElement, and_, delete, func, not_, or_, select, tuple_
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,6 +31,7 @@ class AccountRecords:
     thread_sessions: int = 0
     credential_requests: int = 0
     switch_cards: int = 0
+    long_job_cancel_audit: int = 0
 
 
 def _conditions(
@@ -46,6 +48,13 @@ def _conditions(
         (ThreadSession, ThreadSession.account_id == account_id),
         (CredentialRequest, requests),
         (BackendSwitchCard, BackendSwitchCard.account_id == account_id),
+        (
+            LongJobCancelAuditRecord,
+            or_(
+                LongJobCancelAuditRecord.owner_account_id == account_id,
+                LongJobCancelAuditRecord.requested_by == account_id,
+            ),
+        ),
     ]
 
 

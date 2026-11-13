@@ -19,6 +19,7 @@ from daimon.core._models import (
     CredentialRequest,
     GitHubAccessRequest,
     JournalSession,
+    LongJobCancelAuditRecord,
     LongJobRecord,
     McpOAuthFlow,
     MessageFeedback,
@@ -232,6 +233,21 @@ async def delete_long_jobs(
     )
     return await _delete_batch(
         session, LongJobRecord, condition, limit, order=LongJobRecord.finished_at, cursor=cursor
+    )
+
+
+async def delete_long_job_cancel_audit(
+    session: AsyncSession, *, before: datetime, limit: int, cursor: Position | None = None
+) -> int:
+    """Cancel requests older than the cutoff, on the audit clock, not the job's."""
+    _check(before)
+    return await _delete_batch(
+        session,
+        LongJobCancelAuditRecord,
+        LongJobCancelAuditRecord.requested_at < before,
+        limit,
+        order=LongJobCancelAuditRecord.requested_at,
+        cursor=cursor,
     )
 
 

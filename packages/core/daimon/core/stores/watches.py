@@ -755,13 +755,12 @@ async def list_tenant_watches(
             func.count()
             .filter(WatchFiring.created_at > now - timedelta(days=1))
             .label("fires_today"),
-            func.max(WatchFiring.created_at).label("last_fired_at"),
         )
         .group_by(WatchFiring.watch_id)
         .subquery()
     )
     query = (
-        select(Watch, fired.c.fires_today, fired.c.last_fired_at)
+        select(Watch, fired.c.fires_today, Watch.last_fired_at)
         .outerjoin(fired, fired.c.watch_id == Watch.id)
         .where(Watch.tenant_id == tenant_id)
         .order_by(Watch.created_at, Watch.id)

@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from daimon.core._models import (
     CredentialRequest,
+    GitHubAccessRequest,
+    LongJobCancelAuditRecord,
+    LongJobRecord,
     McpOAuthFlow,
     Routine,
     SessionSettleState,
@@ -14,12 +18,14 @@ from daimon.core._models import (
     ThreadSession,
     TurnOutcome,
     Watch,
+    WatchFiring,
 )
 from daimon.core.credential_requests import mint_request_token
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores import retention, turn_outcomes
 from daimon.core.stores import tenants as tenants_store
+from daimon.core.stores import watches as watches_store
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.factories import (
     make_account,
@@ -28,6 +34,7 @@ from daimon.testing.factories import (
     make_tenant,
     make_usage_event,
 )
+from daimon.testing.watch_fixtures import install_firing_trigger
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -266,3 +273,179 @@ async def test_tenant_deletion_finds_settle_state_without_outcomes(
 
     left = set(await db_session.scalars(select(SessionSettleState.managed_session_id)))
     assert left == {"sesn_other"}, "the tenant's settle row goes, another tenant's stays"
+
+
+def _access_request(
+    tenant_id: uuid.UUID, account_id: uuid.UUID, status: str, **values: object
+) -> GitHubAccessRequest:
+    return GitHubAccessRequest(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        requester_account_id=account_id,
+        requester_platform_user_id=f"u-{status}",
+        platform="discord",
+        parent_channel_id="c",
+        thread_id=f"t-{status}-{uuid.uuid4().hex[:6]}",
+        agent_id=uuid.uuid4(),
+        ma_agent_id="ag_test",
+        agent_name="daimon",
+        repo_names=["org/repo"],
+        status=status,
+        updated_at=OLD,
+        expires_at=OLD,
+        **values,
+    )
+
+
+async def test_access_requests_go_only_when_finished_and_nothing_still_needs_them(
+    db_session: AsyncSession,
+) -> None:
+    """Past expiry alone is not enough: the expiry poller and its notice come first."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session)
+    db_session.add_all(
+        [
+            _access_request(tenant.id, account.id, "open"),
+            _access_request(tenant.id, account.id, "waiting_github"),
+            _access_request(tenant.id, account.id, "expired"),
+            _access_request(tenant.id, account.id, "expired", expiry_notice_sent_at=OLD),
+            _access_request(tenant.id, account.id, "ready"),
+            _access_request(tenant.id, account.id, "cancelled"),
+            _access_request(tenant.id, account.id, "declined"),
+        ]
+    )
+    await db_session.flush()
+    kept = set(
+        await db_session.scalars(
+            select(GitHubAccessRequest.id).where(
+                (GitHubAccessRequest.status.in_(("open", "waiting_github")))
+                | (
+                    (GitHubAccessRequest.status == "expired")
+                    & GitHubAccessRequest.expiry_notice_sent_at.is_(None)
+                )
+            )
+        )
+    )
+
+    removed = await retention.delete_github_access_requests(db_session, before=NOW, limit=100)
+
+    assert removed == 4, "ready, cancelled, declined and a noticed expiry go"
+    left = set(await db_session.scalars(select(GitHubAccessRequest.id)))
+    assert left == kept, "open, waiting and an expiry with no notice yet stay"
+
+
+async def test_cancel_audit_outlives_its_job_and_ages_on_its_own(db_session: AsyncSession) -> None:
+    """Deleting a finished job on the output clock must not take its audit row with it."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session)
+    job = LongJobRecord(
+        tenant_id=tenant.id,
+        owner_account_id=account.id,
+        owner_external_user_id="u1",
+        agent_id="ag_test",
+        agent_name="daimon",
+        agent_version=1,
+        environment_id="env",
+        environment_updated_at=OLD,
+        platform="discord",
+        parent_channel_id="c",
+        thread_id="t",
+        parent_session_id="sesn_1",
+        tool_use_id="tu_1",
+        command="true",
+        title="job",
+        deadline_minutes=5,
+        max_usd=Decimal("1"),
+        state="succeeded",
+        finished_at=OLD,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    for requested_at, id_ in ((OLD, job.id), (NOW - timedelta(days=1), uuid.uuid4())):
+        db_session.add(
+            LongJobCancelAuditRecord(
+                tenant_id=tenant.id,
+                id=id_,
+                state="running",
+                owner_account_id=account.id,
+                requested_by=account.id,
+                requested_at=requested_at,
+            )
+        )
+    await db_session.flush()
+
+    assert await retention.delete_long_jobs(db_session, before=NOW, limit=100) == 1
+    audit = (await db_session.scalars(select(LongJobCancelAuditRecord.requested_at))).all()
+    assert len(audit) == 2, "the job's cancel audit stays when the job goes"
+
+    removed = await retention.delete_long_job_cancel_audit(
+        db_session, before=NOW - timedelta(days=90), limit=100
+    )
+
+    assert removed == 1, "the audit row past its own clock goes"
+    left = (await db_session.scalars(select(LongJobCancelAuditRecord.requested_at))).all()
+    assert left == [NOW - timedelta(days=1)], "a recent audit row stays"
+
+
+async def test_a_watch_keeps_its_last_firing_after_the_wake_is_swept(
+    db_session: AsyncSession,
+) -> None:
+    """The firing rows go with their wake; the live watch still reports its last firing."""
+    await install_firing_trigger(db_session)
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session)
+    watch = Watch(
+        tenant_id=tenant.id,
+        owner_account_id=account.id,
+        owner_external_id="u1",
+        platform="discord",
+        parent_channel_id="c1",
+        thread_id="t1",
+        agent_id="ag_test",
+        agent_name="daimon",
+        session_id="sesn_t1",
+        instructions="watch",
+        producer="p-last-fired",
+        page_id=uuid.uuid4(),
+        status="active",
+        expires_at=NOW + timedelta(days=7),
+    )
+    db_session.add(watch)
+    await db_session.flush()
+    for age, key in ((60, uuid.uuid4()), (40, uuid.uuid4())):
+        fired = NOW - timedelta(days=age)
+        await make_task_continuation(
+            db_session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="c1",
+            thread_id="t1",
+            requester_account_id=account.id,
+            requester_external_user_id="u1",
+            target_ma_agent_id="ag_test",
+            target_name="daimon",
+            reason="watch_fired",
+            idempotency_key=key,
+            created_at=fired,
+        )
+        await db_session.execute(
+            update(TaskContinuation)
+            .where(TaskContinuation.idempotency_key == key)
+            .values(status="delivered", delivered_at=fired)
+        )
+        db_session.add(
+            WatchFiring(wake_key=key, watch_id=watch.id, revision=1, generation=1, created_at=fired)
+        )
+        await db_session.flush()
+
+    removed = await retention.delete_task_continuations(db_session, before=NOW, limit=100)
+
+    assert removed == 2, "both delivered wakes are past their clock"
+    assert await db_session.scalar(select(WatchFiring.wake_key).limit(1)) is None, (
+        "the firing rows go with the wakes"
+    )
+    db_session.expire_all()  # the trigger wrote the column behind the session's back
+    activity = await watches_store.list_tenant_watches(db_session, tenant_id=tenant.id, now=NOW)
+    assert [a.last_fired_at for a in activity] == [NOW - timedelta(days=40)], (
+        "the watch keeps its latest firing time"
+    )

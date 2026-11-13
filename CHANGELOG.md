@@ -15,8 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sessions, memory, vaults, skills, reports and notebooks are deleted, while billing records and the balance stay, so a
   reinstall gets no second trial. `daimon tenants retire` does the same at once. Retirement and tenant deletion also
   remove Slack tokens and settlement progress, and erasing a person also removes their follow-up tasks, turn records,
-  conversation links, model-switch cards and credential requests in every workspace.
-  `DAIMON_SECURITY_AUDIT_RETENTION_DAYS` still works.
+  conversation links, model-switch cards and credential requests in every workspace. Job cancel records age with the
+  audit events, not with their job, and a GitHub access request is kept until it has finished and its expiry notice has
+  gone out. `DAIMON_SECURITY_AUDIT_RETENTION_DAYS` still works.
 
 - **Removing the Teams app from its last team uninstalls the workspace.** Its tenant is archived like a removed
   Discord server or Slack workspace; adding the app to a team again restores it.

@@ -1043,7 +1043,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "gemini_runtime_state": "account_id; gemini_runtime_state.delete_records_for_account",
         "security_audit_events": "account_id erased by security_audit.erase_account_for_privacy",
         "agent_personal_memory_store": "account_id; deleted with the person's memory stores",
-        "long_job_cancel_audit": "cascades from long_job, which cascades with the account",
+        "long_job_cancel_audit": "owner_account_id and requested_by (account_records)",
         "mcp_oauth_flows": "cascades from its credential request",
     }
     # Intentional exclusions, each justified inline.
