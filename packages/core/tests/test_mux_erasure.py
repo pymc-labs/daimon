@@ -1035,3 +1035,56 @@ async def test_the_fence_ignores_ids_that_are_not_accounts(sm: Factory) -> None:
     async with sm() as session, session.begin():
         await mux_erasure.fence_writers(session, None, "operator", "selfhosted-billing:b")
         await mux_erasure.fence_writers(session, str(uuid.uuid4()))
+
+
+async def _age(sm: Factory, label: str) -> None:
+    """Make `label`'s conversation idle for 200 days."""
+    old = NOW - timedelta(days=200)
+    async with sm() as session, session.begin():
+        await session.execute(
+            text("UPDATE provider_binding SET created_at = :t WHERE binding_id = :b"),
+            {"t": old, "b": f"binding-{label}"},
+        )
+        await session.execute(
+            text("UPDATE journal_session SET last_appended_at = :t WHERE binding_id = :b"),
+            {"t": old, "b": f"binding-{label}"},
+        )
+
+
+async def test_idle_slots_go_whole_and_active_or_held_ones_stay(sm: Factory) -> None:
+    """A writer holding a journal session is skipped, not waited on, so no lock cycle forms."""
+    tenant_id = uuid.uuid4()
+    person = await make_person(sm, tenant_id, "idle-sweep")
+    store = PostgresStateStore(sm)
+    for label in ("idle", "active", "held"):
+        await converse(store, person, label, thread(tenant_id, label), release_lease=True)
+    await _age(sm, "idle")
+    await _age(sm, "held")
+    cutoff = NOW - timedelta(days=90)
+
+    async with sm() as writer, writer.begin():
+        await writer.execute(
+            text("SELECT 1 FROM journal_session WHERE binding_id = 'binding-held' FOR UPDATE")
+        )
+        async with sm() as session, session.begin():
+            erased = await asyncio.wait_for(
+                mux_erasure.delete_idle_slots(
+                    session, tenant_id=tenant_id, idle_before=cutoff, limit=10
+                ),
+                10,
+            )
+
+    assert erased.slots == 1, "only the idle slot went; the held one was skipped, not waited on"
+    assert erased.journal_events == 1, "the idle slot's journal went with it"
+    slots = set(await rows(sm, "provider_binding_slot", "true"))
+    assert len(slots) == 2, "the active and held slots stay"
+    assert await count(sm, "journal", "session_id = 'session-idle'") == 0, "no events left behind"
+    assert await count(sm, "journal", "session_id = 'session-active'") == 1, "active journal kept"
+
+    async with sm() as session, session.begin():
+        later = await mux_erasure.delete_idle_slots(
+            session, tenant_id=tenant_id, idle_before=cutoff, limit=10
+        )
+    assert later.slots == 1, "the held slot goes on the next sweep, once the writer is done"
+    assert await count(sm, "journal", "session_id = 'session-held'") == 0, "its journal went too"
+    assert await count(sm, "journal", "session_id = 'session-active'") == 1, "active still kept"

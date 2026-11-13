@@ -407,7 +407,8 @@ def _idle(cutoff: datetime) -> ColumnElement[bool]:
             ThreadLease.channel_id == slot.channel_id,
             ThreadLease.thread_id == slot.thread_id,
             ThreadLease.account_id.is_not_distinct_from(slot.account_id),
-            ThreadLease.active.is_not(None),
+            # Released as SQL NULL or as JSON null, both no holder.
+            func.jsonb_typeof(ThreadLease.active) == "object",
         ),
     )
 
@@ -418,9 +419,10 @@ async def delete_idle_slots(
     """Delete up to `limit` of a tenant's conversations idle since the cutoff, whole.
 
     A slot goes with every journal event and binding generation it holds, so no
-    journal is ever left with a gap; the thread's next turn binds afresh. Slots a
-    writer holds are skipped, and the predicate is checked again once the slots'
-    sessions are locked. Leases (their fences) and operation records stay.
+    journal is ever left with a gap; the thread's next turn binds afresh. A slot, or one
+    of its journal sessions, that a writer holds is skipped for the next sweep, since
+    nothing here waits on a lock, and the predicate is checked again once they are
+    locked. Leases (their fences) and operation records stay.
     """
     if idle_before.utcoffset() is None:
         raise ValueError("idle_before must include a timezone")
@@ -436,15 +438,34 @@ async def delete_idle_slots(
     )
     if not candidates:
         return MuxErased()
-    await session.execute(
-        select(JournalSession.session_id)
-        .where(JournalSession.binding_id.in_(candidates))
-        .with_for_update()
+    # Never wait on a lock while holding one: appends lock a journal head and then
+    # reach for its slot, so a slot with a journal session a writer holds is left for
+    # the next sweep instead of queueing behind that writer.
+    sessions_of = JournalSession.binding_id.in_(candidates)
+    every = set(
+        (await session.execute(select(JournalSession.session_id).where(sessions_of))).scalars()
     )
+    held = set(
+        (
+            await session.execute(
+                select(JournalSession.session_id)
+                .where(sessions_of)
+                .with_for_update(skip_locked=True)
+            )
+        ).scalars()
+    )
+    busy = set(
+        (
+            await session.execute(
+                select(JournalSession.binding_id).where(JournalSession.session_id.in_(every - held))
+            )
+        ).scalars()
+    )
+    free = [binding for binding in candidates if binding not in busy]
     ids = list(
         await session.scalars(
             select(ProviderBindingSlot.binding_id).where(
-                ProviderBindingSlot.binding_id.in_(candidates), idle
+                ProviderBindingSlot.binding_id.in_(free), idle
             )
         )
     )
