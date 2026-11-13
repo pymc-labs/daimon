@@ -308,14 +308,19 @@ class TeamsReleaseScriptTests(unittest.TestCase):
             ("aks.sh", ["teardown"]),
             ("register.sh", []),
         ):
-            for missing in ("RELEASE", "NAMESPACE"):
+            # Both unset, with DELETE_NAMESPACE matching the default, is the case that
+            # would delete another release's namespace daimon on a shared cluster.
+            for missing in (("RELEASE",), ("NAMESPACE",), ("RELEASE", "NAMESPACE")):
                 with (
                     self.subTest(script=script, command=command, missing=missing),
                     tempfile.TemporaryDirectory() as directory,
                 ):
                     state = Path(directory)
                     result, calls = self.run_script(
-                        script, command, state, {missing: "", "DELETE_NAMESPACE": "daimon"}
+                        script,
+                        command,
+                        state,
+                        {**dict.fromkeys(missing, ""), "DELETE_NAMESPACE": "daimon"},
                     )
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("export RELEASE and NAMESPACE first", result.stderr)
