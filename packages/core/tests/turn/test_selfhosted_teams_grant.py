@@ -236,11 +236,30 @@ async def test_rerunning_registration_keeps_every_grant_valid(
         json.dumps({CHANNEL: []}),
         json.dumps({CHANNEL: ["not-an-entra-id"]}),
         json.dumps({";messageid=1": [PERSON]}),
+        "{not json",
+        json.dumps([[CHANNEL, [PERSON]]]),
+        json.dumps({CHANNEL: {"person": PERSON}}),
+        f'{{"{CHANNEL}": ["{PERSON}"], "{CHANNEL}": ["{OTHER_PERSON}"]}}',
+        json.dumps({CHANNEL + ";messageid=1": [PERSON], CHANNEL: [OTHER_PERSON]}),
     ],
 )
 async def test_malformed_teams_grants_stop_registration(raw: str) -> None:
     with pytest.raises(SystemExit):
         script("provision").parse_teams_grants(raw)
+
+
+async def test_malformed_teams_grants_stop_before_anything_is_written() -> None:
+    # The session factory is never reached: any use of it would raise something
+    # other than SystemExit.
+    with pytest.raises(SystemExit, match="TEAMS_GRANTS must be a JSON object"):
+        await script("provision").provision(
+            object(),
+            {
+                "SELFHOSTED_MODEL": MODEL,
+                "TEAMS_GRANTS": "{not json",
+                "DAIMON_TEAMS__TENANT_ID": ENTRA_TENANT,
+            },
+        )
 
 
 async def test_teams_grants_need_the_hosts_teams_tenant(

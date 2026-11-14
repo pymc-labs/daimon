@@ -80,22 +80,35 @@ async def register(sf, model):
     }
 
 
+class _JsonObject(list):
+    """A JSON object's key/value pairs in order, duplicate keys kept."""
+
+
 def parse_teams_grants(raw: str) -> dict[str, tuple[str, ...]]:
     """Validate `TEAMS_GRANTS`: conversation ID -> Entra object IDs, in Teams' own forms.
 
     A channel link's thread suffix (`;messageid=...`) is dropped, as the Teams
     host keys a channel by the ID before it. Person IDs are lowercased UUIDs,
-    the form the Teams host records a sender under.
+    the form the Teams host records a sender under. A conversation listed twice,
+    as itself or with another suffix, is refused rather than merged.
     """
-    grants = json.loads(raw)
-    if not isinstance(grants, dict) or not grants:
-        raise SystemExit("TEAMS_GRANTS must be a JSON object of conversation ID -> person IDs")
+    shape = "TEAMS_GRANTS must be a JSON object of conversation ID -> person IDs"
+    try:
+        pairs = json.loads(raw, object_pairs_hook=_JsonObject)
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"{shape}: {error}") from None
+    if type(pairs) is not _JsonObject or not pairs:
+        raise SystemExit(shape)
     parsed: dict[str, tuple[str, ...]] = {}
-    for conversation, people in grants.items():
+    for conversation, people in pairs:
         channel_id = str(conversation).split(";", 1)[0].strip()
         if not channel_id:
             raise SystemExit("TEAMS_GRANTS has an empty conversation ID")
-        if not isinstance(people, list) or not people:
+        if channel_id in parsed:
+            raise SystemExit(
+                f"TEAMS_GRANTS lists conversation {channel_id!r} twice; list its people once"
+            )
+        if type(people) is not list or not people:
             raise SystemExit(f"TEAMS_GRANTS[{channel_id!r}] must list at least one person ID")
         ids: list[str] = []
         for person in people:
@@ -133,15 +146,15 @@ async def register_teams(sf, model, entra_tenant_id, grants):
 
 async def provision(sf, environ):
     model = environ["SELFHOSTED_MODEL"]
-    registration = await register(sf, model)
     raw = environ.get("TEAMS_GRANTS", "").strip()
-    if raw:
-        entra_tenant_id = environ.get("DAIMON_TEAMS__TENANT_ID", "").strip()
-        if not entra_tenant_id:
-            raise SystemExit("TEAMS_GRANTS needs DAIMON_TEAMS__TENANT_ID in the host Secret")
-        registration["teams"] = await register_teams(
-            sf, model, entra_tenant_id, parse_teams_grants(raw)
-        )
+    entra_tenant_id = environ.get("DAIMON_TEAMS__TENANT_ID", "").strip()
+    # Checked before anything is written, so a bad map changes no grant.
+    grants = parse_teams_grants(raw) if raw else None
+    if grants and not entra_tenant_id:
+        raise SystemExit("TEAMS_GRANTS needs DAIMON_TEAMS__TENANT_ID in the host Secret")
+    registration = await register(sf, model)
+    if grants:
+        registration["teams"] = await register_teams(sf, model, entra_tenant_id, grants)
     return registration
 
 
