@@ -138,6 +138,8 @@ elif name == 'kubectl' and 'exec' in args and 'init' in args:
     print('agent-id environment-id')
 elif name == 'kubectl' and 'exec' in args and '-i' in args:
     print(json.dumps({'tenant_id': 'tenant-id', 'account_id': 'account-id', 'config_digest': 'digest'}))
+elif name == 'helm' and args[:1] == ['list']:
+    print(os.environ.get('HELM_RELEASES', ''))
 """
 
 
@@ -213,7 +215,7 @@ class TeamsReleaseScriptTests(unittest.TestCase):
                     "daimon-teams-aoai",
                 },
             )
-            helm = next(c for c in calls if c[0] == "helm")
+            helm = next(c for c in calls if c[:2] == ["helm", "upgrade"])
             self.assertEqual(
                 helm[1:6],
                 ["upgrade", "--install", "daimon-teams", "deploy/helm/daimon-selfhost", "-n"],
@@ -243,7 +245,7 @@ class TeamsReleaseScriptTests(unittest.TestCase):
                 values["harness"]["env"]["HARNESS_DAIMON_MCP_URL"],
                 "https://daimon-teams-daimon-mcp:8765/mcp",
             )
-            helm = next(c for c in calls if c[0] == "helm")
+            helm = next(c for c in calls if c[:2] == ["helm", "upgrade"])
             files = [helm[i + 1] for i, arg in enumerate(helm) if arg == "-f"]
             self.assertEqual(files, [str(state / "values.yaml"), str(state / "aks-values.json")])
 
@@ -306,6 +308,8 @@ class TeamsReleaseScriptTests(unittest.TestCase):
             ("aks.sh", ["register"]),
             ("aks.sh", ["reinstall"]),
             ("aks.sh", ["teardown"]),
+            ("aks.sh", ["egress-start"]),
+            ("aks.sh", ["egress-check"]),
             ("register.sh", []),
         ):
             # Both unset, with DELETE_NAMESPACE matching the default, is the case that
@@ -320,7 +324,11 @@ class TeamsReleaseScriptTests(unittest.TestCase):
                         script,
                         command,
                         state,
-                        {**dict.fromkeys(missing, ""), "DELETE_NAMESPACE": "daimon"},
+                        {
+                            **dict.fromkeys(missing, ""),
+                            "DELETE_NAMESPACE": "daimon",
+                            "RESTART_COREDNS": "offline",
+                        },
                     )
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("export RELEASE and NAMESPACE first", result.stderr)
@@ -349,6 +357,62 @@ class TeamsReleaseScriptTests(unittest.TestCase):
                 calls,
             )
             self.assertFalse(any(c[:3] == ["az", "aks", "delete"] for c in calls))
+
+    def test_a_namespace_holding_another_release_is_refused(self):
+        # On a shared cluster, installing into or deleting another release's
+        # namespace would reach that release.
+        for script, command in (
+            ("aks.sh", ["install"]),
+            ("aks.sh", ["teardown"]),
+            ("register.sh", []),
+        ):
+            with (
+                self.subTest(script=script, command=command),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                state = Path(directory)
+                result, calls = self.run_script(
+                    script,
+                    command,
+                    state,
+                    {"HELM_RELEASES": "other\ndaimon-teams", "DELETE_NAMESPACE": "daimon-teams"},
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("also holds Helm release(s) other;", result.stderr)
+                self.assertEqual(
+                    calls, [["helm", "list", "-n", "daimon-teams", "-a", "-q"]], result.stderr
+                )
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            result, calls = self.run_script(
+                "aks.sh", ["install"], state, {"HELM_RELEASES": "daimon-teams"}
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(any(c[:3] == ["helm", "upgrade", "--install"] for c in calls))
+
+    def test_egress_start_needs_the_cluster_name(self):
+        # egress-start restarts CoreDNS for every release on the cluster.
+        for confirmation in (None, "", "another-cluster"):
+            with (
+                self.subTest(confirmation=confirmation),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                state = Path(directory)
+                overrides = {} if confirmation is None else {"RESTART_COREDNS": confirmation}
+                result, calls = self.run_script("aks.sh", ["egress-start"], state, overrides)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("set RESTART_COREDNS=offline", result.stderr)
+                self.assertEqual(calls, [])
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            (state / "aoai-host").write_text("aoai.example.invalid\n")
+            result, calls = self.run_script(
+                "aks.sh", ["egress-start"], state, {"RESTART_COREDNS": "offline"}
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                ["kubectl", "-n", "kube-system", "rollout", "restart", "deployment/coredns"], calls
+            )
 
     def test_names_must_be_dns_labels(self):
         with tempfile.TemporaryDirectory() as directory:

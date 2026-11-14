@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unless `RELEASE` and `NAMESPACE` are exported, and `teardown` needs
   `DELETE_NAMESPACE` set to the namespace it deletes.
 
+- The AKS scripts' `install`, `register` and `teardown` refuse a namespace that holds
+  another Helm release, and `egress-start` needs `RESTART_COREDNS` set to the cluster name.
+
 - Let the AKS chart's MCP and scheduler pods reach Teams too, so agent tools and
   scheduled runs can post there; the harness still cannot.
 

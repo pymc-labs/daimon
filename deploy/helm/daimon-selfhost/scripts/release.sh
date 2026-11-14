@@ -11,6 +11,17 @@ require_release_names() {
     exit 1
   }
 }
+# A namespace holds one release: installing beside another, or deleting the
+# namespace under it, would reach a release these scripts do not own.
+refuse_other_releases() {
+  local listed others
+  listed=$(helm list -n "$NAMESPACE" -a -q)
+  others=$(grep -vFx -- "$RELEASE" <<< "$listed" | grep -v '^$' || true)
+  [[ -z $others ]] || {
+    echo "$1 refused: namespace $NAMESPACE also holds Helm release(s) ${others//$'\n'/, }; give $RELEASE a namespace of its own" >&2
+    exit 1
+  }
+}
 RELEASE=${RELEASE:-acme}
 NAMESPACE=${NAMESPACE:-daimon}
 SECRET_PREFIX=${SECRET_PREFIX:-daimon}

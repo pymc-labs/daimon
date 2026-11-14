@@ -10,8 +10,14 @@ chart=deploy/helm/daimon-selfhost
 [[ -d "$AKS_STATE" ]] || { echo 'AKS_STATE must exist' >&2; exit 1; }
 source "$chart/scripts/release.sh"
 case ${1:-} in
-install|register|reinstall|teardown) require_release_names "${1}" ;;
+install|register|reinstall|teardown|egress-start|egress-check) require_release_names "${1}" ;;
 esac
+# egress-start replaces kube-system/coredns-custom and restarts CoreDNS for every
+# release on the cluster, so it needs the cluster's name typed again.
+if [[ ${1:-} == egress-start && ${RESTART_COREDNS:-} != "$AKS" ]]; then
+  echo "egress-start replaces coredns-custom and restarts CoreDNS for all of cluster $AKS; set RESTART_COREDNS=$AKS to confirm" >&2
+  exit 1
+fi
 # The namespace holds the database, so teardown needs its name typed again,
 # checked before any cluster call.
 if [[ ${1:-} == teardown && ${DELETE_NAMESPACE:-} != "$NAMESPACE" ]]; then
@@ -72,6 +78,9 @@ PYVERIFY
 }
 case ${1:-} in
 install|register|turn|egress-start|egress-check|teardown) bind_aks ;;
+esac
+case ${1:-} in
+install|teardown) refuse_other_releases "${1}" ;;
 esac
 case ${1:-} in
 bootstrap)

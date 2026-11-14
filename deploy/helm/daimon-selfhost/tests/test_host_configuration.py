@@ -725,6 +725,7 @@ elif name == 'az' and args[:2] == ['group','exists']:
                 RELEASE="acme",
                 NAMESPACE="daimon",
                 DELETE_NAMESPACE="daimon",
+                RESTART_COREDNS="offline",
                 HOME=str(home),
                 KUBECONFIG=str(ambient),
                 HELM_KUBEAPISERVER="https://foreign.example.invalid",
@@ -781,7 +782,9 @@ elif name == 'az' and args[:2] == ['group','exists']:
                 if operation["tool"] == "helm":
                     self.assertIsNone(operation["helm_server"])
                     self.assertIsNone(operation["helm_context"])
-            return result, operations
+            # The read-only check for other releases in the namespace changes nothing.
+            changes = [c for c in operations if c["args"][:1] != ["list"]]
+            return result, changes
 
     def test_every_cluster_command_refuses_a_foreign_api_server(self):
         for command in (

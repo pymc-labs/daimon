@@ -493,7 +493,7 @@ agent pins and enabled backends, adding only the selfhosted backend selection.
 ### 3. Egress evidence for the entire turn window
 
 ```sh
-bash deploy/helm/daimon-selfhost/scripts/aks.sh egress-start
+RESTART_COREDNS=$AKS bash deploy/helm/daimon-selfhost/scripts/aks.sh egress-start
 # Run the real authorized Daimon CLI/Teams turns, including write then read.
 bash deploy/helm/daimon-selfhost/scripts/aks.sh egress-check
 ```
@@ -712,8 +712,10 @@ Framework and Entra /32s.
 On a cluster other releases use, run only `install`, `register`, `turn`, `probe`
 and `teardown` (which keeps the cluster). `bootstrap` and `reinstall` create a
 cluster, and `egress-start` restarts the cluster's CoreDNS. `install`, `register`,
-`reinstall` and `teardown` refuse the defaults unless `RELEASE` and `NAMESPACE`
-are both exported, so a missed export cannot reach another release. `install` creates and
+`reinstall`, `teardown` and the egress commands refuse the defaults unless `RELEASE`
+and `NAMESPACE` are both exported. `install`, `register` and `teardown` also refuse a
+namespace that holds another Helm release. `egress-start` needs `RESTART_COREDNS=$AKS`.
+`install` creates and
 labels the namespace, and Helm creates cluster-wide PriorityClasses, so the
 installer needs cluster rights for both.
 
