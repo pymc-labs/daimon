@@ -147,6 +147,8 @@ from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.posture import ExemptReason
 from daimon.core.turn.reducers import refusal_error
 from daimon.core.turn.termination import TerminationReason
+from daimon.core.turn.unattended_capabilities import capability_policy
+from daimon.core.turn.web_search_sources import claude_searches, sources_prefix
 from daimon.core.usage_sweep import settle_finished_turn
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -189,7 +191,9 @@ def _turn_boundary(sent: BetaManagedAgentsSendSessionEvents) -> str:
     return sent.data[0].id
 
 
-async def _send_billed(runtime: McpRuntime, session_id: str, message: str, *, scope: Scope) -> str:
+async def _send_billed(
+    runtime: McpRuntime, session: BetaManagedAgentsSession, message: str, *, scope: Scope
+) -> str:
     """Send a headless turn's message with its settle request written first.
 
     Nothing meters a headless turn live, so its calls are billed by
@@ -201,7 +205,16 @@ async def _send_billed(runtime: McpRuntime, session_id: str, message: str, *, sc
     accepted send (a timeout, a 5xx) it stays. Naming the accepted message is
     best effort: an unnamed request waits on the first message processed after
     it was written. Returns the message's event id (the turn boundary).
+
+    The sources rule goes in front as on the routine runner: the agent chat
+    gate turns built-ins, search included, off (`capability_policy`), so it
+    is empty unless that policy changes.
     """
+    session_id = session.id
+    searches = capability_policy("mcp_chat").allow_builtins and claude_searches(
+        [tool.model_dump(mode="json") for tool in session.agent.tools]
+    )
+    text = sources_prefix(on=searches) + message
     async with runtime.session_factory.begin() as db:
         previous, requested_at = await session_settle_state.request_settle(
             db, managed_session_id=session_id
@@ -212,7 +225,7 @@ async def _send_billed(runtime: McpRuntime, session_id: str, message: str, *, sc
             single_attempt(runtime),
             session_id,
             scope=scope,
-            events=[{"type": "user.message", "content": [{"type": "text", "text": message}]}],
+            events=[{"type": "user.message", "content": [{"type": "text", "text": text}]}],
         )
         turn_event_id = _turn_boundary(sent)
     except (ToolError, anthropic.APIStatusError) as err:
@@ -939,7 +952,7 @@ async def _start_turn_impl(
         await recheck()
     await gate(runtime, auth, session)
     turn_started_at = now()
-    turn_event_id = await _send_billed(runtime, session.id, message, scope=mcp_scope(auth))
+    turn_event_id = await _send_billed(runtime, session, message, scope=mcp_scope(auth))
     channel = rules_channel(auth, session)
     await record_turn(runtime, session.id, turn_event_id=turn_event_id, rules_channel_id=channel)
     watch_turn(runtime, auth, session.id, turn_event_id=turn_event_id, rules_channel_id=channel)
@@ -1078,7 +1091,7 @@ async def _continue_turn_impl(
             raise ToolError(_MESSAGE_REQUIRED_MSG)
         turn_started_at = now()
         # Inside the fence, so settle requests follow the order of the sends.
-        turn_event_id = await _send_billed(runtime, handle, message, scope=mcp_scope(auth))
+        turn_event_id = await _send_billed(runtime, current, message, scope=mcp_scope(auth))
         channel = rules_channel(auth, current)
         await record_turn(runtime, handle, turn_event_id=turn_event_id, rules_channel_id=channel)
         watch_turn(runtime, auth, handle, turn_event_id=turn_event_id, rules_channel_id=channel)

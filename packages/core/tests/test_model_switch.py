@@ -17,7 +17,7 @@ from daimon.core.model_switch import (
     SwitchRefusal,
     refusal_of,
     set_effort,
-    switch_fact_lines,
+    switch_card_text,
 )
 from daimon.core.models_catalog import ModelChoice
 from mux.contracts.ids import ModelRef
@@ -53,7 +53,10 @@ def test_a_pick_without_a_preview_shows_only_its_name() -> None:
         before="anthropic",
         preview=None,
     )
-    assert switch_fact_lines(switch, agent_name="Ada") == ("Model: Sonnet",)
+    assert switch_card_text(switch, agent_name="Ada") == ("Switch Ada to Sonnet?",), (
+        "a Claude-to-Claude pick has only a title"
+    )
+    assert not switch.asks_first, "a Claude-to-Claude pick applies at once"
     assert switch.allowed and switch.digest == "" and switch.revision == 0
 
 

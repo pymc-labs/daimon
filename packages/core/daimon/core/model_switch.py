@@ -1,9 +1,9 @@
-"""The setup panels' one model switch: pick a model, see what changes, confirm once.
+"""The setup panels' one model switch: pick a model; it applies, or asks once first.
 
-Discord, Slack and Teams show the same select (`read_picker`), the same preview
-(`preview_model_switch`, `switch_fact_lines`) and the same write (`confirm_model_switch`,
-which accepts the losses the person was shown through `change_model`). A pick on another
-provider and a pick on another Claude model are the same flow; only the write differs.
+Discord, Slack and Teams show the same select (`read_picker`) and the same pick
+(`pick_or_refusal`): a pick that loses nothing applies at once, one that does shows the
+short card (`switch_card_text`) and writes on Switch (`confirm_model_switch`). Both writes
+accept the declared losses through `change_model`, guarded by the preview's digest.
 """
 
 from __future__ import annotations
@@ -29,7 +29,8 @@ from daimon.core.channel_backend import (
 )
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.models_catalog import ModelChoice, catalog_model, list_model_choices
-from daimon.core.turn.notices import conversations_follow_line, provider_name
+from daimon.core.switch_card import needs_switch_card, switch_card_lines, switch_title
+from daimon.core.turn.notices import provider_name
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import ModelRef, Provider
 from mux.contracts.profile import Effort
@@ -45,7 +46,6 @@ if TYPE_CHECKING:
 
 #: Discord's select holds 25 options; every panel keeps the current model in them.
 SELECT_LIMIT: Final = 25
-_NAMES_LIMIT: Final = 500
 #: The refusal card's two buttons, worded the same on every panel.
 SWITCH_BACK_LABEL: Final = "Switch back to Claude"
 REVIEW_AGAIN_LABEL: Final = "Review again"
@@ -95,6 +95,11 @@ class ModelSwitchPreview:
     @property
     def allowed(self) -> bool:
         return self.preview is None or self.preview.allowed
+
+    @property
+    def asks_first(self) -> bool:
+        """Whether the pick shows the card rather than applying at once."""
+        return not self.allowed or needs_switch_card(self.preview)
 
 
 def panel_edit_deps(
@@ -168,7 +173,12 @@ async def preview_model_switch(
 ) -> ModelSwitchPreview:
     """What picking `value` (`provider:id`) would change. Refused as a write would be."""
     agent, backend = await _load(service, edit, actor, agent_name)
-    model = await _resolve(service, agent, value)
+    return await _preview(service, agent, backend, await _resolve(service, agent, value))
+
+
+async def _preview(
+    service: AgentBackendService, agent: BackendAgent, backend: BackendActor, model: ModelRef
+) -> ModelSwitchPreview:
     if service.enabled and not await service.may_edit(agent, backend):
         raise AgentBackendRefused("owner_or_admin_required", provider=model.provider)
     revision = await service.current(agent)
@@ -197,16 +207,24 @@ async def confirm_model_switch(
     The preview is read again; if it no longer matches the shown digest or revision the
     write is refused as `stale_preview` and nothing changes.
     """
-    agent, _backend = await _load(service, edit, actor, agent_name)
-    model = await _resolve(service, agent, value)
-    shown = await preview_model_switch(
-        service, edit, actor=actor, agent_name=agent_name, value=value
-    )
+    agent, backend = await _load(service, edit, actor, agent_name)
+    shown = await _preview(service, agent, backend, await _resolve(service, agent, value))
     if shown.digest != digest or shown.revision != revision:
-        raise AgentBackendRefused("stale_preview", provider=model.provider)
+        raise AgentBackendRefused("stale_preview", provider=shown.model.provider)
+    return await _apply(service, edit, actor, agent, shown)
+
+
+async def _apply(
+    service: AgentBackendService,
+    edit: AgentEditDeps,
+    actor: AgentActor,
+    agent: BackendAgent,
+    shown: ModelSwitchPreview,
+) -> ModelChanged:
+    """Write `shown`, accepting the losses it declares, guarded by its digest and revision."""
     return await change_model(
         agent,
-        model,
+        shown.model,
         actor=actor,
         edit=edit,
         backends=service,
@@ -272,11 +290,33 @@ async def preview_or_refusal(
     value: str,
     admin: bool,
 ) -> ModelSwitchPreview | SwitchRefusal:
-    """`preview_model_switch`, with a refusal returned as the words a panel shows."""
+    """`preview_model_switch`, with a refusal returned as the words a surface shows."""
     try:
         return await preview_model_switch(
             service, edit, actor=actor, agent_name=agent_name, value=value
         )
+    except (AgentBackendRefused, BackendUnsupported, AgentEditError) as error:
+        return refusal_of(error, admin=admin)
+
+
+async def pick_or_refusal(
+    service: AgentBackendService,
+    edit: AgentEditDeps,
+    *,
+    actor: AgentActor,
+    agent_name: str,
+    value: str,
+    admin: bool,
+) -> ModelChanged | ModelSwitchPreview | SwitchRefusal:
+    """A panel's pick: applied at once when nothing stops working, else the card to show.
+
+    Every panel calls this, so the rule (`needs_switch_card`) is the same everywhere; a
+    pick the person may not make is refused before either.
+    """
+    try:
+        agent, backend = await _load(service, edit, actor, agent_name)
+        shown = await _preview(service, agent, backend, await _resolve(service, agent, value))
+        return shown if shown.asks_first else await _apply(service, edit, actor, agent, shown)
     except (AgentBackendRefused, BackendUnsupported, AgentEditError) as error:
         return refusal_of(error, admin=admin)
 
@@ -367,41 +407,17 @@ async def _resolve(service: AgentBackendService, agent: BackendAgent, value: str
     return catalog_model(value, tenant=policy, agent_id=agent.agent_id)
 
 
-def switch_fact_lines(
-    switch: ModelSwitchPreview,
-    *,
-    agent_name: str | None,
-    escape: Callable[[str], str] = str,
-    applies_to: str | None = None,
+def switch_card_text(
+    switch: ModelSwitchPreview, *, agent_name: str | None, escape: Callable[[str], str] = str
 ) -> tuple[str, ...]:
-    """The preview as lines every panel shows; `escape` makes names safe for its markup.
+    """The short card every panel shows; `escape` makes names safe for its markup.
 
-    A pick on the same provider has no losses to list, so it shows its price only.
-    `applies_to` replaces the line on which conversations follow, for a narrower pick.
+    Its title, what stops working and any shared-thread limit; the price stays on the
+    model select, as for any model.
     """
-    lines = [f"Model: {escape(switch.label)}"]
-    preview = switch.preview
-    if preview is None:
-        return tuple(lines)
-    if switch.model.provider == switch.before:
-        lines.append(escape(preview.cost_line))
-        return tuple(lines)
-    for label, items in (
-        ("Unsupported skills", preview.unsupported_skills),
-        ("Unsupported connections", preview.unsupported_mcps),
-        ("Unsupported capabilities", preview.unsupported_capabilities),
-        ("Shared-thread limits", preview.shared_thread_limits),
-    ):
-        names = ", ".join(escape(item) for item in items) or "None"
-        shown = names if len(names) <= _NAMES_LIMIT else names[:_NAMES_LIMIT] + "… (truncated)"
-        lines.append(f"{label}: {shown}")
-    lines.append(escape(preview.cost_line))
-    lines.append(
-        f"Applies to: {applies_to}"
-        if applies_to is not None
-        else conversations_follow_line(agent_name, switch.model.provider, before=switch.before)
-        + " Channel settings still apply."
-    )
-    if not preview.allowed:
-        lines.append(f"{provider_name(switch.model.provider)} is off here. Pick another.")
+    lines = [escape(switch_title(agent_name, switch.label))]
+    if switch.preview is not None:
+        lines.extend(switch_card_lines(switch.preview, escape=escape))
+        if not switch.preview.allowed:
+            lines.append(f"{provider_name(switch.model.provider)} is off here. Pick another.")
     return tuple(lines)

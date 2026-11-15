@@ -300,15 +300,23 @@ class GeminiPlan(BaseModel):
             or (full and tuple(pin.id for pin in target.skills or ()) != self.skill_ids)
         ):
             raise AdmissionDenied(reason="backend_unsupported")
+        # A template's sandbox is set up as the source's environment, as the preview
+        # declared (`finer_drops.kept_environment`); the row's own stays bare.
+        environment = (
+            represented.environment.model_copy(update={"name": self.environment.name})
+            if represented is not None
+            and represented.provider_execution
+            and represented.environment is not None
+            else self.environment
+        )
         try:
             compile_agent(target, authenticated_mcp=full or mcp)
             if compile_environment(self.environment) != {"type": "remote", "sources": []}:
                 raise AdmissionDenied(reason="backend_unsupported")
+            compile_environment(environment)
         except UnsupportedCapability as error:
             raise AdmissionDenied(reason="backend_unsupported") from error
-        return GeminiDeployment(
-            revision.digest, revision.local, self.project, target, self.environment
-        )
+        return GeminiDeployment(revision.digest, revision.local, self.project, target, environment)
 
     async def read_counterpart(
         self,

@@ -1312,32 +1312,6 @@ def backend_switch_callbacks(
             raise ValueError("This permission changed. Preview and confirm again.")
         return action, details
 
-    async def _answering_here(turn_agent: str | None) -> str | None:
-        """Who answers this conversation next: a hand-off's agent, else this turn's.
-
-        The approved switch moves the conversation of the agent answering here (the
-        hand-off's, once one was made), so the card must say so for that agent. A
-        setup conversation never moves (`_move_this_thread`), so nobody does there.
-        """
-        if handoff_thread is None:
-            return turn_agent
-        from daimon.core.stores import thread_agent_bindings
-
-        platform, parent_channel_id, thread_id = handoff_thread
-        async with sessionmaker() as session:
-            handed = await thread_agent_bindings.get_binding(
-                session,
-                tenant_id=tenant_id,
-                platform=platform,
-                parent_channel_id=parent_channel_id,
-                thread_id=thread_id,
-            )
-        if handed is not None and handed.kind == "setup":
-            return None
-        if handed is not None and handed.kind == "handoff":
-            return handed.responder_name
-        return turn_agent
-
     async def prepare(prompt: ConfirmationPrompt) -> ConfirmationPrompt:
         from daimon.core.handoff_context import redact_handoff_summary
 
@@ -1383,23 +1357,19 @@ def backend_switch_callbacks(
                     expires_at=prompt.expires_at,
                 )
             prompt = prompt.model_copy(update={"backend_switch": fresh})
+        from daimon.core.switch_card import switch_card_lines, switch_title
+        from daimon.core.turn.notices import uses_phrase
+
+        unsaved = prompt.backend_switch.unsaved_work if prompt.backend_switch else None
+        # The person's own hand-off answer, bound into the digest: the card names it.
+        work = (f"Uncommitted changes: {_UNSAVED_WORK_WORDS[unsaved]}",) if unsaved else ()
         details = (
             *(
                 ("Agent settings: " + settings_line(preview.target_settings),)
                 if preview.target_settings
                 else ()
             ),
-            "Unsupported skills: " + (", ".join(preview.unsupported_skills) or "None"),
-            "Unsupported connections: " + (", ".join(preview.unsupported_mcps) or "None"),
-            "Unsupported capabilities: " + (", ".join(preview.unsupported_capabilities) or "None"),
-            "Shared-thread limits: " + ("; ".join(preview.shared_thread_limits) or "None"),
-            preview.cost_line,
-            *(
-                ("Uncommitted changes: " + _UNSAVED_WORK_WORDS[prompt.backend_switch.unsaved_work],)
-                if prompt.backend_switch is not None
-                and prompt.backend_switch.unsaved_work is not None
-                else ()
-            ),
+            *work,
             *(
                 (
                     f"Carries a summary of this conversation to {agent.name}: "
@@ -1414,59 +1384,14 @@ def backend_switch_callbacks(
                 else ()
             ),
         )
-        from daimon.core.turn.notices import conversations_follow_line, provider_name, uses_phrase
-        from mux.contracts.config import DEFAULT_BACKEND
-
-        provider = provider_name(preview.target_backend)
-        target = uses_phrase(preview.target_backend, preview.target_model)
-        action = f"Switch {agent.name} to {target}"
-        # Read before the switch is applied: the provider its shared threads stay on.
-        setting = await service.current(agent)
-        before = (setting.backend if setting is not None else None) or DEFAULT_BACKEND
-        unavailable = (
-            f"On {provider} it won't have {drop_words(preview.declared_drops, preview.skill_names)}"
-            if preview.declared_drops
-            else ""
-        )
-        answering = await _answering_here(answering_agent_name)
-        reach = (
-            f"Affects new conversations for everyone on this {place_word}"
-            if await answers_for_everyone(
-                sessionmaker, agent, default_agent_name=default_agent_name
-            )
-            else f"Affects new conversations wherever {agent.name} answers"
-        )
+        title = switch_title(agent.name, uses_phrase(preview.target_backend, preview.target_model))
         return prompt.model_copy(
             update={
-                "title": action + "?",
-                "action": action,
+                "title": title,
+                "action": title.removesuffix("?"),
                 "denied_action": "Model unchanged",
                 "detail_lines": details,
-                "consequence": (
-                    reach
-                    + ". "
-                    + conversations_follow_line(agent.name, preview.target_backend, before)
-                    + (
-                        f" This conversation moves to {provider} from your next message "
-                        "(unless it's shared or this channel pins its provider) and keeps "
-                        "its earlier messages."
-                        if answering == agent.name
-                        else ""
-                    )
-                    + (
-                        f"\n{unavailable}. Nothing is deleted; switch back any time."
-                        if unavailable
-                        else ""
-                    )
-                    + (
-                        "\nUncommitted changes in the repo are "
-                        + _UNSAVED_WORK_WORDS[prompt.backend_switch.unsaved_work]
-                        + "; nothing is committed or pushed."
-                        if prompt.backend_switch is not None
-                        and prompt.backend_switch.unsaved_work is not None
-                        else ""
-                    )
-                ),
+                "consequence": "\n".join((*switch_card_lines(preview), *work)) or None,
             }
         )
 

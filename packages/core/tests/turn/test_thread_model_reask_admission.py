@@ -83,6 +83,7 @@ async def test_a_stale_conversation_consent_runs_on_the_agents_model_and_asks_ag
     call = asked.calls[0]
     assert (call.conversation_id, call.channel_id, call.platform) == ("thread", "channel", "slack")
     assert call.consent == asked.consent and call.user_id == "caller"
+    assert call.attended, "a person's message may keep a pick that loses nothing"
 
 
 @pytest.mark.parametrize("initial_backend", [None], indirect=True)

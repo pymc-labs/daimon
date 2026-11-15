@@ -236,9 +236,29 @@ def test_a_sandbox_part_the_consent_never_accepted_asks_again() -> None:
     assert not holds(consent_for(copy_for()), gained, "gpt-6-luna"), "no sandbox consent at all"
 
 
+def test_a_sandbox_consent_when_the_template_sets_up_more_then_it_still_holds() -> None:
+    """A sandbox that sets up packages or network it lost before has fewer losses: no re-ask."""
+    then = copy_for(drops=("memory", "installed_packages", "network_rules"))
+    for parts in ((), ("installed_packages",), ("network_rules",)):
+        today = copy_for(drops=("memory", *parts))
+        assert holds(consent_for(then), today, "gpt-6-luna"), f"fewer losses: {parts}"
+    gained = copy_for(drops=("memory", "workspace_files"))
+    assert not holds(consent_for(then), gained, "gpt-6-luna"), "a new part still asks"
+
+
 def test_a_consent_for_model_settings_covers_a_lone_effort_setting() -> None:
     """Effort alone is named on its own now; the model settings accepted before cover it."""
     then = copy_for(drops=("memory", "model_controls"))
     today = copy_for(drops=("memory", "effort_setting"))
     assert holds(consent_for(then), today, "gpt-6-luna"), "effort is a part of the settings"
     assert not holds(consent_for(copy_for()), today, "gpt-6-luna"), "never accepted: asks again"
+
+
+def test_a_consent_that_lost_web_search_covers_a_copy_that_runs_it() -> None:
+    """Web search was off by Daimon's choice; the provider's metered search asks nothing."""
+    then = copy_for(drops=("builtin_tool:web_search", "memory"))
+    assert holds(consent_for(then), copy_for(), "gpt-6-luna"), "search runs: no new card"
+    lost = copy_for(drops=("builtin_tool:web_search", "memory"))
+    assert not holds(consent_for(copy_for()), lost, "gpt-6-luna"), (
+        "a search that must ask first, never accepted lost, asks again"
+    )

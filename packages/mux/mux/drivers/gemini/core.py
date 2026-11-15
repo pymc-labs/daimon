@@ -54,6 +54,7 @@ from mux.drivers.gemini.mcp_auth import (
     validate_intent,
 )
 from mux.drivers.gemini.normalize import OUTCOMES, actions, event, saved_events
+from mux.drivers.gemini.packages import package_sources
 from mux.drivers.gemini.storage import Records, SessionRecord, Storage, owner, read_records
 from mux.drivers.gemini.transport import (
     NO_TOOLS_FUNCTION,
@@ -65,7 +66,7 @@ from mux.drivers.gemini.transport import (
     object_value,
     string,
 )
-from mux.drivers.gemini.usage import observation_from_interaction
+from mux.drivers.gemini.usage import observation_from_interaction, provider_time
 from mux.errors import (
     ContinuityLost,
     ExtensionVersionError,
@@ -75,6 +76,7 @@ from mux.errors import (
     ScopeViolation,
     UnsupportedCapability,
 )
+from mux.profiles import PACKAGE_MANAGERS, network_effect
 from mux.profiles.gemini import INLINE_REUSE as PROFILE
 from mux.state.operations import SendClaimed, request_digest
 from mux.state.store import StateStore
@@ -383,13 +385,8 @@ class Base:
             interaction = string(raw["id"])
             # Provider chronology is independent of meter changes and survives
             # restart. Parse offsets rather than ordering timestamp strings.
-            active = raw.get("updated") or raw.get("created")
-            stamp: datetime | None = None
-            if active is not None:
-                stamp = datetime.fromisoformat(string(active).replace("Z", "+00:00"))
-                if stamp.tzinfo is None:
-                    raise ValueError("provider timestamp has no timezone")
-                stamp = stamp.astimezone(UTC)
+            stamp = provider_time(raw)
+            if stamp is not None:
                 watermark = record.native_updated.get(interaction)
                 if watermark is not None and stamp.microsecond == 0:
                     # The create reply can carry microseconds (23:07:10.142775)
@@ -586,11 +583,11 @@ def compile_agent(
             result["system_instruction"] = spec.system
         model_request(result)
         return result
-    config: Object = {"type": "antigravity", "model": spec.model.id}
     if thinking_level is not None:
-        # google-genai 2.7 refuses generation_config beside `agent`: an agent
-        # interaction carries its settings in agent_config (extra items allowed).
-        config["thinking_level"] = thinking_level
+        # The API rejects it ("Unknown parameter 'thinking_level' at 'agent_config'",
+        # measured 2026-11-15); generation_config is refused beside `agent`.
+        refuse("agent_thinking_level")
+    config: Object = {"type": "antigravity", "model": spec.model.id}
     result = {
         "agent": BASE_AGENT,
         "agent_config": config,
@@ -719,8 +716,13 @@ def compile_environment(
         if spec != EnvironmentSpec(name=spec.name, execution="none"):
             refuse("model_interaction_resources")
         return {}
-    if spec.execution != "hosted" or spec.network or spec.packages or spec.native_config:
+    if spec.execution != "hosted" or spec.native_config:
         refuse("environment_configuration")
+    network = network_effect(spec.network)
+    packages = {k: v for k, v in (spec.packages or {}).items() if v}
+    # The install hook fetches from the package registries, so it needs open egress.
+    if packages and (network.mode != "unrestricted" or set(packages) - set(PACKAGE_MANAGERS)):
+        refuse("environment_packages")
     sources: list[JsonValue] = []
     for source in spec.sources or ():
         target = target_path(source.target_path)
@@ -737,8 +739,15 @@ def compile_environment(
             "target": target,
         }
         sources.append(obj)
+    sources.extend(package_sources(packages))
     validate_targets(sources)
-    return {"type": "remote", "sources": sources}
+    result: Object = {"type": "remote", "sources": sources}
+    # Omitting the network allows all egress (Environments API reference).
+    if network.mode == "none":
+        result["network"] = "disabled"
+    elif network.mode == "limited":
+        result["network"] = {"allowlist": [{"domain": host} for host in network.allowed_hosts]}
+    return result
 
 
 class GeminiSessions(Base):

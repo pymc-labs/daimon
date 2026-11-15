@@ -673,13 +673,14 @@ async def prepare_tenant_environment(
     Only for an agent's own `openai.persistent_workspace` turn on a tenant whose
     runtime file has no row for it (its own row, e.g. the template `daimon openai
     init` writes, always wins), on an install with a deployment OpenAI key. The
-    code-default root row (`runtime_defaults`) then uses it. Everything else passes
-    through unchanged and is refused, or served, exactly as before.
+    code-default root row (`runtime_defaults`) then uses it, set up as the
+    representation's environment (`finer_drops.kept_environment`). Everything else
+    passes through unchanged and is refused, or served, exactly as before.
     """
     from daimon.core.provider_keys import DEFAULT_KEY_ENV
     from daimon.core.turn.openai_environment import tenant_environment
     from daimon.core.turn.runtime_defaults import DEFAULT_PROJECT, OPENAI
-    from daimon.core.turn.runtime_manifest import manifest_has_row
+    from daimon.core.turn.runtime_manifest import manifest_has_row, represented_source
 
     revision = request.admission.backend_revision
     store = request.deps.state_store
@@ -699,6 +700,11 @@ async def prepare_tenant_environment(
         # adopt another deployment's environment. The turn stays as it was before.
         log.warning("openai_environment.deployment_unknown", tenant_id=request.scope.tenant_id)
         return request
+    represented = (
+        represented_source(request.source, request.target_spec)
+        if request.source is not None
+        else None
+    )
     environment_id = await tenant_environment(
         store,
         _environments(key),
@@ -708,6 +714,9 @@ async def prepare_tenant_environment(
         # Wall-clock time: a turn's `now` can be frozen at admission, and waiting
         # for another replica's create must actually time out.
         now=lambda: datetime.now(UTC),
+        spec=represented.environment
+        if represented is not None and represented.provider_execution
+        else None,
     )
     return replace(request, openai_environment_id=environment_id)
 

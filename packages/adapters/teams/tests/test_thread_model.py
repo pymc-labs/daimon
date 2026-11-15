@@ -19,7 +19,7 @@ CHANNEL = "19:abc@thread.tacv2"
 THREAD = f"{CHANNEL};messageid=1700"
 TENANT = uuid.uuid4()
 CONFIRM = ThreadConfirm("openai:gpt-6", "digest-1", 3)
-LINES = ("Model: GPT-6", "Cost: $2 per 1M tokens")
+LINES = ("Switch this conversation to GPT-6?", "Stops working: memory")
 OPTIONS = (ThreadOption("GPT-6 ($2)", "openai:gpt-6"), ThreadOption("Agent default", "default"))
 
 
@@ -112,8 +112,10 @@ async def test_a_cross_provider_pick_shows_the_preview_and_one_confirm(
     flow: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     answer = await _on(_press("pick:openai:gpt-6"), monkeypatch, actor=_member())
-    assert [b["data"]["op"] for b in _buttons(answer.value)] == ["confirm", "cancel"]
-    data = _buttons(answer.value)[0]["data"]
+    assert [b["data"]["op"] for b in _buttons(answer.value)] == ["cancel", "confirm"], (
+        "Switch is rightmost"
+    )
+    data = _buttons(answer.value)[1]["data"]
     assert (data["v"], data["d"], data["r"]) == ("openai:gpt-6", "digest-1", 3)
     assert all(line in _text(answer.value) for line in LINES)
     assert flow.pick.await_args.kwargs["conversation_id"] == THREAD
@@ -205,7 +207,7 @@ async def test_the_ask_again_card_is_posted_in_the_conversation() -> None:
     conversation, activity = direct.post_card.await_args.args
     assert conversation == THREAD
     card = activity.attachments[0].content
-    assert [b["data"]["op"] for b in _buttons(card)] == ["confirm", "cancel"]
+    assert [b["data"]["op"] for b in _buttons(card)] == ["cancel", "confirm"], "Switch is rightmost"
 
 
 async def test_the_ask_again_card_without_a_confirm_has_no_buttons() -> None:

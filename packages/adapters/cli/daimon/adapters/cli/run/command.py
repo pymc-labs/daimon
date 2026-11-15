@@ -40,6 +40,7 @@ from daimon.core.turn.unattended import (
     session_rules_channel,
     unattended_posture,
 )
+from daimon.core.turn.web_search_sources import claude_searches, sources_prefix
 from mux.errors import ScopeViolation
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -132,6 +133,13 @@ async def _run_with_defaults(
         # the driver gates again before the message and every confirmation.
         await gate()
         snapshot = await retrieve_session_record(rt.anthropic, session, scope=scope)
+        # The session's own tools decide: this path has no place features.
+        user_message = (
+            sources_prefix(
+                on=claude_searches([tool.model_dump(mode="json") for tool in snapshot.agent.tools])
+            )
+            + user_message
+        )
         keys = tuple(key.get_secret_value() for key in rt.settings.crypto.keys)
         with unattended_sends(gate):
             return await run_conversation(

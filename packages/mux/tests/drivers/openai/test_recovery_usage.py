@@ -530,3 +530,59 @@ async def test_buffered_terminal_conflict_cannot_replace_durable_outcome() -> No
     with pytest.raises(ProviderError):
         await driver.events.reconcile(SCOPE, REF)
     assert await journal.read(REF) == before
+
+
+def _search(id_: str, *, status: str = "completed", action: str | None = "search") -> Object:
+    item: Object = {"id": id_, "type": "web_search_call", "status": status}
+    if action is not None:
+        item["action"] = {"type": action}
+    return item
+
+
+@pytest.mark.asyncio
+async def test_usage_counts_ended_turn_searches_once_and_revises(
+    driver: OpenAIDriver, transport: FakeTransport
+) -> None:
+    items = "/agents/sessions/s/turns/root/items"
+    native = turn("in_progress")
+    native["usage"] = {"input_tokens": 5, "output_tokens": 1}
+    transport.responses["GET", "/agents/sessions/s/turns"] = page(native)
+    running = (await driver.usage.reconcile(SCOPE, REF))[0]
+    assert running.web_searches == 0 and ("GET", items) not in [c[:2] for c in transport.calls]
+    native["status"] = "completed"
+    first = page(
+        _search("a"), _search("b", action=None), _search("x", action="open_page"), more=True
+    )
+    second = page(_search("b", action=None), _search("f", status="failed"), _search("c"))
+    pages = iter((first, second))
+
+    async def paged(method: Method, path: str, **kwargs: object) -> Object:
+        if path == items:
+            return next(pages)
+        return await FakeTransport.request(transport, method, path, **kwargs)  # type: ignore[arg-type]
+
+    transport.request = paged  # type: ignore[method-assign]
+    ended = (await driver.usage.reconcile(SCOPE, REF))[0]
+    # Page opens, finds and failed searches are not billed; a repeated item counts once.
+    assert ended.web_searches == 3 and ended.revision == 2
+    replay = (await driver.usage.reconcile(SCOPE, REF))[0]
+    assert replay == ended.model_copy(update={"observed_at": replay.observed_at})
+
+
+@pytest.mark.asyncio
+async def test_reconcile_turn_when_other_turns_ended_then_reads_only_that_turn(
+    driver: OpenAIDriver, transport: FakeTransport
+) -> None:
+    """A replay bills one root turn, so no other turn or its items is read."""
+    transport.responses["GET", "/agents/sessions/s/turns"] = page(turn(id_="old"), turn())
+    transport.responses["GET", "/agents/sessions/s/turns/root"] = turn()
+    transport.responses["GET", "/agents/sessions/s/turns/root/items"] = page(_search("a"))
+    (root,) = await driver.usage.reconcile_turn(SCOPE, REF, "root")
+    assert root.turn_id == "root" and root.web_searches == 1, root
+    paths = [path for _, path, *_ in transport.calls]
+    assert paths == ["/agents/sessions/s/turns/root", "/agents/sessions/s/turns/root/items"], paths
+    transport.responses["GET", "/agents/sessions/s/turns/child"] = turn(id_="child", child="sub")
+    assert await driver.usage.reconcile_turn(SCOPE, REF, "child") == (), "children bill apart"
+    transport.responses["GET", "/agents/sessions/s/turns/other"] = turn()
+    with pytest.raises(ProviderError, match="malformed_response"):
+        await driver.usage.reconcile_turn(SCOPE, REF, "other")

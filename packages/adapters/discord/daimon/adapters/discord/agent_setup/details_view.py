@@ -66,9 +66,9 @@ from daimon.core.model_switch import (
     confirm_or_refusal,
     panel_actor,
     panel_edit_deps,
-    preview_or_refusal,
+    pick_or_refusal,
     set_effort,
-    switch_fact_lines,
+    switch_card_text,
 )
 from daimon.core.panel_audit import PanelOutcome, record_panel_write
 from daimon.core.roster import RosterAgent
@@ -77,6 +77,7 @@ from daimon.core.setup_conversations import (
     setup_target_label,
     shared_keys_sentence,
 )
+from daimon.core.switch_card import CANCEL_LABEL, SWITCH_LABEL
 from daimon.core.web_links import OPEN_IN_WEB
 
 import discord
@@ -527,7 +528,7 @@ class DetailsView(PanelViewBase):
             lines: tuple[str, ...] = (refusal.line,)
         else:
             assert switch is not None, "a switch card needs a preview or a refusal"
-            lines = switch_fact_lines(
+            lines = switch_card_text(
                 switch, agent_name=self.agent.name if self.agent is not None else None
             )
         text: discord.ui.TextDisplay[discord.ui.LayoutView] = discord.ui.TextDisplay(
@@ -535,10 +536,13 @@ class DetailsView(PanelViewBase):
         )
         container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(text)
         row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
+        cancel: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(label=CANCEL_LABEL)
+        cancel.callback = self._on_model_cancel  # type: ignore[method-assign]
+        row.add_item(cancel)
         if refusal is None:
             assert switch is not None, "a switch card needs a preview or a refusal"
             confirm: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
-                label="Confirm", style=discord.ButtonStyle.primary, disabled=not switch.allowed
+                label=SWITCH_LABEL, style=discord.ButtonStyle.primary, disabled=not switch.allowed
             )
             confirm.callback = self._on_model_confirm  # type: ignore[method-assign]
             row.add_item(confirm)
@@ -554,9 +558,6 @@ class DetailsView(PanelViewBase):
             )
             again.callback = self._on_review_again  # type: ignore[method-assign]
             row.add_item(again)
-        cancel: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(label="Cancel")
-        cancel.callback = self._on_model_cancel  # type: ignore[method-assign]
-        row.add_item(cancel)
         container.add_item(row)
         return container
 
@@ -630,16 +631,20 @@ class DetailsView(PanelViewBase):
         )
 
     async def _preview_pick(self, interaction: discord.Interaction, value: str) -> None:
-        """Preview `value` and show the one Confirm, or why it can't be."""
+        """Apply `value` when it loses nothing; else show the card, or why it can't be."""
         service, edit, actor, admin = await self._model_deps(interaction)
-        shown = await preview_or_refusal(
+        shown = await pick_or_refusal(
             service, edit, actor=actor, agent_name=self.details.name, value=value, admin=admin
         )
         if isinstance(shown, SwitchRefusal):
             await self._backend_audit(interaction, outcome="denied", reason=shown.reason)
             view = self._details_view(refusal=shown, switch_value=value)
-        else:
+        elif isinstance(shown, ModelSwitchPreview):
             view = self._details_view(switch=shown, switch_value=value)
+        else:
+            await self._backend_audit(interaction, outcome="allowed", reason="completed")
+            await self._reload_after_switch(interaction)
+            return
         await self.swap_to(interaction, view)
 
     async def _on_model_select(

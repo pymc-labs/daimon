@@ -155,7 +155,7 @@ async def move_this_thread(
 SWITCH_CARD_MAX_S: Final[int] = 86400
 
 #: The requested card's footer; each renderer fills the requester and the expiry.
-SWITCH_FOOTER: Final[str] = "Only {requester} can confirm. Expires {expires}."
+SWITCH_FOOTER: Final[str] = "Only {requester} can press Switch. Expires {expires}."
 
 
 def requested_switch_card(
@@ -166,8 +166,9 @@ def requested_switch_card(
     requester_platform_user_id: str,
     expires_at: datetime.datetime,
 ) -> PostedCard:
-    """The card as posted: what the switch does, and Confirm / Cancel for its requester."""
+    """The card as posted: what stops working, and Cancel / Switch for its requester."""
     from daimon.core.posted_controls import CardButton, PostedCard
+    from daimon.core.switch_card import CANCEL_LABEL, SWITCH_LABEL
 
     return PostedCard(
         kind="switch",
@@ -176,10 +177,10 @@ def requested_switch_card(
         facts=facts,
         buttons=(
             CardButton(
-                label="Confirm", style="primary", custom_id=card_custom_id(card_id, "confirm")
+                label=CANCEL_LABEL, style="secondary", custom_id=card_custom_id(card_id, "cancel")
             ),
             CardButton(
-                label="Cancel", style="primary", custom_id=card_custom_id(card_id, "cancel")
+                label=SWITCH_LABEL, style="primary", custom_id=card_custom_id(card_id, "confirm")
             ),
         ),
         footer=SWITCH_FOOTER,

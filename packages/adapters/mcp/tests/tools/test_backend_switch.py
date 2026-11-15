@@ -224,6 +224,35 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
         )
 
 
+async def _origin_like(runtime, origin, **changes):
+    """A second store-made origin of the same caller, differing only in `changes`."""
+    from datetime import UTC, datetime
+
+    from daimon.core.stores.turn_origins import create_origin
+
+    fields = origin.model_dump(
+        include={
+            "tenant_id",
+            "account_id",
+            "platform",
+            "parent_channel_id",
+            "thread_id",
+            "responder_ma_agent_id",
+            "responder_name",
+            "configuration_target_ma_agent_id",
+            "configuration_target_name",
+            "role",
+            "expires_at",
+            "sender_foreign",
+            "shared_channel",
+            "attended",
+            "chat_session_id",
+        }
+    )
+    async with runtime.session_factory.begin() as session:
+        return await create_origin(session, now=datetime.now(UTC), **{**fields, **changes})
+
+
 def _without_own_tools(payload):
     """Remove the agent's own tools while retaining the frozen chat toolset."""
     payload["tools"] = []
@@ -343,7 +372,7 @@ async def test_the_first_preview_tells_the_model_to_post_the_card_in_the_same_tu
     summary = " ".join(preview.summary.lower().split())
     assert "same reply" in summary, preview.summary
     assert "do not ask" in summary and "reply yes" in summary, preview.summary
-    assert "confirm on it" in summary, preview.summary
+    assert "switch on it" in summary, preview.summary
     assert not trace.replies and not trace.violations
 
 
@@ -496,7 +525,7 @@ async def test_a_private_session_context_refuses_the_preview(active_chat):
     del frozen["metadata"]["daimon_thread"]
     gate()
     agent()
-    with pytest.raises(ToolError, match="server channel or thread where I answer"):
+    with pytest.raises(ToolError, match="Ask this agent in a server channel or thread"):
         await _request_agent_backend_switch_impl(
             runtime,
             auth,
@@ -535,7 +564,7 @@ async def test_a_thread_opened_by_a_channel_mention_previews_the_switch(active_c
         )
         assert preview.status == "preview"
     else:
-        with pytest.raises(ToolError, match="server channel or thread where I answer"):
+        with pytest.raises(ToolError, match="Ask this agent in a server channel or thread"):
             await _request_agent_backend_switch_impl(
                 runtime,
                 auth,
@@ -546,19 +575,10 @@ async def test_a_thread_opened_by_a_channel_mention_previews_the_switch(active_c
     assert not trace.replies and not trace.violations
 
 
-async def test_native_no_drop_chat_confirmation_binds_empty_consent(active_chat):
+async def test_a_native_no_drop_switch_writes_on_the_first_call_with_empty_consent(active_chat):
+    """A switch that loses nothing applies on the first call, like a model change."""
     runtime, auth, origin, service, trace, payload, _, gate, agent, _ = active_chat
     payload["model"] = {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}}
-    gate()
-    agent()
-    quote = await _request_agent_backend_switch_impl(
-        runtime,
-        auth,
-        agent_name="Researcher",
-        target_backend="anthropic",
-        origin_context_id=str(origin.id),
-    )
-    assert quote.status == "preview" and quote.declared_drops == ()
     gate()
     agent()
     agent()
@@ -568,10 +588,9 @@ async def test_native_no_drop_chat_confirmation_binds_empty_consent(active_chat)
         agent_name="Researcher",
         target_backend="anthropic",
         origin_context_id=str(origin.id),
-        expected_revision=0,
-        preview_digest=quote.preview_digest,
     )
-    assert changed.status == "changed" and changed.declared_drops == ()
+    assert changed.status == "changed", "nothing is lost, so no card and no second call"
+    assert changed.declared_drops == (), "nothing is declared"
     agent()
     from daimon.core.channel_backend import load_backend_agent
 
@@ -579,8 +598,67 @@ async def test_native_no_drop_chat_confirmation_binds_empty_consent(active_chat)
         runtime.client, runtime.session_factory, tenant_id=auth.tenant_id, agent_name="Researcher"
     )
     revision = await service.current(source)
-    assert revision.drop_consent is not None and revision.declared_drops == ()
-    assert not trace.replies and not trace.violations
+    assert revision.drop_consent is not None and revision.declared_drops == (), (
+        "the write still records the empty consent"
+    )
+    assert not trace.replies and not trace.violations, "every scripted reply was used"
+
+
+@pytest.mark.parametrize("attended", [True, False])
+async def test_a_no_drop_switch_on_a_provider_turn_when_nobody_started_it_then_previews(
+    active_chat, attended
+):
+    """A routine or wake has an origin but nobody present: it previews, as a lossy switch does.
+
+    A provider turn reads no session card gate (which refuses an unattended Claude turn),
+    so only the origin says whether someone asked.
+    """
+    runtime, auth, origin, service, trace, payload, _, gate, agent, _ = active_chat
+    payload["model"] = {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}}
+    origin = await _origin_like(runtime, origin, attended=attended)
+    agent()
+    if attended:
+        agent()
+    shown = await _request_agent_backend_switch_impl(
+        runtime,
+        replace(auth, no_confirmation_surface=True),
+        agent_name="Researcher",
+        target_backend="anthropic",
+        origin_context_id=str(origin.id),
+    )
+    assert shown.status == ("changed" if attended else "preview"), (
+        "only a run someone started applies a switch on the first call"
+    )
+    agent()
+    written = await service.current(await load_backend_agent_for(runtime, auth))
+    assert (written is not None) is attended, "a preview writes nothing"
+    assert not trace.replies and not trace.violations, "every scripted reply was used"
+
+
+async def test_a_no_drop_switch_on_a_provider_turn_when_in_a_direct_message_then_is_refused(
+    active_chat,
+):
+    """Refused though it needs no card: the switch reads the agent's setup as a public
+    place runs it, and a direct message is not one (a Claude turn's read refuses it too)."""
+    runtime, auth, origin, service, trace, payload, _, _, agent, _ = active_chat
+    payload["model"] = {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}}
+    origin = await _origin_like(runtime, origin, parent_channel_id="dm:123", thread_id="dm:123")
+    with pytest.raises(ToolError, match="from a direct message") as refused:
+        await _request_agent_backend_switch_impl(
+            runtime,
+            replace(auth, no_confirmation_surface=True),
+            agent_name="Researcher",
+            target_backend="anthropic",
+            origin_context_id=str(origin.id),
+        )
+    assert "Nothing changed." in str(refused.value), "the refusal says nothing changed"
+    assert "I " not in str(refused.value), (
+        "worded as a Claude turn's refusal, not in the first person"
+    )
+    agent()
+    written = await service.current(await load_backend_agent_for(runtime, auth))
+    assert written is None, "a refused switch writes nothing"
+    assert not trace.replies and not trace.violations, "every scripted reply was used"
 
 
 async def test_chat_switch_to_a_named_model_previews_and_applies_that_model(active_chat):
@@ -920,7 +998,7 @@ def _admin_auth():
     [
         ({"reason": "agent_not_found"}, "no agent named 'X'"),
         ({"reason": "backend_not_allowed"}, "OpenAI isn't allowed in this server"),
-        ({"reason": "source_context_unavailable"}, "server channel or thread where I answer"),
+        ({"reason": "source_context_unavailable"}, "Ask this agent in a server channel or thread"),
         (
             {"reason": "source_context_unavailable", "detail": "no_live_session"},
             "couldn't find my conversation in this thread",
@@ -1379,6 +1457,70 @@ async def test_a_non_default_agent_switches_without_saying_for_everyone(active_c
     assert preview.status == "preview"
 
 
+@pytest.mark.parametrize("on", ["anthropic", "openai"])
+async def test_a_no_drop_switch_of_the_agent_everyone_uses_when_for_everyone_then_applies(
+    active_chat, on
+):
+    """A provider switch of the default agent goes like a Claude model change of it.
+
+    Both need "for everyone" and then apply on the first call when nothing stops working.
+    """
+    from daimon.core.scope import DeploymentDefault
+
+    runtime, auth, origin, service, trace, payload, _, gate, agent, _ = active_chat
+    _without_own_tools(payload)
+    payload["model"] = {"id": "claude-haiku-5-5", "speed": "standard"}
+    runtime = replace(
+        runtime,
+        deployment_default=DeploymentDefault(agent_name="Researcher", environment_name="default"),
+    )
+    if on == "openai":
+        to_gpt = {
+            "agent_name": "Researcher",
+            "target_backend": "openai",
+            "origin_context_id": str(origin.id),
+            "for_everyone": True,
+        }
+        gate()
+        agent()
+        quote = await _request_agent_backend_switch_impl(runtime, auth, **to_gpt)
+        gate()
+        agent()
+        agent()
+        await _request_agent_backend_switch_impl(
+            runtime,
+            auth,
+            **to_gpt,
+            expected_revision=quote.expected_revision,
+            preview_digest=quote.preview_digest,
+            accepted_drops=quote.declared_drops,
+        )
+        agent()
+        moved = await service.current(await load_backend_agent_for(runtime, auth))
+        assert moved is not None and moved.backend == "openai", "the agent starts on GPT"
+    # From Claude this is a model change (Haiku to the default); from GPT a provider switch.
+    to_claude = {
+        "agent_name": "Researcher",
+        "target_backend": "anthropic",
+        "origin_context_id": str(origin.id),
+    }
+    gate()
+    agent()
+    with pytest.raises(ToolError, match="changes it for everyone on this server"):
+        await _request_agent_backend_switch_impl(runtime, auth, **to_claude)
+    gate()
+    agent()
+    agent()
+    changed = await _request_agent_backend_switch_impl(
+        runtime, auth, **to_claude, for_everyone=True
+    )
+    assert changed.status == "changed", "nothing stops working, so no card either way"
+    agent()
+    now = await service.current(await load_backend_agent_for(runtime, auth))
+    assert now is not None and now.backend in (None, "anthropic"), "the agent is on Claude"
+    assert not trace.replies and not trace.violations, "every scripted reply was used"
+
+
 async def test_a_provider_turn_previews_then_daimon_posts_the_card_and_nothing_changes(
     active_chat, monkeypatch
 ):
@@ -1414,7 +1556,7 @@ async def test_a_provider_turn_previews_then_daimon_posts_the_card_and_nothing_c
         accepted_drops=preview.declared_drops,
     )
     assert posted.status == "awaiting_confirmation"
-    assert "Nothing changes until the requester presses Confirm" in posted.summary
+    assert "Nothing changes until the requester presses Switch" in posted.summary
     agent()
     actual = await load_backend_agent_for(runtime, auth)
     assert await service.current(actual) is None, "posting the card changes nothing"
@@ -1424,7 +1566,7 @@ async def test_a_provider_turn_previews_then_daimon_posts_the_card_and_nothing_c
     card = kwargs["card"]
     assert card.requester_platform_user_id == "123"
     assert card.headline.startswith("🔁 Switch Researcher to Gemini")
-    card_id, action = parse_custom_id(card.buttons[0].custom_id)
+    card_id, action = parse_custom_id(card.buttons[-1].custom_id)
     assert action == "confirm"
     async with runtime.session_factory() as session:
         row = await get_card(session, tenant_id=auth.tenant_id, card_id=card_id)
@@ -1433,7 +1575,7 @@ async def test_a_provider_turn_previews_then_daimon_posts_the_card_and_nothing_c
     assert row.reference["preview_digest"] == preview.preview_digest
     # One waiting card per requester and agent: asking again while it waits posts nothing.
     agent()
-    with pytest.raises(ToolError, match="already a Confirm card waiting"):
+    with pytest.raises(ToolError, match="already a card waiting"):
         agent()
         await _request_agent_backend_switch_impl(
             runtime,

@@ -342,7 +342,7 @@ async def test_after_yes_make_the_copy_the_switch_card_is_posted_in_that_turn(
     _assert_the_card_is_posted_in_this_turn(
         preview.summary, await _switch_tool_description(chat.runtime)
     )
-    # The card the person sees before Approve names what the copy won't have there.
+    # The card the person sees before Approve names what stops working there.
     from functools import partial as _partial
     from unittest.mock import AsyncMock as _AsyncMock
 
@@ -387,8 +387,8 @@ async def test_after_yes_make_the_copy_the_switch_card_is_posted_in_that_turn(
         )
     )
     assert card.action == f"Switch {copy.name} to OpenAI"
-    assert "On OpenAI it won't have " in card.consequence
-    assert "its memory" in card.consequence and "its sandbox" in card.consequence
+    assert card.consequence.startswith("Stops working: "), "one line names what stops working"
+    assert "memory" in card.consequence and "sandbox" in card.consequence, card.consequence
     changed = await _request_agent_backend_switch_impl(
         chat.runtime,
         chat.auth,
@@ -716,7 +716,9 @@ async def test_the_unsaved_work_answer_is_bound_to_the_card(fresh_chat):
     assert "call request_agent_backend_switch again with unsaved_work" in str(asked.value)
     preview = await _switch(chat, copy.name, unsaved_work="leave")
     card = await _card(chat, copy.name, preview, unsaved_work="leave")
-    assert "Uncommitted changes in the repo are left where they are" in (card.consequence or "")
+    assert "Uncommitted changes: left where they are" in (card.consequence or ""), (
+        "the card names the person's own answer"
+    )
     for changed in ("copy", None):
         # Changed or dropped, the answer is bound to its preview: never re-previewed.
         with pytest.raises(ValueError, match="(?i)preview the switch again"):

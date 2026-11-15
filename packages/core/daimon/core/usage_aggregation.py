@@ -24,7 +24,7 @@ def replace_observation(
             if observation != prior:
                 # Provider refresh timestamps may change on a replay. Counts,
                 # attribution and the untouched meter may not change in place.
-                fields = {"observed_at", "native_revision"}
+                fields = {"observed_at", "occurred_at", "native_revision"}
                 if observation.model_dump(exclude=fields) != prior.model_dump(exclude=fields):
                     raise UsageRevisionConflict(observation.id, observation.revision)
             return values

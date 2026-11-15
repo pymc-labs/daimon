@@ -288,7 +288,7 @@ The agent can open web pages. Off removes it here; On never gives more than the 
 
 ## Search the web
 
-The agent can search the web. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message in a conversation.
+The agent can search the web. Off removes it here; On never gives more than the agent's own tool settings allow. Applies from the next message in a conversation. Each search is billed at the provider's list price, past any free allowance.
 
 | | |
 | --- | --- |

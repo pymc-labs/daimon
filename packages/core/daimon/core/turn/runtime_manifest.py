@@ -19,7 +19,7 @@ from daimon.core.caller_resources import CALLER_RESOURCES_ID, CALLER_VAULT_PREFI
 from daimon.core.config import get_repo_memory_settings
 from daimon.core.connector_relay import relay_key
 from daimon.core.errors import DaimonError
-from daimon.core.finer_drops import FINER_DROPS, sandbox_losses
+from daimon.core.finer_drops import FINER_DROPS, kept_environment, sandbox_losses
 from daimon.core.host_web_fetch import WEB_FETCH_TOOL
 from daimon.core.self_helpers import MULTIAGENT, self_roster_extension, translates_self_roster
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
@@ -82,9 +82,9 @@ _RESERVED = ("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_")
 _ROWS = TypeAdapter(list[dict[str, JsonValue]])
 _MAX_BYTES = 1_048_576
 _WILDCARD = "*"
-#: Built-in web tools an agent template never carries off Anthropic: they are named
-#: losses (OpenAI's web_search is unpriced and uncounted; Gemini's grounding is off).
-_WEB_TOOLS = frozenset({"web_search", "web_fetch"})
+#: Built-in web tools an agent template never carries off Anthropic: named losses.
+#: Web search maps to the provider's own search, metered per search.
+_WEB_TOOLS = frozenset({"web_fetch"})
 """Reserved sentinel for 'every value' on `platform`, `channel_id` and
 `account_id` only. Never accepted for `tenant_id` or `profile`: a manifest
 row always authorizes resources for exactly one tenant, so the one hard
@@ -452,6 +452,7 @@ async def _capture_source_capabilities(
     from daimon.core.turn.session_skills import (
         attaches_session_skills,
         carried_skills,
+        environment_inline_bytes,
         fitting_skills,
         measure_carried_skills,
         skill_losses,
@@ -786,14 +787,27 @@ async def _capture_source_capabilities(
             # A template's custom and channel skills, where its provider installs them.
             carried: tuple[SkillRef, ...] = ()
             if template:
+                if request.admission.toolset.builtins.get("web_search") is False:
+                    # A place with `tool.web_search` off leaves it out, as on Claude.
+                    own_tools = tuple(
+                        tool
+                        for tool in own_tools
+                        if not (tool.kind == "builtin" and tool.name == "web_search")
+                    )
                 # A template maps the source's execution tools to the provider's own
                 # (OpenAI bash in its hosted environment, Gemini code_execution): both
                 # are billed as tokens and container time already measured, never per
-                # call. Web tools stay named losses: OpenAI's web_search is unpriced
-                # and uncounted, and Gemini's grounding is off. Custom skills go per
-                # session where the profile installs them, else a whole named loss.
+                # call. Web search maps to the provider's search, metered per search;
+                # one that must ask first, and web_fetch, stay named losses. Custom skills
+                # go per session where the profile installs them, else a whole named loss.
                 web = tuple(
-                    tool for tool in own_tools if tool.kind == "builtin" and tool.name in _WEB_TOOLS
+                    tool
+                    for tool in own_tools
+                    if tool.kind == "builtin"
+                    and (
+                        tool.name in _WEB_TOOLS
+                        or (tool.name == "web_search" and tool.permission != "auto")
+                    )
                 )
                 unavailable_builtin_tools = tuple(
                     f"builtin_tool:{tool.name}"
@@ -967,6 +981,17 @@ async def _capture_source_capabilities(
                     raise ValueError("target skill digest differs from source bytes")
 
             await asyncio.gather(*(verify_skill(item) for item in inputs.skills))
+            # A template's sandbox is set up as the source's environment, as far as
+            # the provider can recreate it (`finer_drops.kept_environment`). An
+            # operator's own OpenAI environment (`environment_id`) serves as it is.
+            kept = (
+                kept_environment(profile.profile_id, source.environment.spec)
+                if template
+                and mapped_tools
+                and source.environment is not None
+                and row.get("environment_id") is None
+                else None
+            )
             session_skills: tuple[SkillRef, ...] = ()
             names: dict[str, str] = {}
             if carried:
@@ -982,7 +1007,9 @@ async def _capture_source_capabilities(
                     )
                 pins, sizes = measured
                 # Unmeasured or over the limits: that skill alone is a named loss.
-                session_skills = fitting_skills(profile, pins, sizes)
+                session_skills = fitting_skills(
+                    profile, pins, sizes, reserved=environment_inline_bytes(profile, kept)
+                )
                 template_losses = (*template_losses, *skill_losses(pins, session_skills))
                 names = skill_names(sizes)
             target = AgentSpec(
@@ -1002,7 +1029,7 @@ async def _capture_source_capabilities(
                     credential_refs=(reference,),
                     unavailable_mcp_tools=unavailable_mcp_tools,
                     unavailable_builtin_tools=unavailable_builtin_tools,
-                    environment=inputs.environment,
+                    environment=kept if template else inputs.environment,
                     unavailable_capabilities=(*template_losses, *connector_losses),
                     session_skills=session_skills,
                     skill_names=names,
@@ -1488,11 +1515,14 @@ def classify_source_obligations(
             missing.add("source_definition")
     # Removing execution is explicit; retaining a source environment requires
     # its complete canonical policy, which native readback must also verify.
-    # Its code runs in the provider's sandbox, which keeps a plain default environment
-    # whole; each setting beyond it (packages, network, files) is a named loss, covered
-    # by a declared `sandbox`.
+    # Its code runs in the provider's sandbox, set up as the representation's
+    # environment; each setting it can't recreate (packages, network, files) is a
+    # named loss, covered by a declared `sandbox`.
     sandbox_parts = (
-        sandbox_losses(source.environment.spec if source.environment is not None else None)
+        sandbox_losses(
+            source.environment.spec if source.environment is not None else None,
+            represented.environment,
+        )
         if represented is not None and represented.provider_execution and not resources
         else ("sandbox",)
     )

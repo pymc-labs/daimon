@@ -44,12 +44,16 @@ from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding, SessionSpec
 from mux.contracts.usage import UsageObservation
+from mux.drivers.gemini import compile_environment
 from mux.errors import BindingConflict, ScopeViolation, UnsupportedCapability
 from mux.profiles.gemini import INLINE_REUSE, SESSION_NAMESPACE
 from mux.state.lease import Slot
+from mux.state.operations import request_digest
 from mux.state.store import ERA_REF, StateStore, adopted_identity
 
 log = structlog.get_logger(__name__)
+SETUP_REF = "environment_setup"
+"""Native ref: the digest of the sandbox setup a session was created with."""
 
 
 async def prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedTurn:
@@ -205,6 +209,17 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             account_id=scope.account_id,
         )
 
+    # A session keeps the sandbox it was created with, so a changed setup (a
+    # template's carried environment) replaces it. A bare one records nothing,
+    # which keeps every session created before setups were carried.
+    # A model interaction (an output cap) has no sandbox to set up.
+    compiled = (
+        {}
+        if deployment.max_output_tokens is not None
+        else compile_environment(deployment.environment)
+    )
+    setup = "" if compiled in ({}, {"type": "remote", "sources": []}) else request_digest(compiled)
+
     async def created(era: str) -> ProviderBinding:
         agent = deployment.native_agent
         if agent is None:
@@ -256,7 +271,11 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         return session.binding.model_copy(
             update={
                 "legacy_account_id": None if shared is not None else scope.account_id,
-                "native_refs": {**session.binding.native_refs, **({ERA_REF: era} if era else {})},
+                "native_refs": {
+                    **session.binding.native_refs,
+                    **({ERA_REF: era} if era else {}),
+                    **({SETUP_REF: setup} if setup else {}),
+                },
             }
         )
 
@@ -264,7 +283,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         None
         if prior is None
         else binding_decision(
-            recorded_facts(prior),
+            replace(recorded_facts(prior), environment=prior.native_refs.get(SETUP_REF, "")),
             # Gemini records no model, plan or scope ref: those follow config_revision.
             BindingFacts(
                 profile=PROFILE,
@@ -278,6 +297,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
                 account_scope="",
                 model="",
                 plan_digest="",
+                environment=setup,
             ),
             reuse_existing=request.reuse_existing and request.transfer is None,
         )
@@ -403,17 +423,20 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
 def _warn_on_grounding(
     observation: UsageObservation, *, tenant_id: object, binding_id: str
 ) -> None:
-    """Grounding (search) calls carry a per-query price no tariff or daily cap counts.
+    """Grounding other than search carries a per-query price no tariff or daily cap counts.
 
-    Agent requests never offer them, so any count here is a leak to look at. The
-    usage reports them as a list of `{type, count}` (google-genai `GroundingToolCount`).
+    Search is metered as web searches; agent requests offer no other grounding,
+    so any other count is a leak to look at. The usage reports them as a list of
+    `{type, count}` (google-genai `GroundingToolCount`).
     """
     raw = observation.native_meter.get("grounding_tool_count")
     entries = [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
     counts = {
         str(item.get("type")): count
         for item in entries
-        if isinstance(count := item.get("count"), int) and not isinstance(count, bool)
+        if isinstance(count := item.get("count"), int)
+        and not isinstance(count, bool)
+        and item.get("type") != "google_search"
     }
     total = sum(counts.values())
     if total > 0:

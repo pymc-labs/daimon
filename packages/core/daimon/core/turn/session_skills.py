@@ -40,7 +40,7 @@ from daimon.core.turn.agent_notices import missing_skills_notice
 from mux.contracts.ids import ResourceRef, Scope, SkillRef
 from mux.contracts.ports import Skills
 from mux.contracts.profile import Profile
-from mux.contracts.resources import Agent, AgentSpec, SkillUpload, SkillUploadFile
+from mux.contracts.resources import Agent, AgentSpec, EnvironmentSpec, SkillUpload, SkillUploadFile
 from mux.errors import MuxError, ProviderError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -83,14 +83,23 @@ def skill_names(sizes: Mapping[tuple[str, str], SkillSizeRow]) -> dict[str, str]
 
 
 def fitting_skills(
-    profile: Profile, pins: Sequence[SkillRef], sizes: Mapping[tuple[str, str], SkillSizeRow]
+    profile: Profile,
+    pins: Sequence[SkillRef],
+    sizes: Mapping[tuple[str, str], SkillSizeRow],
+    *,
+    reserved: int = 0,
 ) -> tuple[SkillRef, ...]:
     """The measured pins the profile installs, in order, together within `combined_bytes`.
 
-    The skills get all of it: a deployment that installs them mounts no other
-    inline files (`GeminiPlan.deployment` and admission refuse file sources).
+    `reserved` is what the environment's own inline files (Gemini's package hook)
+    already spend of that budget; the skills get the rest.
     """
-    combined = profile.skill_limits.combined_bytes if profile.skill_limits else None
+    limits = profile.skill_limits
+    combined = (
+        limits.combined_bytes - reserved
+        if limits is not None and limits.combined_bytes is not None
+        else None
+    )
     kept: list[SkillRef] = []
     used = 0
     for pin in pins:
@@ -102,6 +111,19 @@ def fitting_skills(
         used += row.total_bytes
         kept.append(pin)
     return tuple(kept)
+
+
+def environment_inline_bytes(profile: Profile, environment: EnvironmentSpec | None) -> int:
+    """What `environment`'s own inline files spend of the budget skills share with them.
+
+    Only Gemini mounts both inline into one environment (`validate_targets`).
+    """
+    from mux.drivers.gemini import compile_environment, inline_bytes
+    from mux.profiles import INLINE_REUSE
+
+    if environment is None or profile.profile_id != INLINE_REUSE.profile_id:
+        return 0
+    return inline_bytes(compile_environment(environment))
 
 
 def skill_losses(pins: Sequence[SkillRef], kept: Sequence[SkillRef]) -> tuple[str, ...]:

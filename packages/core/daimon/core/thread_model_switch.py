@@ -1,17 +1,17 @@
-"""Pick one conversation's model on any provider: see what changes, confirm once.
+"""Pick one conversation's model on any provider; it applies, or asks once first.
 
-Discord `/model` and the MCP `set_thread_model` tool share these. A pick on the agent's
-own Claude needs nothing more (`choose_thread_model`). Any other pick is previewed like
-an agent switch, and confirming stores this agent's consent with the conversation, which
-`thread_backend` reads on the next turn. A pick off the agent's provider also needs the
-agent's `thread_providers` feature on, or its owner or an admin.
+Every chat's thread pick and the MCP `set_thread_model` tool share these. Any pick is
+previewed like an agent switch (`pick_thread_or_card`): one that loses nothing is kept at
+once, one that does shows the short card. Keeping it stores this agent's consent with the
+conversation, which `thread_backend` reads on the next turn. A pick off the agent's
+provider also needs the agent's `thread_providers` feature on, or its owner or an admin.
 """
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
 from daimon.core.agent_editing import AgentEditError
 from daimon.core.agent_model_names import AmbiguousModel, model_name
@@ -44,9 +44,6 @@ if TYPE_CHECKING:
     from daimon.core.scope import DeploymentDefault
     from daimon.core.stores.domain import BackendAgent, Platform
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-#: The preview's scope line: a conversation's pick changes nothing else.
-APPLIES_TO: Final = "this conversation"
 
 
 @dataclass(frozen=True)
@@ -130,9 +127,36 @@ async def preview_thread_or_refusal(
     except (AgentBackendRefused, BackendUnsupported, AgentEditError) as error:
         return refusal_of(error, admin=admin)
     except AmbiguousModel:
-        return SwitchRefusal(
-            f"{value} could mean more than one model. Pick one from the list.", None, "ambiguous"
+        return _ambiguous(value)
+
+
+def _ambiguous(value: str) -> SwitchRefusal:
+    return SwitchRefusal(
+        f"{value} could mean more than one model. Pick one from the list.", None, "ambiguous"
+    )
+
+
+async def pick_thread_or_card(
+    pick: ThreadPick, value: str, *, thread_id: str, admin: bool
+) -> ThreadModelChange | ModelSwitchPreview | SwitchRefusal:
+    """A conversation's pick: kept at once when nothing stops working, else the card to show."""
+    try:
+        shown = await preview_thread_model(pick, value)
+        return (
+            shown if await thread_asks_first(pick, shown) else await _keep(pick, shown, thread_id)
         )
+    except (AgentBackendRefused, BackendUnsupported, AgentEditError) as error:
+        return refusal_of(error, admin=admin)
+    except AmbiguousModel:
+        return _ambiguous(value)
+
+
+async def thread_asks_first(pick: ThreadPick, shown: ModelSwitchPreview) -> bool:
+    """Whether a conversation's pick shows the card: something stops working, or it leaves
+    the agent's provider for someone who may not edit the agent."""
+    return shown.asks_first or not (
+        shown.model.provider == shown.before or await pick.service.may_edit(pick.agent, pick.actor)
+    )
 
 
 async def confirm_thread_or_refusal(
@@ -204,6 +228,11 @@ async def confirm_thread_model(
     shown = await preview_thread_model(pick, value)
     if shown.digest != digest or shown.revision != revision:
         raise AgentBackendRefused("stale_preview", provider=shown.model.provider)
+    return await _keep(pick, shown, thread_id)
+
+
+async def _keep(pick: ThreadPick, shown: ModelSwitchPreview, thread_id: str) -> ThreadModelChange:
+    """Store `shown` for the conversation, its declared losses accepted."""
     consent = None
     if shown.preview is not None:
         if not shown.allowed:

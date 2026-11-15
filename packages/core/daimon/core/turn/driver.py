@@ -126,6 +126,7 @@ from daimon.core.turn.termination import (
     termination_reason,
 )
 from daimon.core.usage_billing import ObservationBilled
+from daimon.core.usage_recording import web_search_call
 from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
@@ -1831,7 +1832,7 @@ def _reasked_after_result(events: Sequence[object], pending_ids: set[str]) -> bo
 
 
 async def _bill_once(billing: BillingPosture, event: object, billed_event_ids: set[str]) -> None:
-    """Meter one `span.model_request_end` through the turn's recorder, once.
+    """Meter one `span.model_request_end` or web search through the turn's recorder, once.
 
     `billed_event_ids` is per turn and shared across stream generations and
     replays, so a call is billed exactly once whether the driver first sees
@@ -1853,6 +1854,15 @@ async def _bill_once(billing: BillingPosture, event: object, billed_event_ids: s
         billed_event_ids.add(key)
         return
     if not isinstance(event, BetaManagedAgentsSpanModelRequestEndEvent):
+        # Claude spans carry no search count, so each search bills by its tool events.
+        if (
+            isinstance(billing, Billed)
+            and (search := web_search_call(event, billed_event_ids)) is not None
+        ):
+            key = f"web_search:{search.id}"
+            if key not in billed_event_ids:
+                await billing.record(event=search)
+                billed_event_ids.add(key)
         return
     if isinstance(billing, ObservationBilled):
         raise ValueError("alternate-provider billing cannot consume a synthetic Anthropic meter")

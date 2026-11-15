@@ -357,4 +357,5 @@ class ManagedLongJobPort:
             job.worker_session_id,
             record=await self.recorder(job),
             scope=self.scope(job),
+            streamed=True,
         )

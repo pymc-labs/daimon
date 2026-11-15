@@ -1,7 +1,7 @@
 """Ask again in a thread, once, when an agent edit leaves its model consent stale.
 
 The card is posted off the turn (`daimon.core.thread_model_reask`), maybe by an earlier
-process, so its Confirm is a persistent button. The custom_id holds the shown revision and
+process, so its Switch is a persistent button. The custom_id holds the shown revision and
 digest only; the pick is the thread's stored choice and the click is decided for the
 clicker's live rights, so a replayed custom_id can only confirm what the clicker could pick.
 
@@ -21,6 +21,7 @@ from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.stores.thread_models import get_thread_choice
+from daimon.core.switch_card import SWITCH_LABEL
 from daimon.core.thread_model_flow import NOTHING_CHANGED, ThreadConfirm, confirm_thread_pick
 from daimon.core.thread_model_reask import ThreadReask, ThreadReaskNotifier
 from daimon.core.turn.deps import TurnDeps
@@ -32,7 +33,6 @@ _log = structlog.get_logger()
 
 CUSTOM_ID_TEMPLATE: Final[str] = r"tmr:(?P<revision>[0-9]{1,18}):(?P<digest>[0-9a-f]{64})"
 _TITLE = "Model for this conversation"
-_PROMPT = "Confirm to switch this conversation."
 _NOT_ALLOWED = "Only people who can start a conversation here can change its model."
 _FAILED = "Something went wrong switching this conversation -- please try again."
 
@@ -44,12 +44,12 @@ def build_custom_id(confirm: ThreadConfirm) -> str:
 class ReaskConfirmButton(
     discord.ui.DynamicItem[discord.ui.Button[discord.ui.View]], template=CUSTOM_ID_TEMPLATE
 ):
-    """Persistent Confirm reconstructed from its custom_id; registered in `setup_hook`."""
+    """Persistent Switch reconstructed from its custom_id; registered in `setup_hook`."""
 
     def __init__(self, *, revision: int, digest: str) -> None:
         button: discord.ui.Button[discord.ui.View] = discord.ui.Button(
             style=discord.ButtonStyle.primary,
-            label="Confirm",
+            label=SWITCH_LABEL,
             custom_id=f"tmr:{revision}:{digest}",
         )
         super().__init__(button)
@@ -110,12 +110,12 @@ async def _reply(interaction: discord.Interaction[commands.Bot], text: str) -> N
 
 
 def reask_message(ask: ThreadReask) -> tuple[discord.Embed, discord.ui.View | None]:
-    """The card, with its Confirm when the pick can still be confirmed."""
+    """The card, with its Switch when the pick can still be confirmed."""
     if ask.confirm is None:
         return build_notice_embed("\n".join(ask.lines), title=_TITLE, neutral=True), None
     view = discord.ui.View(timeout=None)
     view.add_item(ReaskConfirmButton(revision=ask.confirm.revision, digest=ask.confirm.digest))
-    card = build_notice_embed("\n".join((*ask.lines, _PROMPT)), title=_TITLE, neutral=True)
+    card = build_notice_embed("\n".join(ask.lines), title=_TITLE, neutral=True)
     return card, view
 
 

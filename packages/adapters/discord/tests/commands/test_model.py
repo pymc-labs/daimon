@@ -158,7 +158,8 @@ def _cross_provider_preview() -> ModelSwitchPreview:
         unsupported_capabilities=(),
         shared_thread_limits=(),
         cost_line="About 2x the cost.",
-        declared_drops=("Research",),
+        declared_drops=("memory",),
+        skill_names={},
     )
     return ModelSwitchPreview(
         model=ModelRef(provider="openai", id="gpt-5"),
@@ -179,12 +180,13 @@ def _with_selection(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_a_cross_provider_pick_shows_what_changes_then_confirms_once(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A pick that loses something shows the short card; Switch keeps the shown preview."""
     guild_id = 720000004
     await _registered_guild(db_session_factory, guild_id)
     runtime = _runtime(db_session_factory)
     _with_selection(monkeypatch)
     shown = _cross_provider_preview()
-    monkeypatch.setattr(model_command, "preview_thread_or_refusal", AsyncMock(return_value=shown))
+    monkeypatch.setattr(model_command, "pick_thread_or_card", AsyncMock(return_value=shown))
     confirmed = AsyncMock(return_value=ThreadModelChange(model_id="gpt-5", note="Now on GPT-5."))
     monkeypatch.setattr(model_command, "confirm_thread_or_refusal", confirmed)
     interaction = _interaction(runtime, guild_id=guild_id)
@@ -193,12 +195,13 @@ async def test_a_cross_provider_pick_shows_what_changes_then_confirms_once(
     await cog.model.callback(cog, interaction, "openai:gpt-5")  # pyright: ignore[reportArgumentType, reportCallIssue]
 
     sent = interaction.edit_original_response.call_args.kwargs
-    assert "Model: GPT-5" in sent["content"]
-    assert "Unsupported skills: Research" in sent["content"]
-    assert "Applies to: this conversation" in sent["content"]
+    assert sent["content"] == "Switch this conversation to GPT-5?\nStops working: memory", (
+        "the title and one line for what stops working"
+    )
     confirmed.assert_not_awaited()
     view = sent["view"]
-    assert view.confirm.disabled is False
+    assert view.confirm.disabled is False, "Switch is offered"
+    assert [b.label for b in view.children] == ["Cancel", "Switch"], "Switch is rightmost"
 
     click = MagicMock()
     click.response.defer = AsyncMock()
@@ -218,7 +221,7 @@ async def test_a_refused_pick_says_why_and_offers_no_confirm(
     runtime = _runtime(db_session_factory)
     _with_selection(monkeypatch)
     refusal = SwitchRefusal("Ask the agent's owner or an admin to move it.", None, "owner")
-    monkeypatch.setattr(model_command, "preview_thread_or_refusal", AsyncMock(return_value=refusal))
+    monkeypatch.setattr(model_command, "pick_thread_or_card", AsyncMock(return_value=refusal))
     interaction = _interaction(runtime, guild_id=guild_id)
 
     cog = ModelCog(MagicMock())

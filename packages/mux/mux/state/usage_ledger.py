@@ -83,7 +83,10 @@ def apply_observation(
     as a higher revision.
     """
     if prior is not None and observation.revision == prior.revision:
-        if any(getattr(observation, f) != getattr(prior.observation, f) for f in TOKEN_FIELDS):
+        if any(
+            getattr(observation, f) != getattr(prior.observation, f)
+            for f in (*TOKEN_FIELDS, "web_searches")
+        ):
             raise UsageRevisionConflict(observation.id, observation.revision)
         return None
     if prior is not None and observation.revision < prior.revision:

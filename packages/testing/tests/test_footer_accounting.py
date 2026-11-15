@@ -179,7 +179,7 @@ def normalize(
         observation = observation_from_interaction(
             {
                 "id": ROOT,
-                "updated": f"native-version-{revision}",
+                "updated": f"2026-10-10T00:00:0{revision}Z",
                 "usageMetadata": {
                     "promptTokenCount": incoming,
                     "cachedContentTokenCount": 0,

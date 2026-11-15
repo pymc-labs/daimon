@@ -19,7 +19,7 @@ in one conversation.
 | Multi-agent delegation | Yes | Copies of itself | Copies of itself | Copies of itself |
 | Memory across replies | Yes | Through Daimon, needs an Anthropic key | Through Daimon, needs an Anthropic key | Not supported |
 | Web fetch | Yes | Through Daimon | Through Daimon | Through Daimon |
-| Web search | Yes | Not supported | Not supported | Not supported |
+| Web search | Yes | Yes | Yes, through Google Search | Not supported |
 | Output files | Yes | Yes | Yes | Yes, from harness 0.2.0 |
 | Reasoning effort | Yes | Low, medium, high | Agents take none | Not supported |
 | Spend limit for one reply | Yes | Daimon stops the reply | Holds only, no stop mid-turn | Not supported |
@@ -34,15 +34,15 @@ provider, a routine and an unattended turn refuse instead.
 
 ### What is not supported yet
 
-- **Gemini:** web search, and stopping a turn at a spend limit.
-- **OpenAI:** web search, which it neither prices nor counts.
+- **Gemini:** stopping a turn at a spend limit.
 - **Self-hosted:** memory, routines, effort and a
   spend limit, workspace export and import. An agent can pick it only with
   its own runtime file row (`daimon selfhosted init --agent`).
 - **OpenAI and Gemini:** an agent with an `ask` rule or a
   channel-scoped `deny` on a Daimon tool is refused, and so is workspace export
   and import. A connector that OpenAI's size limit cannot hold, or whose tool
-  names clash with Gemini's own, is named on the switch card as a loss.
+  names clash with Gemini's own, is named on the switch card as a loss, and so
+  is a web search that must ask first.
 - **Without an Anthropic key:** memory.
 
 ## Route channels to a backend
@@ -77,8 +77,9 @@ stop.
 Picking a model on another provider is the switch. `/model` on Discord, the
 Model shortcut on Slack, the `model` command on Teams, the web model editor and
 chat header, and the agent panels all list every model your install can run with
-its price. A pick shows what the move drops, the shared-thread limits, the cost
-and what happens to threads, then asks once. Confirming accepts those losses.
+its price. A pick that loses nothing applies at once. A pick that loses
+something, or meets a shared-thread limit, shows a card naming it, and
+**Switch** accepts those losses.
 Earlier messages carry over, and so do saved files where the new provider keeps
 a workspace. A refusal names its cause and changes nothing.
 
@@ -87,7 +88,7 @@ Picking a model for one conversation, in chat or with the MCP tool
 agent's owner or an admin may do it, unless the `thread_providers` feature is
 on. It is off by default and lets anyone who may change a conversation's model
 do it. After an admin edits the agent, the next message in that conversation
-asks once more.
+checks the pick again, and asks only if something stops working.
 
 An admin can **Switch back to Claude** from a refused reply, a switch card or
 a panel, when the install has an Anthropic key. MCP tools and the CLI take

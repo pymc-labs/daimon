@@ -3,7 +3,7 @@ import { TriangleAlert } from "lucide-react"
 import { cn } from "@/lib/utils"
 import type { ModelPreview } from "./types"
 
-/** What a model pick drops, limits and costs, and what happens to threads. */
+/** The switch card's lines (what stops working, any shared-thread limit), or why the pick can't go ahead. */
 export function ModelPreviewPanel({ preview, className }: { preview: ModelPreview; className?: string }) {
   if (preview.refusal) {
     return (
@@ -12,21 +12,10 @@ export function ModelPreviewPanel({ preview, className }: { preview: ModelPrevie
       </div>
     )
   }
-  if (!preview.moves) return null
-  const rows: [string, string[]][] = [
-    ["Stops working", preview.lost.map((w) => w.charAt(0).toUpperCase() + w.slice(1))],
-    ["Shared threads", preview.shared_limits],
-    ["Cost", preview.cost ? [preview.cost] : []],
-    ["Threads", preview.threads ? [preview.threads] : []],
-  ]
+  if (!preview.card || !preview.lines.length) return null
   return (
-    <div className={cn("space-y-2.5 rounded-lg border bg-muted/40 px-3 py-3 text-sm", className)}>
-      {rows.filter(([, v]) => v.length).map(([label, items]) => (
-        <div key={label} className="grid grid-cols-[104px_1fr] gap-3">
-          <span className="text-muted-foreground">{label}</span>
-          <ul className="space-y-0.5">{items.map((i) => <li key={i}>{i}</li>)}</ul>
-        </div>
-      ))}
-    </div>
+    <ul className={cn("space-y-1 rounded-lg border bg-muted/40 px-3 py-2.5 text-sm", className)}>
+      {preview.lines.map((line) => <li key={line}>{line}</li>)}
+    </ul>
   )
 }

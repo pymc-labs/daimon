@@ -131,6 +131,7 @@ class Wire:
         self.delay_stop = False
         self.foreign_usage = False
         self.eof = False
+        self.cancelled = False
 
     def event(self, suffix, id_, **fields):
         return {
@@ -156,6 +157,7 @@ class Wire:
             body = json.loads(request.content)
             if body["events"][0]["type"] == "agent.session.input.cancel":
                 self.running = False
+                self.cancelled = True
             else:
                 assert body == {
                     "events": [
@@ -192,6 +194,11 @@ class Wire:
                     "metadata": {"mux_tenant": "tenant"},
                 },
             )
+        if path.endswith("/turns/root") and not self.cancelled:
+            known = [value for value in self.turns if value["id"] == "root"]
+            if self.foreign_usage:
+                known = [{**turn("root"), "session_id": "foreign"}]
+            return httpx.Response(200, json=known[-1]) if known else httpx.Response(404, json={})
         if path.endswith("/turns/root"):
             self.waits += 1
             return httpx.Response(
@@ -577,16 +584,19 @@ async def test_usage_is_priced_without_cache_writes_and_the_latest_revision_wins
 
 
 @pytest.mark.asyncio
-async def test_usage_poll_when_thread_is_long_then_reads_only_the_newest_page(host):
-    """The guard's poll stops at the root turn, so a long thread cannot time it out."""
+async def test_usage_poll_when_thread_is_long_then_reads_only_the_root_turn(host):
+    """The guard's poll reads the root turn alone, so no other turn can time it out or fail it."""
     _, backend, wire, persistence = host
     wire.turns = [turn(f"old-{index}") for index in range(600)] + [turn("root")]
     io = OpenAITurnIO(backend, SCOPE, SESSION, persistence=persistence, root_turn_id="root")
     before = len(wire.requests)
     usage = await io.replay_usage()
     assert [value.turn_id for value in usage] == ["root"], usage
-    listed = [r for r in wire.requests[before:] if r.url.path.endswith("/turns")]
-    assert len(listed) == 1, f"one page should do, read {len(listed)}"
+    read = [r.url.path.removeprefix("/v1") for r in wire.requests[before:]]
+    assert read == [
+        "/agents/sessions/session/turns/root",
+        "/agents/sessions/session/turns/root/items",
+    ], read
 
 
 def _observation(input_tokens: int, output_tokens: int):

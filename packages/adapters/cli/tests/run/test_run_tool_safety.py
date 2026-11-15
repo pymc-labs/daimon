@@ -491,3 +491,47 @@ async def test_every_mcp_call_of_an_operator_run_pauses_for_the_decider(
     assert toolset["configs"]
     assert all(c["permission_policy"] == {"type": "always_ask"} for c in toolset["configs"])
     assert _confirmations(session) == ["allow"]
+
+
+def _search_toolset(*, on: bool) -> dict[str, Any]:
+    return {
+        "type": "agent_toolset_20260401",
+        "default_config": {"enabled": False, "permission_policy": {"type": "always_allow"}},
+        "configs": [
+            {
+                "name": "web_search",
+                "enabled": on,
+                "permission_policy": {"type": "always_allow"},
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize("search", [True, False])
+async def test_daimon_run_sends_no_sources_rule_because_the_gate_closes_search(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    search: bool,
+) -> None:
+    """`daimon run` cannot search: its unattended entry point disables built-ins, web
+    search included, so the session it sends to has none and gets no sources rule.
+    The prefix is decided from that gated session, so it follows the policy if it opens.
+    """
+    session = _Session([_search_toolset(on=search)], [])
+    await _run(
+        monkeypatch,
+        db_session_factory,
+        session,
+        _events_end(),
+        ToolSafetyPolicy(enabled=False),
+    )
+    sent = [e["content"][0]["text"] for kind, e in session.wire if kind == "user.message"]
+    assert sent == ["file it"], "the gated session gets the operator's message alone"
+
+
+def _events_end() -> list[dict[str, Any]]:
+    return [
+        {"id": "evt_msg", "type": "agent.message", "content": [{"type": "text", "text": "ok"}]},
+        {"id": "evt_end", "type": "session.status_idle", "stop_reason": {"type": "end_turn"}},
+    ]

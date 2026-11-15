@@ -74,6 +74,9 @@ async def test_a_provider_apply_needs_the_consent_its_preview_asks_for(
         after = (await client.get("/api/agents/ag_w")).json()["model"]
     assert preview["moves"] and preview["allowed"], "the preview says the move is allowed"
     assert preview["drops"], "the preview lists what the other provider drops"
+    assert preview["card"], "a switch that loses something shows the card"
+    assert preview["title"].startswith("Switch "), preview["title"]
+    assert preview["lines"][0].startswith("Stops working: "), preview["lines"]
     assert bare.status_code == 422, "drops not accepted refuse the apply"
     assert stale.status_code == 409, "a preview that moved since refuses the apply"
     assert shown.status_code == 200, shown.text

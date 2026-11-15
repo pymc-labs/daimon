@@ -148,7 +148,7 @@ def requested_call_card(row: HostCallCardRow) -> PostedCard:
             CardButton(
                 label="Approve", style="primary", custom_id=card_custom_id(row.id, "approve")
             ),
-            CardButton(label="Deny", style="primary", custom_id=card_custom_id(row.id, "deny")),
+            CardButton(label="Deny", style="secondary", custom_id=card_custom_id(row.id, "deny")),
         ),
         footer=FOOTER,
         requester_platform_user_id=row.requester_platform_user_id,

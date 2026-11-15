@@ -599,12 +599,9 @@ async def test_confirming_the_previewed_losses_applies_once_with_revision_and_au
     data = tool_call(target, preview, list(preview.declared_drops))
 
     text = await card.post(prompt_for(chat, data))
-    from daimon.core.confirmation import drop_words
-    from daimon.core.turn.notices import provider_name
+    from daimon.core.switch_card import loss_words
 
-    losses = f"On {provider_name(target)} it won't have {drop_words(DROPS)}"
-    assert losses in text, text
-    assert "Nothing is deleted; switch back any time." in text
+    assert f"Stops working: {loss_words(DROPS)}" in text, text
 
     assert await card.click(REQUESTER[chat.platform]) is None
     assert isinstance(await card.answer(), ApprovedConfirmation)
@@ -698,12 +695,12 @@ async def test_a_change_after_the_preview_posts_one_card_with_the_fresh_preview(
     data = tool_call(target, preview, list(preview.declared_drops))
     # Web search is turned off after the preview: the agent's setup moved.
     _web_search_off(chat)
-    from daimon.core.confirmation import drop_words
+    from daimon.core.switch_card import loss_words
 
     fresh = await chat.tool(target)
     assert fresh.declared_drops == (*DROPS, "tools") != preview.declared_drops
     text = await card.post(prompt_for(chat, data))
-    assert f"won't have {drop_words(fresh.declared_drops)}" in text, text
+    assert f"Stops working: {loss_words(fresh.declared_drops)}" in text, text
     assert await card.click(REQUESTER[chat.platform]) is None
     assert isinstance(await card.answer(), ApprovedConfirmation)
     changed = await apply(chat, data)
@@ -854,7 +851,7 @@ async def test_a_card_changed_after_prepare_is_refused_on_click(
     target = TARGET
     preview = await chat.tool(target)
     data = tool_call(target, preview, list(preview.declared_drops))
-    assert "it won't have" in await card.post(prompt_for(chat, data))
+    assert "Stops working: " in await card.post(prompt_for(chat, data)), "the card names the losses"
     if change == "drop_list":
         card.tamper(accepted_drops=DROPS[:1])
     elif change == "digest":

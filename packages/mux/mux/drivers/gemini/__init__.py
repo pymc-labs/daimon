@@ -37,6 +37,7 @@ from mux.drivers.gemini.flash import (
     FlashTransport,
 )
 from mux.drivers.gemini.mcp_auth import GCSSecretResolver, MCPSecretResolver, native_server_name
+from mux.drivers.gemini.packages import inline_bytes, package_sources
 from mux.drivers.gemini.resources import GeminiArtifacts, GeminiSkills
 from mux.drivers.gemini.skill_deployment import (
     GCSBundleDeployment,
@@ -196,6 +197,8 @@ __all__ = [
     "Transport",
     "compile_agent",
     "compile_environment",
+    "inline_bytes",
+    "package_sources",
     "configured_catalog_transport",
     "configured_completions",
     "configured_transport",

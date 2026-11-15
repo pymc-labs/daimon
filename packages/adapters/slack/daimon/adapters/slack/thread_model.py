@@ -1,8 +1,8 @@
-"""Slack's model choice for one thread: a message shortcut, a select, one Confirm.
+"""Slack's model choice for one thread: a message shortcut, a select, at most one card.
 
 Slash commands carry no thread, so the thread level is a shortcut on a message in the
-thread. The select lists the agent's catalog with prices; a pick that changes provider shows
-what changes and asks once. The same card is posted in the thread when an agent edit leaves
+thread. The select lists the agent's catalog with prices; a pick that loses something
+names it and asks once. The same card is posted in the thread when an agent edit leaves
 the thread's consent stale (`daimon.core.thread_model_reask`). The shared flow is
 `daimon.core.thread_model_flow`; the person, channel and thread come from Slack's signed
 envelope, and every click is checked again.
@@ -22,6 +22,7 @@ from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.switch_card import CANCEL_LABEL, SWITCH_LABEL
 from daimon.core.thread_model_flow import (
     NOTHING_CHANGED,
     ThreadConfirm,
@@ -54,7 +55,6 @@ _PICK_PLACEHOLDER: Final = "Model"
 _NOT_ALLOWED: Final = "You can't change the model here. Ask an admin or an owner."
 _NOT_IN_THREAD: Final = "Open this on a message in a conversation with Daimon."
 _FAILED: Final = "That didn't work. Try again."
-_CONFIRM_PROMPT: Final = "Confirm to switch this conversation."
 
 
 def _text(text: str) -> dict[str, Any]:
@@ -96,27 +96,32 @@ def _read_confirm(raw: str) -> tuple[ThreadConfirm, str] | None:
         return None
 
 
+def _card_text(lines: tuple[str, ...]) -> dict[str, Any]:
+    """The card's title in bold, its facts under it."""
+    return _text("\n".join((f"*{lines[0]}*", *lines[1:])) if lines else "")
+
+
 def confirm_blocks(
     lines: tuple[str, ...], confirm: ThreadConfirm, conversation_id: str
 ) -> list[dict[str, Any]]:
-    """What a pick changes, with Confirm and Cancel."""
+    """The card for a pick that loses something, with Cancel and Switch."""
     buttons: list[dict[str, Any]] = [
+        {
+            "type": "button",
+            "action_id": CANCEL_ACTION_ID,
+            "text": {"type": "plain_text", "text": CANCEL_LABEL},
+            "value": "cancel",
+        },
         {
             "type": "button",
             "action_id": CONFIRM_ACTION_ID,
             "style": "primary",
-            "text": {"type": "plain_text", "text": "Confirm"},
+            "text": {"type": "plain_text", "text": SWITCH_LABEL},
             "value": _confirm_value(confirm, conversation_id),
-        },
-        {
-            "type": "button",
-            "action_id": CANCEL_ACTION_ID,
-            "text": {"type": "plain_text", "text": "Cancel"},
-            "value": "cancel",
         },
     ]
     return [
-        _text("\n".join((f"*{_TITLE}*", *lines, _CONFIRM_PROMPT))),
+        _card_text(lines),
         {"type": "actions", "block_id": f"{_BLOCK_PREFIX}confirm", "elements": buttons},
     ]
 
@@ -214,7 +219,7 @@ async def handle_thread_model_shortcut(runtime: SlackRuntime, payload: dict[str,
 
 
 async def handle_thread_model_pick(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
-    """A pick from the select: kept when it needs no consent, else previewed for one Confirm."""
+    """A pick from the select: kept when it loses nothing, else the card that asks once."""
     team_id, user_id, channel_id = _ids(payload)
     element = cast("list[dict[str, Any]]", payload.get("actions") or [{}])[0]
     choice = str(cast("dict[str, Any]", element.get("selected_option") or {}).get("value") or "")
@@ -279,7 +284,7 @@ async def handle_thread_model_pick(runtime: SlackRuntime, payload: dict[str, Any
 
 
 async def handle_thread_model_confirm(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
-    """Confirm: the pick is kept only if it still matches what was shown."""
+    """Switch: the pick is kept only if it still matches what was shown."""
     team_id, user_id, channel_id = _ids(payload)
     element = cast("list[dict[str, Any]]", payload.get("actions") or [{}])[0]
     read = _read_confirm(str(element.get("value") or ""))
@@ -342,7 +347,7 @@ def slack_thread_reask_notifier(runtime: SlackRuntime) -> ThreadReaskNotifier:
         if client is None:
             raise RuntimeError("no slack client for the workspace")
         if ask.confirm is None:
-            blocks = [_text("\n".join((f"*{_TITLE}*", *ask.lines)))]
+            blocks = [_card_text(ask.lines)]
         else:
             blocks = confirm_blocks(ask.lines, ask.confirm, ask.conversation_id)
         fields: dict[str, Any] = notice_fields(_TITLE, neutral=True, blocks=blocks)

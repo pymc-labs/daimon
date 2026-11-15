@@ -84,7 +84,7 @@ def build_adaptive_card(card: PostedCard, *, token: str | None = None) -> dict[s
     # Title, body, buttons and footer each sit apart, a blank line's gap between.
     body += [_text(fact, isSubtle=True, spacing="Medium") for fact in card.facts]
     actions: list[dict[str, object]] = []
-    for index, button in enumerate(card.buttons):
+    for button in card.buttons:
         if button.url is not None:
             actions.append({"type": "Action.OpenUrl", "title": button.label, "url": button.url})
             continue
@@ -95,7 +95,7 @@ def build_adaptive_card(card: PostedCard, *, token: str | None = None) -> dict[s
                 "verb": CONTROL_VERB,
                 "data": {"action": CONTROL_VERB, "custom_id": button.custom_id},
             }
-            if index == 0:
+            if button.style == "primary":
                 execute["style"] = "positive"
             actions.append(execute)
             continue

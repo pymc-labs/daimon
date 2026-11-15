@@ -231,9 +231,8 @@ async def test_server_preview_and_current_admin_are_the_only_card_authority(owne
     assert prepared.expires_at == prompt.expires_at
     assert prepared.admin
     preview = await service.preview(agent, "openai")
-    assert prepared.detail_lines[-1] == preview.cost_line
-    assert "worst case per reply: unknown" in prepared.detail_lines[-1].lower()
-    assert prepared.detail_lines[0].startswith("Unsupported skills: ")
+    assert preview.cost_line not in prepared.detail_lines, "the price stays off the card"
+    assert not any("Unsupported" in line for line in prepared.detail_lines), "no category labels"
     trace.queue(reply())
     assert await check(prepared, "requester") is None
     assert admin.await_count == 2
@@ -897,9 +896,10 @@ def test_switch_prompt_carries_an_optional_model() -> None:
 @pytest.mark.parametrize(
     ("default_agent", "place"), [(False, "server"), (True, "server"), (True, "workspace")]
 )
-async def test_card_names_the_model_and_where_the_switch_applies(
+async def test_card_names_the_model_and_only_what_stops_working(
     owned_preview, default_agent, place
 ):
+    """The short card: its title, and a fact line only when something stops working."""
     from unittest.mock import AsyncMock
 
     from daimon.core.confirmation import backend_switch_callbacks
@@ -934,21 +934,9 @@ async def test_card_names_the_model_and_where_the_switch_applies(
     )
     trace.queue(reply())
     prepared = await prepare(prompt)
-    assert prepared.title == "Switch Researcher to Gemini 4 Argon?"
-    assert prepared.consequence is not None
-    reach = (
-        f"Affects new conversations for everyone on this {place}"
-        if default_agent
-        else "Affects new conversations wherever Researcher answers"
-    )
-    # A switch moves each person's own conversation on their next message (#1495);
-    # never "existing threads keep" the old provider.
-    assert prepared.consequence.startswith(
-        reach + ". Each person's own conversation with Researcher moves to Gemini on their "
-        "next message; shared threads stay on Anthropic."
-    )
-    assert "keep" not in prepared.consequence.split("\n")[0]
-    assert prepared.detail_lines[-1] == preview.cost_line
+    assert prepared.title == "Switch Researcher to Gemini 4 Argon?", prepared.title
+    assert prepared.consequence is None, "a switch that loses nothing says nothing more"
+    assert preview.cost_line not in prepared.detail_lines, "the price stays on the model select"
     # The same card for the default model refuses: the server preview differs.
     other = prompt.model_copy(
         update={"backend_switch": prompt.backend_switch.model_copy(update={"model": None})}
@@ -1057,18 +1045,15 @@ async def test_the_card_says_plainly_that_saved_keys_wont_be_available(owned_pre
     trace.queue(reply())
     prepared = await prepare(prompt)
     assert prepared.action == "Switch Researcher to OpenAI"
-    assert (
-        "On OpenAI it won't have its saved keys, its memory and its sandbox" in prepared.consequence
+    assert prepared.consequence == "Stops working: saved keys, memory and sandbox", (
+        "one line, saved keys first"
     )
-    assert prepared.consequence.count("saved keys") == 1
-    assert "credentials" not in prepared.action + prepared.consequence
-    assert "Nothing is deleted" in prepared.consequence
+    assert "credentials" not in prepared.action + prepared.consequence, "plain words only"
 
 
 @pytest.mark.parametrize("answering", ["Researcher", "someone-else", None])
-async def test_the_card_says_this_conversation_moves_only_when_the_agent_answers_here(
-    owned_preview, answering
-):
+async def test_the_card_never_says_which_conversations_move(owned_preview, answering):
+    """Where the switch reaches is said after it lands; the card names only what stops working."""
     from unittest.mock import AsyncMock
 
     from daimon.core.confirmation import backend_switch_callbacks
@@ -1083,57 +1068,13 @@ async def test_the_card_says_this_conversation_moves_only_when_the_agent_answers
         current_admin=AsyncMock(return_value=True),
         current_platform_admin=AsyncMock(return_value=False),
         answering_agent_name=answering,
-    )
-    trace.queue(reply())
-    prepared = await prepare(prompt)
-    moves = "This conversation moves to OpenAI from your next message"
-    assert (moves in prepared.consequence) == (answering == "Researcher")
-    assert "shared threads stay on Anthropic" in prepared.consequence
-
-
-@pytest.mark.parametrize("handed_to", ["Researcher", "someone-else", None])
-async def test_a_hand_off_in_this_thread_decides_whose_conversation_moves(owned_preview, handed_to):
-    """J2: the turn's agent hands the thread to the copy, then switches the copy.
-
-    The approved switch moves the copy's conversation here and drops its history,
-    so the card must say so even though the turn's own agent is someone else.
-    """
-    from unittest.mock import AsyncMock
-
-    from daimon.core.confirmation import backend_switch_callbacks
-    from daimon.core.stores.thread_agent_bindings import upsert_responder_binding
-
-    service, agent, actor, sessions, client, trace, payload, reply, prompt = owned_preview
-    if handed_to is not None:
-        async with sessions.begin() as session:
-            await upsert_responder_binding(
-                session,
-                tenant_id=agent.tenant_id,
-                platform="discord",
-                parent_channel_id="parent-1",
-                thread_id="thread-1",
-                responder_ma_agent_id=f"agent_{handed_to}",
-                responder_name=handed_to,
-                created_by_account_id=actor.account_id,
-                now=datetime.now(UTC),
-            )
-    prepare, _ = backend_switch_callbacks(
-        service,
-        sessionmaker=sessions,
-        anthropic=client,
-        tenant_id=agent.tenant_id,
-        account_id=actor.account_id,
-        current_admin=AsyncMock(return_value=True),
-        current_platform_admin=AsyncMock(return_value=False),
-        answering_agent_name="daimon",
         handoff_thread=("discord", "parent-1", "thread-1"),
     )
     trace.queue(reply())
     prepared = await prepare(prompt)
-    moves = "This conversation moves to OpenAI from your next message"
-    assert (moves in prepared.consequence) == (handed_to == "Researcher")
-    if handed_to == "Researcher":
-        assert "keeps its earlier messages" in prepared.consequence
+    text = " ".join((prepared.title, prepared.consequence or "", *prepared.detail_lines))
+    for reach in ("conversation", "Affects", "shared threads stay", "Nothing is deleted"):
+        assert reach not in text, f"no reach or thread line: {reach!r}"
 
 
 async def _reload(owned_preview):
@@ -1208,8 +1149,7 @@ async def test_a_default_agent_card_is_refused_unless_its_for_everyone(owned_pre
     assert await check(_switch_prompt(preview), "requester") == str(refused.value)
     trace.queue(reply())
     prepared = await prepare(_switch_prompt(preview, for_everyone=True))
-    assert prepared.consequence is not None
-    assert prepared.consequence.startswith("Affects new conversations for everyone on this server")
+    assert prepared.title == "Switch Researcher to Gemini?", "for everyone, the card is posted"
     assert await service.current(agent) is None
 
 
@@ -1253,43 +1193,6 @@ async def test_a_refusal_worded_for_the_person_reaches_the_model_as_is():
     assert isinstance(posture, PolicyApproval)
     result = await posture.decide(_call())
     assert result.allow is False and result.deny_message == said
-
-
-async def test_the_card_never_promises_a_move_in_a_setup_conversation(owned_preview):
-    """A setup conversation stays put on an approved switch, so the card says nothing moves."""
-    from unittest.mock import AsyncMock
-
-    from daimon.core.confirmation import backend_switch_callbacks
-    from daimon.core.stores.thread_agent_bindings import create_binding
-
-    service, agent, actor, sessions, client, trace, payload, reply, prompt = owned_preview
-    async with sessions.begin() as session:
-        await create_binding(
-            session,
-            tenant_id=agent.tenant_id,
-            platform="discord",
-            parent_channel_id="parent-1",
-            thread_id="thread-1",
-            responder_ma_agent_id="agent_daimon",
-            responder_name="daimon",
-            configuration_target_name="Researcher",
-            kind="setup",
-        )
-    prepare, _ = backend_switch_callbacks(
-        service,
-        sessionmaker=sessions,
-        anthropic=client,
-        tenant_id=agent.tenant_id,
-        account_id=actor.account_id,
-        current_admin=AsyncMock(return_value=True),
-        current_platform_admin=AsyncMock(return_value=False),
-        answering_agent_name="Researcher",
-        handoff_thread=("discord", "parent-1", "thread-1"),
-    )
-    trace.queue(reply())
-    prepared = await prepare(prompt)
-    assert "This conversation moves" not in prepared.consequence
-    assert "shared threads stay on Anthropic" in prepared.consequence
 
 
 async def _switch_card(
@@ -1433,6 +1336,7 @@ async def test_a_switch_that_lands_before_the_press_says_who_won(owned_preview):
 
 
 def test_the_requested_switch_card_names_its_requester_and_expiry():
+    """The footer names who may press Switch; Cancel comes first, Switch rightmost."""
     import uuid
 
     from daimon.core.switch_cards import parse_custom_id, requested_switch_card
@@ -1445,12 +1349,15 @@ def test_the_requested_switch_card_names_its_requester_and_expiry():
         requester_platform_user_id="42",
         expires_at=datetime(2026, 10, 23, 18, 0, tzinfo=UTC),
     )
-    assert card.footer == "Only {requester} can confirm. Expires {expires}."
+    assert card.footer == "Only {requester} can press Switch. Expires {expires}.", card.footer
     assert card.requester_platform_user_id == "42" and card.expires_at_unix is not None
-    assert [parse_custom_id(button.custom_id or "") for button in card.buttons] == [
-        (card_id, "confirm"),
-        (card_id, "cancel"),
-    ]
+    assert [(button.label, parse_custom_id(button.custom_id or "")) for button in card.buttons] == [
+        ("Cancel", (card_id, "cancel")),
+        ("Switch", (card_id, "confirm")),
+    ], "the primary action is rightmost"
+    assert [button.style for button in card.buttons] == ["secondary", "primary"], (
+        "Cancel is plain and Switch is the one filled action"
+    )
     assert parse_custom_id("bsw:not-a-card:confirm") is None
 
 

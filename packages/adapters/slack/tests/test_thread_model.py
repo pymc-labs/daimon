@@ -21,7 +21,7 @@ from slack_sdk.socket_mode.response import SocketModeResponse
 
 THREAD = "1700000000.000100"
 CONFIRM = ThreadConfirm("openai:gpt-6", "digest-1", 3)
-LINES = ("Model: GPT-6", "Unsupported skills: None", "Cost: $2 per 1M tokens")
+LINES = ("Switch this conversation to GPT-6?", "Stops working: memory")
 
 
 def _runtime() -> SlackRuntime:
@@ -144,7 +144,7 @@ async def test_a_cross_provider_pick_shows_what_changes_with_one_confirm(
     assert fields_["replace_original"] is True
     text = fields_["blocks"][0]["text"]["text"]
     assert all(line in text for line in LINES), "the facts are shown"
-    confirm, cancel = _buttons(fields_["blocks"])
+    cancel, confirm = _buttons(fields_["blocks"])
     assert (confirm["action_id"], cancel["action_id"]) == (
         module.CONFIRM_ACTION_ID,
         module.CANCEL_ACTION_ID,
@@ -270,7 +270,7 @@ async def test_the_ask_again_card_is_posted_in_the_thread_with_one_confirm(
     posted = seams.chat_postMessage.await_args.kwargs
     assert (posted["channel"], posted["thread_ts"]) == ("C1", THREAD)
     (attachment,) = posted["attachments"]
-    confirm, cancel = _buttons(attachment["blocks"])
+    cancel, confirm = _buttons(attachment["blocks"])
     assert confirm["action_id"] == module.CONFIRM_ACTION_ID
     assert json.loads(confirm["value"])["c"] == THREAD
     assert cancel["action_id"] == module.CANCEL_ACTION_ID

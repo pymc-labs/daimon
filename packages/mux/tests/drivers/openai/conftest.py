@@ -194,6 +194,8 @@ def transport() -> FakeTransport:
             ("GET", "/agents/sessions/s"): native_session(),
             ("GET", "/agents/sessions/s/turns"): page(turn()),
             ("GET", "/agents/sessions/s/turns/root"): turn(),
+            ("GET", "/agents/sessions/s/turns/root/items"): page(),
+            ("GET", "/agents/sessions/s/turns/child/items"): page(),
             ("GET", "/agents/sessions/s/items"): page(message()),
         }
     )

@@ -506,18 +506,20 @@ const dataStatus = (id: string): DataServerStatus => ({
 const DATA = "/api/agents/:id/nodes/data_server"
 
 const PREVIEW_BASE: ModelPreview = {
-  moves: false, allowed: true, skills: [], servers: [], capabilities: [], shared_limits: [], lost: [], drops: [], cost: "", threads: "", digest: "", revision: 0, refusal: null,
+  moves: false, card: false, allowed: true, skills: [], servers: [], capabilities: [], title: "", lines: [], drops: [], digest: "", revision: 0, refusal: null,
 }
 const REFUSED = "gemini:gemini-4-argon"
 
-/** The preview of a pick: no change within a provider, a refusal for one model, drops for the rest. */
-function previewOf(from: Backend, value: string): ModelPreview {
-  const to = value.split(":")[0] as Backend
-  if (to === from) return PREVIEW_BASE
-  if (value === REFUSED) return { ...PREVIEW_BASE, moves: true, allowed: false, refusal: { line: "Gemini 4 Argon can't run this agent here. Ask an admin.", action: null } }
+/** The preview of a pick: no change within a provider, a refusal for one model, the switch card for the rest. */
+function previewOf(name: string, from: Backend, value: string): ModelPreview {
+  const [to, id] = value.split(":") as [Backend, string]
+  const title = `Switch ${name} to ${MODELS.find((m) => m.id === id)?.label ?? id}?`
+  if (to === from) return { ...PREVIEW_BASE, title }
+  if (value === REFUSED) return { ...PREVIEW_BASE, moves: true, card: true, allowed: false, refusal: { line: "Gemini 4 Argon can't run this agent here. Ask an admin.", action: null } }
+  if (to === "openai") return { ...PREVIEW_BASE, moves: true, title, digest: "e".repeat(64), revision: 4 }
   return {
-    ...PREVIEW_BASE, moves: true, drops: ["memory", "sandbox", "skill:sk_pricing"], lost: ["memory", "sandbox", "Pricing playbook skill"], skills: ["Pricing playbook"], shared_limits: ["Shared threads keep the thread's first model"],
-    cost: "Costs about the same per message", threads: "Threads switch on their next message.", digest: "d".repeat(64), revision: 4,
+    ...PREVIEW_BASE, moves: true, card: true, title, drops: ["memory", "skill:sk_pricing"], skills: ["Pricing playbook"],
+    lines: ["Stops working: memory and Pricing playbook skill"], digest: "d".repeat(64), revision: 4,
   }
 }
 
@@ -536,7 +538,7 @@ export const agentsHandlers = [
     const v = viewer(), r = find(String(params.id))
     if (!v) return unauthorized()
     if (!r) return notFound()
-    return HttpResponse.json(previewOf(current(r).config.model.backend, new URL(request.url).searchParams.get("value") ?? ""))
+    return HttpResponse.json(previewOf(current(r).config.name, current(r).config.model.backend, new URL(request.url).searchParams.get("value") ?? ""))
   }),
   http.get("/api/agents/templates", async () => {
     await wait(120)

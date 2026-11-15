@@ -40,7 +40,7 @@ from mux.contracts.ids import PageRequest, ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.receipts import CancelReceipt, OperationStatus, SendReceipt, StopObservation
 from mux.contracts.usage import UsageObservation
-from mux.drivers.openai import SCHEMA_DATE
+from mux.drivers.openai import SCHEMA_DATE, OpenAIUsage
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from pydantic import BaseModel, JsonValue, TypeAdapter
 
@@ -512,6 +512,17 @@ class OpenAITurnIO:
             return ()
         async with asyncio.timeout(_timeout(timeout_s)):
             values: list[UsageObservation] = []
+            if isinstance(self._backend.usage, OpenAIUsage):
+                # A listing reads every ended turn's items for its searches, and any
+                # failed read can end a reconnect; read only the root turn.
+                values.extend(
+                    await _edge(
+                        self._backend.usage.reconcile_turn(self._scope, self._session, self._root)
+                    )
+                )
+                if any(value.session != self._session for value in values):
+                    raise ScopeViolation(self._session.id, "foreign OpenAI usage")
+                return tuple(values)
             cursor: str | None = None
             seen: set[str] = set()
             # Newest first, stopping at the root's one observation: a poll costs a page or

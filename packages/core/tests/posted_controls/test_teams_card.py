@@ -74,3 +74,6 @@ def test_a_control_card_answers_through_one_execute_verb(kind: str) -> None:
         ("Action.Execute", CONTROL_VERB, {"action": CONTROL_VERB, "custom_id": b.custom_id})
         for b in card.buttons
     ], "every button presses through the one verb with its own custom id"
+    assert [a.get("style") for a in actions["actions"]] == [None, "positive"], (  # type: ignore[union-attr]
+        "only the rightmost button, the card's own action, is filled"
+    )

@@ -8,7 +8,7 @@ never see ORM instances.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -18,6 +18,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Double,
     ForeignKey,
@@ -983,6 +984,32 @@ class UsageEvent(Base):
     # The agent whose turn or tool call spent it; NULL when unknown, and on rows
     # written before spend was attributed to agents.
     agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Web searches: the most any revision reported, those the free allowance
+    # covered, and the latest revision's billed ones (`stores.usage_events.SearchTally`).
+    web_searches: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    free_web_searches: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    paid_web_searches: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+
+
+class WebSearchAllowance(Base):
+    """Searches counted against a provider's free monthly allowance.
+
+    One row per provider account, allowance pool and calendar month, shared by
+    every tenant on that account. Private to `daimon.core.stores.**`.
+    """
+
+    __tablename__ = "web_search_allowances"
+    __table_args__ = (CheckConstraint("used >= 0", name="ck_web_search_allowances_used"),)
+
+    provider: Mapped[str] = mapped_column(Text, primary_key=True)
+    account_scope_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    pool: Mapped[str] = mapped_column(Text, primary_key=True)
+    period: Mapped[date] = mapped_column(Date, primary_key=True)
+    used: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class TenantUserCap(Base):
@@ -4674,10 +4701,10 @@ class SessionSettleState(Base):
     `settle_requested_at` is written before the send and `settle_turn_event_id`
     (the send's own `user.message`) once it is accepted; both are cleared when
     that turn has been settled (`daimon.core.usage_sweep`). `covered_through`
-    is read only on the reserved `backlog-cutoff` row, where it records when
-    this settle path was deployed. `unattended_turn_event_id` is the latest
-    turn an agent-chat send started (`unattended_turn`), never cleared by a
-    settle.
+    is read only on the reserved cutoff rows: `backlog-cutoff`, when this
+    settle path was deployed, and `web-search-cutoff`, when search billing
+    was. `unattended_turn_event_id` is the latest turn an agent-chat send
+    started (`unattended_turn`), never cleared by a settle.
 
     The table keeps its original name; the former catch-up's cursor columns
     are no longer mapped and are dropped later. Private to

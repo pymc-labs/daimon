@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Switching an agent to another provider works like a model pick.** A switch
+  that loses nothing applies at once, in Discord, Slack, Teams, the web app and
+  the MCP tools. A run nobody started, such as a routine, never applies one at once.
+  A switch that loses something asks once with a short card.
+  It reads "Switch Ada to GPT-6?" and "Stops working:" with every loss, plus any
+  shared-thread limit. A model pick's card has Cancel and Switch buttons.
+  Price, reach and thread lines are off the card; the model pickers show the price.
+  After an agent edit, a conversation's pick that loses nothing is kept again at once.
+- **Switching an agent to OpenAI or Gemini keeps its packages and network rules.**
+  Its sandbox is set up like the source agent's, also in threads that started
+  earlier. The switch preview names only what the provider cannot set up.
+- **OpenAI and Gemini agents search the web.** Web search is on by default and
+  carries over when an agent switches provider, with Google Search on Gemini.
+  A search that must ask first is still named on the switch card. Every search
+  is counted on every provider and billed at list price: $0.01 on Anthropic and
+  OpenAI, $0.014 on Gemini. Gemini's first 5,000 searches a month are free,
+  shared by the deployment's Gemini project. A replayed or retried turn never
+  counts a search twice, and two turns crossing the free limit split it exactly.
 - **A Gemini agent sends only the files it made.** The skills installed for
   the agent, and the input files and repositories set up in its sandbox, are
   never sent to the thread as the agent's files, also in conversations that

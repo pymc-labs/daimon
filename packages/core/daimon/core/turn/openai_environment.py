@@ -19,9 +19,10 @@ The name carries the deployment (this host's GCP project id, from the metadata
 server, which no environment variable can change; off GCP, an id stamped once in
 the database), so two deployments sharing one OpenAI project (and tenant ids)
 never adopt each other's environment; where neither can be read, nothing is
-created. Only a real turn's
-preparation calls this; previews never do. Logs name the tenant, project and
-environment id, never the key.
+created. An agent whose environment sets packages or network rules gets its own
+environment per setup (`spec`), named and keyed by its digest; one with none shares
+the tenant's default. Only a real turn's preparation calls this; previews never do.
+Logs name the tenant, project and environment id, never the key.
 """
 
 from __future__ import annotations
@@ -182,21 +183,33 @@ async def tenant_environment(
     deployment: str,
     now: Callable[[], datetime],
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    spec: EnvironmentSpec | None = None,
 ) -> str:
-    """The tenant's environment id: recorded, or created now exactly once.
+    """The tenant's environment id for `spec` (None: the default): recorded, or created once.
 
     Raises `AdmissionDenied("provider_setup_pending")` when it can't be had
     yet: the create failed (logged with its cause) or another turn is still
     making it.
     """
     scope = operation_scope(tenant_id)
-    key = operation_key(project)
+    setup = (
+        request_digest(spec.model_dump(mode="json", exclude={"name"}))[:12]
+        if spec is not None
+        else ""
+    )
+    key = f"{operation_key(project)}:{setup}" if setup else operation_key(project)
     # Every GPT turn after the first: one unlocked read, no row lock.
     known = await store.get_operation(scope, key)
     if known is not None and known.operation.status == "processed":
         return _recorded_id(known)
     name = environment_name(deployment, tenant_id)
-    digest = request_digest({"project": project, "name": name})
+    name = f"{name}-{setup}" if setup else name
+    wanted = (spec or EnvironmentSpec(name=name)).model_copy(update={"name": name})
+    digest = request_digest(
+        {"project": project, "name": name}
+        if not setup
+        else {"project": project, "spec": wanted.model_dump(mode="json")}
+    )
     begun = await store.begin_operation(
         scope, key=key, request_digest=digest, operation_id=str(uuid.uuid4()), now=now()
     )
@@ -212,7 +225,7 @@ async def tenant_environment(
             except SendClaimed:
                 record = await _reread(store, scope, key)
                 continue
-            return await _create(store, environments, record, scope, tenant_id, name, now)
+            return await _create(store, environments, record, scope, tenant_id, wanted, now)
         if status in ("sent", "outcome_unknown", "accepted"):
             if now() - record.operation.updated_at >= STALE_AFTER:
                 record = await _reconcile(store, environments, record, scope, tenant_id, name, now)
@@ -247,7 +260,7 @@ async def _create(
     record: OperationRecord,
     scope: Scope,
     tenant_id: str,
-    name: str,
+    spec: EnvironmentSpec,
     now: Callable[[], datetime],
 ) -> str:
     key = record.operation.key
@@ -257,9 +270,7 @@ async def _create(
     claimed_status, claimed_at = record.operation.status, record.operation.updated_at
     try:
         async with asyncio.timeout(CREATE_TIMEOUT.total_seconds()):
-            created = await environments.create(
-                _provider_scope(tenant_id), EnvironmentSpec(name=name), key=key
-            )
+            created = await environments.create(_provider_scope(tenant_id), spec, key=key)
     except Exception as error:
         # The request may have reached OpenAI, so it is never resent from here.
         # If someone else has moved it on meanwhile, their state stands.

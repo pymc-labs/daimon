@@ -145,15 +145,16 @@ from daimon.core.github_panel import (
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.model_switch import (
     ModelPicker,
+    ModelSwitchPreview,
     SwitchRefusal,
     back_to_claude,
     confirm_or_refusal,
     panel_actor,
     panel_edit_deps,
-    preview_or_refusal,
+    pick_or_refusal,
     read_picker,
     set_effort,
-    switch_fact_lines,
+    switch_card_text,
 )
 from daimon.core.models_catalog import claude_model_choices
 from daimon.core.observability import capture_exception_with_scope
@@ -928,11 +929,15 @@ async def _model_action(
             value = str(option.get("value") or "")
         else:
             value = meta.backend_target or ""
-        shown = await preview_or_refusal(
+        shown = await pick_or_refusal(
             service, edit, actor=actor, agent_name=name, value=value, admin=is_admin
         )
         if isinstance(shown, SwitchRefusal):
             await refuse(shown, value)
+            return
+        if not isinstance(shown, ModelSwitchPreview):
+            await audit("allowed", "completed")
+            await show_details()
             return
         bound = dataclasses.replace(
             meta,
@@ -944,7 +949,7 @@ async def _model_action(
             view_id=view_id,
             hash=view_hash or None,
             view=panel_views.build_model_switch_view(
-                switch_fact_lines(shown, agent_name=name, escape=escape_mrkdwn),
+                switch_card_text(shown, agent_name=name, escape=escape_mrkdwn),
                 meta=bound,
                 confirm=shown.allowed,
             ),

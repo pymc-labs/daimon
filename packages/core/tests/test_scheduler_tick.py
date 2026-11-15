@@ -12,6 +12,7 @@ the (eventual) fire transaction.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -167,11 +168,18 @@ async def test_run_one_tick_dispatches_all_concurrently_up_to_cap(
     peak = 0
     fired: list[uuid.UUID] = []
 
+    all_in = asyncio.Event()
+
     async def counting_fire(r: RoutineRow) -> None:
         nonlocal concurrent, peak
         concurrent += 1
         peak = max(peak, concurrent)
-        await asyncio.sleep(0.05)  # DB-free window — do NOT open a session here
+        if concurrent == 10:
+            all_in.set()
+        # DB-free window — do NOT open a session here. Waiting for all ten, not a fixed
+        # sleep, keeps a slow feature read from ending one fire before the last starts.
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(all_in.wait(), timeout=2.0)
         concurrent -= 1
         fired.append(r.id)
 

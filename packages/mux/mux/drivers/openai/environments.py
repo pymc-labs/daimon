@@ -23,6 +23,8 @@ from mux.drivers.openai._common import (
 )
 from mux.drivers.openai.mounts import path, workspace_sources
 from mux.drivers.openai.transport import Object, object_json, segment
+from mux.profiles import PACKAGE_MANAGERS
+from mux.profiles.openai import MAX_ALLOWED_HOSTS
 
 
 class OpenAIEnvironments:
@@ -80,10 +82,13 @@ class OpenAIEnvironments:
         if spec.sources is not None:
             body["files"] = [value for value in workspace_sources(scope, spec.sources, self._c)]
         if spec.packages is not None:
-            if set(spec.packages) - {"python", "npm", "system"}:
+            if set(spec.packages) - set(PACKAGE_MANAGERS):
                 raise self._c.unsupported("environment_packages")
             body["packages"] = {k: list(v) for k, v in spec.packages.items()}
         if spec.network is not None:
+            hosts = len(spec.network.allowed_hosts)
+            if spec.network.mode == "limited" and not 1 <= hosts <= MAX_ALLOWED_HOSTS:
+                raise self._c.unsupported("environment_network")
             body["network"] = {
                 "access": {"none": "disabled", "limited": "restricted", "unrestricted": "enabled"}[
                     spec.network.mode
