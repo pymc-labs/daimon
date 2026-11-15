@@ -587,15 +587,28 @@ async def test_the_session_attaches_the_agents_custom_skills_uploaded_once(templ
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
 async def test_a_channels_skill_is_carried_and_one_over_the_limit_is_a_named_loss(
-    template, consent_request
+    template, consent_request, monkeypatch
 ):
     import io
     import zipfile
 
     from anthropic.types.beta import BetaManagedAgentsCustomSkill
+    from daimon.core.mcp_oauth import discovery
+    from daimon.core.turn import session_skills
     from daimon.core.turn.runtime_manifest import capture_preparation_source
     from mux.profiles import get_profile
 
+    reads: list[str] = []
+
+    def counting(real, name):
+        async def counted(*args, **kwargs):
+            reads.append(name)
+            return await real(*args, **kwargs)
+
+        return counted
+
+    for module, name in ((discovery, "list_mcp_tools"), (session_skills, "measure_carried_skills")):
+        monkeypatch.setattr(module, name, counting(getattr(module, name), name))
     request, *_ = template
     router = consent_request[5]
     limit = get_profile("openai.persistent_workspace").skill_limits
@@ -628,6 +641,10 @@ async def test_a_channels_skill_is_carried_and_one_over_the_limit_is_a_named_los
     source = await capture_preparation_source(request, capability_preview=True)
     openai = [r for r in source.representations if r.target.model.provider == "openai"]
     assert openai, "one per model the template grants"
+    assert len(source.representations) > 1, "several models, so a repeat would show"
+    assert sorted(reads) == ["list_mcp_tools", "measure_carried_skills"], (
+        f"the catalogue and the skills are read once for every model: {reads}"
+    )
     for represented in source.representations:
         carried = {skill.id for skill in represented.session_skills}
         losses = [d for d in represented.unavailable_capabilities if d.startswith("skill:")]

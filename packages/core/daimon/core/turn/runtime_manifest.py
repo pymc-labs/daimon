@@ -446,7 +446,7 @@ async def _capture_source_capabilities(
     from daimon.core.mux_backend import managed_agents
     from daimon.core.mux_compat import legacy_call
     from daimon.core.skills.ingest import retained_archive_files
-    from daimon.core.stores.domain import SourceRepresentation
+    from daimon.core.stores.domain import SkillSizeRow, SourceRepresentation
     from daimon.core.stores.mcp_tokens import revoke_mcp_token
     from daimon.core.turn.runtime_defaults import capture_template_rows
     from daimon.core.turn.session_skills import (
@@ -573,6 +573,10 @@ async def _capture_source_capabilities(
                     ),
                 )
             )
+        # Every candidate shares one source: read its catalogue and measure its
+        # skills once, not once per model the preview offers.
+        source_catalogue: frozenset[str] | None = None
+        measured: tuple[tuple[SkillRef, ...], dict[tuple[str, str], SkillSizeRow]] | None = None
         for row, inputs in candidates:
             template = isinstance(inputs, _TemplateInputs)
             profile_id = row.get("profile")
@@ -607,39 +611,45 @@ async def _capture_source_capabilities(
                 raise ValueError("environment representation differs from captured policy")
             if request.deps.mcp.public_url is None or request.deps.mcp.jwt_secret is None:
                 raise ValueError("MCP catalogue requires the captured caller")
-            # Use the runtime's registered chat-execution authority, never the
-            # restricted external-agent key (which sees a different catalogue).
-            # This preview credential is revoked before returning and never
-            # exposed to a provider; the ACK owner mints the runtime credential.
-            now = request.now()
-            secret = request.deps.mcp.jwt_secret.get_secret_value().encode()
-            async with request.deps.sessionmaker.begin() as db:
-                catalogue_token = await mint_agent_mcp_token(
-                    db,
-                    account_id=request.admission.account_id,
-                    tenant_id=source.tenant_id,
-                    agent_id=source.agent_id,
-                    label="source-catalogue",
-                    secret=secret,
-                    now=now,
-                    ttl_days=900 / 86400,  # pyright: ignore[reportArgumentType]
-                    chat_execution=True,
-                    surface="provider_turn",
-                )
-            try:
-                await validate_agent_mcp_token(
-                    request.deps.sessionmaker,
-                    token=catalogue_token,
-                    secret=secret,
-                    scope=caller_scope(request),
-                    agent_id=source.agent_id,
-                    now=now,
-                    chat_execution=True,
-                )
-                catalogue = await list_mcp_tools(str(request.deps.mcp.public_url), catalogue_token)
-            finally:
+            if source_catalogue is None:
+                # Use the runtime's registered chat-execution authority, never the
+                # restricted external-agent key (which sees a different catalogue).
+                # This preview credential is revoked before returning and never
+                # exposed to a provider; the ACK owner mints the runtime credential.
+                now = request.now()
+                secret = request.deps.mcp.jwt_secret.get_secret_value().encode()
                 async with request.deps.sessionmaker.begin() as db:
-                    await revoke_mcp_token(db, jti=token_jti(catalogue_token), now=request.now())
+                    catalogue_token = await mint_agent_mcp_token(
+                        db,
+                        account_id=request.admission.account_id,
+                        tenant_id=source.tenant_id,
+                        agent_id=source.agent_id,
+                        label="source-catalogue",
+                        secret=secret,
+                        now=now,
+                        ttl_days=900 / 86400,  # pyright: ignore[reportArgumentType]
+                        chat_execution=True,
+                        surface="provider_turn",
+                    )
+                try:
+                    await validate_agent_mcp_token(
+                        request.deps.sessionmaker,
+                        token=catalogue_token,
+                        secret=secret,
+                        scope=caller_scope(request),
+                        agent_id=source.agent_id,
+                        now=now,
+                        chat_execution=True,
+                    )
+                    source_catalogue = await list_mcp_tools(
+                        str(request.deps.mcp.public_url), catalogue_token
+                    )
+                finally:
+                    async with request.deps.sessionmaker.begin() as db:
+                        await revoke_mcp_token(
+                            db, jti=token_jti(catalogue_token), now=request.now()
+                        )
+            catalogue = source_catalogue
             allowed = next(
                 (
                     server.tool_policy.get("allowed_tools")
@@ -961,14 +971,16 @@ async def _capture_source_capabilities(
             names: dict[str, str] = {}
             if carried:
                 # Measured here, uploaded by the turn: a preview never writes to the provider.
-                pins, sizes = await measure_carried_skills(
-                    request.deps.sessionmaker,
-                    request.deps.anthropic,
-                    scope=scope,
-                    tenant_id=source.tenant_id,
-                    carried=carried,
-                    record=source.source,
-                )
+                if measured is None:
+                    measured = await measure_carried_skills(
+                        request.deps.sessionmaker,
+                        request.deps.anthropic,
+                        scope=scope,
+                        tenant_id=source.tenant_id,
+                        carried=carried,
+                        record=source.source,
+                    )
+                pins, sizes = measured
                 # Unmeasured or over the limits: that skill alone is a named loss.
                 session_skills = fitting_skills(profile, pins, sizes)
                 template_losses = (*template_losses, *skill_losses(pins, session_skills))
