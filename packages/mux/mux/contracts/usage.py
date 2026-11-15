@@ -29,6 +29,8 @@ class UsageObservation(Contract):
     keeps the provider's own usage record untouched, so a conversion can be
     audited against it. `final` is the provider saying the measured work has
     ended: no later revision will add usage. A running snapshot is never final.
+    `web_searches` counts the billable web searches the work ran, cumulative
+    like the tokens.
     """
 
     id: str
@@ -50,6 +52,7 @@ class UsageObservation(Contract):
     observed_at: datetime
     covers: tuple[str, ...] = ()
     final: bool = Field(default=False, exclude_if=lambda value: not value)
+    web_searches: int = Field(default=0, ge=0, exclude_if=lambda value: not value)
 
 
 __all__ = [

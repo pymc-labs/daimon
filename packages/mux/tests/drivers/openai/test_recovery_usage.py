@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping
 
 import pytest
 from mux.contracts.events import RequiresActionPayload
@@ -11,7 +11,7 @@ from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai._common import objects
 from mux.drivers.openai.transport import Method, Object, object_json
 from mux.drivers.openai.turn import MemoryRecoveryJournal
-from mux.drivers.openai.usage import MemoryUsageRevisions
+from mux.drivers.openai.usage import _SEARCHES, MemoryUsageRevisions
 from mux.errors import ProviderError
 
 from .conftest import (
@@ -530,3 +530,48 @@ async def test_buffered_terminal_conflict_cannot_replace_durable_outcome() -> No
     with pytest.raises(ProviderError):
         await driver.events.reconcile(SCOPE, REF)
     assert await journal.read(REF) == before
+
+
+@pytest.fixture
+def fresh_search_cache() -> Iterator[None]:
+    _SEARCHES.clear()
+    yield
+    _SEARCHES.clear()
+
+
+def _search(id_: str, *, status: str = "completed", action: str | None = "search") -> Object:
+    item: Object = {"id": id_, "type": "web_search_call", "status": status}
+    if action is not None:
+        item["action"] = {"type": action}
+    return item
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("fresh_search_cache")
+async def test_usage_counts_ended_turn_searches_once_and_revises(
+    driver: OpenAIDriver, transport: FakeTransport
+) -> None:
+    items = "/agents/sessions/s/turns/root/items"
+    native = turn("in_progress")
+    native["usage"] = {"input_tokens": 5, "output_tokens": 1}
+    transport.responses["GET", "/agents/sessions/s/turns"] = page(native)
+    running = (await driver.usage.reconcile(SCOPE, REF))[0]
+    assert running.web_searches == 0 and ("GET", items) not in [c[:2] for c in transport.calls]
+    native["status"] = "completed"
+    first = page(
+        _search("a"), _search("b", action=None), _search("x", action="open_page"), more=True
+    )
+    second = page(_search("b", action=None), _search("f", status="failed"), _search("c"))
+    pages = iter((first, second))
+
+    async def paged(method: Method, path: str, **kwargs: object) -> Object:
+        if path == items:
+            return next(pages)
+        return await FakeTransport.request(transport, method, path, **kwargs)  # type: ignore[arg-type]
+
+    transport.request = paged  # type: ignore[method-assign]
+    ended = (await driver.usage.reconcile(SCOPE, REF))[0]
+    # Page opens, finds and failed searches are not billed; a repeated item counts once.
+    assert ended.web_searches == 3 and ended.revision == 2
+    replay = (await driver.usage.reconcile(SCOPE, REF))[0]
+    assert replay == ended.model_copy(update={"observed_at": replay.observed_at})

@@ -65,4 +65,26 @@ def observation_from_interaction(
         # its tool results continue as a new interaction (`previous_interaction_id`),
         # so this one never runs again. A running interaction may still grow.
         final=raw.get("status") in (*OUTCOMES, "requires_action"),
+        web_searches=web_searches(meter),
     )
+
+
+def web_searches(meter: Mapping[str, JsonValue]) -> int:
+    """Google Search grounding queries, from the usage's `{type, count}` list.
+
+    Other grounding types (Maps, retrieval) are not web searches and stay out.
+    """
+    raw = meter.get("grounding_tool_count", meter.get("groundingToolCount"))
+    if raw is None:
+        return 0
+    if not isinstance(raw, list):
+        raise ValueError("invalid provider grounding count")
+    total = 0
+    for item in raw:
+        if not isinstance(item, dict) or item.get("type") != "google_search":
+            continue
+        count = item.get("count")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("invalid provider grounding count")
+        total += count
+    return total

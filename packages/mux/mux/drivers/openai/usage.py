@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from collections import OrderedDict
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Protocol
@@ -43,7 +45,26 @@ class MemoryUsageRevisions:
         return rev
 
 
-def observation(turn: Object, session: ResourceRef, *, revision: int) -> UsageObservation:
+#: Ended turns: their items no longer change, so their search count is cached.
+_ENDED = frozenset({"completed", "cancelled", "failed"})
+_SEARCHES: OrderedDict[tuple[ResourceRef, str], tuple[str, int]] = OrderedDict()
+_SEARCH_CACHE = 4096
+
+
+def billable_search(item: Mapping[str, JsonValue]) -> bool:
+    """A completed `web_search_call` search action; page opens and finds are not searches."""
+    action = item.get("action")
+    kind = action.get("type") if isinstance(action, dict) else None
+    return (
+        item.get("type") == "web_search_call"
+        and item.get("status") == "completed"
+        and kind in (None, "search")
+    )
+
+
+def observation(
+    turn: Object, session: ResourceRef, *, revision: int, web_searches: int = 0
+) -> UsageObservation:
     value = turn.get("usage")
     meter = {} if value is None else object_json(value)
 
@@ -76,6 +97,7 @@ def observation(turn: Object, session: ResourceRef, *, revision: int) -> UsageOb
         if inputs is not None and outputs is not None
         else "partial",
         observed_at=datetime.now(UTC),
+        web_searches=web_searches,
     )
 
 
@@ -96,6 +118,7 @@ class OpenAIUsage:
             if turn.get("session_id") != session.id:
                 raise ValueError("usage belongs to another session")
             observation(turn, session, revision=1)
+            searches = await self._searches(session, turn)
             # Null usage and an empty reported meter have different completeness.
             # Attribution also belongs to observation identity. Retain both in
             # the revision signature rather than collapsing them to counts.
@@ -103,14 +126,51 @@ class OpenAIUsage:
                 "usage": turn.get("usage"),
                 "subagent_id": turn.get("subagent_id"),
             }
+            if searches:
+                meter["web_searches"] = searches
             rev = await self._revisions.revise(session, "openai:turn:" + text(turn["id"]), meter)
-            values.append(observation(turn, session, revision=rev))
+            values.append(observation(turn, session, revision=rev, web_searches=searches))
         more = raw["has_more"]
         if not isinstance(more, bool):
             raise ValueError("invalid has_more")
         return Page(
             data=tuple(values), has_more=more, next_cursor=text(raw["last_id"]) if more else None
         )
+
+    async def _searches(self, session: ResourceRef, turn: Object) -> int:
+        """Billable searches of an ended turn, read from its items.
+
+        Turn usage carries no search count. A running turn reports none yet: its
+        final observation carries them all, under a new revision.
+        """
+        if turn.get("status") not in _ENDED:
+            return 0
+        turn_id = text(turn["id"])
+        key, signature = (session, turn_id), json.dumps([turn.get("status"), turn.get("usage")])
+        if (hit := _SEARCHES.get(key)) is not None and hit[0] == signature:
+            _SEARCHES.move_to_end(key)
+            return hit[1]
+        searches, cursor, seen = set[str](), None, set[str]()
+        path = f"/agents/sessions/{segment(session.id)}/turns/{segment(turn_id)}/items"
+        while True:
+            params: dict[str, str | int] = {"order": "asc", "limit": 100}
+            if cursor is not None:
+                params["after"] = cursor
+            raw = await self._c.call("GET", path, params=params)
+            items = objects(raw["data"])
+            searches.update(text(item["id"]) for item in items if billable_search(item))
+            if raw["has_more"] is False:
+                break
+            if raw["has_more"] is not True:
+                raise ValueError("invalid has_more")
+            cursor = text(raw["last_id"])
+            if cursor in seen:
+                raise ValueError("usage pagination loop")
+            seen.add(cursor)
+        _SEARCHES[key] = (signature, len(searches))
+        if len(_SEARCHES) > _SEARCH_CACHE:
+            _SEARCHES.popitem(last=False)
+        return len(searches)
 
     @owned
     async def reconcile(self, scope: Scope, session: ResourceRef) -> tuple[UsageObservation, ...]:
