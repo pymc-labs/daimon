@@ -36,7 +36,7 @@ _KEPT = {"mcp", "memory", "skills", "tools", "sandbox", "credentials"}
 _FINER = {
     "installed_packages": "its installed packages",
     "network_rules": "its network rules",
-    "workspace_files": "its workspace files",
+    "workspace_files": "its sandbox files",
 }
 
 

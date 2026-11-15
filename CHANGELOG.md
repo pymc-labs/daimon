@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A model switch names what the provider's sandbox cannot keep.** On OpenAI
   and Gemini the sandbox keeps a plain default environment, but not installed
-  packages, workspace files or network rules, and the preview, the card and
+  packages, sandbox files or network rules, and the preview, the card and
   the tool text now say exactly which ("its installed packages", "its network
   rules") instead of claiming the whole sandbox carries over. A lone effort
   setting reads "its effort setting". A confirmation that accepted the sandbox

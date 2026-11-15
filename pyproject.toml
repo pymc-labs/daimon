@@ -234,6 +234,7 @@ source_modules = [
     "daimon.core.direct_messages",
     "daimon.core.errors",
     "daimon.core.features",
+    "daimon.core.finer_drops",
     "daimon.core.fonts",
     "daimon.core.github_app_auth",
     "daimon.core.github_app_session",

@@ -993,7 +993,7 @@ _DROP_WORDS: Mapping[str, str] = {
     "effort_setting": "its effort setting",
     "installed_packages": "its installed packages",
     "network_rules": "its network rules",
-    "workspace_files": "its workspace files",
+    "workspace_files": "its sandbox files",
     "builtin_tool:web_fetch": "web fetch",
     "builtin_tool:web_search": "web search",
 }
