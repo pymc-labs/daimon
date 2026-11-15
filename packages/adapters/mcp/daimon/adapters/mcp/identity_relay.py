@@ -25,14 +25,17 @@ from daimon.core.mcp_identity import (
     IdentityTokenCache,
     RelayBinding,
     RequesterBodyError,
+    RequesterKind,
     caller_claims,
     matching_turn,
     origin_turn_place,
     parse_relay_claim,
     requester_conversation,
+    routine_conversation,
     stamp_requester,
 )
-from daimon.core.stores.domain import TurnOriginRow
+from daimon.core.stores.domain import RoutineRow, TurnOriginRow
+from daimon.core.stores.routines import get_routine
 from daimon.core.stores.thread_sessions import get_thread_session_by_id
 from daimon.core.stores.turn_origins import list_active_origins
 from fastmcp.server.auth.auth import TokenVerifier
@@ -131,6 +134,26 @@ async def _session_turn(
     return matching_turn(origins, tenant_id=tenant_id, agent_id=agent_id, thread_id=row.thread_id)
 
 
+async def _routine_run(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    binding: RelayBinding,
+    *,
+    tenant_id: uuid.UUID,
+) -> RoutineRow | None:
+    """The routine a scheduled run's credential names, or None.
+
+    Only a routine of this tenant that runs this agent and has an owner counts; a
+    routine since deleted, or one whose id does not match, names nobody.
+    """
+    if binding.routine_id is None:
+        return None
+    async with sessionmaker() as session:
+        row = await get_routine(session, binding.routine_id, tenant_id=tenant_id)
+    if row is None or row.agent_name != binding.agent_name or not row.created_by_user_id:
+        return None
+    return row
+
+
 def build_identity_relay_route(
     *,
     servers: Mapping[str, SignedIdentityServer],
@@ -221,21 +244,33 @@ def build_identity_relay_route(
             )
             headers["authorization"] = f"Bearer {tokens.token(identity, now=now)}"
         if server.requester_meta and request.method == "POST":
-            # Only a live person's turn names a requester: `origin` is None for a routine,
-            # a foreign sender, a replaced session or two turns at once.
-            conversation = requester_conversation(origin) if origin is not None else None
-            named = (
-                person
-                if origin is not None
+            # A live person's turn names that person; a routine run names its owner
+            # and delivery place. A foreign sender, a replaced session and two turns
+            # at once match neither and carry no requester fields.
+            named: str | None = None
+            conversation: dict[str, str | None] | None = None
+            kind: RequesterKind | None = None
+            if (
+                origin is not None
                 and platform in REQUESTER_PLATFORMS
                 and isinstance(person, str)
                 and person
-                else None
-            )
+            ):
+                named, conversation, kind = person, requester_conversation(origin), "person"
+            elif (
+                binding.routine_id is not None
+                and platform in REQUESTER_PLATFORMS
+                and FOREIGN_HOME_CLAIM not in claims
+            ):
+                routine = await _routine_run(sessionmaker, binding, tenant_id=tenant_id)
+                if routine is not None:
+                    named, conversation, kind = (
+                        routine.created_by_user_id,
+                        routine_conversation(routine),
+                        "routine",
+                    )
             try:
-                body = stamp_requester(
-                    body, person=named, conversation=conversation if named else None
-                )
+                body = stamp_requester(body, person=named, conversation=conversation, kind=kind)
             except RequesterBodyError:
                 return Response(status_code=400)
         http = clients[server.name]

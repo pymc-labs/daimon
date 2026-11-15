@@ -128,17 +128,26 @@ DAIMON_MCP_IDENTITY__BEARERS='{"tools": "<key>"}'
 
 Daimon sends the key in place of the caller's own credential, which never
 reaches the server. On every `tools/call` it first removes any
-`params._meta.requester_platform_user_id` and `requester_conversation` the
-caller supplied, then, only while a person's turn is live in the calling
-session's thread, sets them from that turn:
+`params._meta.requester_platform_user_id`, `requester_conversation` and
+`requester_kind` the caller supplied, then sets them from the live run:
 
-- `requester_platform_user_id`: the asker's user id (Discord only).
+- `requester_platform_user_id`: the asker's user id (Discord only). For a
+  routine run, the routine's owner.
 - `requester_conversation`: `{"place_type": "channel" | "thread" | "dm",
   "channel_id": ..., "parent_channel_id": ...}`. `parent_channel_id` is a
-  thread's channel and null otherwise.
+  thread's channel and null otherwise. For a routine run, its delivery place.
+- `requester_kind`: `"person"` while a person's turn is live in the calling
+  session's thread, `"routine"` on a routine's own run.
 
-Routines, a sender from another organisation, a replaced session and two turns
-at once carry neither field. A request body that is not JSON, repeats a key,
+A routine run is stamped only while its routine still exists, belongs to the
+same organisation and agent, and has an owner. `requester_conversation` is left
+out when the routine delivers by DM (the DM channel is only opened at delivery),
+into a legacy thread with no recorded channel, or nowhere; the owner and kind
+are still set. A sender from another organisation, a replaced session and two
+turns at once carry none of the three fields, so a server must not treat a call
+with no `requester_kind` as a routine.
+
+A request body that is not JSON, repeats a key,
 or holds a tool call without object `params` is refused with a 400. Rotating
 the key means changing the secret and restarting the MCP service.
 

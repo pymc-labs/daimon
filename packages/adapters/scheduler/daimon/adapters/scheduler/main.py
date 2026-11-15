@@ -997,6 +997,7 @@ async def _build_fire(
             platform=platform,
             runs_as_user=row.created_by_user_id,
             membership_resolver=membership_resolver,
+            routine_id=row.id,
             **held_fire,
         )
 

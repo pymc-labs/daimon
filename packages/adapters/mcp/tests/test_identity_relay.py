@@ -33,6 +33,7 @@ from daimon.core.mcp_identity import (
     generate_signing_key,
 )
 from daimon.core.stores.domain import Role
+from daimon.core.stores.routines import create_routine
 from daimon.core.stores.thread_sessions import create_thread_session, mark_dead
 from daimon.core.stores.turn_origins import create_origin
 from daimon.testing.factories import make_platform_principal, make_tenant
@@ -408,6 +409,7 @@ async def test_bearer_person_turn_is_stamped_and_the_key_replaces_the_credential
             "channel_id": "thread-1",
             "parent_channel_id": "chan-1",
         },
+        "requester_kind": "person",
     }, "the live turn's asker and place are stamped"
 
 
@@ -420,6 +422,7 @@ async def test_forged_requester_fields_are_replaced_on_a_person_turn(
     forged = _tool_call(
         requester_platform_user_id="666",
         requester_conversation={"place_type": "dm", "channel_id": "evil"},
+        requester_kind="routine",
     )
     async with _relay(
         db_session_factory, upstream, None, BEARER_SERVER, bearers=_BEARERS
@@ -430,6 +433,7 @@ async def test_forged_requester_fields_are_replaced_on_a_person_turn(
     assert meta["requester_conversation"] != {"place_type": "dm", "channel_id": "evil"}, (
         "a forged place is overwritten"
     )
+    assert meta["requester_kind"] == "person", "a forged kind is overwritten"
 
 
 async def test_forged_requester_fields_are_stripped_when_no_person_is_live(
@@ -449,6 +453,103 @@ async def test_forged_requester_fields_are_stripped_when_no_person_is_live(
     assert len(upstream.requests) == 3, "the calls still go through, as the key owner's"
     for case, request in zip(("routine", "idle", "foreign"), upstream.requests, strict=True):
         assert _sent_meta(request) == {}, f"a {case} call carries no requester, forged or not"
+
+
+async def _routine(
+    factory: async_sessionmaker[AsyncSession], person: _Person, **fields: object
+) -> uuid.UUID:
+    async with factory() as db, db.begin():
+        row = await create_routine(
+            db,
+            tenant_id=person.tenant_id,
+            created_by_user_id=fields.pop("owner", "user-1"),  # type: ignore[arg-type]
+            agent_id="agent_a",
+            agent_name=fields.pop("agent_name", "Agent A"),  # type: ignore[arg-type]
+            cron_expr="0 9 * * *",
+            timezone_="UTC",
+            trigger_message="go",
+            **fields,  # type: ignore[arg-type]
+        )
+    return row.id
+
+
+@pytest.mark.parametrize(
+    ("fields", "conversation"),
+    [
+        (
+            {"destination_kind": "channel", "destination_id": "chan-9"},
+            {"place_type": "channel", "channel_id": "chan-9", "parent_channel_id": None},
+        ),
+        (
+            {"destination_kind": "thread", "destination_id": "thr-9", "channel_id": "chan-9"},
+            {"place_type": "thread", "channel_id": "thr-9", "parent_channel_id": "chan-9"},
+        ),
+        ({"destination_kind": "dm", "owner": "1234"}, None),
+        ({}, None),
+    ],
+)
+async def test_routine_run_is_stamped_with_its_owner_delivery_place_and_kind(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fields: dict[str, object],
+    conversation: dict[str, object] | None,
+) -> None:
+    person = await _person(db_session_factory)
+    routine_id = await _routine(db_session_factory, person, **fields)
+    owner = str(fields.get("owner", "user-1"))
+    token = await _token(db_session_factory, person, RelayBinding("Agent A", routine_id=routine_id))
+    upstream = _Upstream()
+    forged = _tool_call(
+        requester_platform_user_id="666",
+        requester_conversation={"place_type": "dm", "channel_id": "evil"},
+        requester_kind="person",
+    )
+    async with _relay(
+        db_session_factory, upstream, None, BEARER_SERVER, bearers=_BEARERS
+    ) as client:
+        await _post(client, token, forged)
+    expected: dict[str, object] = {
+        "requester_platform_user_id": owner,
+        "requester_kind": "routine",
+    }
+    if conversation is not None:
+        expected["requester_conversation"] = conversation
+    assert _sent_meta(upstream.requests[0]) == expected, "the owner, not a forged asker"
+
+
+async def test_a_routine_credential_that_names_no_live_routine_stamps_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    person = await _person(db_session_factory)
+    async with db_session_factory() as db, db.begin():
+        other = _Person(
+            (await make_tenant(db, platform="discord", workspace_id="guild-2")).id,
+            person.account_id,
+            person.agent_id,
+        )
+    cases = {
+        "deleted": uuid.uuid4(),
+        "another tenant's": await _routine(
+            db_session_factory, other, destination_kind="channel", destination_id="c"
+        ),
+        "another agent's": await _routine(db_session_factory, person, agent_name="Helper"),
+        "ownerless": await _routine(db_session_factory, person, owner=None),
+    }
+    upstream = _Upstream()
+    async with _relay(
+        db_session_factory, upstream, None, BEARER_SERVER, bearers=_BEARERS
+    ) as client:
+        for routine_id in cases.values():
+            token = await _token(
+                db_session_factory, person, RelayBinding("Agent A", routine_id=routine_id)
+            )
+            await _post(
+                client,
+                token,
+                _tool_call(requester_platform_user_id="666", requester_kind="routine"),
+            )
+    assert [_sent_meta(r) for r in upstream.requests] == [{}] * len(cases), (
+        "a routine that is gone, foreign, another agent's or ownerless names nobody"
+    )
 
 
 async def test_two_live_turns_and_a_replaced_session_stamp_no_requester(

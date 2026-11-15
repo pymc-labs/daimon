@@ -31,6 +31,7 @@ from daimon.core.mcp_identity import (
     public_pem,
     relay_url,
     requester_conversation,
+    routine_conversation,
     sign_identity,
     stamp_requester,
 )
@@ -341,6 +342,7 @@ def test_stamp_sets_the_requester_and_keeps_other_meta() -> None:
         "progressToken": "p1",
         "requester_platform_user_id": "42",
         "requester_conversation": _CONVERSATION,
+        "requester_kind": "person",
     }, "the asker and place are added beside the caller's own meta"
 
 
@@ -348,10 +350,12 @@ def test_stamp_overwrites_forged_values_and_strips_them_without_a_person() -> No
     forged = _call(
         requester_platform_user_id="666",
         requester_conversation={"place_type": "dm", "channel_id": "1"},
+        requester_kind="routine",
     )
     stamped = _stamp(forged)["params"]["_meta"]
     assert stamped["requester_platform_user_id"] == "42", "a forged asker is overwritten"
     assert stamped["requester_conversation"] == _CONVERSATION, "a forged place is overwritten"
+    assert stamped["requester_kind"] == "person", "a forged kind is overwritten"
     bare = _stamp(forged, person=None)["params"]["_meta"]
     assert bare == {}, "with no person the forged fields are removed, not kept"
     assert _stamp(_call(), person=None)["params"]["_meta"] == {}, "nothing is invented"
@@ -404,3 +408,112 @@ def test_stamp_refuses_a_body_it_cannot_read_strictly(body: bytes) -> None:
 def test_stamp_treats_a_differently_cased_method_as_a_tool_call() -> None:
     message = {**_call(requester_platform_user_id="666"), "method": "Tools/Call"}
     assert _stamp(message, person=None)["params"]["_meta"] == {}, "no spelling skips the strip"
+
+
+def _routine_row(**changes: Any) -> Any:
+    from daimon.core.stores.domain import RoutineRow
+
+    now = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+    base: dict[str, Any] = {
+        "id": uuid.uuid4(),
+        "tenant_id": uuid.uuid4(),
+        "created_by_user_id": "42",
+        "agent_id": "agent_1",
+        "agent_name": "daimon",
+        "cron_expr": "0 9 * * *",
+        "timezone": "UTC",
+        "trigger_message": "go",
+        "enabled": True,
+        "next_fire_at": None,
+        "last_fired_at": None,
+        "last_error": None,
+        "last_result_tail": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    return RoutineRow(**{**base, **changes})
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        (
+            {"destination_kind": "channel", "destination_id": "5"},
+            {"place_type": "channel", "channel_id": "5", "parent_channel_id": None},
+        ),
+        (
+            {"destination_kind": "thread", "destination_id": "9", "channel_id": "5"},
+            {"place_type": "thread", "channel_id": "9", "parent_channel_id": "5"},
+        ),
+        ({"destination_kind": "thread", "destination_id": "9"}, None),
+        ({"destination_kind": "dm", "destination_id": "42"}, None),
+        ({}, None),
+    ],
+)
+def test_routine_delivery_place_is_named_only_when_it_is_recorded(
+    changes: dict[str, Any], expected: dict[str, str | None] | None
+) -> None:
+    assert routine_conversation(_routine_row(**changes)) == expected
+
+
+def test_a_routine_is_stamped_with_its_owner_place_and_kind() -> None:
+    out = json.loads(
+        stamp_requester(
+            json.dumps(_call(requester_kind="person", requester_platform_user_id="666")).encode(),
+            person="42",
+            conversation=_CONVERSATION,
+            kind="routine",
+        )
+    )
+    assert out["params"]["_meta"] == {
+        "requester_platform_user_id": "42",
+        "requester_conversation": _CONVERSATION,
+        "requester_kind": "routine",
+    }, "a forged kind or asker is replaced by the routine's owner"
+
+
+def test_a_routine_without_a_recorded_place_is_stamped_without_one() -> None:
+    out = json.loads(
+        stamp_requester(
+            json.dumps(_call(requester_conversation={"place_type": "dm"})).encode(),
+            person="42",
+            conversation=None,
+            kind="routine",
+        )
+    )
+    assert out["params"]["_meta"] == {
+        "requester_platform_user_id": "42",
+        "requester_kind": "routine",
+    }, "a forged place is removed and none is invented"
+
+
+@pytest.mark.parametrize("kind", ["routine", "person", None])
+def test_nothing_is_stamped_without_an_owner(kind: Any) -> None:
+    out = json.loads(
+        stamp_requester(
+            json.dumps(_call(requester_kind="routine")).encode(),
+            person=None,
+            conversation=_CONVERSATION,
+            kind=kind,
+        )
+    )
+    assert out["params"]["_meta"] == {}
+
+
+def test_a_person_without_a_kind_is_not_stamped() -> None:
+    out = json.loads(
+        stamp_requester(
+            json.dumps(_call()).encode(), person="42", conversation=_CONVERSATION, kind=None
+        )
+    )
+    assert out["params"]["_meta"] == {}
+
+
+def test_the_relay_claim_carries_a_routine_and_never_both_bindings() -> None:
+    routine_id = uuid.uuid4()
+    binding = RelayBinding(agent_name="daimon", routine_id=routine_id)
+    assert parse_relay_claim(binding.claim()) == binding
+    with pytest.raises(ValueError):
+        parse_relay_claim({"agent_name": "daimon", "session": str(uuid.uuid4()), "routine": "x"})
+    with pytest.raises(ValueError):
+        parse_relay_claim({"agent_name": "daimon", "routine": 7})

@@ -199,6 +199,7 @@ async def run_turn(
     feature_settings: Settings | None = None,
     runs_as_user: str | None = None,
     membership_resolver: MembershipResolver | None = None,
+    routine_id: uuid.UUID | None = None,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -239,6 +240,7 @@ async def run_turn(
             feature_settings=feature_settings,
             runs_as_user=runs_as_user,
             membership_resolver=membership_resolver,
+            routine_id=routine_id,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -279,6 +281,7 @@ async def run_turn(
                 feature_settings=feature_settings,
                 runs_as_user=runs_as_user,
                 membership_resolver=membership_resolver,
+                routine_id=routine_id,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -363,6 +366,7 @@ async def run_turn_impl(
     feature_settings: Settings | None = None,
     runs_as_user: str | None = None,
     membership_resolver: MembershipResolver | None = None,
+    routine_id: uuid.UUID | None = None,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its complete final reply.
 
@@ -599,6 +603,7 @@ async def run_turn_impl(
             private_dm_id=origin_place.private_dm_id if origin_place is not None else None,
             model_override=model_override,
             system_override=identity.system(agent.system, platform),
+            relay_routine_id=routine_id if origin == "routine" else None,
             identity=identity,
         )
 
