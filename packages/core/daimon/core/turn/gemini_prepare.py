@@ -44,12 +44,16 @@ from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding, SessionSpec
 from mux.contracts.usage import UsageObservation
+from mux.drivers.gemini import compile_environment
 from mux.errors import BindingConflict, ScopeViolation, UnsupportedCapability
 from mux.profiles.gemini import INLINE_REUSE, SESSION_NAMESPACE
 from mux.state.lease import Slot
+from mux.state.operations import request_digest
 from mux.state.store import ERA_REF, StateStore, adopted_identity
 
 log = structlog.get_logger(__name__)
+SETUP_REF = "environment_setup"
+"""Native ref: the digest of the sandbox setup a session was created with."""
 
 
 async def prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedTurn:
@@ -205,6 +209,12 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             account_id=scope.account_id,
         )
 
+    # A session keeps the sandbox it was created with, so a changed setup (a
+    # template's carried environment) replaces it. A bare one records nothing,
+    # which keeps every session created before setups were carried.
+    compiled = compile_environment(deployment.environment)
+    setup = "" if compiled == {"type": "remote", "sources": []} else request_digest(compiled)
+
     async def created(era: str) -> ProviderBinding:
         agent = deployment.native_agent
         if agent is None:
@@ -256,7 +266,11 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         return session.binding.model_copy(
             update={
                 "legacy_account_id": None if shared is not None else scope.account_id,
-                "native_refs": {**session.binding.native_refs, **({ERA_REF: era} if era else {})},
+                "native_refs": {
+                    **session.binding.native_refs,
+                    **({ERA_REF: era} if era else {}),
+                    **({SETUP_REF: setup} if setup else {}),
+                },
             }
         )
 
@@ -264,7 +278,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         None
         if prior is None
         else binding_decision(
-            recorded_facts(prior),
+            replace(recorded_facts(prior), environment=prior.native_refs.get(SETUP_REF, "")),
             # Gemini records no model, plan or scope ref: those follow config_revision.
             BindingFacts(
                 profile=PROFILE,
@@ -278,6 +292,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
                 account_scope="",
                 model="",
                 plan_digest="",
+                environment=setup,
             ),
             reuse_existing=request.reuse_existing and request.transfer is None,
         )

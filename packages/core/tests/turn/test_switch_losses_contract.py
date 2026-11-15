@@ -18,6 +18,7 @@ from .test_gemini_template_mcp import template as gemini_template  # noqa: F401
 from .test_openai_template_mcp import CONNECTOR_PARAMS as OPENAI_CONNECTOR
 from .test_openai_template_mcp import handoff_mcp
 from .test_openai_template_mcp import template as openai_template  # noqa: F401
+from .test_template_environment import default_environment
 
 #: Every Daimon MCP tool on, as an agent's default toolset has it.
 OPENAI_AGENT = {
@@ -67,13 +68,18 @@ def _environment(*, packages: bool = False, network: bool = False) -> dict:
     }
 
 
-#: Source environments and the finer losses each one names (none for a plain one).
+#: Source environments and the finer losses each names on a Gemini template, which
+#: sets up what it can, and on an operator's own OpenAI environment, served as it is
+#: (`test_openai_names_only_what_its_turn_loses`).
 ENVIRONMENTS = {
-    "plain": ({}, ()),
-    "packages": (_environment(packages=True), ("installed_packages",)),
-    "network": (_environment(network=True), ("network_rules",)),
+    "plain": ({}, (), ()),
+    "default": (default_environment(), (), ("installed_packages",)),
+    "packages": (_environment(packages=True), (), ("installed_packages",)),
+    "network": (_environment(network=True), (), ("network_rules",)),
+    # Gemini installs packages over the network, so a limited one can't carry them.
     "both": (
         _environment(packages=True, network=True),
+        ("installed_packages",),
         ("installed_packages", "network_rules"),
     ),
 }
@@ -150,17 +156,19 @@ async def test_gemini_names_only_what_its_turn_loses(gemini_template, consent_re
 async def test_openai_names_only_what_its_turn_loses(openai_template, consent_request):  # noqa: F811
     request, quote, *_ = openai_template
     relay = "mcp_server:linear" not in quote.declared_drops
-    # The recorded OpenAI source environment installs packages; the bare sandbox has none.
+    # Deliberate: an operator's own OpenAI environment (`environment_id`) is served as
+    # it is, so the recorded source's packages are a loss there. A tenant's own default
+    # environment carries them (`test_template_environment`).
     await _one_reading(request, quote, consent_request, relay=relay, finer=("installed_packages",))
 
 
-def _cases(base):
-    return [(dict(base, environment=env), finer) for env, finer in ENVIRONMENTS.values()]
+def _cases(base, provider: int):
+    return [(dict(base, environment=env), cases[provider]) for env, *cases in ENVIRONMENTS.values()]
 
 
 @pytest.mark.parametrize(
     "consent_request,finer",
-    _cases(GEMINI_CONNECTOR),
+    _cases(GEMINI_CONNECTOR, 0),
     ids=list(ENVIRONMENTS),
     indirect=["consent_request"],
 )
@@ -172,7 +180,7 @@ async def test_gemini_environment_losses(gemini_template, consent_request, finer
 
 @pytest.mark.parametrize(
     "consent_request,finer",
-    _cases(OPENAI_AGENT),
+    _cases(OPENAI_AGENT, 1),
     ids=list(ENVIRONMENTS),
     indirect=["consent_request"],
 )

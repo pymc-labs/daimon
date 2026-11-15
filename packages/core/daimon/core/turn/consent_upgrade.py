@@ -135,6 +135,9 @@ def same_losses(target: AgentSpec, consent: _BackendDropConsent) -> bool:
         # A template's code ran nowhere before; now the provider's sandbox runs it, and
         # only the parts of the environment it can't keep (`finer_drops`) are lost.
         accepted = (accepted - {"sandbox"}) | finer_parts("sandbox", today)
+    # A template's sandbox now sets up the packages and network it lost before:
+    # fewer losses than accepted.
+    accepted -= finer_parts("sandbox", accepted) - today
     effort = finer_parts("model_controls", today)
     if "model_controls" in accepted and "model_controls" not in today and effort:
         # Effort alone is now named on its own: a part of the model settings accepted.

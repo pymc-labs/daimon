@@ -19,7 +19,7 @@ from daimon.core.caller_resources import CALLER_RESOURCES_ID, CALLER_VAULT_PREFI
 from daimon.core.config import get_repo_memory_settings
 from daimon.core.connector_relay import relay_key
 from daimon.core.errors import DaimonError
-from daimon.core.finer_drops import FINER_DROPS, sandbox_losses
+from daimon.core.finer_drops import FINER_DROPS, kept_environment, sandbox_losses
 from daimon.core.host_web_fetch import WEB_FETCH_TOOL
 from daimon.core.self_helpers import MULTIAGENT, self_roster_extension, translates_self_roster
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
@@ -452,6 +452,7 @@ async def _capture_source_capabilities(
     from daimon.core.turn.session_skills import (
         attaches_session_skills,
         carried_skills,
+        environment_inline_bytes,
         fitting_skills,
         measure_carried_skills,
         skill_losses,
@@ -967,6 +968,17 @@ async def _capture_source_capabilities(
                     raise ValueError("target skill digest differs from source bytes")
 
             await asyncio.gather(*(verify_skill(item) for item in inputs.skills))
+            # A template's sandbox is set up as the source's environment, as far as
+            # the provider can recreate it (`finer_drops.kept_environment`). An
+            # operator's own OpenAI environment (`environment_id`) serves as it is.
+            kept = (
+                kept_environment(profile.profile_id, source.environment.spec)
+                if template
+                and mapped_tools
+                and source.environment is not None
+                and row.get("environment_id") is None
+                else None
+            )
             session_skills: tuple[SkillRef, ...] = ()
             names: dict[str, str] = {}
             if carried:
@@ -982,7 +994,9 @@ async def _capture_source_capabilities(
                     )
                 pins, sizes = measured
                 # Unmeasured or over the limits: that skill alone is a named loss.
-                session_skills = fitting_skills(profile, pins, sizes)
+                session_skills = fitting_skills(
+                    profile, pins, sizes, reserved=environment_inline_bytes(profile, kept)
+                )
                 template_losses = (*template_losses, *skill_losses(pins, session_skills))
                 names = skill_names(sizes)
             target = AgentSpec(
@@ -1002,7 +1016,7 @@ async def _capture_source_capabilities(
                     credential_refs=(reference,),
                     unavailable_mcp_tools=unavailable_mcp_tools,
                     unavailable_builtin_tools=unavailable_builtin_tools,
-                    environment=inputs.environment,
+                    environment=kept if template else inputs.environment,
                     unavailable_capabilities=(*template_losses, *connector_losses),
                     session_skills=session_skills,
                     skill_names=names,
@@ -1488,11 +1502,14 @@ def classify_source_obligations(
             missing.add("source_definition")
     # Removing execution is explicit; retaining a source environment requires
     # its complete canonical policy, which native readback must also verify.
-    # Its code runs in the provider's sandbox, which keeps a plain default environment
-    # whole; each setting beyond it (packages, network, files) is a named loss, covered
-    # by a declared `sandbox`.
+    # Its code runs in the provider's sandbox, set up as the representation's
+    # environment; each setting it can't recreate (packages, network, files) is a
+    # named loss, covered by a declared `sandbox`.
     sandbox_parts = (
-        sandbox_losses(source.environment.spec if source.environment is not None else None)
+        sandbox_losses(
+            source.environment.spec if source.environment is not None else None,
+            represented.environment,
+        )
         if represented is not None and represented.provider_execution and not resources
         else ("sandbox",)
     )

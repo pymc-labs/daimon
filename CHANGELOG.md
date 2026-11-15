@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shared-thread limit. A model pick's card has Cancel and Switch buttons.
   Price, reach and thread lines are off the card; the model pickers show the price.
   After an agent edit, a conversation's pick that loses nothing is kept again at once.
+- **Switching an agent to OpenAI or Gemini keeps its packages and network rules.**
+  Its sandbox is set up like the source agent's, also in threads that started
+  earlier. The switch preview names only what the provider cannot set up.
 - **A Gemini agent sends only the files it made.** The skills installed for
   the agent, and the input files and repositories set up in its sandbox, are
   never sent to the thread as the agent's files, also in conversations that

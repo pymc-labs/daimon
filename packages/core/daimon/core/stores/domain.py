@@ -1463,9 +1463,9 @@ class SourceRepresentation(_Facts):
     # A measured skill's own name by id: a `skill:` drop keys it by id, people see this.
     skill_names: dict[str, str] = Field(default_factory=dict)
     # The target runs the source's execution tools in the provider's own sandbox
-    # (an agent template: OpenAI's hosted bash, Gemini's code_execution). That
-    # sandbox is a bare default one: `finer_drops.sandbox_losses` names what the
-    # source's environment had beyond it.
+    # (an agent template: OpenAI's hosted bash, Gemini's code_execution), set up as
+    # `environment` (None: the provider's default). `finer_drops.sandbox_losses`
+    # names what the source's environment had beyond it.
     provider_execution: bool = False
 
 

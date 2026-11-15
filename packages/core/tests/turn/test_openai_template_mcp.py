@@ -143,6 +143,8 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
     thread_mode = "shared" if isinstance(param, dict) and param.get("shared") else "per_caller"
     # {"relay": True}: the connector relay is on from consent onward.
     relay = isinstance(param, dict) and param.get("relay", False)
+    # {"code_default": True}: the operator installed no row; the code default serves.
+    code_default = isinstance(param, dict) and param.get("code_default", False)
     request, _, source, actor, accepted, router, *_ = consent_request
     sessions = request.deps.sessionmaker
     router.add_environment_list(request.admission.environment)
@@ -213,7 +215,9 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
     )
     manifest = tmp_path / "runtime.json"
     before = {key: value for key, value in row.items() if key != "template_capabilities"}
-    manifest.write_text(json.dumps([before if legacy else row]))
+    manifest.write_text("[]" if code_default else json.dumps([before if legacy else row]))
+    if code_default:
+        monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "offline")
     monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(manifest))
     monkeypatch.setenv(KEY, "offline")
 
