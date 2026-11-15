@@ -30,7 +30,8 @@ class UsageObservation(Contract):
     audited against it. `final` is the provider saying the measured work has
     ended: no later revision will add usage. A running snapshot is never final.
     `web_searches` counts the billable web searches the work ran, cumulative
-    like the tokens.
+    like the tokens. `occurred_at` is when the provider says the work last
+    ran, if it says; `observed_at` is when the driver read it.
     """
 
     id: str
@@ -50,6 +51,7 @@ class UsageObservation(Contract):
     native_meter: FrozenMap[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
     completeness: Literal["partial", "measured", "unknown"]
     observed_at: datetime
+    occurred_at: datetime | None = Field(default=None, exclude_if=lambda value: value is None)
     covers: tuple[str, ...] = ()
     final: bool = Field(default=False, exclude_if=lambda value: not value)
     web_searches: int = Field(default=0, ge=0, exclude_if=lambda value: not value)

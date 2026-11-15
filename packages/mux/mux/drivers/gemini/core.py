@@ -66,7 +66,7 @@ from mux.drivers.gemini.transport import (
     object_value,
     string,
 )
-from mux.drivers.gemini.usage import observation_from_interaction
+from mux.drivers.gemini.usage import observation_from_interaction, provider_time
 from mux.errors import (
     ContinuityLost,
     ExtensionVersionError,
@@ -385,13 +385,8 @@ class Base:
             interaction = string(raw["id"])
             # Provider chronology is independent of meter changes and survives
             # restart. Parse offsets rather than ordering timestamp strings.
-            active = raw.get("updated") or raw.get("created")
-            stamp: datetime | None = None
-            if active is not None:
-                stamp = datetime.fromisoformat(string(active).replace("Z", "+00:00"))
-                if stamp.tzinfo is None:
-                    raise ValueError("provider timestamp has no timezone")
-                stamp = stamp.astimezone(UTC)
+            stamp = provider_time(raw)
+            if stamp is not None:
                 watermark = record.native_updated.get(interaction)
                 if watermark is not None and stamp.microsecond == 0:
                     # The create reply can carry microseconds (23:07:10.142775)

@@ -1,7 +1,7 @@
 """Interaction-grain usage, never inferred from text or converted from null to zero."""
 
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 
 from pydantic import JsonValue
 
@@ -61,12 +61,24 @@ def observation_from_interaction(
         if not meter
         else ("measured" if input_tokens is not None and output is not None else "partial"),
         observed_at=observed_at,
+        occurred_at=provider_time(raw),
         # A terminal status ends the interaction's usage, and so does requires_action:
         # its tool results continue as a new interaction (`previous_interaction_id`),
         # so this one never runs again. A running interaction may still grow.
         final=raw.get("status") in (*OUTCOMES, "requires_action"),
         web_searches=web_searches(meter),
     )
+
+
+def provider_time(raw: Mapping[str, JsonValue]) -> datetime | None:
+    """The interaction's last `updated` time (else `created`), in UTC; None if it has none."""
+    active = raw.get("updated") or raw.get("created")
+    if active is None:
+        return None
+    stamp = datetime.fromisoformat(string(active).replace("Z", "+00:00"))
+    if stamp.tzinfo is None:
+        raise ValueError("provider timestamp has no timezone")
+    return stamp.astimezone(UTC)
 
 
 def web_searches(meter: Mapping[str, JsonValue]) -> int:
