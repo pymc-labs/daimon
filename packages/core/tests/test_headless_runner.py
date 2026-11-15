@@ -1768,6 +1768,65 @@ async def test_headless_role_gated_target_is_refused_before_session_creation(
     assert sent == []
 
 
+@pytest.mark.parametrize(
+    ("owner", "facts"),
+    [
+        (None, ("999", True)),
+        ("u1", ("999", True)),
+        ("u1", ("", False)),
+        ("u1", "unreadable"),
+        ("u1", "no_resolver"),
+    ],
+)
+async def test_headless_role_gated_target_refuses_an_owner_without_the_role(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    run_turn: RunTurn,
+    headless_identity: HeadlessIdentity,
+    owner: str | None,
+    facts: tuple[str, bool] | str,
+) -> None:
+    from daimon.core.access_policy import AgentRule, TenantAccessPolicy
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.stores.access_policy import set_access_policy
+    from daimon.core.turn.errors import AdmissionDenied
+
+    await set_access_policy(
+        db_session,
+        tenant_id=headless_identity.tenant_id,
+        policy=TenantAccessPolicy(agent_rules={"test-agent": AgentRule(invoker_role_ids=("123",))}),
+    )
+    await db_session.commit()
+
+    async def fetch(*_args: object) -> Membership:
+        if facts == "unreadable":
+            raise RuntimeError("down")
+        assert isinstance(facts, tuple)
+        role, is_member = facts
+        return Membership(is_member=is_member, role_ids=(role,) if role else (), is_admin=True)
+
+    resolver = None if facts == "no_resolver" else CachedMembershipResolver(fetch)
+    created: list[dict[str, Any]] = []
+    sent: list[dict[str, Any]] = []
+    client = _build_client([], session_create_capture=created, send_capture=sent)
+    try:
+        with pytest.raises(AdmissionDenied, match="invoker_not_allowed"):
+            await run_turn(
+                anthropic=client,
+                agent_id="agent_x",
+                environment_id="env_x",
+                trigger_message="work",
+                tenant_id=headless_identity.tenant_id,
+                session_factory=db_session_factory,
+                runs_as_user=owner,
+                membership_resolver=resolver,
+            )
+    finally:
+        await client.close()
+    assert created == []
+    assert sent == []
+
+
 async def test_routine_receives_shared_repo_memory_only(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Literal, Protocol
 
@@ -134,6 +134,9 @@ class RoutineCaller:
     """The agents (as `derive_agent_uuid`) the caller is talking to or may chat with; a
     member may schedule these."""
     admin_noun: str = "an admin"
+    fresh_subject: Callable[[], Awaitable[Subject]] | None = None
+    """Reads the caller's roles from the platform right now; called only once a save is
+    about to be checked against a role-gated agent, so earlier refusals touch nothing."""
 
     @property
     def user_id(self) -> str | None:
@@ -500,6 +503,12 @@ async def _require_agent_in_scope(
     )
 
 
+async def _with_fresh_subject(caller: RoutineCaller) -> RoutineCaller:
+    if caller.fresh_subject is None:
+        return caller
+    return replace(caller, subject=await caller.fresh_subject())
+
+
 def _store_refusal(err: StoreError) -> RoutineRefused:
     return RoutineRefused(str(err))
 
@@ -529,6 +538,7 @@ async def create_routine(env: RoutineEnv, caller: RoutineCaller, new: NewRoutine
         )
     async with env.sessionmaker() as session:
         policy = await _load_policy(session, caller.tenant_id)
+    caller = await _with_fresh_subject(caller)
     budget_channel_id = destination_channel_id
     if new.destination_kind in (None, "dm") and env.origin_budget_channel is not None:
         budget_channel_id = await env.origin_budget_channel()
@@ -701,6 +711,7 @@ async def update_routine(
                 raise UnknownAgent(f"no agent named {change.agent_name!r} found here")
             new_agent_id = match.id
         if any_agent_rules(policy) or any_own_readers(policy):
+            caller = await _with_fresh_subject(caller)
             # Check the agent the routine will run, by all its names.
             effective_ma_id = new_agent_id or row.agent_id
             effective_agent = next(

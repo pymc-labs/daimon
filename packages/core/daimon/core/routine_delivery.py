@@ -345,6 +345,15 @@ _ROUTINE_FAILURES: Final[dict[TerminationReason, tuple[str, str]]] = {
         "It will run again at its next scheduled time once the limit resets or is raised.",
     ),
 }
+#: The error recorded when a routine's owner no longer holds a role its agent needs.
+OWNER_LACKS_ROLE_ERROR: Final = "owner_lacks_agent_role"
+#: Notices keyed by the recorded error rather than by why the turn ended. No role names.
+_ERROR_NOTICES: Final[dict[str, tuple[str, str]]] = {
+    OWNER_LACKS_ROLE_ERROR: (
+        "Its owner no longer has a role this agent needs, so it didn't run.",
+        _NEXT_RUN,
+    ),
+}
 _OTHER_FAILURE = ("Something went wrong while it was running.", _NEXT_RUN)
 _TURN_NOTICE_FAILURES = (
     TerminationReason.ADMISSION_BALANCE_DEPLETED,
@@ -389,8 +398,12 @@ async def record_failure(
     that keeps failing stays quiet until a run succeeds (`queue_failure_notice`).
     """
     if reason is not None:
-        notice = failure_notice_text(
-            reason, platform=await routine_platform(session, routine_id) or ""
+        notice = (
+            "\n\n".join(_ERROR_NOTICES[error])
+            if error in _ERROR_NOTICES
+            else failure_notice_text(
+                reason, platform=await routine_platform(session, routine_id) or ""
+            )
         )
         if await queue_failure_notice(
             session, routine_id, notice=notice, expected_row=expected_row
@@ -660,15 +673,6 @@ async def clear_creator(
                 thread_id=row.source_thread_id,
             ):
                 return "restricted_source"
-            if not authorize(
-                policy,
-                subject=Subject(),
-                action=Action.RUN_AGENT,
-                surface=Surface.ROUTINE,
-                agent=AgentRef.of(row.agent_name),
-                place=Place(),
-            ):
-                return "agent_not_allowed"
         is_admin = False
         if platform != "discord" and row.created_by_user_id is not None:
             principal = await find_platform_principal(
@@ -692,6 +696,17 @@ async def clear_creator(
             policy, subject=subject, action=Action.ACT_FOR_CREATOR, surface=Surface.ROUTINE
         ):
             return "invoker_not_allowed"
+        # The owner's freshly resolved subject, so a role-gated agent still sends
+        # for an owner who holds its roles, and for nobody else.
+        if row.destination_kind == "dm" and not authorize(
+            policy,
+            subject=subject,
+            action=Action.RUN_AGENT,
+            surface=Surface.ROUTINE,
+            agent=AgentRef.of(row.agent_name),
+            place=Place(),
+        ):
+            return "agent_not_allowed"
         return policy
     refusal = creator_refusal_for(
         policy,

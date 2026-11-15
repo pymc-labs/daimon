@@ -95,7 +95,11 @@ from daimon.core.turn.persistence import MutationRetry, TurnPersistence, current
 from daimon.core.turn.posture import Billed, BillingExempt, BillingPosture, ExemptReason
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.termination import TerminationReason
-from daimon.core.turn.unattended import session_gate, unattended_posture
+from daimon.core.turn.unattended import (
+    owner_principal_check,
+    session_gate,
+    unattended_posture,
+)
 from daimon.core.turn.unattended_capabilities import protected_tools
 from daimon.core.turn.web_search_sources import claude_searches, sources_prefix
 from daimon.core.turn_hold import TurnHold
@@ -110,6 +114,8 @@ from mux.state.mutation_retry import MutationRetryPolicy
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
+    from daimon.core.membership import MembershipResolver
+
     pass
 
 log = structlog.get_logger(__name__)
@@ -191,6 +197,8 @@ async def run_turn(
     turn_path: TurnPath | None = None,
     personal_memory: bool = False,
     feature_settings: Settings | None = None,
+    runs_as_user: str | None = None,
+    membership_resolver: MembershipResolver | None = None,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -229,6 +237,8 @@ async def run_turn(
             turn_path=turn_path,
             personal_memory=personal_memory,
             feature_settings=feature_settings,
+            runs_as_user=runs_as_user,
+            membership_resolver=membership_resolver,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -267,6 +277,8 @@ async def run_turn(
                 turn_path=turn_path,
                 personal_memory=personal_memory,
                 feature_settings=feature_settings,
+                runs_as_user=runs_as_user,
+                membership_resolver=membership_resolver,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -349,6 +361,8 @@ async def run_turn_impl(
     turn_path: TurnPath | None = None,
     personal_memory: bool = False,
     feature_settings: Settings | None = None,
+    runs_as_user: str | None = None,
+    membership_resolver: MembershipResolver | None = None,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its complete final reply.
 
@@ -481,6 +495,12 @@ async def run_turn_impl(
         else frozenset[str]()
     )
 
+    principal_check = owner_principal_check(
+        session_factory,
+        membership_resolver,
+        tenant_id=tenant_id,
+        owner_user_id=runs_as_user,
+    )
     fragments = True  # `origin_fragments` where the session is placed
     memory_on = False  # `repo_memory` where the session is placed
 
@@ -514,7 +534,9 @@ async def run_turn_impl(
 
             async with session_factory() as db:
                 access = await policy_store.load_access_policy(db, tenant_id=tenant_id)
-            if agent_invoker_roles(access, build_agent_ref(agent.name, agent.metadata).names):
+            ref = build_agent_ref(agent.name, agent.metadata)
+            if agent_invoker_roles(access, ref.names) and not await principal_check(access, ref):
+                # Unattended: only a run-as owner freshly verified to hold the roles.
                 raise AdmissionDenied(reason="invoker_not_allowed")
         environment = sdk_environment(
             await legacy_call(
@@ -733,6 +755,7 @@ async def run_turn_impl(
                     tenant_id=tenant_id,
                     entry_point="routine",
                     routine_sandbox_tools=sandbox_tools,
+                    principal_check=principal_check,
                 )
             ),
         ):

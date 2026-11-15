@@ -47,6 +47,7 @@ from daimon.core.authz import (
     build_agent_ref,
     build_subject,
     build_turn_place,
+    holds_agent_roles,
 )
 from daimon.core.channel_backend import (
     BackendUnsupported,
@@ -2102,9 +2103,12 @@ def _require_turn_start(
 
 def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> None:
     """The agent pin, then channel isolation; any denial refuses the turn."""
-    if (grant.act_for_creator or not grant.human_invocation) and agent_invoker_roles(
-        policy, grant.agent.names
+    if (
+        (grant.act_for_creator or not grant.human_invocation)
+        and agent_invoker_roles(policy, grant.agent.names)
+        and not holds_agent_roles(policy, grant.agent.names, grant.subject)
     ):
+        # Unattended: only a freshly verified owner holding every required role.
         raise AdmissionDenied(reason="invoker_not_allowed")
     subject = replace(grant.subject, is_admin=False) if grant.cold_dm else grant.subject
     if grant.cold_dm and not authorize(

@@ -11,9 +11,10 @@ import asyncio
 import functools
 import json
 import os
+import types
 import unittest.mock
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -2107,6 +2108,9 @@ async def test_fire_checks_the_agent_pin_before_the_channel_budget(
     async def fake_resolve(*args: object, **kwargs: object) -> str:
         return "agent_dest"
 
+    async def fake_retrieve(*args: object, **kwargs: object) -> object:
+        return types.SimpleNamespace(name="daimon", metadata={})
+
     with (
         unittest.mock.patch("daimon.adapters.scheduler.main.run_turn", side_effect=fake_run_turn),
         unittest.mock.patch(
@@ -3093,6 +3097,9 @@ async def _fire_with_fake_turn(
     async def fake_resolve(*args: object, **kwargs: object) -> str:
         return "agent_dest"
 
+    async def fake_retrieve(*args: object, **kwargs: object) -> object:
+        return types.SimpleNamespace(name="daimon", metadata={})
+
     with (
         unittest.mock.patch("daimon.adapters.scheduler.main.run_turn", side_effect=fake_run_turn),
         unittest.mock.patch(
@@ -3100,6 +3107,10 @@ async def _fire_with_fake_turn(
         ),
         unittest.mock.patch(
             "daimon.adapters.scheduler.main.resolve_environment", side_effect=fake_resolve
+        ),
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.retrieve_agent",
+            side_effect=fake_retrieve,
         ),
     ):
         await fire(row)
@@ -4244,25 +4255,86 @@ async def test_thread_routine_checks_parent_and_retained_backend_before_anthropi
     assert after.last_result_tail is None
 
 
-async def test_routine_cannot_fire_role_gated_agent_even_for_live_creator(
+async def _role_gated_fire(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+    fetch: Callable[..., Awaitable[object]] | None,
+) -> tuple[RoutineRow, dict[str, object]]:
     from daimon.core.access_policy import AgentRule, TenantAccessPolicy
-    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.membership import CachedMembershipResolver
 
-    async def fetch(*_args: object) -> Membership:
-        return Membership(is_member=True, role_ids=("123",), is_admin=True)
-
-    after, seen = await _fire_with_fake_turn(
+    return await _fire_with_fake_turn(
         db_session,
         db_session_factory,
         monkeypatch,
         destination=None,
         agent_posts_to=None,
         policy=TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("123",))}),
-        membership_resolver=CachedMembershipResolver(fetch),
+        membership_resolver=CachedMembershipResolver(fetch) if fetch is not None else None,  # type: ignore[arg-type]
     )
+
+
+async def test_routine_fires_role_gated_agent_for_owner_holding_the_role(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.membership import Membership
+
+    async def fetch(*_args: object) -> Membership:
+        return Membership(is_member=True, role_ids=("123",), is_admin=False)
+
+    after, seen = await _role_gated_fire(db_session, db_session_factory, monkeypatch, fetch)
+    assert seen["runs_as_user"] == "U_DEST"
+    assert after.last_error is None
+
+
+@pytest.mark.parametrize(
+    ("member", "roles", "admin", "error"),
+    [
+        (True, ("999",), True, "owner_lacks_agent_role"),
+        (True, (), False, "owner_lacks_agent_role"),
+        (False, (), False, "invoker_not_allowed"),
+    ],
+)
+async def test_routine_refuses_role_gated_agent_when_owner_lacks_the_role(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    member: bool,
+    roles: tuple[str, ...],
+    admin: bool,
+    error: str,
+) -> None:
+    from daimon.core.membership import Membership
+
+    async def fetch(*_args: object) -> Membership:
+        return Membership(is_member=member, role_ids=roles, is_admin=admin)
+
+    after, seen = await _role_gated_fire(db_session, db_session_factory, monkeypatch, fetch)
+    assert not seen, "an admin without the role is not a bypass"
+    assert after.last_error == error
+
+
+async def test_routine_role_gated_agent_retries_when_membership_is_unreadable(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fetch(*_args: object) -> object:
+        raise RuntimeError("discord down")
+
+    after, seen = await _role_gated_fire(db_session, db_session_factory, monkeypatch, fetch)
     assert not seen
-    assert after.last_error == "invoker_not_allowed"
+    assert after.last_error == "membership_unavailable"
+
+
+async def test_routine_refuses_role_gated_agent_without_a_resolver(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    after, seen = await _role_gated_fire(db_session, db_session_factory, monkeypatch, None)
+    assert not seen
+    assert after.last_error is not None

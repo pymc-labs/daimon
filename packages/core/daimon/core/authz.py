@@ -165,9 +165,38 @@ class Subject:
     via_agent_key: bool = False
     role_ids: tuple[str, ...] = ()
     verified_membership: bool | None = None
+    # Membership was re-read from the platform for this decision, not served
+    # from cache. Only `resolve_subject(require_fresh=True)` sets it.
+    membership_fresh: bool = False
     # The requester belongs to another organisation (or the platform could not
     # say): never an admin, and refused everything outside the held channel.
     client: bool = False
+
+
+def holds_agent_roles(
+    policy: TenantAccessPolicy, agent_names: tuple[str | None, ...], subject: Subject
+) -> bool:
+    """True when `subject` is a freshly verified member holding every role the agent needs.
+
+    This is what lets a role-gated agent run unattended for its owner. No admin
+    bypass: an admin without the role does not qualify, and cached membership
+    never does.
+    """
+    roles = agent_invoker_roles(policy, agent_names)
+    return (
+        subject.membership_fresh
+        and subject.verified_membership is True
+        and subject.platform_user_id is not None
+        and not subject.client
+        and all(set(subject.role_ids).intersection(required) for required in roles)
+        and is_invoker_allowed(
+            policy,
+            external_user_id=subject.platform_user_id,
+            is_admin=False,
+            role_ids=subject.role_ids,
+            verified_membership=subject.verified_membership,
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -591,7 +620,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     if req.action is Action.RUN_AGENT:
         roles = agent_invoker_roles(policy, agent.names)
         if roles and (
-            req.surface is Surface.ROUTINE
+            (req.surface is Surface.ROUTINE and not holds_agent_roles(policy, agent.names, subject))
             or subject.platform_user_id is None
             or subject.verified_membership is not True
             or not all(set(subject.role_ids).intersection(required) for required in roles)
@@ -628,7 +657,9 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW if refusal is None else _deny(refusal)
 
     if req.action is Action.SAVE_ROUTINE:
-        if agent_invoker_roles(policy, agent.names):
+        if agent_invoker_roles(policy, agent.names) and not holds_agent_roles(
+            policy, agent.names, subject
+        ):
             return _deny("invoker_not_allowed")
         here = place.permissions.home
         if here is not None and agent.permissions.home != here:
@@ -876,6 +907,7 @@ def build_subject(
     via_agent_key: bool = False,
     role_ids: tuple[str, ...] = (),
     verified_membership: bool | None = None,
+    membership_fresh: bool = False,
     client: bool = False,
 ) -> Subject:
     """Who is acting. The one place a caller's identity becomes a `Subject`.
@@ -889,6 +921,7 @@ def build_subject(
         client=client,
         role_ids=role_ids,
         verified_membership=verified_membership,
+        membership_fresh=membership_fresh and verified_membership is True and not client,
     )
 
 

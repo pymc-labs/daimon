@@ -11,7 +11,7 @@ import anthropic
 import httpx
 import pytest
 from daimon.core import routine_delivery as routine_delivery_module
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.config import Settings, WebSettings
 from daimon.core.routine_delivery import (
@@ -685,6 +685,60 @@ async def test_clear_creator_returns_the_policy_or_why_not(
     assert await clear_creator(
         db_session_factory, row, platform="discord", membership_resolver=resolver
     ) == ("access_policy_unreadable")
+
+
+@pytest.mark.parametrize(
+    ("member", "roles", "admin", "expected"),
+    [
+        (True, ("123",), False, "cleared"),
+        (True, ("999",), True, "agent_not_allowed"),
+        (True, (), False, "agent_not_allowed"),
+        (False, (), False, "invoker_not_allowed"),
+    ],
+)
+async def test_a_dm_for_a_role_gated_agent_is_sent_only_for_an_owner_holding_the_role(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    member: bool,
+    roles: tuple[str, ...],
+    admin: bool,
+    expected: str,
+) -> None:
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.stores.direct_messages import set_dm_enabled
+
+    tenant = await make_tenant(db_session, platform="discord")
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="1234",
+        agent_id="ag",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="go",
+        destination_kind="dm",
+        destination_id="1234",
+        source_provenance_known=True,
+    )
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant.id,
+        policy=TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("123",))}),
+    )
+    await db_session.commit()
+
+    async def fetch(*_args: object) -> Membership:
+        return Membership(is_member=member, role_ids=roles, is_admin=admin)
+
+    result = await clear_creator(
+        db_session_factory,
+        row,
+        platform="discord",
+        membership_resolver=CachedMembershipResolver(fetch),  # type: ignore[arg-type]
+    )
+    assert ("cleared" if isinstance(result, TenantAccessPolicy) else result) == expected
 
 
 @pytest.mark.parametrize(

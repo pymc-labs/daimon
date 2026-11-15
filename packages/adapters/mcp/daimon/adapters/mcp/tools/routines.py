@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import cast
 from uuid import UUID
 
@@ -281,6 +282,40 @@ async def _resolve_teams_destination(
     return ref.channel_id
 
 
+def _saving_caller(runtime: McpRuntime, auth: AuthIdentity) -> RoutineCaller:
+    """The caller for a save: a Discord person's roles are read fresh, never cached.
+
+    A role-gated agent's routine is saved only by someone who holds its roles
+    right now; nothing else (an agent key, another platform) can show that.
+    """
+    caller = _caller(auth)
+    if (
+        auth.platform != "discord"
+        or auth.platform_user_id is None
+        or auth.is_external_agent
+        or auth.client
+    ):
+        return caller
+    user_id = auth.platform_user_id
+
+    async def fresh() -> Subject:
+        live = await resolve_subject(
+            runtime.session_factory,
+            runtime.membership_resolver,
+            tenant_id=auth.tenant_id,
+            user_id=user_id,
+            require_fresh=True,
+        )
+        return replace(
+            caller.subject,
+            role_ids=live.role_ids,
+            verified_membership=live.verified_membership,
+            membership_fresh=live.membership_fresh,
+        )
+
+    return replace(caller, fresh_subject=fresh)
+
+
 def _caller(auth: AuthIdentity) -> RoutineCaller:
     return RoutineCaller(
         tenant_id=auth.tenant_id,
@@ -513,7 +548,7 @@ async def _create_routine_impl(
     with _tool_errors():
         return await routine_service.create_routine(
             _env(runtime, auth, origin_context_id=origin_context_id, verified_origin=True),
-            _caller(auth),
+            _saving_caller(runtime, auth),
             NewRoutine(
                 agent_name=agent_name,
                 cron_expr=cron_expr,
@@ -563,7 +598,7 @@ async def _update_routine_impl(
     with _tool_errors():
         return await routine_service.update_routine(
             _env(runtime, auth),
-            _caller(auth),
+            _saving_caller(runtime, auth),
             routine_id,
             RoutineChange(
                 agent_name=agent_name,

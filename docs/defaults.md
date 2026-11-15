@@ -141,8 +141,8 @@ checks.
 
 Limit who can reach them:
 
-- **Discord:** set the agent rule's `invoker_role_ids`. Role-gated agents
-  refuse routines.
+- **Discord:** set the agent rule's `invoker_role_ids`. A routine on a
+  role-gated agent runs only while its owner holds those roles.
 - **Slack and Teams:** there is no per-person gate. Route the agent only to
   private channels with restricted members, and set `runs_in`.
 - **CLI:** `--agent` is not checked per agent, so keep CLI access to trusted

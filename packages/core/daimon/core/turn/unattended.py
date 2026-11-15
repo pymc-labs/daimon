@@ -24,6 +24,7 @@ with it on, the same selection a chat turn asks on.
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -33,6 +34,7 @@ from typing import TYPE_CHECKING
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from cryptography.fernet import MultiFernet
+from daimon.core.authz import holds_agent_roles
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_CHANNEL,
@@ -45,6 +47,7 @@ from daimon.core.mcp_tool_annotations import (
     mcp_annotation_lookup,
     no_mcp_token,
 )
+from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
 from daimon.core.session_ports_compat import retrieve_session_record
 from daimon.core.tool_safety import (
@@ -75,6 +78,9 @@ from mux.profiles import get_profile
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.authz import AgentRef, Subject
+    from daimon.core.membership import MembershipResolver
     from daimon.core.stores.domain import TurnOriginRow
     from daimon.core.turn.admission import Admission
     from daimon.core.turn.deps import TurnDeps
@@ -198,6 +204,50 @@ async def refuse_ungated_confirmation(call: ToolCall) -> ToolConfirmationResult:
     )
 
 
+type PrincipalCheck = Callable[[TenantAccessPolicy, AgentRef], Awaitable[bool]]
+
+#: Longest a verified owner is trusted between re-reads of their membership.
+PRINCIPAL_RECHECK_SECONDS = 60.0
+
+
+def owner_principal_check(
+    sessionmaker: async_sessionmaker[AsyncSession] | None,
+    resolver: MembershipResolver | None,
+    *,
+    tenant_id: uuid.UUID | None,
+    owner_user_id: str | None,
+    clock: Callable[[], float] = time.monotonic,
+) -> PrincipalCheck:
+    """A per-send check that the runs-as owner still holds the agent's roles.
+
+    It re-reads the owner's membership from the platform at most once per
+    `PRINCIPAL_RECHECK_SECONDS`; a failed or unavailable read denies, and a
+    denial is never remembered past the next send.
+    """
+    held: tuple[float, Subject] | None = None
+
+    async def check(policy: TenantAccessPolicy, agent: AgentRef) -> bool:
+        nonlocal held
+        if owner_user_id is None or sessionmaker is None or tenant_id is None:
+            return False
+        now = clock()
+        if held is None or now - held[0] >= PRINCIPAL_RECHECK_SECONDS:
+            subject = await resolve_subject(
+                sessionmaker,
+                resolver,
+                tenant_id=tenant_id,
+                user_id=owner_user_id,
+                require_fresh=True,
+            )
+            held = (now, subject)
+        ok = holds_agent_roles(policy, agent.names, held[1])
+        if not ok:
+            held = None
+        return ok
+
+    return check
+
+
 async def gate_session_snapshot(
     client: AsyncAnthropic,
     session: BetaManagedAgentsSession,
@@ -209,6 +259,7 @@ async def gate_session_snapshot(
     tenant_id: uuid.UUID | None,
     entry_point: UnattendedEntryPoint | None = None,
     routine_sandbox_tools: bool = False,
+    principal_check: PrincipalCheck | None = None,
 ) -> None:
     """Make `session`'s gated calls pause under `policy`, before anything is sent.
 
@@ -223,6 +274,8 @@ async def gate_session_snapshot(
     `protected_tools` ask, and heals a foreign `daimon-mcp` URL, policy on or
     off. A refusal or a failed update raises, so the send never happens on an
     ungated session. An `entry_point` of None gets no built-ins and no skills.
+    A role-gated agent is refused unless `principal_check` confirms the runs-as
+    owner still holds its roles; without one (the CLI, a transfer) it is refused.
     """
     # Attended turns are admitted and reauthorized by the turn driver. Of the
     # unattended entry points, only MCP chat has proved a principal.
@@ -241,7 +294,9 @@ async def gate_session_snapshot(
                 client, session.agent.id, scope=scope, records=session_factory
             )
             ref = build_agent_ref(target.name, target.metadata, session.agent.name)
-            if agent_invoker_roles(access, ref.names):
+            if agent_invoker_roles(access, ref.names) and not (
+                principal_check is not None and await principal_check(access, ref)
+            ):
                 raise AdmissionDenied(reason="invoker_not_allowed")
     allowed = capability_policy(entry_point, routine_sandbox_tools=routine_sandbox_tools)
     constrained = await constrain_capabilities(
@@ -363,6 +418,7 @@ def session_gate(
     read_session: Callable[[], Awaitable[BetaManagedAgentsSession]] | None = None,
     entry_point: UnattendedEntryPoint | None = None,
     routine_sandbox_tools: bool = False,
+    principal_check: PrincipalCheck | None = None,
 ) -> Callable[[], Awaitable[None]]:
     """The gate a driven unattended turn runs before each send (`unattended_sends`).
 
@@ -388,6 +444,7 @@ def session_gate(
             tenant_id=tenant_id,
             entry_point=entry_point,
             routine_sandbox_tools=routine_sandbox_tools,
+            principal_check=principal_check,
         )
 
     return gate
@@ -405,6 +462,19 @@ def session_rules_channel(session: BetaManagedAgentsSession, *, platform: str) -
         platform=platform,
         channel_id=metadata.get(MA_METADATA_KEY_CHANNEL),
         private_dm_id=metadata.get(MA_METADATA_KEY_PRIVATE_DM),
+    )
+
+
+def _grant_owner_check(
+    deps: TurnDeps, admission: Admission, tenant_id: uuid.UUID
+) -> PrincipalCheck:
+    """The per-send role check for the person a turn runs as."""
+    grant = admission.grant
+    return owner_principal_check(
+        deps.sessionmaker,
+        deps.membership_resolver,
+        tenant_id=tenant_id,
+        owner_user_id=grant.subject.platform_user_id if grant is not None else None,
     )
 
 
@@ -486,6 +556,7 @@ async def dm_session_authority(
             session_factory=deps.sessionmaker,
             tenant_id=tenant_id,
             entry_point=entry_point,
+            principal_check=_grant_owner_check(deps, admission, tenant_id),
         )
 
     return posture, gate

@@ -122,11 +122,21 @@ before each model call and approval card. A revoked role refuses the next
 step, not one already running. A handoff checks the person asking against the
 agent it moves to.
 
-Only a person can use a role-gated agent. Routines, watches, timers, long jobs
-and other unattended turns cannot, and saving a routine for one is refused. A
-handoff from an unattended turn cannot switch to one. Handing a thread away
-from a role-gated agent carries the transcript but skips the workspace
-checkpoint.
+A person who holds the agent's roles can run it unattended. A routine for a
+role-gated agent runs as its owner, and each run (and each message it sends)
+reads the owner's membership live: it needs a current member who holds every
+role the agent requires. An admin without the role does not qualify. Saving
+or editing such a routine needs the same, checked live for the person saving.
+Other follow-up turns that run for a person (such as a watch report) are
+checked the same way before each send. Long jobs and handoffs from an
+unattended turn stay refused.
+
+If the owner loses a role, the next run is skipped, the routine records
+`owner_lacks_agent_role`, and the routine's failure notice says so once until
+a run succeeds. An owner whose membership cannot be read gets no notice; the
+run is retried at the next fire. Changing a routine's owner (an edit by
+another admin) moves who must hold the roles. Handing a thread away from a
+role-gated agent carries the transcript but skips the workspace checkpoint.
 
 ## How membership is checked
 

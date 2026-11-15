@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Routines can run role-gated agents for an owner who holds the role.**
+  Before, a routine on an agent limited to certain Discord roles was always
+  refused. Now it runs as its owner, whose membership is read live at each
+  run and each send; it needs every required role, and an admin without them
+  does not qualify. Saving or editing such a routine needs the same of the
+  person saving. If the owner loses a role the run is skipped and the routine's
+  failure notice says so once. Long jobs are still refused.
 - **A remote MCP server can attribute writes to the person who asked.** An
   identity relay server set to `"auth": "bearer"` is called with one key from
   `DAIMON_MCP_IDENTITY__BEARERS` instead of a signed identity, and must name the

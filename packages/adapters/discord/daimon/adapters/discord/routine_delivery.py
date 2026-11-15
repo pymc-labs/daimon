@@ -44,6 +44,7 @@ from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authori
 from daimon.core.channel_tidy import record_turn_post
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.membership import MembershipResolver
+from daimon.core.membership_subject import resolve_subject
 from daimon.core.message_split import split_fenced
 from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.output_delivery import DeliverableFile
@@ -250,9 +251,18 @@ def make_discord_routine_poster(
                     status="skipped", note="The routine agent could not be verified."
                 )
             names = await resolve_agent_names(row)
+            # The owner, freshly resolved: a role-gated agent delivers only for
+            # an owner who holds its roles.
+            owner = await resolve_subject(
+                sessionmaker,
+                membership_resolver,
+                tenant_id=row.tenant_id,
+                user_id=row.created_by_user_id or "",
+                require_fresh=True,
+            )
             if not names or not authorize(
                 cleared,
-                subject=Subject(),
+                subject=owner,
                 action=Action.RUN_AGENT,
                 surface=Surface.ROUTINE,
                 agent=AgentRef.of(*names),

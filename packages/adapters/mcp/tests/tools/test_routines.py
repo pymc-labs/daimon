@@ -2945,3 +2945,46 @@ async def test_legacy_private_output_on_all_mcp_reads(
     with pytest.raises(ToolError, match="routine not found"):
         await _get_routine_impl(runtime, outsider, routine_id=row.id)
     await client.close()
+
+
+@pytest.mark.parametrize(
+    "auth",
+    [
+        _auth_identity(platform="slack"),
+        _auth_identity(platform_user_id=None),
+        dataclasses.replace(_auth_identity(), foreign_home_id="other"),
+        dataclasses.replace(_auth_identity(), agent_id=uuid.uuid4()),
+    ],
+)
+async def test_save_caller_reads_no_roles_for_anyone_but_a_discord_member(
+    monkeypatch: pytest.MonkeyPatch, auth: AuthIdentity
+) -> None:
+    """A client, an agent key or another platform can never show a fresh role read."""
+    read = AsyncMock(side_effect=AssertionError("must not read roles"))
+    monkeypatch.setattr(_routines_mod, "resolve_subject", read)
+    caller = _routines_mod._saving_caller(_runtime(MagicMock()), auth)
+    assert caller.fresh_subject is None
+    assert not caller.subject.membership_fresh
+
+
+async def test_save_caller_reads_a_discord_members_roles_fresh_and_only_when_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.authz import Subject
+
+    read = AsyncMock(
+        return_value=Subject(
+            platform_user_id="u_test",
+            role_ids=("123",),
+            verified_membership=True,
+            membership_fresh=True,
+        )
+    )
+    monkeypatch.setattr(_routines_mod, "resolve_subject", read)
+    caller = _routines_mod._saving_caller(_runtime(MagicMock()), _auth_identity())
+    read.assert_not_awaited()
+    assert caller.fresh_subject is not None
+    subject = await caller.fresh_subject()
+    assert read.await_args.kwargs["require_fresh"] is True
+    assert subject.membership_fresh
+    assert subject.role_ids == ("123",)

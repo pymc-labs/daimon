@@ -24,10 +24,11 @@ from daimon.adapters.discord.routines_panel.write import (
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.admin_actions import DelegatedAction
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
+from daimon.core.authz import Action, AgentRef, Place, Surface, authorize, build_agent_ref
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_tenant_uuid
+from daimon.core.membership_subject import resolve_subject
 from daimon.core.permissions import any_agent_rules
 from daimon.core.posted_controls.routines import apply_routine_action
 from daimon.core.routines import can_read_routine_output
@@ -154,9 +155,17 @@ class _DestinationPicker(discord.ui.Select["RoutinesPanelView"]):
                         )
                         return
                     agent_ref = build_agent_ref(agent.name, agent.metadata, row.agent_name)
+                # The person saving, read fresh: a role-gated agent's routine needs a role holder.
+                owner = await resolve_subject(
+                    self.view.runtime.sessionmaker,
+                    self.view.runtime.turn_deps.membership_resolver,
+                    tenant_id=row.tenant_id,
+                    user_id=str(interaction.user.id),
+                    require_fresh=True,
+                )
                 if self.values[0] == "dm" and not authorize(
                     policy,
-                    subject=Subject(),
+                    subject=owner,
                     action=Action.SAVE_ROUTINE,
                     surface=Surface.ROUTINE,
                     agent=agent_ref,
