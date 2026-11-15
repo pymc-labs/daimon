@@ -97,6 +97,7 @@ from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn.unattended import session_gate, unattended_posture
 from daimon.core.turn.unattended_capabilities import protected_tools
+from daimon.core.turn.web_search_sources import claude_searches, sources_prefix
 from daimon.core.turn_hold import TurnHold
 from daimon.core.usage_recording import WebSearchCall
 from mux.contracts.ids import ChannelRef, Scope, ThreadRef
@@ -742,6 +743,11 @@ async def run_turn_impl(
                 session_id=session.id,
                 user_message=(
                     context_prompt(origin, fragments=fragments, system=session.agent.system)
+                    + sources_prefix(
+                        on=claude_searches(
+                            [tool.model_dump(mode="json") for tool in session.agent.tools]
+                        )
+                    )
                     + routine_memory
                     + trigger_message
                 ),

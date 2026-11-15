@@ -180,6 +180,7 @@ from daimon.core.turn.unattended_capabilities import (
     send_capabilities,
     unattended_entry_point,
 )
+from daimon.core.turn.web_search_sources import claude_searches, native_searches, sources_prefix
 from daimon.core.turn_origin import ExecutionFlags, current_origin_id, execution_origin
 from daimon.core.usage_billing import ObservationBilled, ObservationRecorder
 from daimon.core.usage_sweep import SETTLE_BUDGET_S, settle_session
@@ -637,6 +638,20 @@ async def _replay_previous_session(
     if not turns:
         return None
     return render_previous_session(turns, from_agent_name=from_agent_name)
+
+
+def _web_search_sources(prepared: PreparedTurn) -> str:
+    """The sources rule when this turn's provider tools include web search."""
+    native = prepared._native_spec  # pyright: ignore[reportPrivateUsage]
+    on = (
+        native_searches(native)
+        if native is not None
+        else claude_searches(
+            [tool.model_dump(mode="json") for tool in prepared.admission.agent.tools],
+            prepared.admission.toolset,
+        )
+    )
+    return sources_prefix(on=on)
 
 
 def _with_prefix(prefix: str, message: str) -> str:
@@ -1628,6 +1643,7 @@ async def run_prepared_turn_impl(
         platform=platform,
         chat_rendered=origin in _CHAT_RENDERED_ORIGINS,
     )
+    sources = _web_search_sources(prepared)
     memory_state = await _repo_memory_state(
         deps,
         prepared,
@@ -1636,7 +1652,7 @@ async def run_prepared_turn_impl(
         unattended=unattended,
     )
     repo_memory = memory_state.prefix
-    prefix = context + plans + prepared.continuity.user_prefix
+    prefix = context + plans + sources + prepared.continuity.user_prefix
     if prepared.admission.model_fell_back:
         prefix += MODEL_FALLBACK_NOTICE
 
@@ -2465,7 +2481,10 @@ async def run_prepared_turn_impl(
                     confirmation=tool_confirmation,
                 ) as recovery_confirmation:
                     reseeded_message = _with_prefix(
-                        plans + loss_user_prefix + await briefing(recovery_admission, fresh_cancel),
+                        plans
+                        + sources
+                        + loss_user_prefix
+                        + await briefing(recovery_admission, fresh_cancel),
                         with_memory_prefix(reseed, recovery_memory),
                     )
                     mark = SEND_ATTEMPTED.get()
