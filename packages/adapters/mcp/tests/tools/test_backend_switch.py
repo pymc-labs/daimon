@@ -224,6 +224,35 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
         )
 
 
+async def _origin_like(runtime, origin, **changes):
+    """A second store-made origin of the same caller, differing only in `changes`."""
+    from datetime import UTC, datetime
+
+    from daimon.core.stores.turn_origins import create_origin
+
+    fields = origin.model_dump(
+        include={
+            "tenant_id",
+            "account_id",
+            "platform",
+            "parent_channel_id",
+            "thread_id",
+            "responder_ma_agent_id",
+            "responder_name",
+            "configuration_target_ma_agent_id",
+            "configuration_target_name",
+            "role",
+            "expires_at",
+            "sender_foreign",
+            "shared_channel",
+            "attended",
+            "chat_session_id",
+        }
+    )
+    async with runtime.session_factory.begin() as session:
+        return await create_origin(session, now=datetime.now(UTC), **{**fields, **changes})
+
+
 def _without_own_tools(payload):
     """Remove the agent's own tools while retaining the frozen chat toolset."""
     payload["tools"] = []
@@ -584,15 +613,9 @@ async def test_a_no_drop_switch_on_a_provider_turn_when_nobody_started_it_then_p
     A provider turn reads no session card gate (which refuses an unattended Claude turn),
     so only the origin says whether someone asked.
     """
-    from daimon.core._models import TurnOrigin
-    from sqlalchemy import update
-
     runtime, auth, origin, service, trace, payload, _, gate, agent, _ = active_chat
     payload["model"] = {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}}
-    async with runtime.session_factory.begin() as session:
-        await session.execute(
-            update(TurnOrigin).where(TurnOrigin.id == origin.id).values(attended=attended)
-        )
+    origin = await _origin_like(runtime, origin, attended=attended)
     agent()
     if attended:
         agent()
@@ -617,17 +640,9 @@ async def test_a_no_drop_switch_on_a_provider_turn_when_in_a_direct_message_then
 ):
     """Refused though it needs no card: the switch reads the agent's setup as a public
     place runs it, and a direct message is not one (a Claude turn's read refuses it too)."""
-    from daimon.core._models import TurnOrigin
-    from sqlalchemy import update
-
     runtime, auth, origin, service, trace, payload, _, _, agent, _ = active_chat
     payload["model"] = {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}}
-    async with runtime.session_factory.begin() as session:
-        await session.execute(
-            update(TurnOrigin)
-            .where(TurnOrigin.id == origin.id)
-            .values(parent_channel_id="dm:123", thread_id="dm:123")
-        )
+    origin = await _origin_like(runtime, origin, parent_channel_id="dm:123", thread_id="dm:123")
     with pytest.raises(ToolError, match="private conversation") as refused:
         await _request_agent_backend_switch_impl(
             runtime,
