@@ -315,6 +315,35 @@ def strip_storage_authentication(request: Object, binding: Binding) -> None:
         request["environment"] = expected
 
 
+def validate_network(request: Object) -> None:
+    """Pass only the egress limits `compile_environment` emits.
+
+    A header transform is how the mount bearer travels. Outside a binding (or
+    after the mount's own rule is stripped) one would be a credential this
+    dispatch did not mint, e.g. replayed from a saved request, so it refuses.
+    """
+    environment = request.get("environment")
+    if not isinstance(environment, dict) or "network" not in environment:
+        return
+    network = environment["network"]
+    if network == "disabled":
+        return
+    rules = network.get("allowlist") if isinstance(network, dict) else None
+    if (
+        not isinstance(network, dict)
+        or set(network) != {"allowlist"}
+        or not isinstance(rules, list)
+        or not all(
+            isinstance(rule, dict)
+            and set(rule) == {"domain"}
+            and isinstance(rule["domain"], str)
+            and rule["domain"]
+            for rule in rules
+        )
+    ):
+        refuse("unbound_gcs_authentication")
+
+
 def credential(value: object) -> str:
     if not isinstance(value, str) or not value or any(ord(c) < 33 or ord(c) > 126 for c in value):
         raise ValueError("unavailable MCP credential")
@@ -414,9 +443,7 @@ async def refresh_bound_request(request: Object) -> Object:
                     if isinstance(value, BoundCredential):
                         marked.append(value)
     if not marked:
-        environment = request.get("environment")
-        if isinstance(environment, dict) and "network" in environment:
-            refuse("unbound_gcs_authentication")
+        validate_network(request)
         validate_tools(tools)
         return request
     binding = marked[0].binding
@@ -440,6 +467,7 @@ async def refresh_bound_request(request: Object) -> Object:
             del tool["headers"]
     validate_tools(fresh_tools)
     strip_storage_authentication(fresh, binding)
+    validate_network(fresh)
     expected = cast(Object, json.loads(binding.request_json))
     if stable_request(fresh) != stable_request(expected) or [
         (t.get("type"), t.get("url")) for t in targets
