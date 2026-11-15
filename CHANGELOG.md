@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Switching an agent with many skills to OpenAI or Gemini finishes its preview.**
+  The preview gets 90 seconds to read the agent's skills, and each skill it
+  reads is kept even when the preview runs out of time, so a retry picks up
+  where it stopped. The current version of a skill set to "latest" is looked
+  up at most every five minutes, or at once after Daimon publishes a new one.
 - **A model switch names what the provider's sandbox cannot keep.** On OpenAI
   and Gemini the sandbox keeps a plain default environment, but not installed
   packages, sandbox files or network rules, and the preview, the card and

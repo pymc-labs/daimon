@@ -26,6 +26,7 @@ from daimon.core.defaults.ma_index import download_skill_version
 from daimon.core.errors import DaimonError
 from daimon.core.skill_zip import MAX_UNCOMPRESSED_BYTES
 from daimon.core.skills.ingest import SkillIngestError, retained_archive_files
+from daimon.core.skills.latest_versions import LATEST_VERSIONS
 from daimon.core.stores.agent_notices import record_agent_notices
 from daimon.core.stores.domain import SkillCopyRow, SkillSizeRow
 from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
@@ -218,34 +219,104 @@ async def measure_skills(
     """Each `(skill_id, version)`'s size, downloading only versions never measured.
 
     A version that can't be read is absent from the result, never cached: it costs
-    only its own skill, and the next capture tries it again.
+    only its own skill, and the next capture tries it again. Each size is stored as
+    soon as it is measured, by a task the caller's timeout or cancel never stops,
+    so a retry downloads only what a timed-out try left unmeasured.
     """
     wanted = tuple(dict.fromkeys(pins))
+    # Taken before the read: one that finishes meanwhile is still joined, not redone.
+    running = {pin: task for pin in wanted if (task := _running(tenant_id, pin)) is not None}
     async with sessionmaker() as db:
         known = await get_skill_sizes(db, tenant_id=tenant_id, pins=wanted)
+    tasks = [
+        running.get(pin)
+        or _measuring(
+            sessionmaker, anthropic, scope=scope, tenant_id=tenant_id, record=record, pin=pin
+        )
+        for pin in wanted
+        if pin not in known
+    ]
+    measured = await asyncio.gather(*(asyncio.shield(task) for task in tasks))
+    fresh = {(row.skill_id, row.version): row for row in measured if row is not None}
+    return {**known, **fresh}
 
-    async def measure(skill_id: str, version: str) -> SkillSizeRow | None:
-        try:
-            data = await source_skill_archive(
-                sessionmaker,
-                anthropic,
-                scope=scope,
-                record=record,
-                skill_id=skill_id,
-                version=version,
-            )
-        except (AnthropicError, DaimonError, MuxError) as error:
-            log.warning("skill_size.measure_failed", skill_id=skill_id, error=type(error).__name__)
-            return None
-        return measure_archive(tenant_id, skill_id, version, data)
 
-    measured = await asyncio.gather(*(measure(*pin) for pin in wanted if pin not in known))
-    fresh = [row for row in measured if row is not None]
-    if fresh:
-        async with sessionmaker.begin() as db:
-            for row in fresh:
-                await put_skill_size(db, row)
-    return {**known, **{(row.skill_id, row.version): row for row in fresh}}
+#: Measurements in flight, by tenant, skill and version: a strong reference keeps an
+#: abandoned one running, and a second caller joins it instead of downloading again.
+_IN_FLIGHT: dict[tuple[uuid.UUID, str, str], asyncio.Task[SkillSizeRow | None]] = {}
+
+
+def cancel_pending_measures() -> None:
+    """Cancel every unfinished measurement; for test isolation only."""
+    for task in list(_IN_FLIGHT.values()):
+        task.cancel()
+    _IN_FLIGHT.clear()
+
+
+def _running(
+    tenant_id: uuid.UUID, pin: tuple[str, str]
+) -> asyncio.Task[SkillSizeRow | None] | None:
+    task = _IN_FLIGHT.get((tenant_id, *pin))
+    return task if task is not None and task.get_loop() is asyncio.get_running_loop() else None
+
+
+def _measuring(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    anthropic: AsyncAnthropic,
+    *,
+    scope: Scope,
+    tenant_id: uuid.UUID,
+    record: Agent | None,
+    pin: tuple[str, str],
+) -> asyncio.Task[SkillSizeRow | None]:
+    running = _running(tenant_id, pin)
+    if running is not None:
+        return running
+    key = (tenant_id, *pin)
+    task = asyncio.create_task(
+        _measure_one(
+            sessionmaker,
+            anthropic,
+            scope=scope,
+            tenant_id=tenant_id,
+            record=record,
+            skill_id=pin[0],
+            version=pin[1],
+        )
+    )
+    _IN_FLIGHT[key] = task
+
+    def settle(done: asyncio.Task[SkillSizeRow | None]) -> None:
+        if _IN_FLIGHT.get(key) is done:
+            del _IN_FLIGHT[key]
+        if not done.cancelled() and (error := done.exception()) is not None:
+            log.warning("skill_size.measure_failed", skill_id=pin[0], error=type(error).__name__)
+
+    task.add_done_callback(settle)
+    return task
+
+
+async def _measure_one(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    anthropic: AsyncAnthropic,
+    *,
+    scope: Scope,
+    tenant_id: uuid.UUID,
+    record: Agent | None,
+    skill_id: str,
+    version: str,
+) -> SkillSizeRow | None:
+    try:
+        data = await source_skill_archive(
+            sessionmaker, anthropic, scope=scope, record=record, skill_id=skill_id, version=version
+        )
+    except (AnthropicError, DaimonError, MuxError) as error:
+        log.warning("skill_size.measure_failed", skill_id=skill_id, error=type(error).__name__)
+        return None
+    row = measure_archive(tenant_id, skill_id, version, data)
+    async with sessionmaker.begin() as db:
+        await put_skill_size(db, row)
+    return row
 
 
 async def copy_skills(
@@ -335,10 +406,17 @@ async def copy_skills(
 
 
 async def latest_version(anthropic: AsyncAnthropic, scope: Scope, attached: SkillRef) -> str:
-    """The concrete current version of a skill attached at `latest`."""
+    """The concrete current version of a skill attached at `latest`.
+
+    Remembered for `LATEST_VERSION_TTL_S`: an agent with many skills at `latest`
+    otherwise spends one paced Skills API request per skill on every read.
+    """
     from daimon.core.mux_backend import managed_agents
     from daimon.core.mux_compat import legacy_call
 
+    cached = LATEST_VERSIONS.get(scope.tenant_id, attached.id)
+    if cached is not None:
+        return cached
     # Grant reads only for this id: a scoped catalogue walk hides custom skills.
     backend = managed_agents(anthropic, scope=scope, resources=frozenset({("skill", attached.id)}))
     record = await legacy_call(backend.skills.retrieve(scope, attached.id))
@@ -352,7 +430,47 @@ async def latest_version(anthropic: AsyncAnthropic, scope: Scope, attached: Skil
     ):
         raise ValueError("source skill has no concrete current version")
     assert pin.version is not None
+    LATEST_VERSIONS.put(scope.tenant_id, attached.id, pin.version)
     return pin.version
+
+
+async def measure_carried_skills(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    anthropic: AsyncAnthropic,
+    *,
+    scope: Scope,
+    tenant_id: uuid.UUID,
+    carried: Sequence[SkillRef],
+    record: Agent | None,
+) -> tuple[tuple[SkillRef, ...], dict[tuple[str, str], SkillSizeRow]]:
+    """A capture's carried skills pinned to concrete versions, and each one's size.
+
+    A skill whose latest version can't be read keeps `latest` and goes unmeasured:
+    a named loss of that skill alone.
+    """
+
+    async def pinned(attached: SkillRef) -> SkillRef:
+        if attached.version not in (None, "latest"):
+            return SkillRef(id=attached.id, version=attached.version)
+        try:
+            version = await latest_version(anthropic, scope, attached)
+        except (AnthropicError, DaimonError, MuxError, ValueError) as error:
+            log.warning(
+                "source_capture.skill_unresolved", skill_id=attached.id, error=type(error).__name__
+            )
+            return SkillRef(id=attached.id, version=attached.version)
+        return SkillRef(id=attached.id, version=version)
+
+    pins = tuple(await asyncio.gather(*(pinned(s) for s in carried)))
+    sizes = await measure_skills(
+        sessionmaker,
+        anthropic,
+        scope=scope,
+        tenant_id=tenant_id,
+        pins=((p.id, str(p.version)) for p in pins if p.version not in (None, "latest")),
+        record=record,
+    )
+    return pins, sizes
 
 
 async def channel_session_skills(

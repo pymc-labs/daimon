@@ -27,6 +27,7 @@ from anthropic.types.beta.memory_stores.beta_managed_agents_memory_list_item imp
 from anthropic.types.beta.skills import VersionCreateResponse, VersionListResponse
 from daimon.core.model_presets import ModelSelection, resolve_model
 from daimon.core.mux_backend import managed_agents, resource_ref
+from daimon.core.skills.latest_versions import LATEST_VERSIONS
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Provider, Revision, Scope, SkillRef
 from mux.contracts.ports import SkillVersions
@@ -662,6 +663,7 @@ async def publish_skill_version(
             key=str(uuid4()),
         )
     )
+    LATEST_VERSIONS.forget(skill_id)
     return VersionCreateResponse.model_construct(
         **sdk_skill_version(record).model_dump(mode="json", exclude_unset=True)
     )
@@ -726,11 +728,13 @@ async def delete_skill_version(
             key=str(uuid4()),
         )
     )
+    LATEST_VERSIONS.forget(skill_id)
 
 
 async def delete_skill(client: AsyncAnthropic, skill_id: str, *, scope: Scope) -> None:
     backend = managed_agents(client, scope=scope, resources=frozenset({("skill", skill_id)}))
     await legacy_call(backend.skills.delete(scope, skill_id, key=str(uuid4())))
+    LATEST_VERSIONS.forget(skill_id)
 
 
 # PR3 host edge; append after existing skill helpers.

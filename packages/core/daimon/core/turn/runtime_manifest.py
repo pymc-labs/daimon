@@ -452,8 +452,7 @@ async def _capture_source_capabilities(
         attaches_session_skills,
         carried_skills,
         fitting_skills,
-        latest_version,
-        measure_skills,
+        measure_carried_skills,
         skill_losses,
     )
     from mux.contracts.resources import SkillUpload, SkillUploadFile
@@ -958,32 +957,13 @@ async def _capture_source_capabilities(
             await asyncio.gather(*(verify_skill(item) for item in inputs.skills))
             session_skills: tuple[SkillRef, ...] = ()
             if carried:
-
-                async def carried_pin(attached: SkillRef) -> SkillRef:
-                    if attached.version not in (None, "latest"):
-                        return SkillRef(id=attached.id, version=attached.version)
-                    try:
-                        version = await latest_version(request.deps.anthropic, scope, attached)
-                    except (AnthropicError, DaimonError, MuxError, ValueError) as error:
-                        # Left unmeasured below: a named loss of that skill alone.
-                        log.warning(
-                            "source_capture.skill_unresolved",
-                            skill_id=attached.id,
-                            error=type(error).__name__,
-                        )
-                        return SkillRef(id=attached.id, version=attached.version)
-                    return SkillRef(id=attached.id, version=version)
-
                 # Measured here, uploaded by the turn: a preview never writes to the provider.
-                pins = tuple(await asyncio.gather(*(carried_pin(s) for s in carried)))
-                sizes = await measure_skills(
+                pins, sizes = await measure_carried_skills(
                     request.deps.sessionmaker,
                     request.deps.anthropic,
                     scope=scope,
                     tenant_id=source.tenant_id,
-                    pins=(
-                        (p.id, str(p.version)) for p in pins if p.version not in (None, "latest")
-                    ),
+                    carried=carried,
                     record=source.source,
                 )
                 # Unmeasured or over the limits: that skill alone is a named loss.
