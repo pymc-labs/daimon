@@ -108,6 +108,40 @@ workspace's agents reach the server. Request bodies over 4 MiB are refused.
 Only agents on Anthropic Managed Agents can use the relay. Self-hosted harness,
 GPT and Gemini agents cannot.
 
+### Servers that attribute writes to the requester
+
+A server that trusts one key rather than a signature, and attributes each write
+to the person who asked, is listed with `"auth": "bearer"` and
+`"requester_meta": true`. Its key goes in
+[`DAIMON_MCP_IDENTITY__BEARERS`](configuration.md#daimon_mcp_identity__bearers),
+a JSON object by server name, kept apart from the server list so it can be a
+secret. Because the key is shared, a bearer server must also list the
+`workspaces` and the `agents` (by name) allowed to use it; any other agent
+gets a 403. No signing key is needed when every server is bearer.
+
+```bash
+DAIMON_MCP_IDENTITY__SERVERS='[{"name": "tools", "url": "https://tools.example.com/mcp",
+  "auth": "bearer", "requester_meta": true, "workspaces": ["discord:<guild id>"],
+  "agents": ["<agent name>"]}]'
+DAIMON_MCP_IDENTITY__BEARERS='{"tools": "<key>"}'
+```
+
+Daimon sends the key in place of the caller's own credential, which never
+reaches the server. On every `tools/call` it first removes any
+`params._meta.requester_platform_user_id` and `requester_conversation` the
+caller supplied, then, only while a person's turn is live in the calling
+session's thread, sets them from that turn:
+
+- `requester_platform_user_id`: the asker's user id (Discord only).
+- `requester_conversation`: `{"place_type": "channel" | "thread" | "dm",
+  "channel_id": ..., "parent_channel_id": ...}`. `parent_channel_id` is a
+  thread's channel and null otherwise.
+
+Routines, a sender from another organisation, a replaced session and two turns
+at once carry neither field. A request body that is not JSON, repeats a key,
+or holds a tool call without object `params` is refused with a 400. Rotating
+the key means changing the secret and restarting the MCP service.
+
 ## Add a skill a server serves
 
 A server that implements the MCP Skills extension (`io.modelcontextprotocol/skills`,

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A remote MCP server can attribute writes to the person who asked.** An
+  identity relay server set to `"auth": "bearer"` is called with one key from
+  `DAIMON_MCP_IDENTITY__BEARERS` instead of a signed identity, and must name the
+  workspaces and agents that may use it. With `"requester_meta": true` Daimon
+  removes any `requester_platform_user_id` or `requester_conversation` a tool
+  call carries in `params._meta`, then sets them from the person's live turn
+  (their user id, and whether it runs in a channel, thread or DM). Routines,
+  senders from another organisation, replaced sessions and two turns at once
+  carry neither. A body that is not strict JSON is refused with a 400.
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and
   the MCP tools. A run nobody started, such as a routine, never applies one at once.
