@@ -68,6 +68,9 @@ allow
 
 
 def _install(manager: str, names: tuple[str, ...]) -> str:
+    # Quoting keeps the shell out, but apt, pip and npm would still read a dash as an option.
+    if any(name.startswith("-") for name in names):
+        raise ValueError(f"{manager} package names cannot start with '-'")
     args = " ".join(shlex.quote(name) for name in names)
     if manager == "system":
         return (

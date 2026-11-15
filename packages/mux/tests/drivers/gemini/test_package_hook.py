@@ -70,6 +70,13 @@ def test_package_sources_when_packages_set_then_hook_runs_before_every_sandbox_t
     assert package_sources({"npm": ()}) == [], "no packages, no hook"
 
 
+def test_package_sources_when_a_name_starts_with_a_dash_then_refused() -> None:
+    """A leading dash would reach apt, pip or npm as an option despite shell quoting."""
+    for manager in ("system", "python", "npm"):
+        with pytest.raises(ValueError, match="cannot start with '-'"):
+            package_sources({manager: ("ok", "--index-url=https://example.com")})
+
+
 def test_hook_timeout_when_compiled_then_well_inside_the_tool_deadline() -> None:
     """A tool call fails near 300 s, hook included, so the gate never waits that long."""
     assert packages.WAIT_SECONDS < packages.TIMEOUT_SECONDS <= 150, "the gate returns early"
