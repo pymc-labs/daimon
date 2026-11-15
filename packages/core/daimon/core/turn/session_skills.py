@@ -65,8 +65,9 @@ def carried_skills(spec: AgentSpec) -> tuple[SkillRef, ...]:
     return tuple(s for s in spec.skills or () if s.source in (None, "custom"))
 
 
-def skill_drop(row: SkillSizeRow) -> str:
-    return f"skill:{row.name if _DROP_NAME.fullmatch(row.name) else row.skill_id}"
+def skill_names(sizes: Mapping[tuple[str, str], SkillSizeRow]) -> dict[str, str]:
+    """Each measured skill's own name by id, for people; a drop keys it by id."""
+    return {row.skill_id: row.name for row in sizes.values() if _DROP_NAME.fullmatch(row.name)}
 
 
 def fitting_skills(
@@ -91,21 +92,9 @@ def fitting_skills(
     return tuple(kept)
 
 
-def skill_losses(
-    pins: Sequence[SkillRef],
-    sizes: Mapping[tuple[str, str], SkillSizeRow],
-    kept: Sequence[SkillRef],
-) -> tuple[str, ...]:
-    """A named `skill:` loss for each pin left out; one never measured is named by its id."""
-    return tuple(
-        sorted(
-            {
-                skill_drop(row) if (row := sizes.get((p.id, str(p.version)))) else f"skill:{p.id}"
-                for p in pins
-                if p not in kept
-            }
-        )
-    )
+def skill_losses(pins: Sequence[SkillRef], kept: Sequence[SkillRef]) -> tuple[str, ...]:
+    """A `skill:` loss for each pin left out, by id: measured or not, the same loss."""
+    return tuple(sorted({f"skill:{p.id}" for p in pins if p not in kept}))
 
 
 def skill_fits(profile: Profile, row: SkillSizeRow) -> bool:
@@ -475,8 +464,8 @@ async def measure_carried_skills(
 
 async def channel_session_skills(
     request: ProviderPreparationRequest, profile: Profile, scope: Scope
-) -> tuple[tuple[SkillRef, ...], tuple[str, ...]]:
-    """The channel's custom skills a channel-origin template installs, and those left out.
+) -> tuple[tuple[SkillRef, ...], tuple[str, ...], dict[str, str]]:
+    """The channel's custom skills a channel-origin template installs, those left out, names.
 
     It has no capture, so they are measured here; one over the profile's limits,
     or unreadable, is a named `skill:` loss.
@@ -484,7 +473,7 @@ async def channel_session_skills(
     deps, skills = request.deps, request.admission.channel_skills
     custom = tuple(s for s in skills if s.type == "custom")
     if not custom or not attaches_session_skills(profile):
-        return (), ()
+        return (), (), {}
 
     async def pin(skill: MaSkill) -> SkillRef | None:
         attached = SkillRef(id=skill.skill_id, version=skill.version, source="custom")
@@ -514,7 +503,7 @@ async def channel_session_skills(
         pins=((p.id, str(p.version)) for p in pins),
     )
     kept = fitting_skills(profile, pins, sizes)
-    return kept, (*unresolved, *skill_losses(pins, sizes, kept))
+    return kept, (*unresolved, *skill_losses(pins, kept)), skill_names(sizes)
 
 
 async def turn_session_skills(
@@ -541,8 +530,9 @@ async def turn_session_skills(
         pins = represented.session_skills if represented is not None else ()
         record = source.source if source is not None else None
         left: tuple[str, ...] = ()
+        names = dict(represented.skill_names) if represented is not None else {}
     else:
-        pins, left = await channel_session_skills(request, profile, scope)
+        pins, left, names = await channel_session_skills(request, profile, scope)
         record = None
     copies: tuple[SkillRef, ...] = ()
     if pins:
@@ -559,14 +549,16 @@ async def turn_session_skills(
         )
         left = (*left, *failed)
     if left:
-        await _tell_missing_skills(request, left)
+        await _tell_missing_skills(request, left, names)
     return copies
 
 
-async def _tell_missing_skills(request: ProviderPreparationRequest, losses: Sequence[str]) -> None:
+async def _tell_missing_skills(
+    request: ProviderPreparationRequest, losses: Sequence[str], names: Mapping[str, str]
+) -> None:
     """Queue the agent a notice naming the skills its session goes without."""
-    names = sorted({loss.removeprefix("skill:") for loss in losses})
-    log.warning("session_skills.left_out", tenant_id=str(request.tenant_id), skills=names)
+    ids = sorted({loss.removeprefix("skill:") for loss in losses})
+    log.warning("session_skills.left_out", tenant_id=str(request.tenant_id), skills=ids)
     try:
         async with request.deps.sessionmaker.begin() as db:
             await record_agent_notices(
@@ -575,7 +567,7 @@ async def _tell_missing_skills(request: ProviderPreparationRequest, losses: Sequ
                 platform=request.platform,
                 thread_id=request.thread_id,
                 agent_id=request.admission.agent.id,
-                texts=[missing_skills_notice(names)],
+                texts=[missing_skills_notice(sorted({names.get(i, i) for i in ids}))],
             )
     except SQLAlchemyError as error:  # the notice is advisory; never block the reply
         log.warning("session_skills.notice_failed", error=type(error).__name__)

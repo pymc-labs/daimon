@@ -632,7 +632,8 @@ async def test_a_channels_skill_is_carried_and_one_over_the_limit_is_a_named_los
         carried = {skill.id for skill in represented.session_skills}
         losses = [d for d in represented.unavailable_capabilities if d.startswith("skill:")]
         assert "skills" not in represented.unavailable_capabilities, "never lost whole"
-        assert "skill:skill-huge" in losses, "over every provider's limit: a named loss"
+        assert "skill:skill_huge" in losses, "over every provider's limit: a loss, by id"
+        assert represented.skill_names["skill_huge"] == "skill-huge", "shown by its name"
         assert "skill_team" in carried, f"{represented.target.model.id} carries the channel's"
         if represented in openai:
             assert carried == {f"source-{s['skill_id']}" for s in CUSTOM} | {"skill_team"}
@@ -641,7 +642,8 @@ async def test_a_channels_skill_is_carried_and_one_over_the_limit_is_a_named_los
             assert len(carried) + len(losses) == len(CUSTOM) + 2, (carried, losses)
     from daimon.core.confirmation import drop_words
 
-    assert drop_words(("memory", "skill:skill-huge")) == "its memory and its skill-huge skill"
+    words = drop_words(("memory", "skill:skill_huge"), {"skill_huge": "skill-huge"})
+    assert words == "its memory and its skill-huge skill", "the card shows the name"
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)

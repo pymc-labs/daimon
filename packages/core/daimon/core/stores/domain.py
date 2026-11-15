@@ -1460,6 +1460,8 @@ class SourceRepresentation(_Facts):
     # Source skills, at concrete versions, the target installs per session (not on
     # its agent): every custom and channel skill within the profile's size limit.
     session_skills: tuple[SkillRef, ...] = ()
+    # A measured skill's own name by id: a `skill:` drop keys it by id, people see this.
+    skill_names: dict[str, str] = Field(default_factory=dict)
     # The target runs the source's execution tools in the provider's own sandbox
     # (an agent template: OpenAI's hosted bash, Gemini's code_execution). That
     # sandbox is a bare default one: `finer_drops.sandbox_losses` names what the
@@ -1568,6 +1570,8 @@ class CompatibilityPreview(_BackendConsentFacts):
     digest: str
     # Run by the host in place of the native feature, never lost (`source_translations`).
     translated_capabilities: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    # The name each lost skill shows; its `skill:` drop keys it by id.
+    skill_names: dict[str, str] = Field(default_factory=dict, exclude_if=lambda value: not value)
     # Set only when an admin picked a model other than the provider default.
     target_model: str | None = Field(default=None, exclude_if=lambda value: value is None)
     # The agent's own profile, requirements and thread mode, only when any is set.

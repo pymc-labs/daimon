@@ -455,6 +455,7 @@ async def _capture_source_capabilities(
         fitting_skills,
         measure_carried_skills,
         skill_losses,
+        skill_names,
     )
     from mux.contracts.resources import SkillUpload, SkillUploadFile
     from mux.drivers.anthropic import (
@@ -957,6 +958,7 @@ async def _capture_source_capabilities(
 
             await asyncio.gather(*(verify_skill(item) for item in inputs.skills))
             session_skills: tuple[SkillRef, ...] = ()
+            names: dict[str, str] = {}
             if carried:
                 # Measured here, uploaded by the turn: a preview never writes to the provider.
                 pins, sizes = await measure_carried_skills(
@@ -969,7 +971,8 @@ async def _capture_source_capabilities(
                 )
                 # Unmeasured or over the limits: that skill alone is a named loss.
                 session_skills = fitting_skills(profile, pins, sizes)
-                template_losses = (*template_losses, *skill_losses(pins, sizes, session_skills))
+                template_losses = (*template_losses, *skill_losses(pins, session_skills))
+                names = skill_names(sizes)
             target = AgentSpec(
                 name=spec.name,
                 description=spec.description,
@@ -990,6 +993,7 @@ async def _capture_source_capabilities(
                     environment=inputs.environment,
                     unavailable_capabilities=(*template_losses, *connector_losses),
                     session_skills=session_skills,
+                    skill_names=names,
                     provider_execution=template and bool(mapped_tools),
                 )
             )

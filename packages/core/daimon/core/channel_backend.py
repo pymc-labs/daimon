@@ -1042,24 +1042,32 @@ def compatibility_missing(
     )
 
 
+def loss_names(agent: BackendAgent) -> dict[str, str]:
+    """Each measured skill's name by id, from any of the agent's captured representations."""
+    return {k: v for item in agent.representations for k, v in item.skill_names.items()}
+
+
 def switch_losses(
-    drops: Sequence[str], agent: BackendAgent
+    drops: Sequence[str], agent: BackendAgent, names: Mapping[str, str] | None = None
 ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     """A switch's unsupported skills, connections and capabilities: its declared drops.
 
     The one reading of what a real turn on the target loses, for every surface that
-    lists them; a whole `skills` or `mcp` drop names each of the agent's own.
+    lists them; a whole `skills` or `mcp` drop names each of the agent's own. A skill
+    shows its name from `names`, else from the agent's captures, else its id.
     """
     from daimon.core.confirmation import drop_word
 
+    names = loss_names(agent) if names is None else names
     skills: set[str] = set()
     mcps: set[str] = set()
     capabilities: set[str] = set()
     for drop in drops:
         if drop == "skills":
-            skills.update(i.name for i in agent.skills)
+            skills.update(names.get(i.name, i.name) for i in agent.skills)
         elif drop.startswith("skill:"):
-            skills.add(drop.removeprefix("skill:"))
+            skill = drop.removeprefix("skill:")
+            skills.add(names.get(skill, skill))
         elif drop == "mcp":
             mcps.update(i.name for i in agent.mcps)
         elif drop.startswith("mcp_server:"):
@@ -1146,6 +1154,9 @@ def compatibility_preview(
         cost_line=cost_line,
         allowed=backend_is_enabled(target_backend, tenant.enabled_backends),
         translated_capabilities=translated,
+        skill_names={
+            k: v for k, v in loss_names(agent).items() if f"skill:{k}" in (declared_drops or ())
+        },
         target_model=model if model != backend_selection(target_backend).model else None,
         target_settings=cast(dict[str, JsonValue], settings.facts())
         if settings is not None and not settings.is_default()
