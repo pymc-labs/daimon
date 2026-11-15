@@ -25,7 +25,7 @@ in one conversation.
 | Spend limit for one reply | Yes | Daimon stops the reply | Holds only, no stop mid-turn | Not supported |
 | Routines | Yes | Yes | Yes | Not supported |
 | Workspace export and import | Yes | Not supported | Not supported | Not supported |
-| Skills | Full | Custom and agent skills, up to 28 MiB each | Custom and channel skills, text only, 2 MiB in all | Seeded defaults only |
+| Skills | Full | Custom and agent skills, up to 28 MiB each | Custom and channel skills, up to 28 MiB each; small text skills share 2 MiB | Seeded defaults only |
 
 A provider that cannot meet a channel's requirements refuses the reply. When a
 switch needs confirming again, a person's new conversation runs on Anthropic
