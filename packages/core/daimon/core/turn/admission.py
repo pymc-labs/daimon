@@ -2748,12 +2748,25 @@ async def capture_admitted_backend_source(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
     platform: str,
+    opened_thread_id: str | None = None,
 ) -> BackendAgent:
-    """A chat confirmation card's source capture: only its own turn's public admission."""
+    """A chat confirmation card's source capture: only its own turn's public admission.
+
+    `opened_thread_id` is the thread the turn opened for its reply after admission (a
+    Discord mention in a channel). The turn's origin, and so the switch tool's capture
+    and a copy's `forked_in` stamp, name that thread: the card must read the same place,
+    or a copy made in this turn reads as a bare agent and its card's digest never matches.
+    """
     from daimon.core.session_seal import is_private_conversation
 
     if admission is None or admission.grant is None or admission.account_id != account_id:
         raise channel_backend.AgentBackendRefused("source_unavailable")
+    thread_id = admission.origin_thread_id or opened_thread_id
+    place = admission.grant.run_place
+    if admission.origin_thread_id is None and opened_thread_id is not None:
+        place = replace(
+            place, channel_id=opened_thread_id, parent_channel_id=admission.origin_channel_id
+        )
     # Like the MCP caller's public-context gate: never a DM or private conversation.
     if (
         admission.grant.is_dm
@@ -2761,7 +2774,7 @@ async def capture_admitted_backend_source(
         or admission.slack_turn_context_id is not None
         or admission.origin_channel_id is None
         or is_private_conversation(admission.origin_channel_id)
-        or is_private_conversation(admission.origin_thread_id or "")
+        or is_private_conversation(thread_id or "")
     ):
         raise channel_backend.AgentBackendRefused("source_context_unavailable")
     return await capture_backend_source(
@@ -2772,10 +2785,10 @@ async def capture_admitted_backend_source(
             account_id=account_id,
             platform=platform,
             channel_id=admission.origin_channel_id,
-            thread_id=admission.origin_thread_id,
+            thread_id=thread_id,
         ),
         subject=admission.grant.subject,
-        place=admission.grant.run_place,
+        place=place,
         is_dm=False,
         slack_turn_context_id=None,
         private_dm_id=None,
