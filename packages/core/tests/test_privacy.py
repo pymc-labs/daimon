@@ -1212,6 +1212,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # shared by everyone there; `set_by` is attribution only, severed by
             # ON DELETE SET NULL. Deleting the row would change the place for others.
             "feature_values",
+            # An imported timer's note waits for an operator to confirm it and is emptied
+            # when settled; account_id is ON DELETE CASCADE, so erasing the account removes it.
+            "held_timers",
         }
     )
 

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
-    from daimon.core.continuity.watch_imports import ImportedWatch
+    from daimon.core.continuity.watch_imports import ImportedCallbackWatch, ImportedWatch
 
 from daimon.core._models import (
     Account,
@@ -37,7 +38,7 @@ from daimon.core.stores.domain import (
     WatchFiringRow,
     WatchRow,
 )
-from daimon.core.stores.identity import find_platform_principal
+from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.untrusted import render_untrusted
@@ -171,7 +172,7 @@ async def register_page_watch(
     expires_at: datetime | None,
     now: datetime,
     max_turns_per_day: int = DEFAULT_WATCH_CAP,
-    source: Literal["page_event", "poll", "mcp_poll"] = "page_event",
+    source: Literal["page_event", "poll", "mcp_poll", "callback"] = "page_event",
     permanent_approved_by: uuid.UUID | None = None,
 ) -> WatchRow:
     """Register a human-admitted owner's exact live binding; never called by ingress.
@@ -183,7 +184,9 @@ async def register_page_watch(
         raise ValueError("Page-event enrollment currently requires a Discord thread")
     if not 0 < len(instructions) <= 2000:
         raise ValueError("Instructions or watch lifetime out of bounds")
-    if expires_at is None and (permanent_approved_by is None or source == "page_event"):
+    if expires_at is None and (
+        permanent_approved_by is None or source in ("page_event", "callback")
+    ):
         raise ValueError("Only an admin can approve a permanent watch")
     if expires_at is not None and not now < expires_at <= now + MAX_LIFETIME:
         raise ValueError("Instructions or watch lifetime out of bounds")
@@ -477,6 +480,115 @@ async def accept_page_event(
     return None if result is None else uuid.UUID(str(result))
 
 
+async def accept_callback_event(
+    session: AsyncSession, *, watch_id: uuid.UUID, token: str, body: bytes
+) -> uuid.UUID | None:
+    """Hand a bearer-token post to the constrained database port, which checks everything.
+
+    The body is the event as sent. Nothing here reads, logs or keeps the token.
+    """
+    if not load_watches_settings().enabled:
+        raise ValueError("Watch producers disabled")
+    result = await session.scalar(
+        text("SELECT accept_watch_callback(:watch,:token,:event,:body)"),
+        {"watch": watch_id, "token": token, "event": uuid.uuid4(), "body": body.decode("utf-8")},
+    )
+    return None if result is None else uuid.UUID(str(result))
+
+
+def new_callback_token() -> str:
+    """A fresh secret for a callback link: 256 bits, URL-safe, never stored."""
+    return secrets.token_urlsafe(32)
+
+
+def callback_digest(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+async def has_live_callback_capability(
+    session: AsyncSession, watch_id: uuid.UUID, *, now: datetime
+) -> bool:
+    return (
+        await session.scalar(
+            select(WatchCapability.id)
+            .where(
+                WatchCapability.watch_id == watch_id,
+                WatchCapability.operation == "callback",
+                WatchCapability.revoked_at.is_(None),
+                WatchCapability.expires_at > now,
+            )
+            .limit(1)
+        )
+        is not None
+    )
+
+
+def _add_callback_capability(
+    session: AsyncSession,
+    watch_id: uuid.UUID,
+    *,
+    digest: str,
+    key_id: str,
+    generation: int,
+    expires_at: datetime,
+) -> None:
+    session.add(
+        WatchCapability(
+            watch_id=watch_id,
+            digest=digest,
+            key_id=key_id,
+            generation=generation,
+            operation="callback",
+            expires_at=expires_at,
+        )
+    )
+
+
+async def register_callback_watch(
+    session: AsyncSession,
+    binding: ContinuationRequest,
+    *,
+    instructions: str,
+    expires_at: datetime,
+    now: datetime,
+    delivery: WatchDelivery = "thread",
+    max_turns_per_day: int = DEFAULT_WATCH_CAP,
+) -> tuple[WatchRow, str]:
+    """A watch fed by posts to a secret link; returns the link's token, shown once.
+
+    Only the token's sha256 is stored. Never permanent.
+    """
+    require_delivery(binding, delivery)
+    watch = await register_page_watch(
+        session,
+        binding,
+        instructions=instructions,
+        page_id=uuid.uuid4(),
+        expires_at=expires_at,
+        now=now,
+        max_turns_per_day=max_turns_per_day,
+        source="callback",
+    )
+    if delivery != "thread":
+        await session.execute(
+            update(Watch).where(Watch.id == watch.id).values(**_delivery_values(delivery))
+        )
+    token = new_callback_token()
+    _add_callback_capability(
+        session,
+        watch.id,
+        digest=callback_digest(token),
+        key_id="link",
+        generation=1,
+        expires_at=expires_at,
+    )
+    await session.flush()
+    session.expire_all()
+    result = await get_watch(session, watch.id)
+    assert result is not None
+    return result, token
+
+
 async def prune_evidence(session: AsyncSession) -> None:
     await session.execute(text("SELECT prune_watch_evidence()"))
 
@@ -588,6 +700,10 @@ async def watch_seed(
     )
     if watch.source == "page_event" and capability is None:
         return None
+    if watch.source == "callback" and not await has_live_callback_capability(
+        session, watch.id, now=now
+    ):
+        return None
     if watch.source in ("poll", "mcp_poll"):
         from daimon.core.continuity.poll_tools import ToolUnlisted, require_listed, watch_server
 
@@ -667,6 +783,9 @@ async def audit_sidecar_identity(session: AsyncSession) -> None:
           AND p.proconfig=ARRAY['search_path=pg_catalog, pg_temp']::text[]
           AND ((p.proname='accept_watch_page_event'
                 AND oidvectortypes(p.proargtypes)='uuid, uuid, text, bigint, uuid, text, text, text'
+                AND p.prorettype='uuid'::regtype)
+            OR (p.proname='accept_watch_callback'
+                AND oidvectortypes(p.proargtypes)='uuid, text, uuid, text'
                 AND p.prorettype='uuid'::regtype)
             OR (p.proname='claim_watch_polls' AND p.pronargs=0
                 AND p.prorettype='jsonb'::regtype)
@@ -834,7 +953,7 @@ async def resume_watch(session: AsyncSession, watch_id: uuid.UUID, *, now: datet
         or row.source_state.get("reason") == "source_unmapped"
     ):
         raise ValueError("Imported watch requires operator confirmation and a mapped source")
-    if row.source == "page_event":
+    if row.source in ("page_event", "callback"):
         key = await session.scalar(
             select(WatchCapability.id)
             .where(
@@ -845,7 +964,11 @@ async def resume_watch(session: AsyncSession, watch_id: uuid.UUID, *, now: datet
             .limit(1)
         )
         if key is None:
-            raise ValueError("Issue a fresh page signing key before resuming")
+            raise ValueError(
+                "Issue a fresh page signing key before resuming"
+                if row.source == "page_event"
+                else "This callback watch has no live link; make a new one"
+            )
     row.status = "active"
     row.paused_at = None
     row.revision += 1
@@ -1552,6 +1675,122 @@ async def import_watch(
     result = await get_watch(session, watch.id)
     assert result is not None
     return result
+
+
+@dataclass(frozen=True)
+class CallbackImport:
+    """What one imported callback watch became. `token` is set only the first time."""
+
+    legacy_id: str
+    watch: WatchRow | None
+    token: str | None
+    outcome: Literal["imported", "existing", "expired"]
+    capped: bool = False
+
+
+async def import_callback_watch(
+    session: AsyncSession,
+    definition: ImportedCallbackWatch,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: str,
+    agent_name: str,
+    now: datetime,
+) -> CallbackImport:
+    """Operator-only offline import. The watch is held paused and reports in its owner's DM.
+
+    It keeps the old link's token hash, so the old token still opens it, and gets a fresh
+    token of its own for a forwarder that cannot know the old one. A permanent or
+    long-lived source is kept for 30 days at most: only an admin may make a longer one.
+    """
+    await session.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
+    # Reruns cannot create a second watch or issue a second link.
+    previous = await session.scalar(
+        select(Watch).where(
+            Watch.tenant_id == tenant_id,
+            Watch.source == "callback",
+            Watch.source_state["legacy_id"].astext == definition.legacy_id,
+        )
+    )
+    if previous is not None:
+        return CallbackImport(
+            definition.legacy_id, WatchRow.model_validate(previous), None, "existing"
+        )
+    latest = now + MAX_LIFETIME
+    if definition.expires_at is not None and definition.expires_at <= now:
+        return CallbackImport(definition.legacy_id, None, None, "expired")
+    capped = definition.expires_at is None or definition.expires_at > latest
+    expires_at = latest if capped or definition.expires_at is None else definition.expires_at
+    principal = await get_or_create_platform_principal(
+        session,
+        tenant_id=tenant_id,
+        platform="discord",
+        external_id=definition.owner_discord_id,
+    )
+    await _lock_owner(session, principal.account_id)
+    count = await session.scalar(
+        select(func.count())
+        .select_from(Watch)
+        .where(
+            Watch.owner_account_id == principal.account_id,
+            Watch.status.in_(("active", "paused")),
+            _live_at(now),
+        )
+    )
+    if count is not None and count >= 25:
+        raise ValueError("Owner live watch cap exceeded")
+    row = Watch(
+        tenant_id=tenant_id,
+        owner_account_id=principal.account_id,
+        owner_external_id=definition.owner_discord_id,
+        platform="discord",
+        parent_channel_id=definition.channel_id,
+        thread_id=definition.thread_id or definition.channel_id,
+        agent_id=agent_id,
+        agent_name=agent_name,
+        session_id=None,
+        delivery="dm",
+        instructions=definition.instructions,
+        page_id=uuid.uuid4(),
+        rule={},
+        source="callback",
+        status="paused",
+        paused_at=now,
+        expires_at=expires_at,
+        producer=f"watch:{uuid.uuid4()}",
+        max_turns_per_day=DEFAULT_WATCH_CAP,
+        source_state={
+            "legacy_id": definition.legacy_id,
+            "reason": "awaiting_confirmation",
+            "confirmed": False,
+            "place_type": definition.place_type,
+        },
+    )
+    session.add(row)
+    await session.flush()
+    token = new_callback_token()
+    _add_callback_capability(
+        session,
+        row.id,
+        digest=definition.token_sha256,
+        key_id="imported",
+        generation=1,
+        expires_at=expires_at,
+    )
+    _add_callback_capability(
+        session,
+        row.id,
+        digest=callback_digest(token),
+        key_id="moved",
+        generation=2,
+        expires_at=expires_at,
+    )
+    await session.flush()
+    watch_id = row.id
+    session.expire_all()
+    result = await get_watch(session, watch_id)
+    assert result is not None
+    return CallbackImport(definition.legacy_id, result, token, "imported", capped)
 
 
 async def confirm_import(

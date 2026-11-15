@@ -2584,6 +2584,18 @@ class WatchesSettings(BaseModel):
         ),
     )
 
+    callback_base_url: str | None = Field(
+        default=None,
+        description=(
+            "Public https address of the callback endpoint, with no path, query or "
+            "trailing slash (for example https://hooks.example.com). Callback watches "
+            "give their owner a secret link under it once; unset refuses new callback "
+            "watches and leaves existing ones working. Route "
+            "/callbacks/watches/ on the sidecar to it, and keep proxy access logs "
+            "off that path, since the secret is part of it."
+        ),
+    )
+
     chat_tools: Annotated[list[str], NoDecode] = Field(
         default_factory=list,
         description=(
@@ -2594,6 +2606,29 @@ class WatchesSettings(BaseModel):
             "refused there. Default: none."
         ),
     )
+
+    @field_validator("callback_base_url", mode="before")
+    @classmethod
+    def _callback_base_url(cls, value: object) -> object:
+        if value is None or not isinstance(value, str):
+            return value
+        value = value.strip()
+        if not value:
+            return None
+        parts = urlsplit(value)
+        if (
+            parts.scheme != "https"
+            or not parts.hostname
+            or parts.path not in ("", "/")
+            or parts.query
+            or parts.fragment
+            or parts.username
+            or parts.password
+        ):
+            raise ValueError(
+                "DAIMON_WATCHES__CALLBACK_BASE_URL must be an https address with no path"
+            )
+        return f"https://{parts.netloc}"
 
     @field_validator("pollable_tools", mode="before")
     @classmethod

@@ -1,7 +1,7 @@
 """Versioned, offline watch import manifest. Never exports or accepts secrets."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.poll_tools import require_poll_tool
@@ -27,10 +27,44 @@ class ImportedWatch(BaseModel):
     max_turns_per_day: int = Field(default=24, ge=1, le=120)
 
 
+PlaceType = Literal["direct-message", "thread", "channel", "mcp", "voice", "routine"]
+
+
+class ImportedCallbackWatch(BaseModel):
+    """A watch fed by posts to a secret link. Only the token's sha256 is carried."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    legacy_id: str = Field(min_length=1, max_length=128)
+    source: Literal["callback"]
+    instructions: str = Field(min_length=1, max_length=2000)
+    token_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expires_at: datetime | None = None
+    owner_discord_id: str = Field(min_length=1, max_length=64)
+    channel_id: str = Field(min_length=1, max_length=64)
+    thread_id: str | None = Field(default=None, max_length=64)
+    place_type: PlaceType
+
+
+class ImportedTimer(BaseModel):
+    """A one-shot timer, held until confirmed for an agent."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+    source_id: str = Field(min_length=1, max_length=128)
+    owner_discord_id: str = Field(min_length=1, max_length=64)
+    channel_id: str = Field(min_length=1, max_length=64)
+    thread_id: str | None = Field(default=None, max_length=64)
+    place_type: PlaceType
+    fire_at: datetime
+    note: str = Field(min_length=1, max_length=2000)
+
+
 class WatchExport(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     version: Literal[1]
-    watches: list[ImportedWatch] = Field(max_length=25)
+    watches: list[
+        Annotated[ImportedWatch | ImportedCallbackWatch, Field(discriminator="source")]
+    ] = Field(max_length=25)
+    timers: list[ImportedTimer] = Field(default_factory=list[ImportedTimer], max_length=1000)
 
 
 def map_poll_source(name: str, arguments: dict[str, JsonValue]) -> tuple[str, dict[str, JsonValue]]:

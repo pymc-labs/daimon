@@ -1889,6 +1889,16 @@ raised floor polls at the floor. Default (also used when the value is empty):
 read_thread and read_channel on daimon-mcp, credential none, returns_chat true, floor
 60. Set [] to allow no polls.
 
+### `DAIMON_WATCHES__CALLBACK_BASE_URL`
+
+`str | None` · optional · default unset
+
+Public https address of the callback endpoint, with no path, query or trailing slash
+(for example https://hooks.example.com). Callback watches give their owner a secret link
+under it once; unset refuses new callback watches and leaves existing ones working.
+Route /callbacks/watches/ on the sidecar to it, and keep proxy access logs off that
+path, since the secret is part of it.
+
 ### `DAIMON_WATCHES__CHAT_TOOLS`
 
 `list[str]` · optional · default unset

@@ -4062,6 +4062,40 @@ class DmCarryOver(Base):
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class HeldTimer(Base):
+    """An imported one-shot timer, held until an operator confirms it for an agent.
+
+    Settling one sets `settled_at` and `outcome` and empties the note; the row stays
+    so a repeated import adds nothing.
+    """
+
+    __tablename__ = "held_timers"
+    __table_args__ = (
+        CheckConstraint("(settled_at IS NULL) = (outcome IS NULL)", name="ck_held_timers_settled"),
+        Index("ix_held_timers_account", "account_id"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    source_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    external_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    place_type: Mapped[str] = mapped_column(Text, nullable=False)
+    fire_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    note: Mapped[str] = mapped_column(Text, nullable=False)
+    imported_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class DirectMessagePolicy(Base):
     """Explicit tenant opt-in; absence leaves existing DM behavior unchanged."""
 
@@ -4890,7 +4924,7 @@ class Watch(Base):
             "(delivery = 'thread') = (session_id IS NOT NULL)", name="ck_watches_delivery_session"
         ),
         CheckConstraint(
-            "delivery = 'thread' OR source IN ('poll', 'mcp_poll')",
+            "delivery = 'thread' OR source IN ('poll', 'mcp_poll', 'callback')",
             name="ck_watches_delivery_source",
         ),
         # Only an admin-approved polled watch may be permanent (no expiry).
