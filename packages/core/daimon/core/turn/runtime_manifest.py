@@ -7,7 +7,7 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import CodeType
@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Annotated, Final, Literal, Protocol, Self, cas
 from uuid import UUID
 
 import structlog
+from daimon.core.caller_resources import CALLER_RESOURCES_ID, CALLER_VAULT_PREFIX
 from daimon.core.config import get_repo_memory_settings
 from daimon.core.connector_relay import relay_key
 from daimon.core.errors import DaimonError
@@ -445,16 +446,16 @@ async def _capture_source_capabilities(
     from daimon.core.mux_backend import managed_agents
     from daimon.core.mux_compat import legacy_call
     from daimon.core.skills.ingest import retained_archive_files
-    from daimon.core.stores.domain import SourceRepresentation
+    from daimon.core.stores.domain import SkillSizeRow, SourceRepresentation
     from daimon.core.stores.mcp_tokens import revoke_mcp_token
     from daimon.core.turn.runtime_defaults import capture_template_rows
     from daimon.core.turn.session_skills import (
         attaches_session_skills,
         carried_skills,
         fitting_skills,
-        latest_version,
-        measure_skills,
+        measure_carried_skills,
         skill_losses,
+        skill_names,
     )
     from mux.contracts.resources import SkillUpload, SkillUploadFile
     from mux.drivers.anthropic import (
@@ -572,6 +573,10 @@ async def _capture_source_capabilities(
                     ),
                 )
             )
+        # Every candidate shares one source: read its catalogue and measure its
+        # skills once, not once per model the preview offers.
+        source_catalogue: frozenset[str] | None = None
+        measured: tuple[tuple[SkillRef, ...], dict[tuple[str, str], SkillSizeRow]] | None = None
         for row, inputs in candidates:
             template = isinstance(inputs, _TemplateInputs)
             profile_id = row.get("profile")
@@ -606,39 +611,45 @@ async def _capture_source_capabilities(
                 raise ValueError("environment representation differs from captured policy")
             if request.deps.mcp.public_url is None or request.deps.mcp.jwt_secret is None:
                 raise ValueError("MCP catalogue requires the captured caller")
-            # Use the runtime's registered chat-execution authority, never the
-            # restricted external-agent key (which sees a different catalogue).
-            # This preview credential is revoked before returning and never
-            # exposed to a provider; the ACK owner mints the runtime credential.
-            now = request.now()
-            secret = request.deps.mcp.jwt_secret.get_secret_value().encode()
-            async with request.deps.sessionmaker.begin() as db:
-                catalogue_token = await mint_agent_mcp_token(
-                    db,
-                    account_id=request.admission.account_id,
-                    tenant_id=source.tenant_id,
-                    agent_id=source.agent_id,
-                    label="source-catalogue",
-                    secret=secret,
-                    now=now,
-                    ttl_days=900 / 86400,  # pyright: ignore[reportArgumentType]
-                    chat_execution=True,
-                    surface="provider_turn",
-                )
-            try:
-                await validate_agent_mcp_token(
-                    request.deps.sessionmaker,
-                    token=catalogue_token,
-                    secret=secret,
-                    scope=caller_scope(request),
-                    agent_id=source.agent_id,
-                    now=now,
-                    chat_execution=True,
-                )
-                catalogue = await list_mcp_tools(str(request.deps.mcp.public_url), catalogue_token)
-            finally:
+            if source_catalogue is None:
+                # Use the runtime's registered chat-execution authority, never the
+                # restricted external-agent key (which sees a different catalogue).
+                # This preview credential is revoked before returning and never
+                # exposed to a provider; the ACK owner mints the runtime credential.
+                now = request.now()
+                secret = request.deps.mcp.jwt_secret.get_secret_value().encode()
                 async with request.deps.sessionmaker.begin() as db:
-                    await revoke_mcp_token(db, jti=token_jti(catalogue_token), now=request.now())
+                    catalogue_token = await mint_agent_mcp_token(
+                        db,
+                        account_id=request.admission.account_id,
+                        tenant_id=source.tenant_id,
+                        agent_id=source.agent_id,
+                        label="source-catalogue",
+                        secret=secret,
+                        now=now,
+                        ttl_days=900 / 86400,  # pyright: ignore[reportArgumentType]
+                        chat_execution=True,
+                        surface="provider_turn",
+                    )
+                try:
+                    await validate_agent_mcp_token(
+                        request.deps.sessionmaker,
+                        token=catalogue_token,
+                        secret=secret,
+                        scope=caller_scope(request),
+                        agent_id=source.agent_id,
+                        now=now,
+                        chat_execution=True,
+                    )
+                    source_catalogue = await list_mcp_tools(
+                        str(request.deps.mcp.public_url), catalogue_token
+                    )
+                finally:
+                    async with request.deps.sessionmaker.begin() as db:
+                        await revoke_mcp_token(
+                            db, jti=token_jti(catalogue_token), now=request.now()
+                        )
+            catalogue = source_catalogue
             allowed = next(
                 (
                     server.tool_policy.get("allowed_tools")
@@ -957,38 +968,23 @@ async def _capture_source_capabilities(
 
             await asyncio.gather(*(verify_skill(item) for item in inputs.skills))
             session_skills: tuple[SkillRef, ...] = ()
+            names: dict[str, str] = {}
             if carried:
-
-                async def carried_pin(attached: SkillRef) -> SkillRef:
-                    if attached.version not in (None, "latest"):
-                        return SkillRef(id=attached.id, version=attached.version)
-                    try:
-                        version = await latest_version(request.deps.anthropic, scope, attached)
-                    except (AnthropicError, DaimonError, MuxError, ValueError) as error:
-                        # Left unmeasured below: a named loss of that skill alone.
-                        log.warning(
-                            "source_capture.skill_unresolved",
-                            skill_id=attached.id,
-                            error=type(error).__name__,
-                        )
-                        return SkillRef(id=attached.id, version=attached.version)
-                    return SkillRef(id=attached.id, version=version)
-
                 # Measured here, uploaded by the turn: a preview never writes to the provider.
-                pins = tuple(await asyncio.gather(*(carried_pin(s) for s in carried)))
-                sizes = await measure_skills(
-                    request.deps.sessionmaker,
-                    request.deps.anthropic,
-                    scope=scope,
-                    tenant_id=source.tenant_id,
-                    pins=(
-                        (p.id, str(p.version)) for p in pins if p.version not in (None, "latest")
-                    ),
-                    record=source.source,
-                )
+                if measured is None:
+                    measured = await measure_carried_skills(
+                        request.deps.sessionmaker,
+                        request.deps.anthropic,
+                        scope=scope,
+                        tenant_id=source.tenant_id,
+                        carried=carried,
+                        record=source.source,
+                    )
+                pins, sizes = measured
                 # Unmeasured or over the limits: that skill alone is a named loss.
                 session_skills = fitting_skills(profile, pins, sizes)
-                template_losses = (*template_losses, *skill_losses(pins, sizes, session_skills))
+                template_losses = (*template_losses, *skill_losses(pins, session_skills))
+                names = skill_names(sizes)
             target = AgentSpec(
                 name=spec.name,
                 description=spec.description,
@@ -1009,6 +1005,7 @@ async def _capture_source_capabilities(
                     environment=inputs.environment,
                     unavailable_capabilities=(*template_losses, *connector_losses),
                     session_skills=session_skills,
+                    skill_names=names,
                     provider_execution=template and bool(mapped_tools),
                 )
             )
@@ -1022,8 +1019,15 @@ async def _capture_source_capabilities(
         # Said once here, though: without it the agent silently loses its MCP
         # on the new provider (J2's Argon preview). Only our own fixed
         # sentences and code labels are logged, never a provider's or a validator's text.
-        from daimon.core.channel_backend import exception_labels
+        from daimon.core.channel_backend import exception_labels, transient_failure
+        from daimon.core.errors import TurnError
 
+        # A blip (a timeout, a lost connection, a 5xx or 429) proves no loss: the
+        # caller retries rather than confirm or run without MCP, tools and skills.
+        busy = TurnError(kind="upstream", cause=error)
+        busy.__cause__ = error
+        if transient_failure(busy):
+            raise busy from error
         log.warning(
             "source_capture.representation_skipped",
             error=type(error).__name__,
@@ -1067,6 +1071,17 @@ def source_instructions_preserved(required: str | None, system: str | None) -> b
         or system is not None
         and (system == required or system.startswith(required + "\n\n"))
     )
+
+
+def unavailable_line(drops: Sequence[str], names: Mapping[str, str] | None = None) -> str:
+    """The agent's own line of what its copy lacks: a skill by its name, never its id."""
+    words = (
+        f"skill:{(names or {}).get(d.removeprefix('skill:'), d.removeprefix('skill:'))}"
+        if d.startswith("skill:")
+        else d
+        for d in drops
+    )
+    return "Unavailable capabilities: " + ", ".join(words) + "."
 
 
 def compose_source_instructions(
@@ -1504,6 +1519,8 @@ def preview_source_drops(
     source: BackendAgent, model: ModelRef, *, effort: Effort | None = None
 ) -> AgentSpec:
     """Derive explicit losses using the same complete source-preservation rule."""
+    from daimon.core.channel_backend import loss_names
+
     spec = source.effective_spec
     profile = backend_selection(model.provider).profile
     if (
@@ -1581,8 +1598,7 @@ def preview_source_drops(
         target = target.model_copy(
             update={
                 "system": compose_source_instructions(
-                    spec.system,
-                    "Unavailable capabilities: " + ", ".join(target.declared_drops) + ".",
+                    spec.system, unavailable_line(target.declared_drops, loss_names(source))
                 )
             }
         )
@@ -1594,8 +1610,8 @@ def _source_facts(source: BackendAgent, *, readdress: bool = True) -> dict[str, 
     if readdress and source.resource_scope is not None:
         # The caller's own Daimon credential is addressed per person: any person's
         # capture pins the same source (a shared thread captures as its owner).
-        caller = f"caller-mcp:{source.tenant_id}:{source.resource_scope.account_id}:"
-        anyone = f"caller-mcp:{source.tenant_id}::"
+        caller = f"{CALLER_VAULT_PREFIX}{source.tenant_id}:{source.resource_scope.account_id}:"
+        anyone = f"{CALLER_VAULT_PREFIX}{source.tenant_id}::"
         updates["resource_requirements"] = tuple(
             binding.model_copy(
                 update={
@@ -1619,6 +1635,7 @@ def _source_facts(source: BackendAgent, *, readdress: bool = True) -> dict[str, 
     # Derived representation evidence must not change old consent pins, nor
     # recursively become part of the source it attests.
     facts.pop("representations", None)
+    facts.pop("owner_spec", None)
     return facts
 
 
@@ -1626,11 +1643,52 @@ def _digest(facts: dict[str, object]) -> str:
     return request_digest(cast(JsonValue, TypeAdapter(object).dump_python(facts, mode="json")))
 
 
+#: Facts of the place a turn runs in (held or read-only memory, its instructions),
+#: of a credential's last write and of Daimon's gating: each turn checks what they cost.
+_PLACE_FACTS: Final = (
+    "memory_store_id",
+    "memory_read_only",
+    "memory_instructions",
+    "resource_generations",
+    "asks_before_publishing",
+)
+
+
+def _owner_binding(binding: ResourceBinding) -> ResourceBinding | None:
+    """`binding` as the owner set it up: a Slack turn's own caller credential is the
+    caller's, and a private place's carried resources are that turn's."""
+    if binding.id == CALLER_RESOURCES_ID:
+        return None
+    ref = binding.credential_ref
+    if ref is None or not ref.startswith(CALLER_VAULT_PREFIX) or ":slack-turn:" not in ref:
+        return binding
+    plain = ref.split(":slack-turn:", 1)[0]
+    return binding.model_copy(update={"id": plain, "credential_ref": plain})
+
+
 def source_preservation_pin(source: BackendAgent, *, readdress: bool = True) -> str:
-    """Pin complete owner-captured intent independently of the current caller address."""
+    """Pin the owner's setup: the agent, its environment, repositories and credentials.
+
+    A place's facts (a channel's skills, held or read-only memory, servers hidden
+    from one person, a DM's or Slack turn's context) are left out: preparation
+    checks what each costs on every turn, so one confirmation holds in every place.
+    Daimon's own gating changes with a release, not with the agent, and is left out too.
+    """
     facts = _source_facts(source, readdress=readdress)
-    # Daimon's own gating changes with a release or a place, not with the agent:
-    # pin the source before it, so gating alone never asks to confirm a switch again.
+    for name in (*_PLACE_FACTS, "ungated_spec"):
+        facts.pop(name, None)
+    facts["effective_spec"] = source.owner_spec or source.ungated_spec or source.effective_spec
+    bindings = (
+        _owner_binding(binding)
+        for binding in cast(tuple[ResourceBinding, ...], facts["resource_requirements"])
+    )
+    facts["resource_requirements"] = tuple(b for b in bindings if b is not None)
+    return _digest(facts)
+
+
+def _gated_pin(source: BackendAgent, *, readdress: bool) -> str:
+    """The pin before places left it: Daimon's gating out, every place fact in."""
+    facts = _source_facts(source, readdress=readdress)
     facts.pop("asks_before_publishing", None)
     ungated = facts.pop("ungated_spec", None)
     if ungated is not None:
@@ -1639,16 +1697,17 @@ def source_preservation_pin(source: BackendAgent, *, readdress: bool = True) -> 
 
 
 def source_pin_matches(source: BackendAgent, pin: str) -> bool:
-    """Whether `pin` pins this source, by the current formula or the one before it.
+    """Whether `pin` pins this source, by the current formula or one before it.
 
-    Consents and operator rows stored before Daimon's gating left the pin still
-    hold: the older pin also covers that gating, so it is stricter and safe to accept.
+    Consents and operator rows stored before places, Daimon's gating or the
+    caller's re-addressed credential left the pin still hold: each older pin
+    also covers those facts, so it is stricter and safe to accept.
     """
-    if pin == source_preservation_pin(source):
-        return True
-    # Pins stored before the caller's credential was re-addressed match only
-    # their own consenter's capture: stricter, so safe to accept.
-    if pin == source_preservation_pin(source, readdress=False):
+    if any(
+        pin == formula(source, readdress=readdress)
+        for formula in (source_preservation_pin, _gated_pin)
+        for readdress in (True, False)
+    ):
         return True
     legacy = _source_facts(source, readdress=False)
     legacy.pop("ungated_spec", None)
@@ -1744,8 +1803,10 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
                                 session, request.tenant_id, agent_id, persisted=True
                             )
                         )
-                    if setting != provisional or setting is None or setting.drop_consent is None:
+                    if setting != provisional:
                         raise AgentBackendRefused("re_confirm", detail="provisional_mismatch")
+                    if setting is None or setting.drop_consent is None:
+                        raise AgentBackendRefused("re_confirm", detail="no_consent")
     timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
     owned = request.admission.agent.id.startswith("dm_agent_")
     source = await asyncio.wait_for(
@@ -1795,6 +1856,8 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
             raise AgentBackendRefused("re_confirm", detail="model_unpinned")
         if not source_pin_matches(source, consent.source_pin):
             raise AgentBackendRefused("re_confirm", detail="source_pin")
+        from daimon.core.channel_backend import loss_names
+
         target = preview_source_drops(
             source,
             ModelRef(provider=revision.backend, id=revision.model or spec.model.id),
@@ -1804,6 +1867,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
             consent,
             target,
             source_system=spec.system,
+            names=loss_names(source),
             backend=revision.backend,
             model=revision.model,
             picked=setting.model,
@@ -1892,7 +1956,11 @@ async def read_preparation_counterpart(
         # A stale consent is not missing provider setup: name the fresh preview
         # the person needs. Any other backend refusal stays unsupported (J6g).
         if error.reason == "re_confirm":
-            raise AdmissionDenied(reason="backend_unsupported", cause="re_confirm") from error
+            from daimon.core.channel_backend import RETRY_DETAILS
+
+            # A race is not a stale consent: the same message works once it settles.
+            cause = "preparation_busy" if error.detail in RETRY_DETAILS else "re_confirm"
+            raise AdmissionDenied(reason="backend_unsupported", cause=cause) from error
         raise AdmissionDenied(reason="backend_unsupported") from error
     except UnsupportedCapability as error:
         raise AdmissionDenied(reason="backend_unsupported") from error

@@ -61,6 +61,7 @@ from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
+from daimon.core.errors import TurnError
 from daimon.core.features.model_input import (
     CHAT_KEYS,
     HISTORY_KEYS,
@@ -171,6 +172,11 @@ if TYPE_CHECKING:
     pass
 
 _log = structlog.get_logger(__name__)
+
+#: Seconds a switch preview may spend reading its source. A cold agent with 23 custom
+#: skills at `latest` needs about 69 Skills API requests (a version lookup, a version
+#: list and a download per skill); the process paces them at 0.75 s, about 52 s.
+PREVIEW_CAPTURE_BUDGET_S = 90
 
 
 @dataclass(frozen=True)
@@ -2510,7 +2516,7 @@ async def capture_backend_source(
     from daimon.core.turn.runtime_manifest import capture_preparation_source
 
     try:
-        async with asyncio.timeout(30):
+        async with asyncio.timeout(PREVIEW_CAPTURE_BUDGET_S):
             if context.tenant_id != source.tenant_id or context.account_id is None:
                 raise channel_backend.AgentBackendRefused("source_unavailable", detail="identity")
             if source.source is None:
@@ -2706,7 +2712,7 @@ async def capture_backend_source(
                 False,
                 DEFAULT_MA_CAPABILITIES,
                 None,
-                datetime.now(UTC) + timedelta(seconds=30),
+                datetime.now(UTC) + timedelta(seconds=PREVIEW_CAPTURE_BUDGET_S),
                 lambda: datetime.now(UTC),
                 answers_on=answers_on,
             )
@@ -2718,6 +2724,11 @@ async def capture_backend_source(
             return captured
     except (APIError, TimeoutError) as error:
         raise channel_backend.AgentBackendRefused("source_unavailable") from error
+    except TurnError as error:
+        # A capture blip asks for a retry; it never confirms a loss.
+        if channel_backend.transient_failure(error):
+            raise channel_backend.AgentBackendRefused("source_unavailable") from error
+        raise
     except ScopeViolation as error:
         raise channel_backend.AgentBackendRefused("source_unavailable", detail="place") from error
 

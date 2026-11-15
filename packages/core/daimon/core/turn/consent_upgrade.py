@@ -10,6 +10,7 @@ owner would care about (a model, an MCP server, a gained capability) still must.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final
 
 from daimon.core.finer_drops import finer_parts
@@ -29,6 +30,7 @@ def covers(
     target: AgentSpec | None,
     *,
     source_system: str | None,
+    names: Mapping[str, str] | None = None,
     backend: Provider,
     model: str | None,
     picked: str | None,
@@ -44,9 +46,9 @@ def covers(
         return False
     return (
         _same_target(target, consent)
-        or _regains_carded(target, source_system, consent)
+        or _regains_carded(target, source_system, consent, names)
         or (model_consented(backend, model, picked) and same_losses(target, consent))
-        or _consented_before(target, source_system, consent)
+        or _consented_before(target, source_system, consent, names)
     )
 
 
@@ -167,6 +169,7 @@ def _with_daimon_tools_dropped(
     tools: frozenset[str],
     connectors: frozenset[str] = frozenset(),
     covered: frozenset[str] = frozenset(),
+    names: Mapping[str, str] | None = None,
 ) -> AgentSpec | None:
     """`target` as a consent that named Daimon's `tools` and relayed `connectors` lost builds it.
 
@@ -174,7 +177,7 @@ def _with_daimon_tools_dropped(
     both join the drops and the drops line in the instructions. Only that difference
     is rebuilt; anything else still differs and still needs a fresh confirmation.
     """
-    from daimon.core.turn.runtime_manifest import compose_source_instructions
+    from daimon.core.turn.runtime_manifest import compose_source_instructions, unavailable_line
     from mux.contracts.resources import MCPConnection
 
     named = {f"mcp_tool:{DAIMON_SERVER_NAME}:{tool}" for tool in tools}
@@ -208,17 +211,17 @@ def _with_daimon_tools_dropped(
         update={
             "mcp_servers": tuple(servers),
             "declared_drops": drops,
-            "system": compose_source_instructions(
-                source_system, "Unavailable capabilities: " + ", ".join(drops) + "."
-            ),
+            "system": compose_source_instructions(source_system, unavailable_line(drops, names)),
         }
     )
 
 
-def _with_switch_tool_dropped(target: AgentSpec, source_system: str | None) -> AgentSpec | None:
+def _with_switch_tool_dropped(
+    target: AgentSpec, source_system: str | None, names: Mapping[str, str] | None
+) -> AgentSpec | None:
     """`target` as a consent recorded before the switch tool was offered (#1438) names it."""
     return _with_daimon_tools_dropped(
-        target, source_system, frozenset({_SWITCH_TOOL_DROP.rsplit(":", 1)[1]})
+        target, source_system, frozenset({_SWITCH_TOOL_DROP.rsplit(":", 1)[1]}), names=names
     )
 
 
@@ -266,7 +269,10 @@ def _offered(target: AgentSpec) -> frozenset[str]:
 
 
 def _regains_carded(
-    target: AgentSpec, source_system: str | None, consent: _BackendDropConsent
+    target: AgentSpec,
+    source_system: str | None,
+    consent: _BackendDropConsent,
+    names: Mapping[str, str] | None,
 ) -> bool:
     """`target` is the confirmed one except for what it offers again behind a card or grant.
 
@@ -277,11 +283,13 @@ def _regains_carded(
     regained = _regained(target, consent)
     if regained is None or not any(regained):
         return False
-    rebuilt = _with_daimon_tools_dropped(target, source_system, *regained)
+    rebuilt = _with_daimon_tools_dropped(target, source_system, *regained, names=names)
     return rebuilt is not None and _same_target(rebuilt, consent)
 
 
-def with_tools_dropped(target: AgentSpec, source_system: str | None) -> AgentSpec | None:
+def with_tools_dropped(
+    target: AgentSpec, source_system: str | None, names: Mapping[str, str] | None = None
+) -> AgentSpec | None:
     """`target` as a consent recorded before a template kept the source's tools names it.
 
     That consent (before #1483) declared `tools` a whole loss: no tools on the
@@ -289,7 +297,7 @@ def with_tools_dropped(target: AgentSpec, source_system: str | None) -> AgentSpe
     (an OpenAI consent already named web fetch). Only that difference is rebuilt;
     the copy then runs with its tools from now on.
     """
-    from daimon.core.turn.runtime_manifest import compose_source_instructions
+    from daimon.core.turn.runtime_manifest import compose_source_instructions, unavailable_line
 
     if "tools" in target.declared_drops or not target.tools:
         return None
@@ -303,15 +311,16 @@ def with_tools_dropped(target: AgentSpec, source_system: str | None) -> AgentSpe
         update={
             "tools": (),
             "declared_drops": drops,
-            "system": compose_source_instructions(
-                source_system, "Unavailable capabilities: " + ", ".join(drops) + "."
-            ),
+            "system": compose_source_instructions(source_system, unavailable_line(drops, names)),
         }
     )
 
 
 def _consented_before(
-    target: AgentSpec, source_system: str | None, consent: _BackendDropConsent
+    target: AgentSpec,
+    source_system: str | None,
+    consent: _BackendDropConsent,
+    names: Mapping[str, str] | None,
 ) -> bool:
     """A consent recorded before a template kept the source's tools (#1483) or
     offered the switch tool (#1438).
@@ -319,11 +328,11 @@ def _consented_before(
     Either difference alone, or both, is rebuilt; anything else still needs a
     fresh confirmation.
     """
-    without_tools = with_tools_dropped(target, source_system)
+    without_tools = with_tools_dropped(target, source_system, names)
     candidates = (
-        _with_switch_tool_dropped(target, source_system),
+        _with_switch_tool_dropped(target, source_system, names),
         without_tools,
-        _with_switch_tool_dropped(without_tools, source_system) if without_tools else None,
+        _with_switch_tool_dropped(without_tools, source_system, names) if without_tools else None,
     )
     return any(
         _same_target(candidate, consent) for candidate in candidates if candidate is not None

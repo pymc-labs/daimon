@@ -223,7 +223,15 @@ async def full_openai(consent_request, source_mcp, monkeypatch, tmp_path, reques
     router.routes.insert(0, router.routes.pop())
     router.add_environment_list(environment)
     router.routes.insert(0, router.routes.pop())
-    source = await capture_preparation_source(request, fresh=True)
+    from daimon.core.mcp_oauth import discovery
+
+    async def refused(_url, _token):
+        raise ValueError("MCP catalogue read failed")
+
+    with monkeypatch.context() as early:
+        # Only the environment is read here; the catalogue is served further down.
+        early.setattr(discovery, "list_mcp_tools", refused)
+        source = await capture_preparation_source(request, fresh=True)
     assert source.environment.spec.scope == "organization"
     assert source.environment.spec.metadata["daimon_managed"] == "true"
     assert source.environment.spec.description == environment.description

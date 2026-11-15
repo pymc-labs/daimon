@@ -793,7 +793,8 @@ async def _start_on_backend(
         ) from exc
     words = f"{name} runs on {model_name(ModelRef(provider=backend, id=model))}."
     if preview.declared_drops:
-        words += f" On {provider_name(backend)} it won't have {drop_words(preview.declared_drops)}."
+        lost = drop_words(preview.declared_drops, preview.skill_names)
+        words += f" On {provider_name(backend)} it won't have {lost}."
     return words
 
 

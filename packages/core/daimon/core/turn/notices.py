@@ -272,9 +272,9 @@ _BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {
         "{agent}'s model-provider switch needs to be confirmed again.",
         "In a new conversation, ask {agent_mid} to switch to {provider} again, then Confirm.",
     ),
-    # Nothing is missing: say so, and that the same message works shortly.
+    # Nothing is missing (a blip, or a change mid-read): the same message works shortly.
     "preparation_busy": _Copy(
-        "Daimon is busy right now and couldn't get {agent} ready on {provider}.",
+        "Daimon couldn't get {agent} ready on {provider} just now.",
         "Try again in a minute.",
     ),
     # The cause is unknown, so never claim the provider isn't set up.

@@ -26,6 +26,7 @@ from daimon.core.defaults.metadata import (
     tenant_scoped_display_title,
 )
 from daimon.core.skills.ingest import SkillBundle, SkillIngestError, bundle_from_upload
+from daimon.core.skills.latest_versions import LATEST_VERSIONS
 from daimon.core.skills.service import AddedSkill, StoredSkillUpload, UploadedSkill, add_skill
 from daimon.core.stores.neutral_catalog import (
     AgentRevision,
@@ -588,6 +589,7 @@ class _NeutralSkillAddHost:
             skill_upload(bundle),
             key=self.host.operation_key + ":skill:publish",
         )
+        LATEST_VERSIONS.forget(skill_id)
         return UploadedSkill(native.ref.id, native.version)
 
     async def save_upload(self, bundle: SkillBundle, uploaded: UploadedSkill) -> None:

@@ -14,6 +14,7 @@ from daimon.core.agent_record_ports import DAIMON_ID_PREFIXES
 from daimon.core.anthropic_guard import anthropic_configured
 from daimon.core.channel_backend import (
     REFUSAL_DETAILS,
+    RETRY_DETAILS,
     AgentBackendRefused,
     BackendActor,
     BackendUnsupported,
@@ -104,14 +105,13 @@ DETAIL_LINES: Final = {
             "losses_differ",
             "model_unpinned",
             "no_consent",
-            "provisional_mismatch",
             "revert_differs",
-            "source_drift",
             "source_identity",
             "source_pin",
         ),
         CONFIRM_AGAIN_LINE,
     ),
+    **dict.fromkeys(RETRY_DETAILS, "Daimon couldn't finish setting up the agent. Try again."),
 }
 
 assert set(DETAIL_LINES) == REFUSAL_DETAILS, "every refusal detail needs a line"

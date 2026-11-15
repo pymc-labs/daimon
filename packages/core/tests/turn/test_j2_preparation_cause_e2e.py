@@ -115,8 +115,7 @@ async def test_j2_a_preparation_that_fails_says_busy_or_failed_never_not_set_up(
     assert "isn't set up" not in said
     if cause == "preparation_busy":
         assert said == (
-            "Daimon is busy right now and couldn't get owner-flash ready on Gemini.\n\n"
-            "Try again in a minute."
+            "Daimon couldn't get owner-flash ready on Gemini just now.\n\nTry again in a minute."
         )
     else:
         assert said.startswith("Daimon couldn't get owner-flash ready on Gemini.\n\n")

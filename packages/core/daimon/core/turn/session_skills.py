@@ -1,7 +1,7 @@
 """Custom and channel skills a template carries to a provider that installs them per session.
 
 Capture measures each source skill once per version (`skill_sizes`); a skill over
-the profile's limit is a named `skill:<name>` loss, never a silent one. The turn
+the profile's limit is a named `skill:<id>` loss, never a silent one. The turn
 uploads each remaining skill once per version (`skill_copies`) and attaches the
 copies to its session. A skill left out at the turn (a channel's, or one whose
 upload failed) is told to the agent (`missing_skills_notice`).
@@ -23,9 +23,10 @@ import structlog
 from anthropic import AnthropicError, AsyncAnthropic
 from daimon.core.defaults.loader import parse_skill_markdown
 from daimon.core.defaults.ma_index import download_skill_version
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, TurnError
 from daimon.core.skill_zip import MAX_UNCOMPRESSED_BYTES
 from daimon.core.skills.ingest import SkillIngestError, retained_archive_files
+from daimon.core.skills.latest_versions import LATEST_VERSIONS
 from daimon.core.stores.agent_notices import record_agent_notices
 from daimon.core.stores.domain import SkillCopyRow, SkillSizeRow
 from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
@@ -36,7 +37,7 @@ from daimon.core.stores.skill_copies import (
     put_skill_size,
 )
 from daimon.core.turn.agent_notices import missing_skills_notice
-from mux.contracts.ids import Scope, SkillRef
+from mux.contracts.ids import ResourceRef, Scope, SkillRef
 from mux.contracts.ports import Skills
 from mux.contracts.profile import Profile
 from mux.contracts.resources import Agent, AgentSpec, SkillUpload, SkillUploadFile
@@ -53,6 +54,18 @@ _DROP_NAME = re.compile(r"[A-Za-z0-9_.-]+")
 _MANIFEST_BYTES = 1024 * 1024
 
 
+def read_blip(error: BaseException) -> TurnError | None:
+    """The busy error a skill read's blip (a timeout, a 5xx or 429) becomes, else None.
+
+    A blip proves no loss, so it propagates and the caller retries, as a turn does.
+    """
+    from daimon.core.channel_backend import transient_failure
+
+    busy = TurnError(kind="upstream", cause=error)
+    busy.__cause__ = error
+    return busy if transient_failure(busy) else None
+
+
 def attaches_session_skills(profile: Profile) -> bool:
     """Whether the profile installs a template's custom and channel skills per session."""
     supported = profile.support_for("skills_bundle") != "unsupported"
@@ -64,8 +77,9 @@ def carried_skills(spec: AgentSpec) -> tuple[SkillRef, ...]:
     return tuple(s for s in spec.skills or () if s.source in (None, "custom"))
 
 
-def skill_drop(row: SkillSizeRow) -> str:
-    return f"skill:{row.name if _DROP_NAME.fullmatch(row.name) else row.skill_id}"
+def skill_names(sizes: Mapping[tuple[str, str], SkillSizeRow]) -> dict[str, str]:
+    """Each measured skill's own name by id, for people; a drop keys it by id."""
+    return {row.skill_id: row.name for row in sizes.values() if _DROP_NAME.fullmatch(row.name)}
 
 
 def fitting_skills(
@@ -90,21 +104,9 @@ def fitting_skills(
     return tuple(kept)
 
 
-def skill_losses(
-    pins: Sequence[SkillRef],
-    sizes: Mapping[tuple[str, str], SkillSizeRow],
-    kept: Sequence[SkillRef],
-) -> tuple[str, ...]:
-    """A named `skill:` loss for each pin left out; one never measured is named by its id."""
-    return tuple(
-        sorted(
-            {
-                skill_drop(row) if (row := sizes.get((p.id, str(p.version)))) else f"skill:{p.id}"
-                for p in pins
-                if p not in kept
-            }
-        )
-    )
+def skill_losses(pins: Sequence[SkillRef], kept: Sequence[SkillRef]) -> tuple[str, ...]:
+    """A `skill:` loss for each pin left out, by id: measured or not, the same loss."""
+    return tuple(sorted({f"skill:{p.id}" for p in pins if p not in kept}))
 
 
 def skill_fits(profile: Profile, row: SkillSizeRow) -> bool:
@@ -218,34 +220,112 @@ async def measure_skills(
     """Each `(skill_id, version)`'s size, downloading only versions never measured.
 
     A version that can't be read is absent from the result, never cached: it costs
-    only its own skill, and the next capture tries it again.
+    only its own skill, and the next capture tries it again. A blip propagates
+    instead (`read_blip`): it proves no loss. Each size is stored as
+    soon as it is measured, by a task the caller's timeout or cancel never stops,
+    so a retry downloads only what a timed-out try left unmeasured.
     """
     wanted = tuple(dict.fromkeys(pins))
+    # Taken before the read: one that finishes meanwhile is still joined, not redone.
+    owner = record.ref if record is not None else None
+    running = {
+        pin: task
+        for pin in wanted
+        if (task := _running((tenant_id, scope, owner, *pin))) is not None
+    }
     async with sessionmaker() as db:
         known = await get_skill_sizes(db, tenant_id=tenant_id, pins=wanted)
+    tasks = [
+        running.get(pin)
+        or _measuring(
+            sessionmaker, anthropic, scope=scope, tenant_id=tenant_id, record=record, pin=pin
+        )
+        for pin in wanted
+        if pin not in known
+    ]
+    measured = await asyncio.gather(*(asyncio.shield(task) for task in tasks))
+    fresh = {(row.skill_id, row.version): row for row in measured if row is not None}
+    return {**known, **fresh}
 
-    async def measure(skill_id: str, version: str) -> SkillSizeRow | None:
-        try:
-            data = await source_skill_archive(
-                sessionmaker,
-                anthropic,
-                scope=scope,
-                record=record,
-                skill_id=skill_id,
-                version=version,
-            )
-        except (AnthropicError, DaimonError, MuxError) as error:
-            log.warning("skill_size.measure_failed", skill_id=skill_id, error=type(error).__name__)
-            return None
-        return measure_archive(tenant_id, skill_id, version, data)
 
-    measured = await asyncio.gather(*(measure(*pin) for pin in wanted if pin not in known))
-    fresh = [row for row in measured if row is not None]
-    if fresh:
-        async with sessionmaker.begin() as db:
-            for row in fresh:
-                await put_skill_size(db, row)
-    return {**known, **{(row.skill_id, row.version): row for row in fresh}}
+#: A measurement's caller and source: the scope and record it reads with, by skill and version.
+_MeasureKey = tuple[uuid.UUID, Scope, ResourceRef | None, str, str]
+#: Measurements in flight: a strong reference keeps an abandoned one running, and a
+#: second caller reading the same way joins it instead of downloading again.
+_IN_FLIGHT: dict[_MeasureKey, asyncio.Task[SkillSizeRow | None]] = {}
+
+
+def cancel_pending_measures() -> None:
+    """Cancel every unfinished measurement; for test isolation only."""
+    for task in list(_IN_FLIGHT.values()):
+        task.cancel()
+    _IN_FLIGHT.clear()
+
+
+def _running(key: _MeasureKey) -> asyncio.Task[SkillSizeRow | None] | None:
+    task = _IN_FLIGHT.get(key)
+    return task if task is not None and task.get_loop() is asyncio.get_running_loop() else None
+
+
+def _measuring(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    anthropic: AsyncAnthropic,
+    *,
+    scope: Scope,
+    tenant_id: uuid.UUID,
+    record: Agent | None,
+    pin: tuple[str, str],
+) -> asyncio.Task[SkillSizeRow | None]:
+    key = (tenant_id, scope, record.ref if record is not None else None, *pin)
+    running = _running(key)
+    if running is not None:
+        return running
+    task = asyncio.create_task(
+        _measure_one(
+            sessionmaker,
+            anthropic,
+            scope=scope,
+            tenant_id=tenant_id,
+            record=record,
+            skill_id=pin[0],
+            version=pin[1],
+        )
+    )
+    _IN_FLIGHT[key] = task
+
+    def settle(done: asyncio.Task[SkillSizeRow | None]) -> None:
+        if _IN_FLIGHT.get(key) is done:
+            del _IN_FLIGHT[key]
+        if not done.cancelled() and (error := done.exception()) is not None:
+            log.warning("skill_size.measure_failed", skill_id=pin[0], error=type(error).__name__)
+
+    task.add_done_callback(settle)
+    return task
+
+
+async def _measure_one(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    anthropic: AsyncAnthropic,
+    *,
+    scope: Scope,
+    tenant_id: uuid.UUID,
+    record: Agent | None,
+    skill_id: str,
+    version: str,
+) -> SkillSizeRow | None:
+    try:
+        data = await source_skill_archive(
+            sessionmaker, anthropic, scope=scope, record=record, skill_id=skill_id, version=version
+        )
+    except (AnthropicError, DaimonError, MuxError) as error:
+        if (busy := read_blip(error)) is not None:
+            raise busy from error
+        log.warning("skill_size.measure_failed", skill_id=skill_id, error=type(error).__name__)
+        return None
+    row = measure_archive(tenant_id, skill_id, version, data)
+    async with sessionmaker.begin() as db:
+        await put_skill_size(db, row)
+    return row
 
 
 async def copy_skills(
@@ -335,10 +415,19 @@ async def copy_skills(
 
 
 async def latest_version(anthropic: AsyncAnthropic, scope: Scope, attached: SkillRef) -> str:
-    """The concrete current version of a skill attached at `latest`."""
+    """The concrete current version of a skill attached at `latest`.
+
+    Remembered for `LATEST_VERSION_TTL_S`: an agent with many skills at `latest`
+    otherwise spends one paced Skills API request per skill on every read.
+    """
     from daimon.core.mux_backend import managed_agents
     from daimon.core.mux_compat import legacy_call
 
+    # Keyed by source: a hit is only for a ref whose source a lookup already matched.
+    cached = LATEST_VERSIONS.get(scope.tenant_id, attached.id, attached.source)
+    if cached is not None:
+        return cached
+    generation = LATEST_VERSIONS.generation()
     # Grant reads only for this id: a scoped catalogue walk hides custom skills.
     backend = managed_agents(anthropic, scope=scope, resources=frozenset({("skill", attached.id)}))
     record = await legacy_call(backend.skills.retrieve(scope, attached.id))
@@ -352,13 +441,57 @@ async def latest_version(anthropic: AsyncAnthropic, scope: Scope, attached: Skil
     ):
         raise ValueError("source skill has no concrete current version")
     assert pin.version is not None
+    LATEST_VERSIONS.put(
+        scope.tenant_id, attached.id, pin.version, generation=generation, source=attached.source
+    )
     return pin.version
+
+
+async def measure_carried_skills(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    anthropic: AsyncAnthropic,
+    *,
+    scope: Scope,
+    tenant_id: uuid.UUID,
+    carried: Sequence[SkillRef],
+    record: Agent | None,
+) -> tuple[tuple[SkillRef, ...], dict[tuple[str, str], SkillSizeRow]]:
+    """A capture's carried skills pinned to concrete versions, and each one's size.
+
+    A skill whose latest version can't be read keeps `latest` and goes unmeasured:
+    a named loss of that skill alone. A blip propagates instead (`read_blip`).
+    """
+
+    async def pinned(attached: SkillRef) -> SkillRef:
+        if attached.version not in (None, "latest"):
+            return SkillRef(id=attached.id, version=attached.version)
+        try:
+            version = await latest_version(anthropic, scope, attached)
+        except (AnthropicError, DaimonError, MuxError, ValueError) as error:
+            if (busy := read_blip(error)) is not None:
+                raise busy from error
+            log.warning(
+                "source_capture.skill_unresolved", skill_id=attached.id, error=type(error).__name__
+            )
+            return SkillRef(id=attached.id, version=attached.version)
+        return SkillRef(id=attached.id, version=version)
+
+    pins = tuple(await asyncio.gather(*(pinned(s) for s in carried)))
+    sizes = await measure_skills(
+        sessionmaker,
+        anthropic,
+        scope=scope,
+        tenant_id=tenant_id,
+        pins=((p.id, str(p.version)) for p in pins if p.version not in (None, "latest")),
+        record=record,
+    )
+    return pins, sizes
 
 
 async def channel_session_skills(
     request: ProviderPreparationRequest, profile: Profile, scope: Scope
-) -> tuple[tuple[SkillRef, ...], tuple[str, ...]]:
-    """The channel's custom skills a channel-origin template installs, and those left out.
+) -> tuple[tuple[SkillRef, ...], tuple[str, ...], dict[str, str]]:
+    """The channel's custom skills a channel-origin template installs, those left out, names.
 
     It has no capture, so they are measured here; one over the profile's limits,
     or unreadable, is a named `skill:` loss.
@@ -366,7 +499,7 @@ async def channel_session_skills(
     deps, skills = request.deps, request.admission.channel_skills
     custom = tuple(s for s in skills if s.type == "custom")
     if not custom or not attaches_session_skills(profile):
-        return (), ()
+        return (), (), {}
 
     async def pin(skill: MaSkill) -> SkillRef | None:
         attached = SkillRef(id=skill.skill_id, version=skill.version, source="custom")
@@ -377,6 +510,8 @@ async def channel_session_skills(
                 else skill.version
             )
         except (AnthropicError, DaimonError, MuxError, ValueError) as error:
+            if (busy := read_blip(error)) is not None:
+                raise busy from error
             log.warning(
                 "session_skills.unresolved", skill_id=skill.skill_id, error=type(error).__name__
             )
@@ -396,7 +531,7 @@ async def channel_session_skills(
         pins=((p.id, str(p.version)) for p in pins),
     )
     kept = fitting_skills(profile, pins, sizes)
-    return kept, (*unresolved, *skill_losses(pins, sizes, kept))
+    return kept, (*unresolved, *skill_losses(pins, kept)), skill_names(sizes)
 
 
 async def turn_session_skills(
@@ -423,8 +558,9 @@ async def turn_session_skills(
         pins = represented.session_skills if represented is not None else ()
         record = source.source if source is not None else None
         left: tuple[str, ...] = ()
+        names = dict(represented.skill_names) if represented is not None else {}
     else:
-        pins, left = await channel_session_skills(request, profile, scope)
+        pins, left, names = await channel_session_skills(request, profile, scope)
         record = None
     copies: tuple[SkillRef, ...] = ()
     if pins:
@@ -441,14 +577,16 @@ async def turn_session_skills(
         )
         left = (*left, *failed)
     if left:
-        await _tell_missing_skills(request, left)
+        await _tell_missing_skills(request, left, names)
     return copies
 
 
-async def _tell_missing_skills(request: ProviderPreparationRequest, losses: Sequence[str]) -> None:
+async def _tell_missing_skills(
+    request: ProviderPreparationRequest, losses: Sequence[str], names: Mapping[str, str]
+) -> None:
     """Queue the agent a notice naming the skills its session goes without."""
-    names = sorted({loss.removeprefix("skill:") for loss in losses})
-    log.warning("session_skills.left_out", tenant_id=str(request.tenant_id), skills=names)
+    ids = sorted({loss.removeprefix("skill:") for loss in losses})
+    log.warning("session_skills.left_out", tenant_id=str(request.tenant_id), skills=ids)
     try:
         async with request.deps.sessionmaker.begin() as db:
             await record_agent_notices(
@@ -457,7 +595,7 @@ async def _tell_missing_skills(request: ProviderPreparationRequest, losses: Sequ
                 platform=request.platform,
                 thread_id=request.thread_id,
                 agent_id=request.admission.agent.id,
-                texts=[missing_skills_notice(names)],
+                texts=[missing_skills_notice(sorted({names.get(i, i) for i in ids}))],
             )
     except SQLAlchemyError as error:  # the notice is advisory; never block the reply
         log.warning("session_skills.notice_failed", error=type(error).__name__)

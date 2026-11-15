@@ -551,28 +551,27 @@ async def project_session_resources(
     ):
         # Opaque carry resources and private credentials are not absent obligations.
         requirements.append(ResourceBinding(id=CALLER_RESOURCES_ID, kind="native"))
-    unclassified = ()
-    if source.source is not None:
+
+    def project(payload: Mapping[str, object], skills: Sequence[MaSkill]) -> AgentSpec:
+        spec = agent_spec(payload)
+        if source.source is None:
+            return spec
         # Classify the complete session skill list before neutral projection loses
         # native fields. The driver owns unknown-source detection for both paths.
         session_source = agent_record(
-            agent.model_copy(update={"skills": session_skills(agent, channel_skills)}),
-            source.source.ref.account_scope_id,
-            scope,
+            agent.model_copy(update={"skills": skills}), source.source.ref.account_scope_id, scope
         )
         unclassified = tuple(
             extension
             for extension in session_source.spec.extensions or ()
             if extension.namespace == UNCLASSIFIED_SOURCE_NAMESPACE
         )
-
-    def project(payload: Mapping[str, object]) -> AgentSpec:
-        spec = agent_spec(payload)
         if not unclassified:
             return spec
         return spec.model_copy(update={"extensions": (*(spec.extensions or ()), *unclassified)})
 
-    effective = project(payload)
+    turn_skills = session_skills(agent, channel_skills)
+    effective = project(payload, turn_skills)
     # The consent pin's view: Daimon's own gating (tool safety, asking before
     # publishing) changes with a release or a place, never with the agent.
     ungated_tools = session_tools(
@@ -583,12 +582,35 @@ async def project_session_resources(
         legacy_memory_servers=legacy_memory_servers,
     )
     ungated = project(
-        {**payload, "tools": [t.model_dump(mode="json", exclude_none=True) for t in ungated_tools]}
+        {**payload, "tools": [t.model_dump(mode="json", exclude_none=True) for t in ungated_tools]},
+        turn_skills,
+    )
+    # The pin's view: the owner's setup, the same in every place. A channel's skills
+    # and the servers hidden from one person are that turn's own (checked as losses).
+    owner_tools = session_tools(
+        agent,
+        frozenset(),
+        tool_safety=ToolSafetyPolicy(),
+        public_url=public_url,
+        legacy_memory_servers=legacy_memory_servers,
+    )
+    owner_servers = session_mcp_servers(
+        agent, frozenset(), tool_safety=ToolSafetyPolicy(), public_url=public_url
+    )
+    owner = project(
+        {
+            **payload,
+            "tools": [t.model_dump(mode="json", exclude_none=True) for t in owner_tools],
+            "mcp_servers": [server.model_dump(mode="json") for server in owner_servers],
+            "skills": [skill.model_dump(mode="json") for skill in session_skills(agent)],
+        },
+        session_skills(agent),
     )
     return source.model_copy(
         update={
             "effective_spec": effective,
             "ungated_spec": ungated,
+            "owner_spec": owner,
             "environment": source_environment_record(environment, scope),
             "resource_scope": scope,
             "resource_requirements": tuple(requirements),

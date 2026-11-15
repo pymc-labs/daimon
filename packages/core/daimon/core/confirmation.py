@@ -999,21 +999,31 @@ _DROP_WORDS: Mapping[str, str] = {
 }
 
 
-def drop_word(drop: str) -> str:
-    """Plain words for one declared loss: 'web search', 'its linear connector'."""
+def drop_word(drop: str, names: Mapping[str, str] | None = None) -> str:
+    """Plain words for one declared loss: 'web search', 'its linear connector'.
+
+    `names` gives a skill's own name by id; a skill without one shows its id.
+    """
     if drop.startswith("mcp_tool:"):
         _, server, tool = drop.split(":", 2)
         return f"the {tool} tool of {server}"
     if drop.startswith("mcp_server:"):
         return f"its {drop.removeprefix('mcp_server:')} connector"
     if drop.startswith("skill:"):
-        return f"its {drop.removeprefix('skill:')} skill"
+        skill = drop.removeprefix("skill:")
+        return f"its {(names or {}).get(skill, skill)} skill"
     return _DROP_WORDS.get(drop, drop.replace("_", " "))
 
 
-def drop_words(drops: Sequence[str]) -> str:
+def loss_word(drop: str, names: Mapping[str, str] | None = None) -> str:
+    """A declared loss in a list of what stops working: 'memory', 'pricing skill'."""
+    return drop_word(drop, names).removeprefix("its ")
+
+
+def drop_words(drops: Sequence[str], names: Mapping[str, str] | None = None) -> str:
     """'its saved keys, its memory and its sandbox': saved keys first, as the costliest."""
-    words = [drop_word(d) for d in sorted(drops, key=lambda item: (item != "credentials", item))]
+    ordered = sorted(drops, key=lambda item: (item != "credentials", item))
+    words = [drop_word(d, names) for d in ordered]
     return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
 
 
@@ -1414,7 +1424,7 @@ def backend_switch_callbacks(
         setting = await service.current(agent)
         before = (setting.backend if setting is not None else None) or DEFAULT_BACKEND
         unavailable = (
-            f"On {provider} it won't have {drop_words(preview.declared_drops)}"
+            f"On {provider} it won't have {drop_words(preview.declared_drops, preview.skill_names)}"
             if preview.declared_drops
             else ""
         )

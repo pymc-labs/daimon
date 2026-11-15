@@ -113,7 +113,7 @@ export type Change = {
   text?: boolean
 }
 
-/** What picking a model changes: `drops` is every loss the person accepts by confirming. */
+/** What picking a model changes: `lost` in plain words, `drops` as the apply sends them back. */
 export type ModelPreview = {
   moves: boolean
   allowed: boolean
@@ -121,6 +121,7 @@ export type ModelPreview = {
   servers: string[]
   capabilities: string[]
   shared_limits: string[]
+  lost: string[]
   drops: string[]
   cost: string
   threads: string

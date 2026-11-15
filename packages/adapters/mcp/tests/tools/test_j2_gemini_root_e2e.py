@@ -159,10 +159,17 @@ class Chat:
 @pytest.fixture(params=("admin", "member"))
 async def fresh_chat(request, db_preflight, db_nullpool_engine, monkeypatch):
     """The built-in Daimon answering a person's first message in a fresh public channel."""
+    from daimon.core.mcp_oauth import discovery
     from daimon.core.provider_keys import DEFAULT_KEY_ENV
 
     for provider in ("openai", "gemini"):
         monkeypatch.setenv(DEFAULT_KEY_ENV[provider], "offline")
+
+    async def served_catalogue(_url: str, _token: str) -> frozenset[str]:
+        """Daimon's MCP catalogue, served offline: an unserved read is a retryable blip."""
+        return frozenset({"hand_off_task", "request_agent_backend_switch"})
+
+    monkeypatch.setattr(discovery, "list_mcp_tools", served_catalogue)
     sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
     require_owned_sessionmaker(sessions)
     admin = request.param == "admin"

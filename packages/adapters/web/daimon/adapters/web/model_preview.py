@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from daimon.core.agent_changes import SwitchConsent
+from daimon.core.confirmation import loss_word
 from daimon.core.model_switch import ModelSwitchPreview, SwitchRefusal
 from daimon.core.turn.notices import conversations_follow_line
 from mux.contracts.config import DEFAULT_BACKEND
@@ -25,6 +26,8 @@ class ModelPreview(BaseModel):
     servers: list[str]
     capabilities: list[str]
     shared_limits: list[str]
+    #: What stops working, in the words the switch card uses: skills by name.
+    lost: list[str]
     #: Every drop the person accepts by confirming, as the apply must send them back.
     drops: list[str]
     cost: str
@@ -45,12 +48,22 @@ def preview_doc(switch: ModelSwitchPreview, *, agent_name: str) -> ModelPreview:
             servers=[],
             capabilities=[],
             shared_limits=[],
+            lost=[],
             drops=[],
             cost="",
             threads="",
             digest="",
             revision=0,
         )
+    # A declared drop names what a real turn loses; without one, the coarse lists do.
+    lost = (
+        [
+            *(loss_word(d, found.skill_names) for d in found.declared_drops),
+            *found.unsupported_capabilities,
+        ]
+        if found.declared_drops
+        else [*found.unsupported_skills, *found.unsupported_mcps, *found.unsupported_capabilities]
+    )
     stays = switch.model.provider == switch.before == DEFAULT_BACKEND
     return ModelPreview(
         moves=not stays,
@@ -59,6 +72,7 @@ def preview_doc(switch: ModelSwitchPreview, *, agent_name: str) -> ModelPreview:
         servers=list(found.unsupported_mcps),
         capabilities=list(found.unsupported_capabilities),
         shared_limits=list(found.shared_thread_limits),
+        lost=list(dict.fromkeys(lost)),
         drops=list(found.declared_drops),
         cost=found.cost_line,
         threads=""
@@ -78,6 +92,7 @@ def refused_doc(refusal: SwitchRefusal) -> ModelPreview:
         servers=[],
         capabilities=[],
         shared_limits=[],
+        lost=[],
         drops=[],
         cost="",
         threads="",

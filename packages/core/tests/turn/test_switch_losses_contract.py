@@ -105,11 +105,13 @@ async def _one_reading(request, quote, consent_request, *, relay: bool, finer=()
     assert ("mcp_server:linear" in drops) is not relay
     assert not [d for d in drops if d.startswith("mcp_tool:")], drops
     assert quote.unsupported_mcps == (() if relay else ("linear",))
-    # A skill past the provider's size limits is the only skill named, each by itself.
-    skills = tuple(sorted(d.removeprefix("skill:") for d in drops if d.startswith("skill:")))
-    assert quote.unsupported_skills == skills
+    # A skill past the provider's size limits is the only skill named, each by itself:
+    # keyed by id in the drops, shown by its own name.
+    ids = [d.removeprefix("skill:") for d in drops if d.startswith("skill:")]
+    assert set(ids) <= set(quote.skill_names), f"each lost skill has its name: {ids}"
+    assert quote.unsupported_skills == tuple(sorted(quote.skill_names[i] for i in ids))
     assert (quote.unsupported_skills, quote.unsupported_mcps, quote.unsupported_capabilities) == (
-        switch_losses(drops, consent_request[2])
+        switch_losses(drops, consent_request[2], quote.skill_names)
     )
     if drops:
         assert "connected tools" not in drop_words(drops)
