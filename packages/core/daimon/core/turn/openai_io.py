@@ -40,8 +40,7 @@ from mux.contracts.ids import PageRequest, ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.receipts import CancelReceipt, OperationStatus, SendReceipt, StopObservation
 from mux.contracts.usage import UsageObservation
-from mux.drivers.openai import SCHEMA_DATE
-from mux.drivers.openai.usage import OpenAIUsage
+from mux.drivers.openai import SCHEMA_DATE, OpenAIUsage
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from pydantic import BaseModel, JsonValue, TypeAdapter
 
