@@ -787,6 +787,20 @@ def test_complete_backend_loss_list_survives_native_card_rendering(state):
     assert any(losses in text for text in texts) == (state in {"pending", "approved"})
 
 
+def test_an_admin_card_without_details_posts_no_empty_section():
+    """Slack refuses a section with empty text, so an admin card with no details has none."""
+    from daimon.adapters.slack.tool_confirmation import _attachment
+    from daimon.core.posted_controls.confirmation import build_confirmation_card
+
+    prompt = _prompt().model_copy(
+        update={"admin": True, "consequence": "Stops working: memory", "detail_lines": ()}
+    )
+    card = build_confirmation_card(prompt, state="pending", token="abcdefgh")
+    blocks = _attachment(card, prompt)[0]["blocks"]
+    texts = [block["text"]["text"] for block in blocks if block["type"] == "section"]
+    assert all(texts), f"every section has text: {texts}"
+
+
 async def test_blocked_always_save_does_not_block_retirement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

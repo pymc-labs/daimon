@@ -64,6 +64,7 @@ from daimon.core.stores.domain import (
     ChannelSkillRow,
     McpTokenRow,
 )
+from daimon.core.switch_card import CANCEL_LABEL, SWITCH_LABEL
 from daimon.core.text_layout import fit_lines
 
 __all__ = [
@@ -703,17 +704,20 @@ def build_model_switch_view(
     action: RefusalAction | None = None,
     applying: bool = False,
 ) -> dict[str, Any]:
-    """The one preview (or refusal) a model pick leads to, with its way forward."""
+    """The one card (or refusal) a model pick leads to: Cancel, then its way forward."""
     blocks = [_section("\n".join(lines))]
     if applying:
         blocks.append(_context("Applying…"))
     else:
         name = meta.agent_name or ""
-        buttons: list[dict[str, Any]] = []
+        buttons = [_button(action_id=ACTION_BACKEND_CANCEL, label=CANCEL_LABEL, value=name)]
         if confirm:
             buttons.append(
                 _button(
-                    action_id=ACTION_BACKEND_CONFIRM, label="Confirm", value=name, style="primary"
+                    action_id=ACTION_BACKEND_CONFIRM,
+                    label=SWITCH_LABEL,
+                    value=name,
+                    style="primary",
                 )
             )
         elif action == "switch_back_to_claude":
@@ -734,7 +738,6 @@ def build_model_switch_view(
                     style="primary",
                 )
             )
-        buttons.append(_button(action_id=ACTION_BACKEND_CANCEL, label="Cancel", value=name))
         blocks.append({"type": "actions", "elements": buttons})
     return finish_modal(
         title="Model",

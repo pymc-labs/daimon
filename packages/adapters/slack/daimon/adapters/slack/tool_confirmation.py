@@ -96,13 +96,14 @@ def _attachment(card: ConfirmationCard, prompt: ConfirmationPrompt) -> list[dict
         for block in blocks:
             if block["type"] == "actions":
                 block["elements"][0]["text"]["text"] = "Confirm"
-        blocks.insert(
-            1,
-            {
-                "type": "section",
-                "text": {"type": "plain_text", "text": "\n".join(card.detail_lines)},
-            },
-        )
+        if card.detail_lines:  # Slack refuses a section with empty text.
+            blocks.insert(
+                1,
+                {
+                    "type": "section",
+                    "text": {"type": "plain_text", "text": "\n".join(card.detail_lines)},
+                },
+            )
     return [{"color": _COLORS[card.state], "blocks": blocks}]
 
 
