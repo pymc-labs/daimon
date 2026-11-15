@@ -1978,7 +1978,7 @@ async def _post_own_switch_card(
     service: channel_backend.AgentBackendService,
     reference: BackendSwitchReference,
 ) -> str:
-    """Post the Confirm card a provider turn can't show, after the same checks as its click.
+    """Post the switch card a provider turn can't show, after the same checks as its click.
 
     The card goes only into the verified origin's thread and only its requester
     can press it (`daimon.core.switch_cards.press_switch_card`). Nothing changes
@@ -2008,7 +2008,7 @@ async def _post_own_switch_card(
         )
     if waiting:
         raise ToolError(
-            f"There's already a Confirm card waiting for you to switch {reference.agent}. "
+            f"There's already a card waiting for you to switch {reference.agent}. "
             "Press it, or let it expire, before asking again. Nothing changed."
         )
 
@@ -2075,8 +2075,8 @@ async def _post_own_switch_card(
     async with runtime.session_factory.begin() as session:
         await cards.mark_posted(session, card_id=row.id, message_id=message_id)
     return (
-        "I posted a Confirm card in this conversation. Nothing changes until the requester "
-        "presses Confirm on it. Tell them so; do not call this tool again for this switch."
+        "I posted a switch card in this conversation. Nothing changes until the requester "
+        "presses Switch on it. Tell them so; do not call this tool again for this switch."
     )
 
 
@@ -2140,6 +2140,7 @@ async def _request_agent_backend_switch_impl(
         stated_settings,
         switch_preview_digest,
     )
+    from daimon.core.switch_card import needs_switch_card
     from pydantic import ValidationError
 
     # A provider turn with no card of its own (OpenAI, Gemini): Daimon posts the
@@ -2257,16 +2258,19 @@ async def _request_agent_backend_switch_impl(
             raise ToolError("That model provider isn't turned on here. Nothing changed.")
         status: Literal["preview", "changed", "awaiting_confirmation"] = "preview"
         summary = (
-            "Tell the person in plain words the compatibility, what won't be available "
-            "and the cost line, then call request_agent_backend_switch again in this same "
-            "reply with its expected_revision and preview_digest. Do not ask the person to "
-            "reply yes or to confirm in chat: the second call posts the switch card, and "
-            "they Confirm on it. Their request is already the go-ahead. "
-            "Nothing has changed yet."
+            "Tell the person what stops working, then call request_agent_backend_switch again "
+            "in this same reply with its expected_revision and preview_digest. Do not ask the "
+            "person to reply yes or to confirm in chat: the second call posts the switch card, "
+            "and they press Switch on it. Their request is the go-ahead. Nothing has changed yet."
         )
         reference: BackendSwitchReference | None = None
         # The person's hand-off answers, bound into the digest the card showed.
         bound = unsaved_work is not None or handoff_summary is not None
+        # Nothing stops working: it applies now, like a model change; a hand-off still asks.
+        auto = preview_digest is None and awaiting is None and not bound
+        if auto := auto and not needs_switch_card(preview):
+            expected_revision, preview_digest = preview.setting_revision, preview.digest
+            accepted_drops = tuple(preview.declared_drops) or None
         if preview_digest is not None:
             reference = BackendSwitchReference.model_validate(
                 {
@@ -2328,7 +2332,7 @@ async def _request_agent_backend_switch_impl(
                 # invented one is a different request. (Omitting a bound answer fails
                 # the switch's own digest check.)
                 raise channel_backend.AgentBackendRefused("stale_preview")
-        if reference is not None and self_card:
+        if reference is not None and self_card and not auto:
             if awaiting is not None or bound:
                 # The hand-off this switch carries runs at the write, which a
                 # self-posted card's press doesn't do.
@@ -2813,7 +2817,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             handoff_summary: Annotated[str | None, Field(max_length=2000)] = None,
             effort: Effort | None = None,
         ) -> AgentBackendSwitchInfo:
-            """Change an agent's model to another provider's: preview, then Confirm in this chat.
+            """Change an agent's model to another provider's; a switch that loses something asks.
 
             Use when an admin or the agent's owner asks to switch it to Anthropic, OpenAI
             or Gemini. It stays the same agent on a new model: say "Researcher now uses
@@ -2843,15 +2847,15 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             which the copy starts from there, since the history itself can't move.
             If that preview asks the uncommitted-work question, pass the person's
             answer as ``unsaved_work`` on both calls.
-            First call without preview_digest: tell the person in plain words the
-            compatibility, shared-thread limits, what won't be available and the cost
-            line, then call again in this same turn with the same model and that preview's
+            First call without preview_digest: one that loses nothing applies and returns
+            changed. Otherwise tell the person what stops working and any shared-thread
+            limit, then call again in this same turn with the same model and that preview's
             expected_revision, preview_digest and exact declared_drops as accepted_drops.
             Never ask the person to reply "yes", to confirm in chat, or for a second
             go-ahead: the request that began this turn is the go-ahead, and the second
-            call posts the card, where they Confirm. On an OpenAI or Gemini turn
+            call posts the card, where they press Switch. On an OpenAI or Gemini turn
             that call posts the card itself and returns awaiting_confirmation: tell the
-            person to press Confirm, and don't call again. Never confirm, approve or accept it
+            person to press Switch, and don't call again. Never confirm, approve or accept it
             on their behalf, and never say you did. A stale preview or expired card
             changes nothing; preview again. Make any other change to the agent (its tools,
             skills or settings) before previewing a switch: a change after the preview

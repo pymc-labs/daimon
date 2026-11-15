@@ -7624,7 +7624,7 @@
     }),
     'request_agent_backend_switch': dict({
       'description': '''
-        Change an agent's model to another provider's: preview, then Confirm in this chat.
+        Change an agent's model to another provider's; a switch that loses something asks.
         <blank line>
         Use when an admin or the agent's owner asks to switch it to Anthropic, OpenAI
         or Gemini. It stays the same agent on a new model: say "Researcher now uses
@@ -7654,15 +7654,15 @@
         which the copy starts from there, since the history itself can't move.
         If that preview asks the uncommitted-work question, pass the person's
         answer as ``unsaved_work`` on both calls.
-        First call without preview_digest: tell the person in plain words the
-        compatibility, shared-thread limits, what won't be available and the cost
-        line, then call again in this same turn with the same model and that preview's
+        First call without preview_digest: one that loses nothing applies and returns
+        changed. Otherwise tell the person what stops working and any shared-thread
+        limit, then call again in this same turn with the same model and that preview's
         expected_revision, preview_digest and exact declared_drops as accepted_drops.
         Never ask the person to reply "yes", to confirm in chat, or for a second
         go-ahead: the request that began this turn is the go-ahead, and the second
-        call posts the card, where they Confirm. On an OpenAI or Gemini turn
+        call posts the card, where they press Switch. On an OpenAI or Gemini turn
         that call posts the card itself and returns awaiting_confirmation: tell the
-        person to press Confirm, and don't call again. Never confirm, approve or accept it
+        person to press Switch, and don't call again. Never confirm, approve or accept it
         on their behalf, and never say you did. A stale preview or expired card
         changes nothing; preview again. Make any other change to the agent (its tools,
         skills or settings) before previewing a switch: a change after the preview
@@ -9863,9 +9863,10 @@
         for every later reply until someone changes it; the reply in progress
         keeps its model. Other conversations are unaffected.
         <blank line>
-        A model on another provider returns ``changes`` and does nothing yet:
+        A pick that loses something returns ``changes`` and does nothing yet:
         read them to the person, and only after they agree in a later message
-        call again with the same ``model``, ``digest`` and ``revision``.
+        call again with the same ``model``, ``digest`` and ``revision``. Any
+        other pick applies at once.
         <blank line>
         ``origin_context_id`` must name this execution's attended origin;
         routines and other unattended runs are refused. Read the returned

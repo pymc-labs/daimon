@@ -262,6 +262,26 @@ async def _openai_pick(monkeypatch, sessionmaker, tenant_id, account_id, *, admi
     return thread_model
 
 
+_LIMIT = "Only people here can use it."
+
+
+def _with_a_loss(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Previews here lose something, so a pick asks first."""
+    from dataclasses import replace
+
+    from daimon.core import thread_model_switch as core
+
+    real = core.preview_thread_model
+
+    async def lossy(pick, value):
+        shown = await real(pick, value)
+        assert shown.preview is not None, "another provider's pick is previewed"
+        limited = shown.preview.model_copy(update={"shared_thread_limits": (_LIMIT,)})
+        return replace(shown, preview=limited)
+
+    monkeypatch.setattr(core, "preview_thread_model", lossy)
+
+
 async def test_another_providers_model_waits_for_the_persons_yes(
     monkeypatch: pytest.MonkeyPatch,
     db_session: AsyncSession,
@@ -271,9 +291,11 @@ async def test_another_providers_model_waits_for_the_persons_yes(
     caller = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, mux=True)
+    """A pick that loses something returns the card's words and keeps nothing until yes."""
     tool = await _openai_pick(
         monkeypatch, committing_sessionmaker, tenant.id, caller.id, admin=True
     )
+    _with_a_loss(monkeypatch)
     confirmed: list[tuple[str, str, str, int]] = []
 
     async def confirm(pick, value, *, thread_id, digest, revision):
@@ -302,7 +324,8 @@ async def test_another_providers_model_waits_for_the_persons_yes(
             runtime, auth, origin_context_id=where, model="openai:gpt-6-luna"
         )
         assert shown.model == "openai:gpt-6-luna" and shown.digest is not None
-        assert "Applies to: this conversation" in shown.changes
+        assert shown.changes[0].startswith("Switch this conversation to "), "the card's title"
+        assert shown.changes[1:] == [_LIMIT], "then only what the switch limits"
         assert confirmed == [], "nothing is kept before the person agrees"
         assert await _stored(committing_sessionmaker, tenant.id, "T_THREAD") is None
         kept = await _set_thread_model_impl(
@@ -381,7 +404,14 @@ async def test_with_the_host_call_gate_off_only_a_same_provider_pick_runs(
     kept: list[str] = []
 
     async def preview(pick, value):
-        fake = SimpleNamespace(digest="d1", setting_revision=1, allowed=True)
+        fake = SimpleNamespace(
+            digest="d1",
+            setting_revision=1,
+            allowed=True,
+            declared_drops=("memory",),
+            shared_thread_limits=(),
+            skill_names={},
+        )
         model = ModelRef(provider="openai", id="gpt-6-luna")
         return ModelSwitchPreview(model=model, label="GPT", before=before, preview=fake)  # pyright: ignore[reportArgumentType]
 
@@ -389,7 +419,10 @@ async def test_with_the_host_call_gate_off_only_a_same_provider_pick_runs(
         kept.append(value)
         return ThreadModelChange(model_id="gpt-6-luna", note="kept")
 
+    from daimon.core import thread_model_switch as core
+
     monkeypatch.setattr(tool, "preview_thread_model", preview)
+    monkeypatch.setattr(core, "preview_thread_model", preview)
     monkeypatch.setattr(tool, "confirm_thread_model", confirm)
     async with turn_origin(
         committing_sessionmaker,

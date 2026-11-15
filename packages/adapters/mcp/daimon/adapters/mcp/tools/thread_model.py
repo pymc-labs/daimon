@@ -10,8 +10,9 @@ verified origin, and that origin must be attended. Routines, wakes and
 agent-chat callers have no attended origin, so they can never change the model
 a conversation's people chose.
 
-A pick that needs consent (`daimon.core.thread_model_switch`) is two calls: the
-first returns what changes, the second, after the person says yes, keeps it.
+A pick that loses something (`daimon.core.thread_model_switch.pick_thread_or_card`) is two
+calls: the first returns the card's words, the second, after the person says yes, keeps it.
+Any other pick is kept on the first call.
 """
 
 from __future__ import annotations
@@ -30,17 +31,22 @@ from daimon.core.agent_model_names import AmbiguousModel
 from daimon.core.backend_refusals import refusal_card
 from daimon.core.features.snapshot import deployment_on
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.model_switch import switch_fact_lines
+from daimon.core.model_switch import SwitchRefusal, switch_card_text
 from daimon.core.models_catalog import catalog_model
 from daimon.core.stores import agent_backends
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.thread_model_switch import (
-    APPLIES_TO,
     ThreadPick,
     confirm_thread_model,
+    pick_thread_or_card,
     preview_thread_model,
 )
-from daimon.core.thread_models import THREAD_MODEL_CHOICES, ThreadModelRefused, choose_thread_model
+from daimon.core.thread_models import (
+    THREAD_MODEL_CHOICES,
+    ThreadModelChange,
+    ThreadModelRefused,
+    choose_thread_model,
+)
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.config import DEFAULT_BACKEND
@@ -97,29 +103,37 @@ async def _set_thread_model_impl(
     uncarded = auth.no_confirmation_surface and not deployment_on(
         runtime.settings, "host_call_gate", origin.platform
     )
+    admin = auth.admin_for(DelegatedAction.AGENT_SETTINGS)
     try:
-        if digest is None or revision is None or uncarded:
+        if digest is None or revision is None:
+            done = await pick_thread_or_card(pick, value, thread_id=origin.thread_id, admin=admin)
+            if isinstance(done, SwitchRefusal):
+                raise ToolError(f"{done.line} Nothing changed.")
+            if isinstance(done, ThreadModelChange):
+                return ThreadModelResult(model=done.model_id or "default", note=done.note)
+            if uncarded and done.model.provider != done.before:
+                raise ToolError(_NO_CARD)
+            return ThreadModelResult(
+                model=f"{done.model.provider}:{done.model.id}",
+                note="Read these changes to the person and ask whether to go ahead.",
+                changes=list(switch_card_text(done, agent_name=None)),
+                digest=done.digest,
+                revision=done.revision,
+            )
+        if uncarded:
             shown = await preview_thread_model(pick, value)
-            if uncarded and shown.model.provider != shown.before:
+            if shown.model.provider != shown.before:
                 raise ToolError(_NO_CARD)
             if shown.preview is None:
                 # The agent moved to Claude meanwhile: nothing to consent to.
-                word = _word_of(shown.model.id, said=model)
-                return await _choose_claude(runtime, auth, origin, word)
-            if digest is None or revision is None:
-                lines = switch_fact_lines(shown, agent_name=None, applies_to=APPLIES_TO)
-                return ThreadModelResult(
-                    model=f"{shown.model.provider}:{shown.model.id}",
-                    note="Read these changes to the person and ask whether to go ahead.",
-                    changes=list(lines),
-                    digest=shown.digest,
-                    revision=shown.revision,
+                return await _choose_claude(
+                    runtime, auth, origin, _word_of(shown.model.id, said=model)
                 )
         change = await confirm_thread_model(
             pick, value, thread_id=origin.thread_id, digest=digest, revision=revision
         )
     except (channel_backend.AgentBackendRefused, channel_backend.BackendUnsupported) as exc:
-        line, _action = refusal_card(exc, admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS))
+        line, _action = refusal_card(exc, admin=admin)
         raise ToolError(f"{line} Nothing changed.") from exc
     return ThreadModelResult(model=change.model_id or "default", note=change.note)
 
@@ -232,9 +246,10 @@ def register_thread_model_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         for every later reply until someone changes it; the reply in progress
         keeps its model. Other conversations are unaffected.
 
-        A model on another provider returns ``changes`` and does nothing yet:
+        A pick that loses something returns ``changes`` and does nothing yet:
         read them to the person, and only after they agree in a later message
-        call again with the same ``model``, ``digest`` and ``revision``.
+        call again with the same ``model``, ``digest`` and ``revision``. Any
+        other pick applies at once.
 
         ``origin_context_id`` must name this execution's attended origin;
         routines and other unattended runs are refused. Read the returned

@@ -1,10 +1,9 @@
 """J1 offline E2E (P0, Claude-only sweep item 1): switching back to Claude from a GPT root.
 
-A GPT (or Gemini) turn has no confirmation card of its own, so the switch tool used to
-be refused outright there and the agent could never come back to Claude. Now the
-preview is read-only, the confirm call posts Daimon's own requester-only card in the
-same thread, and the press re-verifies and applies, with the source read the same
-way the preview read it, so the card's digest is the click's digest.
+A GPT (or Gemini) turn has no confirmation card of its own. Back to Claude loses
+nothing, so it applies on the first call, like a model change. A switch that loses
+something posts Daimon's own requester-only card in the same thread, and the press
+re-verifies and applies, with the source read the same way the preview read it.
 """
 
 from __future__ import annotations
@@ -34,9 +33,10 @@ async def _agent(runtime, auth, queue):
     )
 
 
-async def test_j1_a_gpt_root_switches_itself_back_to_claude_with_daimons_own_card(
+async def test_j1_a_gpt_root_switches_back_at_once_and_asks_with_daimons_own_card(
     active_chat, monkeypatch
 ):
+    """Back to Claude applies at once; a lossy switch from a GPT turn uses Daimon's card."""
     runtime, auth, origin, service, trace, payload, _, gate, agent, _ = active_chat
     _without_own_tools(payload)
     # Cheap models only (ROOT): Haiku on Claude, gpt-6-luna on GPT.
@@ -64,8 +64,8 @@ async def test_j1_a_gpt_root_switches_itself_back_to_claude_with_daimons_own_car
     )
     assert (await service.current(await _agent(runtime, auth, agent))).backend == "openai"
 
-    # 2. On GPT, "switch yourself back to Claude": the preview, then the confirm call
-    #    posts Daimon's card into this thread instead of switching.
+    # 2. On GPT, "switch yourself back to Claude": nothing stops working, so it applies
+    #    on the first call, with no card.
     gpt_turn = replace(auth, no_confirmation_surface=True)
     posted = AsyncMock(return_value="card-message")
     monkeypatch.setattr(switch_card_mod, "post_switch_card", posted)
@@ -75,25 +75,37 @@ async def test_j1_a_gpt_root_switches_itself_back_to_claude_with_daimons_own_car
         "origin_context_id": str(origin.id),
     }
     agent()
-    preview = await _request_agent_backend_switch_impl(runtime, gpt_turn, **back)
+    agent()
+    applied = await _request_agent_backend_switch_impl(runtime, gpt_turn, **back)
+    assert applied.status == "changed", "back to Claude loses nothing"
+    posted.assert_not_awaited()
+    now = await service.current(await _agent(runtime, auth, agent))
+    assert now is not None and now.backend in (None, "anthropic"), "the agent is on Claude"
+
+    # 3. A switch that loses something, asked from that GPT turn: the preview, then the
+    #    confirm call posts Daimon's card into this thread instead of switching.
+    agent()
+    preview = await _request_agent_backend_switch_impl(runtime, gpt_turn, **to_gpt)
+    assert preview.status == "preview" and preview.declared_drops, "OpenAI loses something"
     agent()
     agent()
     awaiting = await _request_agent_backend_switch_impl(
         runtime,
         gpt_turn,
-        **back,
+        **to_gpt,
         expected_revision=preview.expected_revision,
         preview_digest=preview.preview_digest,
         accepted_drops=preview.declared_drops,
     )
-    assert awaiting.status == "awaiting_confirmation"
-    assert (await service.current(await _agent(runtime, auth, agent))).backend == "openai"
+    assert awaiting.status == "awaiting_confirmation", "the card asks first"
+    now = await service.current(await _agent(runtime, auth, agent))
+    assert now is not None and now.backend in (None, "anthropic"), "nothing changes yet"
     card = posted.await_args.kwargs["card"]
-    assert posted.await_args.kwargs["channel_id"] == origin.thread_id
-    card_id, action = parse_custom_id(card.buttons[0].custom_id)
-    assert action == "confirm"
+    assert posted.await_args.kwargs["channel_id"] == origin.thread_id, "posted in this thread"
+    card_id, action = parse_custom_id(card.buttons[-1].custom_id)
+    assert action == "confirm", "Switch is the rightmost button"
 
-    # 3. The requester presses Confirm: re-verified with the source read in this
+    # 4. The requester presses Switch: re-verified with the source read in this
     #    conversation (the same digest the card showed), then applied.
     deps = build_turn_deps(
         runtime.settings,
@@ -121,9 +133,9 @@ async def test_j1_a_gpt_root_switches_itself_back_to_claude_with_daimons_own_car
         message_id="card-message",
     )
     assert press is not None and press.applied, press
-    assert press.text.startswith("Researcher now uses Anthropic.")
+    assert press.text.startswith("Researcher now uses "), press.text
     current = await service.current(await _agent(runtime, auth, agent))
-    assert current is not None and current.backend in (None, "anthropic")
+    assert current is not None and current.backend == "openai", "the press applied the switch"
     async with runtime.session_factory() as session:
         row = await get_card(session, tenant_id=auth.tenant_id, card_id=card_id)
-    assert row is not None and row.status == "applied"
+    assert row is not None and row.status == "applied", "the card is spent"

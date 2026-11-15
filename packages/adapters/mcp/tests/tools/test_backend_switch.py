@@ -343,7 +343,7 @@ async def test_the_first_preview_tells_the_model_to_post_the_card_in_the_same_tu
     summary = " ".join(preview.summary.lower().split())
     assert "same reply" in summary, preview.summary
     assert "do not ask" in summary and "reply yes" in summary, preview.summary
-    assert "confirm on it" in summary, preview.summary
+    assert "switch on it" in summary, preview.summary
     assert not trace.replies and not trace.violations
 
 
@@ -546,19 +546,10 @@ async def test_a_thread_opened_by_a_channel_mention_previews_the_switch(active_c
     assert not trace.replies and not trace.violations
 
 
-async def test_native_no_drop_chat_confirmation_binds_empty_consent(active_chat):
+async def test_a_native_no_drop_switch_writes_on_the_first_call_with_empty_consent(active_chat):
+    """A switch that loses nothing applies on the first call, like a model change."""
     runtime, auth, origin, service, trace, payload, _, gate, agent, _ = active_chat
     payload["model"] = {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}}
-    gate()
-    agent()
-    quote = await _request_agent_backend_switch_impl(
-        runtime,
-        auth,
-        agent_name="Researcher",
-        target_backend="anthropic",
-        origin_context_id=str(origin.id),
-    )
-    assert quote.status == "preview" and quote.declared_drops == ()
     gate()
     agent()
     agent()
@@ -568,10 +559,9 @@ async def test_native_no_drop_chat_confirmation_binds_empty_consent(active_chat)
         agent_name="Researcher",
         target_backend="anthropic",
         origin_context_id=str(origin.id),
-        expected_revision=0,
-        preview_digest=quote.preview_digest,
     )
-    assert changed.status == "changed" and changed.declared_drops == ()
+    assert changed.status == "changed", "nothing is lost, so no card and no second call"
+    assert changed.declared_drops == (), "nothing is declared"
     agent()
     from daimon.core.channel_backend import load_backend_agent
 
@@ -579,8 +569,10 @@ async def test_native_no_drop_chat_confirmation_binds_empty_consent(active_chat)
         runtime.client, runtime.session_factory, tenant_id=auth.tenant_id, agent_name="Researcher"
     )
     revision = await service.current(source)
-    assert revision.drop_consent is not None and revision.declared_drops == ()
-    assert not trace.replies and not trace.violations
+    assert revision.drop_consent is not None and revision.declared_drops == (), (
+        "the write still records the empty consent"
+    )
+    assert not trace.replies and not trace.violations, "every scripted reply was used"
 
 
 async def test_chat_switch_to_a_named_model_previews_and_applies_that_model(active_chat):
@@ -1414,7 +1406,7 @@ async def test_a_provider_turn_previews_then_daimon_posts_the_card_and_nothing_c
         accepted_drops=preview.declared_drops,
     )
     assert posted.status == "awaiting_confirmation"
-    assert "Nothing changes until the requester presses Confirm" in posted.summary
+    assert "Nothing changes until the requester presses Switch" in posted.summary
     agent()
     actual = await load_backend_agent_for(runtime, auth)
     assert await service.current(actual) is None, "posting the card changes nothing"
@@ -1424,7 +1416,7 @@ async def test_a_provider_turn_previews_then_daimon_posts_the_card_and_nothing_c
     card = kwargs["card"]
     assert card.requester_platform_user_id == "123"
     assert card.headline.startswith("🔁 Switch Researcher to Gemini")
-    card_id, action = parse_custom_id(card.buttons[0].custom_id)
+    card_id, action = parse_custom_id(card.buttons[-1].custom_id)
     assert action == "confirm"
     async with runtime.session_factory() as session:
         row = await get_card(session, tenant_id=auth.tenant_id, card_id=card_id)
@@ -1433,7 +1425,7 @@ async def test_a_provider_turn_previews_then_daimon_posts_the_card_and_nothing_c
     assert row.reference["preview_digest"] == preview.preview_digest
     # One waiting card per requester and agent: asking again while it waits posts nothing.
     agent()
-    with pytest.raises(ToolError, match="already a Confirm card waiting"):
+    with pytest.raises(ToolError, match="already a card waiting"):
         agent()
         await _request_agent_backend_switch_impl(
             runtime,
