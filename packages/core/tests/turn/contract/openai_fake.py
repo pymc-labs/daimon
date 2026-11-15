@@ -168,38 +168,45 @@ class SessionsWire:
                 return unavailable(request)
             earlier = [self.turn("completed", "earlier")] if self.script.after_restart else []
             return self.page([*earlier, *([self.turn(self.status())] if self.sends else [])])
+        if path.startswith(BASE + "/turns/") and path.endswith("/items"):
+            # Usage counts an ended turn's web searches from that turn's own items.
+            turn = path.removeprefix(BASE + "/turns/").removesuffix("/items")
+            return self.page([item for item in self.items() if item["turn_id"] == turn])
         if path == BASE + "/items":
-            earlier = (
-                [
-                    {
-                        "id": "earlier-answer",
-                        "turn_id": "earlier",
-                        "type": "message",
-                        "role": "assistant",
-                        "status": "completed",
-                        "content": [{"type": "output_text", "text": EARLIER}],
-                    }
-                ]
-                if self.script.after_restart
-                else []
-            )
-            items = [
-                {
-                    "id": "input",
-                    "turn_id": "root",
-                    "type": "message",
-                    "role": "user",
-                    "status": "completed",
-                    "content": [{"type": "input_text", "text": "question"}],
-                },
-                *(
-                    r["item"]
-                    for r in self.progress.records
-                    if r["type"] == "agent.session.turn.item.done"
-                ),
-            ]
-            return self.page([*earlier, *(items if self.sends else [])])
+            return self.page(self.items())
         raise AssertionError(f"unscripted OpenAI request {method} {path}")
+
+    def items(self) -> list[dict[str, object]]:
+        earlier = (
+            [
+                {
+                    "id": "earlier-answer",
+                    "turn_id": "earlier",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": EARLIER}],
+                }
+            ]
+            if self.script.after_restart
+            else []
+        )
+        items = [
+            {
+                "id": "input",
+                "turn_id": "root",
+                "type": "message",
+                "role": "user",
+                "status": "completed",
+                "content": [{"type": "input_text", "text": "question"}],
+            },
+            *(
+                r["item"]
+                for r in self.progress.records
+                if r["type"] == "agent.session.turn.item.done"
+            ),
+        ]
+        return [*earlier, *(items if self.sends else [])]
 
 
 async def run(monkeypatch: pytest.MonkeyPatch, script: Script) -> Result:
