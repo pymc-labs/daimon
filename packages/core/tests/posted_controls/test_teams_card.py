@@ -62,7 +62,7 @@ def test_a_control_card_answers_through_one_execute_verb(kind: str) -> None:
 
     card = requested_switch_card(
         uuid.uuid4(),
-        title="Change the model provider?",
+        title="Change the model?",
         facts=("Researcher moves to OpenAI.",),
         requester_platform_user_id="user-1",
         expires_at=dt.datetime.now(dt.UTC) + dt.timedelta(hours=1),

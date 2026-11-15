@@ -619,6 +619,9 @@ async def test_chat_switch_to_a_named_model_previews_and_applies_that_model(acti
         accepted_drops=preview.declared_drops,
     )
     assert changed.status == "changed" and changed.model == "gemini-4-argon"
+    # The same agent on another model, never a version or copy of it.
+    assert changed.summary.startswith("Researcher now uses Gemini 4 Argon. ")
+    assert not {"version", "copy", "variant"} & set(changed.summary.lower().split())
     agent()
     actual = await load_backend_agent(
         runtime.client, runtime.session_factory, tenant_id=auth.tenant_id, agent_name="Researcher"
@@ -1355,7 +1358,9 @@ async def test_switching_the_default_agent_offers_a_copy_unless_its_for_everyone
         accepted_drops=preview.declared_drops,
     )
     assert changed.status == "changed"
-    assert "New conversations with Researcher use Gemini" in changed.summary
+    assert (
+        "Researcher now uses Gemini. New conversations with Researcher use it." in changed.summary
+    )
 
 
 async def test_a_non_default_agent_switches_without_saying_for_everyone(active_chat):

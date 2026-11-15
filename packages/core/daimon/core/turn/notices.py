@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import cast
 
 import anthropic
 from daimon.core.anthropic_spend import spend_limit_error
@@ -316,6 +317,21 @@ def _model_label(model: str | None) -> str:
 def provider_name(provider: str | None) -> str:
     """How copy names a model provider: "OpenAI", or "a model provider" when unknown."""
     return _PROVIDER_NAMES.get(provider or "", "a model provider")
+
+
+def uses_phrase(provider: str | None, model: str | None) -> str:
+    """What an agent runs on, as a person says it: "Gemini 4 Argon", else the provider.
+
+    A self-hosted model keeps its id, which has no everyday name.
+    """
+    from daimon.core.agent_model_names import model_name
+    from mux.contracts.ids import ModelRef, Provider
+
+    if not model:
+        return provider_name(provider)
+    if provider is None or provider == LOOP.provider:
+        return f"{provider_name(provider)} ({model})"
+    return model_name(ModelRef(provider=cast("Provider", provider), id=model))
 
 
 def conversations_follow_line(

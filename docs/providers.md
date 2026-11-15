@@ -100,8 +100,8 @@ daimon agents convert <name> [--to openai|gemini|anthropic] [--yes]
 ```
 
 An admin runs it. Without `--to` it picks the first provider that has a key.
-Moving to OpenAI or Gemini keeps the agent's name, owner, and channel and agent
-rules, and retires the Claude original. Skills that exist only on Claude are
+Moving to OpenAI or Gemini changes the agent's model and keeps the same agent:
+its name, owner, channels and agent rules. Skills that exist only on Claude are
 left off, and the command names each one. `--to anthropic` makes it a Claude
 agent again with the same owner, threads, routines, memory, settings and grants.
 Both are safe to re-run after a failure. They are refused while the agent has

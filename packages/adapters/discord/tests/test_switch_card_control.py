@@ -54,7 +54,7 @@ async def test_someone_elses_press_is_answered_privately_and_the_card_stays(monk
 
 
 async def test_the_requesters_press_edits_the_card_to_what_happened(monkeypatch):
-    press = SwitchCardPress("Switched Researcher to OpenAI.", closed=True, applied=True)
+    press = SwitchCardPress("Researcher now uses OpenAI.", closed=True, applied=True)
     pressed = AsyncMock(return_value=press)
     monkeypatch.setattr(module, "press_switch_card", pressed)
     interaction = _interaction()
@@ -62,7 +62,7 @@ async def test_the_requesters_press_edits_the_card_to_what_happened(monkeypatch)
     assert pressed.await_args.kwargs["clicker"] == "42"
     interaction.message.edit.assert_awaited_once()
     view = interaction.message.edit.await_args.kwargs["view"]
-    assert "Switched Researcher to OpenAI." in str(
+    assert "Researcher now uses OpenAI." in str(
         [getattr(item, "content", "") for item in view.walk_children()]
     )
     assert not [item for item in view.walk_children() if isinstance(item, discord.ui.Button)]

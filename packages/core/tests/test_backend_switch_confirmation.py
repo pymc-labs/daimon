@@ -934,7 +934,7 @@ async def test_card_names_the_model_and_where_the_switch_applies(
     )
     trace.queue(reply())
     prepared = await prepare(prompt)
-    assert prepared.title == "Switch Researcher to Gemini (gemini-4-argon)?"
+    assert prepared.title == "Switch Researcher to Gemini 4 Argon?"
     assert prepared.consequence is not None
     reach = (
         f"Affects new conversations for everyone on this {place}"
@@ -1384,7 +1384,7 @@ async def test_confirming_a_self_posted_card_switches_once(owned_preview):
     trace.queue(reply())
     press = await _press(owned_preview, card.id)
     assert press is not None and press.applied and press.closed
-    assert press.text.startswith("Switched Researcher to OpenAI.")
+    assert press.text.startswith("Researcher now uses OpenAI.")
     current = await service.current(agent)
     assert current is not None and current.backend == "openai"
     assert await _card_status(owned_preview, card.id) == "applied"

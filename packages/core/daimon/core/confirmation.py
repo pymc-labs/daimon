@@ -684,7 +684,7 @@ def prompt_for_tool_call(
         # No model-supplied compatibility text is accepted. The host hook must
         # reload and verify the preview before displaying this opt-in prompt.
         return ConfirmationPrompt(
-            title="Change the model provider?",
+            title="Change the model?",
             requester_platform_user_id=requester_platform_user_id,
             expires_at=now + timeout,
             admin=True,
@@ -1400,11 +1400,11 @@ def backend_switch_callbacks(
                 else ()
             ),
         )
-        from daimon.core.turn.notices import conversations_follow_line, provider_name
+        from daimon.core.turn.notices import conversations_follow_line, provider_name, uses_phrase
         from mux.contracts.config import DEFAULT_BACKEND
 
         provider = provider_name(preview.target_backend)
-        target = provider + (f" ({preview.target_model})" if preview.target_model else "")
+        target = uses_phrase(preview.target_backend, preview.target_model)
         action = f"Switch {agent.name} to {target}"
         # Read before the switch is applied: the provider its shared threads stay on.
         setting = await service.current(agent)
@@ -1426,7 +1426,7 @@ def backend_switch_callbacks(
             update={
                 "title": action + "?",
                 "action": action,
-                "denied_action": "Model provider unchanged",
+                "denied_action": "Model unchanged",
                 "detail_lines": details,
                 "consequence": (
                     reach

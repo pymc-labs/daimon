@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Changing an agent's model to another provider's says it is the same agent.**
+  Cards, confirmations and tool results say "Researcher now uses Gemini 4
+  Argon", never a version or copy of the agent.
 - **Gemini 4 Carbon and Gemini 4 Hydrogen are selectable Gemini models.** They
   join Gemini 4 Argon wherever a model is picked, each as a single attempt with
   no fallback to Flash. Argon and Carbon cost more from 2026-12-01.

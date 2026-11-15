@@ -774,7 +774,7 @@ def test_complete_backend_loss_list_survives_native_card_rendering(state):
         update={
             "admin": True,
             "action": "Switch Research. " + losses,
-            "denied_action": "Model provider unchanged",
+            "denied_action": "Model unchanged",
             "consequence": losses,
             "detail_lines": ("Optional skill: " + "x" * 1000,),
         }

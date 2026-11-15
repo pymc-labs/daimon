@@ -335,7 +335,7 @@ async def _apply(
     )
     from daimon.core.scope import ScopeContext
     from daimon.core.turn.admission import capture_backend_source
-    from daimon.core.turn.notices import provider_name, switched_meanwhile_text
+    from daimon.core.turn.notices import switched_meanwhile_text, uses_phrase
 
     card_id = claimed.id
     reference = BackendSwitchReference.model_validate(claimed.reference)
@@ -388,7 +388,7 @@ async def _apply(
         answering_agent_name=claimed.answering_agent_name,
     )
     prompt = ConfirmationPrompt(
-        title="Change the model provider?",
+        title="Change the model?",
         requester_platform_user_id=claimed.requester_platform_user_id,
         expires_at=claimed.expires_at,
         admin=True,
@@ -456,5 +456,6 @@ async def _apply(
     log.info("switch_card.applied", card_id=str(card_id), target=reference.target_backend)
     return await end(
         "applied",
-        f"Switched {reference.agent} to {provider_name(reference.target_backend)}. {moved}",
+        f"{reference.agent} now uses "
+        f"{uses_phrase(reference.target_backend, reference.model)}. {moved}",
     )

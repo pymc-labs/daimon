@@ -39,7 +39,7 @@ def _origin(platform: str, thread_id: str = "thread-1") -> TurnOriginRow:
 def _card() -> PostedCard:
     return requested_switch_card(
         uuid.uuid4(),
-        title="Change the model provider?",
+        title="Change the model?",
         facts=(),
         requester_platform_user_id="user-1",
         expires_at=dt.datetime.now(dt.UTC) + dt.timedelta(hours=1),
