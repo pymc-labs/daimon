@@ -98,22 +98,27 @@ async def source_mcp(consent_request):
         yield app
 
 
+def serve_skill(router, skill_id: str, data: bytes, version: str = "1") -> None:
+    """`skill_id` readable at `version`: an unserved read is a retryable blip."""
+    router.add(
+        "GET",
+        rf"/v1/skills/{skill_id}/versions",
+        lambda *_: httpx.Response(
+            200,
+            json={"data": [{"id": f"version-{skill_id}", "version": version}], "has_more": False},
+        ),
+    )
+    router.add(
+        "GET",
+        rf"/v1/skills/{skill_id}/versions/version-{skill_id}/content",
+        lambda *_: httpx.Response(200, content=data),
+    )
+
+
 def serve_source_skills(router) -> None:
     """The source's custom skills, each readable at version 1."""
     for name, _bundle, _version, data in default_skill_bundles():
-        skill_id = f"source-{name}"
-        router.add(
-            "GET",
-            rf"/v1/skills/{skill_id}/versions",
-            lambda *_, sid=skill_id: httpx.Response(
-                200, json={"data": [{"id": f"version-{sid}", "version": "1"}], "has_more": False}
-            ),
-        )
-        router.add(
-            "GET",
-            rf"/v1/skills/{skill_id}/versions/version-{skill_id}/content",
-            lambda *_, body=data: httpx.Response(200, content=body),
-        )
+        serve_skill(router, f"source-{name}", data)
 
 
 def bearer(auth: dict[str, object]) -> str:
@@ -707,6 +712,7 @@ async def test_a_capture_measures_the_sources_skills_through_its_own_record(
 
     monkeypatch.setattr(session_skills, "measure_skills", spy)
     team = BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_team", version="7")
+    serve_skill(consent_request[5], "skill_team", default_skill_bundles()[0][3], version="7")
     request = replace(request, admission=replace(request.admission, channel_skills=(team,)))
     source = await capture_preparation_source(request, capability_preview=True)
     assert source.source is not None, "the capture holds the source record"
