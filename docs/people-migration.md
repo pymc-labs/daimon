@@ -47,3 +47,30 @@ importing the file again never brings it back.
 People who already have a private conversation here are skipped, and the
 command reports them. Erasing a person's data also erases a conversation still
 waiting for them.
+
+## Watches and reminders
+
+```bash
+daimon watches import watches.json --tenant TENANT_UUID \
+  --agent-id AGENT_ID --agent-name NAME --urls-out urls.json
+daimon watches confirm WATCH_UUID TENANT_UUID OWNER_ACCOUNT_UUID AGENT_ID PARENT_CHANNEL_ID THREAD_ID
+daimon watches confirm-timers --tenant TENANT_UUID --agent-id AGENT_ID --agent-name NAME
+```
+
+The file lists at most 25 watches, plus `timers`. A callback watch keeps its
+token's SHA-256 and also gets a new private link. The links go only to
+`--urls-out` (mode 0600), as `{source id: url}`, merged with an earlier file;
+they are never printed. Set `DAIMON_WATCHES__CALLBACK_BASE_URL` first. Owners
+without an identity get one. Watches end at their old expiry; permanent ones
+and ones over 30 days end 30 days after import, and past ones are skipped.
+Rerunning adds nothing and issues no second link.
+
+Imported watches start paused and report to the owner's private conversation.
+Confirm each after checking its owner, channel and thread, which the import
+prints.
+
+Timers are held, not scheduled. `confirm-timers` schedules each one that is
+still more than a minute away, once. Private-conversation reminders need that
+person's private conversation here; others are skipped, as are any past the 25
+pending a person may hold. It prints a count per outcome. A settled timer keeps
+no text.

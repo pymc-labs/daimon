@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Agents can wake on posts to a private link.** `create_watch` with source
+  `callback` DMs the owner a secret link; each post to it wakes the agent once.
+  Operators set `DAIMON_WATCHES__CALLBACK_BASE_URL`. `daimon watches import` also
+  carries over such watches and held reminders, and `confirm-timers` schedules them.
 - **Operators can move people in from another bot.** `daimon tags import` opts
   listed Discord members out of being tagged. `daimon dms import` holds each
   person's earlier private conversation for their first DM here, which starts

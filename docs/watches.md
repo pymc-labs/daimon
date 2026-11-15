@@ -7,7 +7,9 @@ what they may read and manage them for a deployment.
 Watches are off by default. Polling works for Discord `read_thread` and
 `read_channel`, and for read tools on MCP servers an operator lists. Signed
 page-event callbacks are accepted but not yet produced by any host, so
-`create_watch(source="page_event")` is refused.
+`create_watch(source="page_event")` is refused. A callback watch wakes on
+posts to a private link instead of polling; see
+[Callback watches](#callback-watches).
 
 ## How a watch works
 
@@ -181,6 +183,26 @@ restart never sends one twice. A notice Discord will never deliver, such as
 to a closed DM, is recorded as `refused` and not retried. Receipts are kept 30
 days.
 
+## Callback watches
+
+`create_watch(source="callback")` polls nothing. Daimon DMs the owner a private
+link, and each `POST` of up to 4 KiB of UTF-8 text to it wakes the agent once,
+with that text as untrusted evidence. The link is never returned in the tool
+result or shown in a channel, and a lost one cannot be shown again: delete the
+watch and make a new one. If the DM fails the watch is deleted. A callback
+watch always has an end date and reports to the owner's private conversation.
+
+Set the public address of the sidecar first:
+
+```bash
+DAIMON_WATCHES__CALLBACK_BASE_URL=https://hooks.example.com
+```
+
+Only a SHA-256 of each token is stored and compared in constant time. Every
+refusal answers the same `403`; oversized bodies get `413`. Wakes share the
+per-watch and per-owner limits above, and a flood of bad links is rate limited
+per address and in the database. Keep the proxy from logging paths.
+
 ## Import watches from another system
 
 `daimon watches import` loads a reviewed JSON manifest of at most 1 MiB. It
@@ -201,3 +223,7 @@ signing keys, saved credentials, leases or unfinished wakes.
 `discord_read_channel_since` maps to `read_channel` and drops `since`. Other
 tools import as `source_unmapped`, cannot be resumed, and their owner gets a
 private notice. Confirm a watch only after checking every binding field.
+
+Callback entries (`source: "callback"`) carry `token_sha256`, the owner, channel
+and an optional `expires_at`; see
+[Move people in](people-migration.md#watches-and-reminders).
