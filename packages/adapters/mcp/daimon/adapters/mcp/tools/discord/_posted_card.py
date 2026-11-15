@@ -38,9 +38,9 @@ def _build_card_button(button: CardButton) -> discord.ui.Button[discord.ui.Layou
     """
     if button.url is not None:
         return discord.ui.Button(label=button.label, url=button.url)
-    return discord.ui.Button(
-        style=discord.ButtonStyle.primary, label=button.label, custom_id=button.custom_id
-    )
+    plain = button.style == "secondary"
+    style = discord.ButtonStyle.secondary if plain else discord.ButtonStyle.primary
+    return discord.ui.Button(style=style, label=button.label, custom_id=button.custom_id)
 
 
 def _card_footer(card: PostedCard) -> str | None:

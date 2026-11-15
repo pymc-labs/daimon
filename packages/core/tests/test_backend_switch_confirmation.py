@@ -1355,6 +1355,9 @@ def test_the_requested_switch_card_names_its_requester_and_expiry():
         ("Cancel", (card_id, "cancel")),
         ("Switch", (card_id, "confirm")),
     ], "the primary action is rightmost"
+    assert [button.style for button in card.buttons] == ["secondary", "primary"], (
+        "Cancel is plain and Switch is the one filled action"
+    )
     assert parse_custom_id("bsw:not-a-card:confirm") is None
 
 

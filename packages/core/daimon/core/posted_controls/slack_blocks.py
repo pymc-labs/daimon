@@ -94,7 +94,7 @@ def build_card_blocks(card: PostedCard, *, token: str | None = None) -> list[dic
             elif card.kind in CONTROL_KINDS and button.custom_id is not None:
                 element["action_id"] = button.custom_id
                 element["value"] = button.custom_id
-                if index == 0:
+                if button.style == "primary":
                     element["style"] = "primary"
             else:
                 if token is None:

@@ -184,4 +184,6 @@ def test_a_control_card_routes_each_button_by_its_own_custom_id(kind: str) -> No
     (actions,) = [b for b in blocks if b["type"] == "actions"]
     ids = [e["action_id"] for e in actions["elements"]]
     assert ids == [b.custom_id for b in card.buttons], "each button routes by its custom id"
-    assert [e.get("style") for e in actions["elements"]] == ["primary", None], "one primary"
+    assert [e.get("style") for e in actions["elements"]] == [None, "primary"], (
+        "only the rightmost button, the card's own action, is filled"
+    )

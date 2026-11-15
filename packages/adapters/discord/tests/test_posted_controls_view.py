@@ -155,6 +155,25 @@ def test_link_and_form_buttons_coexist_in_one_action_row() -> None:
     assert buttons[1].custom_id is None, "a link button is not dispatchable and carries no token"
 
 
+def test_a_switch_card_when_rendered_then_only_switch_is_filled_and_rightmost() -> None:
+    import uuid
+
+    from daimon.core.switch_cards import requested_switch_card
+
+    card = requested_switch_card(
+        uuid.uuid4(),
+        title="Change the model?",
+        facts=(),
+        requester_platform_user_id=_REQUESTER,
+        expires_at=_EXPIRES_AT,
+    )
+    got = [(b.label, b.style) for b in _buttons(build_card_view(card))]
+    assert got == [
+        ("Cancel", discord.ButtonStyle.secondary),
+        ("Switch", discord.ButtonStyle.primary),
+    ], "Cancel is plain and Switch, rightmost, is the one filled action"
+
+
 def test_card_view_is_components_v2_and_never_times_out() -> None:
     view = build_card_view(_requested_card())
 

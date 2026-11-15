@@ -177,7 +177,7 @@ def requested_switch_card(
         facts=facts,
         buttons=(
             CardButton(
-                label=CANCEL_LABEL, style="primary", custom_id=card_custom_id(card_id, "cancel")
+                label=CANCEL_LABEL, style="secondary", custom_id=card_custom_id(card_id, "cancel")
             ),
             CardButton(
                 label=SWITCH_LABEL, style="primary", custom_id=card_custom_id(card_id, "confirm")
