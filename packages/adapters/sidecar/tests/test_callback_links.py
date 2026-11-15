@@ -12,13 +12,13 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from daimon.adapters.sidecar.main import create_app
 from daimon.core.continuity.continuation import ContinuationRequest
-from daimon.core.continuity.held_timers import import_held_timer, settle_held_timers
 from daimon.core.continuity.watch_imports import (
     ImportedCallbackWatch,
     ImportedTimer,
     WatchExport,
 )
 from daimon.core.stores import tenant_ledger, watches
+from daimon.core.stores.held_timers import import_held_timer, settle_held_timers
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.thread_sessions import create_thread_session

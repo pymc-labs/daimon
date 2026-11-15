@@ -13,7 +13,7 @@ Only the hash is stored.
 `held_timers` keeps imported one-shot timers until an operator confirms them.
 Settling one empties its note and keeps the row, so a repeated import adds nothing.
 
-downgrade: unsupported
+downgrade: destructive
 """
 
 import sqlalchemy as sa
