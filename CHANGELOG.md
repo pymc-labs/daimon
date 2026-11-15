@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and
-  the MCP tools. A switch that loses something asks once with a short card.
+  the MCP tools. A run nobody started, such as a routine, never applies one at once.
+  A switch that loses something asks once with a short card.
   It reads "Switch Ada to GPT-6?" and "Stops working:" with every loss, plus any
   shared-thread limit. A model pick's card has Cancel and Switch buttons.
   Price, reach and thread lines are off the card; the model pickers show the price.

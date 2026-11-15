@@ -575,6 +575,43 @@ async def test_a_native_no_drop_switch_writes_on_the_first_call_with_empty_conse
     assert not trace.replies and not trace.violations, "every scripted reply was used"
 
 
+@pytest.mark.parametrize("attended", [True, False])
+async def test_a_no_drop_switch_on_a_provider_turn_when_nobody_started_it_then_previews(
+    active_chat, attended
+):
+    """A routine or wake has an origin but nobody present: it previews, as a lossy switch does.
+
+    A provider turn reads no session card gate (which refuses an unattended Claude turn),
+    so only the origin says whether someone asked.
+    """
+    from daimon.core._models import TurnOrigin
+    from sqlalchemy import update
+
+    runtime, auth, origin, service, trace, payload, _, gate, agent, _ = active_chat
+    payload["model"] = {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}}
+    async with runtime.session_factory.begin() as session:
+        await session.execute(
+            update(TurnOrigin).where(TurnOrigin.id == origin.id).values(attended=attended)
+        )
+    agent()
+    if attended:
+        agent()
+    shown = await _request_agent_backend_switch_impl(
+        runtime,
+        replace(auth, no_confirmation_surface=True),
+        agent_name="Researcher",
+        target_backend="anthropic",
+        origin_context_id=str(origin.id),
+    )
+    assert shown.status == ("changed" if attended else "preview"), (
+        "only a run someone started applies a switch on the first call"
+    )
+    agent()
+    written = await service.current(await load_backend_agent_for(runtime, auth))
+    assert (written is not None) is attended, "a preview writes nothing"
+    assert not trace.replies and not trace.violations, "every scripted reply was used"
+
+
 async def test_chat_switch_to_a_named_model_previews_and_applies_that_model(active_chat):
     from daimon.core.channel_backend import load_backend_agent
     from mux.profiles import selectable_models

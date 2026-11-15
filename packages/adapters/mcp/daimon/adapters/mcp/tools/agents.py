@@ -2266,8 +2266,9 @@ async def _request_agent_backend_switch_impl(
         reference: BackendSwitchReference | None = None
         # The person's hand-off answers, bound into the digest the card showed.
         bound = unsaved_work is not None or handoff_summary is not None
-        # Nothing stops working: it applies now, like a model change; a hand-off still asks.
-        auto = preview_digest is None and awaiting is None and not bound
+        # Nothing stops working: it applies now, like a model change. A hand-off still
+        # asks, and so does a run nobody started (a routine or wake): nobody asked for it.
+        auto = preview_digest is None and awaiting is None and not bound and origin.attended
         if auto := auto and not needs_switch_card(preview):
             expected_revision, preview_digest = preview.setting_revision, preview.digest
             accepted_drops = tuple(preview.declared_drops) or None
