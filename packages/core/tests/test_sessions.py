@@ -2475,7 +2475,9 @@ async def test_credential_carried_caller_resources_add_no_native_obligation(
     )
     assert carried == plain, "a credential-carried context adds no obligation"
     assert source_preservation_pin(carried) == source_preservation_pin(plain), "pins agree"
-    assert source_preservation_pin(ma) != source_preservation_pin(plain), "MA's pin is its own"
+    assert source_preservation_pin(ma) == source_preservation_pin(plain), (
+        "a place's caller resources are checked per turn, never pinned"
+    )
 
 
 async def test_source_projection_requires_app_vault_only_for_a_live_grant(

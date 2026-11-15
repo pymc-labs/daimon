@@ -1575,3 +1575,36 @@ async def test_a_stale_switch_consent_names_reconfirm_not_missing_provider(monke
     assert refused.value.reason == "backend_unsupported"
     assert refused.value.cause == "re_confirm", "never the generic agent_backend cause"
     assert isinstance(refused.value.__cause__, AgentBackendRefused)
+
+
+@pytest.mark.parametrize(
+    ("consent_request", "place"),
+    [
+        ({}, {"memory_read_only": True}),
+        ({"caller_mcp": True}, {"memory_read_only": True}),
+        (
+            {"caller_mcp": True},
+            {"slack_turn_context_id": __import__("uuid").UUID(int=7)},
+        ),
+    ],
+    indirect=["consent_request"],
+)
+async def test_a_switch_confirmed_in_one_place_holds_in_another(consent_request, place):
+    """A sealed channel, a DM or a read-only channel is a place, not the owner's setup:
+    the consent given elsewhere still holds there."""
+    request = consent_request[0]
+    elsewhere = replace(request, admission=replace(request.admission, **place))
+    prepared = await prepare_source(elsewhere)
+    assert prepared.target_spec is not None, "the confirmed switch runs in the other place"
+
+
+async def test_a_channel_skill_is_a_loss_checked_per_turn_not_a_new_setup(consent_request):
+    """A channel's own skill changes what this turn loses, never the owner's pin."""
+    from anthropic.types.beta import BetaManagedAgentsCustomSkill
+
+    request = consent_request[0]
+    skill = BetaManagedAgentsCustomSkill(type="custom", skill_id="channel-skill", version="1")
+    elsewhere = replace(request, admission=replace(request.admission, channel_skills=(skill,)))
+    with pytest.raises(AgentBackendRefused) as refused:
+        await prepare_source(elsewhere)
+    assert refused.value.detail == "losses_differ", "a real loss here, not a changed setup"

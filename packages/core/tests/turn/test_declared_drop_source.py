@@ -1,6 +1,7 @@
 """Switch previews use the worker preservation rule, without worker authority."""
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -238,8 +239,6 @@ def test_dropping_a_connection_or_attachment_never_drops_unknown_resources(captu
         "tools",
         "system",
         "environment",
-        "memory_store_id",
-        "resource_generations",
     ],
 )
 def test_pin_detects_drift_even_when_the_loss_labels_are_unchanged(captured, field):
@@ -303,20 +302,51 @@ def test_pin_detects_drift_even_when_the_loss_labels_are_unchanged(captured, fie
                 )
             }
         )
-    elif field == "memory_store_id":
-        source = source.model_copy(update={"memory_store_id": "different-store"})
-    else:
-        from datetime import UTC, datetime
-
-        source = source.model_copy(
-            update={"resource_generations": (("resource", datetime(2026, 10, 14, tzinfo=UTC)),)}
-        )
     model = ModelRef(provider="openai", id="gpt-6-luna")
     assert (
         preview_source_drops(before, model).declared_drops
         == preview_source_drops(source, model).declared_drops
     )
     assert source_preservation_pin(source) != source_preservation_pin(before)
+
+
+@pytest.mark.parametrize(
+    "place",
+    [
+        {"memory_store_id": "held-channel-store"},
+        {"memory_read_only": False},
+        {"memory_instructions": "Memory is read-only here."},
+        {"resource_generations": (("agent-env:key", datetime(2026, 10, 14, tzinfo=UTC)),)},
+    ],
+)
+def test_pin_leaves_out_a_place_and_a_credential_rewrite(captured, place):
+    """Held or read-only memory is the place's, and rewriting a credential keeps its
+    setup: neither asks to confirm a switch again; what they cost is checked per turn."""
+    assert source_preservation_pin(captured.model_copy(update=place)) == (
+        source_preservation_pin(captured)
+    ), f"{sorted(place)} is not the owner's setup"
+
+
+def test_pin_keeps_the_owner_spec_and_accepts_the_stricter_pin_before_it(captured):
+    """A channel's skills sit only on the turn's spec; a pin stored with them still holds."""
+    from daimon.core.turn.runtime_manifest import _gated_pin, source_pin_matches
+
+    channel = captured.effective_spec.model_copy(
+        update={"skills": (SkillRef(id="channel-skill", version="1"),)}
+    )
+    placed = captured.model_copy(
+        update={"effective_spec": channel, "owner_spec": captured.effective_spec}
+    )
+    assert source_preservation_pin(placed) == source_preservation_pin(captured), (
+        "a channel skill is not in the owner's setup"
+    )
+    assert source_pin_matches(placed, _gated_pin(placed, readdress=True)), (
+        "a pin stored before places left it is stricter and still holds"
+    )
+    edited = placed.model_copy(update={"owner_spec": channel})
+    assert source_preservation_pin(edited) != source_preservation_pin(placed), (
+        "an owner's own skill is part of the setup"
+    )
 
 
 def test_pin_normalizes_caller_address_but_preserves_source_ownership(captured):

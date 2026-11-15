@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Annotated, Final, Literal, Protocol, Self, cas
 from uuid import UUID
 
 import structlog
+from daimon.core.caller_resources import CALLER_RESOURCES_ID, CALLER_VAULT_PREFIX
 from daimon.core.config import get_repo_memory_settings
 from daimon.core.connector_relay import relay_key
 from daimon.core.errors import DaimonError
@@ -1574,8 +1575,8 @@ def _source_facts(source: BackendAgent, *, readdress: bool = True) -> dict[str, 
     if readdress and source.resource_scope is not None:
         # The caller's own Daimon credential is addressed per person: any person's
         # capture pins the same source (a shared thread captures as its owner).
-        caller = f"caller-mcp:{source.tenant_id}:{source.resource_scope.account_id}:"
-        anyone = f"caller-mcp:{source.tenant_id}::"
+        caller = f"{CALLER_VAULT_PREFIX}{source.tenant_id}:{source.resource_scope.account_id}:"
+        anyone = f"{CALLER_VAULT_PREFIX}{source.tenant_id}::"
         updates["resource_requirements"] = tuple(
             binding.model_copy(
                 update={
@@ -1599,6 +1600,7 @@ def _source_facts(source: BackendAgent, *, readdress: bool = True) -> dict[str, 
     # Derived representation evidence must not change old consent pins, nor
     # recursively become part of the source it attests.
     facts.pop("representations", None)
+    facts.pop("owner_spec", None)
     return facts
 
 
@@ -1606,11 +1608,52 @@ def _digest(facts: dict[str, object]) -> str:
     return request_digest(cast(JsonValue, TypeAdapter(object).dump_python(facts, mode="json")))
 
 
+#: Facts of the place a turn runs in (held or read-only memory, its instructions),
+#: of a credential's last write and of Daimon's gating: each turn checks what they cost.
+_PLACE_FACTS: Final = (
+    "memory_store_id",
+    "memory_read_only",
+    "memory_instructions",
+    "resource_generations",
+    "asks_before_publishing",
+)
+
+
+def _owner_binding(binding: ResourceBinding) -> ResourceBinding | None:
+    """`binding` as the owner set it up: a Slack turn's own caller credential is the
+    caller's, and a private place's carried resources are that turn's."""
+    if binding.id == CALLER_RESOURCES_ID:
+        return None
+    ref = binding.credential_ref
+    if ref is None or not ref.startswith(CALLER_VAULT_PREFIX) or ":slack-turn:" not in ref:
+        return binding
+    plain = ref.split(":slack-turn:", 1)[0]
+    return binding.model_copy(update={"id": plain, "credential_ref": plain})
+
+
 def source_preservation_pin(source: BackendAgent, *, readdress: bool = True) -> str:
-    """Pin complete owner-captured intent independently of the current caller address."""
+    """Pin the owner's setup: the agent, its environment, repositories and credentials.
+
+    A place's facts (a channel's skills, held or read-only memory, servers hidden
+    from one person, a DM's or Slack turn's context) are left out: preparation
+    checks what each costs on every turn, so one confirmation holds in every place.
+    Daimon's own gating changes with a release, not with the agent, and is left out too.
+    """
     facts = _source_facts(source, readdress=readdress)
-    # Daimon's own gating changes with a release or a place, not with the agent:
-    # pin the source before it, so gating alone never asks to confirm a switch again.
+    for name in (*_PLACE_FACTS, "ungated_spec"):
+        facts.pop(name, None)
+    facts["effective_spec"] = source.owner_spec or source.ungated_spec or source.effective_spec
+    bindings = (
+        _owner_binding(binding)
+        for binding in cast(tuple[ResourceBinding, ...], facts["resource_requirements"])
+    )
+    facts["resource_requirements"] = tuple(b for b in bindings if b is not None)
+    return _digest(facts)
+
+
+def _gated_pin(source: BackendAgent, *, readdress: bool) -> str:
+    """The pin before places left it: Daimon's gating out, every place fact in."""
+    facts = _source_facts(source, readdress=readdress)
     facts.pop("asks_before_publishing", None)
     ungated = facts.pop("ungated_spec", None)
     if ungated is not None:
@@ -1619,16 +1662,17 @@ def source_preservation_pin(source: BackendAgent, *, readdress: bool = True) -> 
 
 
 def source_pin_matches(source: BackendAgent, pin: str) -> bool:
-    """Whether `pin` pins this source, by the current formula or the one before it.
+    """Whether `pin` pins this source, by the current formula or one before it.
 
-    Consents and operator rows stored before Daimon's gating left the pin still
-    hold: the older pin also covers that gating, so it is stricter and safe to accept.
+    Consents and operator rows stored before places, Daimon's gating or the
+    caller's re-addressed credential left the pin still hold: each older pin
+    also covers those facts, so it is stricter and safe to accept.
     """
-    if pin == source_preservation_pin(source):
-        return True
-    # Pins stored before the caller's credential was re-addressed match only
-    # their own consenter's capture: stricter, so safe to accept.
-    if pin == source_preservation_pin(source, readdress=False):
+    if any(
+        pin == formula(source, readdress=readdress)
+        for formula in (source_preservation_pin, _gated_pin)
+        for readdress in (True, False)
+    ):
         return True
     legacy = _source_facts(source, readdress=False)
     legacy.pop("ungated_spec", None)
