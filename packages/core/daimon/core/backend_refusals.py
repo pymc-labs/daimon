@@ -111,7 +111,7 @@ DETAIL_LINES: Final = {
         ),
         CONFIRM_AGAIN_LINE,
     ),
-    **dict.fromkeys(RETRY_DETAILS, "The agent changed while it was being readied. Try again."),
+    **dict.fromkeys(RETRY_DETAILS, "Daimon couldn't finish setting up the agent. Try again."),
 }
 
 assert set(DETAIL_LINES) == REFUSAL_DETAILS, "every refusal detail needs a line"
