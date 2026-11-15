@@ -27,13 +27,14 @@ in one conversation.
 | Workspace export and import | Yes | Not supported | Not supported | Not supported |
 | Skills | Full | Custom and agent skills, up to 28 MiB each | Custom and channel skills, text only, 2 MiB in all | Seeded defaults only |
 
-A provider that cannot meet a channel's requirements refuses the reply. Daimon
-never runs it on Anthropic in its place.
+A provider that cannot meet a channel's requirements refuses the reply. When a
+switch needs confirming again, a person's new conversation runs on Anthropic
+and the switch card is offered again. A conversation already on the switched
+provider, a routine and an unattended turn refuse instead.
 
 ### What is not supported yet
 
-- **Gemini:** custom and channel skills, web search, and stopping a turn at a
-  spend limit.
+- **Gemini:** web search, and stopping a turn at a spend limit.
 - **OpenAI:** web search, which it neither prices nor counts.
 - **Self-hosted:** memory, routines, effort and a
   spend limit, workspace export and import. An agent can pick it only with
