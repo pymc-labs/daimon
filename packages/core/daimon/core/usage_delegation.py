@@ -13,6 +13,7 @@ from decimal import Decimal, localcontext
 
 from daimon.core.accounting_outbox import record_observation_usage
 from daimon.core.pricing import ProviderPrice, provider_cost_of
+from daimon.core.stores import usage_events
 from daimon.core.stores.accounting_outbox import settled_amount
 from daimon.core.stores.root_usage import lock_root_usage
 from daimon.core.usage_recording import TurnLedgerReason
@@ -213,10 +214,13 @@ async def record_root_usage(
                 or measurement.provider_price is None
             ):
                 continue
+            # A settled revision keeps the free searches its allowance claim gave it.
+            tally = await usage_events.web_search_tally(session, measurement.observation)
             cost = provider_cost_of(
                 measurement.observation,
                 measurement.provider_price,
                 infrastructure_usd=infrastructure(measurement.observation),
+                paid_web_searches=max(0, measurement.observation.web_searches - tally.free),
             )
             if cost is not None:
                 _, previous = await settled_amount(

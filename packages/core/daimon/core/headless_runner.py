@@ -98,6 +98,7 @@ from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn.unattended import session_gate, unattended_posture
 from daimon.core.turn.unattended_capabilities import protected_tools
 from daimon.core.turn_hold import TurnHold
+from daimon.core.usage_recording import WebSearchCall
 from mux.contracts.ids import ChannelRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.errors import ScopeViolation
@@ -647,7 +648,9 @@ async def run_turn_impl(
         if usage_record is not None:
             _bound_usage_record = usage_record
 
-            async def _record(*, event: BetaManagedAgentsSpanModelRequestEndEvent) -> None:
+            async def _record(
+                *, event: BetaManagedAgentsSpanModelRequestEndEvent | WebSearchCall
+            ) -> None:
                 await _bound_usage_record(event=event)
 
             billing = Billed(record=_record)

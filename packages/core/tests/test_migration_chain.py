@@ -166,6 +166,7 @@ TAIL = (
     "0202_agent_backend_environment",
     "0203_pending_carry_overs",
     "0204_shared_agent_copies",
+    "0205_web_search_usage",
 )
 HEAD = TAIL[-1]
 

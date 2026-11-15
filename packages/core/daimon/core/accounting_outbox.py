@@ -21,8 +21,15 @@ from daimon.core.pricing import (
     uncached_input_tokens,
     unreported_cache_writes,
     usage_tokens,
+    web_search_cost,
 )
-from daimon.core.stores import accounting_outbox, mux_state, tenant_ledger, usage_events
+from daimon.core.stores import (
+    accounting_outbox,
+    mux_state,
+    tenant_ledger,
+    usage_events,
+    web_search_usage,
+)
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.usage_recording import TurnLedgerReason
 from mux.contracts.usage import UsageObservation
@@ -65,6 +72,35 @@ def _amount(applied: AppliedUsage | None, rates: ModelRates | None, markup: Deci
         )
     )
     return debit_amount(cost, markup=markup)
+
+
+async def _search_tally(
+    session: AsyncSession, observation: UsageObservation, price: ProviderPrice
+) -> usage_events.SearchTally:
+    """The observation's searches, claiming free ones for searches no revision counted yet.
+
+    Runs under load_revisions' observation lock after the revision's outbox claim,
+    so a replayed or retried revision claims nothing twice. Claims follow the most
+    searches any revision reported, so a lower revision never claims them again.
+    """
+    rate = price.web_search
+    searches = observation.web_searches
+    if rate is None or not rate.free_monthly:
+        return usage_events.SearchTally(searches, 0, searches)
+    prior = await usage_events.web_search_tally(session, observation)
+    counted, free = prior.counted, prior.free
+    if searches > counted:
+        free += await web_search_usage.claim(
+            session,
+            provider=observation.session.provider,
+            account_scope_id=observation.session.account_scope_id,
+            pool=rate.pool,
+            at=observation.observed_at,
+            searches=searches - counted,
+            free_monthly=rate.free_monthly,
+        )
+        counted = searches
+    return usage_events.SearchTally(counted, free, max(0, searches - free))
 
 
 async def apply_usage_outbox(
@@ -118,7 +154,10 @@ async def apply_usage_outbox(
             "usage requires the caller's configured billing grain or explicit coverage"
         )
     current = _effective(revisions.current)
+    actual: Decimal | None = None
+    settled = Decimal(0)
     exact_amount: Decimal | None = None
+    searches = usage_events.SearchTally()
     first_exact_settlement = False
     if (
         not observation.covers
@@ -132,17 +171,26 @@ async def apply_usage_outbox(
         first_exact_settlement = latest == 0
         if latest > observation.revision:
             return await mux_state.mark_outbox_applied(session, row)
+        # Searches are priced once the claim below says which were free.
         actual = provider_cost_of(
-            observation, provider_price, infrastructure_usd=infrastructure_usd
+            observation, provider_price, infrastructure_usd=infrastructure_usd, paid_web_searches=0
         )
-        if actual is None:
+        if actual is None or (
+            # The usage row holds the search tally, and is written only with its counts.
+            observation.web_searches and provider_usage_tokens(observation, provider_price) is None
+        ):
             return False  # durable pending, not a zero charge or released hold
         await accounting_outbox.check_provider_grain(session, row, tenant_id=tenant_id)
-        with localcontext() as context:
-            context.prec = 80
-            exact_amount = (actual * markup).quantize(Decimal("0.000001")) - settled
     if not await mux_state.mark_outbox_applied(session, row):
         return False
+    if actual is not None:
+        assert provider_price is not None
+        searches = await _search_tally(session, observation, provider_price)
+        search_usd = web_search_cost(observation, provider_price, searches.paid)
+        assert search_usd is not None
+        with localcontext() as context:
+            context.prec = 80
+            exact_amount = ((actual + search_usd) * markup).quantize(Decimal("0.000001")) - settled
     if observation.covers:
         return True
     if observation.model is None:
@@ -163,6 +211,7 @@ async def apply_usage_outbox(
         if provider_price is not None
         else None,
         agent_id=agent_id,
+        searches=searches,
     )
     amount = (
         exact_amount

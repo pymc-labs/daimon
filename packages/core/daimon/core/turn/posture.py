@@ -56,15 +56,16 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
 )
 from daimon.core.tool_safety import ToolCall
 from daimon.core.usage_billing import ObservationBilled
+from daimon.core.usage_recording import WebSearchCall
 
 ExemptReason = Literal["cli-operator-run", "headless-unrecorded", "mcp-internal-caller"]
 
 
 class UsageRecorder(Protocol):
-    """Meters one model call. May return the USD it debited (None: nothing written)."""
+    """Meters one model call or web search; may return the USD it debited (None: none)."""
 
     async def __call__(
-        self, *, event: BetaManagedAgentsSpanModelRequestEndEvent
+        self, *, event: BetaManagedAgentsSpanModelRequestEndEvent | WebSearchCall
     ) -> Decimal | None: ...
 
 

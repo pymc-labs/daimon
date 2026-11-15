@@ -20,6 +20,7 @@ from typing import Any, cast
 
 from daimon.core._models import TurnOutcome, UsageEvent
 from daimon.core.pricing import (
+    AGENT_WEB_SEARCH_USD,
     LONG_CONTEXT_PROMPT_TOKENS,
     MODEL_PRICING,
     PROVIDER_PRICED_INPUT_LIMITS,
@@ -40,6 +41,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
 
+@dataclass(frozen=True)
+class SearchTally:
+    """A usage row's web searches.
+
+    `counted` is the most any revision reported, all counted against the free
+    allowance; `free` is how many of those it covered; `paid` is the latest
+    revision's billed searches.
+    """
+
+    counted: int = 0
+    free: int = 0
+    paid: int = 0
+
+
 async def record(
     session: AsyncSession,
     *,
@@ -52,10 +67,12 @@ async def record(
     event_id: str,
     channel_id: str | None = None,
     agent_id: str | None = None,
-) -> None:
-    """Insert one usage row idempotently on (managed_session_id, event_id).
+    paid_web_searches: int = 0,
+) -> bool:
+    """Insert one usage row idempotently on (managed_session_id, event_id); True if new.
 
-    `agent_id` is the agent whose turn or tool call spent it; None when unknown."""
+    `agent_id` is the agent whose turn or tool call spent it; None when unknown.
+    `paid_web_searches` is the row's billed searches, none of them free."""
     if observation is not None:
         if model_usage is not None:
             raise ValueError("supply either an observation or legacy usage")
@@ -76,13 +93,17 @@ async def record(
             event_id=event_id,
             channel_id=channel_id,
             agent_id=agent_id,
+            web_searches=paid_web_searches,
+            paid_web_searches=paid_web_searches,
         )
         .on_conflict_do_nothing(
             index_elements=["managed_session_id", "event_id"],
         )
+        .returning(UsageEvent.id)
     )
-    await session.execute(stmt)
+    inserted = await session.scalar(stmt)
     await session.flush()
+    return inserted is not None
 
 
 async def project_revision(
@@ -95,8 +116,12 @@ async def project_revision(
     channel_id: str | None,
     projected_tokens: UsageTokens | None = None,
     agent_id: str | None = None,
+    searches: SearchTally | None = None,
 ) -> None:
     """Project complete effective counts, preserving the original row identity.
+
+    The row also keeps `searches`, which `web_search_tally` reads back. An older
+    revision still records the searches it counted against the allowance.
 
     Partial measurements live only in the neutral store: legacy integer columns
     cannot represent unknown. An older pending row may still debit its delta,
@@ -105,6 +130,7 @@ async def project_revision(
     if observation.model is None:
         raise ValueError("a billable usage observation requires a model")
     model = observation.model.id
+    searches = searches or SearchTally()
     tokens = projected_tokens if projected_tokens is not None else usage_tokens(observation)
     where = (
         UsageEvent.managed_session_id == observation.session.id,
@@ -155,6 +181,9 @@ async def project_revision(
         cache_creation_input_tokens=tokens.cache_creation_input_tokens,
         cache_read_input_tokens=tokens.cache_read_input_tokens,
         observation_revision=observation.revision,
+        web_searches=searches.counted,
+        free_web_searches=searches.free,
+        paid_web_searches=searches.paid,
     )
     inserted = await session.scalar(
         pg_insert(UsageEvent)
@@ -183,6 +212,34 @@ async def project_revision(
         or existing.observation_revision < observation.revision
     ):
         await session.execute(update(UsageEvent).where(*where).values(**values))
+    elif searches.counted > existing.web_searches:
+        await session.execute(
+            update(UsageEvent)
+            .where(*where)
+            .values(web_searches=searches.counted, free_web_searches=searches.free)
+        )
+
+
+async def web_search_tally(session: AsyncSession, observation: UsageObservation) -> SearchTally:
+    """The searches the observation's row settled; zeros before its first.
+
+    Locks the row, so the caller's next revision builds on the latest tally.
+    """
+    row = (
+        await session.execute(
+            select(
+                UsageEvent.web_searches, UsageEvent.free_web_searches, UsageEvent.paid_web_searches
+            )
+            .where(
+                UsageEvent.managed_session_id == observation.session.id,
+                UsageEvent.event_id == observation.id,
+            )
+            .with_for_update()
+        )
+    ).first()
+    if row is None:
+        return SearchTally()
+    return SearchTally(row.web_searches, row.free_web_searches, row.paid_web_searches)
 
 
 async def list_event_ids_for_session(
@@ -266,13 +323,25 @@ def _tariff_day() -> ColumnElement[date | None]:
     )
 
 
-def _bucket_cost(model: str, day: date | None, usage: UsageTokens, *, long_prompt: bool) -> float:
-    """One bucket's cost before markup, as the ledger debited it; 0 when unpriced."""
+def _bucket_cost(
+    model: str, day: date | None, usage: UsageTokens, *, long_prompt: bool, paid_searches: int
+) -> float:
+    """One bucket's cost before markup, as the ledger debited it; 0 when unpriced.
+
+    Paid searches are priced at the model's search rate (Claude's for list-priced
+    models), as their debit was.
+    """
     if day is None:
-        return cost_of_bucket(usage, MODEL_PRICING.get(model), long_prompt=long_prompt) or 0.0
+        tokens = cost_of_bucket(usage, MODEL_PRICING.get(model), long_prompt=long_prompt) or 0.0
+        return tokens + float(paid_searches * AGENT_WEB_SEARCH_USD)
     price = provider_price_on(model, day)
     cost = None if price is None else provider_cost_of_bucket(usage, price, long_prompt=long_prompt)
-    return 0.0 if cost is None else float(cost)
+    searches = (
+        paid_searches * price.web_search.usd
+        if price is not None and price.web_search is not None
+        else 0
+    )
+    return 0.0 if cost is None else float(cost + searches)
 
 
 async def _costs_by_keys(
@@ -302,6 +371,7 @@ async def _costs_by_keys(
             func.sum(UsageEvent.output_tokens).label("out_tok"),
             func.sum(UsageEvent.cache_creation_input_tokens).label("cw_tok"),
             func.sum(UsageEvent.cache_read_input_tokens).label("cr_tok"),
+            func.sum(UsageEvent.paid_web_searches).label("paid_ws"),
         )
         .where(*where)
         .group_by(*groups)
@@ -315,7 +385,13 @@ async def _costs_by_keys(
             cache_read_input_tokens=int(row.cr_tok or 0),
         )
         name = tuple(row[3 : 3 + len(keys)])
-        cost = _bucket_cost(row.model, row.tariff_day, usage, long_prompt=bool(row.long_prompt))
+        cost = _bucket_cost(
+            row.model,
+            row.tariff_day,
+            usage,
+            long_prompt=bool(row.long_prompt),
+            paid_searches=int(row.paid_ws or 0),
+        )
         costs[name] = costs.get(name, 0.0) + cost
     return costs
 

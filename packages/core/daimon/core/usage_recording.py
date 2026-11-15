@@ -23,13 +23,21 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Literal
 
+from anthropic.types.beta.sessions.beta_managed_agents_agent_tool_result_event import (
+    BetaManagedAgentsAgentToolResultEvent,
+)
+from anthropic.types.beta.sessions.beta_managed_agents_agent_tool_use_event import (
+    BetaManagedAgentsAgentToolUseEvent,
+)
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 from daimon.core.model_presets import OPUS, OPUS_FAST
 from daimon.core.pricing import (
+    AGENT_WEB_SEARCH_USD,
     ModelRates,
     ProviderPrice,
+    UsageTokens,
     cost_of,
     side_call_rates,
     usage_tokens,
@@ -67,6 +75,39 @@ class _UsageEventTime:
     processed_at: datetime
 
 
+@dataclass(frozen=True)
+class WebSearchCall:
+    """One web search a Claude agent ran: its spans carry no search count.
+
+    `id` is the search's `agent.tool_use` event id, so each search bills once.
+    """
+
+    id: str
+    processed_at: datetime
+
+
+_SEARCH_USE = "web_search_use:"
+
+
+def web_search_call(event: object, seen: set[str]) -> WebSearchCall | None:
+    """The search `event` completes, if any; `seen` keeps the search uses met so far.
+
+    A search counts once its result arrives without an error, as the provider
+    bills no failed search. Callers dedupe the returned call themselves.
+    """
+    if isinstance(event, BetaManagedAgentsAgentToolUseEvent):
+        if event.name == "web_search":
+            seen.add(_SEARCH_USE + event.id)
+        return None
+    if (
+        isinstance(event, BetaManagedAgentsAgentToolResultEvent)
+        and not event.is_error
+        and _SEARCH_USE + event.tool_use_id in seen
+    ):
+        return WebSearchCall(id=event.tool_use_id, processed_at=event.processed_at)
+    return None
+
+
 async def record_turn_usage(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -75,7 +116,7 @@ async def record_turn_usage(
     managed_session_id: str | None = None,
     model_id: str | None = None,
     observation: UsageObservation | None = None,
-    event: BetaManagedAgentsSpanModelRequestEndEvent | None = None,
+    event: BetaManagedAgentsSpanModelRequestEndEvent | WebSearchCall | None = None,
     markup: Decimal = Decimal("1.0"),
     pricing: ModelRates | None = None,
     reason: TurnLedgerReason = "turn_debit",
@@ -105,10 +146,28 @@ async def record_turn_usage(
     channel's budget counts the debit; None leaves the spend unattributed.
     `agent_id` stamps the usage row with the agent that answered, for per-agent spend.
 
+    A `WebSearchCall` writes a token-free row for that one search, charged at
+    the list price per search.
+
     tenant_id=None is the DM signal — no tenant, no usage row, no ledger row.
     """
     if tenant_id is None:
         return None  # DM turn — no tenant to bill, skip write
+    if isinstance(event, WebSearchCall):
+        if observation is not None or managed_session_id is None or model_id is None:
+            raise ValueError("a web search requires its bound session and model")
+        return await _record_web_search(
+            sessionmaker,
+            event,
+            tenant_id=tenant_id,
+            platform_user_id=platform_user_id,
+            managed_session_id=managed_session_id,
+            model_id=model_id,
+            markup=markup,
+            reason=reason,
+            channel_id=channel_id,
+            agent_id=agent_id,
+        )
     if observation is None:
         if event is None or managed_session_id is None or model_id is None:
             raise ValueError("usage requires an observation or a bound legacy event")
@@ -172,6 +231,51 @@ async def record_turn_usage(
             occurred_at=event_time.processed_at,
         )
 
+    return debit if inserted else None
+
+
+async def _record_web_search(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    call: WebSearchCall,
+    *,
+    tenant_id: uuid.UUID,
+    platform_user_id: str | None,
+    managed_session_id: str,
+    model_id: str,
+    markup: Decimal,
+    reason: TurnLedgerReason,
+    channel_id: str | None,
+    agent_id: str | None,
+) -> Decimal | None:
+    debit = debit_amount(float(AGENT_WEB_SEARCH_USD), markup=markup)
+    async with sessionmaker() as s, s.begin():
+        if not await usage_events.record(
+            s,
+            tenant_id=tenant_id,
+            platform_user_id=platform_user_id,
+            managed_session_id=managed_session_id,
+            model=model_id,
+            model_usage=UsageTokens(
+                input_tokens=0,
+                output_tokens=0,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+            ),
+            event_id=call.id,
+            channel_id=channel_id,
+            agent_id=agent_id,
+            paid_web_searches=1,
+        ):
+            return None  # a replay of a search already billed
+        inserted = await tenant_ledger.insert_entry(
+            s,
+            tenant_id=tenant_id,
+            delta_usd=-debit,
+            reason=reason,
+            idempotency_key=f"turn:{managed_session_id}:{call.id}",
+            channel_id=channel_id,
+            occurred_at=call.processed_at,
+        )
     return debit if inserted else None
 
 
