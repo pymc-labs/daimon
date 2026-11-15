@@ -13,10 +13,11 @@ from datetime import UTC, datetime
 from functools import partial
 from unittest.mock import AsyncMock
 
+import pytest
 from daimon.adapters.mcp.tools.agents import (
     _request_agent_backend_switch_impl,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.core.channel_backend import make_backend_service
+from daimon.core.channel_backend import AgentBackendRefused, make_backend_service
 from daimon.core.confirmation import backend_switch_callbacks, prompt_for_tool_call
 from daimon.core.stores.channel_skills import add_channel_skill
 from daimon.core.stores.mux_state import PostgresStateStore
@@ -88,6 +89,7 @@ async def test_a_copy_cloned_in_a_mention_switches_to_gemini_on_its_card(fresh_c
         account_id=chat.auth.account_id,
         platform="discord",
         opened_thread_id=chat.origin.thread_id,
+        opened_thread_parent_id=chat.origin.parent_channel_id,
     )
     prepare, check = backend_switch_callbacks(
         make_backend_service(sm, chat.runtime.settings.turn, capture_source=capture),
@@ -127,3 +129,46 @@ async def test_a_copy_cloned_in_a_mention_switches_to_gemini_on_its_card(fresh_c
     assert await check(card, "123") is None, "Confirm on the card passes its checks"
     changed = await switch(**confirm)
     assert changed.status == "changed", "the confirmed switch applies"
+
+
+async def test_a_thread_opened_under_another_channel_is_not_the_cards_place(fresh_chat):
+    """A thread whose parent is not the admission's channel refuses the capture."""
+    chat = fresh_chat
+    sm = chat.runtime.session_factory
+    deps = replace(
+        deps_for_pinned_mux(chat.runtime.client, sm),
+        agent_backends=True,
+        deployment_default=chat.runtime.deployment_default,
+        state_store=PostgresStateStore(sm),
+        turn_runtimes={},
+        turn_runtime_factory=build_channel_runtime,
+        settings=chat.runtime.settings,
+        mcp=chat.runtime.settings.mcp,
+    )
+    admission = await admit(
+        deps,
+        origin="chat",
+        tenant_id=chat.auth.tenant_id,
+        requester_org=RequesterOrg.HOST,
+        platform="discord",
+        external_user_id="123",
+        channel_id=chat.origin.parent_channel_id,
+        thread_id=None,
+        now=datetime.now(UTC),
+    )
+    copy = await _new_copy(chat)
+    for parent in ("another-channel", None):
+        with pytest.raises(AgentBackendRefused) as refused:
+            await capture_admitted_backend_source(
+                deps,
+                copy,
+                admission=admission,
+                tenant_id=chat.auth.tenant_id,
+                account_id=chat.auth.account_id,
+                platform="discord",
+                opened_thread_id=chat.origin.thread_id,
+                opened_thread_parent_id=parent,
+            )
+        assert refused.value.reason == "source_context_unavailable", (
+            f"a thread under {parent!r} is not this channel's reply thread"
+        )

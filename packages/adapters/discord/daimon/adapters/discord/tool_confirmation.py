@@ -524,6 +524,9 @@ def discord_confirmation_hook(
                 platform="discord",
                 # A mention in a channel is admitted before its reply thread opens.
                 opened_thread_id=str(channel.id) if isinstance(channel, discord.Thread) else None,
+                opened_thread_parent_id=(
+                    str(channel.parent_id) if isinstance(channel, discord.Thread) else None
+                ),
             )
 
             prepare_admin, check_admin = backend_switch_callbacks(

@@ -2759,6 +2759,7 @@ async def capture_admitted_backend_source(
     account_id: uuid.UUID,
     platform: str,
     opened_thread_id: str | None = None,
+    opened_thread_parent_id: str | None = None,
 ) -> BackendAgent:
     """A chat confirmation card's source capture: only its own turn's public admission.
 
@@ -2766,11 +2767,20 @@ async def capture_admitted_backend_source(
     Discord mention in a channel). The turn's origin, and so the switch tool's capture
     and a copy's `forked_in` stamp, name that thread: the card must read the same place,
     or a copy made in this turn reads as a bare agent and its card's digest never matches.
+    The thread counts only as a child of the channel the turn was admitted in
+    (`opened_thread_parent_id`); any other thread is not this turn's reply thread, so
+    the capture is refused and the card fails safe.
     """
     from daimon.core.session_seal import is_private_conversation
 
     if admission is None or admission.grant is None or admission.account_id != account_id:
         raise channel_backend.AgentBackendRefused("source_unavailable")
+    if (
+        opened_thread_id is not None
+        and admission.origin_thread_id is None
+        and opened_thread_parent_id != admission.origin_channel_id
+    ):
+        raise channel_backend.AgentBackendRefused("source_context_unavailable")
     thread_id = admission.origin_thread_id or opened_thread_id
     place = admission.grant.run_place
     if admission.origin_thread_id is None and opened_thread_id is not None:
