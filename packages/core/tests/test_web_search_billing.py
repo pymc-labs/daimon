@@ -189,6 +189,16 @@ async def used(sm):
         )
 
 
+async def test_late_read_when_work_ran_last_month_then_claims_that_month(sessions):
+    """A revision first read after the Pacific month turned claims the month its work ran."""
+    edge = datetime(2026, 12, 1, 8, tzinfo=UTC)
+    usage = observation(searches=2, observed_at=edge, occurred_at=edge - timedelta(minutes=1))
+    assert await record(sessions, usage)
+    async with sessions() as session:
+        periods = (await session.scalars(text("SELECT period FROM web_search_allowances"))).all()
+    assert periods == [date(2026, 11, 1)], periods
+
+
 async def test_openai_bills_every_search_once_across_replays(sessions):
     rate = price("openai", WebSearchPrice(Decimal("0.01")))
     assert await record(sessions, observation("openai", 2), rate)

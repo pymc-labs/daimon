@@ -95,7 +95,8 @@ async def _search_tally(
             provider=observation.session.provider,
             account_scope_id=observation.session.account_scope_id,
             pool=rate.pool,
-            at=observation.observed_at,
+            # The month the provider ran the work, not when a late read or replay saw it.
+            at=observation.occurred_at or observation.observed_at,
             searches=searches - counted,
             free_monthly=rate.free_monthly,
         )
@@ -284,9 +285,10 @@ async def record_observation_usage(
         row = await accounting_outbox.pending_revision(
             session, binding_id, observation.id, observation.revision
         )
+        refresh = {"observed_at", "occurred_at", "native_revision"}
         if row is not None and row.observation.model_dump(
-            exclude={"observed_at", "native_revision"}
-        ) != observation.model_dump(exclude={"observed_at", "native_revision"}):
+            exclude=refresh
+        ) != observation.model_dump(exclude=refresh):
             raise UsageRevisionConflict(observation.id, observation.revision)
     if row is None:
         return False
