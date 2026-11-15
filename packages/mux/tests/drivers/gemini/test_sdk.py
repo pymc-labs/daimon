@@ -577,5 +577,7 @@ async def test_sdk_effort_when_a_model_interaction_then_rides_generation_config(
         stack.push_async_callback(client.aio.aclose)
         await SDKTransport(client).create(body)
     posted = json.loads(captured[0].content)
-    assert posted["generation_config"]["thinking_level"] == "low", "a model interaction sends effort in generation_config"
+    assert posted["generation_config"]["thinking_level"] == "low", (
+        "a model interaction sends effort in generation_config"
+    )
     assert "agent_config" not in posted, "a model interaction sends no agent_config"

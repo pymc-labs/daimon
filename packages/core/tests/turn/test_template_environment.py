@@ -209,8 +209,8 @@ async def _deployment(*_args: object) -> str:
 )
 @pytest.mark.parametrize("openai_template", [{"code_default": True}], indirect=True)
 async def test_default_environment_when_switched_to_openai_then_its_turn_installs_it(
-    openai_template,
-    monkeypatch,  # noqa: F811
+    openai_template,  # noqa: F811
+    monkeypatch,
 ):
     """The tenant's own environment for the agent is created with the source's setup."""
     from daimon.core.turn import openai_deployment
@@ -236,8 +236,8 @@ async def test_default_environment_when_switched_to_openai_then_its_turn_install
 )
 @pytest.mark.parametrize("openai_template", [{"code_default": True}], indirect=True)
 async def test_openai_thread_when_made_on_the_bare_environment_then_it_moves_once(
-    openai_template,
-    monkeypatch,  # noqa: F811
+    openai_template,  # noqa: F811
+    monkeypatch,
 ):
     """A thread whose session runs on the tenant's bare environment moves to the set-up one."""
     from daimon.core.turn import openai_deployment, openai_environment
@@ -318,8 +318,8 @@ async def _run(request, prepared) -> None:
     indirect=["consent_request"],
 )
 async def test_source_environment_when_switched_to_gemini_then_its_turn_sets_it_up(
-    gemini_template,
-    setup,  # noqa: F811
+    gemini_template,  # noqa: F811
+    setup,
 ):
     """The interaction's environment installs the packages, or limits egress, as the source."""
     request, quote, _native, calls, _posts = gemini_template
