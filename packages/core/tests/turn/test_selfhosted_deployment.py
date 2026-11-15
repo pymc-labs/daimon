@@ -38,6 +38,7 @@ def facts():
     return SimpleNamespace(
         admission=SimpleNamespace(
             backend_revision=REVISION,
+            backend_revision_origin="channel",
             agent=SimpleNamespace(id="sh_agent_test"),
             environment=SimpleNamespace(id="sh_env_test"),
         ),
@@ -205,6 +206,20 @@ def test_host_policy_keeps_stricter_agent_and_operator_rules():
     )
 
 
+def test_host_policy_asks_publishing_and_rule_tools():
+    from daimon.core.tool_safety import PUBLISH_TOOLS, ToolSafetyPolicy
+    from daimon.core.turn.selfhosted_deployment import host_tool_policy
+
+    host = host_tool_policy(
+        ToolSafetyPolicy(enabled=False),
+        (),
+        asks_before_publishing=True,
+        rule_tools=frozenset({"memory_write"}),
+    )
+    asked = {"call_tool", "memory_write", *PUBLISH_TOOLS}
+    assert {name: host["daimon-mcp/" + name] for name in asked} == dict.fromkeys(asked, "ask")
+
+
 async def test_entra_refresh_failure_is_retryable_and_credential_is_reused(monkeypatch):
     import time
 
@@ -312,3 +327,66 @@ def test_pool_binding_loads_from_settings_but_environment_requires_pool_routing(
             settings,
             SCOPE.tenant_id,
         )
+
+
+def agent_facts(**admission):
+    request = facts()
+    request.admission.backend_revision_origin = "agent"
+    request.admission.shared_owner = None
+    request.admission.agent = SimpleNamespace(id="agent_source")
+    request.tenant_id = __import__("uuid").UUID(SCOPE.tenant_id)
+    request.target_spec = object()
+    vars(request.admission).update(admission)
+    return request
+
+
+@pytest.mark.parametrize("case", ["no_row", "channel_row", "other_agent", "shared", "no_spec"])
+def test_agent_origin_needs_its_own_agent_row(tmp_path, monkeypatch, case):
+    from daimon.core.ma_identity import derive_agent_uuid
+
+    request = agent_facts(shared_owner=object() if case == "shared" else None)
+    if case == "no_spec":
+        request.target_spec = None
+    source = derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id="agent_source")
+    row = {**manifest(), "platform": "*", "channel_id": "*", "account_id": "*"}
+    rows = {
+        "no_row": [],
+        "channel_row": [manifest()],
+        "other_agent": [{**row, "source_agent_id": "00000000-0000-0000-0000-000000000001"}],
+    }.get(case, [{**row, "source_agent_id": str(source)}])
+    path = tmp_path / "runtime.json"
+    path.write_text(json.dumps(rows))
+    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        build_selfhosted_runtime(request)
+
+
+def test_agent_rows_never_grant_a_channel_turn(tmp_path, monkeypatch):
+    row = {**manifest(), "source_agent_id": "00000000-0000-0000-0000-000000000001"}
+    path = tmp_path / "runtime.json"
+    path.write_text(json.dumps([row]))
+    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
+    assert authorized_deployments(SCOPE.tenant_id) == ()
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        build_selfhosted_runtime(facts())
+
+
+def test_the_agents_own_row_grants_its_turn(tmp_path, monkeypatch):
+    from daimon.core.ma_identity import derive_agent_uuid
+
+    request = agent_facts()
+    source = derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id="agent_source")
+    row = {**manifest(), "platform": "*", "channel_id": "*", "account_id": "*"}
+    path = tmp_path / "runtime.json"
+    path.write_text(json.dumps([{**row, "source_agent_id": str(source)}]))
+    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
+
+    class Matched(Exception):
+        pass
+
+    def matched():
+        raise Matched
+
+    monkeypatch.setattr("daimon.core.config.load_settings", matched)
+    with pytest.raises(Matched):
+        build_selfhosted_runtime(request)

@@ -32,18 +32,12 @@ SKILL = {"type": "custom", "skill_id": "skill_file_handling", "version": "1"}
 #: The declared loss that means the root lost each capability.
 LOSS = {"skill": "skills", "builtin": "tools", "mcp": "mcp"}
 
-
-def _gap(reason: str):
-    return pytest.mark.xfail(strict=True, reason=reason)
-
-
-J6B = "J6 (b) skills/built-in tools off Anthropic: scope waits on ROOT/Carlos (J6-OPTIONS.md)"
 LEGS = [
     pytest.param("openai", "mcp"),  # #1441: GPT roots keep Daimon MCP
-    pytest.param("openai", "skill", marks=_gap(J6B)),
+    pytest.param("openai", "skill"),  # custom skills ride to OpenAI templates
     pytest.param("openai", "builtin"),  # J6b PR1: bash in its hosted environment
     pytest.param("gemini", "mcp"),
-    pytest.param("gemini", "skill", marks=_gap(J6B)),
+    pytest.param("gemini", "skill"),  # custom skills attach to Gemini sessions
     pytest.param("gemini", "builtin"),  # J6b PR1: code_execution
 ]
 
@@ -51,8 +45,11 @@ LEGS = [
 @pytest.fixture
 async def chat(fresh_chat, monkeypatch):
     """J2's fresh chat; its built-in Daimon also carries a custom skill, as shipped."""
+    import io
     import re
+    import zipfile
 
+    import httpx
     from anthropic.types.beta import SkillListResponse
     from daimon.core.defaults.metadata import tenant_scoped_display_title
     from daimon.core.mcp_oauth import discovery
@@ -74,6 +71,22 @@ async def chat(fresh_chat, monkeypatch):
     fresh_chat.trace.router.routes.insert(
         0, ("GET", re.compile(r"/v1/skills$"), lambda call, match: list_response([row]))
     )
+    # Its archive, which the switch preview downloads once to size the skill.
+    version = {"id": "skillver_file_handling_1", "version": SKILL["version"]}
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as packed:
+        packed.writestr(
+            "file-handling/SKILL.md", "---\nname: file-handling\ndescription: Files.\n---\n"
+        )
+    base = rf"/v1/skills/{SKILL['skill_id']}/versions"
+    fresh_chat.trace.router.routes[1:1] = [
+        ("GET", re.compile(base + "$"), lambda call, match: list_response([version])),
+        (
+            "GET",
+            re.compile(rf"{base}/{version['id']}/content$"),
+            lambda call, match: httpx.Response(200, content=stream.getvalue()),
+        ),
+    ]
 
     async def listed(_url: str, _token: str) -> frozenset[str]:
         return frozenset({"describe_agent", "hand_off_task", "request_agent_backend_switch"})

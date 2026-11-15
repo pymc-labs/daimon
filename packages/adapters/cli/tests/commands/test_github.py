@@ -12,6 +12,7 @@ from daimon.adapters.cli.commands import github as github_command
 from daimon.adapters.cli.commands.github import _grant_session_action, github_app
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.session_snapshot import SessionSnapshot
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner
 
 
@@ -38,21 +39,30 @@ async def test_connect_link_agent_must_exist_in_tenant(monkeypatch: pytest.Monke
     listed = AsyncMock(return_value=[SimpleNamespace(id="ma-agent", name="ResearchBot")])
     monkeypatch.setattr(github_command, "list_agents_by_tenant", listed)
     client = cast(AsyncAnthropic, object())
+    records = cast(async_sessionmaker[AsyncSession], object())
     await github_command._require_tenant_agent(  # pyright: ignore[reportPrivateUsage]
-        client, tenant_id=tenant_id, agent_id=agent_id, agent_name="ResearchBot"
+        client, tenant_id=tenant_id, agent_id=agent_id, agent_name="ResearchBot", records=records
     )
     with pytest.raises(ValueError, match="current agent in this workspace"):
         await github_command._require_tenant_agent(  # pyright: ignore[reportPrivateUsage]
-            client, tenant_id=tenant_id, agent_id=uuid.uuid4(), agent_name="ResearchBot"
+            client,
+            tenant_id=tenant_id,
+            agent_id=uuid.uuid4(),
+            agent_name="ResearchBot",
+            records=records,
         )
     with pytest.raises(ValueError, match="current agent in this workspace"):
         await github_command._require_tenant_agent(  # pyright: ignore[reportPrivateUsage]
-            client, tenant_id=tenant_id, agent_id=agent_id, agent_name="OtherBot"
+            client, tenant_id=tenant_id, agent_id=agent_id, agent_name="OtherBot", records=records
         )
     listed.return_value = []
     with pytest.raises(ValueError, match="current agent in this workspace"):
         await github_command._require_tenant_agent(  # pyright: ignore[reportPrivateUsage]
-            client, tenant_id=tenant_id, agent_id=agent_id, agent_name="ResearchBot"
+            client,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            agent_name="ResearchBot",
+            records=records,
         )
 
 

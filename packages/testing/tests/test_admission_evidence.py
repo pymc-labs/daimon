@@ -95,6 +95,7 @@ async def setup(
         await make_channel_budget(session, tenant=tenant, channel_id="101", limit_usd=Decimal("0"))
     await session.commit()
     client = AsyncMock(spec=AsyncAnthropic)
+    client.api_key = "fixture-key"  # an instance attribute the class spec lacks; the gate reads it
     cache = new_resolver_cache()
     cache[(tenant.id, "agent", "daimon")] = "ag_1"
     cache[(tenant.id, "environment", "default")] = "env_1"

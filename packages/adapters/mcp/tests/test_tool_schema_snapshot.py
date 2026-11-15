@@ -313,4 +313,9 @@ async def test_the_tools_for_forking_onto_a_model_name_the_real_reason(sessionma
     assert "pass it as ``model``" in fork, fork
     assert "request a backend switch" in fork, fork
     assert not any("fleet" in name.lower() for name in tools)
-    assert {"fork_agent", "request_provider_allowlist", "request_channel_pin_clear"} <= tools.keys()
+    assert {
+        "fork_agent",
+        "request_provider_allowlist",
+        "request_channel_pin",
+        "request_channel_pin_clear",
+    } <= tools.keys()

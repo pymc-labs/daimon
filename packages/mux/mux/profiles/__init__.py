@@ -17,7 +17,7 @@ from mux.contracts.ids import Provider
 from mux.contracts.profile import SUPPORTED, AccountingMode, Profile
 from mux.contracts.resources import AgentSpec, ToolSpec
 from mux.profiles.anthropic import MANAGED_AGENTS
-from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE
+from mux.profiles.gemini import INLINE_REUSE, OPT_IN_MODELS
 from mux.profiles.openai import ASTRA_MODEL, CONVERSATION_ONLY, LUNA_MODEL, PERSISTENT_WORKSPACE
 from mux.profiles.selfhosted import LOOP
 
@@ -25,6 +25,12 @@ PROFILES: Mapping[str, Profile] = {
     p.profile_id: p
     for p in (MANAGED_AGENTS, PERSISTENT_WORKSPACE, CONVERSATION_ONLY, INLINE_REUSE, LOOP)
 }
+
+DAIMON_RECORD_PROVIDERS: tuple[Provider, ...] = (
+    PERSISTENT_WORKSPACE.provider,
+    INLINE_REUSE.provider,
+)
+"""Providers whose agent definitions Daimon stores and serves itself, not the provider."""
 
 PROVIDER_LABELS: Mapping[Provider, str] = {
     "anthropic": "Anthropic",
@@ -163,6 +169,7 @@ def meters_cache_writes_for(provider: Provider) -> bool:
 
 __all__ = [
     "CONSENTED_DEFAULT_MODELS",
+    "DAIMON_RECORD_PROVIDERS",
     "CONVERSATION_ONLY",
     "PROVIDER_ALIASES",
     "INLINE_REUSE",
@@ -196,18 +203,18 @@ _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
     "anthropic": BackendSelection(BackendConfig(), ("per_caller", "shared")),
     "openai": BackendSelection(
         BackendConfig(backend="openai", profile="openai.persistent_workspace", model=LUNA_MODEL),
-        ("per_caller",),
+        ("per_caller", "shared"),
         allowed_models=(ASTRA_MODEL,),
     ),
     "selfhosted": BackendSelection(
         BackendConfig(backend="selfhosted", profile="selfhosted.loop", model="gpt-6.1-sol"),
-        ("per_caller",),
+        ("per_caller", "shared"),
     ),
     "gemini": BackendSelection(
         BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"),
-        ("per_caller",),
-        allowed_models=(ARGON_MODEL,),
-        tariff_gated_models=(ARGON_MODEL,),
+        ("per_caller", "shared"),
+        allowed_models=OPT_IN_MODELS,
+        tariff_gated_models=OPT_IN_MODELS,
     ),
 }
 #: The provider defaults that backend-switch consents on a default-model setting

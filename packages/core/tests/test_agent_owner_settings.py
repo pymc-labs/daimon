@@ -12,7 +12,6 @@ from daimon.core.channel_backend import (
     AgentSettings,
     BackendActor,
     BackendAgent,
-    BackendUnsupported,
     agent_selection,
     resolve_turn_backend,
     revision_selection,
@@ -263,14 +262,14 @@ async def test_the_owner_edits_settings_and_backend_and_a_member_cannot(people) 
     assert revision.thread_mode == "shared" and revision.backend is None
     assert revision_selection(revision) == agent_selection("anthropic", None, settings)
 
-    # Shared threads don't run on OpenAI: the switch is refused, never silently per caller.
-    with pytest.raises(BackendUnsupported):
-        await service.set_backend(agent, "openai", 1, actors["owner"])
-    await service.set_settings(agent, AgentSettings(requires=REQUIRES_TOOLS), 1, actors["owner"])
-    switched = await service.set_backend(agent, "openai", 2, actors["owner"])
+    # Shared threads run on OpenAI too: the switch keeps them shared.
+    moved = await service.set_backend(agent, "openai", 1, actors["owner"])
+    assert moved.backend == "openai" and moved.thread_mode == "shared"
+    await service.set_settings(agent, AgentSettings(requires=REQUIRES_TOOLS), 2, actors["owner"])
+    switched = await service.set_backend(agent, "openai", 3, actors["owner"])
     assert switched.backend == "openai" and switched.requires == REQUIRES_TOOLS
-    reverted = await service.revert(agent, actors["owner"], expected_revision=3)
-    assert reverted.backend is None and reverted.requires == REQUIRES_TOOLS
+    reverted = await service.revert(agent, actors["owner"], expected_revision=4)
+    assert reverted.backend == "openai" and reverted.requires == REQUIRES_TOOLS
 
     rows = await service.audit(agent.tenant_id, agent_id=agent.agent_id)
     assert {row.operation for row in rows} >= {"settings", "set", "revert"}
@@ -278,3 +277,40 @@ async def test_the_owner_edits_settings_and_backend_and_a_member_cannot(people) 
         actors["admin"].account_id,
         actors["owner"].account_id,
     }
+
+
+_PRE_EFFORT_DIGESTS = {
+    # Hashed by the formula in force before effort existed; they must never move.
+    (None, None): "a0b6c28348efa74b8d21b22f0eb77225de850ca18e04dcc484c5617c4b63b2a3",
+    ("gpt-6-luna", "shared"): "7a7fe59e42f07a9ce4aafef0479835eb408985c25987331c2b8041025d3ac5ca",
+}
+
+
+def test_effort_joins_a_revision_digest_only_once_set() -> None:
+    from daimon.core.channel_backend import _revision_digest
+
+    agent = BackendAgent(
+        tenant_id=uuid.UUID(int=1), agent_id=uuid.UUID(int=2), name="a", configuration_digest="d"
+    )
+    unset = _revision_digest(agent, "openai", None, None, AgentSettings())
+    assert unset == _PRE_EFFORT_DIGESTS[(None, None)]
+    shared = _revision_digest(
+        agent, "openai", None, "gpt-6-luna", AgentSettings(thread_mode="shared")
+    )
+    assert shared == _PRE_EFFORT_DIGESTS[("gpt-6-luna", "shared")]
+    effort = AgentSettings(effort="high")
+    assert effort.facts() == {"effort": "high"} and not effort.is_default()
+    assert _revision_digest(agent, "openai", None, None, effort) != unset
+
+
+def test_effort_belongs_to_the_agent_selection_and_not_the_default_backend() -> None:
+    chosen = agent_selection("openai", None, AgentSettings(effort="low"))
+    assert chosen.effort == "low"
+    assert agent_selection("openai", None, AgentSettings()).effort is None
+    assert AgentSettings(effort="low").for_backend("anthropic").effort is None
+    assert AgentSettings(effort="low").for_backend("openai").effort == "low"
+    assert AgentSettings(effort="low").for_backend("gemini").effort is None, (
+        "a Gemini named agent takes no effort"
+    )
+    with pytest.raises(Exception, match="effort|selectable"):
+        agent_selection("anthropic", None, AgentSettings(effort="low"))

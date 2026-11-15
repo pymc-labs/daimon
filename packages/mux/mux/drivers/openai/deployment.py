@@ -9,6 +9,8 @@ from typing import IO, Self, cast
 import httpx
 from openai import DEFAULT_CONNECTION_LIMITS, DEFAULT_TIMEOUT, AsyncOpenAI
 
+from mux.contracts.completions import CompletionEffort, CompletionResult, Completions
+from mux.contracts.ids import Scope
 from mux.drivers import isolated_ssl_context
 from mux.drivers.openai.transport import Method, Object, SDKTransport, Transport
 
@@ -167,6 +169,34 @@ class _ConfiguredTransport:
             await client.close()
             raise
         return _OwnedStream(source, client)
+
+
+class _ConfiguredCompletions(_ConfiguredTransport):
+    async def complete(
+        self,
+        scope: Scope,
+        model: str,
+        system: str,
+        prompt: str,
+        max_tokens: int,
+        effort: CompletionEffort | None = None,
+    ) -> CompletionResult:
+        from mux.drivers.openai.completions import OpenAICompletions
+
+        client = self._client()
+        try:
+            completions = OpenAICompletions(client)
+            return await completions.complete(scope, model, system, prompt, max_tokens, effort)
+        finally:
+            await client.close()
+
+
+def configured_completions(*, api_key: str) -> Completions:
+    """Side-call completions on a deployment key; each call owns its client."""
+    _check_environment()
+    if not api_key.strip():
+        raise ValueError("explicit OpenAI credential is required")
+    return _ConfiguredCompletions(api_key, None)
 
 
 def configured_transport(*, api_key: str, project: str | None) -> Transport:

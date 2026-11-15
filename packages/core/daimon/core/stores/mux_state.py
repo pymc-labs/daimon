@@ -33,7 +33,7 @@ from collections.abc import (
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from daimon.core._models import (
     AccountingBindingContext,
@@ -49,7 +49,7 @@ from daimon.core._models import (
     UsageEvent,
     UsageObservation,
 )
-from daimon.core.stores import agent_backends, mux_erasure, read_persisted_columns
+from daimon.core.stores import agent_backends, mux_erasure, read_persisted_columns, thread_models
 from daimon.core.stores.domain import AgentBackendRevision
 from mux.contracts.config import ConfigRevision
 from mux.contracts.events import Event
@@ -139,12 +139,21 @@ def fixed_clock(now: datetime) -> Clock:
 
 
 def _agent_backend_reference(
-    channel: ChannelRef, origin: str, revision: AgentBackendRevision | None
+    channel: ChannelRef,
+    origin: str,
+    revision: AgentBackendRevision | None,
+    thread_id: str | None = None,
 ) -> list[JsonValue] | None:
+    """`[agent, local]` for an agent's revision; a conversation's model choice
+    (origin `thread`) adds its conversation and its consent's digest."""
     if revision is None:
         return None
-    if revision.tenant_id != _tenant(channel.tenant_id) or origin != "agent":
+    if revision.tenant_id != _tenant(channel.tenant_id) or origin not in ("agent", "thread"):
         raise ScopeViolation(channel.channel_id, "foreign agent backend association")
+    if (origin == "thread") != (thread_id is not None):
+        raise ScopeViolation(channel.channel_id, "thread backend association needs its thread")
+    if thread_id is not None:
+        return [str(revision.agent_id), revision.local, thread_id, revision.digest]
     return [str(revision.agent_id), revision.local]
 
 
@@ -154,6 +163,7 @@ async def put_config_revision(
     *,
     origin: str = "channel",
     agent_revision: AgentBackendRevision | None = None,
+    thread_id: str | None = None,
 ) -> ConfigRevision:
     channel = revision.channel
     key = {
@@ -162,7 +172,7 @@ async def put_config_revision(
         "channel_id": channel.channel_id,
         "local": revision.local,
     }
-    reference = _agent_backend_reference(channel, origin, agent_revision)
+    reference = _agent_backend_reference(channel, origin, agent_revision, thread_id)
     inserted = await session.scalar(
         insert(ChannelConfigRevision)
         .values(
@@ -1180,8 +1190,9 @@ async def effective_revision(
     origin: str,
     *,
     agent_revision: AgentBackendRevision | None = None,
+    thread_id: str | None = None,
 ) -> ConfigRevision | None:
-    reference = _agent_backend_reference(channel, origin, agent_revision)
+    reference = _agent_backend_reference(channel, origin, agent_revision, thread_id)
     body = await session.scalar(
         select(ChannelConfigRevision.revision)
         .where(
@@ -1206,28 +1217,66 @@ async def config_origin(session: AsyncSession, channel: ChannelRef, local: int) 
     )
 
 
+async def config_thread_pin(
+    session: AsyncSession, channel: ChannelRef, local: int
+) -> tuple[str, str] | None:
+    """The conversation and consent digest a `thread` revision was made with, else None."""
+    raw = await session.scalar(
+        select(ChannelConfigRevision.agent_backend_ref).where(
+            *_channel_where(channel),
+            ChannelConfigRevision.local == local,
+            ChannelConfigRevision.origin == "thread",
+        )
+    )
+    if not isinstance(raw, list) or len(cast(list[JsonValue], raw)) != 4:
+        return None
+    thread_id, digest = cast(list[JsonValue], raw)[2:]
+    return (thread_id, digest) if isinstance(thread_id, str) and isinstance(digest, str) else None
+
+
 async def get_config_agent_revision(
     session: AsyncSession, revision: ConfigRevision, *, agent_id: uuid.UUID
 ) -> AgentBackendRevision | None:
-    """Recover only the immutable consent association retained with this effective revision."""
+    """Recover only the immutable consent association retained with this effective revision.
+
+    A conversation's model choice (origin `thread`) recovers that conversation's
+    consent, only while it is still the one the revision was made with."""
     statement = select(ChannelConfigRevision.agent_backend_ref).where(
         *_channel_where(revision.channel),
         ChannelConfigRevision.local == revision.local,
-        ChannelConfigRevision.origin == "agent",
+        ChannelConfigRevision.origin.in_(("agent", "thread")),
     )
     raw = (await read_persisted_columns(session, statement)).scalar_one_or_none()
     if raw is None:
         return None
+    thread: tuple[str, str] | None = None
     try:
-        identity, local = TypeAdapter(
-            tuple[uuid.UUID, Annotated[int, Field(gt=0, strict=True)]]
-        ).validate_python(raw)
+        if isinstance(raw, list) and len(cast(list[JsonValue], raw)) == 4:
+            identity, local, *pinned = TypeAdapter(
+                tuple[uuid.UUID, Annotated[int, Field(gt=0, strict=True)], str, str]
+            ).validate_python(raw)
+            thread = (pinned[0], pinned[1])
+        else:
+            identity, local = TypeAdapter(
+                tuple[uuid.UUID, Annotated[int, Field(gt=0, strict=True)]]
+            ).validate_python(raw)
     except ValueError:
         raise ScopeViolation(
             revision.channel.channel_id, "invalid agent backend association"
         ) from None
     if identity != agent_id:
         raise ScopeViolation(revision.channel.channel_id, "foreign agent backend association")
+    if thread is not None:
+        consent = await thread_models.get_thread_consent(
+            session,
+            tenant_id=_tenant(revision.channel.tenant_id),
+            platform=revision.channel.platform,
+            thread_id=thread[0],
+            agent_id=identity,
+        )
+        if consent is None or consent.digest != thread[1] or consent.drop_consent is None:
+            raise ScopeViolation(revision.channel.channel_id, "missing original backend consent")
+        return consent
     retained = await agent_backends.current(
         session, _tenant(revision.channel.tenant_id), identity, local=local, persisted=True
     )

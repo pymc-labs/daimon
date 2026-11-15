@@ -16,7 +16,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.agents import _fork_agent_impl  # pyright: ignore[reportPrivateUsage]
 from daimon.core import agent_fork
-from daimon.core.channel_backend import load_backend_agent, make_backend_service
+from daimon.core.channel_backend import NO_CAPTURE, load_backend_agent, make_backend_service
 from daimon.core.config import McpSettings, Settings, TurnSettings
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.provider_keys import DEFAULT_KEY_ENV
@@ -201,7 +201,7 @@ async def test_make_a_copy_of_yourself_on_gpt(joined, monkeypatch, channel):
     agent = await load_backend_agent(
         client, sm, tenant_id=tenant_id, agent_name=copy.name, actual_agent=native
     )
-    service = make_backend_service(sm, SETTINGS.turn)
+    service = make_backend_service(sm, SETTINGS.turn, capture_source=NO_CAPTURE)
     preview = await service.preview(agent, "openai")
     assert preview.allowed, preview
     assert preview.target_backend == "openai"

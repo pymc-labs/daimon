@@ -15,9 +15,10 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from mux.contracts._base import Contract, FrozenMap
+from mux.contracts.digest import additive, digest_body
 from mux.contracts.errors import InvalidConfig
 from mux.contracts.ids import ChannelRef, Provider
-from mux.contracts.profile import Capability
+from mux.contracts.profile import Capability, Effort
 
 ThreadMode = Literal["per_caller", "shared"]
 """`per_caller` (the default) keeps one thread per caller; `shared` is opt-in."""
@@ -64,6 +65,7 @@ class BackendConfig(Contract):
         default_factory=dict[Capability, CapabilityRequirement]
     )
     thread_mode: ThreadMode = "per_caller"
+    effort: Effort | None = None
 
 
 class ResolvedBackend(Contract):
@@ -80,15 +82,23 @@ class ResolvedBackend(Contract):
         default_factory=dict[Capability, CapabilityRequirement]
     )
     thread_mode: ThreadMode = "per_caller"
+    effort: Effort | None = additive(None)
+    """Reasoning effort for a non-default backend; unset keeps the model's own."""
 
     @model_validator(mode="after")
     def _consistent(self) -> ResolvedBackend:
         check_selection(self.backend, self.profile, self.model)
+        if self.effort is not None:
+            from mux.profiles import PROFILES  # deferred: profiles are built from these contracts
+
+            profile = PROFILES.get(self.profile)
+            if profile is not None and self.effort not in profile.effort_map:
+                raise InvalidConfig(f"profile {self.profile!r} carries no {self.effort!r} effort")
         return self
 
     def content_digest(self) -> str:
         """A content digest: equal configurations hash equal."""
-        body = self.model_dump(mode="json", include=set(ResolvedBackend.model_fields))
+        body = digest_body(self, include=set(ResolvedBackend.model_fields))
         canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode()).hexdigest()
 
@@ -156,6 +166,7 @@ def resolve_default(config: BackendConfig | None) -> ResolvedBackend:
         model=config.model,
         requires=config.requires,
         thread_mode=config.thread_mode,
+        effort=config.effort,
     )
 
 

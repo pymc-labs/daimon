@@ -15,6 +15,7 @@ seal can't be read, the successor is sealed to its own thread.
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
+from typing import cast
 
 import anthropic as anthropic_pkg
 import structlog
@@ -30,6 +31,7 @@ from daimon.core.session_ports_compat import retrieve_session_record
 from mux.contracts.ids import Scope
 
 __all__ = [
+    "child_seal_ids",
     "format_seal_ids",
     "inherited_seal_ids",
     "is_private_conversation",
@@ -69,6 +71,18 @@ def seal_ids(metadata: Mapping[str, str | None] | None) -> frozenset[str]:
     return frozenset(ids) if ids else frozenset({_UNMATCHABLE})
 
 
+def child_seal_ids(
+    parent_metadata: Mapping[str, str | None] | None, turn_seal: Collection[str] = ()
+) -> frozenset[str]:
+    """The seal a session a turn starts must carry.
+
+    A Managed Agents turn's seal is on its session's metadata. A provider turn
+    has no such session; its seals ride its credential (`AuthIdentity.seal_ids`,
+    passed as `turn_seal`), so a child started from either is sealed alike.
+    """
+    return seal_ids(parent_metadata) | frozenset(turn_seal)
+
+
 def is_private_conversation(conversation_id: str) -> bool:
     """A DM scope, a Slack IM (``D…``) or a Teams personal chat (``a:…``).
 
@@ -104,6 +118,24 @@ def session_facts(
 
 def format_seal_ids(ids: Collection[str]) -> str:
     return _SEPARATOR.join(sorted(ids))
+
+
+SEAL_CLAIM = "seal_ids"
+"""A provider turn credential's signed seals: the ids its turn runs sealed under."""
+
+
+def seal_claim(ids: Collection[str]) -> list[str]:
+    return sorted(ids)
+
+
+def parse_seal_claim(value: object) -> frozenset[str] | None:
+    """The signed seal ids, or None when malformed (absent reads as no seal)."""
+    if value is None:
+        return frozenset()
+    if not isinstance(value, list) or not value:
+        return None
+    parts = [part for part in cast("list[object]", value) if isinstance(part, str) and part]
+    return frozenset(parts) if len(parts) == len(cast("list[object]", value)) else None
 
 
 def origin_stamp(

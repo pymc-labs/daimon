@@ -249,6 +249,7 @@ WORDS: Mapping[ChatPlatform, PlatformWords] = MappingProxyType(
                     "routines": Command("routines"),
                     "billing": Command("billing"),
                     "settings": Command("settings", "space"),
+                    "model": Command("model", "space"),
                     "privacy": Command("privacy"),
                     "new": Command("new"),
                     "support": Command("support", "chat"),

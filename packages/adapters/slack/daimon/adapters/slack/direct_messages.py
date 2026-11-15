@@ -346,7 +346,10 @@ async def handle_direct_message(
                 return
             try:
                 agent = await find_agent_by_daimon_tag(
-                    runtime.anthropic, tenant_id=conversation.tenant_id, name=name
+                    runtime.anthropic,
+                    tenant_id=conversation.tenant_id,
+                    name=name,
+                    records=runtime.sessionmaker,
                 )
                 async with runtime.sessionmaker.begin() as session:
                     identity = await resolve_agent_identity(

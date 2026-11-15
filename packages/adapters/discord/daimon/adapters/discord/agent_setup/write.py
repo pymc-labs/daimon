@@ -9,9 +9,9 @@ import structlog
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_lifecycle import create_user_agent
-from daimon.core.constants import ALLOWED_MODEL_IDS
 from daimon.core.defaults.report import ResourceOutcome
 from daimon.core.errors import SpecError
+from daimon.core.models_catalog import is_priced_claude_model, priced_claude_ids
 from daimon.core.specs import (
     AgentSpec,
 )
@@ -27,10 +27,10 @@ def validate_model_id(model: str) -> str | None:
     """Return an error message if `model` is not in the allow-list; None if valid.
 
     Discord modals cannot contain Select components, so we validate
-    free-text input at submit time against ALLOWED_MODEL_IDS.
+    free-text input at submit time against the priced Claude ids.
     """
-    if model not in ALLOWED_MODEL_IDS:
-        allowed = ", ".join(ALLOWED_MODEL_IDS)
+    if not is_priced_claude_model(model):
+        allowed = ", ".join(priced_claude_ids())
         return f"Model `{model}` is not allowed. Choose one of: {allowed}"
     return None
 

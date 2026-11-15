@@ -85,7 +85,11 @@ async def test_mux_selfhosted_turn_is_admitted_dispatched_and_billed(composed, m
     await drain_outcomes()
 
     assert request.deps.turn_path == "mux" and request.deps.channel_backends
-    assert [(k["path"], k["profile"]) for k in dispatched] == [("mux", PROFILE)]
+    # The turn and its output sweep both build the turn port: each on the mux leg.
+    assert dispatched, "the turn was dispatched"
+    assert {(k["path"], k["profile"]) for k in dispatched} == {("mux", PROFILE)}, (
+        "every port of the turn runs on the mux leg with the self-hosted profile"
+    )
     assert outcome.state.error is None
     assert "answer 1" in str(outcome.state.content)
     assert wire.posts == 1

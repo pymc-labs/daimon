@@ -613,6 +613,9 @@ async def test_another_tenants_thread_with_the_same_ids_is_another_binding(
 # Per caller stays byte-identical, with no extra reads
 
 
+_WRITE_VERBS = ("INSERT", "UPDATE", "DELETE")
+
+
 async def test_unconfigured_and_per_caller_binds_read_nothing_new(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -666,15 +669,21 @@ async def test_unconfigured_and_per_caller_binds_read_nothing_new(
 
     assert traces[0] == traces[1] == traces[2]
     touched = " ".join(traces[1] + traces[2])
+    writes = " ".join(
+        s for s in traces[1] + traces[2] if s.lstrip().upper().startswith(_WRITE_VERBS)
+    )
     # The mux path publishes every non-DM first bind to the neutral binding
     # tables (`turn/prepare.py` `prepared_persistence`), shared or not, so
-    # those are touched there and only there. The traces above are identical
-    # for the unconfigured, per-caller and reconfigured channels either way.
+    # those are written there and only there. Both paths read the thread's
+    # binding slot first, to carry over a conversation from a provider the
+    # thread was moved off (`turn/carry_over.py` `adoption_predecessor`). The
+    # traces above are identical for the unconfigured, per-caller and
+    # reconfigured channels either way.
     published = ("provider_binding", "journal_session")
     on_mux = load_turn_settings().path == "mux"
     for table in published:
-        assert (table in touched) == on_mux
-    assert "channel_config_revision" not in touched
+        assert (table in writes) == on_mux, f"{table} is written on the mux path only"
+    assert "channel_config_revision" not in touched, "no channel revision is read"
 
 
 # SYS-047 / SYS-048 still decide first

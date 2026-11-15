@@ -17,7 +17,7 @@ from mux.drivers.gemini.skill_deployment import GCSBundleDeployment
 from mux.drivers.gemini.storage import Records, Storage, owner, read_records
 from mux.drivers.gemini.transport import NO_TOOLS_TOOL, Object, Transport, object_value
 from mux.errors import ProviderError, ScopeViolation
-from mux.profiles.gemini import INLINE_REUSE
+from mux.profiles.gemini import INLINE_REUSE, OPT_IN_MODELS
 from mux.state.operations import request_digest
 
 MODE = "gemini.named_agent_catalog@1"
@@ -45,7 +45,7 @@ def native_definition(
     """Keep an explicit native model/tools list and every concrete bundle byte."""
     # Persistent native definitions cannot safely store per-session credentials.
     if spec.model.id not in (
-        "gemini-4-argon",
+        *OPT_IN_MODELS,
         "gemini-3.8-flash",
         "gemini-3.7-flash",
         "gemini-3.6-flash",

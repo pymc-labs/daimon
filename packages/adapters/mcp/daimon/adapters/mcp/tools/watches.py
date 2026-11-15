@@ -503,6 +503,7 @@ async def create_mcp_watch(
             runtime.client,
             binding.target_ma_agent_id,
             scope=resource_scope(tenant_id=str(auth.tenant_id)),
+            records=runtime.session_factory,
         )
         if server.lower().startswith("https://"):
             attached = [item for item in agent.mcp_servers if same_ascii_mcp_url(item.url, server)]

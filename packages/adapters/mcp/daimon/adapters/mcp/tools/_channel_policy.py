@@ -262,7 +262,11 @@ async def _executing_agent(
             {**dict(record.spec.metadata or {}), MA_METADATA_KEY_NAME: record.spec.name},
         )
     agent = await find_agent_by_derived_uuid_cached(
-        runtime.client, runtime.resolver_cache, tenant_id=auth.tenant_id, agent_id=executing
+        runtime.client,
+        runtime.resolver_cache,
+        tenant_id=auth.tenant_id,
+        agent_id=executing,
+        records=runtime.session_factory,
     )
     if agent is None:
         return AgentRef.unresolved()
@@ -592,7 +596,8 @@ async def load_read_policy(
     ordinary chat. A token bound to neither can't claim an origin at all, so a
     limited read with it is judged from outside. An origin that is malformed,
     expired, another account's or another responder's counts as none too.
-    An agent key minted in a channel needs no origin: its calls run inside
+    A provider turn's signed seals (`AuthIdentity.seal_ids`) stand in for an origin
+    it did not name. An agent key minted in a channel needs no origin: its calls run inside
     that channel (`token_channel_id`), and only that channel. While a channel
     is kept to its own agents the executing agent is resolved too.
     """
@@ -628,7 +633,9 @@ async def load_read_policy(
     origin = await get_verified_origin(runtime, auth, origin_context_id)
     origin = await _held_origin(runtime, auth, policy, agent, origin)
     if origin is None:
-        return ChannelReadPolicy(policy, agent=agent, subject=mcp_subject(auth))
+        # A provider turn named no origin: its signed seals are the inside, so it
+        # reads its own sealed conversations and none sealed elsewhere.
+        return ChannelReadPolicy(policy, auth.seal_ids, agent=agent, subject=mcp_subject(auth))
     inside = {origin.parent_channel_id, origin.thread_id}
     if auth.platform == "slack":
         # A Slack thread's rule is keyed by its channel_id:thread_ts form.

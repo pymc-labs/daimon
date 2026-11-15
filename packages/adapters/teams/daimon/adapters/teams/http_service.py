@@ -17,6 +17,7 @@ from daimon.adapters.teams import (
     billing_panel,
     card,
     credential_requests,
+    own_cards,
     privacy_card,
     provider_actions,
     routines_card,
@@ -62,6 +63,8 @@ from daimon.adapters.teams.support import SupportCommand
 from daimon.adapters.teams.support import enabled as support_enabled
 from daimon.adapters.teams.team_owners import fetch_team_owner_ids
 from daimon.adapters.teams.thread_handoff import TeamsThreadHandoff
+from daimon.adapters.teams.thread_model import VERB as THREAD_MODEL_VERB
+from daimon.adapters.teams.thread_model import ThreadModelActions, show_model
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.wizard import TeamsWizards
 from daimon.core.config import TeamsSettings
@@ -315,6 +318,7 @@ def create_teams_http_service(
         "setup": setup.command,
         "here": show_here,
         "settings": show_settings,
+        "model": show_model,
         "routines": routines.command,
         "memory": show_memory,
         "privacy": privacy.command,
@@ -444,9 +448,11 @@ def create_teams_http_service(
     teams_app.on_card_action_execute(routines_card.VERB, routines.on_action)
     teams_app.on_card_action_execute(privacy_card.VERB, privacy.on_action)
     teams_app.on_card_action_execute(SETTINGS_VERB, SettingsActions(runtime).on_action)
+    teams_app.on_card_action_execute(THREAD_MODEL_VERB, ThreadModelActions(runtime).on_action)
     teams_app.on_card_action_execute(billing_panel.VERB, billing.on_action)
     teams_app.on_card_action_execute(tool_confirmation.VERB, turns.confirmations.on_action)
     teams_app.on_card_action_execute(provider_actions.VERB, turns.provider_actions.on_action)
+    teams_app.on_card_action_execute(own_cards.VERB, own_cards.TeamsOwnCards(runtime).on_action)
     handover = TeamsThreadHandoff(
         runtime,
         dispatch=turns._dispatch_inbound,  # pyright: ignore[reportPrivateUsage]  # verified message ingress

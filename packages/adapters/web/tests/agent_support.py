@@ -15,17 +15,24 @@ from cryptography.fernet import Fernet
 from daimon.adapters.web.app import create_app
 from daimon.adapters.web.cookies import new_session_token, token_sha256
 from daimon.adapters.web.runtime import WebRuntime
-from daimon.core.config import Settings
+from daimon.adapters.web.turns import WebTurns
+from daimon.core.authz import build_subject
+from daimon.core.channel_backend import NO_CAPTURE, BackendActor, make_backend_service
+from daimon.core.config import Settings, TurnSettings
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.ma_resolver import new_resolver_cache
+from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import agent_owners
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_roles as roles_store
 from daimon.core.stores import web_sessions as sessions_store
 from daimon.core.stores.domain import WebPersonRow
+from daimon.core.turn.deps import build_turn_deps
 from daimon.testing.factories import make_account, make_tenant, make_web_person
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, json_body
+from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import PUBLIC_URL, web_settings
@@ -141,14 +148,35 @@ async def agent_client(
 ) -> AsyncIterator[httpx.AsyncClient]:
     db = {"url": "postgresql+asyncpg://u:p@h/db"}
     settings = extra.pop("settings", None) or Settings(_env_file=None, database=db)  # pyright: ignore[reportCallIssue, reportArgumentType]
+    web = extra.pop("web", None) or web_settings()
+    anthropic = build_fake_anthropic(agents.router.dispatch)
+    if extra.pop("with_turns", False):
+        # A switch reads the agent's source through the turn machinery.
+        environment = ma_environment(tenant_id=tenant_id)
+        agents.router.add_environment_list(environment)
+        agents.router.add_environment(environment)
+        extra["turns"] = WebTurns(
+            settings,
+            web,
+            build_turn_deps(
+                settings,
+                anthropic,
+                factory,
+                deployment_default=DeploymentDefault(
+                    agent_name=DEFAULT_AGENT_NAME, environment_name=DEFAULT_ENV_NAME
+                ),
+                resolver_cache=new_resolver_cache(),
+                billing_config=None,
+            ),
+        )
     async with httpx.AsyncClient() as http:
         runtime = WebRuntime(
             settings=settings,
-            web=extra.pop("web", None) or web_settings(),
+            web=web,
             sessionmaker=factory,
             http_client=http,
             fernet=build_multifernet((Fernet.generate_key().decode(),)),
-            anthropic=build_fake_anthropic(agents.router.dispatch),
+            anthropic=anthropic,
             now=lambda: NOW,
             **extra,
         )
@@ -168,3 +196,39 @@ async def make_admin(factory: async_sessionmaker[AsyncSession], person: WebPerso
             role="owner",
             granted_by_account_id=None,
         )
+
+
+async def provider_choice(
+    factory: async_sessionmaker[AsyncSession], owner: WebPersonRow, providers: tuple[str, ...]
+) -> Settings:
+    """Settings with provider choice on, and ``providers`` allowed in the owner's workspace."""
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
+        turn=TurnSettings(path="mux", channel_backends=True),
+    )
+    service = make_backend_service(factory, settings.turn, capture_source=NO_CAPTURE)
+    policy = await service.tenant_policy(owner.tenant_id)
+    await service.set_tenant_allowlist(
+        owner.tenant_id,
+        providers,  # pyright: ignore[reportArgumentType]
+        policy.revision,
+        BackendActor(
+            tenant_id=owner.tenant_id,
+            account_id=owner.account_id,
+            subject=build_subject(is_admin=True, platform_user_id=None),
+        ),
+    )
+    return settings
+
+
+async def consent_body(
+    client: httpx.AsyncClient, value: str = "openai:gpt-6-astra"
+) -> dict[str, Any]:
+    """The apply body that accepts what the model preview says the switch drops."""
+    preview = (await client.get(f"/api/agents/ag_w/model-preview?value={value}")).json()
+    return {
+        "accepted_drops": preview["drops"],
+        "preview_digest": preview["digest"],
+        "preview_revision": preview["revision"],
+    }

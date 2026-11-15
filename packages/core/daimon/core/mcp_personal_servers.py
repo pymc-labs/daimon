@@ -67,9 +67,14 @@ def hidden_mcp_server_names(
     account_id: uuid.UUID,
     shared_server_urls: Iterable[str],
     server_urls: Mapping[str, str],
+    connector_token_urls: Iterable[str] | None = None,
 ) -> frozenset[str]:
     """Of `server_urls`, the ones people sign in to that this caller has not
     signed in to on this agent.
+
+    `connector_token_urls` is set when Daimon, not Managed Agents, holds the
+    caller's tokens (a non-MA backend): a grant counts only where a token is
+    there too, so a grant made under MA shows as a reconnect.
 
     Pure. `server_urls` is the agent's own `{name: url}`; `grants` is the
     tenant's, so a sign-in on any agent marks the URL as one that needs a
@@ -84,6 +89,8 @@ def hidden_mcp_server_names(
         signed_in.add(grant_url)
         if grant.agent_id == agent_id and grant.account_id == account_id:
             mine.add(grant_url)
+    if connector_token_urls is not None:
+        mine &= {canonical_mcp_url(url) for url in connector_token_urls}
     hidden_urls = signed_in - mine - {canonical_mcp_url(url) for url in shared_server_urls}
     return frozenset(
         name for name, url in server_urls.items() if canonical_mcp_url(url) in hidden_urls

@@ -887,6 +887,56 @@ async def test_admit_raises_resolver_miss_when_the_resolved_agent_is_archived(
     assert (tenant.id, "agent", "doomed-agent") not in cache
 
 
+async def test_admit_keeps_references_to_a_converted_agent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A convert archives the Managed Agents copy; the channel's name now means the record."""
+    from daimon.core.turn import selfhosted_records
+
+    async def converted(*_args: object) -> bool:
+        return True
+
+    monkeypatch.setattr(selfhosted_records, "names_a_record", converted)
+    tenant = await make_tenant(db_session)
+    scope = ChannelScopeRef(tenant_id=tenant.id, channel_id="chan-1")
+    await set_fields(
+        db_session, scope=scope, tenant_id=tenant.id, agent_name="moved", environment_name="default"
+    )
+    await db_session.commit()
+    dead = ma_agent(
+        id="ag_dead",
+        name="moved",
+        tenant_id=tenant.id,
+        archived_at=datetime(2026, 7, 30, tzinfo=UTC),
+    )
+    cache = new_resolver_cache()
+    cache[(tenant.id, "agent", "moved")] = "ag_dead"
+    deps = _deps(
+        sessionmaker=db_session_factory,
+        defaults_root=tmp_path,
+        router=_archived_agent_router(tenant_id=tenant.id, dead_agent=dead),
+        resolver_cache=cache,
+    )
+
+    with pytest.raises(MAResolverMissError):
+        await admit(
+            deps,
+            origin="chat",
+            tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
+            platform="discord",
+            external_user_id="user-1",
+            channel_id="chan-1",
+            now=_NOW,
+        )
+
+    async with db_session_factory() as s:
+        assert await get_scope(s, scope=scope) is not None, "the channel still names it"
+
+
 async def test_admit_invalidates_archived_environment_cache(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

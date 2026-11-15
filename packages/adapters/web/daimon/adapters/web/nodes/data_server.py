@@ -364,7 +364,7 @@ class DataServerNode:
         relay = self.relay
         if relay is None:
             raise HTTPException(status_code=503, detail=f"{self.label} isn't set up here.")
-        deps, actor = change_deps(runtime), actor_of(caller)
+        deps, actor = change_deps(runtime, caller), actor_of(caller)
         agent = await self._editable(runtime, caller, agent_id)
         await self._attached(runtime, caller, agent_id)
         server_id = await self._server_agent_id(runtime, caller, agent_id)
@@ -405,7 +405,7 @@ class DataServerNode:
         self, runtime: WebRuntime, caller: WebCaller, agent_id: str
     ) -> DataServerStatus:
         """Detach the server from the agent; the server's agent and its access stay."""
-        deps, actor = change_deps(runtime), actor_of(caller)
+        deps, actor = change_deps(runtime, caller), actor_of(caller)
         agent = await self._editable(runtime, caller, agent_id)
         await self._attached(runtime, caller, agent_id)
         if any(self.claims(s.url) for s in agent.mcp_servers):

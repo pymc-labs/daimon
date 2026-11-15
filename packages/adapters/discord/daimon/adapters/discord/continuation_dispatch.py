@@ -75,10 +75,10 @@ async def dispatch_pending_continuations(
     """Dispatch under the caller's existing thread guard."""
 
     async def context(row: TaskContinuationRow) -> tuple[datetime | None, bool]:
-        # A timer is never superseded by newer messages, so it needs no history.
+        # A timer or a pressed card is never superseded by newer messages: no history.
         latest = (
             None
-            if row.reason in ("timer", "watch_fired", "job_finished")
+            if row.reason in ("timer", "watch_fired", "job_finished", "confirmed_call")
             else await _latest_human_message_at(thread, after=row.created_at)
         )
         async with sessionmaker() as session:

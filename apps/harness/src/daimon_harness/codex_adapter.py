@@ -26,6 +26,7 @@ from .codex_relay import ResponsesRelay
 from .credentials import credential_log_redaction, remember_log_secret
 from .errors import HarnessError
 from .model_adapter import AzureModelAdapter, context_tools
+from .outputs import outputs_note
 from .runtime import TurnContext
 
 CODEX_VERSION = "0.162.1"
@@ -428,9 +429,13 @@ class CodexModelAdapter(AzureModelAdapter):
                                 "sandbox": "read-only",
                                 "environments": [],
                                 "dynamicTools": dynamic,
-                                "baseInstructions": context.request.instructions
-                                + "\n\n"
-                                + await context.skills(),
+                                "baseInstructions": "\n\n".join(
+                                    (
+                                        context.request.instructions,
+                                        outputs_note(context.work),
+                                        await context.skills(),
+                                    )
+                                ),
                             },
                         )
                         connection.thread_id = str(

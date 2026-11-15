@@ -1,7 +1,7 @@
 """Thread-participation classifier: one small model call, fail closed to silence.
 
 The shell half of `daimon.core.thread_participation`. This is a plain
-`messages.create` call, not a Managed Agents session; the caller meters it to
+completion through `auxiliary_calls`, not a Managed Agents session; the caller meters it to
 the tenant through `usage_recording.record_classifier_usage` from the token
 counts returned here. It runs only for threads whose resolved mode is `on`,
 after the burst of messages has gone quiet and after the balance and cap
@@ -16,8 +16,8 @@ from dataclasses import dataclass
 
 import structlog
 from anthropic import AsyncAnthropic
-from anthropic.types import TextBlock
 from daimon.core.anthropic_guard import require_anthropic_allowed
+from daimon.core.auxiliary_calls import auxiliary_complete
 from daimon.core.thread_participation import (
     SILENCE_ON_ERROR,
     ClassifierMessage,
@@ -26,6 +26,8 @@ from daimon.core.thread_participation import (
     classifier_system_prompt,
     parse_classifier_response,
 )
+from mux.contracts.config import DEFAULT_BACKEND
+from mux.contracts.ids import Provider
 
 log = structlog.get_logger()
 
@@ -49,6 +51,9 @@ class ClassifierOutcome:
     verdict: ClassifierVerdict
     usage: ClassifierUsage | None
     """`None` when the call failed before the API answered: nothing to meter."""
+    provider: Provider = DEFAULT_BACKEND
+    model_id: str | None = None
+    """What the call ran on, for metering."""
 
 
 async def classify(
@@ -58,29 +63,36 @@ async def classify(
     bot_display_name: str,
     recent: list[ClassifierMessage],
     candidates: list[ClassifierMessage],
+    provider: Provider | None = None,
 ) -> ClassifierOutcome:
     require_anthropic_allowed()
     prompt = build_classifier_prompt(recent, candidates, bot_display_name=bot_display_name)
-    usage: ClassifierUsage | None = None
     try:
-        response = await anthropic.messages.create(
-            model=model,
+        done = await auxiliary_complete(
+            anthropic,
+            provider=provider,
+            purpose="classifier",
+            system=classifier_system_prompt(bot_display_name),
+            prompt=prompt,
             max_tokens=_MAX_OUTPUT_TOKENS,
             # Adaptive thinking at low effort judged ambiguous bursts better than
             # thinking off, and rarely thinks at all.
-            output_config={"effort": "low"},
-            system=classifier_system_prompt(bot_display_name),
-            messages=[{"role": "user", "content": prompt}],
+            effort="low",
+            anthropic_model=model,
         )
-        usage = ClassifierUsage(
-            input_tokens=response.usage.input_tokens,
-            output_tokens=response.usage.output_tokens,
-            cache_read_input_tokens=response.usage.cache_read_input_tokens or 0,
-        )
-        if response.stop_reason == "refusal":
-            raise ValueError("classifier call was refused")
-        text = "".join(b.text for b in response.content if isinstance(b, TextBlock))
-        return ClassifierOutcome(parse_classifier_response(text), usage)
     except Exception:  # fail-closed boundary: any failure means silence
         log.warning("thread_participation.classifier_failed", exc_info=True)
-        return ClassifierOutcome(SILENCE_ON_ERROR, usage)
+        return ClassifierOutcome(SILENCE_ON_ERROR, None)
+    usage = ClassifierUsage(
+        input_tokens=done.usage.input_tokens,
+        output_tokens=done.usage.output_tokens,
+        cache_read_input_tokens=done.usage.cache_read_input_tokens,
+    )
+    try:
+        if done.refused:
+            raise ValueError("classifier call was refused")
+        verdict = parse_classifier_response(done.text)
+    except Exception:  # fail-closed boundary: malformed output or a refusal means silence
+        log.warning("thread_participation.classifier_failed", exc_info=True)
+        verdict = SILENCE_ON_ERROR
+    return ClassifierOutcome(verdict, usage, done.provider, done.model_id)

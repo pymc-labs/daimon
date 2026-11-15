@@ -27,11 +27,17 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 from daimon.core.model_presets import OPUS, OPUS_FAST
-from daimon.core.pricing import ModelRates, ProviderPrice, cost_of, usage_tokens
+from daimon.core.pricing import (
+    ModelRates,
+    ProviderPrice,
+    cost_of,
+    side_call_rates,
+    usage_tokens,
+)
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.usage_compat import event_observation
-from mux.contracts.ids import ModelRef, ResourceRef
+from mux.contracts.ids import ModelRef, Provider, ResourceRef
 from mux.contracts.usage import UsageObservation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -259,6 +265,7 @@ async def _record_tool_model_usage(
     idempotency_prefix: str,
     channel_id: str | None,
     agent_id: str | None = None,
+    provider: Provider | None = None,
 ) -> None:
     """One usage_events row plus one debit ledger row for a model call made outside a turn.
 
@@ -271,6 +278,8 @@ async def _record_tool_model_usage(
     function existed and must keep that prefix.
     Exceptions are NOT swallowed (see module docstring).
     """
+    if provider is None:
+        provider = "gemini" if session_prefix == "gemini" else "anthropic"
     if managed_session_id is None:
         managed_session_id = f"{session_prefix}:{uuid.uuid4()}"
     if event_id is None:
@@ -281,13 +290,11 @@ async def _record_tool_model_usage(
         session=ResourceRef(
             id=managed_session_id,
             kind="session",
-            provider="gemini" if session_prefix == "gemini" else "anthropic",
+            provider=provider,
             account_scope_id="host-tools",
             tenant_id=str(tenant_id),
         ),
-        model=ModelRef(
-            provider="gemini" if session_prefix == "gemini" else "anthropic", id=model_id
-        ),
+        model=ModelRef(provider=provider, id=model_id),
         grain="model_request",
         basis="increment",
         input_tokens=input_tokens + cache_read_input_tokens,
@@ -429,4 +436,50 @@ async def record_thread_naming_usage(
         idempotency_prefix="thread-naming",
         channel_id=channel_id,
         agent_id=agent_id,
+    )
+
+
+_AUXILIARY_PURPOSES = {
+    "thread_naming": ("thread_naming_debit", "thread-naming"),
+    "classifier": ("classifier_debit", "classifier"),
+}
+
+
+async def record_auxiliary_usage(
+    *,
+    purpose: Literal["thread_naming", "classifier"],
+    provider: Provider,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    platform_user_id: str | None,
+    model_id: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_input_tokens: int,
+    managed_session_id: str | None = None,
+    event_id: str | None = None,
+    markup: Decimal = Decimal("1.0"),
+    channel_id: str | None = None,
+    agent_id: str | None = None,
+) -> None:
+    """A side call on any provider, billed to the message's author at a required price."""
+    reason, prefix = _AUXILIARY_PURPOSES[purpose]
+    await _record_tool_model_usage(
+        sessionmaker=sessionmaker,
+        tenant_id=tenant_id,
+        platform_user_id=platform_user_id,
+        model_id=model_id,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
+        managed_session_id=managed_session_id,
+        event_id=event_id,
+        markup=markup,
+        pricing=side_call_rates(model_id, input_tokens + cache_read_input_tokens),
+        reason=reason,
+        session_prefix=prefix,
+        idempotency_prefix=prefix,
+        channel_id=channel_id,
+        agent_id=agent_id,
+        provider=provider,
     )

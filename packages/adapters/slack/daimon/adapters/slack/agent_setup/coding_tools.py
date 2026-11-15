@@ -186,6 +186,7 @@ async def handle_coding_tools_click(
             thread_id=None,
             default=runtime.deployment_default,
             is_admin=True,
+            records=runtime.sessionmaker,
         )
     target = next((row for row in roster.rows if row.name == agent_name), None)
     if target is None:
@@ -401,7 +402,10 @@ async def _authorize_mint(
     agent = AgentRef.of(target.name)
     if channel_id is not None and any_agent_rules(policy):
         ma_agent = await retrieve_agent(
-            runtime.anthropic, target.ma_agent_id, scope=resource_scope(tenant_id=str(tenant_id))
+            runtime.anthropic,
+            target.ma_agent_id,
+            scope=resource_scope(tenant_id=str(tenant_id)),
+            records=runtime.sessionmaker,
         )
         agent = build_agent_ref(ma_agent.name, ma_agent.metadata, target.name)
     decision, bound_channel_id = authorize_coding_token(

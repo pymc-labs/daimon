@@ -17,6 +17,7 @@ from decimal import Decimal, localcontext
 from types import MappingProxyType
 from typing import Protocol
 
+import structlog
 from mux.contracts.usage import UsageObservation
 from mux.profiles import (
     CONVERSATION_ONLY,
@@ -24,6 +25,8 @@ from mux.profiles import (
     PERSISTENT_WORKSPACE,
     meters_cache_writes_for,
 )
+
+_log = structlog.get_logger()
 
 
 class LegacyUsage(Protocol):
@@ -602,7 +605,7 @@ PROVIDER_PRICING_SOURCES = (
     "https://developers.openai.com/api/docs/models/gpt-6-luna",
     "https://developers.openai.com/api/docs/models/gpt-6-astra",
     "https://developers.openai.com/api/docs/guides/agents-api/observability",
-    "https://ai.google.dev/gemini-api/docs/pricing",
+    "https://aistudio.google.com/docs/pricing",
     "https://ai.google.dev/gemini-api/docs/antigravity-agent",
 )
 _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
@@ -651,19 +654,51 @@ _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
                 Decimal("0.075"),
                 valid_before=date(2027, 1, 1),
             ),
-            # Intro tariff only (GA 2026-10-13, through 2026-11-30). The post-intro
-            # price is unpublished here, so from 2026-12-01 Argon is unpriced and
-            # refused at admission until a dated row is added. Cached input: 95% off.
-            # FOLLOW-UP before 2026-12-01: add the post-intro row, or the daily model
-            # cap also refuses every Argon turn (provider_price_unavailable).
+            # No start-date field: a successor row's `checked_on` is its start date,
+            # and a later row wins an overlap. Cached input is implicit caching only.
             ProviderPrice(
                 INLINE_REUSE.provider,
-                "gemini-4-argon",
-                date(2026, 10, 22),
-                Decimal("2.00"),
-                Decimal("10.00"),
-                Decimal("0.10"),
-                valid_before=date(2026, 12, 1),
+                "gemini-3.8-flash",
+                date(2027, 1, 1),
+                Decimal("1.50"),
+                Decimal("7.50"),
+                Decimal("0.15"),
+            ),
+            # Argon and Carbon share one tariff: intro rates through 2026-11-30,
+            # then the standard rates from 2026-12-01.
+            *(
+                row
+                for model, checked_on in (
+                    ("gemini-4-argon", date(2026, 10, 22)),
+                    ("gemini-4-carbon", date(2026, 11, 15)),
+                )
+                for row in (
+                    ProviderPrice(
+                        INLINE_REUSE.provider,
+                        model,
+                        checked_on,
+                        Decimal("2.00"),
+                        Decimal("10.00"),
+                        Decimal("0.10"),
+                        valid_before=date(2026, 12, 1),
+                    ),
+                    ProviderPrice(
+                        INLINE_REUSE.provider,
+                        model,
+                        date(2026, 12, 1),
+                        Decimal("4.00"),
+                        Decimal("20.00"),
+                        Decimal("0.20"),
+                    ),
+                )
+            ),
+            ProviderPrice(
+                INLINE_REUSE.provider,
+                "gemini-4-hydrogen",
+                date(2026, 11, 15),
+                Decimal("1.50"),
+                Decimal("7.50"),
+                Decimal("0.075"),
             ),
         ),
     }
@@ -708,6 +743,21 @@ def provider_prices(profile: str) -> Mapping[tuple[str, str], ProviderPrice]:
     return MappingProxyType(_current_price(_PROVIDER_PRICING.get(profile, ()), on))
 
 
+def price_expiries() -> tuple[tuple[str, str, date], ...]:
+    """Every model whose newest tariff lapses: (profile, model, valid_before), soonest first.
+
+    A model with an open-ended successor row never lapses, so it is not listed.
+    """
+    found = [
+        (profile, model, max(price.valid_before for price in rows if price.valid_before))
+        for profile, prices in _PROVIDER_PRICING.items()
+        for model in {price.model for price in prices}
+        if (rows := [price for price in prices if price.model == model])
+        and all(price.valid_before is not None for price in rows)
+    ]
+    return tuple(sorted(found, key=lambda each: each[2]))
+
+
 def provider_price_on(model: str, on: date) -> ProviderPrice | None:
     """The tariff usage of `model` on day `on` settled at, from any profile; None when none.
 
@@ -727,6 +777,33 @@ def _priced_input_limits() -> Mapping[str, int | None]:
                 # Stored rows are bucketed by one limit per model before a tariff is chosen.
                 raise ValueError(f"{price.model} tariffs disagree on the priced input limit")
     return MappingProxyType(limits)
+
+
+def side_call_rates(model: str, prompt_tokens: int = 0) -> ModelRates:
+    """Rates for a side call: the model's table row, else its sourced provider tariff today.
+
+    A prompt over the tariff's priced input limit takes its long-context multipliers,
+    or the base rate as a floor when none is sourced. Raises KeyError when neither
+    prices the model, so a side call never runs unmetered.
+    """
+    if model in MODEL_PRICING:
+        return MODEL_PRICING[model]
+    price = provider_price_on(model, datetime.now(UTC).date())
+    if price is None:
+        raise KeyError(model)
+    incoming = outgoing = Decimal(1)
+    limit = price.max_priced_input_tokens
+    if limit is not None and prompt_tokens > limit:
+        if price.long_context_multipliers is None:
+            _log.warning("side_call.priced_at_base_rate", model=model, prompt_tokens=prompt_tokens)
+        else:
+            incoming, outgoing = price.long_context_multipliers
+    return ModelRates(
+        input=float(price.input * incoming),
+        output=float(price.output * outgoing),
+        cache_write=float((price.cache_write or 0) * incoming),
+        cache_read=float(price.cache_read * incoming),
+    )
 
 
 #: Every provider-priced model and its tariff's priced input limit (None: no limit).

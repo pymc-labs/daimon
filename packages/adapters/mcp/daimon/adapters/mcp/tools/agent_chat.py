@@ -134,7 +134,7 @@ from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
 from daimon.core.session_mutation import session_mutation_fence
 from daimon.core.session_ports_compat import archive_session_record
-from daimon.core.session_seal import seal_ids
+from daimon.core.session_seal import child_seal_ids, seal_ids
 from daimon.core.session_snapshot import (
     canonical_json,
 )
@@ -420,15 +420,18 @@ async def _bound_posture(
     Memory is read-only under the seal unless the agent is the isolated
     channel's own (`memory_writable`), as at chat admission.
     """
+    # A provider turn's seals ride its credential (`child_seal_ids`); they
+    # keep memory read-only like a channel seal does.
+    carried = child_seal_ids(None, auth.seal_ids)
     channel_id = token_channel_id(auth)
     if channel_id is None:
-        return frozenset(), False
+        return carried, bool(carried)
     policy = await load_channel_policy(runtime, auth)
     here = channel_permissions(policy, channel_id=channel_id)
     if here.readers == "any":
-        return frozenset(), False
+        return carried, bool(carried)
     agent = agent_permissions(policy, agent_names)
-    return frozenset({channel_id}), not memory_writable(agent, here)
+    return carried | {channel_id}, bool(carried) or not memory_writable(agent, here)
 
 
 async def _budget_channel(
@@ -519,7 +522,11 @@ async def _resolve_ma_agent(
     if auth.agent_id is None:
         raise ToolError("agent not found")
     agent = await find_agent_by_derived_uuid_cached(
-        runtime.client, runtime.resolver_cache, tenant_id=auth.tenant_id, agent_id=auth.agent_id
+        runtime.client,
+        runtime.resolver_cache,
+        tenant_id=auth.tenant_id,
+        agent_id=auth.agent_id,
+        records=runtime.session_factory,
     )
     if agent is None:
         raise ToolError("agent not found")
@@ -664,11 +671,17 @@ async def _refuse_a_changed_agent(
     An unedited agent costs one agent read.
     """
     scope = mcp_scope(auth)
-    agent = await retrieve_agent(runtime.client, session.agent.id, scope=scope)
+    agent = await retrieve_agent(
+        runtime.client, session.agent.id, scope=scope, records=runtime.session_factory
+    )
     if agent.version == session.agent.version:
         return
     started = await retrieve_agent_version(
-        runtime.client, agent.id, session.agent.version, scope=scope
+        runtime.client,
+        agent.id,
+        session.agent.version,
+        scope=scope,
+        records=runtime.session_factory,
     )
     if _session_setup(started) != _session_setup(agent):
         log.info(
@@ -795,7 +808,7 @@ async def _start_turn_impl(
         raise ToolError("environment not found")
 
     environment: BetaEnvironment | None = await find_environment_by_daimon_tag(
-        runtime.client, tenant_id=auth.tenant_id, name=env_name
+        runtime.client, tenant_id=auth.tenant_id, name=env_name, records=runtime.session_factory
     )
     if environment is None:
         raise ToolError("environment not found")

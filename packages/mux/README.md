@@ -610,7 +610,7 @@ lazily after interaction acceptance, preserves provider root identities across
 replay/cancel and emits cumulative interaction usage through the neutral host
 recorder. The host configures `gemini-3.8-flash` as primary; only create HTTP503
 permits the reviewed Flash fallback chain. A channel revision may instead pin
-`gemini-4-argon`, which is a single attempt with no fallback. Preparation rejects missing stores,
+an opt-in model (`gemini-4-argon`, `gemini-4-carbon` or `gemini-4-hydrogen`), which is a single attempt with no fallback. Preparation rejects missing stores,
 foreign bindings, seals and unsupported deployment policies before dispatch.
 Unsupported runtime/model/policy selections return the host's typed
 `backend_unsupported` refusal. Native journal source identities are scoped to

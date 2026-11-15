@@ -30,6 +30,7 @@ from mux.errors import (
     ScopeViolation,
     UnsupportedCapability,
 )
+from mux.profiles.gemini import OPT_IN_MODELS
 from mux.state.memory import MemoryStateStore
 from mux.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from pydantic import JsonValue
@@ -688,17 +689,19 @@ def test_removed_model_preserves_default_selections_and_thread_mode() -> None:
     )
 
 
-def test_argon_is_an_opt_in_gemini_selection_that_never_changes_the_default() -> None:
-    from mux.profiles import backend_selection, runnable_selection
+@pytest.mark.parametrize("model", OPT_IN_MODELS)
+def test_opt_in_model_is_an_opt_in_gemini_selection_that_never_changes_the_default(
+    model: str,
+) -> None:
+    from mux.profiles import backend_selection, runnable_selection, tariff_gated
 
     assert backend_selection("gemini").model == "gemini-3.8-flash"
-    argon = BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-4-argon")
-    assert runnable_selection(resolve_default(argon))
-    assert not runnable_selection(
-        resolve_default(argon.model_copy(update={"thread_mode": "shared"}))
-    )
-    for near in ("gemini-4-argon-preview", "gemini-4", "Gemini-4-Argon"):
-        assert not runnable_selection(resolve_default(argon.model_copy(update={"model": near})))
+    opted = BackendConfig(backend="gemini", profile="gemini.inline_reuse", model=model)
+    assert runnable_selection(resolve_default(opted))
+    assert runnable_selection(resolve_default(opted.model_copy(update={"thread_mode": "shared"})))
+    assert tariff_gated(resolve_default(opted)), "an opt-in model needs a current price"
+    for near in (f"{model}-preview", "gemini-4", model.title()):
+        assert not runnable_selection(resolve_default(opted.model_copy(update={"model": near})))
 
 
 @pytest.mark.parametrize("ceiling", (False, 0, -1, 65_537, "4096"))
@@ -1123,3 +1126,16 @@ async def test_a_stop_observation_holds_no_lock_while_it_reads_the_provider(
     assert wrote and stop.stopped and stop.outcome == "interrupted"
     t.get = real_get  # type: ignore[method-assign]  # retrieve still reads under the lock
     assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "idle"
+
+
+def test_thinking_level_compiles_into_the_model_or_the_agent_config() -> None:
+    spec = AgentSpec(name="a", model=ModelRef(provider="gemini", id="gemini-3.8-flash"))
+    assert "thinking_level" not in str(compile_agent(spec))
+    agent = compile_agent(spec, thinking_level="low")
+    assert agent["agent_config"] == {
+        "type": "antigravity",
+        "model": "gemini-3.8-flash",
+        "thinking_level": "low",
+    }
+    model = compile_agent(spec, max_output_tokens=64, thinking_level="high")
+    assert model["generation_config"] == {"max_output_tokens": 64, "thinking_level": "high"}

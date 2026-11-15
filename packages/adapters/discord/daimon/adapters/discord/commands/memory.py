@@ -97,7 +97,7 @@ async def _resolve_agent(
     if config.agent_name is None:
         return None
     agent = await find_agent_by_daimon_tag(
-        runtime.anthropic, tenant_id=tenant_id, name=config.agent_name
+        runtime.anthropic, tenant_id=tenant_id, name=config.agent_name, records=runtime.sessionmaker
     )
     if agent is None:
         log.warning("discord.memory.agent_missing", configured_name=config.agent_name)

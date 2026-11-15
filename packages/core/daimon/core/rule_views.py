@@ -331,6 +331,7 @@ async def load_rule_viewer(
     platform: str | None = None,
     thread_id: str | None = None,
     default: DeploymentDefault | None = None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> RuleViewer | None:
     """What a reader at `channel_id` (a thread's parent) sees; None sees everything.
 
@@ -345,7 +346,7 @@ async def load_rule_viewer(
     agents = (
         await list_live_agent_facts(session, tenant_id=tenant_id)
         if anthropic_disabled()
-        else await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+        else await list_agents_by_tenant(anthropic, tenant_id=tenant_id, records=records)
     )
     return RuleViewer(
         policy,
@@ -437,7 +438,7 @@ async def is_thread_turn_refused(
     names: tuple[str | None, ...] = (config.agent_name,)
     if home_of(policy, thread_id, channel_id) is not None:
         agent = await find_agent_by_daimon_tag(
-            anthropic, tenant_id=tenant_id, name=config.agent_name
+            anthropic, tenant_id=tenant_id, name=config.agent_name, records=sessionmaker
         )
         if agent is not None:
             names = (config.agent_name, *agent_pin_names(agent.name, agent.metadata))

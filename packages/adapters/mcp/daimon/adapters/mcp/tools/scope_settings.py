@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Final, Literal
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.confirmed_call import card_satisfied
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._card import NEEDS_CARD, require_card
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin
@@ -76,7 +77,7 @@ async def _place(
         or auth.execution_id is not None
         or auth.hold is not None
         or auth.client
-        or auth.no_confirmation_surface
+        or (auth.no_confirmation_surface and not card_satisfied(auth))
         or auth.platform_user_id is None
     ):
         raise ToolError(NEEDS_CARD)

@@ -159,6 +159,11 @@ skills and sandbox environments under **Agents** > **Skills** and
 private one needs an agent's grant, made in chat. Copying an agent that runs on
 another provider than the default is refused.
 
+The model editor and the chat header list every model with its provider and
+price. A pick on another provider shows what changes and asks once. Admins can
+pin a channel to such a model from its page, and **Switch back to Claude**
+appears on a refused reply. See [model providers](providers.md).
+
 ## Admin settings and audit
 
 Admins change the workspace's rules under **Admin** > **Settings**. The same

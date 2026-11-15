@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from importlib.metadata import entry_points
@@ -47,12 +48,29 @@ class RuntimeDeployment(Protocol):
 DeploymentLoader = Callable[[str], tuple[RuntimeDeployment, ...]]
 
 
+class AgentGrant(Protocol):
+    """An operator's opt-in for one agent's own configuration on a profile."""
+
+    @property
+    def source_agent_id(self) -> uuid.UUID | None: ...
+
+    @property
+    def config_digest(self) -> str | None: ...
+
+    @property
+    def environment_id(self) -> str: ...
+
+
 @dataclass(frozen=True)
 class _RuntimeRegistration:
     factory: RuntimeFactory
     authorizations: DeploymentLoader | None = None
     tariffs: Callable[[], Mapping[tuple[str, str], ProviderPrice]] | None = None
     prepare: RuntimePreparation | None = None
+    # Set by a profile an agent may select only where the operator granted it.
+    agent_grants: Callable[[str], tuple[AgentGrant, ...]] | None = None
+    # Its host runs an agent's own copy in a shared thread as the thread's owner.
+    shares_agent_threads: bool = False
 
 
 _RUNTIME_FACTORIES: dict[str, _RuntimeRegistration] = {}
@@ -66,6 +84,8 @@ def register_channel_runtime(
     tariffs: Callable[[], Mapping[tuple[str, str], ProviderPrice]] | None = None,
     fallback: bool = False,
     prepare: RuntimePreparation | None = None,
+    agent_grants: Callable[[str], tuple[AgentGrant, ...]] | None = None,
+    shares_agent_threads: bool = False,
 ) -> None:
     """Register a constructor; provider defaults preserve explicit host overrides."""
     if profile == "anthropic.managed_agents":
@@ -74,7 +94,15 @@ def register_channel_runtime(
         if fallback:
             return
         raise ValueError(f"channel runtime already registered: {profile}")
-    _RUNTIME_FACTORIES[profile] = _RuntimeRegistration(factory, authorizations, tariffs, prepare)
+    _RUNTIME_FACTORIES[profile] = _RuntimeRegistration(
+        factory, authorizations, tariffs, prepare, agent_grants, shares_agent_threads
+    )
+
+
+def shares_agent_threads(profile: str) -> bool:
+    """Whether `profile` runs an agent's own copy in a shared thread (as its owner)."""
+    registration = _RUNTIME_FACTORIES.get(profile)
+    return registration is not None and registration.shares_agent_threads
 
 
 def ensure_channel_runtime(profile: str, *, ready: Callable[[], bool] | None = None) -> bool:
@@ -108,6 +136,56 @@ def authorized_channel_deployments(profile: str, tenant_id: str) -> tuple[Runtim
     if read is None:
         raise UnsupportedCapability(("host_deployment_authorization",), profile)
     return read(tenant_id)
+
+
+def granted_agent_environments(
+    profile: str, tenant_id: str, agent_id: uuid.UUID, config_digest: str
+) -> tuple[str, ...] | None:
+    """The environments an operator granted this agent's configuration on `profile`.
+
+    None: the profile takes no per-agent grant. Empty: it needs one and none exists.
+    """
+    if not ensure_channel_runtime(profile):
+        return None
+    read = _RUNTIME_FACTORIES[profile].agent_grants
+    if read is None:
+        return None
+    return tuple(
+        dict.fromkeys(
+            grant.environment_id
+            for grant in read(tenant_id)
+            if grant.source_agent_id == agent_id and grant.config_digest == config_digest
+        )
+    )
+
+
+def has_agent_grants(profile: str, tenant_id: str) -> bool:
+    """Whether any agent of this tenant has an operator grant on `profile`."""
+    if not ensure_channel_runtime(profile):
+        return False
+    read = _RUNTIME_FACTORIES[profile].agent_grants
+    return read is not None and bool(read(tenant_id))
+
+
+def agent_granted_prices(
+    tenant_id: str, agent_id: uuid.UUID | None = None
+) -> Mapping[tuple[str, str], ProviderPrice]:
+    """Tariffs of the grant-gated profiles where this tenant has an agent grant.
+
+    With `agent_id`, only profiles where that agent holds a grant.
+    """
+    for registration in entry_points(group="daimon.turn_runtimes"):
+        ensure_channel_runtime(registration.name)
+    prices: dict[tuple[str, str], ProviderPrice] = {}
+    for registration in _RUNTIME_FACTORIES.values():
+        read, tariffs = registration.agent_grants, registration.tariffs
+        if (
+            read is not None
+            and tariffs is not None
+            and any(agent_id in (None, grant.source_agent_id) for grant in read(tenant_id))
+        ):
+            prices.update(tariffs())
+    return MappingProxyType(prices)
 
 
 def channel_runtime_prices() -> Mapping[tuple[str, str], ProviderPrice]:
@@ -169,7 +247,8 @@ def build_channel_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         revision.channel.tenant_id != request.scope.tenant_id
         or revision.channel.platform != request.platform
         or str(request.tenant_id) != request.scope.tenant_id
-        or str(request.session_account_id) != request.scope.account_id
+        or str(request.session_account_id)
+        != str(request.admission.shared_owner or request.scope.account_id)
         or request.scope.is_platform
         or request.scope.is_legacy_host_authorized
         or revision.backend != get_profile(revision.profile).provider

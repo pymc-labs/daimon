@@ -198,7 +198,9 @@ async def test_widening_an_agent_rule_says_its_repos_come_too(
     async def set_rule(*_args: object, **_kwargs: object) -> AgentRuleChange:
         return AgentRuleChange("bot", runs_in, True)
 
-    async def find(_client: object, *, tenant_id: uuid.UUID, name: str) -> object:
+    async def find(
+        _client: object, *, tenant_id: uuid.UUID, name: str, records: object = None
+    ) -> object:
         return SimpleNamespace(id="ag_bot", metadata={})
 
     async def summary(_session: object, *, tenant_id: uuid.UUID) -> AgentRepoSummary:

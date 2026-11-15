@@ -366,7 +366,10 @@ class TeamsCredentialRequests:
             # Gated at the click too, as on Slack: a member is not asked for a
             # token a shared agent would refuse.
             agent = await find_agent_by_derived_uuid(
-                self._runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+                self._runtime.anthropic,
+                tenant_id=row.tenant_id,
+                agent_id=row.agent_id,
+                records=self._runtime.sessionmaker,
             )
             if agent is None:
                 return _notice(_AGENT_GONE, row)
@@ -384,7 +387,10 @@ class TeamsCredentialRequests:
         if root is None or mcp.jwt_secret is None or self._runtime.turn_deps.fernet is None:
             return _notice(_UNCONFIGURED_OAUTH, row)
         agent = await find_agent_by_derived_uuid(
-            self._runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+            self._runtime.anthropic,
+            tenant_id=row.tenant_id,
+            agent_id=row.agent_id,
+            records=self._runtime.sessionmaker,
         )
         async with self._runtime.sessionmaker() as session:
             pin_refusal = await request_pin_refusal(session, row=row, agent=agent)
@@ -451,7 +457,10 @@ class TeamsCredentialRequests:
                 )
                 return credential_form(row, rejected)
         agent = await find_agent_by_derived_uuid(
-            self._runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+            self._runtime.anthropic,
+            tenant_id=row.tenant_id,
+            agent_id=row.agent_id,
+            records=self._runtime.sessionmaker,
         )
         if agent is None:
             return dialog_message(_AGENT_GONE)

@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import Field
 
 from mux.contracts._base import Contract
+from mux.contracts.digest import additive
 
 
 class SessionControls(Contract):
@@ -12,9 +13,14 @@ class SessionControls(Contract):
 
     Omission preserves provider/template defaults. The limit is positive whole
     USD cents across the session, not a per-turn token cap or a final bill.
+    `mcp_enabled=False` creates the session without the agent's MCP servers
+    (a shared thread carries no per-caller credential).
     """
 
     model: Literal["gpt-6-luna", "gpt-6-astra"] | None = None
     multi_agent_enabled: Literal[False] | None = None
     container_size: Literal["small", "medium", "large"] | None = None
     spend_limit_usd_cents: int | None = Field(default=None, gt=0, strict=True)
+    mcp_enabled: Literal[False] | None = additive(None)
+    reasoning_effort: Literal["low", "medium", "high"] | None = additive(None)
+    """The agent's `reasoning.effort` for this session; omitted keeps the model's own."""

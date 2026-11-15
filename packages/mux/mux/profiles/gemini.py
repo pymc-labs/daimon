@@ -8,23 +8,42 @@ it.
 
 from __future__ import annotations
 
-from mux.contracts.extensions import ExtensionRef
-from mux.contracts.profile import AccountingMode, Profile
+from typing import Final, Literal
 
-# Opt-in model: one attempt, never the Flash fallback chain.
-ARGON_MODEL = "gemini-4-argon"
+from mux.contracts.extensions import ExtensionRef
+from mux.contracts.profile import AccountingMode, Effort, Profile, SkillLimits
+
+InlineReuseId = Literal["gemini.inline_reuse"]
+"""The profile id as a type, for a record that must name this profile."""
+INLINE_REUSE_ID: Final[InlineReuseId] = "gemini.inline_reuse"
+#: The extension config that carries a thread's session binding.
+SESSION_NAMESPACE: Final = "gemini.session"
+
+#: Opt-in models, defined once: each is its own single attempt, never the Flash
+#: fallback chain, and is selectable only while the host holds a current price.
+OPT_IN_MODELS: Final = ("gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen")
+
+# The agent's thinking level; the neutral names match.
+_EFFORT: dict[Effort, str] = {"low": "low", "medium": "medium", "high": "high"}
+MIB = 1024 * 1024
 
 INLINE_REUSE = Profile(
     provider="gemini",
-    profile_id="gemini.inline_reuse",
+    profile_id=INLINE_REUSE_ID,
+    carries_caller_resources=True,
     schema_version="1",
     accounting_mode=AccountingMode.NATIVE_TOTALS,
     sdk_pin="google-genai>=2.7.0,<3",
     core=False,
-    extensions=(ExtensionRef(namespace="gemini.session", version=1),),
+    effort_map=_EFFORT,
+    extensions=(ExtensionRef(namespace=SESSION_NAMESPACE, version=1),),
     execution_tool="code_execution",
     mcp_policy_keys=("allowed_tools",),
     skill_digest="version",
+    # Inline mounts: UTF-8 text, 1 MiB a file, 2 MiB across the session.
+    skill_limits=SkillLimits(
+        total_bytes=2 * MIB, file_bytes=MIB, files=256, text_only=True, combined_bytes=2 * MIB
+    ),
     catalog_readback="verify",
     support={
         "neutral_catalog": "emulated",

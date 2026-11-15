@@ -12,6 +12,7 @@ from decimal import ROUND_CEILING
 
 import anthropic
 from anthropic.types.beta import BetaManagedAgentsSession
+from daimon.core.agent_record_ports import DAIMON_ID_PREFIXES
 from daimon.core.config import Settings
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
@@ -142,6 +143,10 @@ class ManagedLongJobPort:
         return session
 
     async def create_or_find(self, job: LongJob) -> str:
+        if job.agent_id.startswith(DAIMON_ID_PREFIXES) or job.environment_id.startswith(
+            DAIMON_ID_PREFIXES
+        ):
+            raise WorkerVanished("Long jobs are not available for this agent")
         scope = self.scope(job)
         backend = managed_agents(self.client, scope=scope)
         cursor: str | None = None

@@ -6,12 +6,15 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.github_app_auth import PermissionProfile, group_repository_access
 from daimon.core.github_app_session import (
     AppToken,
     _working_alias,  # pyright: ignore[reportPrivateUsage]
     token_scopes_for_groups,
 )
+from daimon.core.mux_backend import resource_scope
+from daimon.core.mux_compat import retrieve_agent
 from daimon.core.session_compat import (
     DEFAULT_MA_CAPABILITIES,
     ChangeReason,
@@ -26,7 +29,16 @@ from daimon.core.session_compat import (
     decide_session_compatibility,
     identity_change_reasons,
 )
-from daimon.core.session_snapshot import SessionSnapshot, fingerprint_identity
+from daimon.core.session_snapshot import (
+    SessionSnapshot,
+    desired_snapshot,
+    fingerprint_identity,
+)
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
+from mux.testing.drivers.anthropic.ma_models import ma_model_config
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 NOW = datetime(2026, 9, 13, 12, 0, 0, tzinfo=UTC)
 
@@ -807,3 +819,45 @@ def test_an_unheld_snapshot_keeps_the_form_and_fingerprint_it_was_recorded_with(
     assert fingerprint_identity(unheld) != fingerprint_identity(
         make_snapshot(mcp_hold="slack:C-SYN-1:client")
     )
+
+
+async def test_a_managed_agents_session_is_reused_across_the_records_seam() -> None:
+    """An agent read with and without the records seam gives one snapshot, so a stored session lives."""
+    tenant = "00000000-0000-0000-0000-0000000000a1"
+    agent = ma_agent(
+        id="ag_stored",
+        name="stored",
+        model=ma_model_config("claude-sonnet-4-6", speed="standard"),
+        metadata={MA_METADATA_KEY_TENANT: tenant, MA_METADATA_KEY_NAME: "stored"},
+    )
+    router = MARouter()
+    router.add_agent(agent)
+    client = build_fake_anthropic(router.dispatch)
+    scope = resource_scope(tenant_id=tenant)
+
+    def snapshot_of(read: Any) -> SessionSnapshot:
+        return desired_snapshot(
+            read,
+            hidden_mcp_server_names=frozenset(),
+            environment_id="env_baseline",
+            env_sha256=None,
+            repo_url=None,
+            repo_branch=None,
+            memory_store_id=None,
+            vault_id=None,
+            tool_safety=OPEN_TOOL_SAFETY,
+        )
+
+    before = await retrieve_agent(client, "ag_stored", scope=scope)
+    after = await retrieve_agent(client, "ag_stored", scope=scope, records=async_sessionmaker())
+    assert after.model_dump() == before.model_dump(), (
+        "an Anthropic id reads the same through records"
+    )
+    recorded, desired = snapshot_of(before), snapshot_of(after)
+    assert fingerprint_identity(recorded) == fingerprint_identity(desired), (
+        "the records seam must not move the identity a stored session was recorded with"
+    )
+    decision = decide_session_compatibility(
+        recorded=recorded, desired=desired, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
+    )
+    assert decision == ReuseAsIs(), "the stored session is reused untouched after the seam"

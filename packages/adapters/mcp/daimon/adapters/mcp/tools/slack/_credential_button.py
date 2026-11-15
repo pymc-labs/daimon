@@ -47,6 +47,7 @@ from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.posted_controls import (
     CardKind,
     CardState,
+    PostedCard,
     RefusalReason,
     build_card_blocks,
     build_posted_card,
@@ -220,3 +221,34 @@ async def edit_card_replaced(
             kind=row.kind,
             error=str(err.response.get("error", "slack_api_error")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # slack_sdk response is dict-like
         )
+
+
+async def post_slack_control_card(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    channel_id: str,
+    thread_ts: str | None,
+    card: PostedCard,
+    origin: Place,
+) -> str:
+    """Post a call or switch card after the credential card's checks. Returns its ts."""
+    requester_id = _require_slack_identity(auth)
+    client = await slack_web_client(runtime, team_id=_require_team_id(auth))
+    try:
+        info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]
+        channel: dict[str, Any] = dict(info.get("channel") or {})  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+        await check_channel_access(
+            client, channel=channel, user_id=requester_id, allow_own_im=True, is_client=auth.client
+        )
+        await require_channel_writable(runtime, auth, channel_id=channel_id, origin=origin)
+        sent = await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text=card_notification_text(card),
+            blocks=build_card_blocks(card),
+        )
+    except SlackApiError as err:
+        code = str(err.response.get("error", "slack_api_error"))  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # slack_sdk response is dict-like
+        raise ToolError(f"posting to the channel failed ({code})") from err
+    return str(sent.get("ts") or "")  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]

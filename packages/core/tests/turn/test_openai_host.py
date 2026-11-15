@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
 import pytest
@@ -563,7 +563,8 @@ async def test_actual_postgres_pending_then_measured_settlement(composed, monkey
     assert await store.pending_outbox() == []
 
 
-async def test_foreign_plan_and_changed_plan_refuse_before_new_session(composed):
+async def test_changed_plan_replaces_and_foreign_plan_refuses(composed):
+    """A changed plan replaces the bound session; a foreign plan sends nothing."""
     request, wire, store, _, runtime = composed
     await prepare_openai(request)
 
@@ -575,10 +576,12 @@ async def test_foreign_plan_and_changed_plan_refuse_before_new_session(composed)
         request,
         deps=replace(request.deps, turn_runtimes={PROFILE: replace(runtime, session_plan=changed)}),
     )
+    replaced = await prepare_openai(next_request)
+    assert replaced.continuity.state in ("replaced", "replaced_after_loss"), (
+        "a changed plan replaces the session instead of losing the thread"
+    )
+    assert replaced.continuity.state == "replaced", "the old conversation was readable"
     count = len(wire.requests)
-    with pytest.raises(ContinuityLost):
-        await prepare_openai(next_request)
-    assert len(wire.requests) == count
 
     async def foreign(req):
         spec = await runtime.session_plan(req)
@@ -872,11 +875,7 @@ async def test_origin_approval_has_separate_claim_and_native_response(composed):
 @pytest.mark.parametrize(
     ("policy", "value"),
     [
-        ("memory_read_only", True),
-        ("source_sealed", True),
-        ("asks_before_publishing", True),
         ("daimon_rules_need_driver", True),
-        ("hold", TurnHold(platform="slack", channel_id="C-SYN-1", client=True)),
     ],
 )
 async def test_unimplemented_restricted_policy_refuses_before_transport(composed, policy, value):
@@ -892,6 +891,25 @@ async def test_unimplemented_restricted_policy_refuses_before_transport(composed
         assert isinstance(refused.value.__cause__, UnsupportedCapability)
         assert refused.value.__cause__.missing == ("daimon_tool_rules",)
     assert wire.requests == []
+
+
+@pytest.mark.parametrize("composed", ["postgres"], indirect=True)
+@pytest.mark.parametrize(
+    ("policy", "value"),
+    [
+        ("memory_read_only", True),
+        ("hold", TurnHold(platform="slack", channel_id="C-SYN-1", client=True)),
+        ("source_sealed", True),
+        ("origin_seal_ids", frozenset({"C-SYN-1"})),
+        ("slack_turn_context_id", UUID("00000000-0000-4000-8000-000000000001")),
+    ],
+)
+async def test_held_and_read_only_turns_prepare(composed, policy, value):
+    """Held, sealed and Slack-context turns run on a per-turn credential carrying them."""
+    request, *_ = composed
+    request = replace(request, admission=replace(request.admission, **{policy: value}))
+    prepared = await prepare_openai(request)
+    assert prepared.session_ref is not None, f"a {policy} turn prepares its session"
 
 
 @pytest.mark.parametrize("missing_runtime", [True, False])
@@ -912,7 +930,7 @@ async def test_configured_channel_refuses_unavailable_runtime_before_io(composed
     admission = (
         request.admission
         if missing_runtime
-        else replace(request.admission, asks_before_publishing=True)
+        else replace(request.admission, daimon_rules_need_driver=True)
     )
     with pytest.raises(AdmissionDenied) as refused:
         await bind_session_impl(
@@ -1322,7 +1340,9 @@ async def prechange_controls(composed, request):
         "container_size": "small",
         "spend_limit_usd_cents": cap,
     }
-    digest = request_digest({"spec": spec.model_dump(mode="json"), "controls": controls})
+    # The spec as persisted then, too: per-session `skills` came later as an additive field.
+    persisted_spec = spec.model_dump(mode="json", exclude={"skills"})
+    digest = request_digest({"spec": persisted_spec, "controls": controls})
     key = "openai:prepare:" + str(uuid5(NAMESPACE_URL, slot.model_dump_json()))
     await store.put_config_revision(REVISION)
     return application, wire, store, runtime, spec, slot, digest, key
@@ -1427,3 +1447,61 @@ async def test_existing_positional_runtime_constructor_keeps_billing_arguments(c
     assert retained.price is runtime.price
     assert retained.infrastructure is runtime.infrastructure
     assert retained.mcp_secrets is None
+
+
+async def test_a_shared_thread_binds_once_and_a_second_caller_continues_it(composed):
+    request, wire, store, _, runtime = composed
+    owner = uuid5(NAMESPACE_URL, "shared-owner-fixture")
+    other = uuid5(NAMESPACE_URL, "second-caller")
+
+    async def plan(prepared):
+        return SessionSpec(
+            agent=ResourceRef(
+                id="native-agent",
+                kind="agent",
+                provider="openai",
+                account_scope_id="project",
+                tenant_id=prepared.scope.tenant_id,
+                account_id=prepared.scope.account_id,
+            ),
+            agent_revision=Revision(local=0),
+            config_revision=REVISION.local,
+        )
+
+    shared_runtime = replace(
+        runtime,
+        session_plan=plan,
+        authorization=lambda scope, kind, id_: scope.tenant_id == SCOPE.tenant_id,
+        controls=runtime.controls.model_copy(update={"mcp_enabled": False}),
+    )
+    deps = replace(request.deps, turn_runtimes={PROFILE: shared_runtime})
+
+    def caller(account):
+        return replace(
+            request,
+            deps=deps,
+            admission=replace(request.admission, account_id=account, shared_owner=owner),
+            scope=SCOPE.model_copy(update={"account_id": str(account)}),
+            session_account_id=owner,
+        )
+
+    first = await prepare_openai(caller(ACCOUNT))
+    second = await prepare_openai(caller(other))
+    assert first.session_ref.id == second.session_ref.id and second.reused
+    assert second.session_ref.account_id == str(other)
+    thread = ThreadRef(channel=REVISION.channel, thread_id="thread")
+    binding = await store.get_binding(Slot(thread=thread, account_id=None))
+    assert binding.id == str(owner) and binding.legacy_account_id is None
+    assert "daimon_chat_session_id" not in binding.native_refs
+    assert await store.get_binding(Slot(thread=thread, account_id=SCOPE.account_id)) is None
+    assert len([r for r in wire.requests if r.method == "POST"]) == 1
+    # A shared turn mints no per-caller credential. An agent copy runs as the
+    # thread owner: a caller's own scope never reaches the owner's session.
+    assert first._finalize is None
+    agent_origin = caller(other)
+    agent_origin = replace(
+        agent_origin,
+        admission=replace(agent_origin.admission, backend_revision_origin="agent"),
+    )
+    with pytest.raises(ScopeViolation):
+        await prepare_openai(agent_origin)

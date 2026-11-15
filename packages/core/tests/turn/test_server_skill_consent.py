@@ -15,6 +15,7 @@ from daimon.core.server_skills.sync import NeedsReconfirm
 from daimon.core.turn import runtime_manifest
 from daimon.core.turn.runtime_manifest import source_preservation_pin
 from mux.contracts.ids import Revision, SkillRef
+from mux.contracts.resources import ResourceBinding
 
 from ..test_agent_backend import enable
 from ..test_agent_backend import owned as owned
@@ -32,13 +33,27 @@ def _with_skill(source):
     )
 
 
-@pytest.fixture(params=["openai", "gemini"])
-async def consented(request, owned):
-    """An agent on another provider whose owner accepted its declared drops."""
+async def _consent(backend, owned, *, before_readdress=False):
+    """An agent on `backend` whose owner accepted its declared drops.
+
+    `before_readdress` stores the consent as an earlier release did: pinned to the
+    source with the consenter's own caller credential address, on a source that has one.
+    """
     _, agent, actor, sessions = owned
     source = _with_skill(captured_source()).model_copy(
         update={"tenant_id": agent.tenant_id, "agent_id": agent.agent_id}
     )
+    if before_readdress:
+        reference = (
+            f"caller-mcp:{source.tenant_id}:{source.resource_scope.account_id}:{source.agent_id}"
+        )
+        source = source.model_copy(
+            update={
+                "resource_requirements": (
+                    ResourceBinding(id=reference, kind="credential", credential_ref=reference),
+                )
+            }
+        )
     captured = [source]
 
     async def capture(_actual):
@@ -46,16 +61,28 @@ async def consented(request, owned):
 
     service = AgentBackendService(sessions, enabled=True, capture_source=capture)
     await enable(service, agent, actor)
-    preview = await service.preview(agent, request.param)
-    revision = await service.set_backend(
-        agent,
-        request.param,
-        0,
-        actor,
-        accepted_drops=preview.declared_drops,
-        expected_preview_digest=preview.digest,
-    )
+    with pytest.MonkeyPatch.context() as patch:
+        if before_readdress:
+            current = runtime_manifest.source_preservation_pin
+            patch.setattr(
+                runtime_manifest,
+                "source_preservation_pin",
+                lambda source, *, readdress=True: current(source, readdress=False),
+            )
+        preview = await service.preview(agent, backend)
+        revision = await service.set_backend(
+            agent,
+            backend,
+            0,
+            actor,
+            accepted_drops=preview.declared_drops,
+            expected_preview_digest=preview.digest,
+        )
     assert revision.drop_consent is not None, "the switch records a consent"
+    if before_readdress:
+        assert revision.drop_consent.source_pin != source_preservation_pin(source), (
+            "the stored pin predates the readdressed formula"
+        )
 
     async def renewer(_mirror):
         return Renewer(backends=service, account_id=actor.account_id)
@@ -65,6 +92,18 @@ async def consented(request, owned):
 
     keeper = ConsentKeeper(sessionmaker=sessions, renewer=renewer, load=load)
     return keeper, service, agent, actor, captured, revision
+
+
+@pytest.fixture(params=["openai", "gemini"])
+async def consented(request, owned):
+    """An agent on another provider whose owner accepted its declared drops."""
+    return await _consent(request.param, owned)
+
+
+@pytest.fixture(params=["openai", "gemini"])
+async def consented_before_readdress(request, owned):
+    """The same, with a consent stored before the caller credential was readdressed."""
+    return await _consent(request.param, owned, before_readdress=True)
 
 
 def _repin(captured):
@@ -120,13 +159,32 @@ async def test_same_drops_renew_the_consent_and_audit_it(consented):
         assert part in renewal.reason, f"the audit names {part}"
 
 
+async def test_a_consent_stored_before_the_readdress_still_renews(consented_before_readdress):
+    """An owner who confirmed under the older pin is not asked again after a repin."""
+    keeper, service, agent, _, captured, revision = consented_before_readdress
+    old_pin = revision.drop_consent.source_pin
+    assert await keeper.covers(MIRROR, "agent"), "the older pin still vouches for its source"
+    checked = await keeper.check(MIRROR, "agent", "2")
+    assert checked is not None and checked.revision == revision, "no NeedsReconfirm"
+
+    _repin(captured)
+    await keeper.renew(MIRROR, "agent", checked)
+
+    current = await service.current(agent)
+    assert current is not None and current.local == revision.local + 1, "renewed as a revision"
+    assert current.drop_consent.source_pin == source_preservation_pin(captured[0]) != old_pin, (
+        "the renewal stores the new pin"
+    )
+    assert await keeper.covers(MIRROR, "agent"), "the new pin covers the repinned source"
+
+
 async def test_different_drops_hold_the_agent_untouched(consented, monkeypatch):
     """An update that would change the drops is never applied for the owner."""
     keeper, service, agent, _, _, revision = consented
     real = runtime_manifest.preview_source_drops
 
-    def drops_memory_at_v2(source, model):
-        spec = real(source, model)
+    def drops_memory_at_v2(source, model, *, effort=None):
+        spec = real(source, model, effort=effort)
         if any(s.version == "2" for s in source.effective_spec.skills or ()):
             return spec.model_copy(update={"declared_drops": (*spec.declared_drops, "memory")})
         return spec
@@ -156,7 +214,9 @@ async def test_drops_that_change_during_the_repin_refuse_the_renewal(consented, 
     monkeypatch.setattr(
         runtime_manifest,
         "preview_source_drops",
-        lambda s, m: real(s, m).model_copy(update={"declared_drops": ("memory",)}),
+        lambda s, m, *, effort=None: real(s, m, effort=effort).model_copy(
+            update={"declared_drops": ("memory",)}
+        ),
     )
     _repin(captured)
     with pytest.raises(NeedsReconfirm):

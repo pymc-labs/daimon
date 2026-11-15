@@ -280,7 +280,7 @@ async def _plan_phase(
         for us in us_rows:
             user_skills_by_agent.setdefault(us.agent_name, []).append(us.name)
 
-        agents = await list_agents_by_tenant(client, tenant_id=tenant_id)
+        agents = await list_agents_by_tenant(client, tenant_id=tenant_id, records=sessionmaker)
         # Collect legacy skill ids pinned by this tenant's agents (by id, never skills.list)
         # skill_id -> list of agent names that pin it
         pinned: dict[str, list[str]] = {}
@@ -387,7 +387,7 @@ async def _apply_phase(
         legacy_tenants[row.skill_id] = tenant_id
 
         # Re-pin: for each pinning agent, swap legacy skill id for new id
-        agents = await list_agents_by_tenant(client, tenant_id=tenant_id)
+        agents = await list_agents_by_tenant(client, tenant_id=tenant_id, records=sessionmaker)
         for agent in agents:
             pinned_ids = [s.skill_id for s in agent.skills if s.type == "custom"]
             if row.skill_id not in pinned_ids:
@@ -401,7 +401,10 @@ async def _apply_phase(
                     new_skills.append(s.model_dump(mode="json"))
             # Retrieve fresh version before update (Pitfall 3 / rekey pattern)
             fresh = await retrieve_agent(
-                client, agent.id, scope=resource_scope(tenant_id=str(tenant_id))
+                client,
+                agent.id,
+                scope=resource_scope(tenant_id=str(tenant_id)),
+                records=sessionmaker,
             )
             try:
                 await update_agent(
@@ -410,6 +413,7 @@ async def _apply_phase(
                     version=fresh.version,
                     payload={"skills": new_skills},
                     scope=resource_scope(tenant_id=str(tenant_id)),
+                    records=sessionmaker,
                 )
             except Exception as exc:  # per-agent error; run continues
                 _log.warning(

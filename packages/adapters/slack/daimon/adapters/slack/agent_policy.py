@@ -190,7 +190,7 @@ async def refuse_unless_allowed(
         return False
 
     agent = await find_agent_by_derived_uuid(
-        runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id
+        runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id, records=runtime.sessionmaker
     )
     if agent is None:
         log.warning(
@@ -276,7 +276,7 @@ async def refuse_unless_allowed_for_agent_name(
 
     if agent is None:
         agent = await find_agent_by_daimon_tag(
-            runtime.anthropic, tenant_id=tenant_id, name=agent_name
+            runtime.anthropic, tenant_id=tenant_id, name=agent_name, records=runtime.sessionmaker
         )
     facts = await gather_target_facts(
         runtime,
@@ -323,7 +323,7 @@ async def refuse_unless_pin_allows(
         if agent is not None:
             return agent
         return await find_agent_by_daimon_tag(
-            runtime.anthropic, tenant_id=tenant_id, name=agent_name
+            runtime.anthropic, tenant_id=tenant_id, name=agent_name, records=runtime.sessionmaker
         )
 
     async with runtime.sessionmaker() as session:

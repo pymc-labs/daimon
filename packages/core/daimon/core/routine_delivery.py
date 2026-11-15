@@ -499,7 +499,9 @@ async def resolve_routine_identity(
     if not identity_enabled_for(settings, platform, workspace_id):
         return plain
     try:
-        agent = await find_agent_by_daimon_tag(client, tenant_id=row.tenant_id, name=row.agent_name)
+        agent = await find_agent_by_daimon_tag(
+            client, tenant_id=row.tenant_id, name=row.agent_name, records=sessionmaker
+        )
         async with sessionmaker.begin() as session:
             return await resolve_agent_identity(
                 session,

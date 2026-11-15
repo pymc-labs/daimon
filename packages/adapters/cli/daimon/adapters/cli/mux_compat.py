@@ -14,6 +14,7 @@ from daimon.core.mux_compat import environment_spec, legacy_call, sdk_environmen
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic import ResourceAuthorization
 from mux.drivers.anthropic import create_environment_ignored as native_create_environment_ignored
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 async def create_environment_ignored(
@@ -28,10 +29,17 @@ async def create_environment_ignored(
 
 
 async def retrieve_environment(
-    client: AsyncAnthropic, environment_id: str, *, scope: Scope
+    client: AsyncAnthropic,
+    environment_id: str,
+    *,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaEnvironment:
     backend = managed_agents(
-        client, scope=scope, resources=frozenset({("environment", environment_id)})
+        client,
+        records=records,
+        scope=scope,
+        resources=frozenset({("environment", environment_id)}),
     )
     return sdk_environment(
         await legacy_call(
@@ -42,9 +50,18 @@ async def retrieve_environment(
     )
 
 
-async def delete_environment(client: AsyncAnthropic, environment_id: str, *, scope: Scope) -> None:
+async def delete_environment(
+    client: AsyncAnthropic,
+    environment_id: str,
+    *,
+    scope: Scope,
+    records: async_sessionmaker[AsyncSession] | None = None,
+) -> None:
     backend = managed_agents(
-        client, scope=scope, resources=frozenset({("environment", environment_id)})
+        client,
+        records=records,
+        scope=scope,
+        resources=frozenset({("environment", environment_id)}),
     )
     await legacy_call(
         backend.environments.delete(

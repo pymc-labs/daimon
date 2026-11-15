@@ -36,7 +36,7 @@ Where each feature can be set, and its default.
 | Platform prompt | `platform_prompt` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always Off on OpenAI |
 | Platform skills | `platform_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
 | Agent skills | `agent_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always On on Gemini, OpenAI |
-| Channel skills | `channel_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
+| Channel skills | `channel_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Thread participation | `participation` | Chat | Off | ✓ | ✓ |  | ✓ | ✓ | Only Discord, Teams |
 | Progress plans | `progress_plans` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Cost footer | `cost_footer` | Chat | Shown |  | ✓ |  | ✓ | ✓ |  |
@@ -46,11 +46,12 @@ Where each feature can be set, and its default.
 | Table images | `table_rendering` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ | Only Discord, Slack; Off by default on Slack |
 | Budget notices | `budget_notices` | Chat | On | ✓ | ✓ |  | ✓ |  |  |
 | Vote buttons | `message_feedback` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Other providers per conversation | `thread_providers` | Chat | Off | ✓ | ✓ | ✓ |  |  |  |
 | Repository memory | `repo_memory` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Context provider | `context_provider` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
-| Personal memory | `memory_personal` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always Off on Gemini, OpenAI |
-| Shared memory | `memory_shared` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always On on Gemini, OpenAI |
-| Channel memory | `memory_channel` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
+| Personal memory | `memory_personal` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
+| Shared memory | `memory_shared` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon; Always On on Gemini, OpenAI |
+| Channel memory | `memory_channel` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Private channel messages | `private_channel_messages` | Capability | On | ✓ |  |  |  |  | Needs setup by whoever runs Daimon; Only Teams |
 | Direct messages | `direct_messages` | Capability | Off | ✓ | ✓ |  |  |  | Only Discord, Slack |
 | Web app: chat | `web.chat` | Capability | On | ✓ | ✓ |  |  |  |  |
@@ -81,6 +82,8 @@ Where each feature can be set, and its default.
 | Approvals | `approvals` | Guardrail | Ask |  | ✓ |  | ✓ | ✓ |  |
 | Read-only memory in direct messages | `dm_memory_read_only` | Guardrail | Writable | ✓ | ✓ |  |  |  | Only Discord, Slack |
 | Tool safety | `tool_safety` | Guardrail | On | ✓ |  |  |  |  |  |
+| Approve cards for OpenAI and Gemini | `host_call_gate` | Guardrail | On | ✓ |  |  |  |  | Only Discord, Slack, Teams, Web |
+| Connectors on OpenAI and Gemini | `mcp_connector_relay` | Guardrail | On | ✓ |  |  |  |  | Only Discord, Slack, Teams, Web |
 | Reach check | `reach_budget` | Guardrail | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Built-in tools in routines | `unattended_capabilities` | Guardrail | Allowed | ✓ | ✓ | ✓ |  |  |  |
 | Routines must say where they post | `require_routine_destination` | Guardrail | Optional | ✓ | ✓ |  |  |  |  |
@@ -390,7 +393,7 @@ The skills listed on the agent. Off leaves them out of new conversations; the ag
 
 ## Channel skills
 
-The skills added to a channel. They need the read tool, so they are off wherever it is. A conversation keeps what it started with until /new. Claude agents only.
+The skills added to a channel. They need the read tool, so they are off wherever it is. A conversation keeps what it started with until /new.
 
 | | |
 | --- | --- |
@@ -399,12 +402,10 @@ The skills added to a channel. They need the read tool, so they are off wherever
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Not available |
-| Levels on OpenAI | Not available |
 
 ## Personal memory
 
-Each person's own memory with the agent, in conversations only they can read. On never adds it anywhere else. A conversation keeps what it started with until /new. Off for Gemini and OpenAI agents.
+Each person's own memory with the agent, in conversations only they can read. On never adds it anywhere else. A conversation keeps what it started with until /new.
 
 | | |
 | --- | --- |
@@ -428,7 +429,7 @@ The agent's memory shared by everyone who talks to it. A conversation keeps what
 
 ## Channel memory
 
-The memory a restricted channel keeps for itself in place of the shared one. Off leaves such a channel with no memory at all. A conversation keeps what it started with until /new. Claude agents only.
+The memory a restricted channel keeps for itself in place of the shared one. Off leaves such a channel with no memory at all. A conversation keeps what it started with until /new.
 
 | | |
 | --- | --- |
@@ -437,8 +438,6 @@ The memory a restricted channel keeps for itself in place of the shared one. Off
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Off above is a ceiling |
-| Levels on Gemini | Not available |
-| Levels on OpenAI | Not available |
 
 ## Thread titles
 
@@ -722,6 +721,18 @@ People can connect a Microsoft account and the agent can search, read, write and
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Off above is a ceiling |
 
+## Other providers per conversation
+
+Anyone who can change a conversation's model may pick an OpenAI or Gemini model for it. Off, only the agent's owner or an admin can.
+
+| | |
+| --- | --- |
+| Key | `thread_providers` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace, Agent |
+| Combines | Off above is a ceiling |
+
 ## Ask a person
 
 Answers offer a way to ask the Daimon team for help, which posts the request in the support channel. Off removes the button and the form. Whoever runs Daimon sets the channel and each person's credits.
@@ -872,6 +883,30 @@ A change through a connected tool waits for the person to press Approve. In a ro
 | Levels | Deployment |
 | Combines | Stricter wins |
 | Deprecated | `DAIMON_TOOL_SAFETY__ENABLED` |
+
+## Approve cards for OpenAI and Gemini
+
+On an OpenAI or Gemini agent, a tool that needs approval posts an Approve card and runs once the person presses it. Off refuses those tools there.
+
+| | |
+| --- | --- |
+| Key | `host_call_gate` |
+| Values | `off` (Off), `on` (On) |
+| Default | `on` |
+| Levels | Deployment |
+| Combines | Stricter wins |
+
+## Connectors on OpenAI and Gemini
+
+An agent's own connectors work on OpenAI and Gemini agents: Daimon calls them for the agent with the person's sign-in. Off leaves them out there.
+
+| | |
+| --- | --- |
+| Key | `mcp_connector_relay` |
+| Values | `off` (Off), `on` (On) |
+| Default | `on` |
+| Levels | Deployment |
+| Combines | Stricter wins |
 
 ## Reach check
 

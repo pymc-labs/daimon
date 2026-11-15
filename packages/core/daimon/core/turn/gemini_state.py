@@ -35,6 +35,7 @@ from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini import ATTEMPT_MODELS, FlashAttempt, Records
+from mux.state.lease import Slot
 from pydantic import BaseModel, JsonValue, TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -455,10 +456,17 @@ class PostgresGeminiStorage(_GeminiStorage):
     """Full Records transactions on the existing application state database."""
 
     def __init__(
-        self, sessions: async_sessionmaker[AsyncSession], *, scope: Scope, project: str
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        *,
+        scope: Scope,
+        project: str,
+        shared_slot: Slot | None = None,
     ) -> None:
         super().__init__(
-            PostgresPayloadDatabase(sessions, scope=scope, project=project, kind="records")
+            PostgresPayloadDatabase(
+                sessions, scope=scope, project=project, kind="records", shared_slot=shared_slot
+            )
         )
 
 
@@ -489,9 +497,12 @@ class PostgresFlashAccounting(_FlashAccounting):
         hold_usd: Decimal,
         cap_usd: Decimal,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        shared_slot: Slot | None = None,
     ) -> None:
         super().__init__(
-            PostgresPayloadDatabase(sessions, scope=scope, project=project, kind="holds"),
+            PostgresPayloadDatabase(
+                sessions, scope=scope, project=project, kind="holds", shared_slot=shared_slot
+            ),
             hold_usd=hold_usd,
             cap_usd=cap_usd,
             now=now,

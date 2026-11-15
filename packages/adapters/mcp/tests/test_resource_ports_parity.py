@@ -706,6 +706,7 @@ async def test_session_card_gate_keeps_one_read_and_refusal_copy(
         thread_id="thread",
         responder_ma_agent_id="agent",
         responder_name="agent",
+        attended=True,
         configuration_target_ma_agent_id=None,
         configuration_target_name=None,
         role=Role.USER,

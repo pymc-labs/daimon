@@ -276,7 +276,9 @@ def _widens(before: tuple[str, ...] | None, after: tuple[str, ...] | None) -> bo
 
 
 async def _has_repos(runtime: McpRuntime, *, tenant_id: uuid.UUID, agent_name: str) -> bool:
-    agent = await find_agent_by_daimon_tag(runtime.client, tenant_id=tenant_id, name=agent_name)
+    agent = await find_agent_by_daimon_tag(
+        runtime.client, tenant_id=tenant_id, name=agent_name, records=runtime.session_factory
+    )
     if agent is None:
         return False
     async with runtime.session_factory() as session:

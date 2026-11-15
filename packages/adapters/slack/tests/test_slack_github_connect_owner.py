@@ -58,7 +58,9 @@ async def _run(
     )
     agents = [_AGENT, _OTHER]
 
-    async def live(_client: object, *, tenant_id: uuid.UUID, agent_id: uuid.UUID) -> object | None:
+    async def live(
+        _client: object, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, records: object = None
+    ) -> object | None:
         for row in agents:
             if derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=row.id) == agent_id:
                 return SimpleNamespace(id=row.id, name=row.name, metadata={})

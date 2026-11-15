@@ -16,6 +16,7 @@ from typing import Literal
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.adapters.web.control_cards import show_card
 from daimon.adapters.web.lifecycle import WebTurnLifecycle
 from daimon.core.agent_ownership import owns_agent
 from daimon.core.agent_pins import FormPinRefused, request_pin_refusal
@@ -107,20 +108,8 @@ class WebCredentialCards:
             return
         if thread_id is None:
             return
-        card = card_for(row)
-        lifecycle = self._lifecycle_of(thread_id)
-        if lifecycle is not None and not lifecycle.finished:
-            await lifecycle.raise_card(card)
-            return
-        async with self._sessionmaker.begin() as session:
-            reply = await chat_store.get_last_reply(session, thread_id=thread_id)
-            if reply is not None and reply.blocks.card is None:
-                await chat_store.update_blocks(
-                    session,
-                    message_id=reply.id,
-                    blocks=reply.blocks.model_copy(update={"card": card}),
-                )
-        log.info("web.credential_card.raised_after_turn")
+        await show_card(self._sessionmaker, self._lifecycle_of, thread_id, card_for(row))
+        log.info("web.credential_card.raised")
 
     async def answer(
         self,

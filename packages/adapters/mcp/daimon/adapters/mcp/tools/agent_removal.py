@@ -157,6 +157,7 @@ async def _detach_mcp_server_impl(
             version=fresh.version,
             payload={"mcp_servers": new_mcp_servers, "tools": new_tools},
             scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+            records=runtime.session_factory,
         )
 
     try:
@@ -165,6 +166,7 @@ async def _detach_mcp_server_impl(
             agent.id,
             _apply,
             scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+            records=runtime.session_factory,
         )
     except anthropic.ConflictError as exc:
         raise ToolError("the agent was modified concurrently — please retry the operation") from exc
@@ -255,6 +257,7 @@ async def _remove_skill_impl(
             version=fresh.version,
             payload={"skills": new_skills},
             scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+            records=runtime.session_factory,
         )
 
     try:
@@ -263,6 +266,7 @@ async def _remove_skill_impl(
             agent.id,
             _apply,
             scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+            records=runtime.session_factory,
         )
     except anthropic.ConflictError as exc:
         raise ToolError("the agent was modified concurrently — please retry the operation") from exc

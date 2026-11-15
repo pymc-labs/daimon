@@ -136,7 +136,9 @@ async def resolve_setup_agent(
             "Pass expected_ma_agent_id from the selected target or list_agents before acting. "
             "Which current agent should I configure? Nothing was changed."
         )
-    agents = await find_agents_by_daimon_tag(runtime.client, tenant_id=auth.tenant_id, name=name)
+    agents = await find_agents_by_daimon_tag(
+        runtime.client, tenant_id=auth.tenant_id, name=name, records=runtime.session_factory
+    )
     caller = await (load_caller_view if discovery else load_isolation_view)(
         runtime,
         auth,
@@ -187,7 +189,9 @@ async def _set_setup_target_impl(
     agent_id: str,
 ) -> TurnOriginRow:
     origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
-    agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    agents = await list_agents_by_tenant(
+        runtime.client, tenant_id=auth.tenant_id, records=runtime.session_factory
+    )
     caller = await load_caller_view(
         runtime,
         auth,

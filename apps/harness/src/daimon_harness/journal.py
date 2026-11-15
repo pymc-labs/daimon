@@ -115,6 +115,16 @@ class Journal:
         self.root.parent.chmod(0o711)
         return parent / name, 10_000 + ordinal
 
+    def existing_sandbox(self, session_id: str) -> tuple[Path, int] | None:
+        """The sandbox of a session that has one; never allocates an identity."""
+        identifier(session_id)
+        row = self.db.execute(
+            "SELECT ordinal FROM sandboxes WHERE session_id=?", (session_id,)
+        ).fetchone()
+        name = hashlib.sha256(session_id.encode()).hexdigest()[:32]
+        path = self.root.parent / "sessions" / name
+        return (path, 10_000 + row[0]) if row and path.is_dir() else None
+
     def configure_single_session(self) -> None:
         known = {
             row[0]

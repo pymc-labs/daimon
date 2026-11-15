@@ -58,8 +58,11 @@ McpTokenProbe = Callable[[str, str], Awaitable[McpProbe]]
 
 
 async def probe_bearer_token(mcp_server_url: str, bearer_token: str) -> McpProbe:
-    """The production `McpTokenProbe`: one short-lived client per check."""
-    async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as http:
+    """The production `McpTokenProbe`: one short-lived pinned client per check."""
+    # Imported here: mcp_tool_call imports this package's urls module.
+    from daimon.core.mcp_tool_call import pinned_http_client
+
+    async with pinned_http_client() as http:
         return await probe_mcp_server(
             http, mcp_server_url=mcp_server_url, bearer_token=bearer_token
         )

@@ -123,7 +123,10 @@ async def run_backfill_agent_names(
         resolved: str
         try:
             agent = await retrieve_agent(
-                rt.anthropic, row.agent_id, scope=resource_scope(tenant_id=str(row.tenant_id))
+                rt.anthropic,
+                row.agent_id,
+                scope=resource_scope(tenant_id=str(row.tenant_id)),
+                records=rt.sessionmaker,
             )
         except APIStatusError as err:
             if err.status_code == 404:
@@ -257,7 +260,9 @@ async def run_create_dm_routine(
         policy, subject=subject, action=Action.ACT_FOR_CREATOR, surface=Surface.ROUTINE
     ):
         raise UserFacingError("The owner is not a verified, allowed tenant member.")
-    agent = await find_agent_by_daimon_tag(rt.anthropic, tenant_id=tenant_id, name=agent_name)
+    agent = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=agent_name, records=rt.sessionmaker
+    )
     if agent is None or not authorize(
         policy,
         subject=subject,

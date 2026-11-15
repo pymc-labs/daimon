@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, cast
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from daimon.core.anthropic_guard import ANTHROPIC_UNCONFIGURED_PLACEHOLDER
 from daimon.core.features.registry import FEATURES, deployment_key, parse_deployment
 from daimon.core.features.removed import without_removed_features, without_removed_fields
 from daimon.core.mcp_server_url import ascii_mcp_url, canonical_mcp_url
@@ -98,15 +99,6 @@ class DatabaseSettings(BaseModel):
             "preparations wait in memory instead of timing out in the DB pool."
         ),
     )
-
-
-ANTHROPIC_UNCONFIGURED_PLACEHOLDER = "sk-ant-unconfigured-openai-only-deployment"
-"""Never a valid credential. `AnthropicSettings.resolved_api_key()` returns
-this when no real key is configured, so every `AsyncAnthropic` client in the
-app can keep its existing non-optional constructor call: an OpenAI-only
-deployment that never exercises the Anthropic/default path never notices,
-and one that accidentally does gets a clean 401 instead of a crash at
-startup or a scattered `Optional` check at every call site."""
 
 
 class AnthropicSettings(BaseModel):

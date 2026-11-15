@@ -56,6 +56,7 @@ async def test_avatar_edit_requires_admin_and_non_builtin_agent(
 ) -> None:
     runtime = SimpleNamespace(
         anthropic=MagicMock(),
+        sessionmaker=None,
         deployment_default=DeploymentDefault(agent_name="Main"),
         settings=SimpleNamespace(agent_identity=SimpleNamespace(enabled=True)),
     )

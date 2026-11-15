@@ -180,7 +180,7 @@ async def test_spec_edit_refuses_a_managed_agent_even_for_an_admin(
         mock.get(_USERS_INFO_PATTERN, payload=_users_info_payload(is_admin=True), repeat=True)  # pyright: ignore[reportUnknownMemberType]
         mock.post(f"{_SLACK_API_BASE}/chat.postEphemeral", payload={"ok": True}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
         runtime = _build_runtime(
-            None, handler=_agent_list_handler(tenant_id=tenant.id, managed=True)
+            db_session_factory, handler=_agent_list_handler(tenant_id=tenant.id, managed=True)
         )
 
         refused = await refuse_unless_allowed_for_agent_name(

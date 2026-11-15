@@ -19,9 +19,18 @@ from daimon.core.purge import purge_account
 from daimon.core.skills.ingest import SkillBundle, bundle_from_files, bundle_from_markdown
 from daimon.core.stores.neutral_catalog import CatalogConflict, PostgresNeutralCatalog
 from daimon.testing.factories import make_account, make_tenant
-from mux.contracts.ids import ModelRef, ResourceRef, Revision, Scope, SkillRef
+from mux.contracts.ids import (
+    ChannelRef,
+    ModelRef,
+    ResourceRef,
+    Revision,
+    Scope,
+    SkillRef,
+    ThreadRef,
+)
 from mux.contracts.resources import Agent, AgentSpec
 from mux.errors import ScopeViolation
+from mux.state.lease import Slot
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -335,3 +344,183 @@ async def test_account_purge_cascades_catalog_data_and_preserves_other_account(
     assert len(await catalog.list_skills(other)) == 1
     with pytest.raises(ScopeViolation):
         await catalog.list_agents(scope)
+
+
+async def test_a_shared_threads_copy_belongs_to_its_owner_and_no_person(setup: Setup) -> None:
+    from daimon.core.shared_threads import shared_owner
+
+    sessions, scope, other, foreign = setup
+    channel = ChannelRef(tenant_id=scope.tenant_id, platform="slack", channel_id="C1")
+    slot = Slot(thread=ThreadRef(channel=channel, thread_id="t1"))
+    owner = scope.model_copy(update={"account_id": str(shared_owner(slot))})
+    shared = PostgresNeutralCatalog(
+        sessions, provider="openai", account_scope_id="workspace", shared_slot=slot
+    )
+    await shared.put_agent(owner, "logical", agent(owner, "openai"), expected_revision=0)
+    assert len(await shared.list_agents(owner)) == 1
+    # A person, another thread's owner or another tenant never reaches it.
+    elsewhere = Slot(thread=ThreadRef(channel=channel, thread_id="t2"))
+    stranger = scope.model_copy(update={"account_id": str(shared_owner(elsewhere))})
+    for caller in (
+        scope,
+        other,
+        stranger,
+        foreign.model_copy(update={"account_id": owner.account_id}),
+    ):
+        with pytest.raises(ScopeViolation):
+            await shared.list_agents(caller)
+    with pytest.raises(ScopeViolation):
+        await store(sessions).list_agents(owner)
+
+
+async def _shared_copy(
+    sessions: async_sessionmaker[AsyncSession],
+    scope: Scope,
+    thread_id: str,
+    catalog_id: str,
+    *,
+    channel_id: str = "C1",
+) -> uuid.UUID:
+    """A shared thread's agent copy and one skill copy, held by the thread's owner."""
+    from daimon.core.shared_threads import shared_owner
+
+    channel = ChannelRef(tenant_id=scope.tenant_id, platform="slack", channel_id=channel_id)
+    slot = Slot(thread=ThreadRef(channel=channel, thread_id=thread_id))
+    owner = shared_owner(slot)
+    owned = scope.model_copy(update={"account_id": str(owner)})
+    catalog = PostgresNeutralCatalog(
+        sessions, provider="openai", account_scope_id="workspace", shared_slot=slot
+    )
+    await catalog.put_agent(owned, catalog_id, agent(owned, "openai"), expected_revision=0)
+    await catalog.put_skill(
+        owned,
+        skill_id=f"skill-{thread_id}",
+        version="v1",
+        agent_name="dev",
+        display_title="dev planning",
+        bundle=bundle_from_markdown(MARKDOWN),
+    )
+    return owner
+
+
+async def _rows(sessions: async_sessionmaker[AsyncSession], owner: uuid.UUID) -> tuple[int, int]:
+    """(agent revisions, skill versions) one owner holds."""
+    async with sessions() as session:
+        agents = await session.scalar(
+            select(func.count())
+            .select_from(NeutralAgentRevision)
+            .where(NeutralAgentRevision.account_id == owner)
+        )
+        skills = await session.scalar(
+            select(func.count())
+            .select_from(NeutralSkillVersion)
+            .where(NeutralSkillVersion.account_id == owner)
+        )
+    return agents or 0, skills or 0
+
+
+async def test_deleting_an_agent_removes_the_copies_shared_threads_hold(setup: Setup) -> None:
+    """Shared owners have no account row, so the agent's deletion must reach them itself."""
+    from daimon.core.stores.neutral_catalog import delete_shared_agent_copies
+
+    sessions, scope, _, _ = setup
+    gone, kept = uuid.uuid4(), uuid.uuid4()
+    held = await _shared_copy(sessions, scope, "t1", f"root:{gone}:1:openai")
+    other = await _shared_copy(sessions, scope, "t2", f"root:{kept}:1:openai")
+    # A person's own copy of the same agent leaves with the person, not with this call.
+    await store(sessions).put_agent(
+        scope, f"root:{gone}:1:openai", agent(scope, "openai"), expected_revision=0
+    )
+    async with sessions() as session, session.begin():
+        await delete_shared_agent_copies(
+            session, tenant_id=uuid.UUID(scope.tenant_id), agent_id=gone
+        )
+    assert await _rows(sessions, held) == (0, 0), "the thread keeps no copy of a deleted agent"
+    assert await _rows(sessions, other) == (1, 1), "another agent's shared copy stays"
+    assert await _rows(sessions, uuid.UUID(scope.account_id)) == (1, 0), "a person's copy stays"
+
+
+async def test_archiving_an_agent_clears_its_shared_copies_through_the_delete_path(
+    setup: Setup,
+) -> None:
+    """The archive flow's reference sweep reaches the shared owner's catalog rows."""
+    from daimon.core.agent_lifecycle import forget_archived_agent
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.testing.ma_models import ma_agent
+
+    sessions, scope, _, _ = setup
+    tenant = uuid.UUID(scope.tenant_id)
+    gone = derive_agent_uuid(tenant_id=tenant, ma_agent_id="ag_doomed")
+    kept = derive_agent_uuid(tenant_id=tenant, ma_agent_id="ag_kept")
+    held = await _shared_copy(sessions, scope, "t1", f"root:{gone}:1:openai")
+    other = await _shared_copy(sessions, scope, "t2", f"root:{kept}:1:openai")
+    await store(sessions).put_agent(
+        scope, f"root:{gone}:1:openai", agent(scope, "openai"), expected_revision=0
+    )
+
+    await forget_archived_agent(
+        sessions,
+        tenant_id=tenant,
+        name="doomed",
+        agent=ma_agent(id="ag_doomed", name="doomed", tenant_id=tenant),
+    )
+
+    assert await _rows(sessions, held) == (0, 0), "the archive flow removes the thread's copies"
+    assert await _rows(sessions, other) == (1, 1), "another agent's shared copy stays"
+    assert await _rows(sessions, uuid.UUID(scope.account_id)) == (1, 0), "a person's copy stays"
+
+
+async def test_deleting_a_thread_removes_its_owners_catalog_rows(setup: Setup) -> None:
+    """A deleted thread's copy of a person's agent is not kept for good."""
+    from daimon.core.stores.thread_agent_bindings import update_lifecycle
+
+    sessions, scope, _, _ = setup
+    tenant = uuid.UUID(scope.tenant_id)
+    deleted = await _shared_copy(sessions, scope, "t1", "root:a:1:openai")
+    other = await _shared_copy(sessions, scope, "t2", "root:a:1:openai")
+    async with sessions() as session, session.begin():
+        await update_lifecycle(
+            session,
+            tenant_id=tenant,
+            platform="slack",
+            parent_channel_id="C1",
+            thread_id="t1",
+            archived=True,
+        )
+    assert await _rows(sessions, deleted) == (1, 1), "an archived thread can come back"
+    async with sessions() as session, session.begin():
+        await update_lifecycle(
+            session,
+            tenant_id=tenant,
+            platform="slack",
+            parent_channel_id="C1",
+            thread_id="t1",
+            deleted=True,
+        )
+    assert await _rows(sessions, deleted) == (0, 0), "the deleted thread's rows are gone"
+    assert await _rows(sessions, other) == (1, 1), "another thread's rows stay"
+
+
+async def test_deleting_a_channel_removes_its_threads_owners_catalog_rows(setup: Setup) -> None:
+    from daimon.core.stores.thread_agent_bindings import create_binding, update_channel_lifecycle
+
+    sessions, scope, _, _ = setup
+    tenant = uuid.UUID(scope.tenant_id)
+    inside = await _shared_copy(sessions, scope, "t1", "root:a:1:openai")
+    elsewhere = await _shared_copy(sessions, scope, "t1", "root:a:1:openai", channel_id="C2")
+    async with sessions() as session, session.begin():
+        await create_binding(
+            session,
+            tenant_id=tenant,
+            platform="slack",
+            parent_channel_id="C1",
+            thread_id="t1",
+            responder_ma_agent_id="agent_1",
+            responder_name="dev",
+            kind="handoff",
+        )
+        await update_channel_lifecycle(
+            session, tenant_id=tenant, platform="slack", parent_channel_id="C1", deleted=True
+        )
+    assert await _rows(sessions, inside) == (0, 0), "the channel's thread loses its copy"
+    assert await _rows(sessions, elsewhere) == (1, 1), "a thread of another channel keeps it"

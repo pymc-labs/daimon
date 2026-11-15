@@ -17,14 +17,15 @@ from decimal import Decimal
 
 import structlog
 from anthropic import APIError, AsyncAnthropic
+from daimon.core.auxiliary_calls import AuxiliaryUnavailable
 from daimon.core.platform_words import scrub_other_platforms
-from daimon.core.pricing import MODEL_PRICING
 from daimon.core.thread_naming import (
-    THREAD_NAMING_MODEL,
     is_generic_thread_name,
     suggest_thread_name,
 )
-from daimon.core.usage_recording import record_thread_naming_usage
+from daimon.core.usage_recording import record_auxiliary_usage
+from mux.contracts.ids import Provider
+from mux.errors import ProviderError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
@@ -43,6 +44,8 @@ async def generate_thread_name(
     max_input_chars: int,
     timeout_seconds: float,
     channel_id: str | None = None,
+    provider: Provider | None = None,
+    agent_id: str | None = None,
 ) -> str:
     """Title from ``message_text``; ``fallback`` on failure, timeout, or a blank or generic answer.
 
@@ -60,30 +63,35 @@ async def generate_thread_name(
     try:
         async with asyncio.timeout(timeout_seconds):
             suggestion = await suggest_thread_name(
-                anthropic, message_text=message_text, max_input_chars=max_input_chars
+                anthropic,
+                message_text=message_text,
+                max_input_chars=max_input_chars,
+                provider=provider,
             )
     except TimeoutError:
         log.warning(
             "thread.naming_timed_out", message_id=message_id, timeout_seconds=timeout_seconds
         )
         return fallback
-    except APIError as exc:
+    except (APIError, ProviderError, AuxiliaryUnavailable) as exc:
         log.warning("thread.naming_failed", message_id=message_id, error=str(exc))
         return fallback
 
-    await record_thread_naming_usage(
+    await record_auxiliary_usage(
+        purpose="thread_naming",
+        provider=suggestion.provider,
         sessionmaker=sessionmaker,
         tenant_id=tenant_id,
         platform_user_id=platform_user_id,
-        model_id=THREAD_NAMING_MODEL,
+        model_id=suggestion.model_id,
         input_tokens=suggestion.usage.input_tokens,
         output_tokens=suggestion.usage.output_tokens,
         cache_read_input_tokens=suggestion.usage.cache_read_input_tokens,
         managed_session_id=f"thread-naming:{message_id}",
         event_id="title",
         markup=markup,
-        pricing=MODEL_PRICING.get(THREAD_NAMING_MODEL),
         channel_id=channel_id,
+        agent_id=agent_id,
     )
 
     if suggestion.name is None:

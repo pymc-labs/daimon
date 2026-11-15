@@ -1,11 +1,14 @@
 import { Plus, X } from "lucide-react"
+import { cn } from "@/lib/utils"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import { AgentAvatar } from "@/components/common"
 import { useAgents, useSetHelpers } from "../api"
-import { Dot, Locked } from "../bits"
+import { Dot, Locked, NotSupported } from "../bits"
+import { NOTHING } from "../unsupported"
 import { Section, type Props } from "./parts"
 
-export function HelpersEditor({ agent, config, ro, update, changed }: Props) {
+export function HelpersEditor({ agent, config, ro, update, changed, unsupported = NOTHING }: Props) {
+  const lost = unsupported.capabilities.has("multiagent")
   const roster = useAgents().data
   const set = useSetHelpers(agent.id)
   // A seeded agent is read-only, but an admin may change its helper list in place.
@@ -25,7 +28,8 @@ export function HelpersEditor({ agent, config, ro, update, changed }: Props) {
             {helpers.map((h) => (
               <div key={h.id} className="group flex h-8 items-center gap-2 rounded-md px-2 text-sm hover:bg-accent">
                 <AgentAvatar src={roster?.find((a) => a.id === h.id)?.avatar} name={h.name} className="size-4 text-[8px]" />
-                <span className="truncate">{h.name}</span>
+                <span className={cn("truncate", lost && "text-muted-foreground")}>{h.name}</span>
+                {lost && <NotSupported />}
                 {changed.has(`helper:${h.id}`) && <Dot />}
                 {editable && (
                   <button onClick={() => edit(helpers.filter((x) => x.id !== h.id))} disabled={set.isPending}
@@ -46,7 +50,7 @@ export function HelpersEditor({ agent, config, ro, update, changed }: Props) {
               <CommandEmpty>No match</CommandEmpty>
               <CommandGroup>
                 {free.map((a) => (
-                  <CommandItem key={a.id} value={`${a.name} ${a.id}`} disabled={set.isPending} onSelect={() => edit([...helpers, { id: a.id, name: a.name }])}>
+                  <CommandItem key={a.id} value={`${a.name} ${a.id}`} disabled={set.isPending || lost} onSelect={() => edit([...helpers, { id: a.id, name: a.name }])}>
                     <Plus />
                     <AgentAvatar src={a.avatar} name={a.name} className="size-4 text-[8px]" />
                     <span className="truncate">{a.name}</span>

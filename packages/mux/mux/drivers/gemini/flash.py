@@ -20,14 +20,14 @@ from mux.drivers.gemini.transport import (
     string,
 )
 from mux.errors import ProviderError
-from mux.profiles.gemini import ARGON_MODEL
+from mux.profiles.gemini import OPT_IN_MODELS
 
 log = logging.getLogger(__name__)
 
 FLASH_PRIMARY = "gemini-3.8-flash"
 FLASH_MODELS = (FLASH_PRIMARY, "gemini-flash-latest", "gemini-3.5-flash-lite")
-# Every model an attempt may name. Argon is only ever its own single attempt.
-ATTEMPT_MODELS = (*FLASH_MODELS, ARGON_MODEL)
+# Every model an attempt may name. An opt-in model is only ever its own single attempt.
+ATTEMPT_MODELS = (*FLASH_MODELS, *OPT_IN_MODELS)
 
 
 @dataclass(frozen=True)
@@ -99,8 +99,8 @@ class FlashTransport:
         native_agent: Agent | None = None,
         primary: str = FLASH_PRIMARY,
     ) -> None:
-        if primary not in (FLASH_PRIMARY, ARGON_MODEL):
-            raise ValueError("an explicit Flash or Argon primary is required")
+        if primary not in (FLASH_PRIMARY, *OPT_IN_MODELS):
+            raise ValueError("an explicit Flash or opt-in primary is required")
         self._primary = primary
         self._native_agent = native_agent
         self.source, self.accounting = source, accounting
@@ -117,16 +117,16 @@ class FlashTransport:
             self._native_agent.spec.model.id if self._native_agent is not None else self._primary
         )
         if (
-            required not in (FLASH_PRIMARY, ARGON_MODEL)
+            required not in (FLASH_PRIMARY, *OPT_IN_MODELS)
             or (request.get("model") if capped else original.get("model")) != required
         ):
             raise ProviderError(
                 "invalid_request", retryable=False, native_code="flash_primary_required"
             )
         models = FLASH_MODELS
-        if required == ARGON_MODEL:
-            # A 503 on Argon is the turn's answer, never a silent switch to Flash.
-            models = (ARGON_MODEL,)
+        if required in OPT_IN_MODELS:
+            # A 503 on an opt-in model is the turn's answer, never a silent switch to Flash.
+            models = (required,)
         if self._native_agent is not None:
             if capped:
                 raise ProviderError(

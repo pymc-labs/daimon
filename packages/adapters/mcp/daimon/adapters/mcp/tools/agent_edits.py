@@ -4,6 +4,7 @@ owners and helpers and save a skill's files. Each calls what the web app's route
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 
 import httpx
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -18,6 +19,7 @@ from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools._web_admin import audit_to, now
 from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
 from daimon.adapters.mcp.tools.agents import (
+    _capture_backend_source,  # pyright: ignore[reportPrivateUsage]
     _edit_actor,  # pyright: ignore[reportPrivateUsage]
     _edit_deps,  # pyright: ignore[reportPrivateUsage]
 )
@@ -28,7 +30,7 @@ from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
 from daimon.core.agent_github import SkillResyncDeps
 from daimon.core.agent_view import AgentConfigDoc, AgentViewDeps, HelperDoc, OwnMcpServer
 from daimon.core.anthropic_guard import anthropic_disabled
-from daimon.core.channel_backend import make_backend_service
+from daimon.core.channel_backend import NO_CAPTURE, make_backend_service
 from daimon.core.defaults.loader import load_skill_descriptions
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -104,8 +106,12 @@ def _web_edit_deps(runtime: McpRuntime) -> AgentEditDeps:
     )
 
 
-def _change_deps(runtime: McpRuntime) -> AgentChangeDeps:
-    """The change service's dependencies, as the web app builds them."""
+def _change_deps(runtime: McpRuntime, auth: AuthIdentity | None = None) -> AgentChangeDeps:
+    """The change service's dependencies, as the web app builds them.
+
+    Only an `auth` can switch an agent's provider: its loss consent is read from the
+    agent's source as that caller. Without one, a switch is refused.
+    """
     settings = runtime.settings
     public_url = settings.mcp.public_url
     base = str(public_url) if public_url is not None else None
@@ -127,7 +133,13 @@ def _change_deps(runtime: McpRuntime) -> AgentChangeDeps:
             fernet=runtime.fernet,
             own_server=own,
         ),
-        backends=make_backend_service(runtime.session_factory, settings.turn),
+        backends=make_backend_service(
+            runtime.session_factory,
+            settings.turn,
+            capture_source=NO_CAPTURE
+            if auth is None
+            else partial(_capture_backend_source, runtime, auth, None),
+        ),
     )
 
 
@@ -141,7 +153,10 @@ async def _revert_impl(
     await require_card(runtime, auth, tool_name="revert_agent", origin_context_id=origin_context_id)
     try:
         written = await agent_changes.revert(
-            _change_deps(runtime), actor=_edit_actor(auth), ma_agent_id=agent_id, version=version
+            _change_deps(runtime, auth),
+            actor=_edit_actor(auth),
+            ma_agent_id=agent_id,
+            version=version,
         )
     except AgentEditError as err:
         raise ToolError(str(err)) from err
@@ -187,7 +202,9 @@ async def _live_agents(runtime: McpRuntime, auth: AuthIdentity) -> list[BetaMana
     if auth.anthropic_disabled or anthropic_disabled():
         async with runtime.session_factory() as session:
             return await list_live_agent_facts(session, tenant_id=auth.tenant_id)
-    return await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    return await list_agents_by_tenant(
+        runtime.client, tenant_id=auth.tenant_id, records=runtime.session_factory
+    )
 
 
 def _agent_named(ref: str, agents: list[BetaManagedAgentsAgent]) -> BetaManagedAgentsAgent:

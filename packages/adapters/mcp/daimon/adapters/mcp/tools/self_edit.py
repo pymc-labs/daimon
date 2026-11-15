@@ -206,7 +206,7 @@ async def _require_member_may_remove(
     the tenant. An agent that no longer resolves fails closed.
     """
     agent = await find_agent_by_derived_uuid(
-        runtime.client, tenant_id=auth.tenant_id, agent_id=agent_id
+        runtime.client, tenant_id=auth.tenant_id, agent_id=agent_id, records=runtime.session_factory
     )
     refusal = ToolError(
         f"Removing {key} needs {admin_noun(auth.platform)}: this agent is shared, and "

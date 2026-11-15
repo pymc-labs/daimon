@@ -60,7 +60,7 @@ from daimon.core.stores.thread_sessions import (
 from mux.contracts.ids import Scope
 from rich.console import Console
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 github_app = typer.Typer(help="GitHub App connection commands.")
 grants_app = typer.Typer(help="Manage live agent GitHub grants.")
@@ -301,10 +301,15 @@ def cleanup_legacy_vault(
 
 
 async def _require_tenant_agent(
-    anthropic: AsyncAnthropic, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, agent_name: str
+    anthropic: AsyncAnthropic,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    agent_name: str,
+    records: async_sessionmaker[AsyncSession],
 ) -> None:
     """Verify both CLI agent arguments against a live MA agent in this tenant."""
-    rows = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+    rows = await list_agents_by_tenant(anthropic, tenant_id=tenant_id, records=records)
     if not any(
         derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(row.id)) == agent_id
         and row.name == agent_name
@@ -560,7 +565,11 @@ def connect_link(
                     base_url=str(settings.anthropic.base_url),
                 ) as anthropic:
                     await _require_tenant_agent(
-                        anthropic, tenant_id=tenant, agent_id=agent, agent_name=agent_name
+                        anthropic,
+                        tenant_id=tenant,
+                        agent_id=agent,
+                        agent_name=agent_name,
+                        records=sessionmaker,
                     )
             async with sessionmaker.begin() as session:
                 account_id = await admin_account_for_platform_user(

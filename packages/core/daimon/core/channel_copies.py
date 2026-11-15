@@ -120,9 +120,16 @@ def archive_refusal(
 
 
 async def _find(
-    client: AsyncAnthropic, *, tenant_id: uuid.UUID, name: str, expected_ma_agent_id: str | None
+    client: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    name: str,
+    expected_ma_agent_id: str | None,
 ) -> BetaManagedAgentsAgent:
-    found = await find_agents_by_daimon_tag(client, tenant_id=tenant_id, name=name)
+    found = await find_agents_by_daimon_tag(
+        client, tenant_id=tenant_id, name=name, records=sessionmaker
+    )
     if not found:
         raise ChannelCopyArchiveRefused("not_found")
     if len(found) > 1 or (expected_ma_agent_id not in (None, found[0].id)):
@@ -148,7 +155,11 @@ async def archive_channel_copy(
     a copy freed from its channel and still running.
     """
     agent = await _find(
-        client, tenant_id=tenant_id, name=name, expected_ma_agent_id=expected_ma_agent_id
+        client,
+        sessionmaker,
+        tenant_id=tenant_id,
+        name=name,
+        expected_ma_agent_id=expected_ma_agent_id,
     )
     names = {n for n in agent_pin_names(agent.name, agent.metadata) if n}
     async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
@@ -168,7 +179,9 @@ async def archive_channel_copy(
         )
         if refusal is not None:
             raise ChannelCopyArchiveRefused(refusal)
-        await archive_agent(client, agent.id, scope=resource_scope(tenant_id=str(tenant_id)))
+        await archive_agent(
+            client, agent.id, scope=resource_scope(tenant_id=str(tenant_id)), records=sessionmaker
+        )
         updated = without_agent_rules(policy, names)
         if updated != policy:
             await set_access_policy(session, tenant_id=tenant_id, policy=updated)

@@ -22,7 +22,7 @@ import json
 import os
 import stat
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from decimal import Decimal
@@ -43,10 +43,11 @@ from daimon.core.authz import (
     build_turn_place,
 )
 from daimon.core.lead_intake_execution import current_intake_execution
-from daimon.core.mcp_hold import HOLD_CLAIM, hold_claim
+from daimon.core.mcp_hold import HOLD_CLAIM, hold_claim, parse_hold_claim
 from daimon.core.mcp_identity import RELAY_CLAIM, RelayBinding
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.permissions import agent_permissions, channel_rule
+from daimon.core.session_seal import SEAL_CLAIM, seal_claim
 from daimon.core.stores.domain import McpTokenPurpose, McpTokenRow, McpTokenSurface
 from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
@@ -114,11 +115,13 @@ async def resolve_agent_mcp_credential(
     now: dt.datetime,
     chat_execution: bool,
     surface: McpTokenSurface | None = None,
+    memory_read_only: bool | None = None,
 ) -> str:
     """Recheck registered caller authority and its exact remote catalogue before exposure.
 
     `surface` requires the credential's registry row to carry it (see
-    `validate_agent_mcp_token`); an OpenAI/Gemini turn requires `provider_turn`."""
+    `validate_agent_mcp_token`); an OpenAI/Gemini turn requires `provider_turn`.
+    `memory_read_only` restamps the turn's origin (`bind_execution_session`)."""
     from daimon.core.mcp_oauth.discovery import list_mcp_tools
 
     token = read_private_credential(path)
@@ -143,47 +146,80 @@ async def resolve_agent_mcp_credential(
         claims = pyjwt.decode(token, secret, algorithms=["HS256"], options={"verify_exp": False})
         return pyjwt.encode({**claims, "chat_session_id": grant}, secret, algorithm="HS256")
     if chat_execution:
-        from daimon.core.ma_identity import derive_agent_uuid
-        from daimon.core.stores.accounts import get_account_with_tenant
-        from daimon.core.stores.turn_origins import bind_origin_session, get_active_origin
-        from daimon.core.turn_origin import current_execution_origin_id
+        token = await bind_execution_session(
+            sessionmaker,
+            token=token,
+            secret=secret,
+            scope=scope,
+            agent_id=agent_id,
+            now=now,
+            memory_read_only=memory_read_only,
+        )
+    return token
 
-        origin_id = current_execution_origin_id.get()
-        if origin_id is not None:
-            # Send-time native runtimes resolve inside the executing turn.
-            # run_prepared_turn exposes execution_origin only inside the acquired
-            # lease; its execution cleanup also revokes this origin-unique grant.
-            # Derive a grant from that trusted context, keeping the SAME registry
-            # owner, expiry and revocation as the validated source credential.
-            async with sessionmaker.begin() as db:
-                identity = await get_account_with_tenant(db, account_id=uuid.UUID(scope.account_id))
-                origin = (
-                    None
-                    if identity is None
-                    else await get_active_origin(
-                        db,
-                        origin_id=origin_id,
-                        tenant_id=uuid.UUID(scope.tenant_id),
-                        account_id=uuid.UUID(scope.account_id),
-                        platform=identity.platform,
-                        now=now,
-                    )
+
+async def bind_execution_session(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    token: str,
+    secret: bytes,
+    scope: Scope,
+    agent_id: uuid.UUID,
+    now: dt.datetime,
+    memory_read_only: bool | None = None,
+    requester_account_id: uuid.UUID | None = None,
+) -> str:
+    """Add the executing turn's origin as `chat_session_id`; unchanged outside a turn.
+
+    `memory_read_only` restamps the origin as MA's own grant does (`turn.run`), so
+    the MCP server reads a sealed or read-only provider turn's memory as read-only.
+    `requester_account_id` marks a shared thread's turn (signed only with the grant).
+    """
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores.accounts import get_account_with_tenant
+    from daimon.core.stores.turn_origins import bind_origin_session, get_active_origin
+    from daimon.core.turn_origin import current_execution_origin_id
+
+    origin_id = current_execution_origin_id.get()
+    if origin_id is not None:
+        # Send-time native runtimes resolve inside the executing turn.
+        # run_prepared_turn exposes execution_origin only inside the acquired
+        # lease; its execution cleanup also revokes this origin-unique grant.
+        # Derive a grant from that trusted context, keeping the SAME registry
+        # owner, expiry and revocation as the validated source credential.
+        async with sessionmaker.begin() as db:
+            identity = await get_account_with_tenant(db, account_id=uuid.UUID(scope.account_id))
+            origin = (
+                None
+                if identity is None
+                else await get_active_origin(
+                    db,
+                    origin_id=origin_id,
+                    tenant_id=uuid.UUID(scope.tenant_id),
+                    account_id=uuid.UUID(scope.account_id),
+                    platform=identity.platform,
+                    now=now,
                 )
-                if (
-                    origin is None
-                    or derive_agent_uuid(
-                        tenant_id=origin.tenant_id, ma_agent_id=origin.responder_ma_agent_id
-                    )
-                    != agent_id
-                ):
-                    raise ValueError("native MCP origin has no executing session grant")
-                await bind_origin_session(db, origin_id=origin_id, chat_session_id=str(origin_id))
-            claims = pyjwt.decode(
-                token, secret, algorithms=["HS256"], options={"verify_exp": False}
             )
-            token = pyjwt.encode(
-                {**claims, "chat_session_id": str(origin_id)}, secret, algorithm="HS256"
+            if (
+                origin is None
+                or derive_agent_uuid(
+                    tenant_id=origin.tenant_id, ma_agent_id=origin.responder_ma_agent_id
+                )
+                != agent_id
+            ):
+                raise ValueError("native MCP origin has no executing session grant")
+            await bind_origin_session(
+                db,
+                origin_id=origin_id,
+                chat_session_id=str(origin_id),
+                memory_read_only=memory_read_only,
             )
+        claims = pyjwt.decode(token, secret, algorithms=["HS256"], options={"verify_exp": False})
+        claims["chat_session_id"] = str(origin_id)
+        if requester_account_id is not None:
+            claims["requester_account_id"] = str(requester_account_id)
+        token = pyjwt.encode(claims, secret, algorithm="HS256")
     return token
 
 
@@ -204,6 +240,7 @@ def mint_jwt(
     hold: TurnHold | None = None,
     relay: RelayBinding | None = None,
     anthropic_disabled: bool = False,
+    seal_ids: Collection[str] = (),
 ) -> str:
     """Sign `{sub: <account_uuid>, iat: <unix ts>}` HS256 with `secret`.
 
@@ -227,6 +264,7 @@ def mint_jwt(
       DM session credentials. Readers require the matching live tenant/account row.
     - ``hold`` signs the channel a held turn is kept to (`daimon.core.mcp_hold`).
       The MCP server honours it only when the registry row names the same channel.
+    - ``seal_ids`` signs a self-hosted turn's seals (`SEAL_CLAIM`).
     - ``relay`` binds a signed-identity relay credential to its session
       (`daimon.core.mcp_identity.RelayBinding`); only the relay reads it.
     - When ``is_admin`` is ``True``, an ``"is_admin": True`` claim is added
@@ -236,7 +274,7 @@ def mint_jwt(
       Discord vault token's baked
       ``is_admin`` claim alone never elevates a non-admin caller.
     """
-    claims: dict[str, str | int | bool | dict[str, str | bool] | dict[str, str]] = {
+    claims: dict[str, str | int | bool | dict[str, str | bool] | dict[str, str] | list[str]] = {
         "sub": str(account_id),
         "iat": int(now.timestamp()),
     }
@@ -263,6 +301,8 @@ def mint_jwt(
         claims[HOLD_CLAIM] = hold_claim(hold)
     if relay is not None:
         claims[RELAY_CLAIM] = relay.claim()
+    if seal_ids:
+        claims[SEAL_CLAIM] = seal_claim(seal_ids)
     if anthropic_disabled:
         claims["anthropic_disabled"] = True
     if is_admin:
@@ -319,6 +359,7 @@ async def mint_chat_mcp_token(
     relay: RelayBinding | None = None,
     ttl: dt.timedelta = CHAT_TOKEN_TTL,
     anthropic_disabled: bool = False,
+    seal_ids: Collection[str] = (),
 ) -> tuple[str, uuid.UUID, dt.datetime]:
     """Register one expiring ordinary-chat credential with the existing token owner.
 
@@ -373,6 +414,7 @@ async def mint_chat_mcp_token(
         relay=relay,
         jti=jti,
         expires_at=expires_at,
+        seal_ids=seal_ids,
     )
     return token, jti, expires_at
 
@@ -394,6 +436,10 @@ async def mint_agent_mcp_token(
     purpose: McpTokenPurpose | None = None,
     jti: uuid.UUID | None = None,
     client: str | None = None,
+    hold: TurnHold | None = None,
+    slack_turn_context_id: uuid.UUID | None = None,
+    seal_ids: Collection[str] = (),
+    host_builtins: bool = False,
 ) -> str:
     """Mint a long-lived, revocable, agent-scoped MCP JWT.
 
@@ -432,6 +478,14 @@ async def mint_agent_mcp_token(
     ``jti`` lets a caller name the token in its label (`internal_token_label`).
 
     ``client`` names the coding tool a coding key is for (row only, for listings).
+
+    A provider-turn credential carries its turn's flags as MA's chat credential
+    does (`mint_chat_mcp_token`): a ``hold`` binds the row to the held channel
+    under the held label and signs `HOLD_CLAIM`, and ``slack_turn_context_id`` is
+    signed as its own claim, and ``seal_ids`` as `SEAL_CLAIM`: the server reads
+    sealed sessions inside those ids only. ``host_builtins`` signs
+    `HOST_BUILTINS_CLAIM`: an unattended turn may use host built-ins only with it.
+    Nothing else may carry any of them.
     """
     # Registered chat execution retains the ordinary chat surface. External
     # agent keys keep their existing restricted agent-chat surface. The signed
@@ -448,7 +502,19 @@ async def mint_agent_mcp_token(
     if internal and purpose != "internal":
         raise ValueError("a chat-execution or provider-turn credential is internal")
     assert (platform is None) == (channel_id is None), "a channel binding needs both"
+    if (
+        hold is not None or slack_turn_context_id is not None or seal_ids or host_builtins
+    ) and surface != "provider_turn":
+        raise ValueError("only a provider-turn credential carries turn flags")
     jti = jti or uuid.uuid4()
+    if hold is not None:
+        if platform is not None:
+            raise ValueError("a held credential is bound to its hold's channel")
+        label, platform, channel_id = (
+            chat_token_label(jti, held=True),
+            hold.platform,
+            hold.channel_id,
+        )
     expires_at = now + dt.timedelta(days=ttl_days)
     await create_mcp_token_row(
         session,
@@ -465,16 +531,57 @@ async def mint_agent_mcp_token(
         purpose=purpose,
         client=client,
     )
-    return pyjwt.encode(
-        {
-            "sub": str(account_id),
-            "chat_agent_id" if chat_execution else "agent_id": str(agent_id),
-            "jti": str(jti),
-            "exp": int(expires_at.timestamp()),
-        },
-        secret,
-        algorithm="HS256",
+    claims: dict[str, str | int | bool | dict[str, str | bool] | list[str]] = {
+        "sub": str(account_id),
+        "chat_agent_id" if chat_execution else "agent_id": str(agent_id),
+        "jti": str(jti),
+        "exp": int(expires_at.timestamp()),
+    }
+    if hold is not None:
+        claims[HOLD_CLAIM] = hold_claim(hold)
+    if slack_turn_context_id is not None:
+        claims["slack_turn_context_id"] = str(slack_turn_context_id)
+    if seal_ids:
+        claims[SEAL_CLAIM] = seal_claim(seal_ids)
+    if host_builtins:
+        claims[HOST_BUILTINS_CLAIM] = True
+    return pyjwt.encode(claims, secret, algorithm="HS256")
+
+
+def is_held_provider_row(row: McpTokenRow) -> bool:
+    """A provider turn's held credential: its row carries the held label and channel."""
+    return (
+        row.kind == "agent"
+        and row.surface == "provider_turn"
+        and row.label == chat_token_label(row.jti, held=True)
     )
+
+
+def provider_hold_refusal(row: McpTokenRow, claim: object) -> str | None:
+    """Why a provider-turn row and a token's hold claim disagree, or None when they agree.
+
+    Row and claim must say the same, as for a held chat token: the held label
+    and channel binding with a claim naming that channel, or neither.
+    """
+    if not is_held_provider_row(row):
+        return None if claim is None else "hold_claim_unexpected"
+    if claim is None:
+        return "hold_claim_missing"
+    try:
+        hold = parse_hold_claim(claim)
+    except ValueError:
+        return "hold_claim_malformed"
+    if (row.platform, row.channel_id) != (hold.platform, hold.channel_id):
+        return "hold_binding_mismatch"
+    return None
+
+
+#: A provider turn's signed leave to run host built-ins (web_fetch, memory) unattended:
+#: only where `ENTRY_POINT_POLICY` allows built-ins (`turn.run`).
+HOST_BUILTINS_CLAIM = "host_builtins"
+
+#: Mirrors `host_calls.CONFIRMED_CALL_TTL_S`; the verifier's own bound.
+CONFIRMED_CALL_MAX_TTL_S = 120
 
 
 def registered_agent_claims_match(
@@ -495,8 +602,27 @@ def registered_agent_claims_match(
     identity_claim = "chat_agent_id" if chat_execution else "agent_id"
     expiry = claims.get("exp")
     expected = {"sub", identity_claim, "jti", "exp"}
+    # A provider turn's Slack DM context, as on MA's chat credential. The hold
+    # claim never reaches here: both readers check it against the row first.
+    if chat_execution and row.surface == "provider_turn":
+        if isinstance(claims.get("slack_turn_context_id"), str):
+            expected.add("slack_turn_context_id")
+        # Its turn's seals; the identity reader refuses a malformed value.
+        if SEAL_CLAIM in claims:
+            expected.add(SEAL_CLAIM)
+        if claims.get(HOST_BUILTINS_CLAIM) is True:
+            expected.add(HOST_BUILTINS_CLAIM)
     if allow_session_grant and chat_execution and isinstance(claims.get("chat_session_id"), str):
         expected.add("chat_session_id")
+        if isinstance(claims.get("requester_account_id"), str):
+            expected.add("requester_account_id")
+        # A press-approved call's one-shot credential (`daimon.core.host_calls`): a
+        # provider turn's only, and never longer-lived than one call.
+        if isinstance(claims.get("confirmed_call"), str):
+            if row.surface != "provider_turn":
+                return False
+            expected.add("confirmed_call")
+            max_ttl_s = min(max_ttl_s, CONFIRMED_CALL_MAX_TTL_S)
     return (
         0 < max_ttl_s <= 900
         and set(claims) == expected
@@ -572,6 +698,7 @@ async def validate_agent_mcp_token(
             or row.agent_id != str(agent_id)
             or row.revoked_at is not None
             or (surface is not None and row.surface != surface)
+            or provider_hold_refusal(row, claims.pop(HOLD_CLAIM, None)) is not None
             or not registered_agent_claims_match(
                 row, claims, now=now, chat_execution=chat_execution, max_ttl_s=max_ttl_s
             )

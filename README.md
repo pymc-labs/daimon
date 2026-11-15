@@ -70,7 +70,7 @@ prefer them; on Teams they are plain words (`setup`, `routines`, `help`) sent in
 The [quickstart](docs/quickstart.md) has the full walkthrough. In short, you
 need [Docker](https://docs.docker.com/get-docker/) and an Anthropic API key in
 a workspace dedicated to this deployment. Want to run on just an
-OpenAI key instead, no Anthropic account at all? Skip to
+OpenAI or Gemini key instead, no Anthropic account at all? Skip to
 [Run on OpenAI](#run-on-openai) below.
 
 1. Configure the environment.
@@ -122,8 +122,7 @@ the default skill set; the second routes that agent's channels to it. Then
 run `docker compose up -d` so the services read the new values. See
 [Run on OpenAI](docs/providers.md#run-on-openai) for the OpenAI
 key setup, per-channel routing, verifying the install, and what's different
-on OpenAI (no multi-agent delegation, no cross-turn memory, and a few other
-gaps listed there).
+on OpenAI and Gemini, and the few gaps that remain.
 
 The [documentation](https://pymc-labs.github.io/daimon/) covers production
 setup, Slack, Microsoft Teams, GitHub, MCP servers and the Claude Code plugin.

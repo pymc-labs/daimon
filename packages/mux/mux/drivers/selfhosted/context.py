@@ -62,7 +62,8 @@ class Context:
             or binding.profile != "selfhosted.loop"
             or binding.native_refs.get("session") != ref.id
             or binding.thread.channel.tenant_id != scope.tenant_id
-            or binding.legacy_account_id != scope.account_id
+            # An account-less binding is a shared thread's, run as its owner's scope.
+            or binding.legacy_account_id not in (None, scope.account_id)
         ):
             raise ScopeViolation(ref.id, "self-hosted session requires its authorized host binding")
         return binding

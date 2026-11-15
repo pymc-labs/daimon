@@ -8,13 +8,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { useServerToken } from "../api"
 import { cn } from "@/lib/utils"
-import { Dot, Locked } from "../bits"
+import { Dot, Locked, NotSupported } from "../bits"
+import { NOTHING } from "../unsupported"
 import { RULE } from "../lib"
 import type { McpServer, ToolRule } from "../types"
 import { Field, Section, type Props } from "./parts"
 import { useLocal } from "./useLocal"
 
-export function ServerEditor({ agent, ro, update, select, server: s, changed }: Props & { server: McpServer }) {
+export function ServerEditor({ agent, ro, update, select, server: s, changed, unsupported = NOTHING }: Props & { server: McpServer }) {
   const set = (fn: (x: McpServer) => void, d = 0) => update((c) => fn(c.mcp_servers.find((x) => x.key === s.key)!), d)
   const [url, setUrl] = useLocal(s.url, (v) => set((x) => { x.url = v }, 600))
   const hidden = !agent.can_view_details
@@ -30,7 +31,7 @@ export function ServerEditor({ agent, ro, update, select, server: s, changed }: 
           <span className="text-sm font-semibold text-muted-foreground">{s.name[0]}</span>
         </span>
         <div className="min-w-0">
-          <div className="text-base font-semibold">{s.name}</div>
+          <div className="flex items-center gap-2 text-base font-semibold">{s.name}{(unsupported.servers.has(s.key) || unsupported.servers.has(s.name)) && <NotSupported />}</div>
           <div className="text-xs text-muted-foreground">{s.listed === false ? "Not listed" : `${plural(s.tools.length, "tool")}, ${writes.length} change data`}</div>
         </div>
       </div>

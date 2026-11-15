@@ -95,15 +95,15 @@ def test_a_row_above_an_unpriced_limit_has_no_cost() -> None:
     )
 
 
-def test_provider_price_on_follows_each_tariffs_dates() -> None:
-    assert provider_price_on("gemini-4-argon", date(2026, 10, 21)) is None, (
+@pytest.mark.parametrize("model", ["gemini-4-argon", "gemini-4-carbon"])
+def test_provider_price_on_follows_each_tariffs_dates(model: str) -> None:
+    assert provider_price_on(model, date(2026, 10, 21)) is None, (
         "before its checked date a tariff does not apply"
     )
-    argon = provider_price_on("gemini-4-argon", date(2026, 11, 30))
-    assert argon is not None and argon.input == Decimal("2.00"), "last day of the intro tariff"
-    assert provider_price_on("gemini-4-argon", date(2026, 12, 1)) is None, (
-        "the intro tariff ends at valid_before"
-    )
+    intro = provider_price_on(model, date(2026, 11, 30))
+    assert intro is not None and intro.input == Decimal("2.00"), "last day of the intro tariff"
+    standard = provider_price_on(model, date(2026, 12, 1))
+    assert standard is not None and standard.input == Decimal("4.00"), "the standard tariff starts"
     assert provider_price_on("claude-opus-4-7", ON) is None, "list-priced models are not here"
 
 

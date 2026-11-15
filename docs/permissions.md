@@ -139,9 +139,9 @@ the server's own read-only and destructive hints decide instead.
 A rule on a publish tool makes it ask in every channel and refuse in routines,
 even where the rule does not name the channel.
 
-> **Warning:** Gemini and OpenAI cannot pause for a card. A turn for an agent
-> on one of them is refused when the agent has an `ask` rule or a
-> channel-scoped `deny` on a Daimon tool. Agent-wide `deny` rules still work.
+> **Warning:** OpenAI, Gemini and self-hosted agents cannot ask first on
+> Daimon's tools. Their turn is refused when the agent has an `ask` rule or a
+> channel-scoped `deny` on one. Agent-wide `deny` rules still work.
 > The operator log records `turn.backend_unsupported`.
 
 ## Approval overrides

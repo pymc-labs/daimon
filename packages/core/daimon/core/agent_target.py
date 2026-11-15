@@ -40,7 +40,9 @@ class AgentTarget:
 async def load_target(deps: AgentEditDeps, *, actor: AgentActor, ma_agent_id: str) -> AgentTarget:
     """The tenant's live agent ``ma_agent_id`` for ``actor``; not found when missing or foreign."""
     try:
-        agent = await retrieve_agent(deps.client, ma_agent_id, scope=actor.scope())
+        agent = await retrieve_agent(
+            deps.client, ma_agent_id, scope=actor.scope(), records=deps.session_factory
+        )
     except (anthropic.NotFoundError, ScopeViolation) as exc:
         raise AgentEditError("No such agent.", kind="not_found") from exc
     if agent.archived_at is not None or agent.metadata.get(MA_METADATA_KEY_TENANT) != str(

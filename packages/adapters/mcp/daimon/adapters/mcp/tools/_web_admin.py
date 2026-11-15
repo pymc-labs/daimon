@@ -59,7 +59,9 @@ async def web_admin_of(runtime: McpRuntime, auth: AuthIdentity) -> WebAdmin:
 
 
 async def agent_names(runtime: McpRuntime, tenant_id: uuid.UUID) -> dict[str, str]:
-    agents = await list_agents_by_tenant(runtime.client, tenant_id=tenant_id)
+    agents = await list_agents_by_tenant(
+        runtime.client, tenant_id=tenant_id, records=runtime.session_factory
+    )
     return {a.id: a.name for a in agents}
 
 

@@ -641,6 +641,7 @@ async def channels_skills_add(
                 rt.settings.defaults_root, features=rt.settings.configured_features
             ),
             surface="cli",
+            records=rt.sessionmaker,
         )
         if isinstance(added, str):
             raise DaimonError(CHANNEL_SKILL_REFUSALS[added])

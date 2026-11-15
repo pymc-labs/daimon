@@ -8,10 +8,11 @@ capability. Anything it does not declare is `unknown`, and admission treats
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import Field, JsonValue, model_validator
 
 from mux.contracts._base import Contract, FrozenMap
 from mux.contracts.errors import ExtensionVersionError, UnsupportedCapability
@@ -19,6 +20,9 @@ from mux.contracts.extensions import ExtensionRef
 from mux.contracts.ids import Provider
 
 Support = Literal["native", "emulated", "unsupported", "unknown"]
+
+Effort = Literal["low", "medium", "high"]
+"""A neutral reasoning effort; each profile maps it to its provider's own value."""
 
 SUPPORTED: frozenset[Support] = frozenset({"native", "emulated"})
 """The support levels admission accepts."""
@@ -101,6 +105,25 @@ class AccountingMode(StrEnum):
         return "turn"
 
 
+class SkillLimits(Contract):
+    """The largest skill a profile installs: an attached skill never exceeds these."""
+
+    total_bytes: int = Field(gt=0)
+    file_bytes: int = Field(gt=0)
+    files: int = Field(gt=0)
+    text_only: bool = False
+    combined_bytes: int | None = Field(default=None, gt=0)
+    """The bytes all of a session's skills may take together; None: no shared cap."""
+
+    def fits(self, *, total_bytes: int, largest_file_bytes: int, files: int, text: bool) -> bool:
+        return (
+            0 < files <= self.files
+            and total_bytes <= self.total_bytes
+            and largest_file_bytes <= self.file_bytes
+            and (text or not self.text_only)
+        )
+
+
 class Profile(Contract):
     """One provider profile and what it supports.
 
@@ -119,6 +142,11 @@ class Profile(Contract):
     extensions: tuple[ExtensionRef, ...] = ()
     execution_tool: Literal["bash", "code_execution"] = "code_execution"
     implicit_execution: bool = False
+    model_controls: tuple[str, ...] = ()
+    """`ModelRef.options` keys this profile's driver compiles; any other key is refused."""
+    effort_map: FrozenMap[Effort, str] = Field(default_factory=dict[Effort, str], exclude=True)
+    """The provider value for each neutral effort the profile carries; empty: none.
+    Excluded from dumps, so profile digests hold."""
     mcp_policy_keys: tuple[Literal["allowed_tools", "required"], ...] = ()
     skill_digest: Literal["version", "content"] | None = None
     tool_readback: Literal["authored", "compiled"] = "authored"
@@ -128,6 +156,12 @@ class Profile(Contract):
     meters_cache_writes: bool = True
     """The usage meter counts cache-write input. False where the provider bills cache
     writes but its usage has no such count: the host then prices none, an estimate."""
+    skill_limits: SkillLimits | None = Field(default=None, exclude=True)
+    """The largest custom skill the profile attaches; None: no custom skills.
+    Excluded from dumps, so profile digests hold."""
+    carries_caller_resources: bool = Field(default=False, exclude=True)
+    """The host carries the caller's seals, Slack turn context and private DM on its
+    per-turn credential, not as a native resource. Excluded from dumps: digests hold."""
 
     @model_validator(mode="after")
     def _check(self) -> Profile:
@@ -146,6 +180,10 @@ class Profile(Contract):
 
     def support_for(self, capability: Capability) -> Support:
         return self.support.get(capability, "unknown")
+
+    def undeclared_model_options(self, options: Mapping[str, JsonValue]) -> tuple[str, ...]:
+        """The option keys outside `model_controls`, sorted: empty when all are declared."""
+        return tuple(sorted(set(options) - set(self.model_controls)))
 
     @property
     def execution_tools(self) -> frozenset[str]:
@@ -188,6 +226,7 @@ __all__ = [
     "AccountingMode",
     "CORE_CAPABILITIES",
     "Capability",
+    "Effort",
     "Profile",
     "SUPPORTED",
     "Support",

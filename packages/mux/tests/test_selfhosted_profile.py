@@ -23,8 +23,8 @@ def test_selfhosted_selection_requires_explicit_profile_and_allows_deployment_na
     )
     assert runnable_selection(selected)
     assert runnable_selection(selected.model_copy(update={"model": "gpt-6-luna"}))
-    assert not shared_threads_available("selfhosted")
-    assert not runnable_selection(selected.model_copy(update={"thread_mode": "shared"}))
+    assert shared_threads_available("selfhosted")
+    assert runnable_selection(selected.model_copy(update={"thread_mode": "shared"}))
     with pytest.raises(InvalidConfig, match="no default profile"):
         resolve_default(BackendConfig(backend="selfhosted", model="gpt-6-luna"))
 

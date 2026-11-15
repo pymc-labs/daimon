@@ -449,9 +449,9 @@ def agent_setup_routing_view() -> Any:
 
 
 def _model_choices() -> Any:
-    from daimon.core.models_catalog import list_model_choices
+    from daimon.core.models_catalog import claude_model_choices
 
-    return list_model_choices(default="claude-sonnet-4-6")
+    return claude_model_choices(default="claude-sonnet-4-6")
 
 
 @entry("agent_setup_new_agent_modal", "slack", "view")

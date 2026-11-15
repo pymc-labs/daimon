@@ -62,13 +62,15 @@ def owner_repo_from_url(url: str) -> str:
 
 
 async def delete_agent(runtime: SlackRuntime, *, tenant_id: uuid.UUID, name: str) -> None:
-    """Archive the MA agent matching ``name`` under the given tenant.
+    """Archive the agent matching ``name`` under the given tenant, wherever its record lives.
 
     Channel and workspace scope rows naming the agent are cleared as part of the
     delete, so turn resolution falls through the cascade instead of resolving to
     a deleted agent, and its agent rule is dropped with them.
     """
-    agent = await find_agent_by_daimon_tag(runtime.anthropic, tenant_id=tenant_id, name=name)
+    agent = await find_agent_by_daimon_tag(
+        runtime.anthropic, tenant_id=tenant_id, name=name, records=runtime.sessionmaker
+    )
     if agent is None:
         raise DaimonError(f"No agent named *{name}* found.")
     if agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
@@ -81,7 +83,12 @@ async def delete_agent(runtime: SlackRuntime, *, tenant_id: uuid.UUID, name: str
             f"*{name}* is a built-in agent and cannot be deleted. "
             "Make a copy first, then delete the copy."
         )
-    await archive_agent(runtime.anthropic, agent.id, scope=resource_scope(tenant_id=str(tenant_id)))
+    await archive_agent(
+        runtime.anthropic,
+        agent.id,
+        scope=resource_scope(tenant_id=str(tenant_id)),
+        records=runtime.sessionmaker,
+    )
     await agent_lifecycle.archive_memory_store_best_effort(
         anthropic=runtime.anthropic,
         sessionmaker=runtime.sessionmaker,

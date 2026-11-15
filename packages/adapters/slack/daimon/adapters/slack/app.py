@@ -160,6 +160,7 @@ from daimon.adapters.slack.names import (
     remember_payload_names,
 )
 from daimon.adapters.slack.output_delivery import NoticeKeys, deliver_session_outputs
+from daimon.adapters.slack.own_cards import handle_own_card_click, is_own_card_action
 from daimon.adapters.slack.privacy_panel.actions import (
     handle_privacy_block_action,
     handle_privacy_command,
@@ -212,6 +213,17 @@ from daimon.adapters.slack.thread_handoff import (
     build_hand_over_blocks,
     handle_hand_over_click,
 )
+from daimon.adapters.slack.thread_model import (
+    SHORTCUT_CALLBACK_ID as THREAD_MODEL_SHORTCUT_ID,
+)
+from daimon.adapters.slack.thread_model import (
+    THREAD_MODEL_ACTION_IDS,
+    handle_thread_model_cancel,
+    handle_thread_model_confirm,
+    handle_thread_model_pick,
+    handle_thread_model_shortcut,
+    with_thread_reask_notifier,
+)
 from daimon.adapters.slack.tool_confirmation import (
     CONFIRMATION_CUSTOM_ID_PREFIX,
     SlackConfirmationCards,
@@ -249,6 +261,7 @@ from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_request_expiry import run_request_expiry_poller
+from daimon.core.host_calls import wake_prefix
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.mux_backend import resource_scope
@@ -256,6 +269,7 @@ from daimon.core.mux_compat import retrieve_agent
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.output_delivery import NoticedFiles
+from daimon.core.output_runtime import OutputRuntime
 from daimon.core.platform_words import words_for
 from daimon.core.routine_delivery import run_delivery_poller
 from daimon.core.stores.credential_requests import peek_credential_request
@@ -296,6 +310,7 @@ from daimon.core.turn.errors import (
     SessionPreparationFailed,
 )
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.mutation_gate import send_prefix
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import protection_state, turn_target_protected
@@ -457,7 +472,7 @@ class SlackApp:
     def __init__(
         self, *, runtime: SlackRuntime, member_sync: SlackMemberSync | None = None
     ) -> None:
-        self.runtime = with_budget_notifier(runtime)
+        self.runtime = with_thread_reask_notifier(with_budget_notifier(runtime))
         # Keeps workspace member lists for web access; None leaves them alone.
         self.member_sync = member_sync
         # Slack timestamps are unique only within a workspace conversation.
@@ -720,37 +735,37 @@ class SlackApp:
         channel: str,
         thread_id: str,
         team_id: str,
-        selfhosted: bool,
         requester_user_id: str,
     ) -> None:
-        """Serialize the optional Anthropic file sweep after a tool turn."""
+        """Serialize the file sweep after a tool turn."""
 
-        if selfhosted or not any(
+        outputs = outcome.outputs
+        if outputs is None or not any(
             isinstance(block, ToolUseBlock) for block in outcome.state.content
         ):
             return
         # Read the chain link synchronously, before spawning, so it cannot be lost.
-        previous = self._output_sweeps.get(outcome.ma_session_id)
+        previous = self._output_sweeps.get(outputs.session_id)
         task = self._spawn(
             self._sweep_session_outputs(
                 previous,
                 web_client,
-                session_id=outcome.ma_session_id,
+                outputs=outputs,
                 channel_id=channel,
                 thread_ts=thread_id,
                 team_id=team_id,
                 requester_user_id=requester_user_id,
             )
         )
-        self._output_sweeps[outcome.ma_session_id] = task
-        task.add_done_callback(functools.partial(self._forget_output_sweep, outcome.ma_session_id))
+        self._output_sweeps[outputs.session_id] = task
+        task.add_done_callback(functools.partial(self._forget_output_sweep, outputs.session_id))
 
     async def _sweep_session_outputs(
         self,
         previous: asyncio.Task[None] | None,
         web_client: AsyncWebClient,
         *,
-        session_id: str,
+        outputs: OutputRuntime,
         channel_id: str,
         thread_ts: str,
         team_id: str,
@@ -780,11 +795,11 @@ class SlackApp:
         except Exception:  # named boundary: the files still go out, pinging nobody
             log.warning("slack.output_delivery.opt_out_lookup_failed", exc_info=True)
             requester_label = "@someone"
+        session_id = outputs.session_id
         try:
             await deliver_session_outputs(
-                self.runtime.turn_deps.anthropic,
+                outputs,
                 web_client,
-                session_id=session_id,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
                 notice_keys=self._delivery_notice_keys,
@@ -1402,6 +1417,12 @@ class SlackApp:
                     # Slack did not say whose workspace the clicker is in:
                     # users.info decides before anything runs.
                     self._spawn(self._verify_then_route_block_action(payload, action_id))
+            elif (
+                payload.get("type") == "message_action"
+                and payload.get("callback_id") == THREAD_MODEL_SHORTCUT_ID
+            ):
+                # A shortcut is the host's, like every control but the allowlisted ones.
+                self._spawn(self._gated_shortcut(payload))
         else:
             # Log unrecognised envelope types so the envelope key can be
             # confirmed or corrected from staging logs.
@@ -1540,6 +1561,12 @@ class SlackApp:
             self._spawn(handle_routine_action(self.runtime, payload))
         elif is_settings_action(action_id):
             self._spawn(handle_settings_change(self.runtime, payload))
+        elif action_id in THREAD_MODEL_ACTION_IDS:
+            handler = {
+                "thread_model_pick": handle_thread_model_pick,
+                "thread_model_confirm": handle_thread_model_confirm,
+            }.get(action_id, handle_thread_model_cancel)
+            self._spawn(handler(self.runtime, payload))
         elif action_id == "billing_topup":
             self._spawn(handle_topup_select(self.runtime, payload))
         elif action_id == REDEEM_OPEN_ACTION_ID:
@@ -1584,6 +1611,8 @@ class SlackApp:
             self._spawn(self._provider_actions.handle_click(payload))
         elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):
             self._spawn(self._confirmations.handle_click(payload))
+        elif is_own_card_action(action_id):
+            self._spawn(handle_own_card_click(self.runtime, payload))
         elif action_id == HAND_OVER_ACTION_ID:
             self._spawn(handle_hand_over_click(self.runtime, payload, app=self))
 
@@ -1647,6 +1676,17 @@ class SlackApp:
             self._route_block_action(payload, action_id)
             return
         log.info("slack.on_request.unverified_block_action_refused", check=check)
+        await self._refuse_external_click(
+            payload, text=TRY_AGAIN_NOTICE if check == "unavailable" else None
+        )
+
+    async def _gated_shortcut(self, payload: dict[str, Any]) -> None:
+        """Run the thread model shortcut for a verified host member; anyone else is refused."""
+        check = await self._submitter_check(payload)
+        if check == "member":
+            await handle_thread_model_shortcut(self.runtime, payload)
+            return
+        log.info("slack.on_request.unverified_shortcut_refused", check=check)
         await self._refuse_external_click(
             payload, text=TRY_AGAIN_NOTICE if check == "unavailable" else None
         )
@@ -2847,6 +2887,7 @@ class SlackApp:
                             self.runtime.anthropic,
                             error.source_agent_id,
                             scope=resource_scope(tenant_id=str(tenant_id)),
+                            records=self.runtime.sessionmaker,
                         )
                         owner_name = owner_agent.name
                 except (anthropic.APIStatusError, ScopeViolation):
@@ -3319,10 +3360,6 @@ class SlackApp:
                 thread_id=thread_id,
                 team_id=team_id,
                 requester_user_id=author_id,
-                selfhosted=(
-                    admission.backend_revision is not None
-                    and admission.backend_revision.backend == "selfhosted"
-                ),
             )
         finally:
             # Bookkeeping only -- see the comment above the try. Deregister
@@ -3707,26 +3744,42 @@ class SlackApp:
             return new_lifecycle
 
         try:
-            async with turn_origin(
-                self.runtime.sessionmaker,
-                attended=continuation_attended(row),
-                tenant_id=tenant_id,
-                account_id=follow_admission.account_id,
-                platform="slack",
-                parent_channel_id=channel,
-                thread_id=thread_id,
-                responder_ma_agent_id=str(follow_admission.agent.id),
-                responder_name=follow_admission.config.agent_name or follow_admission.agent.name,
-                configuration_target_ma_agent_id=(
-                    follow_admission.config.configuration_target_ma_agent_id
+            async with (
+                turn_origin(
+                    self.runtime.sessionmaker,
+                    attended=continuation_attended(row),
+                    tenant_id=tenant_id,
+                    account_id=follow_admission.account_id,
+                    platform="slack",
+                    parent_channel_id=channel,
+                    thread_id=thread_id,
+                    responder_ma_agent_id=str(follow_admission.agent.id),
+                    responder_name=follow_admission.config.agent_name
+                    or follow_admission.agent.name,
+                    configuration_target_ma_agent_id=(
+                        follow_admission.config.configuration_target_ma_agent_id
+                    ),
+                    configuration_target_name=(follow_admission.config.configuration_target_name),
+                    role=Role.ADMIN if follow_admission.is_platform_admin else Role.USER,
+                    sender_foreign=follow_admission.hold is not None
+                    and follow_admission.hold.client,
+                    shared_channel=follow_admission.shared_channel,
+                    is_setup=follow_admission.config.thread_binding_kind == "setup",
+                    platform_channel_id=channel,
+                ) as follow_origin,
+                send_prefix(
+                    wake_prefix(
+                        self.runtime.sessionmaker,
+                        self.runtime.settings.mcp,
+                        tenant_id=tenant_id,
+                        platform="slack",
+                        thread_id=thread_id,
+                        target_ma_agent_id=row.target_ma_agent_id,
+                    )
+                    if row.reason == "confirmed_call"
+                    else None
                 ),
-                configuration_target_name=(follow_admission.config.configuration_target_name),
-                role=Role.ADMIN if follow_admission.is_platform_admin else Role.USER,
-                sender_foreign=follow_admission.hold is not None and follow_admission.hold.client,
-                shared_channel=follow_admission.shared_channel,
-                is_setup=follow_admission.config.thread_binding_kind == "setup",
-                platform_channel_id=channel,
-            ) as follow_origin:
+            ):
                 await run_prepared_turn(
                     self.runtime.turn_deps,
                     follow_prepared,

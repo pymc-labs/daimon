@@ -454,6 +454,8 @@ async def decide_continuation(
        Not for a timer, which is meant to fire whatever was said since.
     4. A turn is already running in this thread. The continuation waits for it
        rather than racing it, and the person is told so.
+    5. A confirmed-call wake whose approved calls an earlier wake already ran:
+       there is nothing to run, so it skips silently.
 
     Otherwise: dispatch, seeded with the person's own words.
 
@@ -510,7 +512,10 @@ async def decide_continuation(
         try:
             require_anthropic_allowed()
             await get_setup_agent(
-                anthropic, tenant_id=request.tenant_id, ma_agent_id=request.target_ma_agent_id
+                anthropic,
+                tenant_id=request.tenant_id,
+                ma_agent_id=request.target_ma_agent_id,
+                records=sessionmaker,
             )
         except AnthropicDisabled:
             # A provider prohibition says nothing about whether the target exists.
@@ -524,9 +529,11 @@ async def decide_continuation(
             )
 
     # A timer is the agent's own appointment: the person talking in the
-    # meantime is expected, not a newer request that replaces it.
+    # meantime is expected, not a newer request that replaces it. A confirmed call
+    # was pressed after the person's last message, and its card must still run.
     if (
-        request.reason not in ("timer", "watch_fired", "watch_report", "job_finished")
+        request.reason
+        not in ("timer", "watch_fired", "watch_report", "job_finished", "confirmed_call")
         and latest_user_message_at is not None
         and latest_user_message_at > row.created_at
     ):
@@ -539,6 +546,24 @@ async def decide_continuation(
                 request.target_name, handoff=request.reason == "task_handoff"
             ),
         )
+
+    if request.reason == "confirmed_call":
+        from daimon.core.host_calls import has_approved_calls
+        from daimon.core.ma_identity import derive_agent_uuid
+
+        # One wake runs every approved call for the thread; a second finds none left.
+        if not await has_approved_calls(
+            sessionmaker,
+            tenant_id=request.tenant_id,
+            platform=request.platform,
+            thread_id=request.thread_id,
+            executing_agent_id=derive_agent_uuid(
+                tenant_id=request.tenant_id, ma_agent_id=request.target_ma_agent_id
+            ),
+            requester_account_id=request.requester_account_id,
+            now=now,
+        ):
+            return ContinuationDecision(action="skip_superseded")
 
     if request.reason in WATCH_REASONS:
         from daimon.core.stores.watches import watch_seed

@@ -16,7 +16,7 @@ ALLOWED_MODEL_IDS: tuple[str, ...] = tuple(AGENT_MODEL_PRICING.keys())
 
 # Human-readable label for each selectable model, keyed by the same ids as
 # `ALLOWED_MODEL_IDS`. Every entry in `pricing.AGENT_MODEL_PRICING` must have
-# one here — `models_catalog.list_model_choices` falls back to the raw id for
+# one here — `models_catalog.claude_model_choices` falls back to the raw id for
 # any id missing from this map, and `test_models_catalog` asserts none does.
 MODEL_DISPLAY_NAMES: Final[dict[str, str]] = {
     "claude-opus-5-5": "Opus 5.5",

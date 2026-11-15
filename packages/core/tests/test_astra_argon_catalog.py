@@ -1,4 +1,4 @@
-"""gpt-6-astra and gemini-4-argon: priced models an agent's own config may pick."""
+"""gpt-6-astra and the Gemini opt-in models: priced models an agent's own config may pick."""
 
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -9,6 +9,7 @@ from daimon.core.pricing import PROVIDER_PRICING_SOURCES, provider_cost_of, prov
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef
 from mux.contracts.usage import UsageObservation
+from mux.profiles.gemini import INLINE_REUSE, OPT_IN_MODELS
 from mux.profiles.openai import PERSISTENT_WORKSPACE
 
 ASTRA = "gpt-6-astra"
@@ -31,6 +32,15 @@ def test_astra_has_a_dated_verified_price_row() -> None:
     )
     assert price.max_priced_input_tokens == 272_000
     assert "https://developers.openai.com/api/docs/models/gpt-6-astra" in PROVIDER_PRICING_SOURCES
+
+
+@pytest.mark.parametrize("model", OPT_IN_MODELS)
+def test_gemini_opt_in_models_have_a_flat_sourced_standard_price(model: str) -> None:
+    price = provider_prices(INLINE_REUSE.profile_id)[("gemini", model)]
+    assert price.max_priced_input_tokens is None, "no long-context tier"
+    assert price.long_context_multipliers is None
+    assert price.cache_write is None, "implicit caching has no write rate"
+    assert "https://aistudio.google.com/docs/pricing" in PROVIDER_PRICING_SOURCES
 
 
 def usage(**changes: object) -> UsageObservation:

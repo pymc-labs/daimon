@@ -361,6 +361,7 @@ async def add_skill_to_channel(
     actor_account_id: uuid.UUID | None,
     platform_skills: Mapping[str, Sequence[SkillRef]],
     surface: ChangeSurface,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> ChannelSkillRow | ChannelSkillRefusal:
     """Add `skill` to `channel_id` for whatever agent answers there now, or say why not.
 
@@ -373,7 +374,9 @@ async def add_skill_to_channel(
         session, context=ScopeContext(tenant_id=tenant_id, channel_id=channel_id), default=default
     )
     agent = (
-        await find_agent_by_daimon_tag(client, tenant_id=tenant_id, name=resolved.agent_name)
+        await find_agent_by_daimon_tag(
+            client, tenant_id=tenant_id, name=resolved.agent_name, records=records
+        )
         if resolved.agent_name
         else None
     )

@@ -141,6 +141,7 @@ from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.output_delivery import NoticedFiles
+from daimon.core.output_runtime import OutputRuntime
 from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
 from daimon.core.platform_words import words_for
 from daimon.core.posted_controls.lifecycle import drain_card_edits
@@ -211,6 +212,7 @@ from daimon.core.turn.errors import (
     SessionPreparationFailed,
 )
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.mutation_gate import initial_send_prefix
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.output import OutputAuthorization
@@ -478,7 +480,11 @@ def admission_refusal_message(
 
 
 async def _resolve_agent_display_name(
-    anthropic: _anthropic.AsyncAnthropic, *, tenant_id: uuid.UUID, ma_agent_id: str
+    anthropic: _anthropic.AsyncAnthropic,
+    *,
+    tenant_id: uuid.UUID,
+    ma_agent_id: str,
+    records: async_sessionmaker[AsyncSession],
 ) -> str:
     """Best-effort display name for a concrete MA agent id, tenant-scoped.
 
@@ -486,7 +492,7 @@ async def _resolve_agent_display_name(
     back to a generic phrase rather than failing the render.
     """
     try:
-        agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+        agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id, records=records)
     except _anthropic.APIError:
         return "the previous agent"
     for candidate in agents:
@@ -687,6 +693,10 @@ class DaimonBot(commands.Bot):
             self.runtime,
             turn_deps=replace(self.runtime.turn_deps, membership_resolver=self.membership_resolver),
         )
+        # Local import: the re-ask card's module reaches the /model command module.
+        from daimon.adapters.discord.thread_model_reask import with_thread_reask_notifier
+
+        self.runtime = with_thread_reask_notifier(self.runtime, self)
         # The SDK routes slash commands, buttons, and modals before dispatching
         # on_interaction, so filter their gateway payload before those callbacks.
         parse_interaction = self._connection.parsers["INTERACTION_CREATE"]
@@ -848,7 +858,10 @@ class DaimonBot(commands.Bot):
 
     async def _routine_agent_names(self, row: RoutineRow) -> tuple[str | None, ...]:
         agent = await find_agent_by_daimon_tag(
-            self.runtime.anthropic, tenant_id=row.tenant_id, name=row.agent_name
+            self.runtime.anthropic,
+            tenant_id=row.tenant_id,
+            name=row.agent_name,
+            records=self.runtime.sessionmaker,
         )
         if agent is None or agent.id != row.agent_id:
             return ()
@@ -858,10 +871,11 @@ class DaimonBot(commands.Bot):
         self,
         previous: asyncio.Task[None] | None,
         thread: Conversation,
-        session_id: str,
+        outputs: OutputRuntime,
         may_post: Callable[[], Awaitable[bool]],
         lifecycle: DiscordTurnLifecycle | None = None,
     ) -> None:
+        session_id = outputs.session_id
         # A previous sweep owns post-then-delete for this MA session until it finishes.
         if previous is not None:
             with contextlib.suppress(Exception):
@@ -871,9 +885,8 @@ class DaimonBot(commands.Bot):
         try:
             requester_label = await self._sweep_requester_label(thread, attributed)
             await deliver_session_outputs(
-                self.runtime.turn_deps.anthropic,
+                outputs,
                 thread,
-                session_id=session_id,
                 may_post=may_post,
                 notice_thread_ids=self._delivery_notice_thread_ids,
                 noticed_files=self._noticed_output_files,
@@ -890,6 +903,21 @@ class DaimonBot(commands.Bot):
                 thread_id=thread.id,
                 error=str(exc)[:300],
             )
+
+    def _confirmed_call_prefix(
+        self, tenant_id: uuid.UUID, row: TaskContinuationRow
+    ) -> Callable[[], Awaitable[str]] | None:
+        """Runs the thread's press-approved calls inside this wake's lease (`host_calls`)."""
+        from daimon.core.host_calls import wake_prefix
+
+        return wake_prefix(
+            self.runtime.sessionmaker,
+            self.runtime.settings.mcp,
+            tenant_id=tenant_id,
+            platform="discord",
+            thread_id=row.thread_id,
+            target_ma_agent_id=row.target_ma_agent_id,
+        )
 
     async def _archive_requested(self, origin_id: uuid.UUID) -> bool:
         """Whether the agent asked, during this turn, to archive its own thread.
@@ -979,7 +1007,6 @@ class DaimonBot(commands.Bot):
         thread: discord.Thread,
         tenant_id: uuid.UUID,
         lifecycle: DiscordTurnLifecycle | None = None,
-        selfhosted: bool = False,
     ) -> None:
         """Sweep the session's files onto the turn's answer, detached from the turn.
 
@@ -992,13 +1019,13 @@ class DaimonBot(commands.Bot):
         if lifecycle is not None and lifecycle.output_authorization is not None:
             # A watch's execution grant ends with the turn, before detached sweeps.
             return
-        if selfhosted or not any(
+        if outcome.outputs is None or not any(
             isinstance(block, ToolUseBlock) for block in outcome.state.content
         ):
             return
         self._queue_output_sweep(
             thread,
-            outcome.ma_session_id,
+            outcome.outputs,
             may_post=lambda: self._may_post_in(tenant_id=tenant_id, channel=thread),
             lifecycle=lifecycle,
         )
@@ -1006,7 +1033,7 @@ class DaimonBot(commands.Bot):
     def schedule_dm_output_sweep(
         self,
         channel: discord.DMChannel,
-        session_id: str,
+        outputs: OutputRuntime,
         *,
         may_post: Callable[[], Awaitable[bool]],
         lifecycle: DiscordTurnLifecycle | None,
@@ -1016,19 +1043,20 @@ class DaimonBot(commands.Bot):
         ``may_post`` is the DM's own delivery check, asked again before each
         file: the thread gate's channel permissions mean nothing in a DM.
         """
-        self._queue_output_sweep(channel, session_id, may_post=may_post, lifecycle=lifecycle)
+        self._queue_output_sweep(channel, outputs, may_post=may_post, lifecycle=lifecycle)
 
     def _queue_output_sweep(
         self,
         thread: Conversation,
-        session_id: str,
+        outputs: OutputRuntime,
         *,
         may_post: Callable[[], Awaitable[bool]],
         lifecycle: DiscordTurnLifecycle | None,
     ) -> None:
+        session_id = outputs.session_id
         previous = self._output_sweeps.get(session_id)
         task = self._spawn(
-            self._sweep_session_outputs(previous, thread, session_id, may_post, lifecycle)
+            self._sweep_session_outputs(previous, thread, outputs, may_post, lifecycle)
         )
         self._output_sweeps[session_id] = task
         task.add_done_callback(functools.partial(self._forget_output_sweep, session_id))
@@ -1259,6 +1287,9 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.posted_controls.switch_card import SwitchCardControl
 
         self.add_dynamic_items(SwitchCardControl)
+        from daimon.adapters.discord.posted_controls.host_call import HostCallControl
+
+        self.add_dynamic_items(HostCallControl)
 
         # Same rationale as CredentialRequestButton above: the wizard's
         # first screen is posted by the MCP process, and every tap on it
@@ -1291,6 +1322,9 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.thread_handoff import HandOverButton
 
         self.add_dynamic_items(HandOverButton)
+        from daimon.adapters.discord.thread_model_reask import ReaskConfirmButton
+
+        self.add_dynamic_items(ReaskConfirmButton)
 
         from daimon.adapters.discord.github_connect_button import GitHubConnectButton
 
@@ -1443,7 +1477,10 @@ class DaimonBot(commands.Bot):
                     log.info("guild_seed_roster_check_skipped", tenant_id=str(tenant_id))
                 else:
                     default_agent = await find_agent_by_daimon_tag(
-                        self.runtime.anthropic, tenant_id=tenant_id, name=agent_name
+                        self.runtime.anthropic,
+                        tenant_id=tenant_id,
+                        name=agent_name,
+                        records=self.runtime.sessionmaker,
                     )
                     if default_agent is None:
                         seed_ok = False
@@ -4457,6 +4494,11 @@ class DaimonBot(commands.Bot):
                 else:
                     await running_origin.enter_async_context(origins.pop_all())
                     origin = prepared_origin
+                if row.reason == "confirmed_call":
+                    running_origin.callback(
+                        initial_send_prefix.reset,
+                        initial_send_prefix.set(self._confirmed_call_prefix(tenant_id, row)),
+                    )
                 outcome = await run_prepared_turn(
                     self.runtime.turn_deps,
                     prepared,
@@ -4573,10 +4615,6 @@ class DaimonBot(commands.Bot):
             thread=thread,
             tenant_id=tenant_id,
             lifecycle=final_lifecycle,
-            selfhosted=(
-                prepared.admission.backend_revision is not None
-                and prepared.admission.backend_revision.backend == "selfhosted"
-            ),
         )
         if archive_after:
             await self._archive_after_outputs(outcome, thread)
@@ -5184,6 +5222,12 @@ class DaimonBot(commands.Bot):
                                 max_input_chars=naming.max_input_chars,
                                 timeout_seconds=naming.timeout_seconds,
                                 channel_id=admission.budget_channel_id,
+                                agent_id=agent.id,
+                                provider=(
+                                    admission.backend_revision.backend
+                                    if admission.backend_revision is not None
+                                    else None
+                                ),
                             )
                     opened = await message.create_thread(
                         name=thread_name, auto_archive_duration=10080
@@ -5470,7 +5514,10 @@ class DaimonBot(commands.Bot):
                 or admission.backend_revision.backend != "selfhosted"
             ):
                 owner_name = await _resolve_agent_display_name(
-                    self.runtime.anthropic, tenant_id=tenant_id, ma_agent_id=error.source_agent_id
+                    self.runtime.anthropic,
+                    tenant_id=tenant_id,
+                    ma_agent_id=error.source_agent_id,
+                    records=self.runtime.sessionmaker,
                 )
             error_text = render_error(
                 error,
@@ -6010,10 +6057,6 @@ class DaimonBot(commands.Bot):
             thread=thread,
             tenant_id=tenant_id,
             lifecycle=final_lifecycle,
-            selfhosted=(
-                prepared.admission.backend_revision is not None
-                and prepared.admission.backend_revision.backend == "selfhosted"
-            ),
         )
         if archive_after:
             await self._archive_after_outputs(outcome, thread)

@@ -522,7 +522,10 @@ async def run_action(
         ):
             await lock_tidy_agent(session, ctx.actor)
             agent_data = await find_agent_by_derived_uuid(
-                runtime.client, tenant_id=ctx.auth.tenant_id, agent_id=ctx.actor.agent_id
+                runtime.client,
+                tenant_id=ctx.auth.tenant_id,
+                agent_id=ctx.actor.agent_id,
+                records=runtime.session_factory,
             )
             agent = (
                 build_agent_ref(agent_data.name, agent_data.metadata)

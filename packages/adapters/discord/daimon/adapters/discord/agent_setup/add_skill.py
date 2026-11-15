@@ -111,7 +111,10 @@ async def skill_change_refusal(
         if ma_agent is not None:
             return ma_agent
         return await retrieve_agent(
-            runtime.anthropic, agent.ma_agent_id, scope=resource_scope(tenant_id=str(tenant_id))
+            runtime.anthropic,
+            agent.ma_agent_id,
+            scope=resource_scope(tenant_id=str(tenant_id)),
+            records=runtime.sessionmaker,
         )
 
     async with runtime.sessionmaker() as session:
@@ -342,6 +345,7 @@ class SkillPreviewView(PanelViewBase):
                     self.runtime.anthropic,
                     self.agent.ma_agent_id,
                     scope=resource_scope(tenant_id=str(tenant_id)),
+                    records=self.runtime.sessionmaker,
                 )
             except ScopeViolation as exc:
                 if exc.reason != "provider record belongs to another tenant":

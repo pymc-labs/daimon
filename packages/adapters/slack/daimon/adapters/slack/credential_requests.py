@@ -123,7 +123,10 @@ async def start_mcp_oauth_from_click(
         return
     try:
         agent = await find_agent_by_derived_uuid(
-            runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+            runtime.anthropic,
+            tenant_id=row.tenant_id,
+            agent_id=row.agent_id,
+            records=runtime.sessionmaker,
         )
     except anthropic.APIError:
         await post_ephemeral(

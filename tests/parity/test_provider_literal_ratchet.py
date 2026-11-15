@@ -12,7 +12,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 BASELINE = Path(__file__).with_name("provider_literal_baseline.json")
 # Lower this ceiling along with the reviewed inventory when extracting provider policy.
-MAX_OUTSIDE_SEAM = 209
+MAX_OUTSIDE_SEAM = 152
 
 
 def _is_provider_literal(node: ast.AST) -> bool:

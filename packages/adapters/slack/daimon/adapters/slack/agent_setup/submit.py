@@ -58,7 +58,7 @@ from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.models_catalog import list_model_choices
+from daimon.core.models_catalog import claude_model_choices
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.rule_views import load_rule_viewer
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -229,9 +229,9 @@ def _new_agent_error(
 
 
 def _allowed_model_ids() -> frozenset[str]:
-    from daimon.core.constants import ALLOWED_MODEL_IDS
+    from daimon.core.models_catalog import priced_claude_ids
 
-    return frozenset(ALLOWED_MODEL_IDS)
+    return frozenset(priced_claude_ids())
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +296,7 @@ async def run_new_agent_submission(
                 view_id=view_id,
                 view=build_new_agent_form(
                     meta=meta.with_view("new_agent", root_view_id=meta.root_view_id),
-                    model_choices=list_model_choices(default=DEFAULT_AGENT_MODEL),
+                    model_choices=claude_model_choices(default=DEFAULT_AGENT_MODEL),
                     initial_name=name,
                     initial_purpose=purpose,
                     initial_model=model,
@@ -330,6 +330,7 @@ async def run_new_agent_submission(
                 thread_id=None,
                 default=runtime.deployment_default,
                 is_admin=is_admin,
+                records=runtime.sessionmaker,
             )
             details = await load_panel_details(
                 session,
@@ -361,6 +362,7 @@ async def run_new_agent_submission(
                     platform="slack",
                     thread_id=None,
                     default=runtime.deployment_default,
+                    records=runtime.sessionmaker,
                 )
             )
 

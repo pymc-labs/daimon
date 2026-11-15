@@ -50,7 +50,10 @@ async def _may_manage_request(
     if not is_admin:
         return False
     live_agent = await find_agent_by_derived_uuid(
-        runtime.anthropic, tenant_id=row.tenant_id, agent_id=row.agent_id
+        runtime.anthropic,
+        tenant_id=row.tenant_id,
+        agent_id=row.agent_id,
+        records=runtime.sessionmaker,
     )
     return live_agent is not None and live_agent.id == row.ma_agent_id
 

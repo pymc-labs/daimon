@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, Literal
 
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -10,14 +11,26 @@ from daimon.adapters.web import directory
 from daimon.adapters.web.caller import FILES_OFF, WebCaller, requires
 from daimon.adapters.web.cards import CardChoice
 from daimon.adapters.web.chat_json import agent_json, message_json, session_json
+from daimon.adapters.web.chat_model import thread_model
+from daimon.adapters.web.chat_switch_back import switch_back
+from daimon.adapters.web.chat_thread_model import (
+    Picked,
+    ThreadModels,
+    keep_thread_model,
+    preview_thread,
+    thread_models,
+)
+from daimon.adapters.web.control_cards import ControlRefused, is_control_card
 from daimon.adapters.web.credential_cards import CredentialRefused
 from daimon.adapters.web.faces import avatars_of
 from daimon.adapters.web.files import PERSON_UPLOAD_QUOTA_BYTES, download, open_attachment
+from daimon.adapters.web.model_preview import ModelPreview
 from daimon.adapters.web.paging import PageRequest, cut, page_of
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.adapters.web.stream import OTHER_TURN, Event, sse_response
 from daimon.adapters.web.turns import WebTurns
 from daimon.core.cursor import MAX_PAGE
+from daimon.core.host_calls import WAKE_SEED, wake_prefix
 from daimon.core.stores import file_uploads
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores import web_workspace_settings as workspace_settings
@@ -30,6 +43,7 @@ from daimon.core.stores.domain import (
 )
 from daimon.core.stores.message_feedback import record_vote
 from daimon.core.stores.thread_agent_bindings import create_binding
+from daimon.core.turn.mutation_gate import send_prefix
 from daimon.core.web_identity import WebPrincipal, place_of, thread_key
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -49,6 +63,14 @@ class NewSession(BaseModel):
 
 class Rename(BaseModel):
     title: str = Field(min_length=1, max_length=200)
+
+
+class PickModel(BaseModel):
+    """A model as `provider:id` (or `default`), with the preview the person confirmed."""
+
+    value: str = Field(min_length=1, max_length=200)
+    preview_digest: str = ""
+    preview_revision: int = 0
 
 
 class NewMessage(BaseModel):
@@ -224,7 +246,12 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
                 creator_account_id=caller.person.account_id,
                 kind="web",
             )
-        return session_json(thread, agent, avatar=(await faces(caller, [agent])).get(agent.id, ""))
+        return session_json(
+            thread,
+            agent,
+            avatar=(await faces(caller, [agent])).get(agent.id, ""),
+            model=await thread_model(runtime, caller, thread, agent),
+        )
 
     @router.get("/sessions/{session_id}")
     async def detail(  # pyright: ignore[reportUnusedFunction]
@@ -266,6 +293,7 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
             agent,
             running="resume_from" in out,
             avatar=(await faces(caller, [agent])).get(thread.agent_id, ""),
+            model=await thread_model(runtime, caller, thread, agent),
         )
         return out
 
@@ -284,6 +312,45 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
             agent,
             running=is_running(thread.id),
             avatar=(await faces(caller, [agent])).get(thread.agent_id, ""),
+            model=await thread_model(runtime, caller, thread, agent),
+        )
+
+    @router.post("/sessions/{session_id}/switch-back")
+    async def back_to_claude(session_id: uuid.UUID, caller: Caller) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
+        """The refusal card's way back: the agent answers on Claude again."""
+        async with runtime.sessionmaker() as db:
+            thread = await thread_of(db, caller, session_id)
+        runtime.agents.forget(caller.person.tenant_id)
+        return {"line": await switch_back(runtime, caller, thread)}
+
+    @router.get("/sessions/{session_id}/models")
+    async def models(session_id: uuid.UUID, caller: Caller) -> ThreadModels:  # pyright: ignore[reportUnusedFunction]
+        """What this chat can pick its model from, and the pick it runs on."""
+        async with runtime.sessionmaker() as db:
+            thread = await thread_of(db, caller, session_id)
+        return await thread_models(runtime, caller, thread)
+
+    @router.get("/sessions/{session_id}/model-preview")
+    async def model_preview(  # pyright: ignore[reportUnusedFunction]
+        session_id: uuid.UUID, caller: Caller, value: str
+    ) -> ModelPreview:
+        """What picking `value` (`provider:id`) changes for this chat, or why it can't."""
+        async with runtime.sessionmaker() as db:
+            thread = await thread_of(db, caller, session_id)
+        return await preview_thread(runtime, caller, thread, value)
+
+    @router.put("/sessions/{session_id}/model")
+    async def pick_model(session_id: uuid.UUID, body: PickModel, caller: Caller) -> Picked:  # pyright: ignore[reportUnusedFunction]
+        """Keep the pick the person confirmed for this chat; `default` is the agent's own."""
+        async with runtime.sessionmaker() as db:
+            thread = await thread_of(db, caller, session_id)
+        return await keep_thread_model(
+            runtime,
+            caller,
+            thread,
+            value=body.value,
+            digest=body.preview_digest,
+            revision=body.preview_revision,
         )
 
     @router.delete("/sessions/{session_id}")
@@ -394,13 +461,24 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
         if answered.follow_up is None:
             settled = None if answered.message is None else message_json(answered.message)
             return JSONResponse({"type": "settled", "message": settled})
+        return await carry_on(caller, thread, principal, answered.follow_up)
+
+    async def carry_on(
+        caller: WebCaller,
+        thread: WebThreadRow,
+        principal: WebPrincipal,
+        content: str,
+        prefix: Callable[[], Awaitable[str]] | None = None,
+    ) -> Response:
+        """Carry the chat on in a new reply to `content`, the agent's cue."""
+        live = turns()
         # Not saved: the follow-up's message is the agent's cue, not the person's words.
         message = WebMessageRow(
             id=uuid.uuid4(),
             tenant_id=thread.tenant_id,
             thread_id=thread.id,
             role="user",
-            content=answered.follow_up,
+            content=content,
             blocks=WebMessageBlocks(),
             turn_id=None,
             status="done",
@@ -411,12 +489,54 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
             created_at=runtime.now(),
         )
         try:
-            stream = live.start(
-                person=caller.person, principal=principal, thread=thread, message=message
-            )
+            # The turn's task copies the prefix hook as it starts (`send_prefix`).
+            async with send_prefix(prefix):
+                stream = live.start(
+                    person=caller.person, principal=principal, thread=thread, message=message
+                )
         except RuntimeError:
             raise HTTPException(status_code=409, detail="Wait for the answer to finish.") from None
         return sse_response(stream)
+
+    async def answer_control(
+        thread: WebThreadRow,
+        caller: WebCaller,
+        principal: WebPrincipal,
+        card_id: str,
+        choice: CardChoice,
+    ) -> Response:
+        """Press a call or switch card. An approved call runs in a new reply, its wake turn."""
+        live = turns()
+        if live.draining:
+            raise HTTPException(status_code=503, detail="Restarting. Try again in a moment.")
+        if live.streams.running(thread.id) is not None:
+            raise HTTPException(status_code=409, detail="Wait for the answer to finish.")
+        try:
+            answered = await live.controls.answer(
+                thread=thread,
+                card_id=card_id,
+                clicker=principal.external_id,
+                is_admin=principal.role is Role.ADMIN,
+                choice=choice,
+            )
+        except ControlRefused as refused:
+            raise HTTPException(status_code=409, detail=str(refused)) from None
+        prefix = (
+            None
+            if answered.wake_agent is None
+            else wake_prefix(
+                live.sessionmaker,
+                live.deps.mcp,
+                tenant_id=thread.tenant_id,
+                platform="web",
+                thread_id=thread_key(thread.id),
+                target_ma_agent_id=answered.wake_agent,
+            )
+        )
+        if prefix is None:
+            settled = None if answered.message is None else message_json(answered.message)
+            return JSONResponse({"type": "settled", "message": settled})
+        return await carry_on(caller, thread, principal, WAKE_SEED, prefix)
 
     @router.post("/sessions/{session_id}/cards/{card_id}")
     async def answer(  # pyright: ignore[reportUnusedFunction]
@@ -429,6 +549,8 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
         clicker = principal.external_id
         if body.answer in ("save", "skip"):
             return await answer_credential(caller, thread, principal, card_id, body)
+        if is_control_card(card_id):
+            return await answer_control(thread, caller, principal, card_id, body.answer)
         stream = live.streams.running(thread.id)
         if stream is None:
             raise HTTPException(status_code=409, detail=live.cards.missing_message(card_id))

@@ -139,8 +139,10 @@ class Base:
         gcs_secrets: GCSSecretResolver | None = None,
         native_agent: Agent | None = None,
         max_output_tokens: int | None = None,
+        thinking_level: str | None = None,
     ) -> None:
         self._max_output_tokens = max_output_tokens
+        self._thinking_level = thinking_level
         self._native_agent = native_agent
         self._transport, self._storage, self._account = transport, storage, account_scope_id
         self._mcp_secrets = mcp_secrets
@@ -164,9 +166,15 @@ class Base:
             agent.spec,
             authenticated_mcp=self._mcp_secrets is not None,
             max_output_tokens=self._max_output_tokens,
+            thinking_level=self._thinking_level,
         )
         if self._max_output_tokens is not None:
-            if self._native_agent is not None or spec.environment is not None or spec.resources:
+            if (
+                self._native_agent is not None
+                or spec.environment is not None
+                or spec.resources
+                or spec.skills
+            ):
                 refuse("model_interaction_resources")
             return request
         if self._native_agent is not None:
@@ -182,7 +190,10 @@ class Base:
             environment = compile_environment(
                 env.spec, files=inline_files(records, scope, self._account, env.spec.sources)
             )
-        mounted = skill_sources(records, scope, self._account, agent.spec.skills)
+        # A session's own skills (a template's copies) mount beside the agent's.
+        mounted = skill_sources(
+            records, scope, self._account, (*(agent.spec.skills or ()), *spec.skills)
+        )
         if mounted:
             configuration = object_value(environment)
             sources = configuration.get("sources", [])
@@ -558,6 +569,7 @@ def compile_agent(
     *,
     authenticated_mcp: bool = False,
     max_output_tokens: int | None = None,
+    thinking_level: str | None = None,
 ) -> Object:
     if spec.model.provider != "gemini" or not spec.model.id or spec.model.options:
         refuse("model")
@@ -566,18 +578,22 @@ def compile_agent(
     if max_output_tokens is not None:
         if spec.tools or spec.skills or spec.mcp_servers:
             refuse("model_interaction_resources")
-        result: Object = {
-            "model": spec.model.id,
-            "generation_config": {"max_output_tokens": max_output_tokens},
-            "tools": [],
-        }
+        generation: Object = {"max_output_tokens": max_output_tokens}
+        if thinking_level is not None:
+            generation["thinking_level"] = thinking_level
+        result: Object = {"model": spec.model.id, "generation_config": generation, "tools": []}
         if spec.system is not None:
             result["system_instruction"] = spec.system
         model_request(result)
         return result
+    config: Object = {"type": "antigravity", "model": spec.model.id}
+    if thinking_level is not None:
+        # google-genai 2.7 refuses generation_config beside `agent`: an agent
+        # interaction carries its settings in agent_config (extra items allowed).
+        config["thinking_level"] = thinking_level
     result = {
         "agent": BASE_AGENT,
-        "agent_config": {"type": "antigravity", "model": spec.model.id},
+        "agent_config": config,
         # Omission would enable provider defaults, including billable web tools.
         "tools": [],  # filled below; never sent empty
     }
@@ -887,6 +903,7 @@ class GeminiEvents(Base):
         gcs_secrets: GCSSecretResolver | None = None,
         native_agent: Agent | None = None,
         max_output_tokens: int | None = None,
+        thinking_level: str | None = None,
     ) -> None:
         super().__init__(
             transport,
@@ -896,6 +913,7 @@ class GeminiEvents(Base):
             gcs_secrets=gcs_secrets,
             native_agent=native_agent,
             max_output_tokens=max_output_tokens,
+            thinking_level=thinking_level,
         )
         self._state_store = state_store
         self._model_for_interaction = model_for_interaction

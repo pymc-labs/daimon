@@ -19,6 +19,7 @@ import httpx
 import pytest
 from aioresponses import CallbackResult
 from aioresponses import aioresponses as AioResponsesMock
+from anthropic import AsyncAnthropic
 from anthropic.types.beta import FileMetadata
 from daimon.adapters.slack.blockkit import ERROR_COLOR
 from daimon.adapters.slack.output_delivery import (
@@ -27,6 +28,8 @@ from daimon.adapters.slack.output_delivery import (
     deliver_session_outputs,
 )
 from daimon.core.output_delivery import DeliverableFile, NoticedFiles
+from daimon.core.output_runtime import AnthropicOutputRuntime
+from mux.contracts.ids import Scope
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from slack_sdk.web.async_client import AsyncWebClient
 from yarl import URL
@@ -52,6 +55,11 @@ def _notice_text(call: Any) -> str:
     assert attachment["color"] == ERROR_COLOR, "the bar is error red"
     (section,) = attachment["blocks"]
     return section["text"]["text"]
+
+
+def _runtime(client: AsyncAnthropic, session_id: str) -> AnthropicOutputRuntime:
+    scope = Scope.legacy_host_authorized(call_site="test_slack_output_delivery")
+    return AnthropicOutputRuntime(client, session_id, scope=scope)
 
 
 async def test_delivery_uploads_via_three_request_flow_without_content_type(
@@ -109,9 +117,8 @@ async def test_delivery_uploads_via_three_request_flow_without_content_type(
         pass
 
     await deliver_session_outputs(
-        anthropic_client,
+        _runtime(anthropic_client, "sesn_1"),
         fake_slack_web_client.client,
-        session_id="sesn_1",
         channel_id="C1",
         thread_ts="1.2",
         notice_keys=NoticeKeys(),
@@ -188,9 +195,8 @@ async def test_delivery_posts_scope_notice_and_deletes_nothing_on_missing_scope(
 
     notice_keys = NoticeKeys()
     await deliver_session_outputs(
-        anthropic_client,
+        _runtime(anthropic_client, "sesn_1"),
         fake_slack_web_client.client,
-        session_id="sesn_1",
         channel_id="C1",
         thread_ts="1.2",
         notice_keys=notice_keys,
@@ -255,9 +261,8 @@ async def test_delivery_posts_storage_notice_and_deletes_nothing_on_storage_limi
 
     notice_keys = NoticeKeys()
     await deliver_session_outputs(
-        anthropic_client,
+        _runtime(anthropic_client, "sesn_1"),
         fake_slack_web_client.client,
-        session_id="sesn_1",
         channel_id="C1",
         thread_ts="1.2",
         notice_keys=notice_keys,
@@ -329,9 +334,8 @@ async def test_delivery_posts_abort_notice_once_per_thread_and_logs_once_per_wor
     notice_keys = NoticeKeys()
     for channel_id, thread_ts in (("C1", "1.2"), ("C1", "2.3"), ("C2", "2.3"), ("C1", "1.2")):
         await deliver_session_outputs(
-            anthropic_client,
+            _runtime(anthropic_client, "sesn_1"),
             fake_slack_web_client.client,
-            session_id="sesn_1",
             channel_id=channel_id,
             thread_ts=thread_ts,
             notice_keys=notice_keys,
@@ -415,9 +419,8 @@ async def test_delivery_continues_after_bytes_post_failure_on_one_file(
         pass
 
     await deliver_session_outputs(
-        anthropic_client,
+        _runtime(anthropic_client, "sesn_1"),
         fake_slack_web_client.client,
-        session_id="sesn_1",
         channel_id="C1",
         thread_ts="1.2",
         notice_keys=NoticeKeys(),
@@ -495,9 +498,8 @@ async def test_delivery_continues_after_non_scope_api_error_on_one_file(
         pass
 
     await deliver_session_outputs(
-        anthropic_client,
+        _runtime(anthropic_client, "sesn_1"),
         fake_slack_web_client.client,
-        session_id="sesn_1",
         channel_id="C1",
         thread_ts="1.2",
         notice_keys=NoticeKeys(),
@@ -554,9 +556,8 @@ async def test_delivery_posts_one_oversize_notice_and_keeps_entry_without_upload
     noticed = NoticedFiles()
     for _ in range(2):
         await deliver_session_outputs(
-            anthropic_client,
+            _runtime(anthropic_client, "sesn_1"),
             fake_slack_web_client.client,
-            session_id="sesn_1",
             channel_id="C1",
             thread_ts="1.2",
             notice_keys=NoticeKeys(),
@@ -672,9 +673,8 @@ async def test_a_file_at_the_slack_cap_is_downloaded_and_uploaded(
         pass
 
     await deliver_session_outputs(
-        build_fake_anthropic(router.dispatch),
+        _runtime(build_fake_anthropic(router.dispatch), "sesn_1"),
         fake_slack_web_client.client,
-        session_id="sesn_1",
         channel_id="C1",
         thread_ts="1.2",
         notice_keys=NoticeKeys(),
@@ -748,9 +748,8 @@ async def _deliver_abort(
         pass
 
     await deliver_session_outputs(
-        anthropic_client,
+        _runtime(anthropic_client, session_id),
         web_client,
-        session_id=session_id,
         channel_id="C1",
         thread_ts=thread_ts,
         notice_keys=notice_keys,
@@ -950,9 +949,8 @@ async def test_overlapping_turns_in_one_thread_each_attribute_their_own_files() 
 
         def sweep(session_id: str, user_id: str, sleep: Any) -> Any:
             return deliver_session_outputs(
-                anthropic_client,
+                _runtime(anthropic_client, session_id),
                 web_client,
-                session_id=session_id,
                 channel_id="C1",
                 thread_ts="1.0",
                 notice_keys=NoticeKeys(),

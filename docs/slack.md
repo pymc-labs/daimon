@@ -196,6 +196,9 @@ the web app. Members see only agents whose
 rules allow them to answer at that location, while admins see all. Knowing an
 agent's name does not grant edit rights.
 
+The **Model** shortcut on a message in a thread lists the agent's models with
+prices and picks one for that thread. A pick that changes provider asks you to confirm once.
+
 When a channel's readers are not `own`, `/here` and the Permissions screen warn
 that guest accounts aren't checked on Slack. A channel shared with another
 workspace gets a sharing warning and, for admins, a **Make confidential**

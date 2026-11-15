@@ -267,7 +267,7 @@ def isolation_view_loader(
             policy = await _load_policy(session, tenant_id)
         if not any_own_readers(policy):
             return CallView(viewer=RuleViewer(policy=policy))
-        agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+        agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id, records=sessionmaker)
         return CallView(
             viewer=RuleViewer(
                 policy,
@@ -539,7 +539,7 @@ async def create_routine(env: RoutineEnv, caller: RoutineCaller, new: NewRoutine
             budget_channel_id = source.channel_id
     view = await _view(env)
     match = await find_agent_by_daimon_tag(
-        env.anthropic, tenant_id=caller.tenant_id, name=new.agent_name
+        env.anthropic, tenant_id=caller.tenant_id, name=new.agent_name, records=env.sessionmaker
     )
     if match is None or not view.viewer.sees_agent(match):
         raise UnknownAgent(f"no agent named {new.agent_name!r} found here")
@@ -695,7 +695,7 @@ async def update_routine(
         new_agent_id: str | None = None
         if change.agent_name is not None and change.agent_name != row.agent_name:
             match = await find_agent_by_daimon_tag(
-                env.anthropic, tenant_id=tenant_id, name=change.agent_name
+                env.anthropic, tenant_id=tenant_id, name=change.agent_name, records=env.sessionmaker
             )
             if match is None:
                 raise UnknownAgent(f"no agent named {change.agent_name!r} found here")
@@ -706,7 +706,9 @@ async def update_routine(
             effective_agent = next(
                 (
                     agent
-                    for agent in await list_agents_by_tenant(env.anthropic, tenant_id=tenant_id)
+                    for agent in await list_agents_by_tenant(
+                        env.anthropic, tenant_id=tenant_id, records=env.sessionmaker
+                    )
                     if agent.id == effective_ma_id
                 ),
                 None,

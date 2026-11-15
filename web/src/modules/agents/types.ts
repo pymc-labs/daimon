@@ -8,8 +8,9 @@ export type Backend = "anthropic" | "openai" | "gemini" | "selfhosted"
 export type ToolRule = "allow" | "ask" | "deny"
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max"
 
-export type ModelChoice = { id: string; backend: Backend; speed: "standard" | "fast"; effort: Effort }
-export type CatalogModel = { id: string; label: string; backend: Backend; in_usd: number; out_usd: number; fast?: boolean }
+/** `effort` null runs the model's own default. */
+export type ModelChoice = { id: string; backend: Backend; speed: "standard" | "fast"; effort: Effort | null }
+export type CatalogModel = { id: string; label: string; backend: Backend; in_usd: number; out_usd: number; fast?: boolean; efforts?: Effort[] }
 
 /** `agent_toolset_20260401` configs. */
 export type BuiltinTool = { name: string; enabled: boolean }
@@ -111,6 +112,25 @@ export type Change = {
   /** Long text (prompt, skill files): diffed by line. */
   text?: boolean
 }
+
+/** What picking a model changes: `drops` is every loss the person accepts by confirming. */
+export type ModelPreview = {
+  moves: boolean
+  allowed: boolean
+  skills: string[]
+  servers: string[]
+  capabilities: string[]
+  shared_limits: string[]
+  drops: string[]
+  cost: string
+  threads: string
+  digest: string
+  revision: number
+  refusal: { line: string; action: string | null } | null
+}
+
+/** The consent an apply carries: the drops, digest and revision the person was shown. */
+export type Consent = { accepted_drops: string[]; preview_digest: string; preview_revision: number }
 
 export type Draft = { base_version: number; config: AgentConfig; changes: Change[]; stale: boolean }
 

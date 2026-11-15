@@ -190,6 +190,7 @@ async def _attach_synced_skills(
             version=fresh.version,
             payload={"skills": merged},
             scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+            records=runtime.session_factory,
         )
 
     try:
@@ -198,6 +199,7 @@ async def _attach_synced_skills(
             agent.id,
             _apply,
             scope=resource_scope(tenant_id=str(auth.tenant_id), account_id=str(auth.account_id)),
+            records=runtime.session_factory,
         )
     except (ToolError, DaimonError, anthropic.APIStatusError) as exc:
         return f"Uploaded to the registry, but attaching to '{agent_name}' failed: {exc}"
@@ -308,7 +310,9 @@ async def _sync_impl(
     # agent" -- so it can be non-zero on an import that attached nothing. The
     # summary has to say which of the two it is, or the caller reads a re-import
     # of already-attached skills as an attach it just performed.
-    agents = await list_agents_by_tenant(runtime.client, tenant_id=auth.tenant_id)
+    agents = await list_agents_by_tenant(
+        runtime.client, tenant_id=auth.tenant_id, records=runtime.session_factory
+    )
     attached_ids = {skill.skill_id for agent in agents for skill in agent.skills}
     attached = registry_ids & attached_ids
 

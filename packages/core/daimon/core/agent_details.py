@@ -49,7 +49,7 @@ from daimon.core.stores.domain import AgentFileRow, Platform
 from daimon.core.stores.github_access import list_live_grant_repositories
 from daimon.core.web_links import TenantLinks
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 class GitHubDeploymentFacts(BaseModel):
@@ -234,6 +234,7 @@ async def load_agent_details(
     channel_label: str | None,
     preloaded_agent: BetaManagedAgentsAgent | None = None,
     web: TenantLinks | None = None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> AgentDetails:
     """Read everything `build_agent_details` needs, then fold it.
 
@@ -250,7 +251,7 @@ async def load_agent_details(
     `channel_id`, as if it did not exist.
     """
     agent = preloaded_agent or await get_setup_agent(
-        anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id
+        anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id, records=records
     )
     viewer = await load_rule_viewer(
         session,
@@ -261,6 +262,7 @@ async def load_agent_details(
         platform=platform,
         thread_id=thread_id,
         default=deployment_default,
+        records=records,
     )
     if viewer is not None and not viewer.sees_agent(agent):
         raise UserFacingError("That agent is no longer available here. Choose another agent.")

@@ -42,7 +42,7 @@ async def test_a_foreign_reread_keeps_the_existing_refusal_and_does_not_upload()
             cast(
                 add_skill.SkillPreviewView,
                 SimpleNamespace(
-                    runtime=SimpleNamespace(anthropic=new),
+                    runtime=SimpleNamespace(anthropic=new, sessionmaker=None),
                     state=SimpleNamespace(guild_id="guild-N7"),
                     agent=SimpleNamespace(name="project", ma_agent_id="agent1"),
                     bundle=SimpleNamespace(preview=SimpleNamespace(name="sample")),

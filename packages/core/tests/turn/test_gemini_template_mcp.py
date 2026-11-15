@@ -26,7 +26,7 @@ from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.gemini_deployment import GeminiPlan
-from daimon.core.turn.prepare import admitted_session_scope
+from daimon.core.turn.prepare import CONTINUED, admitted_session_scope
 from daimon.core.turn.runtime_manifest import read_preparation_counterpart
 from daimon.core.turn.runtimes import build_channel_runtime, scope_channel_runtimes
 from mux.contracts.config import ConfigRevision
@@ -37,7 +37,7 @@ from mux.errors import ScopeViolation
 from ..test_agent_backend import owned as owned
 from .test_declared_drop_preparation import consent_request as consent_request
 from .test_gemini_codec import interaction
-from .test_gemini_full_source import PARAMS
+from .test_gemini_full_source import PARAMS, default_skill_bundles, serve_source_skill
 from .test_gemini_full_source import source_mcp as source_mcp
 from .test_gemini_runtime_transport import clients_for
 
@@ -56,6 +56,9 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
     request, service, source, actor, accepted, router, *_ = consent_request
     sessions = request.deps.sessionmaker
     router.add_environment_list(request.admission.environment)
+    # The OpenAI code-default template sizes the source's custom skills at capture.
+    for name, _bundle, _version, data in default_skill_bundles():
+        serve_source_skill(router, name, data)
     scope = admitted_session_scope(
         request.admission, tenant_id=request.tenant_id, session_id="preparation"
     )
@@ -212,7 +215,9 @@ def _connection(selected):
 async def test_consent_keeps_daimon_tools_and_drops_only_what_gemini_lacks(template):
     _, quote, *_ = template
     assert "mcp" not in quote.declared_drops
-    assert {"memory", "skills"} <= set(quote.declared_drops)
+    assert "memory" in quote.declared_drops
+    # Its custom skills attach per session; only one past Gemini's limits is a named loss.
+    assert "skills" not in quote.declared_drops, quote.declared_drops
     # J6b: its execution tools map to code_execution; web search and fetch
     # (grounding, off) are each a named loss, never all of its tools.
     assert "tools" not in quote.declared_drops
@@ -398,6 +403,12 @@ async def test_a_real_turn_revokes_its_credential_however_it_ends(template, monk
             for body in sent
             for t in body.get("tools", [])
         ), "the credential travels only in the MCP server entry"
+        mounted = {
+            source["target"].split("/")[2]
+            for source in sent[0]["environment"].get("sources", [])
+            if source["target"].startswith(".agents/skills/")
+        }
+        assert mounted, "the template's custom skills mount in its first interaction"
 
 
 GATED = (
@@ -410,6 +421,43 @@ GATED = (
     "lead_intake_resolve",
     "set_routine_sandbox_tools",
 )
+
+
+CONNECTOR_PARAMS = {
+    **PARAMS,
+    "mcp_servers": [{"type": "url", "name": "linear", "url": "https://mcp.linear.app/mcp"}],
+    "tools": [
+        *PARAMS["tools"],
+        {
+            "type": "mcp_toolset",
+            "mcp_server_name": "linear",
+            "configs": [],
+            "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+        },
+    ],
+}
+
+
+@pytest.mark.parametrize("consent_request", [CONNECTOR_PARAMS], indirect=True)
+async def test_the_relay_mounts_a_user_connector_instead_of_losing_it(template, monkeypatch):
+    """With the relay on the connector is a second server on Daimon's one credential."""
+    from daimon.core.features import snapshot
+
+    request, quote, native, *_ = template
+    assert "mcp_server:linear" in quote.declared_drops, "confirmed while the relay was off"
+    monkeypatch.setattr(snapshot, "deployment_on", lambda _s, k, _p: k == "mcp_connector_relay")
+    request = replace(request, deps=replace(request.deps, settings=object()))
+    selected, runtime = await _prepared(request)
+    daimon, linear = selected.target_spec.mcp_servers
+    public = str(request.deps.mcp.public_url).rstrip("/")
+    assert linear.url == f"{public}/connectors/linear", "relayed under Daimon's URL"
+    assert "mcp_server:linear" not in selected.target_spec.declared_drops, "never a loss"
+    served = [tool["url"] for tool in native["tools"] if tool.get("type") == "mcp_server"]
+    assert served == [daimon.url, linear.url], "both reach Gemini, never the upstream URL"
+    transport = runtime.transport_factory(request.admission.backend_revision, request.scope)
+    token = await transport.mcp_secrets(request.scope, daimon.credential_ref, daimon.url)
+    relayed = await transport.mcp_secrets(request.scope, linear.credential_ref, linear.url)
+    assert relayed == token, "the relay authenticates the turn's own Daimon credential"
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
@@ -432,6 +480,33 @@ async def test_gated_and_publishing_tools_stay_unavailable_in_a_template(templat
     assert allowed == {"search_tools", "call_tool"}
     assert set(representation.unavailable_mcp_tools) == {f"mcp_tool:daimon-mcp:{t}" for t in GATED}
     assert represented_source(captured, representation.target) == representation
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_the_host_call_gate_offers_gated_tools_behind_a_card(template, monkeypatch):
+    """With the gate on for the platform each gated call is carded, so it is no loss;
+    a reach approval, tallied under a turn gone by the press, still is."""
+    from daimon.core.features import snapshot
+    from daimon.core.mcp_oauth import discovery
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+    request, *_ = template
+    catalogue = frozenset({"search_tools", "call_tool", "approve_reach", *GATED})
+
+    async def listed(_url, _token):
+        return catalogue
+
+    monkeypatch.setattr(discovery, "list_mcp_tools", listed)
+    monkeypatch.setattr(snapshot, "deployment_on", lambda _s, key, _p: key == "host_call_gate")
+    request = replace(request, deps=replace(request.deps, settings=object()))
+    captured = await capture_preparation_source(request, fresh=True)
+    (representation,) = [r for r in captured.representations if r.target.mcp_servers]
+    (connection,) = representation.target.mcp_servers
+    allowed = set(connection.tool_policy["allowed_tools"])  # pyright: ignore[reportArgumentType]
+    assert set(GATED) <= allowed, "every gated tool is offered behind its card"
+    assert representation.unavailable_mcp_tools == ("mcp_tool:daimon-mcp:approve_reach",), (
+        "a reach approval stays a named loss"
+    )
 
 
 def _gated(request, gating):
@@ -524,7 +599,7 @@ async def test_a_pin_from_before_the_gating_change_still_holds_but_not_for_an_ed
     from daimon.core.turn.runtime_manifest import capture_preparation_source as capture
 
     def legacy_pin(source):
-        facts = manifest._source_facts(source)  # pyright: ignore[reportPrivateUsage]
+        facts = manifest._source_facts(source, readdress=False)  # pyright: ignore[reportPrivateUsage]
         facts.pop("ungated_spec", None)
         return manifest._digest(facts)  # pyright: ignore[reportPrivateUsage]
 
@@ -689,6 +764,7 @@ async def test_a_second_cancel_cannot_abandon_credential_revocation(monkeypatch)
         model_by_session={},
     )
     prepared = SimpleNamespace(
+        continuity=CONTINUED,
         admission=SimpleNamespace(
             observation=observation,
             account_id=None,
@@ -701,6 +777,8 @@ async def test_a_second_cancel_cannot_abandon_credential_revocation(monkeypatch)
             backend_revision=None,
         ),
         ma_session_id="session",
+        watermark=None,
+        reused=False,
         snapshot=None,
         _finalize=finalize,
     )
@@ -760,6 +838,7 @@ async def test_a_second_cancel_during_revocation_still_restores_the_callers_log_
         model_by_session={},
     )
     prepared = SimpleNamespace(
+        continuity=CONTINUED,
         admission=SimpleNamespace(
             observation=observation,
             account_id=None,
@@ -769,6 +848,8 @@ async def test_a_second_cancel_during_revocation_still_restores_the_callers_log_
             backend_revision=None,
         ),
         ma_session_id="session",
+        watermark=None,
+        reused=False,
         snapshot=None,
         _finalize=finalize,
     )
@@ -829,6 +910,7 @@ async def test_a_failing_revocation_still_restores_the_callers_log_fields(
         model_by_session={},
     )
     prepared = SimpleNamespace(
+        continuity=CONTINUED,
         admission=SimpleNamespace(
             observation=observation,
             account_id=None,
@@ -838,6 +920,8 @@ async def test_a_failing_revocation_still_restores_the_callers_log_fields(
             backend_revision=None,
         ),
         ma_session_id="session",
+        watermark=None,
+        reused=False,
         snapshot=None,
         _finalize=finalize,
     )
@@ -902,6 +986,7 @@ async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_i
         model_by_session={},
     )
     prepared = SimpleNamespace(
+        continuity=CONTINUED,
         admission=SimpleNamespace(
             observation=observation,
             account_id=None,
@@ -914,6 +999,8 @@ async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_i
             backend_revision=None,
         ),
         ma_session_id="session",
+        watermark=None,
+        reused=False,
         snapshot=None,
         _finalize=slow_failing_finalize,
     )
@@ -1018,22 +1105,23 @@ async def test_a_consent_that_dropped_the_switch_tool_still_prepares(
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-async def test_an_old_consent_with_any_other_difference_still_needs_a_new_confirmation(
+async def test_an_old_consent_holds_when_another_carded_tool_is_offered(
     consent_recorded_before_self_cards, template, monkeypatch
 ):
+    """Each tool regained runs behind Daimon's card, so neither asks again; any other
+    difference does (`test_consent_upgrade`)."""
     from daimon.core import tool_safety
-    from daimon.core.channel_backend import AgentBackendRefused
 
     request, *_ = template
     consent_recorded_before_self_cards["old"] = False
-    # One more gated tool now offered as well: more than the switch tool changed.
     monkeypatch.setattr(
         tool_safety,
         "self_carded_tools",
         lambda: frozenset({"request_agent_backend_switch", "add_skill"}),
     )
-    with pytest.raises((AgentBackendRefused, AdmissionDenied)):
-        await _prepared(request)
+    selected, _ = await _prepared(request)
+    allowed = _connection(selected).tool_policy["allowed_tools"]
+    assert {"request_agent_backend_switch", "add_skill"} <= set(allowed), "both are offered"
 
 
 @pytest.fixture

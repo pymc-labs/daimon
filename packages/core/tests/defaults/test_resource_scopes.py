@@ -47,10 +47,11 @@ def observed_scopes(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[Scope]]:
         *,
         scope: Scope | None = None,
         resources: frozenset[tuple[str, str]] = frozenset(),
+        records: async_sessionmaker[AsyncSession] | None = None,
     ) -> AnthropicManagedAgents:
         assert scope is not None
         scopes.append(scope)
-        return managed_agents(client, scope=scope, resources=resources)
+        return managed_agents(client, scope=scope, resources=resources, records=records)
 
     monkeypatch.setattr(mux_compat, "managed_agents", record)
     yield scopes

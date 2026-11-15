@@ -145,8 +145,8 @@ async def move_this_thread(
             now=datetime.datetime.now(datetime.UTC),
         )
     return (
-        f"This conversation moves to {provider} from the next message; "
-        "earlier messages here aren't carried over."
+        f"This conversation moves to {provider} from the next message "
+        "and keeps its earlier messages."
     )
 
 
@@ -222,7 +222,7 @@ FAILED_TEXT: Final[str] = (
 
 async def press_switch_card(
     *,
-    deps: TurnDeps | None,
+    deps: TurnDeps,
     sessionmaker: async_sessionmaker[AsyncSession],
     anthropic: AsyncAnthropic,
     turn_settings: TurnSettings,
@@ -239,8 +239,7 @@ async def press_switch_card(
     """Answer one press. None: not the requester's (the card stays as it is).
 
     The requester is checked before the card is claimed, so nobody else's press
-    can use it up. A claimed card is applied or refused exactly once. `deps`
-    None reads no source (only for a service whose previews read none).
+    can use it up. A claimed card is applied or refused exactly once.
     """
     from daimon.core.stores import backend_switch_cards as cards
 
@@ -309,7 +308,7 @@ async def _apply(
     claimed: SwitchCardRow,
     end: Callable[[Literal["applied", "refused"], str], Awaitable[SwitchCardPress]],
     *,
-    deps: TurnDeps | None,
+    deps: TurnDeps,
     sessionmaker: async_sessionmaker[AsyncSession],
     anthropic: AsyncAnthropic,
     turn_settings: TurnSettings,
@@ -320,6 +319,7 @@ async def _apply(
     place_word: str,
 ) -> SwitchCardPress:
     from daimon.core.authz import Place, build_subject
+    from daimon.core.backend_refusals import refusal_card
     from daimon.core.channel_backend import (
         AgentBackendRefused,
         BackendActor,
@@ -350,29 +350,25 @@ async def _apply(
     subject = build_subject(is_admin=is_admin, platform_user_id=clicker, client=claimed.client)
     # The source is read in the card's own conversation, as the MCP tool read it
     # for the preview, so the same agent setup yields the same preview digest.
-    capture = (
-        None
-        if deps is None
-        else partial(
-            capture_backend_source,
-            deps,
-            context=ScopeContext(
-                tenant_id=tenant_id,
-                account_id=claimed.account_id,
-                platform=claimed.platform,
-                channel_id=claimed.channel_id,
-                thread_id=claimed.thread_id,
-            ),
-            subject=subject,
-            place=Place.from_origin(
-                parent_channel_id=claimed.channel_id,
-                thread_id=claimed.thread_id,
-                setup_thread=claimed.setup_thread,
-            ),
-            is_dm=False,
-            slack_turn_context_id=None,
-            private_dm_id=None,
-        )
+    capture = partial(
+        capture_backend_source,
+        deps,
+        context=ScopeContext(
+            tenant_id=tenant_id,
+            account_id=claimed.account_id,
+            platform=claimed.platform,
+            channel_id=claimed.channel_id,
+            thread_id=claimed.thread_id,
+        ),
+        subject=subject,
+        place=Place.from_origin(
+            parent_channel_id=claimed.channel_id,
+            thread_id=claimed.thread_id,
+            setup_thread=claimed.setup_thread,
+        ),
+        is_dm=False,
+        slack_turn_context_id=None,
+        private_dm_id=None,
     )
     service = make_backend_service(
         sessionmaker,
@@ -436,15 +432,12 @@ async def _apply(
                 )
                 + " Nothing changed.",
             )
-        return await end(
-            "refused", "This switch was refused when it was confirmed. Nothing changed."
-        )
-    except BackendUnsupported:
+        line, _ = refusal_card(exc, provider=reference.target_backend, admin=is_admin)
+        return await end("refused", f"{line} Nothing changed.")
+    except BackendUnsupported as unsupported:
         log.warning("switch_card.unsupported", card_id=str(card_id))
-        return await end(
-            "refused",
-            f"{provider_name(reference.target_backend)} can't run here right now. Nothing changed.",
-        )
+        line, _ = refusal_card(unsupported, provider=reference.target_backend)
+        return await end("refused", f"{line} Nothing changed.")
     pin = await channel_pin_line(
         sessionmaker, tenant_id=tenant_id, platform=claimed.platform, channel_id=claimed.channel_id
     )

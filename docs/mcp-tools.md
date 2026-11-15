@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 216 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 222 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -17,6 +17,8 @@ tool is hidden by default and restored only for a matching caller.
 - **admin only** — carries the `admin` tag.
 - **agent tokens only** — carries the `agent-chat` tag.
 - **Discord callers** — carries the `discord` tag.
+- **OpenAI and Gemini agents** — carries the `host-memory` tag.
+- **OpenAI, Gemini and self-hosted agents** — carries the `host-web-fetch` tag.
 - **operator tokens with agents:archive** — carries the `scope:agents:archive` tag.
 - **operator tokens with channels:write** — carries the `scope:channels:write` tag.
 - **operator tokens with promo:create** — carries the `scope:promo:create` tag.
@@ -87,6 +89,17 @@ owners and helpers and save a skill's files.
 | `set_agent_helpers` | admin only | Set the agents an agent may ask for help to exactly these names or ids, for any agent you can see; helpers kept to channels you can't see stay. |
 | `set_agent_owners` | admin only | Set an agent's owner and co-owners to exactly these web person or account ids. |
 
+## `agent_memory`
+
+Memory tools for agents whose backend has no memory stores of its own.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `memory_create` | OpenAI and Gemini agents | Save a new memory file at `path` (for example `/notes/project.md`). |
+| `memory_delete` | OpenAI and Gemini agents | Delete a memory file. |
+| `memory_str_replace` | OpenAI and Gemini agents | Replace the one occurrence of `old_str` in a memory file with `new_str`. |
+| `memory_view` | OpenAI and Gemini agents | Read a memory file, or list the memory paths under a directory. |
+
 ## `agent_removal`
 
 Agent removal tools: detach_mcp_server, remove_skill, remove_agent_key, list_agent_keys.
@@ -123,7 +136,7 @@ Agent tools: list / get / create / update / fork / archive.
 | `request_agent_backend_switch` | all callers | Preview a requested agent backend switch, then Confirm in this chat. |
 | `set_agent_backend` | all callers | Set an enabled model provider, or clear the agent setting with backend=null. |
 | `set_agent_builtin_tool` | all callers | Turn one of an agent's built-in tools on or off, e.g. "turn off its web search". |
-| `update_agent` | all callers | Change an agent's instructions (system prompt), switch its model, or add existing skills such as build-models. |
+| `update_agent` | all callers | Update an agent: change its instructions (system prompt), switch its model, or add existing skills such as build-models. |
 
 ## `allowances`
 
@@ -336,6 +349,14 @@ Current-place status tool with short text and complete structured facts.
 | --- | --- | --- |
 | `where_am_i` | all callers | Return the short who-answers-here text and the full structured facts. |
 
+## `host_web_fetch`
+
+`web_fetch` for agents whose backend has no page fetch of its own.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `web_fetch` | OpenAI, Gemini and self-hosted agents | Open a public https web page and return its text. |
+
 ## `lead_intake`
 
 First-party lead intake tools; authority derives only from live server context.
@@ -460,6 +481,7 @@ Provider and channel-pin configuration over the service owners.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
+| `request_channel_pin` | admin only | Pin THIS channel to another provider's model, with admin confirmation. |
 | `request_channel_pin_clear` | admin only | Show or clear THIS channel's model-provider pin, with admin confirmation. |
 | `request_provider_allowlist` | admin only | Preview and confirm the server's allowed model providers. |
 
@@ -611,7 +633,7 @@ harder").
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `set_thread_model` | all callers | Run this conversation on another model when the person asks in words: "use opus here", "think harder". |
+| `set_thread_model` | all callers | Run this conversation on another model when the person asks in words: "use opus here", "use GPT-5 here". |
 
 ## `thread_overrides`
 

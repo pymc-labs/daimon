@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
+from anthropic import AsyncAnthropic
 from daimon.adapters.discord.commands import direct_messages as module
 from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
 from daimon.core import direct_messages as core_direct_messages
@@ -18,6 +19,7 @@ from daimon.core.config import DirectMessagePolicy
 from daimon.core.direct_messages import DirectMessageReply
 from daimon.core.errors import DaimonError
 from daimon.core.membership import CachedMembershipResolver, Membership
+from daimon.core.output_runtime import AnthropicOutputRuntime
 from daimon.core.scope import ResolvedConfig
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.direct_messages import get_conversation, set_dm_agent_name, set_dm_enabled
@@ -28,6 +30,7 @@ from daimon.core.turn_queue import TurnQueue
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.turn_fakes import deps_for
+from mux.contracts.ids import Scope
 
 
 def sent_text(call):
@@ -45,6 +48,13 @@ def assert_generic_guidance(msg, tenants):
         assert str(tenant.id) not in notice
         assert tenant.external_id not in notice
     assert "private-0" not in notice
+
+
+_FILES = AnthropicOutputRuntime(
+    AsyncAnthropic(api_key="test-key"),
+    "sesn_files",
+    scope=Scope.legacy_host_authorized(call_site="test_cold_dm"),
+)
 
 
 def private_reply(row, text="private answer"):
@@ -1003,7 +1013,7 @@ async def test_dm_turn_files_are_swept_into_the_dm_and_gated_by_dm_access(
 
     async def answer(deps, **kwargs):
         row = await conversation(db_session_factory)
-        return replace(private_reply(row), session_id="sesn_files")
+        return replace(private_reply(row), outputs=_FILES)
 
     reply.side_effect = answer
     delivery = AsyncMock()
@@ -1013,7 +1023,7 @@ async def test_dm_turn_files_are_swept_into_the_dm_and_gated_by_dm_access(
 
     schedule = cog.bot.schedule_dm_output_sweep
     schedule.assert_called_once()
-    assert schedule.call_args.args == (msg.channel, "sesn_files")
+    assert schedule.call_args.args == (msg.channel, _FILES)
     may_post = schedule.call_args.kwargs["may_post"]
     assert await may_post() is True
     delivery.side_effect = DirectMessageAccessRevoked("delivery_access_revoked", message="gone")

@@ -118,7 +118,9 @@ async def load_environment_picker(
                 is_admin=is_admin,
                 default=runtime.deployment_default,
             )
-        names = await list_environment_names(runtime.anthropic, tenant_id=tenant_id, hidden=hidden)
+        names = await list_environment_names(
+            runtime.anthropic, tenant_id=tenant_id, records=runtime.sessionmaker, hidden=hidden
+        )
     except anthropic.APIError:
         log.warning("slack.agent_setup.environment_picker.list_failed", exc_info=True)
         return None
@@ -159,6 +161,7 @@ async def save_environment_choice(
             channel_id=channel_id,
             environment_name=name,
             default=runtime.deployment_default,
+            records=runtime.sessionmaker,
         )
     audit = functools.partial(
         record_panel_write,

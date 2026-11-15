@@ -32,6 +32,7 @@ from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
+from daimon.core.output_runtime import OutputRuntime
 from daimon.core.permissions import dm_source_limited, limited_ids
 from daimon.core.platform_words import words_for
 from daimon.core.scope import ChannelScopeRef
@@ -102,14 +103,14 @@ class DirectMessageMembershipUnknown(DirectMessageAccessRevoked):
 class DirectMessageReply:
     """Text and the exact agent authority used for this private model turn.
 
-    ``session_id`` is the Managed Agents session whose saved files the adapter
-    delivers after the answer; None when the turn ran on another backend.
+    ``outputs`` is the session whose saved files the adapter delivers after
+    the answer; None when the turn has none (self-hosted).
     """
 
     text: str
     conversation: DirectMessageRow
     grant: AdmissionGrant
-    session_id: str | None = None
+    outputs: OutputRuntime | None = None
 
 
 async def load_dm_access_policy(
@@ -623,7 +624,7 @@ async def _run_admitted_dm_turn(
     request_text: str | None = None,
     platform_channel_id: str | None = None,
     platform_message_id: str | None = None,
-) -> tuple[str, str]:
+) -> tuple[str, str, OutputRuntime | None]:
     """Run one admitted, bound private turn and return its final text and session.
 
     Shared by live DM replies, DM routines and DM watch reports (`watch_row`,
@@ -703,7 +704,7 @@ async def _run_admitted_dm_turn(
             "execution_incomplete", message="The run did not complete."
         )
     answer = extract_final_response(outcome.state.content) or "The reply finished without text."
-    return answer, outcome.ma_session_id
+    return answer, outcome.ma_session_id, outcome.outputs
 
 
 async def reply_to_dm(
@@ -880,7 +881,7 @@ async def reply_to_dm_result(
                     bounded_turns(previous), from_agent_name="private conversation"
                 )
             )
-            answer, session_id = await _run_admitted_dm_turn(
+            answer, _session_id, outputs = await _run_admitted_dm_turn(
                 deps,
                 prepared,
                 tenant_id=conversation.tenant_id,
@@ -919,9 +920,9 @@ async def reply_to_dm_result(
                 text=answer,
                 conversation=conversation,
                 grant=grant,
-                session_id=None
+                outputs=None
                 if revision is not None and revision.backend == "selfhosted"
-                else session_id,
+                else outputs,
             )
         except (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError) as error:
             raise _revoked(error) from error
@@ -1127,7 +1128,7 @@ async def _run_dm_fire(
             raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE)
 
         try:
-            text, session_id = await _run_admitted_dm_turn(
+            text, session_id, _outputs = await _run_admitted_dm_turn(
                 deps,
                 prepared,
                 tenant_id=tenant_id,

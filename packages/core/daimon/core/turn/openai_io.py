@@ -22,6 +22,7 @@ from anthropic.types.beta.sessions import (
 )
 from daimon.core.errors import TurnError
 from daimon.core.ma import REPLAY_TIMEOUT_S
+from daimon.core.turn.host_spend_cap import SpendGuard
 from daimon.core.turn.io import TurnConnectionLost, TurnEvent, TurnStream
 from daimon.core.turn.openai_codec import PROFILE, PROFILES, display_batch
 from daimon.core.turn.openai_state import journal_source
@@ -46,6 +47,8 @@ from pydantic import BaseModel, JsonValue, TypeAdapter
 _INPUTS = TypeAdapter(list[dict[str, JsonValue]])
 _PAGE_BOUND = 50
 _BUFFER_BOUND = 1000
+# Usage pages read, newest first, before the root turn counts as missing (500 turns).
+_USAGE_PAGE_SIZE, _USAGE_PAGES = 10, 50
 
 
 class OpenAIPersistence(Protocol):
@@ -204,6 +207,7 @@ class OpenAITurnIO:
             [ResourceRef, tuple[str, ...]], Awaitable[tuple[tuple[str, ...], bool]]
         ]
         | None = None,
+        spend_guard: SpendGuard | None = None,
     ) -> None:
         if (
             backend.capabilities().profile_id not in PROFILES
@@ -218,6 +222,7 @@ class OpenAITurnIO:
         self._backend, self._scope, self._session = backend, scope, session
         self._persistence = persistence
         self._baseline_loader = baseline_loader
+        self._spend_guard = spend_guard
         self._resuming = False
         self._root = root_turn_id
         self._prior_roots: set[str] | None = None
@@ -340,7 +345,32 @@ class OpenAITurnIO:
             self._buffered.append(event)
             return []
         pending, self._buffered = self._buffered, []
-        return [frame for value in (*pending, event) for frame in self._frames(value)]
+        frames = [frame for value in (*pending, event) for frame in self._frames(value)]
+        await self._enforce_spend_limit(event)
+        return frames
+
+    async def _enforce_spend_limit(self, event: Event) -> None:
+        """Cancel the root once its priced usage passes the row's limit (host-side cap)."""
+        guard = self._spend_guard
+        if (
+            guard is None
+            or self._root is None
+            or self._terminal is not None
+            or event.turn_id != self._root
+            or event.type == "session.turn_ended"
+        ):
+            return
+        try:
+            over = await guard.exceeded(self.replay_usage)
+        except (ProviderError, TurnConnectionLost, TimeoutError) as error:
+            over = guard.unread(error)
+        if not over:
+            return
+        await self.interrupt(timeout_s=30.0)
+        await guard.notify()
+        from daimon.core.turn.driver import InterruptedDuringRecovery
+
+        raise InterruptedDuringRecovery(phase="replay")
 
     async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
         inputs = _inputs(events)
@@ -484,12 +514,14 @@ class OpenAITurnIO:
             values: list[UsageObservation] = []
             cursor: str | None = None
             seen: set[str] = set()
-            for _ in range(5):
+            # Newest first, stopping at the root's one observation: a poll costs a page or
+            # two however long the thread is, not a read of every turn it ever had.
+            for _ in range(_USAGE_PAGES):
                 page = await _edge(
                     self._backend.usage.list(
                         self._scope,
                         self._session,
-                        page=PageRequest(cursor=cursor, order="desc", limit=100),
+                        page=PageRequest(cursor=cursor, order="desc", limit=_USAGE_PAGE_SIZE),
                     )
                 )
                 for observation in page.data:
@@ -497,7 +529,7 @@ class OpenAITurnIO:
                         raise ScopeViolation(self._session.id, "foreign OpenAI usage")
                     if observation.turn_id == self._root and observation.thread_id is None:
                         values.append(observation)
-                if not page.has_more:
+                if values or not page.has_more:
                     return tuple(values)
                 cursor = page.next_cursor
                 if not cursor or cursor in seen:

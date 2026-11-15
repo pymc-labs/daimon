@@ -102,7 +102,7 @@ class CreateRoutineModal(discord.ui.Modal, title="New routine"):
             )
             name = self.agent.value.strip()
             agent = await find_agent_by_daimon_tag(
-                runtime.anthropic, tenant_id=tenant_id, name=name
+                runtime.anthropic, tenant_id=tenant_id, name=name, records=runtime.sessionmaker
             )
             if agent is None:
                 await interaction.followup.send(embeds.AGENT_UNAVAILABLE, ephemeral=True)

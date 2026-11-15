@@ -806,7 +806,7 @@ async def test_dm_watch_turn_runs_under_watch_posture_not_routine_posture(monkey
     monkeypatch.setattr(direct_messages, "extract_final_response", lambda _content: "report")
     prepared = MagicMock()
     prepared.admission.hold = None
-    text, session_id = await _run_admitted_dm_turn(
+    text, session_id, _outputs = await _run_admitted_dm_turn(
         MagicMock(),
         prepared,
         tenant_id=row.tenant_id,

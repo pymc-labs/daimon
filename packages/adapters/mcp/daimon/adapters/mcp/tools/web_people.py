@@ -253,7 +253,9 @@ async def _access_list_impl(
     runtime: McpRuntime, auth: AuthIdentity, after: str | None = None
 ) -> AgentWebAccessList:
     actor = await web_admin_of(runtime, auth)
-    agents = await list_agents_by_tenant(runtime.client, tenant_id=actor.tenant_id)
+    agents = await list_agents_by_tenant(
+        runtime.client, tenant_id=actor.tenant_id, records=runtime.session_factory
+    )
     async with runtime.session_factory() as db:
         rows = await web_admin.agent_access_rows(db, actor.tenant_id, agents)
     shown, total, next_page = paged(rows, after)
@@ -275,7 +277,9 @@ async def _access_set_impl(
     )
     agents = [
         a
-        for a in await list_agents_by_tenant(runtime.client, tenant_id=actor.tenant_id)
+        for a in await list_agents_by_tenant(
+            runtime.client, tenant_id=actor.tenant_id, records=runtime.session_factory
+        )
         if a.id == agent_id
     ]
     if not agents:

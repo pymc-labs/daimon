@@ -97,6 +97,7 @@ from daimon.adapters.teams.restart_catch_up import RestartCatchUp
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import route_to_setup
 from daimon.adapters.teams.thread_handoff import hand_over_button
+from daimon.adapters.teams.thread_model import with_thread_reask_notifier
 from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.tool_confirmation import TeamsConfirmationCards
 from daimon.adapters.teams.turn_hooks import turn_hooks
@@ -119,6 +120,7 @@ from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.errors import DaimonError
 from daimon.core.features.model_input import FULL_HISTORY, HistoryDepth
 from daimon.core.features.snapshot import FeaturePlace, may_turn_on, place_feature
+from daimon.core.host_calls import wake_prefix
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.mux_backend import resource_scope
@@ -165,6 +167,7 @@ from daimon.core.turn.errors import (
     TurnNotStarted,
 )
 from daimon.core.turn.lifecycle import TurnLifecycle
+from daimon.core.turn.mutation_gate import send_prefix
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import finish_with_error, observe_turn, record_refusal
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
@@ -420,7 +423,9 @@ class TeamsApp:
         teams = runtime.settings.teams
         if teams is None:
             raise ValueError("TeamsApp requires Teams settings")
-        self.runtime = runtime = with_budget_notifier(runtime, direct)
+        self.runtime = runtime = with_thread_reask_notifier(
+            with_budget_notifier(runtime, direct), direct
+        )
         self._teams = teams
         # Known before any read, so `_may_post` can gate every post.
         self._tenant_id = derive_tenant_uuid(platform="teams", workspace_id=teams.tenant_id)
@@ -1642,23 +1647,36 @@ class TeamsApp:
                             raise AdmissionDenied(reason=slot)
                         raise TurnNotStarted(slot)
                     return
-                await self._bind_and_run(
-                    inbound,
-                    tenant_id,
-                    admission,
-                    cancel,
-                    holder,
-                    markers,
-                    new_lifecycle,
-                    watch_row=continuation
-                    if continuation and continuation.reason == "watch_fired"
-                    else None,
-                    role=role or Role.USER,  # admission's: one read per turn
-                    handoff=handoff,
-                    reraise=reraise,
-                    attended=continuation is None or continuation_attended(continuation),
-                    continued=continuation is not None,
+                prefix = (
+                    wake_prefix(
+                        self.runtime.sessionmaker,
+                        self.runtime.settings.mcp,
+                        tenant_id=tenant_id,
+                        platform="teams",
+                        thread_id=continuation.thread_id,
+                        target_ma_agent_id=continuation.target_ma_agent_id,
+                    )
+                    if continuation is not None and continuation.reason == "confirmed_call"
+                    else None
                 )
+                async with send_prefix(prefix):
+                    await self._bind_and_run(
+                        inbound,
+                        tenant_id,
+                        admission,
+                        cancel,
+                        holder,
+                        markers,
+                        new_lifecycle,
+                        watch_row=continuation
+                        if continuation and continuation.reason == "watch_fired"
+                        else None,
+                        role=role or Role.USER,  # admission's: one read per turn
+                        handoff=handoff,
+                        reraise=reraise,
+                        attended=continuation is None or continuation_attended(continuation),
+                        continued=continuation is not None,
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1705,6 +1723,7 @@ class TeamsApp:
                         self.runtime.anthropic,
                         error.source_agent_id,
                         scope=resource_scope(tenant_id=str(tenant_id)),
+                        records=self.runtime.sessionmaker,
                     )
                 ).name
         text = render_responder_changed_without_handoff(
@@ -1901,15 +1920,7 @@ class TeamsApp:
             markers.add(outcome.mapping_id)
         final = holder[-1]
         if final.output_authorization is None:
-            await self._finish_outputs(
-                inbound,
-                outcome,
-                final,
-                selfhosted=(
-                    admission.backend_revision is not None
-                    and admission.backend_revision.backend == "selfhosted"
-                ),
-            )
+            await self._finish_outputs(inbound, outcome, final)
         if outcome.mapping_id is not None and final.final_message_id is not None:
             mark = final.final_message_id
             if inbound.kind != "dm":
@@ -1928,16 +1939,14 @@ class TeamsApp:
         inbound: TeamsInbound,
         outcome: RunOutcome,
         final: TeamsTurnLifecycle,
-        *,
-        selfhosted: bool,
     ) -> None:
-        """Release controls immediately when no Anthropic file sweep applies."""
-        if not selfhosted and any(
+        """Release controls immediately when no file sweep applies."""
+        if outcome.outputs is not None and any(
             isinstance(block, ToolUseBlock) for block in outcome.state.content
         ):
             sweep = self.outputs.sweep(
                 inbound,
-                outcome.ma_session_id,
+                outcome.outputs,
                 append=final.append_to_answer,
                 quiet_s=final.outputs_quiet_s(),
             )

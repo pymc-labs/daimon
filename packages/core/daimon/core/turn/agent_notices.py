@@ -19,6 +19,7 @@ __all__ = [
     "HANDED_OVER_NOTICE",
     "LOST_WORKSPACE_NOTICE",
     "mcp_failure_notices",
+    "missing_skills_notice",
     "render_agent_notices",
     "stale_switch_notice",
 ]
@@ -57,6 +58,15 @@ def mcp_failure_notices(failures: Sequence[McpServerFailure]) -> tuple[str, ...]
         f"The `{_server(f.server_name)}` connection {_REASON[f.error_type]} during your last "
         "reply, so its tools were missing. The person can ask you to reconnect or disconnect it."
         for f in failures
+    )
+
+
+def missing_skills_notice(names: Sequence[str]) -> str:
+    """Skills this conversation goes without: too large, unreadable or refused on upload."""
+    listed = ", ".join(f"`{_server(name)}`" for name in names)
+    return (
+        f"These skills could not be added to this conversation, so they are missing: {listed}. "
+        "An admin can check them."
     )
 
 

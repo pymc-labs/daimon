@@ -87,6 +87,7 @@ async def open_setup_conversation(
             runtime.anthropic,
             tenant_id=tenant_id,
             target_ma_agent_id=selected.ma_agent_id if selected else None,
+            records=runtime.sessionmaker,
         )
         target_name = selected.name if ma_target is not None and selected is not None else None
         opener = build_setup_opener(

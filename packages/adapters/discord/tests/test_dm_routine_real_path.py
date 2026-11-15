@@ -375,6 +375,8 @@ class Harness:
             mcp={"public_url": "https://mcp.example/mcp", "jwt_secret": "t" * 32},
             crypto={"keys": [upstream.crypto_key.decode()]},
             turn={"path": "mux"},
+            # Memory features require an Anthropic key, where every store lives.
+            anthropic={"api_key": "test-key"},
         )
         self.deps = replace(
             build_turn_deps(

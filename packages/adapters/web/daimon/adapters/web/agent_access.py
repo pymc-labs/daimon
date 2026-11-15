@@ -9,11 +9,12 @@ from daimon.adapters.web.caller import WebCaller, requires
 from daimon.adapters.web.channel_names import channel_lookup_of
 from daimon.adapters.web.faces import avatar_base_url
 from daimon.adapters.web.runtime import WebRuntime
+from daimon.core import backend_capture
 from daimon.core.agent_changes import AgentChangeDeps
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
 from daimon.core.agent_view import AgentViewDeps, AgentViewer, OwnMcpServer
 from daimon.core.authz import Subject, Surface
-from daimon.core.channel_backend import make_backend_service
+from daimon.core.channel_backend import NO_CAPTURE, make_backend_service
 from fastapi import Depends, HTTPException
 
 Viewer = Annotated[WebCaller, Depends(requires("agents.view"))]
@@ -35,7 +36,9 @@ def edit_refusal(exc: AgentEditError) -> HTTPException:
     return HTTPException(status_code=_STATUS.get(exc.kind, 400), detail=str(exc))
 
 
-def change_deps(runtime: WebRuntime) -> AgentChangeDeps:
+def change_deps(runtime: WebRuntime, caller: WebCaller | None = None) -> AgentChangeDeps:
+    """The change deps. Only a `caller` can switch an agent's provider: its loss consent is
+    read from the agent's source as that person. Without one, a switch is refused."""
     if runtime.anthropic is None:
         raise HTTPException(status_code=503, detail="Agents are not available here.")
     public_url = runtime.settings.mcp.public_url
@@ -67,7 +70,18 @@ def change_deps(runtime: WebRuntime) -> AgentChangeDeps:
             own_server=own,
             channel_lookup=channel_lookup_of(runtime),
         ),
-        backends=make_backend_service(runtime.sessionmaker, runtime.settings.turn),
+        backends=make_backend_service(
+            runtime.sessionmaker,
+            runtime.settings.turn,
+            capture_source=NO_CAPTURE
+            if caller is None
+            else backend_capture.for_agent(
+                None if runtime.turns is None else runtime.turns.deps,
+                account_id=caller.person.account_id,
+                subject=Subject(is_admin=is_admin(caller.role), platform_user_id=None),
+                external_user_id=str(caller.person.id),
+            ),
+        ),
     )
 
 

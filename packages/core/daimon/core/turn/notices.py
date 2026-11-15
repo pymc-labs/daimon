@@ -281,6 +281,15 @@ _BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {
         "Daimon couldn't get {agent} ready on {provider}.",
         "Try again; if it keeps happening, give {who} the reference.",
     ),
+    "channel_row_missing": _Copy(
+        "This channel is pinned to {provider}, which isn't set up for it yet.",
+        'Ask whoever runs Daimon to set it up, or ask {who} to say "clear this channel\'s pin".',
+    ),
+    "anthropic_unconfigured": _Copy(
+        "{agent} runs on Anthropic, which isn't set up on this Daimon install.",
+        "Ask {who} to make a copy of {agent_mid} on another provider, or ask whoever runs"
+        " Daimon to add the Anthropic key.",
+    ),
 }
 _PROVIDER_NAMES = {
     MANAGED_AGENTS.provider: "Anthropic",

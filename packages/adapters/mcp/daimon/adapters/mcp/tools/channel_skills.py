@@ -139,6 +139,7 @@ async def _add(
                     features=runtime.settings.configured_features,
                 ),
                 surface="chat",
+                records=runtime.session_factory,
             )
         except SkillsListTruncatedError as exc:
             raise ToolError("The skills here could not all be read. Nothing changed.") from exc

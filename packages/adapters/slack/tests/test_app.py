@@ -1396,7 +1396,7 @@ async def test_orchestrate_first_turn_when_new_thread_creates_session_row_and_wr
             await asyncio.sleep(0)
         mock_deliver_outputs.assert_awaited_once()
         delivery_kwargs = mock_deliver_outputs.await_args.kwargs
-        assert delivery_kwargs["session_id"] == "sess-first-001"
+        assert mock_deliver_outputs.await_args.args[0].session_id == "sess-first-001"
         assert delivery_kwargs["channel_id"] == channel
         assert delivery_kwargs["thread_ts"] == thread_ts
         assert delivery_kwargs["requester_user_id"] == event["user"], (

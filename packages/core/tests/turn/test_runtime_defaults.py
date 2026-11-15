@@ -159,6 +159,37 @@ def test_a_channel_pinned_to_gemini_runs_from_the_code_default(
     assert plan.tools == () and plan.template_capabilities is None
 
 
+def test_a_channel_pinned_to_openai_names_the_missing_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(DEFAULT_KEY_ENV["openai"], "set")
+
+    with pytest.raises(AdmissionDenied) as denied:
+        select_runtime_manifest(
+            request("openai.persistent_workspace", "gpt-6-luna", origin="channel"),
+            OpenAIDeployment,
+        )
+
+    assert denied.value.cause == "channel_row_missing", (
+        "a keyed OpenAI install has no code row for a channel pin: the card says so"
+    )
+    assert denied.value.provider == "openai"
+
+
+def test_the_channel_row_refusal_copy_names_the_pin_and_both_fixes() -> None:
+    from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
+
+    text = admission_refusal_text(
+        "backend_unsupported",
+        RefusalNouns(scope="server", admin="a server admin", billing="`/billing`"),
+        cause="channel_row_missing",
+        provider="openai",
+        agent_name="Daimon",
+    )
+    assert "pinned to OpenAI" in text and "whoever runs Daimon" in text
+    assert "clear this channel's pin" in text and "DAIMON_" not in text
+
+
 def test_a_pro_model_is_never_in_a_default_grant(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "set")
     monkeypatch.setenv("DAIMON_CHANNEL_GEMINI_KEY", "set")

@@ -340,6 +340,7 @@ class ResourceAdminBindings:
                     actor_account_id=uuid.UUID(binding.scope.account_id),
                     platform_skills=self.platform_skills,
                     surface="web",
+                    records=binding.sessions,
                 )
                 if isinstance(row, str):
                     return AdminReceipt(

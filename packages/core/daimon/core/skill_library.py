@@ -145,7 +145,9 @@ async def _library(
     deps: AgentEditDeps, actor: AgentActor, descriptions: Mapping[str, str]
 ) -> list[LibrarySkill]:
     rows, _truncated = await list_skills_lenient(deps.client)
-    agents = await list_agents_by_tenant(deps.client, tenant_id=actor.tenant_id)
+    agents = await list_agents_by_tenant(
+        deps.client, tenant_id=actor.tenant_id, records=deps.session_factory
+    )
     uses: dict[str, list[SkillUse]] = defaultdict(list)
     for agent in agents:
         for pinned in agent.skills:

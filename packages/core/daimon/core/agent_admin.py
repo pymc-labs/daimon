@@ -181,7 +181,7 @@ async def archive(
             f"{agent.name} is managed by the server and can't be archived.", kind="forbidden"
         )
     name = _display_name(agent)
-    await archive_agent(deps.client, agent.id, scope=actor.scope())
+    await archive_agent(deps.client, agent.id, scope=actor.scope(), records=deps.session_factory)
     await archive_memory_store_best_effort(
         anthropic=deps.client,
         sessionmaker=deps.session_factory,

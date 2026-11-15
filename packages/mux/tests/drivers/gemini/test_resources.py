@@ -9,7 +9,7 @@ import pytest
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
-from mux.contracts.ids import ModelRef, PageRequest, Scope
+from mux.contracts.ids import ModelRef, PageRequest, Scope, SkillRef
 from mux.contracts.resources import (
     AgentSpec,
     EnvironmentSpec,
@@ -58,7 +58,12 @@ def bundle(body: bytes = b"# Original", title: str = "original") -> SkillUpload:
     )
 
 
-async def session(ma: GeminiManagedAgents, agent: AgentSpec, env: EnvironmentSpec) -> Session:
+async def session(
+    ma: GeminiManagedAgents,
+    agent: AgentSpec,
+    env: EnvironmentSpec,
+    skills: tuple[SkillRef, ...] = (),
+) -> Session:
     a = await ma.agents.create(SCOPE, agent, key="agent")
     e = await ma.environments.create(SCOPE, env, key="env")
     return await ma.sessions.create(
@@ -68,6 +73,7 @@ async def session(ma: GeminiManagedAgents, agent: AgentSpec, env: EnvironmentSpe
             agent_revision=a.revision,
             environment=e.ref,
             config_revision=1,
+            skills=skills,
             extensions={
                 "gemini.session": ExtensionConfig(
                     namespace="gemini.session",
@@ -298,8 +304,16 @@ async def test_output_snapshot_pagination_is_stable_and_download_revalidates_byt
     transport.snapshots["e1"] = snapshot({"a.bin": b"changed"})
     with pytest.raises(ProviderError, match="artifact_changed"):
         _ = [part async for part in ma.artifacts.download(SCOPE, first.data[0].ref)]
-    with pytest.raises(UnsupportedCapability, match="workspace_artifact_delete"):
-        await ma.artifacts.delete(SCOPE, first.data[0].ref, key="delete")
+    # A workspace file cannot be removed: deleting records it as delivered.
+    await ma.artifacts.delete(SCOPE, first.data[0].ref, key="delete")
+    transport.snapshots["e1"] = snapshot({"a.bin": b"changed", "c.txt": b"new"})
+    relisted = await ma.artifacts.list(SCOPE, s.ref, page=PageRequest())
+    assert [a.filename for a in relisted.data] == ["a.bin", "c.txt"], (
+        "a changed file is a new artifact; the delivered original is not listed"
+    )
+    transport.snapshots["e1"] = snapshot({"a.bin": data, "c.txt": b"new"})
+    relisted = await ma.artifacts.list(SCOPE, s.ref, page=PageRequest())
+    assert [a.filename for a in relisted.data] == ["c.txt"], "delivered file left the listing"
     transport.snapshots["e1"] = ProviderError("not_found", retryable=False)
     with pytest.raises(ContinuityLost) as lost:
         _ = [part async for part in ma.artifacts.download(SCOPE, first.data[0].ref)]
@@ -542,3 +556,31 @@ async def test_relative_workspace_directory_is_distinct_from_workspace_root(
             {"type": "inline", "target": "/workspace/file", "content": "input"},
         ],
     }
+
+
+@pytest.mark.asyncio
+async def test_session_skills_mount_beside_the_agents_own(resources: Resources) -> None:
+    """A template's per-session skill copies mount next to the agent's own skills."""
+    ma, transport, _, _ = resources
+    own = await ma.skills.create(SCOPE, bundle(), key="own")
+    extra = await ma.skills.create(SCOPE, bundle(b"# Extra", "extra"), key="extra")
+    assert own.latest_version is not None and extra.latest_version is not None, "pinned"
+    s = await session(
+        ma,
+        AgentSpec(
+            name="a",
+            model=ModelRef(provider="gemini", id="gemini-3.8-flash"),
+            skills=(own.latest_version,),
+        ),
+        EnvironmentSpec(name="e"),
+        skills=(extra.latest_version,),
+    )
+    await send(ma, transport, s)
+    sources = transport.requests[0]["environment"]["sources"]  # type: ignore[index]
+    targets = [source["target"] for source in sources]  # type: ignore[index,union-attr]
+    assert targets == [
+        f".agents/skills/{own.id}/SKILL.md",
+        f".agents/skills/{own.id}/scripts/run.py",
+        f".agents/skills/{extra.id}/SKILL.md",
+        f".agents/skills/{extra.id}/scripts/run.py",
+    ], f"both skills mount: {targets}"

@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from daimon.core.handoff_context import render_handoff_summary
 from daimon.core.stores import thread_agent_bindings as bindings
+from daimon.core.turn.prepare import ContinuityOutcome
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -256,8 +257,10 @@ async def test_a_summary_goes_back_only_when_its_turn_never_sent(
             backend_revision=None,
         ),
         ma_session_id="sess",
+        watermark="msg_answered",
         snapshot=None,
         _finalize=None,
+        continuity=ContinuityOutcome(),
     )
     deps = SimpleNamespace(
         running_turns=SimpleNamespace(track=contextlib.nullcontext),

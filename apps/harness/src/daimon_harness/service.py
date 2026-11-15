@@ -28,9 +28,13 @@ from mux.drivers.selfhosted.wire import (
     EventType,
     HealthResponse,
     InvocationEnvelope,
+    OutputContent,
+    OutputDeleted,
+    OutputsResponse,
     TurnAccepted,
     TurnRequest,
     URLSkill,
+    output_route,
 )
 from pydantic import JsonValue, ValidationError
 from starlette.requests import Request
@@ -56,6 +60,8 @@ from .isolation import (
 )
 from .journal import MAX_CURSOR, ConflictError, Journal, identifier
 from .model_adapter import AzureModelAdapter, ModelAdapter
+from .outputs import content, listing
+from .outputs import operate as output_operation
 from .runtime import TurnContext
 from .storage_worker import StorageWorker
 
@@ -1298,6 +1304,74 @@ def create_app(
             complete=complete,
         )
 
+    async def output_sandbox(
+        session_id: str, context_session_id: str | None, after_seq: int
+    ) -> tuple[Path, int] | None:
+        if context_session_id is not None and context_session_id != session_id:
+            raise HTTPException(status_code=409, detail="session_mismatch")
+        try:
+            identifier(session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Invalid session identifier") from exc
+        await supervisor.ensure_session(session_id, after_seq)
+        if supervisor.session_mode == "single":
+            try:
+                await supervisor.io(supervisor.journal.bind_session, session_id)
+            except ConflictError as exc:
+                raise HTTPException(status_code=409, detail="session_bound") from exc
+        return await supervisor.io(supervisor.journal.existing_sandbox, session_id)
+
+    async def output_target(
+        session_id: str, output_id: str, context_session_id: str | None, after_seq: int
+    ) -> tuple[Path, int, str, str]:
+        try:
+            path, version = output_route(output_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Invalid output id") from exc
+        sandbox = await output_sandbox(session_id, context_session_id, after_seq)
+        if sandbox is None:
+            raise HTTPException(status_code=404, detail="output_not_found")
+        return *sandbox, path, version
+
+    async def outputs(
+        session_id: str,
+        after_seq: int = Query(default=0, ge=0, le=MAX_CURSOR),
+        context_session_id: Annotated[str | None, Query(alias="session_id")] = None,
+    ) -> OutputsResponse:
+        sandbox = await output_sandbox(session_id, context_session_id, after_seq)
+        if sandbox is None:
+            return OutputsResponse(outputs=[])
+        return listing(await output_operation(*sandbox, "list"))
+
+    async def output(
+        session_id: str,
+        output_id: str,
+        after_seq: int = Query(default=0, ge=0, le=MAX_CURSOR),
+        context_session_id: Annotated[str | None, Query(alias="session_id")] = None,
+    ) -> OutputContent:
+        home, uid, path, version = await output_target(
+            session_id, output_id, context_session_id, after_seq
+        )
+        return content(output_id, await output_operation(home, uid, "read", path, version))
+
+    async def delete_output(
+        session_id: str,
+        output_id: str,
+        after_seq: int = Query(default=0, ge=0, le=MAX_CURSOR),
+        context_session_id: Annotated[str | None, Query(alias="session_id")] = None,
+    ) -> OutputDeleted:
+        home, uid, path, version = await output_target(
+            session_id, output_id, context_session_id, after_seq
+        )
+        await output_operation(home, uid, "delete", path, version)
+        # Checkpoint before answering, so a restart cannot restore a delivered file and
+        # post it twice. A failed upload is retried and announced as for any turn, but
+        # this delete is not answered as done: the driver must not treat the file as gone.
+        await supervisor.checkpoint(session_id)
+        if supervisor.checkpoint_pending == session_id:
+            raise HTTPException(status_code=503, detail="Checkpoint unavailable")
+        return OutputDeleted(id=output_id)
+
     async def invoke(
         envelope: InvocationEnvelope,
         caller: str = Depends(authenticate),
@@ -1372,6 +1446,19 @@ def create_app(
                 return JSONResponse(
                     (await events(match[1], after, context_id, replay)).model_dump(mode="json")
                 )
+            if match := re.fullmatch(r"/v0/sessions/([^/]+)/outputs(?:/([^/]+)(/delete)?)?", path):
+                session, output_key, deletion = match.groups()
+                if method == "POST" and output_key and deletion:
+                    if route.body not in (None, {}):
+                        raise HTTPException(status_code=422, detail="Delete body must be empty")
+                    result = await delete_output(session, output_key, cursor, context_id)
+                elif method == "GET" and output_key and not deletion:
+                    result = await output(session, output_key, cursor, context_id)
+                elif method == "GET" and not output_key:
+                    result = await outputs(session, cursor, context_id)
+                else:
+                    raise HTTPException(status_code=404, detail="Unknown C3 route")
+                return JSONResponse(result.model_dump(mode="json"))
         except (ValidationError, ValueError) as exc:
             raise HTTPException(status_code=422, detail="Invalid C3 invocation") from exc
         raise HTTPException(status_code=404, detail="Unknown C3 route")
@@ -1389,6 +1476,21 @@ def create_app(
     app.add_api_route("/v0/turns/{turn_id}/cancel", cancel, methods=["POST"], dependencies=secured)
     app.add_api_route(
         "/v0/sessions/{session_id}/events", events, methods=["GET"], dependencies=secured
+    )
+    app.add_api_route(
+        "/v0/sessions/{session_id}/outputs", outputs, methods=["GET"], dependencies=secured
+    )
+    app.add_api_route(
+        "/v0/sessions/{session_id}/outputs/{output_id}",
+        output,
+        methods=["GET"],
+        dependencies=secured,
+    )
+    app.add_api_route(
+        "/v0/sessions/{session_id}/outputs/{output_id}/delete",
+        delete_output,
+        methods=["POST"],
+        dependencies=secured,
     )
     app.add_api_route("/invocations", invoke, methods=["POST"], dependencies=secured)
     app.add_api_route("/readiness", readiness, methods=["GET"])

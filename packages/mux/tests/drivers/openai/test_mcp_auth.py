@@ -1021,6 +1021,122 @@ async def test_multiple_bound_servers_refuse_before_resolver_or_write(saved: boo
     assert wire.resolve_calls == []
 
 
+def _offline_context() -> Context:
+    from .conftest import FakeTransport
+
+    return Context(FakeTransport(), "project", "openai.persistent_workspace", None)
+
+
+def _shared(names: tuple[str, ...] = ("drive", "notion")) -> tuple[MCPConnection, ...]:
+    """Daimon's server plus relay routes under it, all on one credential."""
+    return (
+        *(spec().mcp_servers or ()),
+        *(
+            MCPConnection(name=n, url=f"{URL}/connectors/{n}", credential_ref="host:owned-token")
+            for n in names
+        ),
+    )
+
+
+async def test_shared_credential_servers_bind_one_vault_credential_per_destination() -> None:
+    wire = Wire()
+    resolved: list[str] = []
+    puts: list[Object] = []
+
+    async def resolve(scope: Scope, ref: str, destination: str) -> str:
+        assert scope == SCOPE and ref == "host:owned-token", "only the shared ref resolves"
+        resolved.append(destination)
+        return "fictional-shared-bearer"
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/credentials"):
+            raw = {
+                "id": f"credential-{len(puts)}",
+                "vault_id": request.url.path.split("/")[3],
+                "created_at": 0,
+                **json.loads(request.content),
+            }
+            puts.append(raw)
+            return httpx.Response(200, json=raw)
+        return wire.handle(request)
+
+    connections = _shared()
+    async with build_async_openai(
+        transport=httpx.MockTransport(handle),
+        api_key="offline-placeholder",
+        base_url="https://openai.invalid/v1",
+    ) as sdk:
+        driver = OpenAIDriver(
+            SDKTransport(sdk),
+            account_scope_id="project",
+            authorization=lambda scope, _kind, _id: scope == SCOPE,
+            journal=MemoryRecoveryJournal(),
+            usage_revisions=MemoryUsageRevisions(),
+            mcp_secrets=resolve,
+        )
+        agent = await driver.agents.create(
+            SCOPE, spec().model_copy(update={"mcp_servers": connections}), key="agent"
+        )
+        assert agent.spec.mcp_servers == connections, "every shared server round-trips"
+        await driver.sessions.create(
+            SCOPE,
+            SessionSpec(agent=agent.ref, agent_revision=Revision(local=0), config_revision=1),
+            key="shared-session",
+        )
+    intent = json.loads(str(object_json(wire.agent["metadata"])[KEY]))
+    assert intent["servers"][1:] == [
+        ["drive", "/connectors/drive"],
+        ["notion", "/connectors/notion"],
+    ]
+    assert resolved == [c.url for c in connections], "each destination is authorized"
+    assert [object_json(p["auth"])["mcp_server_url"] for p in puts] == resolved, "one per URL"
+    post = next(r for r in wire.requests if r.url.path == "/v1/agents/sessions")
+    tools = objects(object_json(object_json(json.loads(post.content))["agent"])["tools"])
+    ids = [t["credential_id"] for t in tools if t["type"] == "mcp"]
+    assert ids == ["credential-0", "credential-1", "credential-2"], "each tool its own credential"
+
+
+@pytest.mark.parametrize(
+    ("edit", "missing"),
+    [
+        ({"credential_ref": "host:other"}, "single_bound_mcp_server"),
+        ({"url": "https://qa.example.com/elsewhere"}, "single_bound_mcp_server"),
+        ({"credential_ref": None}, "unbound_mcp_destination"),
+    ],
+)
+def test_shared_credential_requires_one_ref_under_the_first_url(
+    edit: dict[str, object], missing: str
+) -> None:
+    connections = _shared()
+    changed = (*connections[:-1], connections[-1].model_copy(update=edit))
+    context = _offline_context()
+    with pytest.raises(UnsupportedCapability) as refused:
+        agent_body(spec().model_copy(update={"mcp_servers": changed}), context)
+    assert refused.value.missing == (missing,), "mixed refs or foreign URLs refuse"
+
+
+@pytest.mark.parametrize("edit", ["url", "policy", "digest"])
+def test_shared_credential_decode_refuses_a_changed_destination(edit: str) -> None:
+    context = _offline_context()
+    raw: Object = {
+        "id": "a",
+        "created_at": 0,
+        **agent_body(spec().model_copy(update={"mcp_servers": _shared()}), context),
+    }
+    tools = objects(raw["tools"])
+    metadata = object_json(raw["metadata"])
+    if edit == "url":
+        tools[-1]["transport"] = {"type": "http", "server_url": URL + "/connectors/other"}
+    elif edit == "policy":
+        tools[-1]["allowed_tools"] = ["delete_everything"]
+    else:
+        intent = json.loads(str(metadata[KEY]))
+        metadata[KEY] = json.dumps({**intent, "digest": "0" * 32})
+    raw["tools"], raw["metadata"] = list(tools), metadata
+    with pytest.raises(ValueError, match="changed"):
+        agent_spec(raw, context)
+
+
 @pytest.mark.parametrize(
     ("section", "field", "value"),
     [

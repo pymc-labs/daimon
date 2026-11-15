@@ -101,7 +101,10 @@ class GitHubReposView(PanelViewBase):
             return False
         tenant_id, agent_id = self._ids()
         live_agent = await find_agent_by_derived_uuid(
-            self.runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id
+            self.runtime.anthropic,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            records=self.runtime.sessionmaker,
         )
         if live_agent is None:
             return False
@@ -163,7 +166,7 @@ async def mint_agent_connect_url(
         None
         if admin
         else await find_agent_by_derived_uuid(
-            runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id
+            runtime.anthropic, tenant_id=tenant_id, agent_id=agent_id, records=runtime.sessionmaker
         )
     )
     async with runtime.sessionmaker.begin() as session:

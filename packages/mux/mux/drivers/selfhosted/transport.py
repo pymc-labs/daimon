@@ -89,7 +89,18 @@ def checked(response: httpx.Response) -> None:
         categories.get(response.status_code, "upstream"),
         retryable=response.status_code in (429, 502, 503, 504),
         native_code=str(response.status_code),
+        native_error_code=error_detail(response),
     )
+
+
+def error_detail(response: httpx.Response) -> str | None:
+    """A short string `detail`: it tells a missing route from a missing resource."""
+    try:
+        body = _JSON.validate_python(response.json())
+    except ValueError:
+        return None
+    detail = body.get("detail") if isinstance(body, dict) else None
+    return detail if isinstance(detail, str) and len(detail) <= 64 else None
 
 
 def retry_delay(response: httpx.Response, attempt: int) -> float:

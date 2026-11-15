@@ -198,8 +198,39 @@ async def exchange_authorization_code(
         "code": code,
         "redirect_uri": redirect_uri,
         "code_verifier": code_verifier,
-        "client_id": client.client_id,
     }
+    return await _token_request(
+        http, token_endpoint=token_endpoint, form=form, client=client, resource=resource
+    )
+
+
+async def refresh_access_token(
+    http: httpx.AsyncClient,
+    *,
+    token_endpoint: str,
+    refresh_token: str,
+    client: ClientRegistration,
+    scope: str | None,
+    resource: str | None,
+) -> TokenResponse:
+    """Trade a refresh token for a new access token, asking for no more than `scope`."""
+    form: dict[str, str] = {"grant_type": "refresh_token", "refresh_token": refresh_token}
+    if scope:
+        form["scope"] = scope
+    return await _token_request(
+        http, token_endpoint=token_endpoint, form=form, client=client, resource=resource
+    )
+
+
+async def _token_request(
+    http: httpx.AsyncClient,
+    *,
+    token_endpoint: str,
+    form: dict[str, str],
+    client: ClientRegistration,
+    resource: str | None,
+) -> TokenResponse:
+    form = {**form, "client_id": client.client_id}
     if resource:
         form["resource"] = resource
     headers = {"Accept": "application/json"}
@@ -209,17 +240,15 @@ async def exchange_authorization_code(
             headers["Authorization"] = f"Basic {basic}"
         else:
             form["client_secret"] = client.client_secret
+    grant = "token refresh" if form["grant_type"] == "refresh_token" else "token exchange"
     response = await http.post(token_endpoint, data=form, headers=headers)
     if response.status_code != 200:
         raise McpOAuthTokenRefusedError(
-            f"token exchange at {token_endpoint} failed: "
-            f"{response.status_code} {response.text[:300]}",
+            f"{grant} at {token_endpoint} failed: {response.status_code} {response.text[:300]}",
             error_code=_oauth_error_code(response),
         )
     try:
         return TokenResponse.model_validate(response.json())
     except ValueError as err:
         # Never include the body: a token response is a secret.
-        raise McpOAuthFlowError(
-            f"token exchange at {token_endpoint} returned an unusable body"
-        ) from err
+        raise McpOAuthFlowError(f"{grant} at {token_endpoint} returned an unusable body") from err

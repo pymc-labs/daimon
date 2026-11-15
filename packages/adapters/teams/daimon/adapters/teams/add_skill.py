@@ -92,6 +92,7 @@ async def skill_change_refusal(
             runtime.anthropic,
             agent.ma_agent_id,
             scope=resource_scope(tenant_id=str(actor.tenant_id)),
+            records=runtime.sessionmaker,
         )
 
     async with runtime.sessionmaker() as session:
@@ -170,6 +171,7 @@ async def add_previewed_skill(
             runtime.anthropic,
             agent.ma_agent_id,
             scope=resource_scope(tenant_id=str(actor.tenant_id)),
+            records=runtime.sessionmaker,
         )
     except ScopeViolation as exc:
         if exc.reason != "provider record belongs to another tenant":

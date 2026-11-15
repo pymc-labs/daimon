@@ -17,6 +17,7 @@ from mux.profiles import (
     runnable_selection,
     selectable_models,
 )
+from mux.profiles.gemini import OPT_IN_MODELS
 
 
 def model_name(model: ModelRef) -> str:
@@ -183,7 +184,11 @@ def resolve_model(value: str, *, available: Sequence[ModelRef] | None = None) ->
             + ", ".join(model_name(model) for model in matches)
             + ". Choose a model by name."
         )
-    known = {"astra", "argon", "sol", "gemini 4", "gemini 4 argon"}
+    known = {"astra", "sol", "gemini 4"} | {
+        word
+        for model in OPT_IN_MODELS
+        for word in (model.removeprefix("gemini-4-"), model.replace("-", " "))
+    }
     explanation = (
         "isn't available for agents here yet"
         if key in known

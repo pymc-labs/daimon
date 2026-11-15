@@ -29,7 +29,7 @@ from daimon.core.stores import scoped_config_read
 from daimon.core.stores.domain import Platform
 from daimon.core.stores.selfhosted_resources import list_live_agent_facts
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 class RosterAgent(BaseModel):
@@ -132,6 +132,7 @@ async def load_roster(
     thread_id: str | None,
     default: DeploymentDefault,
     viewer: RuleViewer | None = None,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> Roster:
     """Build the tenant's roster, marking whichever agent answers for the caller.
 
@@ -143,7 +144,7 @@ async def load_roster(
     available = (
         await list_live_agent_facts(session, tenant_id=tenant_id)
         if anthropic_disabled()
-        else await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+        else await list_agents_by_tenant(anthropic, tenant_id=tenant_id, records=records)
     )
     agents = [agent for agent in available if viewer is None or viewer.sees_agent(agent)]
     answering_name: str | None = None

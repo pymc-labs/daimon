@@ -291,6 +291,9 @@ class AnthropicSessions:
             raise ValueError("Anthropic sessions require an environment")
         self._check(scope, spec.environment, "environment")
         check_record(scope, spec.agent.id, spec.metadata)
+        if spec.skills:
+            # Its sessions take skills through the agent; never drop a session's own.
+            raise UnsupportedCapability(("session_skills",), "anthropic.managed_agents")
         config = SessionCreateConfig()
         for namespace, extension in spec.extensions.items():
             if namespace != "anthropic.session_create":

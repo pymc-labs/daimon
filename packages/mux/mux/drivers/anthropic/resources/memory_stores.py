@@ -78,6 +78,17 @@ class MemoryStores(CoreMemoryStores, Protocol):
         key: str,
     ) -> Operation: ...
 
+    async def update_memory(
+        self,
+        scope: Scope,
+        store: ResourceRef,
+        memory_id: str,
+        content: str,
+        *,
+        expected_content_sha256: str,
+        key: str,
+    ) -> Memory: ...
+
 
 class AnthropicMemoryStores:
     def __init__(
@@ -277,6 +288,33 @@ class AnthropicMemoryStores:
             )
         )
         return operation(store, key, "delete_memory")
+
+    async def update_memory(
+        self,
+        scope: Scope,
+        store: ResourceRef,
+        memory_id: str,
+        content: str,
+        *,
+        expected_content_sha256: str,
+        key: str,
+    ) -> Memory:
+        """Replace one memory's content only while it still hashes to the expected value."""
+        self._check(scope, store)
+        return self._memory(
+            await provider_call(
+                self._client.beta.memory_stores.memories.update(
+                    memory_id,
+                    memory_store_id=store.id,
+                    content=content,
+                    view="full",
+                    precondition={
+                        "type": "content_sha256",
+                        "content_sha256": expected_content_sha256,
+                    },
+                )
+            )
+        )
 
     async def archive(self, scope: Scope, store: ResourceRef, *, key: str) -> Operation:
         self._check(scope, store)

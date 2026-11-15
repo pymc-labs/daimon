@@ -2,6 +2,7 @@ import { Label } from "@/components/ui/label"
 import { cn } from "@/lib/utils"
 import { Dot } from "../bits"
 import type { Agent, AgentConfig, Catalog } from "../types"
+import type { Unsupported } from "../unsupported"
 
 export type Props = {
   node: string
@@ -12,6 +13,8 @@ export type Props = {
   changed: Set<string>
   update: (fn: (c: AgentConfig) => void, delay?: number) => void
   select: (id: string) => void
+  /** What the model in the draft can't run; items listed are disabled. */
+  unsupported?: Unsupported
 }
 export function Section({ title, action, children, className, flush }: { title?: string; action?: React.ReactNode; children: React.ReactNode; className?: string; flush?: boolean }) {
   return (

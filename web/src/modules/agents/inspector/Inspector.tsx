@@ -20,6 +20,8 @@ import { GoogleBadge, ToolRulesPanel } from "../setup/ToolRulesPanel"
 import { GithubPanel } from "../setup/GithubPanel"
 import { KeysPanel } from "../setup/KeysPanel"
 import { PeoplePanel } from "../setup/PeoplePanel"
+import { usePendingPreview } from "../usePendingPreview"
+import { unsupportedOf } from "../unsupported"
 import { nodeUi } from "../nodes/registry"
 import { FeatureSettings } from "@/modules/features/Settings"
 
@@ -28,8 +30,9 @@ const TITLES: Record<string, string> = {
   history: "History", features: "Features", "mcp:new": "New MCP server", keys: "Keys", coding: "Access via MCP", people: "People", knowledge: "Knowledge", github: "GitHub",
 }
 
-export function Inspector(p: Props) {
-  const { node, agent, config, select } = p
+export function Inspector(props: Props) {
+  const { node, agent, config, select } = props
+  const p = { ...props, unsupported: unsupportedOf(usePendingPreview(agent, config.model).data) }
   const can = useCan()
   useKey((e) => { if (e.key === "Escape") select("") }, [select])
   const kind = node.split(/[:/]/)[0]!

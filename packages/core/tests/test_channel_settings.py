@@ -14,7 +14,9 @@ from daimon.core.channel_settings import (
     clear_provider_pin,
     clear_thread_override,
     list_thread_overrides,
+    provider_pin,
     set_environment,
+    set_provider_pin,
     set_tool_rule,
     set_workspace_default_agent,
 )
@@ -23,7 +25,7 @@ from daimon.core.permissions import with_agent_rule, with_channel_rule
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
-from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.domain import FeatureTarget, TenantBackendPolicy
 from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.testing.factories import make_account, make_tenant
@@ -258,6 +260,79 @@ async def test_a_provider_pin_that_is_gone_is_stale(
         await clear_provider_pin(
             db_session_factory, actor, platform="discord", channel_id="c1", expected_local=1
         )
+
+
+def _policy(tenant_id: uuid.UUID, *enabled: str) -> TenantBackendPolicy:
+    return TenantBackendPolicy(
+        tenant_id=tenant_id,
+        revision="1",
+        enabled_backends=("anthropic", *enabled),  # type: ignore[arg-type]
+    )
+
+
+async def test_a_channel_is_pinned_to_a_catalog_model_and_it_is_recorded(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A set pin is read back, recorded for the channel, and a stale read is refused."""
+    actor = await _actor(db_session)
+    policy = _policy(actor.tenant_id, "openai")
+    pin = await set_provider_pin(
+        db_session_factory,
+        actor,
+        platform="web",
+        channel_id="c1",
+        value="openai:gpt-6-astra",
+        policy=policy,
+        expected_local=None,
+    )
+    assert (pin.backend, pin.model) == ("openai", "gpt-6-astra"), (
+        "the pin names the picked provider and model"
+    )
+    async with db_session_factory() as read:
+        held = await provider_pin(read, tenant_id=actor.tenant_id, platform="web", channel_id="c1")
+        kinds = [
+            c.setting for c in await list_changes(read, tenant_id=actor.tenant_id, channel_id="c1")
+        ]
+    assert held is not None and held.local == pin.local, "the pin is stored"
+    assert "provider_pin" in kinds, f"the change is recorded: {kinds}"
+    with pytest.raises(StaleChannelValue):
+        await set_provider_pin(
+            db_session_factory,
+            actor,
+            platform="web",
+            channel_id="c1",
+            value="openai:gpt-6-astra",
+            policy=policy,
+            expected_local=None,
+        )
+
+
+async def test_a_pin_needs_an_admin_an_allowed_provider_and_a_non_default_model(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Members, providers the workspace hasn't enabled and Claude models are refused."""
+    admin = await _actor(db_session)
+    member = await _actor(db_session, admin=False)
+
+    async def pin(actor: ChannelActor, value: str, *enabled: str) -> None:
+        await set_provider_pin(
+            db_session_factory,
+            actor,
+            platform="web",
+            channel_id="c1",
+            value=value,
+            policy=_policy(actor.tenant_id, *enabled),
+            expected_local=None,
+        )
+
+    with pytest.raises(ChannelChangeRefused):
+        await pin(member, "openai:gpt-6-astra", "openai")
+    with pytest.raises(ChannelChangeRefused) as off:
+        await pin(admin, "openai:gpt-6-astra")
+    assert "Nothing was changed" in str(off.value), "a model that isn't offered changes nothing"
+    with pytest.raises(ChannelChangeRefused) as claude:
+        await pin(admin, "anthropic:claude-opus-5-5")
+    assert claude.value.kind == "invalid", "a pin names a model on another provider"
 
 
 async def test_leaving_own_needs_a_choice_for_its_agents(

@@ -1,6 +1,6 @@
 """Session output files to Teams: a consent card in 1:1 chats, the channel's Files in channels.
 
-Thin adapter over `sweep_session_outputs`. In a 1:1 chat each file is offered
+Thin adapter over `sweep_outputs`. In a 1:1 chat each file is offered
 with a FileConsentCard and the post defers, so the file stays listed until the
 person accepts (upload, then delete) or declines (delete). The card's context
 round-trips through the client, so it carries only a random token keyed to a
@@ -67,10 +67,9 @@ from daimon.core.output_delivery import (
     DeliverableFile,
     OutputDeliveryDeferred,
     SkippedFile,
-    delete_output_file,
-    download_output_file,
-    sweep_session_outputs,
+    sweep_outputs,
 )
+from daimon.core.output_runtime import OutputRuntime
 from daimon.core.stores.file_uploads import get_upload
 from daimon.core.teams_file_offers import (
     FILE_CONSENT_CONTENT_TYPE,
@@ -89,6 +88,7 @@ from microsoft_teams.api import (
     MessageActivityInput,
 )
 from microsoft_teams.apps import ActivityContext
+from mux.errors import ProviderError
 
 log = structlog.get_logger()
 
@@ -190,6 +190,8 @@ class _Offer:
     expires_at: float
     # Neutral bytes stay server-side until consent; None retains native behavior.
     content: bytes | None = field(default=None, repr=False)
+    # Where a listed file is read and cleared once the click decides it.
+    outputs: OutputRuntime | None = field(default=None, repr=False)
 
 
 def consent_card(name: str, size_bytes: int, token: str) -> MessageActivityInput:
@@ -295,7 +297,7 @@ class TeamsOutputDelivery:
     async def sweep(
         self,
         inbound: TeamsInbound,
-        session_id: str,
+        outputs: OutputRuntime,
         *,
         append: AppendToAnswer | None = None,
         quiet_s: float | None = None,
@@ -305,6 +307,7 @@ class TeamsOutputDelivery:
         `append` puts file links and previews below the turn's answer. `quiet_s`:
         seconds since the turn's last tool call ended, which shortens the listing's settle.
         """
+        session_id = outputs.session_id
         started = self._clock()
         previous = self._sweeps.get(session_id)
         current = asyncio.current_task()
@@ -317,13 +320,12 @@ class TeamsOutputDelivery:
             if quiet_s is not None:
                 quiet_s += self._clock() - started
             if inbound.kind != "dm":  # a group chat has no files: each is skipped
-                await self._sweep_channel(inbound, session_id, append, quiet_s)
+                await self._sweep_channel(inbound, outputs, append, quiet_s)
                 return
             previews: list[Attachment] = []
-            await sweep_session_outputs(
-                self._runtime.anthropic,
-                session_id=session_id,
-                post=functools.partial(self._post_direct, inbound, session_id, previews),
+            await sweep_outputs(
+                outputs,
+                post=functools.partial(self._post_direct, inbound, outputs, previews),
                 on_skip=_log_skip,
                 sleep=self._sleep,
                 order=previews_first,
@@ -342,7 +344,7 @@ class TeamsOutputDelivery:
     async def _post_direct(
         self,
         inbound: TeamsInbound,
-        session_id: str,
+        outputs: OutputRuntime,
         previews: list[Attachment],
         file: DeliverableFile,
     ) -> None:
@@ -351,7 +353,7 @@ class TeamsOutputDelivery:
         Either one's preview goes into `previews`, shown once the sweep ends.
         """
         if not is_preview_output(file.filename):
-            await self._offer(inbound, session_id, file, previews=previews)
+            await self._offer(inbound, outputs.session_id, file, outputs=outputs, previews=previews)
             return
         if (preview := await self._preview_output(file)) is not None:
             previews.append(preview)
@@ -363,13 +365,13 @@ class TeamsOutputDelivery:
     async def _sweep_channel(
         self,
         inbound: TeamsInbound,
-        session_id: str,
+        outputs: OutputRuntime,
         append: AppendToAnswer | None,
         quiet_s: float | None,
     ) -> None:
         files = self._files
         if files is None or not await files.is_available(inbound):
-            await self._sweep_unsaved(inbound, session_id, quiet_s)
+            await self._sweep_unsaved(inbound, outputs, quiet_s)
             return
         links: list[str] = []
         previews: list[Attachment] = []
@@ -423,9 +425,8 @@ class TeamsOutputDelivery:
                     documents.append(asyncio.create_task(self._thumbnail(files, item)))
 
         try:
-            await sweep_session_outputs(
-                self._runtime.anthropic,
-                session_id=session_id,
+            await sweep_outputs(
+                outputs,
                 post=upload,
                 on_skip=_log_skip,
                 sleep=self._sleep,
@@ -455,17 +456,16 @@ class TeamsOutputDelivery:
         await self._send_previews(inbound, previews)
 
     async def _sweep_unsaved(
-        self, inbound: TeamsInbound, session_id: str, quiet_s: float | None
+        self, inbound: TeamsInbound, outputs: OutputRuntime, quiet_s: float | None
     ) -> None:
         """A channel or group chat whose files cannot be saved: every file takes the skip path.
 
         A skipped file is logged, then deleted if it fits the cap; one over it
         is kept, as on every other path: no channel could take it either.
         """
-        await sweep_session_outputs(
-            self._runtime.anthropic,
-            session_id=session_id,
-            post=functools.partial(self._offer, inbound, session_id),
+        await sweep_outputs(
+            outputs,
+            post=functools.partial(self._offer, inbound, outputs.session_id, outputs=outputs),
             on_skip=_log_channel_skip,
             sleep=self._sleep,
             max_bytes=0,
@@ -613,6 +613,7 @@ class TeamsOutputDelivery:
         session_id: str,
         file: DeliverableFile,
         *,
+        outputs: OutputRuntime | None = None,
         content: bytes | None = None,
         previews: list[Attachment] | None = None,
     ) -> None:
@@ -643,6 +644,7 @@ class TeamsOutputDelivery:
             service_url=inbound.service_url,
             expires_at=now + OFFER_TTL_S,
             content=content,
+            outputs=outputs,
         )
         try:
             await self._sender.send(
@@ -701,13 +703,20 @@ class TeamsOutputDelivery:
 
     async def _upload(self, offer: _Offer, info: FileUploadInfo) -> None:
         """PUT the bytes, show the file, then remove its output listing."""
-        client = self._runtime.anthropic
         try:
             content = offer.content
             if content is None:
-                content = await download_output_file(client, offer.file_id)
+                if offer.outputs is None:
+                    raise FetchRefused("the offer has no output source")
+                content = await offer.outputs.read_output(offer.file_id)
             await self._put(info, content)
-        except (FetchRefused, anthropic.APIError, httpx.InvalidURL, *TEAMS_SEND_ERRORS) as err:
+        except (
+            FetchRefused,
+            anthropic.APIError,
+            ProviderError,
+            httpx.InvalidURL,
+            *TEAMS_SEND_ERRORS,
+        ) as err:
             # The output stays listed, so the next sweep offers it again.
             log.warning("teams.file_upload.failed", file_id=offer.file_id, error=type(err).__name__)
             await self._say(
@@ -717,8 +726,8 @@ class TeamsOutputDelivery:
         await self._sender.send(
             offer.conversation_id, file_info_message(info), service_url=offer.service_url
         )
-        if offer.content is None:
-            await delete_output_file(client, session_id=offer.session_id, file_id=offer.file_id)
+        if offer.content is None and offer.outputs is not None:
+            await offer.outputs.delete_output(offer.file_id)
 
     async def _put(self, info: FileUploadInfo, content: bytes) -> None:
         """PUT `content` to the person's OneDrive upload session; `FetchRefused` on failure."""
@@ -769,8 +778,6 @@ class TeamsOutputDelivery:
         await self._sender.send(conversation, file_info_message(info), service_url=service_url)
 
     async def _decline(self, offer: _Offer) -> None:
-        if offer.content is None:
-            await delete_output_file(
-                self._runtime.anthropic, session_id=offer.session_id, file_id=offer.file_id
-            )
+        if offer.content is None and offer.outputs is not None:
+            await offer.outputs.delete_output(offer.file_id)
         log.info("teams.file_consent.declined", file_id=offer.file_id)

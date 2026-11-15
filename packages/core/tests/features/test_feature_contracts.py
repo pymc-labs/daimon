@@ -87,11 +87,14 @@ _NARROWED: dict[str, str] = {
     "direct_messages": "a workspace policy for DMs, which have no agent or thread to choose",
     "dm_memory_read_only": "a workspace policy for DMs, which have no agent or thread to choose",
     "tool_safety": "operator-only security switch",
+    "host_call_gate": "operator-only rollback switch",
+    "mcp_connector_relay": "operator-only rollback switch",
     "unattended_capabilities": "read for unattended runs, which have no channel or thread",
     "require_routine_destination": "read when a routine is created, at the workspace",
     "long_jobs_max_usd": "checked when a job starts, from its workspace and agent",
     "long_jobs_max_deadline": "checked when a job starts, from its workspace and agent",
     "daily_model_cap": "counts the team's spend, so a workspace or agent limit",
+    "thread_providers": "an agent owner's consent, checked when a conversation's model is picked",
     **{f"web.{module}": "workspace-only web app surface" for module in WEB_MODULES},
 }
 

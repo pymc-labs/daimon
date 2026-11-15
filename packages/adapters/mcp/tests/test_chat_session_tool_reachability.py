@@ -376,7 +376,8 @@ async def test_chat_execution_identity_preserves_exact_tools_list(
         # Unregistered here: backend selection and Microsoft accounts are off.
         *(
             APPROVAL_TOOLS
-            - backend_switch_tools(enabled=True)
+            # The thread-model pick is registered with selection off; it asks only cross-provider.
+            - (backend_switch_tools(enabled=True) - {"set_thread_model"})
             - microsoft_send_tools(enabled=True, tool_safety_on=True)
             - {"set_routine_sandbox_tools"}
             # Carded tools tagged admin stay hidden from a non-admin credential.

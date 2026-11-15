@@ -538,6 +538,32 @@ async def test_off_gcp_the_deployment_is_unknown(monkeypatch):
     )
 
 
+async def test_off_gcp_the_stored_id_names_the_deployment(monkeypatch, db_session_factory):
+    import httpx
+
+    monkeypatch.setattr(openai_environment, "_deployment", None)
+    monkeypatch.setattr(openai_environment, "_missed_until", None)
+
+    def unreachable(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no metadata server", request=request)
+
+    transport = httpx.MockTransport(unreachable)
+    plain = await openai_environment.deployment_id(
+        transport=transport, sessionmaker=db_session_factory
+    )
+    labelled = await openai_environment.deployment_id(
+        transport=transport, sessionmaker=db_session_factory, project="proj_a"
+    )
+    again = await openai_environment.deployment_id(
+        transport=transport, sessionmaker=db_session_factory
+    )
+
+    assert plain is not None and len(plain) == 12, "the stamped id stands in off GCP"
+    assert again == plain, "the stamp is read back, never re-minted"
+    assert labelled == f"{plain}-proj_a", "another OpenAI project names differently"
+    assert openai_environment._deployment is None, "a stored id is never kept as a GCP project"
+
+
 async def test_a_miss_is_asked_again_after_it_expires(monkeypatch):
     import httpx
 

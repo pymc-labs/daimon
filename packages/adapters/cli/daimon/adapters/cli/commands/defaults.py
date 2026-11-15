@@ -12,6 +12,7 @@ from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.config import load_settings
 from daimon.core.defaults.apply import apply_defaults
+from daimon.core.defaults.owned import owned_defaults_possible
 from daimon.core.defaults.provisioning import verify_tenant_defaults
 from daimon.core.defaults.report import ApplyReport, ResourceOutcome, classify_verification
 from daimon.core.stores.tenants import list_tenants_by_platform
@@ -89,15 +90,10 @@ async def defaults_apply(
     as_json: bool,
     defaults_root: Path,
 ) -> None:
-    if rt.settings.anthropic.api_key is None:
-        # OpenAI-only deployment (see docs/providers.md's "Run on OpenAI"):
-        # there is no Anthropic-backed default agent/environment/
-        # skill set to reconcile. `daimon openai init` seeds the OpenAI
-        # equivalent separately, once the operator has a project and model.
+    if rt.settings.anthropic.api_key is None and not owned_defaults_possible():
         console.print(
-            "defaults apply: no DAIMON_ANTHROPIC__API_KEY configured — skipped the "
-            "Anthropic default agent/environment/skill reconciliation. Run "
-            "`daimon openai init` to provision and seed defaults on OpenAI instead."
+            "defaults apply: no Anthropic, OpenAI or Gemini key is configured, so there is "
+            "nothing to run the default agents on. Set a provider key and run it again."
         )
         report = ApplyReport()
     else:

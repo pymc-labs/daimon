@@ -71,10 +71,12 @@ def test_memory_features_narrow_each_store() -> None:
     assert identity.shared_memory, "shared memory stays on"
 
 
-def test_backends_without_a_store_fix_the_memory_feature() -> None:
-    """Gemini and OpenAI mount the agent-wide store only, so personal memory is fixed off."""
+def test_backends_without_a_store_reach_every_memory_through_the_host() -> None:
+    """Gemini and OpenAI reach the shared, personal and channel stores through Daimon's tools."""
     place = FeaturePlace(uuid.uuid4(), "discord", "c1", agent_id="a", backend="gemini")
     personal = resolve_one(FEATURES["memory_personal"], None, place, [])
+    channel = resolve_one(FEATURES["memory_channel"], None, place, [])
     shared = resolve_one(FEATURES["memory_shared"], None, place, [])
-    assert (personal.value, personal.unavailable) == ("off", "backend"), "no personal store"
+    assert personal.unavailable is None, "personal store reachable"
+    assert channel.unavailable is None, "channel store reachable"
     assert (shared.value, shared.unavailable) == ("on", "backend"), "agent-wide store fixed on"

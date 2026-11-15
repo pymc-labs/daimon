@@ -6,7 +6,7 @@ from typing import Literal
 
 from daimon.core.stores.domain import TenantBackendPolicy
 from mux.contracts.config import ConfigRevision
-from mux.contracts.ids import Provider
+from mux.contracts.ids import ChannelRef, Provider
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 
 
@@ -14,14 +14,25 @@ class ConfigurationReference(BaseModel):
     """Bind an admin's provider or channel-pin confirmation to its preview."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    operation: Literal["provider_allowlist", "channel_pin_clear"]
+    operation: Literal["provider_allowlist", "channel_pin", "channel_pin_clear"]
     providers: tuple[Provider, ...] | None = None
+    model: StrictStr | None = None
+    """A pin's catalog model (`provider:id`); only a pin names one."""
     expected_revision: StrictInt | StrictStr
     preview_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
 
     @model_validator(mode="after")
     def _bound(self) -> ConfigurationReference:
-        if self.operation == "channel_pin_clear":
+        if (self.operation == "channel_pin") != bool(self.model):
+            raise ValueError("only pinning a channel names a model")
+        if self.operation == "channel_pin":
+            if (
+                type(self.expected_revision) is not int
+                or self.expected_revision < 0
+                or self.providers is not None
+            ):
+                raise ValueError("pinning a channel requires the pin's revision, 0 for none")
+        elif self.operation == "channel_pin_clear":
             if (
                 type(self.expected_revision) is not int
                 or self.expected_revision < 1
@@ -42,6 +53,22 @@ def channel_pin_digest(pin: ConfigRevision) -> str:
                 "local": pin.local,
                 "digest": pin.digest,
                 "operation": "channel_pin_clear",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+
+def channel_pin_set_digest(channel: ChannelRef, local: int, model: str) -> str:
+    """Binds a pin preview to the channel's pin revision (0 for none) and the model."""
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "channel": channel.model_dump(mode="json"),
+                "local": local,
+                "model": model,
+                "operation": "channel_pin",
             },
             sort_keys=True,
             separators=(",", ":"),

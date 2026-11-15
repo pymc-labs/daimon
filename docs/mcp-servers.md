@@ -142,9 +142,10 @@ apply without approval.
 
 An agent switched to OpenAI or Gemini moves only when its dropped capabilities
 stay the same. Otherwise it keeps its version and shows **Needs re-confirm**.
-Its update button moves it, and its owner then confirms the new drops. Those
-providers run custom skills only through an operator representation, which a
-new version outdates. Self-hosted channels use their deployment's own skills.
+Its update button moves it, and its owner then confirms the new drops. OpenAI
+uploads each version of a custom or channel skill, and a skill over its size
+limit is named on the switch card. Gemini carries the default skills only.
+Self-hosted channels use their deployment's own skills.
 
 ## Give an agent Google Workspace access
 

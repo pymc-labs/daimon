@@ -1,6 +1,7 @@
 """Backend switching uses the existing confirmation gate with a bound reference."""
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from daimon.core.confirmation import prompt_for_tool_call
@@ -145,11 +146,20 @@ def test_preview_is_a_read_but_confirm_is_never_unattended() -> None:
     )
 
 
+#: Turn deps for a card press; the press then uses the fixture's service, which reads
+#: no source (these tests' previews read none).
+_DEPS = SimpleNamespace()
+
+
 @pytest.fixture
-async def owned_preview(db_preflight, db_committing_engine):
+async def owned_preview(db_preflight, db_committing_engine, monkeypatch):
+    from daimon.core import channel_backend
     from daimon.core.authz import Subject
-    from daimon.core.channel_backend import BackendActor, load_backend_agent, make_backend_service
-    from daimon.core.config import TurnSettings
+    from daimon.core.channel_backend import (
+        AgentBackendService,
+        BackendActor,
+        load_backend_agent,
+    )
     from daimon.testing.db import require_owned_sessionmaker
     from daimon.testing.factories import make_account, make_platform_principal, make_tenant
     from daimon.testing.ma_models import ma_agent
@@ -181,7 +191,10 @@ async def owned_preview(db_preflight, db_committing_engine):
         agent = await load_backend_agent(
             client, sessions, tenant_id=tenant.id, agent_name="Researcher"
         )
-        service = make_backend_service(sessions, TurnSettings(path="mux", channel_backends=True))
+
+        # These tests pin the service without a source capture.
+        service = AgentBackendService(sessions, enabled=True)
+        monkeypatch.setattr(channel_backend, "make_backend_service", lambda *_, **__: service)
         actor = BackendActor(tenant.id, account.id, Subject(is_admin=True))
         policy = await service.tenant_policy(tenant.id)
         await service.set_tenant_allowlist(
@@ -1120,7 +1133,7 @@ async def test_a_hand_off_in_this_thread_decides_whose_conversation_moves(owned_
     moves = "This conversation moves to OpenAI from your next message"
     assert (moves in prepared.consequence) == (handed_to == "Researcher")
     if handed_to == "Researcher":
-        assert "earlier messages here aren't carried over" in prepared.consequence
+        assert "keeps its earlier messages" in prepared.consequence
 
 
 async def _reload(owned_preview):
@@ -1326,7 +1339,7 @@ def _press(owned_preview, card_id, *, action="confirm", clicker="requester", adm
 
     _, agent, _, sessions, client, *_ = owned_preview
     return press_switch_card(
-        deps=None,
+        deps=_DEPS,
         sessionmaker=sessions,
         anthropic=client,
         turn_settings=TurnSettings(path="mux", channel_backends=True),
@@ -1456,7 +1469,7 @@ async def test_only_the_posted_message_can_press_its_switch_card(owned_preview):
 
     async def press(message_id: str):
         return await press_switch_card(
-            deps=None,
+            deps=_DEPS,
             sessionmaker=sessions,
             anthropic=client,
             turn_settings=TurnSettings(path="mux", channel_backends=True),

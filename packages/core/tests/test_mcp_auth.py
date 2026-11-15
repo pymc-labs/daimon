@@ -19,6 +19,7 @@ import pytest
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import AgentRef, build_subject
 from daimon.core.mcp_auth import (
+    HOST_BUILTINS_CLAIM,
     authorize_coding_token,
     coding_key_ttl_days,
     coding_token_channel,
@@ -26,6 +27,7 @@ from daimon.core.mcp_auth import (
     mint_cli_mcp_token,
     mint_jwt,
     mint_operator_mcp_token,
+    registered_agent_claims_match,
 )
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.testing.legacy_mcp_tokens import mint_internal_mcp_token
@@ -787,6 +789,38 @@ async def test_a_provider_turn_surface_is_registry_only_and_needs_chat_execution
             now=now,
             surface="provider_turn",
         )
+
+
+async def test_host_builtins_claim_is_a_provider_turns_only(db_session: AsyncSession) -> None:
+    """Unattended host web_fetch and memory need this signed leave (A-M2)."""
+    tenant_id, account_id = await _seed_tenant_and_account(db_session)
+    secret = b"a" * 32
+    now = dt.datetime.now(dt.UTC)
+
+    async def mint(surface: str | None) -> str:
+        return await mint_agent_mcp_token(
+            db_session,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            agent_id=uuid.uuid4(),
+            label="turn",
+            secret=secret,
+            now=now,
+            ttl_days=600 / 86400,  # pyright: ignore[reportArgumentType]
+            chat_execution=True,
+            surface=surface,
+            host_builtins=True,
+        )
+
+    decoded = pyjwt.decode(await mint("provider_turn"), secret, algorithms=["HS256"])
+    assert decoded.get(HOST_BUILTINS_CLAIM) is True, "provider turn must carry the claim"
+    row = await get_mcp_token(db_session, jti=uuid.UUID(decoded["jti"]))
+    assert row is not None, "row must be registered"
+    assert registered_agent_claims_match(row, decoded, now=now, chat_execution=True), (
+        "the verifier must admit the claim on a provider turn"
+    )
+    with pytest.raises(ValueError):
+        await mint(None)
 
 
 @pytest.mark.parametrize("minted", ["provider_turn", None])

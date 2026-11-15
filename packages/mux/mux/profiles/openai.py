@@ -9,7 +9,7 @@ to name it to get it.
 from __future__ import annotations
 
 from mux.contracts.extensions import OPENAI_EXTENSIONS
-from mux.contracts.profile import AccountingMode, Profile
+from mux.contracts.profile import AccountingMode, Effort, Profile, SkillLimits
 
 LUNA_MODEL = "gpt-6-luna"
 ASTRA_MODEL = "gpt-6-astra"
@@ -20,13 +20,19 @@ NATIVE_MODELS = (LUNA_MODEL, ASTRA_MODEL)
 # so they cannot determine the exact model charge when that pricing applies" (Agents
 # API observability). The driver's meter therefore never reports one.
 _METERS_CACHE_WRITES = False
+# `reasoning.effort` on the agent (Agents API reference); the neutral names match.
+_EFFORT: dict[Effort, str] = {"low": "low", "medium": "medium", "high": "high"}
+
+MIB = 1024 * 1024
 
 PERSISTENT_WORKSPACE = Profile(
     provider="openai",
     profile_id="openai.persistent_workspace",
+    carries_caller_resources=True,
     schema_version="1",
     accounting_mode=AccountingMode.NATIVE_ROOT_TOTALS,
     meters_cache_writes=_METERS_CACHE_WRITES,
+    effort_map=_EFFORT,
     sdk_pin="openai>=2.54.0,<3",
     core=True,  # Nine mandatory capabilities have actual-driver evidence; see driver README.
     execution_tool="bash",
@@ -34,6 +40,8 @@ PERSISTENT_WORKSPACE = Profile(
     mcp_policy_keys=("allowed_tools", "required"),
     tool_readback="compiled",
     skill_digest="content",
+    # The readback bounds in `drivers/openai/skills.py`: what is installed can be read back.
+    skill_limits=SkillLimits(total_bytes=28 * MIB, file_bytes=25 * MIB, files=500),
     support={
         "neutral_catalog": "native",
         "agent_delete": "native",
@@ -77,9 +85,11 @@ PERSISTENT_WORKSPACE = Profile(
 CONVERSATION_ONLY = Profile(
     provider="openai",
     profile_id="openai.conversation_only",
+    carries_caller_resources=True,
     schema_version="1",
     accounting_mode=AccountingMode.NATIVE_ROOT_TOTALS,
     meters_cache_writes=_METERS_CACHE_WRITES,
+    effort_map=_EFFORT,
     sdk_pin="openai>=2.54.0,<3",
     core=False,
     support={

@@ -663,6 +663,9 @@ GEMINI_PROBES: dict[Capability, Probe] = {
 # --------------------------------------------------------------------------- selfhosted
 
 
+_NOW = datetime.now(UTC).isoformat()
+
+
 class Harness:
     """In-process C3 harness: durable event log, one turn per idempotency key."""
 
@@ -755,6 +758,9 @@ class Harness:
         if path.endswith("/cancel"):
             self.finish("interrupted")
             return httpx.Response(200, json={"cancelled": True})
+        if path.endswith("/outputs"):
+            output = {"id": "out", "path": "report.txt", "size_bytes": 2, "modified_at": _NOW}
+            return httpx.Response(200, json={"outputs": [output], "truncated": False})
         raise AssertionError(path)
 
 
@@ -835,6 +841,12 @@ async def _selfhosted_tool_loop(rig: Rig) -> object:
     return events
 
 
+async def _selfhosted_outputs(rig: Rig) -> object:
+    page = await rig.driver.artifacts.list(rig.scope, rig.session, page=PAGE)
+    assert [a.filename for a in page.data] == ["report.txt"], page
+    return page
+
+
 async def _selfhosted_previews(rig: Rig) -> object:
     events = await _selfhosted_stream(rig, previews=True)
     assert "agent.message.delta" in {e.type for e in events}
@@ -887,6 +899,7 @@ SELFHOSTED_PROBES: dict[Capability, Probe] = {
     "native_event_replay": _selfhosted_replay,
     "event_previews": _selfhosted_previews,
     "tool_confirmation": _selfhosted_confirmation,
+    "artifacts": _selfhosted_outputs,
 }
 
 # The rig a profile's probes run against; approval-mode probes pick their own harness.

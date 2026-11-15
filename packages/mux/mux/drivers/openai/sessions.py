@@ -5,9 +5,20 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 
+from pydantic import JsonValue
+
 from mux.contracts.actions import UserMessage
 from mux.contracts.config import ConfigRevision
-from mux.contracts.ids import ChannelRef, Page, PageRequest, ResourceRef, Revision, Scope, ThreadRef
+from mux.contracts.ids import (
+    ChannelRef,
+    Page,
+    PageRequest,
+    ResourceRef,
+    Revision,
+    Scope,
+    SkillRef,
+    ThreadRef,
+)
 from mux.contracts.receipts import DeletionReceipt, Operation, RestoreReceipt, UpdateReceipt
 from mux.contracts.resources import (
     Continuity,
@@ -22,7 +33,7 @@ from mux.contracts.resources import (
 from mux.drivers.openai import session_mcp
 from mux.drivers.openai._common import Context, objects, owned, query, text
 from mux.drivers.openai.actions import content
-from mux.drivers.openai.mcp_auth import MCPSecretResolver
+from mux.drivers.openai.mcp_auth import MCPSecretResolver, non_mcp_tool
 from mux.drivers.openai.mounts import resources, vault_ids
 from mux.drivers.openai.normalize import required_actions
 from mux.drivers.openai.session_controls import SessionControls
@@ -127,6 +138,11 @@ class OpenAISessions:
                 raise ProviderError(
                     "permission", retryable=False, native_code="host_delegation_enabled"
                 )
+        if self._controls.mcp_enabled is False and any(
+            value.get("type") == "mcp"
+            for value in objects(object_json(raw["agent"]).get("tools") or [])
+        ):
+            raise ProviderError("permission", retryable=False, native_code="host_mcp_disabled")
         status = text(raw["status"])
         states = {
             "idle": "idle",
@@ -201,6 +217,8 @@ class OpenAISessions:
                 raise self._c.unsupported("hosted_container_size")
             if spec.environment is not None or spec.resources:
                 raise self._c.unsupported("thread_workspace_persistence")
+            if spec.skills:
+                raise self._c.unsupported("skills_bundle")
             if initial is None or not initial.content:
                 raise ProviderError(
                     "invalid_request", retryable=False, native_code="initial_input_required"
@@ -219,7 +237,9 @@ class OpenAISessions:
         if agent.get("id") != spec.agent.id:
             raise ValueError("wrong session agent identity")
         self._c.record(scope, agent)
-        pins = decode(agent.get("metadata"))
+        if any(pin.source is not None for pin in spec.skills):
+            raise self._c.unsupported("session_skill_source")
+        pins = session_pins(decode(agent.get("metadata")), spec.skills)
         resolved = None
         if pins is not None:
             if self._c.profile_id == "openai.conversation_only" and pins:
@@ -246,6 +266,11 @@ class OpenAISessions:
                 **object_json(body.get("agent") or {}),
                 "multi_agent": {"enabled": False},
             }
+        if self._controls.reasoning_effort is not None:
+            body["agent"] = {
+                **object_json(body.get("agent") or {}),
+                "reasoning": {"effort": self._controls.reasoning_effort},
+            }
         if self._controls.spend_limit_usd_cents is not None:
             body["spend_control"] = {"limit": self._controls.spend_limit_usd_cents}
         if vaults is not None:
@@ -256,9 +281,18 @@ class OpenAISessions:
             body["input"] = [
                 {"role": "user", "content": content(initial.content, self._c.profile_id)}
             ]
-        tools, managed = await session_mcp.prepare(
-            self._c, scope, agent, self._mcp_secrets, key=key, vaults_attached=bool(vaults)
-        )
+        if self._controls.mcp_enabled is False:
+            native = objects(agent.get("tools") or [])
+            tools: list[JsonValue] | None = (
+                [non_mcp_tool(value) for value in native if value.get("type") != "mcp"]
+                if any(value.get("type") == "mcp" for value in native)
+                else None
+            )
+            managed = None
+        else:
+            tools, managed = await session_mcp.prepare(
+                self._c, scope, agent, self._mcp_secrets, key=key, vaults_attached=bool(vaults)
+            )
         if tools is not None:
             body["agent"] = {**object_json(body.get("agent") or {}), "tools": tools}
         if managed is not None:
@@ -494,3 +528,14 @@ class OpenAISessions:
     ) -> Session:
         self._c.check(scope, ref, "session")
         raise MigrationUnsupported(ref.id)
+
+
+def session_pins(
+    agent: tuple[SkillRef, ...] | None, extra: tuple[SkillRef, ...]
+) -> tuple[SkillRef, ...] | None:
+    """The agent's pins, then the session's own; a session never repins an agent skill."""
+    if not extra:
+        return agent
+    held = {pin.id for pin in agent or ()}
+    added = tuple({pin.id: pin for pin in extra if pin.id not in held}.values())
+    return (*(agent or ()), *added)

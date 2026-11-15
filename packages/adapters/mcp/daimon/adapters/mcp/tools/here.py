@@ -162,6 +162,7 @@ async def _where_am_i_impl(
             visible_channel_ids=visible,
             bot_can_view=None,
             caller_can_view=True,
+            records=runtime.session_factory,
         )
     # Someone from another organisation has no 1:1 chat to send `setup` in.
     return for_foreign_sender(card) if foreign else card

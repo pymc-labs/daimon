@@ -13,6 +13,7 @@ from daimon.adapters.mcp.tools._channel_policy import load_channel_policy
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._long_job_access import LongJobCaller, long_job_access
 from daimon.adapters.mcp.tools.setup_target import refuse_helper, require_turn_origin
+from daimon.core.agent_record_ports import DAIMON_ID_PREFIXES
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_PRIVATE_DM
 from daimon.core.errors import StoreError
@@ -21,7 +22,7 @@ from daimon.core.long_job_models import LongJob, LongJobCancelReply, LongJobReda
 from daimon.core.long_jobs import require_admission
 from daimon.core.permissions import limiting_ids_at
 from daimon.core.scope import ScopeContext
-from daimon.core.session_seal import origin_stamp, seal_ids
+from daimon.core.session_seal import child_seal_ids, origin_stamp
 from daimon.core.stores import long_jobs as store
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.thread_sessions import get_live_thread_session
@@ -62,6 +63,8 @@ def register_long_job_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
         if origin.platform != "discord":
             raise ToolError("long jobs report back only in Discord threads for now")
+        if origin.responder_ma_agent_id.startswith(DAIMON_ID_PREFIXES):
+            raise ToolError("Long jobs are not available for this agent")
         if (
             not origin.attended
             or not auth.platform_user_id
@@ -134,7 +137,10 @@ def register_long_job_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 "The provider has no approved call matching this command and its exact limits"
             )
         environment = await find_environment_by_daimon_tag(
-            runtime.client, tenant_id=auth.tenant_id, name=config.environment_name or "default"
+            runtime.client,
+            tenant_id=auth.tenant_id,
+            name=config.environment_name or "default",
+            records=runtime.session_factory,
         )
         if (
             environment is None
@@ -146,7 +152,7 @@ def register_long_job_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         provenance = origin_stamp(
             channel_id=origin.parent_channel_id,
             thread_id=origin.thread_id,
-            seal=seal_ids(parent.metadata)
+            seal=child_seal_ids(parent.metadata, auth.seal_ids)
             | limiting_ids_at(
                 privacy_policy, channel_id=origin.parent_channel_id, thread_id=origin.thread_id
             ),

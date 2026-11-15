@@ -366,7 +366,9 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                 )
                 return
 
-            agents = await list_agents_by_tenant(runtime.anthropic, tenant_id=tenant_id)
+            agents = await list_agents_by_tenant(
+                runtime.anthropic, tenant_id=tenant_id, records=runtime.sessionmaker
+            )
             agent_names: list[str] = []
             for agent in agents:
                 name = agent.metadata.get(MA_METADATA_KEY_NAME)

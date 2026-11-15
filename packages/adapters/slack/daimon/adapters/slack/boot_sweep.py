@@ -172,7 +172,7 @@ async def _seed_tenant_defaults(
                 log.info("slack.boot_sweep_roster_check_skipped", tenant_id=str(tenant_id))
             else:
                 default_agent = await find_agent_by_daimon_tag(
-                    anthropic, tenant_id=tenant_id, name=agent_name
+                    anthropic, tenant_id=tenant_id, name=agent_name, records=sessionmaker
                 )
                 if default_agent is None:
                     seed_ok = False

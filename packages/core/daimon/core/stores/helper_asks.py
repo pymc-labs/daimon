@@ -79,12 +79,19 @@ async def list_asks(
 
 
 async def claim_queued(
-    session: AsyncSession, *, origin_id: uuid.UUID, skip_helpers: Collection[str], limit: int
+    session: AsyncSession,
+    *,
+    origin_id: uuid.UUID,
+    skip_helpers: Collection[str],
+    limit: int,
+    parallel_helper: str | None = None,
 ) -> list[HelperAskRow]:
     """Mark up to `limit` queued asks running, oldest first, one per helper.
 
     A helper not in `skip_helpers` (those already running an ask) gets its oldest
     queued ask; its later ones wait, so a helper's conversation stays in order.
+    Asks to `parallel_helper` (the asking agent's own copies, each a fresh
+    conversation) all run at once.
     """
     if limit <= 0:
         return []
@@ -99,6 +106,9 @@ async def claim_queued(
     for ask in queued:
         if len(claimed) == limit:
             break
+        if ask.helper_agent_id == parallel_helper:
+            claimed.append(ask)
+            continue
         if ask.helper_agent_id in busy:
             continue
         busy.add(ask.helper_agent_id)
