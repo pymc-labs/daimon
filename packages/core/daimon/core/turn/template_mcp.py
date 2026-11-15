@@ -3,10 +3,11 @@
 A template row with `template_capabilities: "mcp"` keeps the source agent's Daimon
 MCP toolset without any operator credential. Each turn mints one registered caller
 credential in memory: the requesting person's account with the agent's
-chat-execution authority (no admin elevation; roles are re-read live by the
-server), surface `provider_turn` (the server refuses it gated and publishing tools),
-living at most min(turn deadline + 60 s, 900 s). It is checked against the
-consented catalogue before use, and `finalize` revokes it and reads that back.
+chat-execution authority (an admin acts as themselves, as on a native chat
+turn; roles are re-read live by the server), surface `provider_turn` (the server
+refuses it gated and publishing tools), living at most min(turn deadline + 60 s,
+900 s). It is checked against the consented catalogue before use, and `finalize`
+revokes it and reads that back.
 
 An operator-pinned credential file cannot carry a turn's own flags, so a held or
 Slack DM context turn on such a row mints the same per-turn credential once the

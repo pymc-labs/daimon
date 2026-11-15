@@ -48,7 +48,7 @@ from daimon.core.mcp_identity import RELAY_CLAIM, RelayBinding
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.permissions import agent_permissions, channel_rule
 from daimon.core.session_seal import SEAL_CLAIM, seal_claim
-from daimon.core.stores.domain import McpTokenPurpose, McpTokenRow, McpTokenSurface, Role
+from daimon.core.stores.domain import McpTokenPurpose, McpTokenRow, McpTokenSurface
 from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -638,11 +638,6 @@ def registered_agent_claims_match(
     )
 
 
-#: Roles whose own caller-bound token may reach a provider: a person acting as
-#: themselves, admin or not (the server re-reads the role live). Any other is refused.
-PROVIDER_TOKEN_ROLES: frozenset[Role] = frozenset({Role.USER, Role.ADMIN})
-
-
 async def validate_agent_mcp_token(
     sessions: async_sessionmaker[AsyncSession],
     *,
@@ -663,6 +658,8 @@ async def validate_agent_mcp_token(
     This checks the mint owner's own claims and registry facts; the MCP server
     still owns tool authorization. No provider id is substituted for the
     canonical Daimon agent identity, and a bearer never becomes a stored fact.
+    Any role holds its own token, an admin acting as themselves included, as on
+    a native chat turn; another account's or tenant's token is refused.
     """
     from daimon.core.stores.accounts import get_account_with_tenant
     from daimon.core.stores.mcp_tokens import get_mcp_token
@@ -694,7 +691,6 @@ async def validate_agent_mcp_token(
         if (
             identity is None
             or str(identity.tenant_id) != scope.tenant_id
-            or identity.role not in PROVIDER_TOKEN_ROLES
             or row is None
             or row.kind != "agent"
             or row.scopes
