@@ -1,8 +1,8 @@
 """The `model` command: one conversation's model, as a card with a button per choice.
 
-The buttons list the agent's catalog with prices; a pick that changes provider shows what
-changes and asks once. The same card is posted in the conversation when an agent edit leaves
-its consent stale (`daimon.core.thread_model_reask`). The shared flow is
+The buttons list the agent's catalog with prices; a pick that loses something asks once and
+names it, any other pick applies at once. The same card is posted in the conversation when an
+agent edit leaves its consent stale (`daimon.core.thread_model_reask`). The shared flow is
 `daimon.core.thread_model_flow`; a press re-verifies the clicker (`card_actor`) and takes the
 conversation from the activity, never from the button.
 """
@@ -30,6 +30,7 @@ from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.errors import DaimonError
+from daimon.core.switch_card import CANCEL_LABEL, SWITCH_LABEL
 from daimon.core.thread_model_flow import (
     NOTHING_CHANGED,
     ThreadConfirm,
@@ -56,7 +57,6 @@ log = structlog.get_logger()
 VERB: Final = "thread_model"
 TITLE: Final = "Model for this conversation"
 PICK_PROMPT: Final = "Pick a model."
-CONFIRM_PROMPT: Final = "Confirm to switch this conversation."
 NOT_ALLOWED: Final = "You can't change the model here. Ask an admin or an owner."
 CANNOT_VERIFY: Final = "I couldn't verify you just now. Try again."
 IN_THE_CONVERSATION: Final = "Send `model` in the conversation you want to change."
@@ -80,21 +80,21 @@ def options_card(options: tuple[ThreadOption, ...]) -> AdaptiveCard:
 
 
 def confirm_card(lines: tuple[str, ...], confirm: ThreadConfirm | None) -> AdaptiveCard:
-    """What a pick changes; with Confirm and Cancel when it can go ahead."""
-    body: list[CardElement] = [heading(TITLE), *text_lines(*lines)]
+    """The switch card: its title, what stops working, then Cancel and Switch if it may go."""
+    title, *facts = lines or (TITLE,)
+    body: list[CardElement] = [heading(title), *text_lines(*facts)]
     if confirm is not None:
-        body += text_lines(CONFIRM_PROMPT)
         yes = button(
             VERB,
-            "Confirm",
+            SWITCH_LABEL,
             "confirm",
             style="positive",
             v=confirm.value,
             d=confirm.digest,
             r=confirm.revision,
         )
-        body.append(ActionSet(actions=[yes, button(VERB, "Cancel", "cancel")]))
-    return AdaptiveCard(body=body, fallback_text=TITLE)
+        body.append(ActionSet(actions=[button(VERB, CANCEL_LABEL, "cancel"), yes]))
+    return AdaptiveCard(body=body, fallback_text=title)
 
 
 def _done(text: str) -> AdaptiveCardInvokeResponse:

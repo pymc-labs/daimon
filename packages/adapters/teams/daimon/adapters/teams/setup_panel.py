@@ -76,15 +76,16 @@ from daimon.core.mcp_auth import (
 )
 from daimon.core.model_switch import (
     ModelPicker,
+    ModelSwitchPreview,
     SwitchRefusal,
     back_to_claude,
     confirm_or_refusal,
     panel_actor,
     panel_edit_deps,
-    preview_or_refusal,
+    pick_or_refusal,
     read_picker,
     set_effort,
-    switch_fact_lines,
+    switch_card_text,
 )
 from daimon.core.models_catalog import (
     ModelChoice,
@@ -751,15 +752,18 @@ class SetupPanel:
                 return refused(done)
             await audit("allowed", "completed")
             return await details()
-        shown = await preview_or_refusal(
+        shown = await pick_or_refusal(
             service, edit, actor=who, agent_name=name, value=value, admin=admin
         )
         if isinstance(shown, SwitchRefusal):
             await audit("denied", shown.reason)
             return refused(shown)
+        if not isinstance(shown, ModelSwitchPreview):
+            await audit("allowed", "completed")
+            return await details()
         return replace_card(
             cards.model_switch_card(
-                switch_fact_lines(shown, agent_name=name),
+                switch_card_text(shown, agent_name=name),
                 agent_name=name,
                 value=value,
                 revision=shown.revision,

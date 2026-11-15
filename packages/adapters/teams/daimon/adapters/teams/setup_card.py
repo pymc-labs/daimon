@@ -40,6 +40,7 @@ from daimon.core.setup_conversations import (
 )
 from daimon.core.skills.ingest import SkillPreview
 from daimon.core.stores.domain import McpTokenRow
+from daimon.core.switch_card import CANCEL_LABEL, SWITCH_LABEL
 from microsoft_teams.cards import (
     Action,
     ActionSet,
@@ -338,20 +339,24 @@ def model_switch_card(
     confirm: bool = False,
     action: RefusalAction | None = None,
 ) -> AdaptiveCard:
-    """A pick's preview or refusal: Confirm once, or the one step the refusal offers."""
+    """A pick's card or refusal: Cancel, then Switch or the one step the refusal offers."""
     fields: dict[str, str | int] = {"agent": agent_name, "target": value}
-    actions: list[Action] = []
+    actions: list[Action] = [_button(CANCEL_LABEL, "backend_cancel", agent=agent_name)]
     if confirm:
         actions.append(
             _button(
-                "Confirm", "backend_confirm", "positive", revision=revision, digest=digest, **fields
+                SWITCH_LABEL,
+                "backend_confirm",
+                "positive",
+                revision=revision,
+                digest=digest,
+                **fields,
             )
         )
     elif action == "switch_back_to_claude":
         actions.append(_button(SWITCH_BACK_LABEL, "backend_back", "positive", **fields))
     elif action in ("fresh_preview", "confirm_again"):
         actions.append(_button(REVIEW_AGAIN_LABEL, "backend_again", "positive", **fields))
-    actions.append(_button("Cancel", "backend_cancel", agent=agent_name))
     return _card("Model", [_text("\n".join(lines)[:3000])], actions)
 
 
