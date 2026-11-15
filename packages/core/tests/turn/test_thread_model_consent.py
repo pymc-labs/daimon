@@ -13,7 +13,7 @@ from daimon.core.channel_backend import (
     ThreadBackend,
     resolve_turn_backend,
 )
-from daimon.core.model_switch import SwitchRefusal
+from daimon.core.model_switch import ModelSwitchPreview, SwitchRefusal
 from daimon.core.stores import mux_state, security_audit
 from daimon.core.stores.domain import FeatureTarget
 from daimon.core.stores.feature_values import set_feature_value
@@ -27,11 +27,12 @@ from daimon.core.thread_model_switch import (
     ThreadPick,
     confirm_thread_model,
     confirm_thread_or_refusal,
+    pick_thread_or_card,
     pick_value,
     preview_thread_model,
     preview_thread_or_refusal,
 )
-from daimon.core.thread_models import thread_backend
+from daimon.core.thread_models import ThreadModelChange, thread_backend
 from mux.contracts.ids import ChannelRef, ModelRef
 
 from .test_declared_drop_service import owned as owned
@@ -185,6 +186,24 @@ async def test_a_consent_without_its_losses_is_confirmed_again(switching):
             False,
             "default",
         )
+
+
+async def test_a_lossy_pick_shows_the_card_and_a_lossless_one_is_kept(switching):
+    """The one rule: a pick that loses sandbox asks first; a Claude pick applies at once."""
+    service, agent, actor, sessions, _, _ = switching
+    pick = _pick(service, agent, actor, sessions)
+    card = await pick_thread_or_card(pick, LUNA, thread_id="thread", admin=False)
+    assert isinstance(card, ModelSwitchPreview) and card.asks_first, "sandbox stops working"
+    assert await _thread(sessions, agent) is None, "nothing is kept before the press"
+    kept = await pick_thread_or_card(
+        pick, "anthropic:claude-haiku-5-5", thread_id="thread", admin=False
+    )
+    assert isinstance(kept, ThreadModelChange), "a pick that loses nothing needs no card"
+    async with sessions() as db:
+        choice = await get_thread_choice(
+            db, tenant_id=agent.tenant_id, platform="discord", thread_id="thread"
+        )
+    assert choice == ModelRef(provider="anthropic", id="claude-haiku-5-5"), "kept at once"
 
 
 def test_a_typed_word_names_its_catalog_value():

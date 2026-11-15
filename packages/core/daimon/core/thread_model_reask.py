@@ -2,7 +2,8 @@
 
 A conversation that picked another provider runs it on the agent's consent. When the agent
 changes, that consent no longer matches, so its turns run on the agent's own model. The
-first message after the change posts the preview card again; whoever confirms moves the
+first message after the change picks again (`pick_thread_or_card`): a pick that loses
+nothing is kept at once, else the card is posted and whoever presses Switch moves the
 conversation back. The post happens off the turn: the reply never waits on it, and a failed
 post is tried again by the next message. Each (consent, agent revision) is asked once.
 """
@@ -17,7 +18,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.model_switch import SwitchRefusal, switch_fact_lines
+from daimon.core.model_switch import ModelSwitchPreview, switch_card_text
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_model_reasks import (
     reask_key,
@@ -27,7 +28,7 @@ from daimon.core.stores.thread_model_reasks import (
 )
 from daimon.core.stores.thread_models import get_thread_choice
 from daimon.core.thread_model_flow import ThreadConfirm, thread_actor
-from daimon.core.thread_model_switch import APPLIES_TO, ThreadPick, preview_thread_or_refusal
+from daimon.core.thread_model_switch import ThreadPick, pick_thread_or_card
 
 if TYPE_CHECKING:
     from daimon.core.config import Settings
@@ -42,7 +43,7 @@ NOTICE_TIMEOUT_S = 15.0
 
 @dataclass(frozen=True)
 class ThreadReask:
-    """The card to post: what the conversation's pick changes, with its one Confirm."""
+    """The card to post: what the conversation's pick changes, with its one Switch."""
 
     tenant_id: uuid.UUID
     workspace_id: str
@@ -124,8 +125,10 @@ async def _ask_again(
         platform_user_id=stale.user_id,
     )
     value = f"{choice.provider}:{choice.id}"
-    shown = await preview_thread_or_refusal(pick, value, admin=stale.admin)
-    if not isinstance(shown, SwitchRefusal) and shown.preview is not None:
+    shown = await pick_thread_or_card(
+        pick, value, thread_id=stale.conversation_id, admin=stale.admin
+    )
+    if isinstance(shown, ModelSwitchPreview) and shown.preview is not None:
         async with asyncio.timeout(NOTICE_TIMEOUT_S):
             await notifier(
                 ThreadReask(
@@ -136,7 +139,7 @@ async def _ask_again(
                     thread_id=stale.thread_id,
                     conversation_id=stale.conversation_id,
                     agent_name=stale.consent.agent_name,
-                    lines=switch_fact_lines(shown, agent_name=None, applies_to=APPLIES_TO),
+                    lines=switch_card_text(shown, agent_name=None),
                     confirm=(
                         ThreadConfirm(value, shown.digest, shown.revision)
                         if shown.allowed
@@ -144,7 +147,7 @@ async def _ask_again(
                     ),
                 )
             )
-    # A refusal is as settled as a post: nothing to ask until the agent changes again.
+    # A refusal or a kept pick is as settled as a post: nothing to ask until the agent changes.
     async with sessionmaker.begin() as session:
         await record_reask(
             session,

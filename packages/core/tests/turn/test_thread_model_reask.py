@@ -63,7 +63,9 @@ async def test_a_cross_provider_pick_shows_what_changes_then_keeps_it_on_one_con
     shown = await _picked(pick, sessions)
 
     assert shown.confirm is not None and shown.confirm.value == LUNA, "one Confirm is offered"
-    assert shown.lines[0].startswith("Model: "), "the facts lead with the model"
+    assert shown.lines[0] == "Switch this conversation to GPT-6 Luna?", (
+        "the card leads with its title"
+    )
     async with sessions() as db:
         assert (
             await get_thread_choice(
@@ -178,7 +180,7 @@ async def test_the_card_is_posted_once_after_an_agent_edit(stale):
     card = posted.cards[0]
     assert card.conversation_id == CONVERSATION and card.thread_id == CONVERSATION
     assert card.confirm is not None and card.confirm.value == LUNA
-    assert card.lines and card.lines[0].startswith("Model: ")
+    assert card.lines and card.lines[0] == "Switch this conversation to GPT-6 Luna?", card.lines
 
     spawn_thread_reask(sessionmaker=stale.sessions, notifier=posted, stale=stale.at(3))
     await drain_thread_reasks()
