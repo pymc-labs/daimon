@@ -169,6 +169,18 @@ def test_the_relay_turned_off_is_a_daimon_decided_drop() -> None:
     assert holds(consent_for(today), then, "gpt-6-luna"), "the relay's mount is no new gain"
 
 
+def test_a_server_hidden_from_the_confirmer_is_kept_or_named_for_its_owner() -> None:
+    """A confirms without B's personal server; B's turn relays it on B's own sign-in, or
+    with the relay off loses it as any connector does: named on the agent's own line."""
+    from daimon.core.turn.runtime_manifest import unavailable_line
+
+    confirmed = consent_for(copy_for())
+    assert holds(confirmed, copy_for(relays=("personal",)), "gpt-6-luna"), "relayed: kept"
+    lost = copy_for(drops=("mcp_server:personal", "memory"))
+    assert holds(confirmed, lost, "gpt-6-luna"), "the relay's call, as for every connector"
+    assert "mcp_server:personal" in unavailable_line(lost.declared_drops), "never silent"
+
+
 def test_no_module_compares_a_consent_digest_outside_the_helper() -> None:
     """Both operand orders of `== ...target_digest` live only in `consent_upgrade`."""
     root = Path(next(iter(daimon.core.__path__)))
