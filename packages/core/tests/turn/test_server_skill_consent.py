@@ -33,11 +33,12 @@ def _with_skill(source):
     )
 
 
-async def _consent(backend, owned, *, before_readdress=False):
+async def _consent(backend, owned, *, before_readdress=False, place_specs=False):
     """An agent on `backend` whose owner accepted its declared drops.
 
     `before_readdress` stores the consent as an earlier release did: pinned to the
     source with the consenter's own caller credential address, on a source that has one.
+    `place_specs` carries the owner's and the ungated spec, as a real capture does.
     """
     _, agent, actor, sessions = owned
     source = _with_skill(captured_source()).model_copy(
@@ -54,6 +55,9 @@ async def _consent(backend, owned, *, before_readdress=False):
                 )
             }
         )
+    if place_specs:
+        spec = source.effective_spec
+        source = source.model_copy(update={"owner_spec": spec, "ungated_spec": spec})
     captured = [source]
 
     async def capture(_actual):
@@ -104,6 +108,12 @@ async def consented(request, owned):
 async def consented_before_readdress(request, owned):
     """The same, with a consent stored before the caller credential was readdressed."""
     return await _consent(request.param, owned, before_readdress=True)
+
+
+@pytest.fixture(params=["openai", "gemini"])
+async def consented_with_place_specs(request, owned):
+    """The same, captured with the owner's and the ungated spec the pin hashes."""
+    return await _consent(request.param, owned, place_specs=True)
 
 
 def _repin(captured):
@@ -157,6 +167,22 @@ async def test_same_drops_renew_the_consent_and_audit_it(consented):
         f"source_pin={old_pin}->{new_pin}",
     ):
         assert part in renewal.reason, f"the audit names {part}"
+
+
+async def test_a_repin_renews_a_consent_pinned_to_the_owners_spec(consented_with_place_specs):
+    """The pin hashes `owner_spec`: the repin moves the skill there too, so it renews."""
+    keeper, service, agent, _, captured, revision = consented_with_place_specs
+    checked = await keeper.check(MIRROR, "agent", "2")
+    assert checked is not None, "the consent holds for the repin"
+    _repin(captured)
+    # The provider's own read: every spec carries the new version, whatever the helper does.
+    spec = captured[0].source.spec
+    captured[0] = captured[0].model_copy(
+        update={"effective_spec": spec, "owner_spec": spec, "ungated_spec": spec}
+    )
+    await keeper.renew(MIRROR, "agent", checked)
+    current = await service.current(agent)
+    assert current is not None and current.local == revision.local + 1, "renewed, no re-ask"
 
 
 async def test_a_consent_stored_before_the_readdress_still_renews(consented_before_readdress):

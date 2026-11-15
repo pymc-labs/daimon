@@ -16,6 +16,7 @@ from daimon.core.server_skills.sync import NeedsReconfirm
 from daimon.core.stores import agent_backends
 from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, ServerSkillRow
 from mux.contracts.ids import Revision, SkillRef
+from mux.contracts.resources import AgentSpec
 from mux.errors import UnsupportedCapability
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -44,11 +45,13 @@ def _swap(
 def with_skill_version(source: BackendAgent, skill_id: str, version: str) -> BackendAgent:
     """The captured source as it reads once the skill is pinned to `version`."""
     update: dict[str, object] = {}
-    if source.effective_spec is not None:
-        spec = source.effective_spec
-        update["effective_spec"] = spec.model_copy(
-            update={"skills": _swap(spec.skills, skill_id, version)}
-        )
+    # Every spec the pin or the drops may read: the pin hashes `owner_spec`.
+    for field in ("effective_spec", "ungated_spec", "owner_spec"):
+        spec: AgentSpec | None = getattr(source, field)
+        if spec is not None:
+            update[field] = spec.model_copy(
+                update={"skills": _swap(spec.skills, skill_id, version)}
+            )
     if source.source is not None:
         native = source.source
         update["source"] = native.model_copy(
