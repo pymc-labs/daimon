@@ -11,6 +11,7 @@ import pytest_asyncio
 from daimon.core import accounting_outbox
 from daimon.core.pricing import (
     ProviderPrice,
+    UsageTokens,
     WebSearchPrice,
     provider_cost_of,
     provider_price_on,
@@ -287,3 +288,24 @@ async def test_spend_reads_match_the_ledger(sessions):
     # The ledger rounds each debit to the micro-dollar; the read reprices exactly.
     assert spend == pytest.approx(float(-await balance(sessions)), abs=5e-7)
     assert -await balance(sessions) > 3 * real.web_search.usd
+
+
+async def test_spend_reads_when_tokens_are_unpriced_then_keep_paid_searches(sessions):
+    """A long prompt with no long-context tariff prices no tokens, but its searches still cost."""
+    tokens = UsageTokens(300_000, 10, 0, 0)
+    async with sessions() as session, session.begin():
+        assert await usage_events.record(
+            session,
+            tenant_id=TENANT,
+            platform_user_id="user",
+            managed_session_id="session-long",
+            model="gpt-6-luna",
+            model_usage=tokens,
+            event_id="usage-long",
+            paid_web_searches=2,
+        ), "expected a new usage row"
+    async with sessions() as session:
+        spend = await usage_events.cost_for_tenant_since(
+            session, tenant_id=TENANT, since=datetime.now(UTC) - timedelta(days=1)
+        )
+    assert spend == pytest.approx(0.02), "paid searches must survive unpriced tokens"

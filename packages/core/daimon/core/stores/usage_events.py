@@ -326,10 +326,10 @@ def _tariff_day() -> ColumnElement[date | None]:
 def _bucket_cost(
     model: str, day: date | None, usage: UsageTokens, *, long_prompt: bool, paid_searches: int
 ) -> float:
-    """One bucket's cost before markup, as the ledger debited it; 0 when unpriced.
+    """One bucket's cost before markup, as the ledger debited it; unpriced tokens add 0.
 
     Paid searches are priced at the model's search rate (Claude's for list-priced
-    models), as their debit was.
+    models), as their debit was, whether or not the tokens are priced.
     """
     if day is None:
         tokens = cost_of_bucket(usage, MODEL_PRICING.get(model), long_prompt=long_prompt) or 0.0
@@ -341,7 +341,7 @@ def _bucket_cost(
         if price is not None and price.web_search is not None
         else 0
     )
-    return 0.0 if cost is None else float(cost + searches)
+    return float((cost or 0) + searches)
 
 
 async def _costs_by_keys(
