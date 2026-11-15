@@ -102,7 +102,7 @@ function Review({ open, onOpenChange, agent, draft }: { open: boolean; onOpenCha
               <ChangeList changes={g.items} showEffect={false} />
             </section>
           ))}
-          {preview && (preview.moves || preview.refusal) && <ModelPreviewPanel preview={preview} className="m-5 mt-3" />}
+          {preview && <ModelPreviewPanel preview={preview} className="m-5 mt-3" />}
         </div>
         <DialogFooter className="m-0 items-center px-5 py-3 sm:justify-between">
           <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Note" className="h-8 sm:max-w-64" />

@@ -14,7 +14,7 @@ import type { ThreadModels } from "./types"
 const DEFAULT = "default"
 type Pending = { value: string; label: string; preview: ModelPreview }
 
-/** The chat's model: pick one for this chat only; a pick that moves provider shows what changes and asks once. */
+/** The chat's model: pick one for this chat only; a pick that loses something shows the switch card once. */
 export function ThreadModel({ sid, model, onChanged }: { sid: string; model: string; onChanged: () => void }) {
   const qc = useQueryClient()
   const [open, setOpen] = useState(false)
@@ -46,8 +46,8 @@ export function ThreadModel({ sid, model, onChanged }: { sid: string; model: str
     if (value === DEFAULT) return keep(value)
     try {
       const preview = await api.get<ModelPreview>(`/api/chat/sessions/${sid}/model-preview?value=${encodeURIComponent(value)}`)
-      if (preview.moves || preview.refusal) setPending({ value, label, preview })
-      else await keep(value)
+      if (preview.card || preview.refusal) setPending({ value, label, preview })
+      else await keep(value, preview)
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Couldn't check that model.")
     }
@@ -79,7 +79,7 @@ export function ThreadModel({ sid, model, onChanged }: { sid: string; model: str
       </DropdownMenu>
       <Dialog open={!!pending} onOpenChange={(o) => { if (!o) setPending(null) }}>
         <DialogContent className="sm:max-w-md">
-          <DialogHeader><DialogTitle>Switch this chat to {pending?.label}?</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle>{pending?.preview.title || `Switch this conversation to ${pending?.label}?`}</DialogTitle></DialogHeader>
           {pending && <ModelPreviewPanel preview={pending.preview} />}
           <DialogFooter>
             <Button variant="outline" onClick={() => setPending(null)}>Cancel</Button>

@@ -16,8 +16,9 @@ const models = {
     { value: "openai:gpt-6-luna", label: "GPT-6 Luna", price: "$2 / $10", provider: "openai" },
   ],
 }
-const stays = { moves: false, allowed: true, skills: [], servers: [], capabilities: [], shared_limits: [], lost: [], drops: [], cost: "", threads: "", digest: "", revision: 0, refusal: null }
-const moves = { ...stays, moves: true, lost: ["memory"], drops: ["memory"], cost: "Costs about the same", threads: "This chat only.", digest: "d1", revision: 4 }
+const stays = { moves: false, card: false, allowed: true, skills: [], servers: [], capabilities: [], title: "", lines: [], drops: [], digest: "", revision: 0, refusal: null }
+const lossless = { ...stays, moves: true, title: "Switch this conversation to GPT-6 Luna?", digest: "d0", revision: 3 }
+const moves = { ...lossless, card: true, lines: ["Stops working: memory"], drops: ["memory"], digest: "d1", revision: 4 }
 
 const open = async (onChanged = vi.fn()) => {
   render(<QueryClientProvider client={new QueryClient()}><ThreadModel sid="s1" model="Sonnet 5.5" onChanged={onChanged} /></QueryClientProvider>)
@@ -45,11 +46,20 @@ describe("ThreadModel", () => {
     expect(changed).toHaveBeenCalled()
   })
 
-  it("shows what a cross-provider pick changes and keeps it only on Switch", async () => {
+  it("keeps a cross-provider pick that loses nothing at once, with its preview", async () => {
+    previews(lossless)
+    await open()
+    await userEvent.click(await screen.findByText("GPT-6 Luna"))
+    await vi.waitFor(() => expect(api.put, "no card, the preview's consent sent").toHaveBeenCalledWith("/api/chat/sessions/s1/model", { value: "openai:gpt-6-luna", preview_digest: "d0", preview_revision: 3 }))
+    expect(screen.queryByRole("button", { name: "Switch" }), "no card").not.toBeInTheDocument()
+  })
+
+  it("shows the switch card for a pick that loses something and keeps it only on Switch", async () => {
     previews(moves)
     await open()
     await userEvent.click(await screen.findByText("GPT-6 Luna"))
-    expect(await screen.findByText("Memory")).toBeInTheDocument()
+    expect(await screen.findByText("Switch this conversation to GPT-6 Luna?"), "the card's title").toBeInTheDocument()
+    expect(screen.getByText("Stops working: memory"), "what stops working").toBeInTheDocument()
     expect(api.put).not.toHaveBeenCalled()
     await userEvent.click(screen.getByRole("button", { name: "Switch" }))
     await vi.waitFor(() => expect(api.put).toHaveBeenCalledWith("/api/chat/sessions/s1/model", { value: "openai:gpt-6-luna", preview_digest: "d1", preview_revision: 4 }))

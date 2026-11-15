@@ -1,11 +1,9 @@
-"""A model pick, previewed for the agent editor: what the person confirms."""
+"""A model pick, previewed for the agent editor: the switch card when it asks first."""
 
 from __future__ import annotations
 
 from daimon.core.agent_changes import SwitchConsent
-from daimon.core.confirmation import loss_word
-from daimon.core.model_switch import ModelSwitchPreview, SwitchRefusal
-from daimon.core.turn.notices import conversations_follow_line
+from daimon.core.model_switch import ModelSwitchPreview, SwitchRefusal, switch_card_text
 from mux.contracts.config import DEFAULT_BACKEND
 from pydantic import BaseModel
 
@@ -18,66 +16,55 @@ class PreviewRefusal(BaseModel):
 
 
 class ModelPreview(BaseModel):
-    """What a pick changes. `moves` is false when it only edits the agent's own record."""
+    """What a pick changes. `moves` is false when it only edits the agent's own record;
+    `card` is true when the pick asks first, with the card's `title` and `lines`."""
 
     moves: bool
+    card: bool
     allowed: bool
     skills: list[str]
     servers: list[str]
     capabilities: list[str]
-    shared_limits: list[str]
-    #: What stops working, in the words the switch card uses: skills by name.
-    lost: list[str]
+    title: str
+    #: The lines under the title, as every switch card says them.
+    lines: list[str]
     #: Every drop the person accepts by confirming, as the apply must send them back.
     drops: list[str]
-    cost: str
-    threads: str
     digest: str
     revision: int
     refusal: PreviewRefusal | None = None
 
 
-def preview_doc(switch: ModelSwitchPreview, *, agent_name: str) -> ModelPreview:
-    """The preview as the editor shows it. Pure."""
+def preview_doc(
+    switch: ModelSwitchPreview, *, agent_name: str | None, card: bool | None = None
+) -> ModelPreview:
+    """The preview as the editor shows it; `card` defaults to the switch's own rule. Pure."""
     found = switch.preview
+    title, *lines = switch_card_text(switch, agent_name=agent_name)
     if found is None:
         return ModelPreview(
             moves=False,
+            card=False,
             allowed=True,
             skills=[],
             servers=[],
             capabilities=[],
-            shared_limits=[],
-            lost=[],
+            title=title,
+            lines=[],
             drops=[],
-            cost="",
-            threads="",
             digest="",
             revision=0,
         )
-    # A declared drop names what a real turn loses; without one, the coarse lists do.
-    lost = (
-        [
-            *(loss_word(d, found.skill_names) for d in found.declared_drops),
-            *found.unsupported_capabilities,
-        ]
-        if found.declared_drops
-        else [*found.unsupported_skills, *found.unsupported_mcps, *found.unsupported_capabilities]
-    )
-    stays = switch.model.provider == switch.before == DEFAULT_BACKEND
     return ModelPreview(
-        moves=not stays,
+        moves=not switch.model.provider == switch.before == DEFAULT_BACKEND,
+        card=switch.asks_first if card is None else card,
         allowed=found.allowed,
         skills=list(found.unsupported_skills),
         servers=list(found.unsupported_mcps),
         capabilities=list(found.unsupported_capabilities),
-        shared_limits=list(found.shared_thread_limits),
-        lost=list(dict.fromkeys(lost)),
+        title=title,
+        lines=lines,
         drops=list(found.declared_drops),
-        cost=found.cost_line,
-        threads=""
-        if stays
-        else conversations_follow_line(agent_name, switch.model.provider, before=switch.before),
         digest=found.digest,
         revision=found.setting_revision,
     )
@@ -87,15 +74,14 @@ def refused_doc(refusal: SwitchRefusal) -> ModelPreview:
     """A pick that can't go ahead: nothing to confirm, the way out to offer. Pure."""
     return ModelPreview(
         moves=True,
+        card=True,
         allowed=False,
         skills=[],
         servers=[],
         capabilities=[],
-        shared_limits=[],
-        lost=[],
+        title="",
+        lines=[],
         drops=[],
-        cost="",
-        threads="",
         digest="",
         revision=0,
         refusal=PreviewRefusal(line=refusal.line, action=refusal.action),

@@ -1,9 +1,9 @@
 """One chat's model: the choices, what a pick changes, and keeping it.
 
 The chat-view control of the same `daimon.core.thread_model_switch` Discord `/model`
-uses: a pick on the agent's own provider is kept at once, any other is previewed and
-confirmed once. The person must own the agent or be an admin to move it off its provider,
-unless its `thread_providers` feature is on.
+uses: a pick that loses nothing is kept at once, any other shows the switch card once. The
+person must own the agent or be an admin to move it off its provider, unless its
+`thread_providers` feature is on.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from daimon.core.thread_model_switch import (
     confirm_thread_or_refusal,
     pick_value,
     preview_thread_or_refusal,
+    thread_asks_first,
     thread_model_picker,
 )
 from daimon.core.thread_models import choose_thread_model
@@ -30,8 +31,6 @@ from fastapi import HTTPException
 from pydantic import BaseModel
 
 _STATUS = {"owner_or_admin_required": 403, "forbidden": 403}
-#: What the preview says its scope is: a chat's pick changes nothing else.
-THIS_CHAT = "This chat only."
 
 
 class ModelOption(BaseModel):
@@ -105,8 +104,7 @@ async def preview_thread(
     found = await preview_thread_or_refusal(pick, pick_value(value), admin=is_admin(caller.role))
     if isinstance(found, SwitchRefusal):
         return refused_doc(found)
-    doc = preview_doc(found, agent_name=thread.agent_name)
-    return doc.model_copy(update={"threads": THIS_CHAT if doc.moves else ""})
+    return preview_doc(found, agent_name=None, card=await thread_asks_first(pick, found))
 
 
 async def keep_thread_model(

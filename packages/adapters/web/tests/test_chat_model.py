@@ -119,6 +119,7 @@ async def test_a_chat_keeps_its_own_model_and_a_member_cannot_move_it_off_the_pr
         assert offered["current"] is None
         shown = (await client.get(f"{base}/model-preview?value={haiku}", headers=_OWN)).json()
         assert shown["moves"] is False and shown["refusal"] is None, shown
+        assert shown["card"] is False, "a pick that loses nothing shows no card"
         kept = await client.put(base + "/model", json={"value": haiku}, headers=_OWN)
         assert kept.status_code == 200, kept.text
         assert (await client.get(f"{base}/models", headers=_OWN)).json()["current"] == haiku

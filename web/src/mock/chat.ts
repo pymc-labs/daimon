@@ -397,11 +397,12 @@ export const chatHandlers: HttpHandler[] = [
   http.get("/api/chat/sessions/:id/model-preview", async ({ request }) => {
     await sleep(150)
     const value = new URL(request.url).searchParams.get("value") ?? ""
-    const base = { moves: false, allowed: true, skills: [], servers: [], capabilities: [], shared_limits: [], lost: [], drops: [], cost: "", threads: "", digest: "", revision: 0, refusal: null }
+    const title = `Switch this conversation to ${CHAT_MODELS.find((m) => m.value === value)?.label ?? value}?`
+    const base = { moves: false, card: false, allowed: true, skills: [], servers: [], capabilities: [], title, lines: [], drops: [], digest: "", revision: 0, refusal: null }
     if (value.startsWith("anthropic:")) return HttpResponse.json(base)
     return HttpResponse.json({
-      ...base, moves: true, drops: ["memory", "skill:sk_pricing"], lost: ["memory", "Pricing playbook skill"], skills: ["Pricing playbook"], cost: "Costs about the same per message",
-      threads: "This chat only.", digest: "d".repeat(64), revision: 4,
+      ...base, moves: true, card: true, drops: ["memory", "skill:sk_pricing"], skills: ["Pricing playbook"],
+      lines: ["Stops working: memory and Pricing playbook skill"], digest: "d".repeat(64), revision: 4,
     })
   }),
   http.put("/api/chat/sessions/:id/model", async ({ params, request }) => {

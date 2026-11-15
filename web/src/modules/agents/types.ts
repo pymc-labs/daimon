@@ -113,18 +113,17 @@ export type Change = {
   text?: boolean
 }
 
-/** What picking a model changes: `lost` in plain words, `drops` as the apply sends them back. */
+/** What picking a model changes: the switch card when `card`, `drops` as the apply sends them back. */
 export type ModelPreview = {
   moves: boolean
+  card: boolean
   allowed: boolean
   skills: string[]
   servers: string[]
   capabilities: string[]
-  shared_limits: string[]
-  lost: string[]
+  title: string
+  lines: string[]
   drops: string[]
-  cost: string
-  threads: string
   digest: string
   revision: number
   refusal: { line: string; action: string | null } | null

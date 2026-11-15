@@ -4,8 +4,8 @@ import type { ModelPreview } from "./types"
 import { NOTHING, unsupportedOf } from "./unsupported"
 
 const base: ModelPreview = {
-  moves: true, allowed: true, skills: ["pricing"], servers: ["mail"], capabilities: ["multiagent"], shared_limits: [], lost: [], drops: ["memory"],
-  cost: "", threads: "", digest: "d", revision: 1, refusal: null,
+  moves: true, card: true, allowed: true, skills: ["pricing"], servers: ["mail"], capabilities: ["multiagent"], title: "", lines: [], drops: ["memory"],
+  digest: "d", revision: 1, refusal: null,
 }
 
 describe("unsupportedOf", () => {
