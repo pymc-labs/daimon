@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Switching an agent to another provider works like a model pick.** A switch
+  that loses nothing applies at once, in Discord, Slack, Teams, the web app and
+  the MCP tools. A switch that loses something asks once with a short card.
+  It reads "Switch Ada to GPT-6?" and "Stops working:" with every loss, plus any
+  shared-thread limit. A model pick's card has Cancel and Switch buttons.
+  Price, reach and thread lines are off the card; the model pickers show the price.
+  After an agent edit, a conversation's pick that loses nothing is kept again at once.
 - **A Gemini agent sends only the files it made.** The skills installed for
   the agent, and the input files and repositories set up in its sandbox, are
   never sent to the thread as the agent's files, also in conversations that

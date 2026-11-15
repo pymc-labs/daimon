@@ -77,8 +77,9 @@ stop.
 Picking a model on another provider is the switch. `/model` on Discord, the
 Model shortcut on Slack, the `model` command on Teams, the web model editor and
 chat header, and the agent panels all list every model your install can run with
-its price. A pick shows what the move drops, the shared-thread limits, the cost
-and what happens to threads, then asks once. Confirming accepts those losses.
+its price. A pick that loses nothing applies at once. A pick that loses
+something, or meets a shared-thread limit, shows a card naming it, and
+**Switch** accepts those losses.
 Earlier messages carry over, and so do saved files where the new provider keeps
 a workspace. A refusal names its cause and changes nothing.
 
@@ -87,7 +88,7 @@ Picking a model for one conversation, in chat or with the MCP tool
 agent's owner or an admin may do it, unless the `thread_providers` feature is
 on. It is off by default and lets anyone who may change a conversation's model
 do it. After an admin edits the agent, the next message in that conversation
-asks once more.
+checks the pick again, and asks only if something stops working.
 
 An admin can **Switch back to Claude** from a refused reply, a switch card or
 a panel, when the install has an Anthropic key. MCP tools and the CLI take
