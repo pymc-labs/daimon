@@ -212,7 +212,9 @@ Discord, Slack or Teams. Sender and recipient must both be current members, and
 bots, inactive, external and anonymous users are rejected. It sends at most
 19,000 characters as plain text, with no attachments and no cross-tenant
 delivery. The default policy is tenant members. Set a tenant to `allowlist`
-(with `recipient_ids`) or `disabled` in `DAIMON_DIRECT_MESSAGE_POLICIES`
+(with `recipient_ids`), `role` (Discord only, with `role_ids`: the recipient
+must hold one of those roles now) or `disabled` in
+`DAIMON_DIRECT_MESSAGE_POLICIES`
 ([configuration.md](configuration.md#daimon_direct_message_policies)).
 
 ### Opt-in DM conversations

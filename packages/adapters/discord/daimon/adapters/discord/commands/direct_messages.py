@@ -53,7 +53,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
-from daimon.core.membership_subject import resolve_subject
+from daimon.core.membership_subject import dm_policy_allows, resolve_subject
 from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.setup_conversations import BoundAgentUnavailable
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -235,7 +235,17 @@ class DirectMessageCog(commands.Cog):
         recipient_policy = runtime.settings.direct_message_policies.get(
             tenant.id, DirectMessagePolicy()
         )
-        if not enabled or agent is None or not recipient_policy.allows(str(message.author.id)):
+        if (
+            not enabled
+            or agent is None
+            or not await dm_policy_allows(
+                recipient_policy,
+                runtime.sessionmaker,
+                runtime.turn_deps.membership_resolver,
+                tenant_id=tenant.id,
+                user_id=str(message.author.id),
+            )
+        ):
             self._suppress(message, "dm_policy")
             return None, False, False
         subject = await self._subject(tenant.id, message.author.id)

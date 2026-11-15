@@ -50,7 +50,7 @@ from daimon.core.continuity.poll_tools import (
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_server_url import ascii_mcp_url, same_ascii_mcp_url
 from daimon.core.mcp_tool_call import McpCallError
-from daimon.core.membership_subject import resolve_subject
+from daimon.core.membership_subject import dm_policy_allows, resolve_subject
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.stores import mux_state, watches
@@ -196,7 +196,13 @@ async def private_key_delivery(
 ) -> None:
     """Never return plaintext keys to an MCP result or post into a conversation."""
     policy = runtime.settings.direct_message_policies.get(watch.tenant_id, DirectMessagePolicy())
-    if not policy.allows(watch.owner_external_id):
+    if not await dm_policy_allows(
+        policy,
+        runtime.session_factory,
+        runtime.membership_resolver,
+        tenant_id=watch.tenant_id,
+        user_id=watch.owner_external_id,
+    ):
         raise ToolError("Private owner delivery is disabled")
     await require_dm_recipient_allowed(runtime, auth, recipient_id=watch.owner_external_id)
     async with rest_client(_require_bot_token(runtime)) as client:
@@ -318,7 +324,13 @@ async def require_delivery_allowed(
         policy = runtime.settings.direct_message_policies.get(auth.tenant_id, DirectMessagePolicy())
         async with runtime.session_factory() as db:
             enabled = await dm_enabled(db, tenant_id=auth.tenant_id)
-        if not enabled or not policy.allows(auth.platform_user_id):
+        if not enabled or not await dm_policy_allows(
+            policy,
+            runtime.session_factory,
+            runtime.membership_resolver,
+            tenant_id=auth.tenant_id,
+            user_id=auth.platform_user_id,
+        ):
             raise ToolError("Daimon cannot DM you here. Ask an admin or an owner.")
         await require_dm_recipient_allowed(runtime, auth, recipient_id=auth.platform_user_id)
         return

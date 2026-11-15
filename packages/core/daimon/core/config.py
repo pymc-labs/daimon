@@ -13,6 +13,7 @@ import json
 import os
 import ssl
 import uuid
+from collections.abc import Collection
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -2259,10 +2260,26 @@ class DirectMessagePolicy(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    mode: Literal["members", "allowlist", "disabled"] = "members"
+    mode: Literal["members", "allowlist", "role", "disabled"] = "members"
     recipient_ids: list[str] = Field(default_factory=list[str])
+    # Discord role ids; in `role` mode a recipient needs one of them.
+    role_ids: list[str] = Field(default_factory=list[str])
 
-    def allows(self, recipient_id: str) -> bool:
+    @model_validator(mode="after")
+    def _roles(self) -> DirectMessagePolicy:
+        if any(not (rid.isascii() and rid.isdecimal()) for rid in self.role_ids):
+            raise ValueError("role_ids must be Discord role ids (digits only)")
+        if self.mode == "role" and not self.role_ids:
+            raise ValueError("role mode needs at least one role id")
+        if self.mode != "role" and self.role_ids:
+            raise ValueError("role_ids apply only in role mode")
+        return self
+
+    def allows(self, recipient_id: str, role_ids: Collection[str] | None = None) -> bool:
+        """Whether `recipient_id` may be sent a DM. Role mode needs the recipient's
+        current roles; without them (None) it refuses, so an unprepared caller fails closed."""
+        if self.mode == "role":
+            return role_ids is not None and not set(role_ids).isdisjoint(self.role_ids)
         return self.mode == "members" or (
             self.mode == "allowlist" and recipient_id in self.recipient_ids
         )
@@ -2905,7 +2922,9 @@ class Settings(BaseSettings):
             "invalid keys rejected). Default is "
             "members (live membership required). Set mode=disabled to disable DMs, "
             "or mode=allowlist with recipient_ids to restrict delivery to listed "
-            "members. Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object."
+            "members. On Discord, mode=role with role_ids limits delivery to members "
+            "holding one of those roles. Configure DAIMON_DIRECT_MESSAGE_POLICIES as a "
+            "JSON object."
         ),
     )
     table_rendering: dict[uuid.UUID, bool] = Field(

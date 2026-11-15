@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Direct messages can be limited to a Discord role.** A tenant's
+  `DAIMON_DIRECT_MESSAGE_POLICIES` entry accepts `{"mode": "role", "role_ids":
+  [...]}`: Daimon DMs only members who hold one of those roles, checked at each
+  send (agent DMs, routine and watch reports, budget notices). Without a
+  readable role list it sends nothing. Slack and Teams refuse this mode.
 - **Routines can run role-gated agents for an owner who holds the role.**
   Before, a routine on an agent limited to certain Discord roles was always
   refused. Now it runs as its owner, whose membership is read live at each

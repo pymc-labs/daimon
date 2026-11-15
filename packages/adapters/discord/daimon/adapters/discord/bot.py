@@ -3985,6 +3985,7 @@ class DaimonBot(commands.Bot):
                 dm_policy=lambda tenant_id: self.runtime.settings.direct_message_policies.get(
                     tenant_id, DirectMessagePolicy()
                 ),
+                membership_resolver=self.membership_resolver,
             )
             return
         if watch.delivery != "new_thread":

@@ -3834,6 +3834,60 @@ async def test_dm_fire_refuses_disabled_or_unverified_private_access(
     await client.close()
 
 
+@pytest.mark.parametrize("roles", [("7",), ("9",), ()])
+async def test_dm_role_policy_sends_a_routine_dm_only_to_an_owner_holding_the_role(
+    db_session, db_session_factory, monkeypatch, roles
+):
+    from daimon.core.config import DirectMessagePolicy
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.stores.direct_messages import set_dm_enabled
+
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="424242")
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="123",
+        agent_id="ag",
+        agent_name="daimon",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="summary",
+        destination_kind="dm",
+        channel_id="456",
+        source_thread_id="789",
+    )
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
+    await db_session.commit()
+    settings = _make_test_settings(monkeypatch).model_copy(
+        update={
+            "direct_message_policies": {tenant.id: DirectMessagePolicy(mode="role", role_ids=["7"])}
+        }
+    )
+
+    async def member(*args):
+        return Membership(is_member=True, role_ids=roles, is_admin=True)
+
+    client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    fire = await _build_fire(
+        client=client,
+        sm=db_session_factory,
+        settings=settings,
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+        membership_resolver=CachedMembershipResolver(member),
+    )
+    with unittest.mock.patch("daimon.adapters.scheduler.main.run_turn") as turn:
+        await fire(row)
+        if "7" not in roles:
+            turn.assert_not_called()
+    async with db_session_factory() as session:
+        after = await get_routine(session, row.id, tenant_id=tenant.id)
+    assert after is not None
+    refused = after.last_error == "routine DMs are disabled or the owner is not allowed"
+    assert refused is ("7" not in roles)
+    await client.close()
+
+
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 @pytest.mark.parametrize("kind", ["channel", "thread"])
 async def test_legacy_public_routines_still_fire_with_unknown_creation_source(

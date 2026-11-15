@@ -14,6 +14,7 @@ from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.channel_budget_notice import BudgetNotice, BudgetNotifier
 from daimon.core.config import DirectMessagePolicy
+from daimon.core.membership_subject import dm_policy_allows
 from daimon.core.stores.watches import (
     REFUSED,
     UNCLEAR,
@@ -44,8 +45,11 @@ def discord_budget_notifier(
         policies = runtime.settings.direct_message_policies
         text = notice.text(f"<#{notice.channel_id}>")
         delivered = 0
-        for user_id in notice.allowed_recipients(
-            policies.get(notice.tenant_id, DirectMessagePolicy())
+        # `send_member_notice` applies the policy to each recipient (role mode reads roles).
+        for user_id in (
+            notice.recipient_ids
+            if policies.get(notice.tenant_id, DirectMessagePolicy()).mode != "disabled"
+            else ()
         ):
             if is_closed():
                 log.info("channel_budget.notice_undelivered", err_type="ClientClosed")
@@ -109,7 +113,13 @@ async def send_member_notice(
 ) -> bool:
     """Existing private member-notice transport, also used for watch migration DMs."""
     policy = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
-    if is_closed() or not policy.allows(recipient_id):
+    if is_closed() or not await dm_policy_allows(
+        policy,
+        runtime.sessionmaker,
+        runtime.turn_deps.membership_resolver,
+        tenant_id=tenant_id,
+        user_id=recipient_id,
+    ):
         return False
     try:
         dm = await open_dm(int(workspace_id), int(recipient_id))
@@ -150,7 +160,13 @@ async def send_watch_notice(
     closed or the bot blocked) is `REFUSED`.
     """
     policy = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
-    if is_closed() or not policy.allows(recipient_id):
+    if is_closed() or not await dm_policy_allows(
+        policy,
+        runtime.sessionmaker,
+        runtime.turn_deps.membership_resolver,
+        tenant_id=tenant_id,
+        user_id=recipient_id,
+    ):
         return None
     try:
         dm = await open_dm(int(workspace_id), int(recipient_id))

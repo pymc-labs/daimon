@@ -2285,7 +2285,8 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
             policy, subject=grant.subject, action=Action.ACT_FOR_CREATOR, surface=Surface.ROUTINE
         )
         or not deps.direct_message_policies.get(grant.tenant_id, DirectMessagePolicy()).allows(
-            grant.subject.platform_user_id or ""
+            grant.subject.platform_user_id or "",
+            grant.subject.role_ids if grant.subject.verified_membership is True else None,
         )
     ):
         raise AdmissionDenied(reason="invoker_not_allowed")

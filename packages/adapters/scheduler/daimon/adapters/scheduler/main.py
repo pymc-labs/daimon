@@ -92,7 +92,7 @@ from daimon.core.ma_resolver import (
 )
 from daimon.core.mcp_vault_janitor import archive_idle_relay_vaults
 from daimon.core.membership import MembershipResolver
-from daimon.core.membership_subject import resolve_subject
+from daimon.core.membership_subject import dm_policy_allows, resolve_subject
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_session, retrieve_agent
 from daimon.core.observability import init_sentry
@@ -550,9 +550,13 @@ async def _build_fire(
             if row.destination_kind == "dm" and (
                 platform != "discord"
                 or not await dm_enabled(s, tenant_id=row.tenant_id)
-                or not settings.direct_message_policies.get(
-                    row.tenant_id, DirectMessagePolicy()
-                ).allows(row.created_by_user_id)
+                or not await dm_policy_allows(
+                    settings.direct_message_policies.get(row.tenant_id, DirectMessagePolicy()),
+                    sm,
+                    membership_resolver,
+                    tenant_id=row.tenant_id,
+                    user_id=row.created_by_user_id,
+                )
             ):
                 await _refuse(s, row, "routine DMs are disabled or the owner is not allowed")
                 return

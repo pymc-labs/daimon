@@ -321,3 +321,120 @@ async def test_noncanonical_policy_denies_before_client_creation(
         )
     discord_client.assert_not_called()
     slack_client.assert_not_called()
+
+
+def test_role_policy_validation_and_matching():
+    with pytest.raises(ValueError, match="at least one role"):
+        DirectMessagePolicy(mode="role")
+    with pytest.raises(ValueError, match="digits"):
+        DirectMessagePolicy(mode="role", role_ids=["staff"])
+    with pytest.raises(ValueError, match="only in role mode"):
+        DirectMessagePolicy(mode="members", role_ids=["7"])
+    policy = DirectMessagePolicy(mode="role", role_ids=["7", "8"])
+    assert policy.allows("1", ["8", "9"])
+    assert not policy.allows("1", ["9"])
+    assert not policy.allows("1", []), "no roles never match"
+    assert not policy.allows("1"), "an unprepared caller is refused"
+    assert not policy.allows("1", None)
+
+
+@pytest.mark.parametrize("platform", ["slack", "teams"])
+async def test_role_policy_refuses_outside_discord(platform):
+    runtime, auth = runtime_and_auth(
+        platform=platform, policy=DirectMessagePolicy(mode="role", role_ids=["7"])
+    )
+    with pytest.raises(ToolError, match="Discord only"):
+        await direct_messages.send_direct_message_impl(
+            runtime,
+            auth,
+            recipient_id="U456" if platform == "slack" else str(uuid.uuid4()),
+            content="hello",
+        )
+
+
+@pytest.mark.parametrize("outcome", ["holds", "lacks", "fetch_failed"])
+def _role(role_id):
+    return {
+        "id": role_id,
+        "name": f"r{role_id}",
+        "permissions": "0",
+        "position": 1,
+        "color": 0,
+        "hoist": False,
+        "managed": False,
+        "mentionable": False,
+    }
+
+
+@pytest.mark.parametrize("outcome", ["holds", "lacks", "fetch_failed"])
+async def test_role_policy_reads_the_recipients_live_roles(monkeypatch, outcome):
+    runtime, auth = runtime_and_auth(policy=DirectMessagePolicy(mode="role", role_ids=["7"]))
+    opened = []
+
+    async def login(self, token):
+        return {"id": "1", "username": "bot", "discriminator": "0", "avatar": None, "bot": True}
+
+    async def request(self, route, **kwargs):
+        if route.path == "/guilds/{guild_id}":
+            return {
+                "id": "111",
+                "name": "Tenant",
+                "roles": [_role("7"), _role("9")],
+                "emojis": [],
+                "features": [],
+                "owner_id": "42",
+            }
+        if route.path == "/guilds/{guild_id}/members/{member_id}":
+            who = route.url.rsplit("/", 1)[1]
+            if who == "123" and outcome == "fetch_failed":
+                from types import SimpleNamespace
+
+                raise discord.NotFound(
+                    SimpleNamespace(status=404, reason="Not Found"),
+                    {"code": 10007, "message": "Unknown Member"},
+                )
+            return {
+                "user": {"id": who, "username": "m", "discriminator": "0", "avatar": None},
+                "roles": ["7"] if who == "123" and outcome == "holds" else ["9"],
+                "joined_at": "2026-01-01T00:00:00+00:00",
+                "flags": 0,
+            }
+        if route.path == "/users/@me/channels":
+            opened.append(route.path)
+            return {
+                "id": "555",
+                "type": 1,
+                "recipients": [
+                    {"id": "123", "username": "m", "discriminator": "0", "avatar": None}
+                ],
+            }
+        if route.path == "/channels/{channel_id}/messages":
+            return {
+                "id": "1000",
+                "channel_id": "555",
+                "author": {"id": "1", "username": "bot", "discriminator": "0", "avatar": None},
+                "content": kwargs["json"]["content"],
+                "timestamp": "2026-01-01T00:00:00+00:00",
+                "type": 0,
+                "attachments": [],
+                "embeds": [],
+                "mentions": [],
+                "mention_roles": [],
+                "pinned": False,
+                "tts": False,
+            }
+        raise AssertionError(route.path)
+
+    monkeypatch.setattr(discord.http.HTTPClient, "static_login", login)
+    monkeypatch.setattr(discord.http.HTTPClient, "request", request)
+    if outcome == "holds":
+        result = await direct_messages.send_direct_message_impl(
+            runtime, auth, recipient_id="123", content="hello"
+        )
+        assert result.message_ids == ["1000"]
+        return
+    with pytest.raises(ToolError):
+        await direct_messages.send_direct_message_impl(
+            runtime, auth, recipient_id="123", content="hello"
+        )
+    assert opened == [], "no DM is opened for a recipient without a held role"
