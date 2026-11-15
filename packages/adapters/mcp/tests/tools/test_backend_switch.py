@@ -1408,6 +1408,70 @@ async def test_a_non_default_agent_switches_without_saying_for_everyone(active_c
     assert preview.status == "preview"
 
 
+@pytest.mark.parametrize("on", ["anthropic", "openai"])
+async def test_a_no_drop_switch_of_the_agent_everyone_uses_when_for_everyone_then_applies(
+    active_chat, on
+):
+    """A provider switch of the default agent goes like a Claude model change of it.
+
+    Both need "for everyone" and then apply on the first call when nothing stops working.
+    """
+    from daimon.core.scope import DeploymentDefault
+
+    runtime, auth, origin, service, trace, payload, _, gate, agent, _ = active_chat
+    _without_own_tools(payload)
+    payload["model"] = {"id": "claude-haiku-5-5", "speed": "standard"}
+    runtime = replace(
+        runtime,
+        deployment_default=DeploymentDefault(agent_name="Researcher", environment_name="default"),
+    )
+    if on == "openai":
+        to_gpt = {
+            "agent_name": "Researcher",
+            "target_backend": "openai",
+            "origin_context_id": str(origin.id),
+            "for_everyone": True,
+        }
+        gate()
+        agent()
+        quote = await _request_agent_backend_switch_impl(runtime, auth, **to_gpt)
+        gate()
+        agent()
+        agent()
+        await _request_agent_backend_switch_impl(
+            runtime,
+            auth,
+            **to_gpt,
+            expected_revision=quote.expected_revision,
+            preview_digest=quote.preview_digest,
+            accepted_drops=quote.declared_drops,
+        )
+        agent()
+        moved = await service.current(await load_backend_agent_for(runtime, auth))
+        assert moved is not None and moved.backend == "openai", "the agent starts on GPT"
+    # From Claude this is a model change (Haiku to the default); from GPT a provider switch.
+    to_claude = {
+        "agent_name": "Researcher",
+        "target_backend": "anthropic",
+        "origin_context_id": str(origin.id),
+    }
+    gate()
+    agent()
+    with pytest.raises(ToolError, match="changes it for everyone on this server"):
+        await _request_agent_backend_switch_impl(runtime, auth, **to_claude)
+    gate()
+    agent()
+    agent()
+    changed = await _request_agent_backend_switch_impl(
+        runtime, auth, **to_claude, for_everyone=True
+    )
+    assert changed.status == "changed", "nothing stops working, so no card either way"
+    agent()
+    now = await service.current(await load_backend_agent_for(runtime, auth))
+    assert now is not None and now.backend in (None, "anthropic"), "the agent is on Claude"
+    assert not trace.replies and not trace.violations, "every scripted reply was used"
+
+
 async def test_a_provider_turn_previews_then_daimon_posts_the_card_and_nothing_changes(
     active_chat, monkeypatch
 ):
