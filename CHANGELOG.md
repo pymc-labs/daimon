@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   messages each direct message reply carries: 12 (the default), 25, 50 or 100, at the
   deployment, workspace and agent levels. The smallest setting wins. The history is
   sent again with every reply, so a higher setting costs more.
+- **`/model` works in direct messages, with an effort choice.** `/model` in a direct
+  message sets the model for that conversation, and a new `effort` option (low, medium,
+  high, xhigh, max) sets how hard Claude thinks. Effort alone keeps the agent's model, and
+  a later model pick keeps the effort. `default` clears both. The `thread_model` MCP tool
+  takes the same `effort`. Effort has no effect on other providers.
+- **Fable is a model choice.** `/model` and the model pickers offer Fable, with the
+  same switch card as the other models.
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and
   the MCP tools. A run nobody started, such as a routine, never applies one at once.

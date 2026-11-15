@@ -633,7 +633,7 @@ harder").
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `set_thread_model` | all callers | Run this conversation on another model when the person asks in words: "use opus here", "use GPT-5 here". |
+| `set_thread_model` | all callers | Run this conversation on another model or effort when the person asks in words: "use opus here", "think harder". |
 
 ## `thread_overrides`
 
