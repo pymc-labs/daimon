@@ -1,5 +1,7 @@
 """Pinned host catalogues compiled into documented inline environment sources."""
 
+import hashlib
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 from pydantic import JsonValue
@@ -16,6 +18,7 @@ SKILL_SOURCE = "gemini.inline"
 MAX_BUNDLE_BYTES = 2 * 1024 * 1024
 MAX_INLINE_FILE_BYTES = 1024 * 1024
 MAX_DEPLOYED_BUNDLE_BYTES = 64 * 1024 * 1024
+SKILLS_ROOT = ".agents/skills"
 
 
 def relative_path(path: str) -> str:
@@ -99,14 +102,14 @@ def skill_sources(
         if deployment is not None:
             validate_deployment(deployment, scope, account, pin.version, bundle)
             sources.append(
-                {"type": "gcs", "source": deployment.source, "target": f".agents/skills/{pin.id}"}
+                {"type": "gcs", "source": deployment.source, "target": f"{SKILLS_ROOT}/{pin.id}"}
             )
             continue
         for file in bundle.files:
             sources.append(
                 {
                     "type": "inline",
-                    "target": f".agents/skills/{pin.id}/{file.path}",
+                    "target": f"{SKILLS_ROOT}/{pin.id}/{file.path}",
                     "content": text_bytes(file.content),
                 }
             )
@@ -169,3 +172,47 @@ def validate_targets(sources: list[JsonValue]) -> None:
         ):
             raise ValueError("workspace source targets overlap")
         targets.append(target)
+
+
+@dataclass(frozen=True)
+class MountedFiles:
+    """What Daimon placed in a session's workspace; none of it is the agent's output.
+
+    Everything under a mounted directory (an installed skill, a repository clone)
+    stays out even when edited. An inline file stays out while its bytes are the
+    mounted ones; once the agent changes it, it is the agent's work.
+    """
+
+    directories: tuple[str, ...]
+    files: dict[str, str]
+
+    def covers(self, path: str, sha256: str) -> bool:
+        return self.files.get(path) == sha256 or any(
+            path == directory or path.startswith(directory + "/") for directory in self.directories
+        )
+
+
+def mounted_files(environment: JsonValue) -> MountedFiles:
+    """Read the mounts from a session's saved request, so older sessions are covered too."""
+    directories: list[str] = []
+    files: dict[str, str] = {}
+    sources = environment.get("sources") if isinstance(environment, dict) else None
+    for source in sources if isinstance(sources, list) else ():
+        target = source.get("target") if isinstance(source, dict) else None
+        if not isinstance(source, dict) or not isinstance(target, str):
+            continue
+        path = target_path(target)
+        if path.startswith("/"):
+            # The snapshot holds /workspace only; other absolute targets never appear in it.
+            if not path.startswith("/workspace/"):
+                continue
+            path = path.removeprefix("/workspace/")
+        parts = PurePosixPath(path).parts
+        content = source.get("content")
+        if path.startswith(SKILLS_ROOT + "/") and len(parts) > 2:
+            directories.append("/".join(parts[:3]))
+        elif source.get("type") == "inline" and isinstance(content, str):
+            files[path] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        else:
+            directories.append(path)
+    return MountedFiles(tuple(directories), files)
