@@ -19,7 +19,7 @@ in one conversation.
 | Multi-agent delegation | Yes | Copies of itself | Copies of itself | Copies of itself |
 | Memory across replies | Yes | Through Daimon, needs an Anthropic key | Through Daimon, needs an Anthropic key | Not supported |
 | Web fetch | Yes | Through Daimon | Through Daimon | Through Daimon |
-| Web search | Yes | Not supported | Not supported | Not supported |
+| Web search | Yes | Yes | Yes, through Google Search | Not supported |
 | Output files | Yes | Yes | Yes | Yes, from harness 0.2.0 |
 | Reasoning effort | Yes | Low, medium, high | Agents take none | Not supported |
 | Spend limit for one reply | Yes | Daimon stops the reply | Holds only, no stop mid-turn | Not supported |
@@ -34,15 +34,15 @@ provider, a routine and an unattended turn refuse instead.
 
 ### What is not supported yet
 
-- **Gemini:** web search, and stopping a turn at a spend limit.
-- **OpenAI:** web search, which it neither prices nor counts.
+- **Gemini:** stopping a turn at a spend limit.
 - **Self-hosted:** memory, routines, effort and a
   spend limit, workspace export and import. An agent can pick it only with
   its own runtime file row (`daimon selfhosted init --agent`).
 - **OpenAI and Gemini:** an agent with an `ask` rule or a
   channel-scoped `deny` on a Daimon tool is refused, and so is workspace export
   and import. A connector that OpenAI's size limit cannot hold, or whose tool
-  names clash with Gemini's own, is named on the switch card as a loss.
+  names clash with Gemini's own, is named on the switch card as a loss, and so
+  is a web search that must ask first.
 - **Without an Anthropic key:** memory.
 
 ## Route channels to a backend

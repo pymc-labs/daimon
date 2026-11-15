@@ -197,6 +197,11 @@ _BUILTIN_WORDS: Final[Mapping[str, tuple[str, str]]] = {
 """Each built-in tool's name and what it lets the agent do."""
 
 
+_SEARCH_BILLING: Final = (
+    " Each search is billed at the provider's list price, past any free allowance."
+)
+
+
 def _builtin(tool: str) -> FeatureSpec:
     name, does = _BUILTIN_WORDS[tool]
     return FeatureSpec(
@@ -211,6 +216,7 @@ def _builtin(tool: str) -> FeatureSpec:
         doc=(
             f"The agent can {does}. Off removes it here; On never gives more than the "
             "agent's own tool settings allow. Applies from the next message in a conversation."
+            + (_SEARCH_BILLING if tool == "web_search" else "")
         ),
         backend_tiers=_PROVIDER_ONLY,
         platforms=EVERY_PLATFORM,
