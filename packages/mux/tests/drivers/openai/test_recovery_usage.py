@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Mapping
 
 import pytest
 from mux.contracts.events import RequiresActionPayload
@@ -11,7 +11,7 @@ from mux.drivers.openai import OpenAIDriver
 from mux.drivers.openai._common import objects
 from mux.drivers.openai.transport import Method, Object, object_json
 from mux.drivers.openai.turn import MemoryRecoveryJournal
-from mux.drivers.openai.usage import _SEARCHES, MemoryUsageRevisions
+from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError
 
 from .conftest import (
@@ -532,13 +532,6 @@ async def test_buffered_terminal_conflict_cannot_replace_durable_outcome() -> No
     assert await journal.read(REF) == before
 
 
-@pytest.fixture
-def fresh_search_cache() -> Iterator[None]:
-    _SEARCHES.clear()
-    yield
-    _SEARCHES.clear()
-
-
 def _search(id_: str, *, status: str = "completed", action: str | None = "search") -> Object:
     item: Object = {"id": id_, "type": "web_search_call", "status": status}
     if action is not None:
@@ -547,7 +540,6 @@ def _search(id_: str, *, status: str = "completed", action: str | None = "search
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("fresh_search_cache")
 async def test_usage_counts_ended_turn_searches_once_and_revises(
     driver: OpenAIDriver, transport: FakeTransport
 ) -> None:
@@ -575,3 +567,22 @@ async def test_usage_counts_ended_turn_searches_once_and_revises(
     assert ended.web_searches == 3 and ended.revision == 2
     replay = (await driver.usage.reconcile(SCOPE, REF))[0]
     assert replay == ended.model_copy(update={"observed_at": replay.observed_at})
+
+
+@pytest.mark.asyncio
+async def test_reconcile_turn_when_other_turns_ended_then_reads_only_that_turn(
+    driver: OpenAIDriver, transport: FakeTransport
+) -> None:
+    """A replay bills one root turn, so no other turn or its items is read."""
+    transport.responses["GET", "/agents/sessions/s/turns"] = page(turn(id_="old"), turn())
+    transport.responses["GET", "/agents/sessions/s/turns/root"] = turn()
+    transport.responses["GET", "/agents/sessions/s/turns/root/items"] = page(_search("a"))
+    (root,) = await driver.usage.reconcile_turn(SCOPE, REF, "root")
+    assert root.turn_id == "root" and root.web_searches == 1, root
+    paths = [path for _, path, *_ in transport.calls]
+    assert paths == ["/agents/sessions/s/turns/root", "/agents/sessions/s/turns/root/items"], paths
+    transport.responses["GET", "/agents/sessions/s/turns/child"] = turn(id_="child", child="sub")
+    assert await driver.usage.reconcile_turn(SCOPE, REF, "child") == (), "children bill apart"
+    transport.responses["GET", "/agents/sessions/s/turns/other"] = turn()
+    with pytest.raises(ProviderError, match="malformed_response"):
+        await driver.usage.reconcile_turn(SCOPE, REF, "other")
