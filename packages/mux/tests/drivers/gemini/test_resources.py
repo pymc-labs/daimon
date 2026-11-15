@@ -21,6 +21,7 @@ from mux.contracts.resources import (
 )
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.resources import parse_snapshot
+from mux.drivers.gemini.skill_deployment import GCSBundleDeployment, file_manifest
 from mux.errors import (
     ContinuityLost,
     OperationConflict,
@@ -612,13 +613,15 @@ async def test_first_turn_lists_the_agents_files_but_never_its_mounted_skills(
             f".agents/skills/{own.id}/scripts/run.py": b"print(1)\n",
             f".agents/skills/{extra.id}/SKILL.md": b"# Edited by the agent",
             f".agents/skills/{extra.id}/scripts/run.py": b"print(1)\n",
+            f".agents/skills/{own.id}/dashboard.html": b"<html>",
             "report.md": b"# Report",
         }
     )
     listed = await ma.artifacts.list(SCOPE, s.ref, page=PageRequest())
-    assert [a.filename for a in listed.data] == ["report.md"], (
-        "installed skill files, even edited ones, are not outputs; the agent's file is"
-    )
+    assert [a.filename for a in listed.data] == [
+        f".agents/skills/{own.id}/dashboard.html",
+        "report.md",
+    ], "installed skill files, even edited ones, are not outputs; files the agent made are"
 
 
 @pytest.mark.asyncio
@@ -661,10 +664,14 @@ async def test_session_saved_before_the_rule_stops_listing_its_installed_files(
 ) -> None:
     """The rule reads only the request every session saved at creation, nothing new.
 
-    A session made earlier, here with a GCS skill directory and a repository clone,
-    is covered after a restart with no migration.
+    A session made earlier, here with GCS skill directories and a repository clone,
+    is covered after a restart with no migration. A GCS skill hides its own files;
+    one whose bundle is unknown hides its whole directory.
     """
     ma, transport, storage, state = resources
+    own = await ma.skills.create(SCOPE, bundle(), key="own")
+    assert own.latest_version is not None and own.latest_version.version is not None, "pinned"
+    version = own.latest_version.version
     s = await session(
         ma,
         AgentSpec(name="a", model=ModelRef(provider="gemini", id="gemini-3.8-flash")),
@@ -672,9 +679,13 @@ async def test_session_saved_before_the_rule_stops_listing_its_installed_files(
     )
     await send(ma, transport, s)
     async with storage.transaction() as records:
+        records.skills[own.id].deployments[version] = GCSBundleDeployment(
+            "t", "a", "project", version, "gs://bucket/own/", file_manifest(bundle())
+        )
         records.sessions[s.ref.id].request["environment"] = {
             "type": "remote",
             "sources": [
+                {"type": "gcs", "source": "gs://bucket/own/", "target": f".agents/skills/{own.id}"},
                 {"type": "gcs", "source": "gs://bucket/v1/", "target": ".agents/skills/s1"},
                 {"type": "repository", "source": "https://example.com/r", "target": "repo"},
             ],
@@ -684,6 +695,9 @@ async def test_session_saved_before_the_rule_stops_listing_its_installed_files(
     )
     transport.snapshots["e1"] = snapshot(
         {
+            f".agents/skills/{own.id}/SKILL.md": b"# Edited",
+            f".agents/skills/{own.id}/scripts/run.py": b"print(1)\n",
+            f".agents/skills/{own.id}/dashboard.html": b"<html>",
             ".agents/skills/s1/SKILL.md": b"# Skill",
             ".agents/skills/s1/dashboard/app.js": b"js",
             "repo/README.md": b"readme",
@@ -691,6 +705,7 @@ async def test_session_saved_before_the_rule_stops_listing_its_installed_files(
         }
     )
     listed = await ma.artifacts.list(SCOPE, s.ref, page=PageRequest())
-    assert [a.filename for a in listed.data] == ["chart.png"], (
-        f"an existing session must not deliver its installed files: {listed.data}"
-    )
+    assert [a.filename for a in listed.data] == [
+        f".agents/skills/{own.id}/dashboard.html",
+        "chart.png",
+    ], f"an existing session must not deliver its installed files: {listed.data}"

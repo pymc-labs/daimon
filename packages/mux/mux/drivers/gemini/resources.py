@@ -333,7 +333,7 @@ class GeminiArtifacts(Base):
                     )
                 # The first snapshot holds every file Daimon mounted (skills, inputs);
                 # those were never the agent's work, so they are never outputs.
-                mounted = mounted_files(current.request.get("environment"))
+                mounted = mounted_files(current.request.get("environment"), records.skills)
                 for path, data in sorted(files.items(), reverse=order == "desc"):
                     sha = hashlib.sha256(data).hexdigest()
                     if mounted.covers(path, sha):

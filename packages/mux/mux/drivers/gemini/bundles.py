@@ -1,6 +1,7 @@
 """Pinned host catalogues compiled into documented inline environment sources."""
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
@@ -178,24 +179,28 @@ def validate_targets(sources: list[JsonValue]) -> None:
 class MountedFiles:
     """What Daimon placed in a session's workspace; none of it is the agent's output.
 
-    Everything under a mounted directory (an installed skill, a repository clone)
-    stays out even when edited. An inline file stays out while its bytes are the
-    mounted ones; once the agent changes it, it is the agent's work.
+    An installed skill's own files stay out even when edited; new files beside them
+    are the agent's. An inline input stays out while its bytes are the mounted ones.
+    Anything under a mounted directory whose files are unknown (a clone) stays out.
     """
 
-    directories: tuple[str, ...]
+    paths: frozenset[str]
     files: dict[str, str]
+    directories: tuple[str, ...]
 
     def covers(self, path: str, sha256: str) -> bool:
-        return self.files.get(path) == sha256 or any(
-            path == directory or path.startswith(directory + "/") for directory in self.directories
+        return (
+            path in self.paths
+            or self.files.get(path) == sha256
+            or any(path == d or path.startswith(d + "/") for d in self.directories)
         )
 
 
-def mounted_files(environment: JsonValue) -> MountedFiles:
+def mounted_files(environment: JsonValue, skills: Mapping[str, SkillRecord]) -> MountedFiles:
     """Read the mounts from a session's saved request, so older sessions are covered too."""
-    directories: list[str] = []
+    paths: set[str] = set()
     files: dict[str, str] = {}
+    directories: list[str] = []
     sources = environment.get("sources") if isinstance(environment, dict) else None
     for source in sources if isinstance(sources, list) else ():
         target = source.get("target") if isinstance(source, dict) else None
@@ -207,12 +212,24 @@ def mounted_files(environment: JsonValue) -> MountedFiles:
             if not path.startswith("/workspace/"):
                 continue
             path = path.removeprefix("/workspace/")
-        parts = PurePosixPath(path).parts
+        parts: list[str] = list(PurePosixPath(path).parts)
         content = source.get("content")
-        if path.startswith(SKILLS_ROOT + "/") and len(parts) > 2:
-            directories.append("/".join(parts[:3]))
+        skill = path.startswith(SKILLS_ROOT + "/") and len(parts) > 2
+        if skill and source.get("type") == "inline":
+            paths.add(path)
+        elif skill and (manifest := deployed_files(skills, parts[2], source.get("source"))):
+            paths.update(target_path(f"{path}/{file}") for file in manifest)
         elif source.get("type") == "inline" and isinstance(content, str):
             files[path] = hashlib.sha256(content.encode("utf-8")).hexdigest()
         else:
             directories.append(path)
-    return MountedFiles(tuple(directories), files)
+    return MountedFiles(frozenset(paths), files, tuple(directories))
+
+
+def deployed_files(skills: Mapping[str, SkillRecord], skill_id: str, uri: JsonValue) -> list[str]:
+    """The file paths of the GCS bundle a skill mount names, or none when unknown."""
+    record = skills.get(skill_id)
+    for deployment in record.deployments.values() if record else ():
+        if deployment.source == uri:
+            return [path for path, _ in deployment.files]
+    return []
