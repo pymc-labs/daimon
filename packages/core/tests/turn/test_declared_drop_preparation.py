@@ -263,7 +263,7 @@ async def test_a_caller_target_cannot_replace_the_confirmed_target(consent_reque
     assert selected.target_spec.declared_drops == accepted.declared_drops
 
 
-async def test_source_drift_during_counterpart_read_requires_reconfirmation(consent_request):
+async def test_source_drift_during_counterpart_read_asks_for_a_retry(consent_request):
     request, _, _, _, _, router, reads, constructions, targets, _ = consent_request
     construct = request.deps.turn_runtime_factory
 
@@ -290,6 +290,7 @@ async def test_source_drift_during_counterpart_read_requires_reconfirmation(cons
         await read_preparation_counterpart(request)
     assert isinstance(refused.value.__cause__, AgentBackendRefused)
     assert refused.value.__cause__.reason == "re_confirm"
+    assert refused.value.cause == "preparation_busy", "a retry reads the new setup"
     assert len(constructions) == len(targets) == 1
     assert len(reads) == 4 and all(r.method == "GET" for r in reads)
 
@@ -1575,6 +1576,32 @@ async def test_a_stale_switch_consent_names_reconfirm_not_missing_provider(monke
     assert refused.value.reason == "backend_unsupported"
     assert refused.value.cause == "re_confirm", "never the generic agent_backend cause"
     assert isinstance(refused.value.__cause__, AgentBackendRefused)
+
+
+@pytest.mark.parametrize(
+    ("detail", "cause"),
+    [
+        ("source_drift", "preparation_busy"),
+        ("provisional_mismatch", "preparation_busy"),
+        ("losses_differ", "re_confirm"),
+        ("no_consent", "re_confirm"),
+    ],
+)
+async def test_a_race_asks_for_a_retry_and_only_a_real_change_for_a_new_card(
+    monkeypatch, detail, cause
+):
+    """A setup read mid-change or a switch changed since admission clears on retry."""
+    from daimon.core.channel_backend import AgentBackendRefused
+    from daimon.core.turn import runtime_manifest
+    from daimon.core.turn.errors import AdmissionDenied
+
+    async def refuse(_request):
+        raise AgentBackendRefused("re_confirm", detail=detail)
+
+    monkeypatch.setattr(runtime_manifest, "prepare_source", refuse)
+    with pytest.raises(AdmissionDenied) as refused:
+        await runtime_manifest.read_preparation_counterpart(object())  # type: ignore[arg-type]
+    assert refused.value.cause == cause, f"{detail} must say {cause}"
 
 
 @pytest.mark.parametrize(

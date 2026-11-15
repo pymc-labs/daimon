@@ -534,6 +534,10 @@ REFUSAL_DETAILS: Final = frozenset(
     }
 )
 
+#: `re_confirm` details a retry can clear: the setup or the switch changed while a
+#: turn was being readied, and a fresh admission reads the new one.
+RETRY_DETAILS: Final = frozenset({"provisional_mismatch", "source_drift"})
+
 
 type BackendRefusalStage = Literal[
     "workspace_policy",

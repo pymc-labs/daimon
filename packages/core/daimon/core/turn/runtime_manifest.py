@@ -1775,8 +1775,10 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
                                 session, request.tenant_id, agent_id, persisted=True
                             )
                         )
-                    if setting != provisional or setting is None or setting.drop_consent is None:
+                    if setting != provisional:
                         raise AgentBackendRefused("re_confirm", detail="provisional_mismatch")
+                    if setting is None or setting.drop_consent is None:
+                        raise AgentBackendRefused("re_confirm", detail="no_consent")
     timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
     owned = request.admission.agent.id.startswith("dm_agent_")
     source = await asyncio.wait_for(
@@ -1923,7 +1925,11 @@ async def read_preparation_counterpart(
         # A stale consent is not missing provider setup: name the fresh preview
         # the person needs. Any other backend refusal stays unsupported (J6g).
         if error.reason == "re_confirm":
-            raise AdmissionDenied(reason="backend_unsupported", cause="re_confirm") from error
+            from daimon.core.channel_backend import RETRY_DETAILS
+
+            # A race is not a stale consent: the same message works once it settles.
+            cause = "preparation_busy" if error.detail in RETRY_DETAILS else "re_confirm"
+            raise AdmissionDenied(reason="backend_unsupported", cause=cause) from error
         raise AdmissionDenied(reason="backend_unsupported") from error
     except UnsupportedCapability as error:
         raise AdmissionDenied(reason="backend_unsupported") from error
