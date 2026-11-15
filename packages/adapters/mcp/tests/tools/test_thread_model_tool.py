@@ -228,7 +228,7 @@ async def test_a_model_this_deployment_does_not_offer_is_refused(
                 runtime,
                 _auth(tenant.id, caller.id),
                 origin_context_id=str(origin.id),
-                model="fable",
+                model="gpt-6",
             )
 
     assert await _stored(committing_sessionmaker, tenant.id, "T_THREAD") is None
@@ -454,3 +454,65 @@ async def test_with_the_host_call_gate_off_only_a_same_provider_pick_runs(
             with pytest.raises(ToolError, match="needs an approval card"):
                 await call
             assert kept == [], "another provider is never kept without a card"
+
+
+async def test_an_effort_alone_or_beside_a_model_is_kept_for_a_direct_message_conversation(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.thread_models import get_thread_effort
+    from daimon.core.stores.turn_origins import bind_origin_session
+    from daimon.core.turn.invocation import human_invocation
+
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker)
+
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="D_ROUTE",
+        thread_id="dm:scope-1",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.USER,
+        chat_session_id=_CHAT_SESSION,
+        sender_foreign=False,
+        shared_channel=False,
+    ) as origin:
+        async with committing_sessionmaker() as db:
+            await bind_origin_session(
+                db,
+                origin_id=origin.id,
+                chat_session_id=_CHAT_SESSION,
+                attended=True,
+                human_invocation=human_invocation("chat", True),
+            )
+            await db.commit()
+        auth = _auth(tenant.id, caller.id)
+        origin_id = str(origin.id)
+        alone = await _set_thread_model_impl(
+            runtime, auth, origin_context_id=origin_id, effort="xhigh"
+        )
+        assert (alone.model, alone.effort) == ("default", "xhigh")
+        both = await _set_thread_model_impl(
+            runtime, auth, origin_context_id=origin_id, model="fable", effort="low"
+        )
+        assert (both.model, both.effort) == ("claude-fable-5-2", "low")
+        assert both.note == "This conversation runs on Fable 5.2 at low effort from the next reply."
+        with pytest.raises(ToolError, match="isn't an effort"):
+            await _set_thread_model_impl(runtime, auth, origin_context_id=origin_id, effort="turbo")
+        with pytest.raises(ToolError, match="Name a model, an effort"):
+            await _set_thread_model_impl(runtime, auth, origin_context_id=origin_id)
+
+    assert await _stored(committing_sessionmaker, tenant.id, "dm:scope-1") == "claude-fable-5-2"
+    async with committing_sessionmaker() as session:
+        assert (
+            await get_thread_effort(
+                session, tenant_id=tenant.id, platform="discord", thread_id="dm:scope-1"
+            )
+            == "low"
+        )

@@ -70,6 +70,8 @@ class ThreadModelResult:
     """The model now chosen, 'default' for the agent's own; the pick when not yet kept."""
     note: str
     """The sentence to report back to the person."""
+    effort: str | None = None
+    """The effort now chosen, None for the agent's own."""
     changes: list[str] = field(default_factory=list[str])
     """What the pick changes, when it waits for the person's yes; read these out."""
     digest: str | None = None
@@ -82,13 +84,33 @@ async def _set_thread_model_impl(
     auth: AuthIdentity,
     *,
     origin_context_id: str,
-    model: str,
+    model: str | None = None,
+    effort: str | None = None,
     digest: str | None = None,
     revision: int | None = None,
 ) -> ThreadModelResult:
     origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     if not origin.attended:
         raise ToolError(_UNATTENDED)
+    if model is None or not model.strip():
+        if effort is None:
+            raise ToolError("Name a model, an effort, or both. Nothing changed.")
+        return await _choose_claude(runtime, auth, origin, None, effort)
+    result = await _set_model(runtime, auth, origin, model, digest, revision)
+    if effort is None or result.digest is not None:
+        return result
+    # The pick is kept (a card still waiting is not): keep the effort beside it.
+    return await _choose_claude(runtime, auth, origin, None, effort)
+
+
+async def _set_model(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin: TurnOriginRow,
+    model: str,
+    digest: str | None,
+    revision: int | None,
+) -> ThreadModelResult:
     word = model.strip().lower()
     if word == "default":
         return await _choose_claude(runtime, auth, origin, word)
@@ -139,7 +161,11 @@ async def _set_thread_model_impl(
 
 
 async def _choose_claude(
-    runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow, word: str
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin: TurnOriginRow,
+    word: str | None,
+    effort: str | None = None,
 ) -> ThreadModelResult:
     try:
         change = await choose_thread_model(
@@ -148,10 +174,13 @@ async def _choose_claude(
             platform=origin.platform,
             thread_id=origin.thread_id,
             choice=word,
+            effort=effort,
         )
     except ThreadModelRefused as exc:
         raise ToolError(str(exc)) from exc
-    return ThreadModelResult(model=change.model_id or "default", note=change.note)
+    return ThreadModelResult(
+        model=change.model_id or "default", note=change.note, effort=change.effort
+    )
 
 
 async def _pick(runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow) -> ThreadPick:
@@ -232,19 +261,23 @@ def register_thread_model_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def set_thread_model(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         origin_context_id: str,
-        model: str,
+        model: str | None = None,
+        effort: str | None = None,
         digest: str | None = None,
         revision: int | None = None,
     ) -> ThreadModelResult:
-        """Run this conversation on another model when the person asks in words: "use opus here", "use GPT-5 here".
+        """Run this conversation on another model or effort when the person asks in words: "use opus here", "think harder".
 
         Only on the person's direct instruction in this conversation, never on
         your own judgement or because a model is mentioned. ``model`` is
-        ``haiku``, ``sonnet``, ``opus``, ``default`` (the agent's own model) or
-        a model from ``list_models`` as ``provider:id``. "Think harder" means
-        ``opus``. There is no effort setting. The conversation keeps the choice
-        for every later reply until someone changes it; the reply in progress
-        keeps its model. Other conversations are unaffected.
+        ``haiku``, ``sonnet``, ``opus``, ``fable``, ``default`` (the agent's own
+        model) or a model from ``list_models`` as ``provider:id``. ``effort`` is
+        ``low``, ``medium``, ``high``, ``xhigh``, ``max`` or ``default`` (the
+        agent's own), and may be given alone: "think harder" means a higher
+        ``effort``, not another model. A model pick keeps the chosen effort.
+        The conversation keeps the choice for every later reply until someone
+        changes it; the reply in progress keeps its model. Other conversations
+        are unaffected.
 
         A pick that loses something returns ``changes`` and does nothing yet:
         read them to the person, and only after they agree in a later message
@@ -260,6 +293,7 @@ def register_thread_model_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             await _auth(ctx),
             origin_context_id=origin_context_id,
             model=model,
+            effort=effort,
             digest=digest,
             revision=revision,
         )
