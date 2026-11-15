@@ -4038,6 +4038,30 @@ class TagOptOut(Base):
     )
 
 
+class DmCarryOver(Base):
+    """An earlier private conversation, held for the person's first DM here.
+
+    Keyed by platform user, not account: it is imported before the person has
+    one. Taking it sets `consumed_at` and empties the words.
+    """
+
+    __tablename__ = "dm_carry_overs"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    platform: Mapped[str] = mapped_column(Text, primary_key=True)
+    external_user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    source_name: Mapped[str] = mapped_column(Text, nullable=False)
+    exported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    history: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
+    context: Mapped[str] = mapped_column(Text, nullable=False)
+    imported_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class DirectMessagePolicy(Base):
     """Explicit tenant opt-in; absence leaves existing DM behavior unchanged."""
 

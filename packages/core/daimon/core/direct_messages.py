@@ -52,6 +52,7 @@ from daimon.core.stores.direct_messages import (
     quarantine_conversation,
     start_conversation,
 )
+from daimon.core.stores.dm_carry_overs import take_carry_over
 from daimon.core.stores.domain import ChatPlatform, Role, TaskContinuationRow, TenantRow
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_turn_contexts import (
@@ -533,6 +534,14 @@ async def start_cold_dm(
             or await get_dm_agent_name(session, tenant_id=tenant_id) != admission.config.agent_name
         ):
             raise AdmissionDenied(reason="invoker_not_allowed")
+        # An imported earlier conversation is used by the first private start, once.
+        carried = await take_carry_over(
+            session, tenant_id=tenant_id, platform="discord", external_user_id=external_user_id
+        )
+        if carried is not None:
+            conversation = conversation.model_copy(
+                update={"history": carried.history, "context": carried.context}
+            )
         await start_conversation(session, conversation=conversation, now=datetime.now(UTC))
         if current is not None:
             # Retired mappings can never be reused by a later private turn.
