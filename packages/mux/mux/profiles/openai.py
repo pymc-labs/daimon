@@ -24,6 +24,8 @@ _METERS_CACHE_WRITES = False
 _EFFORT: dict[Effort, str] = {"low": "low", "medium": "medium", "high": "high"}
 
 MIB = 1024 * 1024
+# A restricted environment network names 1 to 100 domains (Environments API reference).
+MAX_ALLOWED_HOSTS = 100
 
 PERSISTENT_WORKSPACE = Profile(
     provider="openai",

@@ -54,6 +54,7 @@ from mux.drivers.gemini.mcp_auth import (
     validate_intent,
 )
 from mux.drivers.gemini.normalize import OUTCOMES, actions, event, saved_events
+from mux.drivers.gemini.packages import package_sources
 from mux.drivers.gemini.storage import Records, SessionRecord, Storage, owner, read_records
 from mux.drivers.gemini.transport import (
     NO_TOOLS_FUNCTION,
@@ -75,6 +76,7 @@ from mux.errors import (
     ScopeViolation,
     UnsupportedCapability,
 )
+from mux.profiles import PACKAGE_MANAGERS, network_effect
 from mux.profiles.gemini import INLINE_REUSE as PROFILE
 from mux.state.operations import SendClaimed, request_digest
 from mux.state.store import StateStore
@@ -719,8 +721,13 @@ def compile_environment(
         if spec != EnvironmentSpec(name=spec.name, execution="none"):
             refuse("model_interaction_resources")
         return {}
-    if spec.execution != "hosted" or spec.network or spec.packages or spec.native_config:
+    if spec.execution != "hosted" or spec.native_config:
         refuse("environment_configuration")
+    network = network_effect(spec.network)
+    packages = {k: v for k, v in (spec.packages or {}).items() if v}
+    # The install hook fetches from the package registries, so it needs open egress.
+    if packages and (network.mode != "unrestricted" or set(packages) - set(PACKAGE_MANAGERS)):
+        refuse("environment_packages")
     sources: list[JsonValue] = []
     for source in spec.sources or ():
         target = target_path(source.target_path)
@@ -737,8 +744,15 @@ def compile_environment(
             "target": target,
         }
         sources.append(obj)
+    sources.extend(package_sources(packages))
     validate_targets(sources)
-    return {"type": "remote", "sources": sources}
+    result: Object = {"type": "remote", "sources": sources}
+    # Omitting the network allows all egress (Environments API reference).
+    if network.mode == "none":
+        result["network"] = "disabled"
+    elif network.mode == "limited":
+        result["network"] = {"allowlist": [{"domain": host} for host in network.allowed_hosts]}
+    return result
 
 
 class GeminiSessions(Base):

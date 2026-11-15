@@ -15,10 +15,16 @@ from mux.contracts.config import BackendConfig, ResolvedBackend, ThreadMode, res
 from mux.contracts.errors import InvalidConfig
 from mux.contracts.ids import Provider
 from mux.contracts.profile import SUPPORTED, AccountingMode, Profile
-from mux.contracts.resources import AgentSpec, ToolSpec
+from mux.contracts.resources import AgentSpec, EnvironmentSpec, NetworkPolicy, ToolSpec
 from mux.profiles.anthropic import MANAGED_AGENTS
 from mux.profiles.gemini import INLINE_REUSE, OPT_IN_MODELS
-from mux.profiles.openai import ASTRA_MODEL, CONVERSATION_ONLY, LUNA_MODEL, PERSISTENT_WORKSPACE
+from mux.profiles.openai import (
+    ASTRA_MODEL,
+    CONVERSATION_ONLY,
+    LUNA_MODEL,
+    MAX_ALLOWED_HOSTS,
+    PERSISTENT_WORKSPACE,
+)
 from mux.profiles.selfhosted import LOOP
 
 PROFILES: Mapping[str, Profile] = {
@@ -122,6 +128,44 @@ def represented_execution_tools(
     )
 
 
+PACKAGE_MANAGERS = ("system", "python", "npm")
+"""Package lists both OpenAI templates and Gemini environments install."""
+
+
+def network_effect(policy: NetworkPolicy | None) -> NetworkPolicy:
+    """The egress a policy allows: none set is open, and limited to no hosts is none."""
+    if policy is None:
+        return NetworkPolicy()
+    if policy.mode == "limited" and not policy.allowed_hosts:
+        return NetworkPolicy(mode="none")
+    return policy
+
+
+def carried_environment(profile: Profile, spec: EnvironmentSpec) -> EnvironmentSpec:
+    """The part of a source environment the profile's template sandbox recreates.
+
+    Workspace files are provider-bound and never carry. OpenAI restricts egress to
+    1 to MAX_ALLOWED_HOSTS hosts. Gemini installs packages over the network at the
+    first tool call, so they carry only while egress is open.
+    """
+    if profile.profile_id not in (INLINE_REUSE.profile_id, PERSISTENT_WORKSPACE.profile_id):
+        raise InvalidConfig("profile has no source execution mapping")
+    if spec.execution != "hosted" or spec.native_config is not None:
+        return EnvironmentSpec(name=spec.name)
+    network = network_effect(spec.network)
+    packages = {k: v for k, v in (spec.packages or {}).items() if v and k in PACKAGE_MANAGERS}
+    if profile.profile_id == INLINE_REUSE.profile_id and network.mode != "unrestricted":
+        packages = {}
+    too_many = len(network.allowed_hosts) > MAX_ALLOWED_HOSTS
+    return EnvironmentSpec(
+        name=spec.name,
+        network=None
+        if too_many and profile.profile_id == PERSISTENT_WORKSPACE.profile_id
+        else network,
+        packages=packages or None,
+    )
+
+
 def native_agent_tools(profile: Profile, spec: AgentSpec) -> tuple[ToolSpec, ...]:
     """Compare native readback while retaining the authored tool intent."""
     if profile.tool_readback == "authored":
@@ -176,12 +220,15 @@ __all__ = [
     "MANAGED_AGENTS",
     "LOOP",
     "PERSISTENT_WORKSPACE",
+    "PACKAGE_MANAGERS",
     "PROFILES",
     "PROVIDER_LABELS",
+    "carried_environment",
     "get_profile",
     "meters_cache_writes_for",
     "emits_legacy_events_for",
     "native_agent_tools",
+    "network_effect",
     "neutral_catalog_profile_for",
     "accounting_mode_for",
 ]

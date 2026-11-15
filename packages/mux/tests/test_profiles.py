@@ -11,13 +11,20 @@ from mux.contracts import ports
 from mux.contracts.extensions import ExtensionConfig, ExtensionRef
 from mux.contracts.ids import ModelRef, Provider
 from mux.contracts.profile import CORE_CAPABILITIES, Profile
-from mux.contracts.resources import AgentSpec, ToolSpec
+from mux.contracts.resources import (
+    AgentSpec,
+    EnvironmentSpec,
+    NetworkPolicy,
+    ToolSpec,
+    WorkspaceSource,
+)
 from mux.errors import ExtensionVersionError, InvalidConfig, UnsupportedCapability
 from mux.profiles import (
     INLINE_REUSE,
     MANAGED_AGENTS,
     PERSISTENT_WORKSPACE,
     PROFILES,
+    carried_environment,
     emits_legacy_events_for,
     get_profile,
     native_agent_tools,
@@ -414,3 +421,55 @@ def test_resolved_backend_refuses_effort_the_profile_does_not_declare() -> None:
         ResolvedBackend(
             backend="anthropic", profile="anthropic.managed_agents", model=None, effort="low"
         )
+
+
+_PACKAGES = {"system": ("gh",), "python": ("duckdb",), "npm": ()}
+_LIMITED = NetworkPolicy(mode="limited", allowed_hosts=("api.example.com",))
+_MANY = NetworkPolicy(mode="limited", allowed_hosts=tuple(f"h{i}.example.com" for i in range(101)))
+
+
+@pytest.mark.parametrize(
+    ("profile", "network", "carried_network", "carried_packages"),
+    [
+        (PERSISTENT_WORKSPACE, NetworkPolicy(), NetworkPolicy(), True),
+        (PERSISTENT_WORKSPACE, _LIMITED, _LIMITED, True),
+        (PERSISTENT_WORKSPACE, _MANY, None, True),
+        (INLINE_REUSE, NetworkPolicy(), NetworkPolicy(), True),
+        (INLINE_REUSE, _LIMITED, _LIMITED, False),
+        (INLINE_REUSE, _MANY, _MANY, False),
+        (
+            INLINE_REUSE,
+            NetworkPolicy(mode="limited"),
+            NetworkPolicy(mode="none"),
+            False,
+        ),
+    ],
+)
+def test_carried_environment_by_profile_keeps_what_the_sandbox_recreates(
+    profile: Profile,
+    network: NetworkPolicy,
+    carried_network: NetworkPolicy | None,
+    carried_packages: bool,
+) -> None:
+    """OpenAI carries packages and up to 100 hosts; Gemini packages need open egress."""
+    source = EnvironmentSpec(
+        name="env",
+        network=network,
+        packages=_PACKAGES,
+        sources=(WorkspaceSource(kind="repository", target_path="r", repository_url="https://g"),),
+    )
+    carried = carried_environment(profile, source)
+    packages = {"system": ("gh",), "python": ("duckdb",)} if carried_packages else None
+    assert carried == EnvironmentSpec(name="env", network=carried_network, packages=packages), (
+        "the carried part differs from the profile's sandbox limits"
+    )
+
+
+def test_carried_environment_for_native_config_or_other_profiles_when_unmapped_then_bare() -> None:
+    """A native or self-hosted environment carries nothing; Anthropic has no mapping."""
+    native = EnvironmentSpec(name="env", execution="self_hosted", packages=_PACKAGES)
+    assert carried_environment(INLINE_REUSE, native) == EnvironmentSpec(name="env"), (
+        "a self-hosted environment must not carry"
+    )
+    with pytest.raises(InvalidConfig):
+        carried_environment(MANAGED_AGENTS, native)
