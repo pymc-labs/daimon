@@ -525,7 +525,7 @@ async def test_a_private_session_context_refuses_the_preview(active_chat):
     del frozen["metadata"]["daimon_thread"]
     gate()
     agent()
-    with pytest.raises(ToolError, match="server channel or thread where I answer"):
+    with pytest.raises(ToolError, match="Ask this agent in a server channel or thread"):
         await _request_agent_backend_switch_impl(
             runtime,
             auth,
@@ -564,7 +564,7 @@ async def test_a_thread_opened_by_a_channel_mention_previews_the_switch(active_c
         )
         assert preview.status == "preview"
     else:
-        with pytest.raises(ToolError, match="server channel or thread where I answer"):
+        with pytest.raises(ToolError, match="Ask this agent in a server channel or thread"):
             await _request_agent_backend_switch_impl(
                 runtime,
                 auth,
@@ -643,7 +643,7 @@ async def test_a_no_drop_switch_on_a_provider_turn_when_in_a_direct_message_then
     runtime, auth, origin, service, trace, payload, _, _, agent, _ = active_chat
     payload["model"] = {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}}
     origin = await _origin_like(runtime, origin, parent_channel_id="dm:123", thread_id="dm:123")
-    with pytest.raises(ToolError, match="private conversation") as refused:
+    with pytest.raises(ToolError, match="from a direct message") as refused:
         await _request_agent_backend_switch_impl(
             runtime,
             replace(auth, no_confirmation_surface=True),
@@ -652,6 +652,9 @@ async def test_a_no_drop_switch_on_a_provider_turn_when_in_a_direct_message_then
             origin_context_id=str(origin.id),
         )
     assert "Nothing changed." in str(refused.value), "the refusal says nothing changed"
+    assert "I " not in str(refused.value), (
+        "worded as a Claude turn's refusal, not in the first person"
+    )
     agent()
     written = await service.current(await load_backend_agent_for(runtime, auth))
     assert written is None, "a refused switch writes nothing"
@@ -995,7 +998,7 @@ def _admin_auth():
     [
         ({"reason": "agent_not_found"}, "no agent named 'X'"),
         ({"reason": "backend_not_allowed"}, "OpenAI isn't allowed in this server"),
-        ({"reason": "source_context_unavailable"}, "server channel or thread where I answer"),
+        ({"reason": "source_context_unavailable"}, "Ask this agent in a server channel or thread"),
         (
             {"reason": "source_context_unavailable", "detail": "no_live_session"},
             "couldn't find my conversation in this thread",

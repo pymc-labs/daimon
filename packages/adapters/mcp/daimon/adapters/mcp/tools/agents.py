@@ -1629,8 +1629,8 @@ _SOURCE_DETAIL_WORDS: Final[Mapping[str, str]] = {
 #: Why this conversation can't show the switch's Confirm card (a `CardGap`).
 _CARD_GAP_WORDS: Final[Mapping[str, str]] = {
     "source_context_unavailable": (
-        "I can't confirm a change from a direct message or from a conversation that "
-        "started somewhere else. Ask in a server channel or thread where I answer."
+        "A switch can't be confirmed from a direct message or from a conversation that "
+        "started somewhere else. Ask this agent in a server channel or thread."
     ),
     "no_live_session": (
         "I couldn't find my conversation in this thread, so I can't post the Confirm card. "
@@ -2162,10 +2162,8 @@ async def _request_agent_backend_switch_impl(
             raise ToolError("Choosing a model provider is turned off. Nothing changed.")
         if self_card:
             if _private_origin(origin):
-                raise ToolError(
-                    "I can't post a confirmation card in a private conversation. Ask in a "
-                    "channel or thread where I answer. Nothing changed."
-                )
+                # Worded as a Claude turn's refusal from a direct message.
+                raise channel_backend.AgentBackendRefused("source_context_unavailable")
         elif (
             await session_card_gap(runtime, auth, origin, tool_name="request_agent_backend_switch")
             is not None
