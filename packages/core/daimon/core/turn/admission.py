@@ -2505,6 +2505,7 @@ async def capture_backend_source(
     from daimon.core.mux_compat import retrieve_agent
     from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES
     from daimon.core.stores.accounts import get_account_with_tenant
+    from daimon.core.stores.identity import list_tenant_chat_platforms
     from daimon.core.turn.prepare import ProviderPreparationRequest
     from daimon.core.turn.runtime_manifest import capture_preparation_source
 
@@ -2518,6 +2519,11 @@ async def capture_backend_source(
                 account = await get_account_with_tenant(db, account_id=context.account_id)
                 policy = await load_access_policy(db, tenant_id=context.tenant_id)
                 config = await resolve_config(db, context=context, default=deps.deployment_default)
+                answers_on = (
+                    await list_tenant_chat_platforms(db, tenant_id=context.tenant_id)
+                    if explicit_target_name is not None
+                    else ()
+                )
             if account is None or account.tenant_id != context.tenant_id:
                 raise channel_backend.AgentBackendRefused("source_unavailable", detail="identity")
             if (
@@ -2702,6 +2708,7 @@ async def capture_backend_source(
                 None,
                 datetime.now(UTC) + timedelta(seconds=30),
                 lambda: datetime.now(UTC),
+                answers_on=answers_on,
             )
             captured = await capture_preparation_source(
                 request, fresh=True, capability_preview=True

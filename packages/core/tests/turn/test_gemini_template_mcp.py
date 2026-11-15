@@ -467,6 +467,32 @@ async def test_the_relay_mounts_a_user_connector_instead_of_losing_it(template, 
     assert relayed == token, "the relay authenticates the turn's own Daimon credential"
 
 
+@pytest.mark.parametrize("consent_request", [CONNECTOR_PARAMS], indirect=True)
+async def test_a_channel_less_read_keeps_a_connector_only_if_every_platform_relays(
+    template, monkeypatch
+):
+    """Where a copy answers on several platforms, the relay must be on on all of them."""
+    from daimon.core.features import snapshot
+
+    request, *_ = template
+    monkeypatch.setattr(
+        snapshot,
+        "deployment_on",
+        lambda _s, key, platform: key == "mcp_connector_relay" and platform == "slack",
+    )
+    request = replace(request, deps=replace(request.deps, settings=object()))
+    both = replace(request, answers_on=("discord", "slack"))
+    selected, _ = await _prepared(both)
+    assert "mcp_server:linear" in selected.target_spec.declared_drops, (
+        "discord has no relay: the connector is lost there, so it is named"
+    )
+    only = replace(request, answers_on=("slack",))
+    selected, _ = await _prepared(only)
+    assert "mcp_server:linear" not in selected.target_spec.declared_drops, (
+        "answering only on slack, the relay keeps it"
+    )
+
+
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
 async def test_gated_and_publishing_tools_stay_unavailable_in_a_template(template, monkeypatch):
     from daimon.core.mcp_oauth import discovery

@@ -727,7 +727,7 @@ async def _capture_source_capabilities(
             # posts one for a self-carded tool and, with the host call gate on
             # for this platform, for each gated call; any other gated tool stays
             # unavailable (and the server refuses it for provider-turn credentials).
-            from daimon.core.features.snapshot import deployment_on
+            from daimon.core.features.snapshot import deployment_on_everywhere
             from daimon.core.tool_safety import (
                 GATE_OFF_TOOLS,
                 confirmation_gated_tools,
@@ -737,7 +737,9 @@ async def _capture_source_capabilities(
 
             settings = request.deps.settings
             gated, carded = confirmation_gated_tools(), self_carded_tools()
-            if settings is not None and deployment_on(settings, "host_call_gate", request.platform):
+            if settings is not None and deployment_on_everywhere(
+                settings, "host_call_gate", request.answers_on or (request.platform,)
+            ):
                 carded |= host_call_carded_tools()
             else:
                 carded |= GATE_OFF_TOOLS
@@ -874,7 +876,9 @@ async def _capture_source_capabilities(
                 connection,
                 provider=profile.provider,
                 relay_on=settings is not None
-                and deployment_on(settings, "mcp_connector_relay", request.platform),
+                and deployment_on_everywhere(
+                    settings, "mcp_connector_relay", request.answers_on or (request.platform,)
+                ),
                 public_url=str(request.deps.mcp.public_url),
             )
             mounted = {f"mcp_server:{server.name}" for server in relayed}
