@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A Gemini agent sends only the files it made.** The skills installed for
+  the agent, and the input files and repositories set up in its sandbox, are
+  never sent to the thread as the agent's files, also in conversations that
+  started earlier. A skill's own files stay out even if the agent edits them;
+  files the agent makes beside them, and input files it changes, are sent. The first
+  answer after switching an agent to Gemini carries no skill files.
 - **Switching an agent with many skills to OpenAI or Gemini finishes its preview.**
   The preview gets 90 seconds to read the agent's skills, and each skill it
   reads is kept even when the preview runs out of time, so a retry picks up

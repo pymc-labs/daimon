@@ -21,6 +21,7 @@ from mux.contracts.resources import (
 )
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.resources import parse_snapshot
+from mux.drivers.gemini.skill_deployment import GCSBundleDeployment, file_manifest
 from mux.errors import (
     ContinuityLost,
     OperationConflict,
@@ -584,3 +585,128 @@ async def test_session_skills_mount_beside_the_agents_own(resources: Resources) 
         f".agents/skills/{extra.id}/SKILL.md",
         f".agents/skills/{extra.id}/scripts/run.py",
     ], f"both skills mount: {targets}"
+
+
+@pytest.mark.asyncio
+async def test_first_turn_lists_the_agents_files_but_never_its_mounted_skills(
+    resources: Resources,
+) -> None:
+    """Every installed skill sits in the first snapshot; none of it is an output."""
+    ma, transport, _, _ = resources
+    own = await ma.skills.create(SCOPE, bundle(), key="own")
+    extra = await ma.skills.create(SCOPE, bundle(b"# Extra", "extra"), key="extra")
+    assert own.latest_version is not None and extra.latest_version is not None, "pinned"
+    s = await session(
+        ma,
+        AgentSpec(
+            name="a",
+            model=ModelRef(provider="gemini", id="gemini-3.8-flash"),
+            skills=(own.latest_version,),
+        ),
+        EnvironmentSpec(name="e"),
+        skills=(extra.latest_version,),
+    )
+    await send(ma, transport, s)
+    transport.snapshots["e1"] = snapshot(
+        {
+            f".agents/skills/{own.id}/SKILL.md": b"# Original",
+            f".agents/skills/{own.id}/scripts/run.py": b"print(1)\n",
+            f".agents/skills/{extra.id}/SKILL.md": b"# Edited by the agent",
+            f".agents/skills/{extra.id}/scripts/run.py": b"print(1)\n",
+            f".agents/skills/{own.id}/dashboard.html": b"<html>",
+            f".agents/skills/{own.id}/scripts/__pycache__/run.cpython-312.pyc": b"\x00",
+            "report.md": b"# Report",
+        }
+    )
+    listed = await ma.artifacts.list(SCOPE, s.ref, page=PageRequest())
+    assert [a.filename for a in listed.data] == [
+        f".agents/skills/{own.id}/dashboard.html",
+        "report.md",
+    ], "installed skill files, even edited ones, and Python caches are not outputs"
+
+
+@pytest.mark.asyncio
+async def test_mounted_input_file_is_an_output_only_once_the_agent_changes_it(
+    resources: Resources,
+) -> None:
+    ma, transport, _, _ = resources
+    text = await ma.artifacts.upload(
+        SCOPE, chunks(b"hello\n"), filename="input.txt", media_type="text/plain", key="upload"
+    )
+    s = await session(
+        ma,
+        AgentSpec(name="a", model=ModelRef(provider="gemini", id="gemini-3.8-flash")),
+        EnvironmentSpec(
+            name="e",
+            sources=(
+                WorkspaceSource(kind="file", target_path="inputs/input.txt", artifact=text.ref),
+                WorkspaceSource(kind="file", target_path="/workspace/top.txt", artifact=text.ref),
+            ),
+        ),
+    )
+    await send(ma, transport, s)
+    transport.snapshots["e1"] = snapshot(
+        {"inputs/input.txt": b"hello\n", "top.txt": b"hello\n", "notes.txt": b"n"}
+    )
+    listed = await ma.artifacts.list(SCOPE, s.ref, page=PageRequest())
+    assert [a.filename for a in listed.data] == ["notes.txt"], "unchanged mounts are not outputs"
+    transport.snapshots["e1"] = snapshot(
+        {"inputs/input.txt": b"hello, edited\n", "top.txt": b"hello\n", "notes.txt": b"n"}
+    )
+    listed = await ma.artifacts.list(SCOPE, s.ref, page=PageRequest())
+    assert [a.filename for a in listed.data] == ["inputs/input.txt", "notes.txt"], (
+        "an edited mounted file is the agent's work"
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_saved_before_the_rule_stops_listing_its_installed_files(
+    resources: Resources,
+) -> None:
+    """The rule reads only the request every session saved at creation, nothing new.
+
+    A session made earlier, here with GCS skill directories and a repository clone,
+    is covered after a restart with no migration. A GCS skill hides its own files;
+    one whose bundle is unknown hides its whole directory.
+    """
+    ma, transport, storage, state = resources
+    own = await ma.skills.create(SCOPE, bundle(), key="own")
+    assert own.latest_version is not None and own.latest_version.version is not None, "pinned"
+    version = own.latest_version.version
+    s = await session(
+        ma,
+        AgentSpec(name="a", model=ModelRef(provider="gemini", id="gemini-3.8-flash")),
+        EnvironmentSpec(name="e"),
+    )
+    await send(ma, transport, s)
+    async with storage.transaction() as records:
+        records.skills[own.id].deployments[version] = GCSBundleDeployment(
+            "t", "a", "project", version, "gs://bucket/own/", file_manifest(bundle())
+        )
+        records.sessions[s.ref.id].request["environment"] = {
+            "type": "remote",
+            "sources": [
+                {"type": "gcs", "source": "gs://bucket/own/", "target": f".agents/skills/{own.id}"},
+                {"type": "gcs", "source": "gs://bucket/v1/", "target": ".agents/skills/s1"},
+                {"type": "repository", "source": "https://example.com/r", "target": "repo"},
+            ],
+        }
+    ma = GeminiManagedAgents(
+        transport, storage=storage, state_store=state.restart(), account_scope_id="project"
+    )
+    transport.snapshots["e1"] = snapshot(
+        {
+            f".agents/skills/{own.id}/SKILL.md": b"# Edited",
+            f".agents/skills/{own.id}/scripts/run.py": b"print(1)\n",
+            f".agents/skills/{own.id}/dashboard.html": b"<html>",
+            ".agents/skills/s1/SKILL.md": b"# Skill",
+            ".agents/skills/s1/dashboard/app.js": b"js",
+            "repo/README.md": b"readme",
+            "chart.png": b"png",
+        }
+    )
+    listed = await ma.artifacts.list(SCOPE, s.ref, page=PageRequest())
+    assert [a.filename for a in listed.data] == [
+        f".agents/skills/{own.id}/dashboard.html",
+        "chart.png",
+    ], f"an existing session must not deliver its installed files: {listed.data}"

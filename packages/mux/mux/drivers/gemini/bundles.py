@@ -1,5 +1,8 @@
 """Pinned host catalogues compiled into documented inline environment sources."""
 
+import hashlib
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 from pydantic import JsonValue
@@ -16,6 +19,7 @@ SKILL_SOURCE = "gemini.inline"
 MAX_BUNDLE_BYTES = 2 * 1024 * 1024
 MAX_INLINE_FILE_BYTES = 1024 * 1024
 MAX_DEPLOYED_BUNDLE_BYTES = 64 * 1024 * 1024
+SKILLS_ROOT = ".agents/skills"
 
 
 def relative_path(path: str) -> str:
@@ -99,14 +103,14 @@ def skill_sources(
         if deployment is not None:
             validate_deployment(deployment, scope, account, pin.version, bundle)
             sources.append(
-                {"type": "gcs", "source": deployment.source, "target": f".agents/skills/{pin.id}"}
+                {"type": "gcs", "source": deployment.source, "target": f"{SKILLS_ROOT}/{pin.id}"}
             )
             continue
         for file in bundle.files:
             sources.append(
                 {
                     "type": "inline",
-                    "target": f".agents/skills/{pin.id}/{file.path}",
+                    "target": f"{SKILLS_ROOT}/{pin.id}/{file.path}",
                     "content": text_bytes(file.content),
                 }
             )
@@ -169,3 +173,63 @@ def validate_targets(sources: list[JsonValue]) -> None:
         ):
             raise ValueError("workspace source targets overlap")
         targets.append(target)
+
+
+@dataclass(frozen=True)
+class MountedFiles:
+    """What Daimon placed in a session's workspace; none of it is the agent's output.
+
+    An installed skill's own files stay out even when edited; new files beside them
+    are the agent's. An inline input stays out while its bytes are the mounted ones.
+    Anything under a mounted directory whose files are unknown (a clone) stays out.
+    """
+
+    paths: frozenset[str]
+    files: dict[str, str]
+    directories: tuple[str, ...]
+
+    def covers(self, path: str, sha256: str) -> bool:
+        return (
+            path in self.paths
+            or self.files.get(path) == sha256
+            or any(path == d or path.startswith(d + "/") for d in self.directories)
+        )
+
+
+def mounted_files(environment: JsonValue, skills: Mapping[str, SkillRecord]) -> MountedFiles:
+    """Read the mounts from a session's saved request, so older sessions are covered too."""
+    paths: set[str] = set()
+    files: dict[str, str] = {}
+    directories: list[str] = []
+    sources = environment.get("sources") if isinstance(environment, dict) else None
+    for source in sources if isinstance(sources, list) else ():
+        target = source.get("target") if isinstance(source, dict) else None
+        if not isinstance(source, dict) or not isinstance(target, str):
+            continue
+        path = target_path(target)
+        if path.startswith("/"):
+            # The snapshot holds /workspace only; other absolute targets never appear in it.
+            if not path.startswith("/workspace/"):
+                continue
+            path = path.removeprefix("/workspace/")
+        parts: list[str] = list(PurePosixPath(path).parts)
+        content = source.get("content")
+        skill = path.startswith(SKILLS_ROOT + "/") and len(parts) > 2
+        if skill and source.get("type") == "inline":
+            paths.add(path)
+        elif skill and (manifest := deployed_files(skills, parts[2], source.get("source"))):
+            paths.update(target_path(f"{path}/{file}") for file in manifest)
+        elif source.get("type") == "inline" and isinstance(content, str):
+            files[path] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        else:
+            directories.append(path)
+    return MountedFiles(frozenset(paths), files, tuple(directories))
+
+
+def deployed_files(skills: Mapping[str, SkillRecord], skill_id: str, uri: JsonValue) -> list[str]:
+    """The file paths of the GCS bundle a skill mount names, or none when unknown."""
+    record = skills.get(skill_id)
+    for deployment in record.deployments.values() if record else ():
+        if deployment.source == uri:
+            return [path for path, _ in deployment.files]
+    return []

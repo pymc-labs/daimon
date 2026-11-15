@@ -11,7 +11,13 @@ from uuid import uuid4
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Scope, SkillRef
 from mux.contracts.receipts import DeletionReceipt
 from mux.contracts.resources import Artifact, Skill, SkillUpload, SkillVersion
-from mux.drivers.gemini.bundles import SKILL_SOURCE, owned_skill, relative_path, validate_bundle
+from mux.drivers.gemini.bundles import (
+    SKILL_SOURCE,
+    mounted_files,
+    owned_skill,
+    relative_path,
+    validate_bundle,
+)
 from mux.drivers.gemini.core import Base, now, page_values, refuse
 from mux.drivers.gemini.skill_deployment import SkillBundlePublisher, validate_deployment
 from mux.drivers.gemini.storage import ArtifactRecord, Records, SkillRecord, Storage, owner
@@ -325,8 +331,14 @@ class GeminiArtifacts(Base):
                     raise ProviderError(
                         "conflict", retryable=False, native_code="snapshot_turn_changed"
                     )
+                # The first snapshot holds every file Daimon mounted (skills, inputs);
+                # those were never the agent's work, so they are never outputs. Nor is
+                # the bytecode Python caches when a skill script imports a sibling.
+                mounted = mounted_files(current.request.get("environment"), records.skills)
                 for path, data in sorted(files.items(), reverse=order == "desc"):
                     sha = hashlib.sha256(data).hexdigest()
+                    if mounted.covers(path, sha) or "__pycache__" in path.split("/"):
+                        continue
                     id_ = request_digest(
                         {
                             "session": session.id,
