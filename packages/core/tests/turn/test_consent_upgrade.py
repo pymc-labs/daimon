@@ -252,3 +252,13 @@ def test_a_consent_for_model_settings_covers_a_lone_effort_setting() -> None:
     today = copy_for(drops=("memory", "effort_setting"))
     assert holds(consent_for(then), today, "gpt-6-luna"), "effort is a part of the settings"
     assert not holds(consent_for(copy_for()), today, "gpt-6-luna"), "never accepted: asks again"
+
+
+def test_a_consent_that_lost_web_search_covers_a_copy_that_runs_it() -> None:
+    """Web search was off by Daimon's choice; the provider's metered search asks nothing."""
+    then = copy_for(drops=("builtin_tool:web_search", "memory"))
+    assert holds(consent_for(then), copy_for(), "gpt-6-luna"), "search runs: no new card"
+    lost = copy_for(drops=("builtin_tool:web_search", "memory"))
+    assert not holds(consent_for(copy_for()), lost, "gpt-6-luna"), (
+        "a search that must ask first, never accepted lost, asks again"
+    )

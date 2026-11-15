@@ -418,17 +418,20 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
 def _warn_on_grounding(
     observation: UsageObservation, *, tenant_id: object, binding_id: str
 ) -> None:
-    """Grounding (search) calls carry a per-query price no tariff or daily cap counts.
+    """Grounding other than search carries a per-query price no tariff or daily cap counts.
 
-    Agent requests never offer them, so any count here is a leak to look at. The
-    usage reports them as a list of `{type, count}` (google-genai `GroundingToolCount`).
+    Search is metered as web searches; agent requests offer no other grounding,
+    so any other count is a leak to look at. The usage reports them as a list of
+    `{type, count}` (google-genai `GroundingToolCount`).
     """
     raw = observation.native_meter.get("grounding_tool_count")
     entries = [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
     counts = {
         str(item.get("type")): count
         for item in entries
-        if isinstance(count := item.get("count"), int) and not isinstance(count, bool)
+        if isinstance(count := item.get("count"), int)
+        and not isinstance(count, bool)
+        and item.get("type") != "google_search"
     }
     total = sum(counts.values())
     if total > 0:

@@ -234,10 +234,11 @@ async def test_consent_keeps_daimon_tools_and_drops_only_what_gemini_lacks(templ
     assert "memory" in quote.declared_drops
     # Its custom skills attach per session; only one past Gemini's limits is a named loss.
     assert "skills" not in quote.declared_drops, quote.declared_drops
-    # J6b: its execution tools map to code_execution; web search and fetch
-    # (grounding, off) are each a named loss, never all of its tools.
+    # J6b: its execution tools map to code_execution and web search to Google
+    # Search; only web fetch is a named loss, never all of its tools.
     assert "tools" not in quote.declared_drops
-    assert {"builtin_tool:web_fetch", "builtin_tool:web_search"} <= set(quote.declared_drops)
+    assert "builtin_tool:web_fetch" in quote.declared_drops
+    assert "builtin_tool:web_search" not in quote.declared_drops
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
@@ -1241,14 +1242,52 @@ async def test_a_consent_that_dropped_tools_still_prepares_and_now_keeps_them(
 ):
     """PRE fleet-gemini (smoke 4acca048): switched before #1483, its consent named
     `tools` a whole loss. It keeps working without re-confirming, and runs with
-    code execution from now on."""
+    code execution and Google Search from now on."""
     request, quote, *_ = template
     assert "tools" in quote.declared_drops, "the consent was recorded the old way"
     assert not any(drop.startswith("builtin_tool:") for drop in quote.declared_drops)
     consent_recorded_before_template_tools()  # today's template maps the tools
     selected, _ = await _prepared(request)
     assert "tools" not in selected.target_spec.declared_drops
-    assert [tool.name for tool in selected.target_spec.tools or ()] == ["code_execution"]
+    tools = [tool.name for tool in selected.target_spec.tools or ()]
+    assert tools == ["code_execution", "google_search"]
+
+
+@pytest.fixture
+def consent_recorded_while_search_was_off(monkeypatch):
+    """While the consent is recorded, web search is a named loss, as before it was metered."""
+    from daimon.core.turn import runtime_manifest
+
+    real = runtime_manifest._WEB_TOOLS  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(runtime_manifest, "_WEB_TOOLS", real | {"web_search"})
+    return lambda: monkeypatch.setattr(runtime_manifest, "_WEB_TOOLS", real)
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_consent_that_lost_web_search_prepares_and_runs_google_search(
+    consent_recorded_while_search_was_off, template
+):
+    """A copy switched while search was off keeps working, with Google Search, unasked."""
+    request, quote, *_ = template
+    assert "builtin_tool:web_search" in quote.declared_drops, "the consent named it lost"
+    consent_recorded_while_search_was_off()
+    selected, _ = await _prepared(request)
+    assert "builtin_tool:web_search" not in selected.target_spec.declared_drops
+    assert "google_search" in [tool.name for tool in selected.target_spec.tools or ()]
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_place_with_web_search_off_leaves_it_out_unasked(template, monkeypatch):
+    """`tool.web_search` off at a place removes Google Search, as it removes Claude's."""
+    from daimon.core.features.model_input import SessionToolset
+    from daimon.core.turn.admission import Admission
+
+    request, *_ = template
+    off = property(lambda _: SessionToolset(builtins={"web_search": False}))
+    monkeypatch.setattr(Admission, "toolset", off)
+    selected, _ = await _prepared(request)
+    assert "google_search" not in [tool.name for tool in selected.target_spec.tools or ()]
+    assert "builtin_tool:web_search" not in selected.target_spec.declared_drops
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
@@ -1263,7 +1302,7 @@ async def test_a_consent_that_dropped_tools_and_the_switch_tool_still_prepares(
     selected, _ = await _prepared(request)
     spec = selected.target_spec
     assert not {"tools", switch_drop} & set(spec.declared_drops)
-    assert [tool.name for tool in spec.tools or ()] == ["code_execution"]
+    assert [tool.name for tool in spec.tools or ()] == ["code_execution", "google_search"]
     assert "request_agent_backend_switch" in _connection(selected).tool_policy["allowed_tools"]
 
 

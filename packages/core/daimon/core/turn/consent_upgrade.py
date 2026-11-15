@@ -138,6 +138,9 @@ def same_losses(target: AgentSpec, consent: _BackendDropConsent) -> bool:
     # A template's sandbox now sets up the packages and network it lost before:
     # fewer losses than accepted.
     accepted -= finer_parts("sandbox", accepted) - today
+    if "builtin_tool:web_search" in accepted and "builtin_tool:web_search" not in today:
+        # Web search was off by Daimon's choice; the provider's search runs it, metered.
+        accepted.discard("builtin_tool:web_search")
     effort = finer_parts("model_controls", today)
     if "model_controls" in accepted and "model_controls" not in today and effort:
         # Effort alone is now named on its own: a part of the model settings accepted.

@@ -82,9 +82,9 @@ _RESERVED = ("OPENAI_", "ANTHROPIC_", "GOOGLE_", "GEMINI_")
 _ROWS = TypeAdapter(list[dict[str, JsonValue]])
 _MAX_BYTES = 1_048_576
 _WILDCARD = "*"
-#: Built-in web tools an agent template never carries off Anthropic: they are named
-#: losses (OpenAI's web_search is unpriced and uncounted; Gemini's grounding is off).
-_WEB_TOOLS = frozenset({"web_search", "web_fetch"})
+#: Built-in web tools an agent template never carries off Anthropic: named losses.
+#: Web search maps to the provider's own search, metered per search.
+_WEB_TOOLS = frozenset({"web_fetch"})
 """Reserved sentinel for 'every value' on `platform`, `channel_id` and
 `account_id` only. Never accepted for `tenant_id` or `profile`: a manifest
 row always authorizes resources for exactly one tenant, so the one hard
@@ -787,14 +787,27 @@ async def _capture_source_capabilities(
             # A template's custom and channel skills, where its provider installs them.
             carried: tuple[SkillRef, ...] = ()
             if template:
+                if request.admission.toolset.builtins.get("web_search") is False:
+                    # A place with `tool.web_search` off leaves it out, as on Claude.
+                    own_tools = tuple(
+                        tool
+                        for tool in own_tools
+                        if not (tool.kind == "builtin" and tool.name == "web_search")
+                    )
                 # A template maps the source's execution tools to the provider's own
                 # (OpenAI bash in its hosted environment, Gemini code_execution): both
                 # are billed as tokens and container time already measured, never per
-                # call. Web tools stay named losses: OpenAI's web_search is unpriced
-                # and uncounted, and Gemini's grounding is off. Custom skills go per
-                # session where the profile installs them, else a whole named loss.
+                # call. Web search maps to the provider's search, metered per search;
+                # one that must ask first, and web_fetch, stay named losses. Custom skills
+                # go per session where the profile installs them, else a whole named loss.
                 web = tuple(
-                    tool for tool in own_tools if tool.kind == "builtin" and tool.name in _WEB_TOOLS
+                    tool
+                    for tool in own_tools
+                    if tool.kind == "builtin"
+                    and (
+                        tool.name in _WEB_TOOLS
+                        or (tool.name == "web_search" and tool.permission != "auto")
+                    )
                 )
                 unavailable_builtin_tools = tuple(
                     f"builtin_tool:{tool.name}"

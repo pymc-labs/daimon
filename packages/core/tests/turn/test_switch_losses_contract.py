@@ -146,8 +146,8 @@ async def test_gemini_names_only_what_its_turn_loses(gemini_template, consent_re
     request, quote, *_ = gemini_template
     relay = "mcp_server:linear" not in quote.declared_drops
     await _one_reading(request, quote, consent_request, relay=relay)
-    # Grounding is off: web search is a named loss; Daimon's own web_fetch carries fetch.
-    assert "builtin_tool:web_search" in quote.declared_drops
+    # Web search maps to Google Search; Daimon's own web_fetch carries fetch.
+    assert "builtin_tool:web_search" not in quote.declared_drops
     assert "builtin_tool:web_fetch" not in quote.declared_drops
 
 

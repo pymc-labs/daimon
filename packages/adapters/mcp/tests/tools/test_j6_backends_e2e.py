@@ -149,9 +149,9 @@ async def test_j6_a_copy_on_another_backend_keeps_it(chat, backend, capability):
     )
     assert LOSS[capability] not in preview.declared_drops, preview.declared_drops
     if capability == "builtin":
-        # Its shell/code execution is kept; web search is a named loss (unpriced on
-        # OpenAI, grounding off on Gemini), said plainly on the card.
-        assert "builtin_tool:web_search" in preview.declared_drops, preview.declared_drops
+        # Its shell/code execution and web search are kept: search maps to the
+        # provider's own, metered per search.
+        assert "builtin_tool:web_search" not in preview.declared_drops, preview.declared_drops
 
 
 @pytest.mark.parametrize("fresh_chat", ["member"], indirect=True)
