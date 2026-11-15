@@ -23,6 +23,7 @@ from mux.profiles import (
     native_agent_tools,
     neutral_catalog_profile_for,
 )
+from mux.profiles.gemini import OPT_IN_MODELS
 from pydantic import ValidationError
 
 
@@ -388,7 +389,11 @@ def test_builtin_bare_id_fallback_only_without_source(
 def test_selectable_models_list_the_default_first_and_never_pro() -> None:
     from mux.profiles import selectable_models
 
-    assert selectable_models("gemini") == ("gemini-3.8-flash", "gemini-4-argon")
+    assert selectable_models("gemini") == (
+        "gemini-3.8-flash",
+        *OPT_IN_MODELS,
+    )
+    assert OPT_IN_MODELS == ("gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen")
     assert selectable_models("openai") == ("gpt-6-luna", "gpt-6-astra")
     assert not any("pro" in model for model in selectable_models("gemini"))
 

@@ -74,7 +74,7 @@ from mux.drivers.gemini import (
     compile_environment,
 )
 from mux.errors import ContinuityLost, ProviderError, ScopeViolation, UnsupportedCapability
-from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE
+from mux.profiles.gemini import INLINE_REUSE, OPT_IN_MODELS
 from mux.state.store import StateStore
 from pydantic import JsonValue, TypeAdapter
 
@@ -130,7 +130,7 @@ def _runtime_model(runtime: TurnRuntime | None) -> str:
     if deployment is None:
         return FLASH_PRIMARY
     model = deployment.agent.model.id
-    return model if model == ARGON_MODEL else FLASH_PRIMARY
+    return model if model in OPT_IN_MODELS else FLASH_PRIMARY
 
 
 def compose_gemini_backend(request: TurnBackendRequest) -> TurnBackend:
@@ -215,7 +215,7 @@ def gemini_backend(
         supplied.transport,
         runtime.usage_store.accounting,
         native_agent=deployment.native_agent,
-        primary=ARGON_MODEL if required_model == ARGON_MODEL else FLASH_PRIMARY,
+        primary=required_model,
     )
     return GeminiManagedAgents(
         transport,

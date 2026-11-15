@@ -74,8 +74,8 @@ from mux.drivers.gemini import (
     verify_retained_deployments,
 )
 from mux.errors import ScopeViolation, UnsupportedCapability
-from mux.profiles import selectable_models
-from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE, InlineReuseId
+from mux.profiles import selectable_models, tariff_gated
+from mux.profiles.gemini import INLINE_REUSE, InlineReuseId
 from mux.state.lease import Slot
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
@@ -392,10 +392,10 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     if (
         revision is None
         or revision.model not in selectable_models(INLINE_REUSE.provider)
-        # Argon has no checked-in price after its intro tariff; never run it unpriced.
+        # A tariff-gated model without a checked-in price is never run unpriced.
         or (
-            revision.model == ARGON_MODEL
-            and (INLINE_REUSE.provider, ARGON_MODEL) not in pricing.provider_prices(PROFILE)
+            tariff_gated(revision)
+            and (INLINE_REUSE.provider, revision.model) not in pricing.provider_prices(PROFILE)
         )
         or request.deps.state_store is None
     ):

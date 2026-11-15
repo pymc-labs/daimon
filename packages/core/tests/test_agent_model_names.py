@@ -3,6 +3,7 @@
 import pytest
 from daimon.core.agent_model_names import resolve_model
 from mux.contracts.ids import ModelRef
+from mux.profiles.gemini import OPT_IN_MODELS
 
 
 @pytest.mark.parametrize(
@@ -21,13 +22,32 @@ from mux.contracts.ids import ModelRef
         ("cheapest anthropic", "claude-haiku-5-5"),
         ("luna", "gpt-6-luna"),
         ("flash", "gemini-3.8-flash"),
-        ("gemini 4", "gemini-4-argon"),
         ("argon", "gemini-4-argon"),
+        ("carbon", "gemini-4-carbon"),
+        ("hydrogen", "gemini-4-hydrogen"),
+        ("gemini 4 carbon", "gemini-4-carbon"),
+        ("Gemini 4 Hydrogen", "gemini-4-hydrogen"),
         ("lunaa", "gpt-6-luna"),
     ],
 )
 def test_natural_names_use_the_priced_runtime_catalog(name, model):
     assert resolve_model(name).id == model
+
+
+@pytest.mark.parametrize("model", OPT_IN_MODELS)
+def test_every_opt_in_model_resolves_by_id_and_natural_name(model):
+    from daimon.core.agent_model_names import model_name
+
+    assert resolve_model(model).id == model
+    assert resolve_model(model.removeprefix("gemini-4-")).id == model
+    assert model_name(ModelRef(provider="gemini", id=model)).startswith("Gemini 4 ")
+
+
+def test_a_bare_generation_never_picks_one_of_the_opt_in_models():
+    with pytest.raises(ValueError, match="could mean") as error:
+        resolve_model("gemini 4")
+    for word in ("argon", "carbon", "hydrogen"):
+        assert word in str(error.value).lower()
 
 
 def test_cheapest_claude_is_the_current_haiku_not_the_older_row():
@@ -99,6 +119,8 @@ def test_family_shorthand_never_means_the_pricier_fast_preset():
         ("openai", "gpt-6-astra", "GPT-6 Astra"),
         ("openai", "gpt-6-luna", "GPT-6 Luna"),
         ("gemini", "gemini-4-argon", "Gemini 4 Argon"),
+        ("gemini", "gemini-4-carbon", "Gemini 4 Carbon"),
+        ("gemini", "gemini-4-hydrogen", "Gemini 4 Hydrogen"),
         ("gemini", "gemini-3.8-flash", "Gemini 3.8 Flash"),
     ],
 )

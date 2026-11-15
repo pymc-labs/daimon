@@ -20,7 +20,7 @@ from mux.contracts.ids import ModelRef, ResourceRef
 from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAttempt
 from mux.errors import ProviderError
-from mux.profiles.gemini import ARGON_MODEL
+from mux.profiles.gemini import OPT_IN_MODELS
 from sqlalchemy import select, update
 from structlog.testing import capture_logs
 
@@ -61,7 +61,7 @@ async def accepted(owner, model: ModelRef, interaction: str) -> None:
     )
 
 
-@pytest.mark.parametrize("model_id", [FLASH_PRIMARY, ARGON_MODEL])
+@pytest.mark.parametrize("model_id", [FLASH_PRIMARY, *OPT_IN_MODELS])
 async def test_settled_attempts_never_exhaust_the_cap(postgres_state, model_id):
     sessions, scope, _, _ = postgres_state
     model = ModelRef(provider="gemini", id=model_id)
@@ -89,24 +89,23 @@ async def test_unsettled_holds_still_stop_at_the_cap(postgres_state):
         await holds(sessions, scope).before_attempt(model=model, attempt=1)
 
 
-async def test_settlement_is_idempotent_and_never_double_counts(postgres_state):
+@pytest.mark.parametrize("model_id", OPT_IN_MODELS)
+async def test_settlement_is_idempotent_and_never_double_counts(postgres_state, model_id):
     sessions, scope, _, _ = postgres_state
-    model = ModelRef(provider="gemini", id=ARGON_MODEL)
+    model = ModelRef(provider="gemini", id=model_id)
     owner = holds(sessions, scope)
     await accepted(owner, model, "i1")
     # A cumulative revision of the same interaction replaces the actual cost only.
     for actual in ("0.02", "0.03", "0.03"):
-        assert await owner.settle(
-            interaction_id="i1", model=ARGON_MODEL, actual_usd=Decimal(actual)
-        )
+        assert await owner.settle(interaction_id="i1", model=model_id, actual_usd=Decimal(actual))
     (row,) = (await ledger(sessions)).values()
     assert (row["held_usd"], row["settled_usd"], row["actual_usd"]) == ("0", "0.10", "0.03")
     # No such accepted attempt in this ledger: nothing changes.
-    assert not await owner.settle(interaction_id="other", model=ARGON_MODEL, actual_usd=Decimal(1))
+    assert not await owner.settle(interaction_id="other", model=model_id, actual_usd=Decimal(1))
     with pytest.raises(ValueError, match="model"):
         await owner.settle(interaction_id="i1", model=FLASH_PRIMARY, actual_usd=Decimal(1))
     with pytest.raises(ValueError, match="measured cost"):
-        await owner.settle(interaction_id="i1", model=ARGON_MODEL, actual_usd=Decimal(-1))
+        await owner.settle(interaction_id="i1", model=model_id, actual_usd=Decimal(-1))
 
 
 async def test_concurrent_settlements_release_one_hold_once(postgres_state):
@@ -148,10 +147,11 @@ async def test_an_unsettled_hold_expires_after_the_ttl_with_an_audit_log(postgre
     assert audit["expired_usd"] == "0.49" and audit["outcome"] == outcome
 
 
+@pytest.mark.parametrize("model_id", OPT_IN_MODELS)
 @pytest.mark.parametrize("status", [400, 503])
-async def test_a_4xx_or_503_refusal_releases_at_once(postgres_state, status):
+async def test_a_4xx_or_503_refusal_releases_at_once(postgres_state, status, model_id):
     sessions, scope, _, _ = postgres_state
-    model = ModelRef(provider="gemini", id=ARGON_MODEL)
+    model = ModelRef(provider="gemini", id=model_id)
     owner = holds(sessions, scope, hold="0.49")
     await owner.before_attempt(model=model, attempt=1)
     await owner.after_attempt(receipt=FlashAttempt(model, 1, "refused", http_status=status))
@@ -200,7 +200,8 @@ def test_outstanding_holds_report_reads_without_writing():
     assert outstanding_holds(None)["held_usd"] == "0"
 
 
-async def test_sqlite_ledger_settles_and_expires_the_same_way(tmp_path):
+@pytest.mark.parametrize("model_id", OPT_IN_MODELS)
+async def test_sqlite_ledger_settles_and_expires_the_same_way(tmp_path, model_id):
     clock = Clock()
     path = tmp_path / "holds.sqlite3"
 
@@ -209,10 +210,10 @@ async def test_sqlite_ledger_settles_and_expires_the_same_way(tmp_path):
             path, namespace="n", hold_usd=Decimal("0.49"), cap_usd=Decimal("0.49"), now=clock
         )
 
-    model = ModelRef(provider="gemini", id=ARGON_MODEL)
+    model = ModelRef(provider="gemini", id=model_id)
     first = owner()
     await accepted(first, model, "i1")
-    assert await first.settle(interaction_id="i1", model=ARGON_MODEL, actual_usd=Decimal("0.2"))
+    assert await first.settle(interaction_id="i1", model=model_id, actual_usd=Decimal("0.2"))
     second = owner()
     await second.before_attempt(model=model, attempt=1)
     await second.after_attempt(receipt=FlashAttempt(model, 1, "unknown"))
@@ -255,32 +256,39 @@ class Settling:
         return True
 
 
-async def test_measured_usage_settles_at_the_models_token_cost(monkeypatch):
+@pytest.mark.parametrize("model_id", OPT_IN_MODELS)
+async def test_measured_usage_settles_at_the_models_token_cost(monkeypatch, model_id):
     from daimon.core import pricing
 
-    class InArgonWindow(datetime):
+    def priced_usage(interaction, model_id, **changes):
+        return usage(
+            interaction, model_id, observed_at=datetime(2026, 11, 30, tzinfo=UTC), **changes
+        )
+
+    class InTariffWindow(datetime):
         @classmethod
         def now(cls, tz=None):
             return datetime(2026, 11, 30, tzinfo=UTC)
 
-    monkeypatch.setattr(pricing, "datetime", InArgonWindow)
+    monkeypatch.setattr(pricing, "datetime", InTariffWindow)
     prices = pricing.provider_prices("gemini.inline_reuse")
-    argon = prices[("gemini", ARGON_MODEL)]
-    assert interaction_of(usage("abc", ARGON_MODEL)) == "abc"
+    price = prices[("gemini", model_id)]
+    assert interaction_of(priced_usage("abc", model_id)) == "abc"
     accounting = Settling()
-    await _settle_hold(accounting, usage("abc", ARGON_MODEL), argon)
-    # 10k input at $2/M + 1k output at $10/M.
-    assert accounting.calls == [("abc", ARGON_MODEL, Decimal("0.03"))]
+    await _settle_hold(accounting, priced_usage("abc", model_id), price)
+    # 10k input and 1k output at the model's own per-million rates.
+    cost = (10_000 * price.input + 1_000 * price.output) / 1_000_000
+    assert accounting.calls == [("abc", model_id, cost)]
     # A running snapshot never frees the hold, even with a measured meter.
-    await _settle_hold(accounting, usage("r", ARGON_MODEL, final=False), argon)
+    await _settle_hold(accounting, priced_usage("r", model_id, final=False), price)
     # Partial meters, unpriced models and foreign ids leave the hold for the TTL.
-    await _settle_hold(accounting, usage("p", ARGON_MODEL, completeness="partial"), argon)
-    await _settle_hold(accounting, usage("u", ARGON_MODEL), None)
-    await _settle_hold(accounting, usage("x", ARGON_MODEL, id="other:x"), argon)
+    await _settle_hold(accounting, priced_usage("p", model_id, completeness="partial"), price)
+    await _settle_hold(accounting, priced_usage("u", model_id), None)
+    await _settle_hold(accounting, priced_usage("x", model_id, id="other:x"), price)
     assert len(accounting.calls) == 1
     # A settlement failure never fails the billed turn.
     with capture_logs() as logs:
-        await _settle_hold(Settling(RuntimeError("busy")), usage("abc", ARGON_MODEL), argon)
+        await _settle_hold(Settling(RuntimeError("busy")), priced_usage("abc", model_id), price)
     assert [entry["event"] for entry in logs] == ["provider_hold_settle_failed"]
 
 

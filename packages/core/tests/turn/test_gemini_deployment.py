@@ -36,7 +36,7 @@ from mux.drivers.gemini.storage import ArtifactRecord
 from mux.drivers.gemini.transport import NO_TOOLS_TOOL
 from mux.errors import ScopeViolation
 from mux.profiles import selectable_models
-from mux.profiles.gemini import ARGON_MODEL
+from mux.profiles.gemini import OPT_IN_MODELS
 from mux.state.lease import Slot
 from pydantic import JsonValue
 
@@ -301,19 +301,20 @@ async def test_holds_survive_restart_and_refusal_never_releases_budget(
     assert error.value.reason == "provider_hold_cap_reached"
 
 
-async def test_argon_attempt_holds_and_near_miss_ids_refuse(tmp_path: Path) -> None:
+@pytest.mark.parametrize("model", OPT_IN_MODELS)
+async def test_opt_in_attempt_holds_and_near_miss_ids_refuse(tmp_path: Path, model: str) -> None:
     hold = SQLiteFlashAccounting(
         tmp_path / "holds.sqlite",
         namespace="account",
         hold_usd=Decimal(".05"),
         cap_usd=Decimal(".10"),
     )
-    for near in ("gemini-4-argon-preview", "gemini-4"):
+    for near in (f"{model}-preview", "gemini-4"):
         with pytest.raises(AdmissionDenied):
             await hold.before_attempt(model=ModelRef(provider="gemini", id=near), attempt=1)
-    argon = ModelRef(provider="gemini", id=ARGON_MODEL)
-    await hold.before_attempt(model=argon, attempt=1)
-    await hold.after_attempt(receipt=FlashAttempt(argon, 1, "accepted", interaction_id="argon"))
+    opted = ModelRef(provider="gemini", id=model)
+    await hold.before_attempt(model=opted, attempt=1)
+    await hold.after_attempt(receipt=FlashAttempt(opted, 1, "accepted", interaction_id="opt-in"))
 
 
 async def test_unknown_hold_commits_before_native_dispatch_and_survives_crash(
@@ -415,7 +416,7 @@ async def test_policy_refusal_precedes_selected_key_and_transport(
     assert not (tmp_path / "records.sqlite").exists()
 
 
-def argon_clock(monkeypatch: pytest.MonkeyPatch, day: datetime) -> None:
+def tariff_clock(monkeypatch: pytest.MonkeyPatch, day: datetime) -> None:
     class Clock(datetime):
         @classmethod
         def now(cls, tz: tzinfo | None = None) -> datetime:  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -425,17 +426,20 @@ def argon_clock(monkeypatch: pytest.MonkeyPatch, day: datetime) -> None:
     monkeypatch.setattr(pricing, "datetime", Clock)
 
 
-def argon_selected(
-    selected: ProviderPreparationRequest, monkeypatch: pytest.MonkeyPatch, day: datetime
+def opt_in_selected(
+    selected: ProviderPreparationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    day: datetime,
+    model: str,
 ) -> ProviderPreparationRequest:
-    """Select Argon on the channel and move the tariff clock to `day`."""
-    argon_clock(monkeypatch, day)
+    """Select an opt-in model on the channel and move the tariff clock to `day`."""
+    tariff_clock(monkeypatch, day)
     revision = selected.admission.backend_revision
     assert revision is not None
     config = ConfigRevision.create(
         revision.channel,
         1,
-        resolve_default(BackendConfig(backend="gemini", profile=PROFILE, model=ARGON_MODEL)),
+        resolve_default(BackendConfig(backend="gemini", profile=PROFILE, model=model)),
     )
     return replace(
         selected,
@@ -446,7 +450,8 @@ def argon_selected(
 
 
 @pytest.mark.parametrize(
-    "output_cap,model", ((None, FLASH_PRIMARY), (4096, FLASH_PRIMARY), (None, ARGON_MODEL))
+    "output_cap,model",
+    ((None, FLASH_PRIMARY), (4096, FLASH_PRIMARY), *((None, model) for model in OPT_IN_MODELS)),
 )
 async def test_application_constructs_gemini_and_reuses_persisted_native_binding(
     selected: ProviderPreparationRequest,
@@ -460,8 +465,8 @@ async def test_application_constructs_gemini_and_reuses_persisted_native_binding
 
     from .test_gemini_codec import interaction
 
-    if model == ARGON_MODEL:
-        selected = argon_selected(selected, monkeypatch, datetime(2026, 11, 30, tzinfo=UTC))
+    if model in OPT_IN_MODELS:
+        selected = opt_in_selected(selected, monkeypatch, datetime(2026, 11, 30, tzinfo=UTC), model)
     plan = entry(selected, tmp_path)
     if output_cap is not None:
         plan.update(
@@ -573,18 +578,24 @@ async def test_application_constructs_gemini_and_reuses_persisted_native_binding
         assert debited < 0
 
 
-async def test_argon_after_its_intro_tariff_refuses_before_runtime_discovery(
+@pytest.mark.parametrize("model", OPT_IN_MODELS)
+async def test_a_tariff_gated_model_without_a_price_refuses_before_runtime_discovery(
     selected: ProviderPreparationRequest,
     monkeypatch: pytest.MonkeyPatch,
+    model: str,
 ) -> None:
-    # Admitted inside the window; the tariff expires before the runtime is built.
-    selected = argon_selected(selected, monkeypatch, datetime(2026, 11, 30, tzinfo=UTC))
-    argon_clock(monkeypatch, datetime(2026, 12, 1, tzinfo=UTC))
+    # Admitted while priced; the price row is gone before the runtime is built.
+    selected = opt_in_selected(selected, monkeypatch, datetime(2026, 11, 30, tzinfo=UTC), model)
+    unpriced = {
+        profile: tuple(price for price in rows if price.model != model)
+        for profile, rows in pricing._PROVIDER_PRICING.items()
+    }
+    monkeypatch.setattr(pricing, "_PROVIDER_PRICING", unpriced)
     getter = os.environ.get
 
     def no_manifest(name: str, default: str | None = None) -> str | None:
         if name == "DAIMON_TURN__PROVIDER_RUNTIME_FILE":
-            pytest.fail("unpriced Argon discovered its runtime")
+            pytest.fail("an unpriced model discovered its runtime")
         return getter(name, default)
 
     monkeypatch.setattr(os.environ, "get", no_manifest)
@@ -649,7 +660,7 @@ async def test_an_unselectable_model_does_not_enable_an_ordinary_runtime(
     monkeypatch: pytest.MonkeyPatch,
     model: str,
 ) -> None:
-    # Ordinary turns run the selectable models (Flash, Flash-Lite, Argon); others,
+    # Ordinary turns run the selectable models (Flash, Flash-Lite and the opt-in models); others,
     # Pro included, refuse before any runtime discovery.
     revision = selected.admission.backend_revision
     assert revision is not None

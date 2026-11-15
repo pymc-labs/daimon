@@ -605,7 +605,7 @@ PROVIDER_PRICING_SOURCES = (
     "https://developers.openai.com/api/docs/models/gpt-6-luna",
     "https://developers.openai.com/api/docs/models/gpt-6-astra",
     "https://developers.openai.com/api/docs/guides/agents-api/observability",
-    "https://ai.google.dev/gemini-api/docs/pricing",
+    "https://aistudio.google.com/docs/pricing",
     "https://ai.google.dev/gemini-api/docs/antigravity-agent",
 )
 _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
@@ -654,19 +654,51 @@ _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
                 Decimal("0.075"),
                 valid_before=date(2027, 1, 1),
             ),
-            # Intro tariff only (GA 2026-10-13, through 2026-11-30). The post-intro
-            # price is unpublished here, so from 2026-12-01 Argon is unpriced and
-            # refused at admission until a dated row is added. Cached input: 95% off.
-            # FOLLOW-UP before 2026-12-01: add the post-intro row, or the daily model
-            # cap also refuses every Argon turn (provider_price_unavailable).
+            # No start-date field: a successor row's `checked_on` is its start date,
+            # and a later row wins an overlap. Cached input is implicit caching only.
             ProviderPrice(
                 INLINE_REUSE.provider,
-                "gemini-4-argon",
-                date(2026, 10, 22),
-                Decimal("2.00"),
-                Decimal("10.00"),
-                Decimal("0.10"),
-                valid_before=date(2026, 12, 1),
+                "gemini-3.8-flash",
+                date(2027, 1, 1),
+                Decimal("1.50"),
+                Decimal("7.50"),
+                Decimal("0.15"),
+            ),
+            # Argon and Carbon share one tariff: intro rates through 2026-11-30,
+            # then the standard rates from 2026-12-01.
+            *(
+                row
+                for model, checked_on in (
+                    ("gemini-4-argon", date(2026, 10, 22)),
+                    ("gemini-4-carbon", date(2026, 11, 15)),
+                )
+                for row in (
+                    ProviderPrice(
+                        INLINE_REUSE.provider,
+                        model,
+                        checked_on,
+                        Decimal("2.00"),
+                        Decimal("10.00"),
+                        Decimal("0.10"),
+                        valid_before=date(2026, 12, 1),
+                    ),
+                    ProviderPrice(
+                        INLINE_REUSE.provider,
+                        model,
+                        date(2026, 12, 1),
+                        Decimal("4.00"),
+                        Decimal("20.00"),
+                        Decimal("0.20"),
+                    ),
+                )
+            ),
+            ProviderPrice(
+                INLINE_REUSE.provider,
+                "gemini-4-hydrogen",
+                date(2026, 11, 15),
+                Decimal("1.50"),
+                Decimal("7.50"),
+                Decimal("0.075"),
             ),
         ),
     }
@@ -712,12 +744,16 @@ def provider_prices(profile: str) -> Mapping[tuple[str, str], ProviderPrice]:
 
 
 def price_expiries() -> tuple[tuple[str, str, date], ...]:
-    """Every dated tariff that lapses: (profile, model, valid_before), soonest first."""
+    """Every model whose newest tariff lapses: (profile, model, valid_before), soonest first.
+
+    A model with an open-ended successor row never lapses, so it is not listed.
+    """
     found = [
-        (profile, price.model, price.valid_before)
+        (profile, model, max(price.valid_before for price in rows if price.valid_before))
         for profile, prices in _PROVIDER_PRICING.items()
-        for price in prices
-        if price.valid_before is not None
+        for model in {price.model for price in prices}
+        if (rows := [price for price in prices if price.model == model])
+        and all(price.valid_before is not None for price in rows)
     ]
     return tuple(sorted(found, key=lambda each: each[2]))
 

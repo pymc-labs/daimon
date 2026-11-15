@@ -21,7 +21,7 @@ from daimon.core.turn.state import extract_final_response
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.drivers.gemini.flash import FLASH_PRIMARY
 from mux.profiles import INLINE_REUSE
-from mux.profiles.gemini import ARGON_MODEL
+from mux.profiles.gemini import OPT_IN_MODELS
 
 from ..test_agent_backend import owned as owned
 from .test_declared_drop_preparation import consent_request as consent_request
@@ -32,7 +32,10 @@ from .test_gemini_template_mcp import template as template
 
 @pytest.mark.parametrize(
     ("consent_request", "model"),
-    [(PARAMS, FLASH_PRIMARY), ({**PARAMS, "backend_model": ARGON_MODEL}, ARGON_MODEL)],
+    [
+        (PARAMS, FLASH_PRIMARY),
+        *(({**PARAMS, "backend_model": model}, model) for model in OPT_IN_MODELS),
+    ],
     indirect=["consent_request"],
 )
 async def test_a_copys_gemini_turn_runs_from_the_code_default_template(

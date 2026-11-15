@@ -19,8 +19,9 @@ INLINE_REUSE_ID: Final[InlineReuseId] = "gemini.inline_reuse"
 #: The extension config that carries a thread's session binding.
 SESSION_NAMESPACE: Final = "gemini.session"
 
-# Opt-in model: one attempt, never the Flash fallback chain.
-ARGON_MODEL = "gemini-4-argon"
+#: Opt-in models, defined once: each is its own single attempt, never the Flash
+#: fallback chain, and is selectable only while the host holds a current price.
+OPT_IN_MODELS: Final = ("gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen")
 
 # The agent's thinking level; the neutral names match.
 _EFFORT: dict[Effort, str] = {"low": "low", "medium": "medium", "high": "high"}

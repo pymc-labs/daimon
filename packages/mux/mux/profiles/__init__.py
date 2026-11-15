@@ -17,7 +17,7 @@ from mux.contracts.ids import Provider
 from mux.contracts.profile import SUPPORTED, AccountingMode, Profile
 from mux.contracts.resources import AgentSpec, ToolSpec
 from mux.profiles.anthropic import MANAGED_AGENTS
-from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE
+from mux.profiles.gemini import INLINE_REUSE, OPT_IN_MODELS
 from mux.profiles.openai import ASTRA_MODEL, CONVERSATION_ONLY, LUNA_MODEL, PERSISTENT_WORKSPACE
 from mux.profiles.selfhosted import LOOP
 
@@ -213,8 +213,8 @@ _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
     "gemini": BackendSelection(
         BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"),
         ("per_caller", "shared"),
-        allowed_models=(ARGON_MODEL,),
-        tariff_gated_models=(ARGON_MODEL,),
+        allowed_models=OPT_IN_MODELS,
+        tariff_gated_models=OPT_IN_MODELS,
     ),
 }
 #: The provider defaults that backend-switch consents on a default-model setting

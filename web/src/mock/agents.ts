@@ -25,6 +25,8 @@ const MODELS: CatalogModel[] = [
   { id: "gpt-6-astra", label: "GPT-6 Astra", backend: "openai", in_usd: 10, out_usd: 50, efforts: LEVELS },
   { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", backend: "gemini", in_usd: 0.75, out_usd: 3.75, efforts: LEVELS },
   { id: "gemini-4-argon", label: "Gemini 4 Argon", backend: "gemini", in_usd: 2, out_usd: 10, efforts: LEVELS },
+  { id: "gemini-4-carbon", label: "Gemini 4 Carbon", backend: "gemini", in_usd: 2, out_usd: 10, efforts: LEVELS },
+  { id: "gemini-4-hydrogen", label: "Gemini 4 Hydrogen", backend: "gemini", in_usd: 1.5, out_usd: 7.5, efforts: LEVELS },
 ]
 const modelLabel = (m: ModelChoice) => {
   const c = MODELS.find((x) => x.id === m.id)

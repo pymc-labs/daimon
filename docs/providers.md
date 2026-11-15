@@ -10,7 +10,7 @@ in one conversation.
 | | Anthropic (default) | OpenAI | Gemini | Self-hosted harness |
 | --- | --- | --- | --- | --- |
 | Needs | Anthropic API key | OpenAI key and project | Gemini key | Your own harness service and Azure OpenAI |
-| Models | The agent's own model | `gpt-6-luna`, `gpt-6-astra` | `gemini-3.8-flash`, `gemini-4-argon` (priced through 2026-11-30, then refused) | The deployment you name (default `gpt-6.1-sol`) |
+| Models | The agent's own model | `gpt-6-luna`, `gpt-6-astra` | `gemini-3.8-flash`, `gemini-4-argon`, `gemini-4-carbon`, `gemini-4-hydrogen` | The deployment you name (default `gpt-6.1-sol`) |
 | Set as an agent's model or a thread's | Yes | Yes | Yes | An agent's, once the operator grants it; not a thread's |
 | Shared threads | Yes | Yes, without Daimon's tools unless the agent itself picks OpenAI | Yes, without Daimon's tools | Yes |
 | Tools that need a confirmation | Yes | Daimon's Approve card | Daimon's Approve card | Daimon's Approve card |

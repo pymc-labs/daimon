@@ -585,6 +585,7 @@ async def test_native_no_drop_chat_confirmation_binds_empty_consent(active_chat)
 
 async def test_chat_switch_to_a_named_model_previews_and_applies_that_model(active_chat):
     from daimon.core.channel_backend import load_backend_agent
+    from mux.profiles import selectable_models
 
     runtime, auth, origin, service, trace, payload, frozen, gate, agent, mapping = active_chat
     _without_own_tools(payload)
@@ -599,7 +600,9 @@ async def test_chat_switch_to_a_named_model_previews_and_applies_that_model(acti
         origin_context_id=str(origin.id),
     )
     assert preview.status == "preview" and preview.model == "gemini-4-argon"
-    assert preview.models == ("gemini-3.8-flash", "gemini-4-argon")
+    assert preview.models == selectable_models("gemini"), (
+        "the previewed list is the selectable list"
+    )
     assert "gemini-4-argon" in preview.cost_line
     gate()
     agent()

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Gemini 4 Carbon and Gemini 4 Hydrogen are selectable Gemini models.** They
+  join Gemini 4 Argon wherever a model is picked, each as a single attempt with
+  no fallback to Flash. Argon and Carbon cost more from 2026-12-01.
 - **An agent can run on a self-hosted model.** Once an operator grants the
   agent, its model picker lists the self-hosted model, and one preview and
   confirm switches it. A channel pin still wins.
