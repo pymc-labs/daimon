@@ -44,6 +44,8 @@ INLINE_REUSE = Profile(
     skill_limits=SkillLimits(
         total_bytes=2 * MIB, file_bytes=MIB, files=256, text_only=True, combined_bytes=2 * MIB
     ),
+    # Past those, uploaded into a pre-created environment; binaries allowed.
+    skill_upload_limits=SkillLimits(total_bytes=28 * MIB, file_bytes=28 * MIB, files=256),
     catalog_readback="verify",
     support={
         "neutral_catalog": "emulated",

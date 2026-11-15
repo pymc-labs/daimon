@@ -1,6 +1,9 @@
 """Pinned host catalogues compiled into documented inline environment sources."""
 
+import gzip
 import hashlib
+import io
+import tarfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -10,7 +13,7 @@ from pydantic import JsonValue
 from mux.contracts.ids import Scope, SkillRef
 from mux.contracts.resources import SkillUpload, WorkspaceSource
 from mux.drivers.gemini.skill_deployment import validate_deployment
-from mux.drivers.gemini.storage import Records, SkillRecord, owner
+from mux.drivers.gemini.storage import Records, SkillRecord, UploadedBundle, owner
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from mux.profiles.gemini import INLINE_REUSE
 from mux.state.operations import request_digest
@@ -19,7 +22,10 @@ SKILL_SOURCE = "gemini.inline"
 MAX_BUNDLE_BYTES = 2 * 1024 * 1024
 MAX_INLINE_FILE_BYTES = 1024 * 1024
 MAX_DEPLOYED_BUNDLE_BYTES = 64 * 1024 * 1024
+MAX_UPLOAD_BUNDLE_BYTES = 28 * 1024 * 1024
 SKILLS_ROOT = ".agents/skills"
+#: Where an uploaded skill's files land: the inline sources' root.
+UPLOAD_ROOT = SKILLS_ROOT
 
 
 def relative_path(path: str) -> str:
@@ -45,7 +51,30 @@ def text_bytes(body: bytes) -> str:
         raise UnsupportedCapability(("binary_inline_source",), INLINE_REUSE.profile_id) from None
 
 
-def validate_bundle(bundle: SkillUpload, *, external: bool = False) -> str:
+def fits_inline(bundle: SkillUpload) -> bool:
+    """Whether a bundle mounts as inline sources: UTF-8 text within the inline limits."""
+    if sum(len(file.content) for file in bundle.files) > MAX_BUNDLE_BYTES:
+        return False
+    for file in bundle.files:
+        try:
+            file.content.decode("utf-8")
+        except UnicodeDecodeError:
+            return False
+        if len(file.content) > MAX_INLINE_FILE_BYTES:
+            return False
+    return True
+
+
+def fits_upload(bundle: SkillUpload) -> bool:
+    """Whether a bundle past the inline limits uploads: only its SKILL.md mounts inline."""
+    manifest = next(file.content for file in bundle.files if file.path == "SKILL.md")
+    return (
+        sum(len(file.content) for file in bundle.files) <= MAX_UPLOAD_BUNDLE_BYTES
+        and len(manifest) <= MAX_INLINE_FILE_BYTES
+    )
+
+
+def validate_bundle(bundle: SkillUpload, *, external: bool = False, upload: bool = False) -> str:
     if not bundle.files or len(bundle.files) > 256:
         raise ValueError("skill bundle needs between one and 256 files")
     paths = [relative_path(file.path) for file in bundle.files]
@@ -61,22 +90,63 @@ def validate_bundle(bundle: SkillUpload, *, external: bool = False) -> str:
         raise ValueError("root SKILL.md must be UTF-8 text") from None
     if sum(len(file.content) for file in bundle.files) > MAX_DEPLOYED_BUNDLE_BYTES:
         raise ValueError("skill bundle exceeds the deployment size limit")
-    if not external:
-        if sum(len(file.content) for file in bundle.files) > MAX_BUNDLE_BYTES or any(
-            len(file.content) > MAX_INLINE_FILE_BYTES for file in bundle.files
-        ):
-            raise UnsupportedCapability(("skill_bundle_gcs_deployment",), INLINE_REUSE.profile_id)
-        for file in bundle.files:
-            try:
-                text_bytes(file.content)
-            except UnsupportedCapability:
-                raise UnsupportedCapability(
-                    ("skill_bundle_gcs_deployment",), INLINE_REUSE.profile_id
-                ) from None
+    if not external and not fits_inline(bundle) and not (upload and fits_upload(bundle)):
+        raise UnsupportedCapability(("skill_bundle_gcs_deployment",), INLINE_REUSE.profile_id)
     canonical = bundle.model_copy(
         update={"files": tuple(sorted(bundle.files, key=lambda f: f.path))}
     )
     return request_digest(canonical.model_dump(mode="json"))
+
+
+def upload_manifest(bundle: SkillUpload) -> UploadedBundle:
+    """What a record keeps of an uploaded version: the SKILL.md, the rest by digest."""
+    files = sorted(
+        (file.path, len(file.content), hashlib.sha256(file.content).hexdigest())
+        for file in bundle.files
+        if file.path != "SKILL.md"
+    )
+    manifest = next(file.content for file in bundle.files if file.path == "SKILL.md")
+    return UploadedBundle(manifest.decode("utf-8"), tuple(files))
+
+
+def skill_archive(uploaded: UploadedBundle, bundle: SkillUpload) -> bytes:
+    """A tar.gz of an uploaded version's files past SKILL.md, each checked against its manifest.
+
+    Regular files only, at validated relative paths, so it can't write outside its directory.
+    """
+    contents = {file.path: file.content for file in bundle.files}
+    expected = {path for path, _, _ in uploaded.files}
+    if (
+        set(contents) - {"SKILL.md"} != expected
+        or contents.get("SKILL.md") != uploaded.manifest.encode("utf-8")
+        or any(
+            len(contents[path]) != size or hashlib.sha256(contents[path]).hexdigest() != sha256
+            for path, size, sha256 in uploaded.files
+        )
+    ):
+        raise ProviderError("conflict", retryable=False, native_code="skill_bytes_mismatch")
+    buffer = io.BytesIO()
+    with (
+        gzip.GzipFile(fileobj=buffer, mode="wb", mtime=0) as zipped,
+        tarfile.open(fileobj=zipped, mode="w", format=tarfile.PAX_FORMAT) as archive,
+    ):
+        for path, size, _ in uploaded.files:
+            info = tarfile.TarInfo(relative_path(path))
+            info.size, info.mode = size, 0o644
+            archive.addfile(info, io.BytesIO(contents[path]))
+    return buffer.getvalue()
+
+
+def uploaded_pins(
+    records: Records, scope: Scope, account: str, pins: tuple[SkillRef, ...]
+) -> tuple[SkillRef, ...]:
+    """The pins whose versions upload, in order, once each."""
+    found: dict[str, SkillRef] = {}
+    for pin in pins:
+        record = owned_skill(records, scope, account, pin.id)
+        if pin.version is not None and pin.version in record.uploads:
+            found.setdefault(pin.id, pin)
+    return tuple(found.values())
 
 
 def owned_skill(records: Records, scope: Scope, account: str, skill_id: str) -> SkillRecord:
@@ -97,8 +167,22 @@ def skill_sources(
             raise UnsupportedCapability(("pinned_inline_skill",), INLINE_REUSE.profile_id)
         ids.add(pin.id)
         bundle = record.bundles.get(pin.version)
-        if bundle is None or (pin.digest is not None and pin.digest != pin.version):
+        uploaded = record.uploads.get(pin.version)
+        if (bundle is None and uploaded is None) or (
+            pin.digest is not None and pin.digest != pin.version
+        ):
             raise ProviderError("conflict", retryable=False, native_code="skill_pin_mismatch")
+        if bundle is None:
+            # Only the SKILL.md mounts, so the agent lists the skill; the rest is uploaded.
+            assert uploaded is not None, "an uploaded version without a bundle"
+            sources.append(
+                {
+                    "type": "inline",
+                    "target": f"{SKILLS_ROOT}/{pin.id}/SKILL.md",
+                    "content": uploaded.manifest,
+                }
+            )
+            continue
         deployment = record.deployments.get(pin.version)
         if deployment is not None:
             validate_deployment(deployment, scope, account, pin.version, bundle)
@@ -217,6 +301,11 @@ def mounted_files(environment: JsonValue, skills: Mapping[str, SkillRecord]) -> 
         skill = path.startswith(SKILLS_ROOT + "/") and len(parts) > 2
         if skill and source.get("type") == "inline":
             paths.add(path)
+            if len(parts) == 4 and parts[3] == "SKILL.md" and isinstance(content, str):
+                directory = "/".join(parts[:3])
+                paths.update(
+                    f"{directory}/{file}" for file in uploaded_files(skills, parts[2], content)
+                )
         elif skill and (manifest := deployed_files(skills, parts[2], source.get("source"))):
             paths.update(target_path(f"{path}/{file}") for file in manifest)
         elif source.get("type") == "inline" and isinstance(content, str):
@@ -224,6 +313,15 @@ def mounted_files(environment: JsonValue, skills: Mapping[str, SkillRecord]) -> 
         else:
             directories.append(path)
     return MountedFiles(frozenset(paths), files, tuple(directories))
+
+
+def uploaded_files(skills: Mapping[str, SkillRecord], skill_id: str, manifest: str) -> list[str]:
+    """The paths uploaded beside a mounted SKILL.md, or none when it names no upload."""
+    record = skills.get(skill_id)
+    for uploaded in record.uploads.values() if record else ():
+        if uploaded.manifest == manifest:
+            return [path for path, _, _ in uploaded.files]
+    return []
 
 
 def deployed_files(skills: Mapping[str, SkillRecord], skill_id: str, uri: JsonValue) -> list[str]:

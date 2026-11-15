@@ -802,8 +802,11 @@ file digest manifest. Persisted receipts mount immutable directories at the
 original skill paths, including binary fonts/images, and retain old version
 pins after publication. The host owns authorized GCS publication/access and
 retention; no publisher or credentials are selected implicitly. Without that
-adapter, binary/oversize bundles refuse `skill_bundle_gcs_deployment`; normal
-text bundles retain inline mounts. See
+adapter or a `skill_files` reader, binary/oversize bundles refuse
+`skill_bundle_gcs_deployment`; normal text bundles retain inline mounts. With
+`skill_files`, bundles up to 28 MiB upload into an environment created before
+the first interaction; failed uploads are left out and named in
+`Session.native["skills_left_out"]`. See
 [the capability notes](docs/drivers/gemini/DEFAULT-CAPABILITY.md) for limits and
 offline evidence. A scripted publisher does not certify a live full default.
 

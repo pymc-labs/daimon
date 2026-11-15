@@ -18,6 +18,7 @@ from mux.drivers.gemini.core import (
     GeminiEnvironments,
     GeminiEvents,
     GeminiSessions,
+    SkillFiles,
     compile_agent,
     compile_environment,
     page_values,
@@ -46,7 +47,13 @@ from mux.drivers.gemini.skill_deployment import (
     verify_retained_deployments,
 )
 from mux.drivers.gemini.storage import Records, Storage, read_records
-from mux.drivers.gemini.transport import NO_TOOLS_FUNCTION, NO_TOOLS_TOOL, SDKTransport, Transport
+from mux.drivers.gemini.transport import (
+    NO_TOOLS_FUNCTION,
+    NO_TOOLS_TOOL,
+    EnvironmentTransport,
+    SDKTransport,
+    Transport,
+)
 from mux.errors import UnsupportedCapability
 from mux.profiles.gemini import INLINE_REUSE as PROFILE
 from mux.state.store import StateStore
@@ -97,6 +104,7 @@ class GeminiManagedAgents:
         native_agent: Agent | None = None,
         max_output_tokens: int | None = None,
         thinking_level: str | None = None,
+        skill_files: SkillFiles | None = None,
     ) -> None:
         if type(resource_catalog_enabled) is not bool:
             raise ValueError("resource catalog capability must be an explicit bool")
@@ -131,6 +139,7 @@ class GeminiManagedAgents:
             gcs_secrets=gcs_secrets,
             max_output_tokens=max_output_tokens,
             thinking_level=thinking_level,
+            skill_files=skill_files,
         )
         self.events = GeminiEvents(
             transport,
@@ -147,7 +156,11 @@ class GeminiManagedAgents:
         self.usage = GeminiUsage(transport, storage, account_scope_id)
         self.artifacts = GeminiArtifacts(transport, storage, account_scope_id)
         self.skills = GeminiSkills(
-            transport, storage, account_scope_id, publisher=skill_bundle_publisher
+            transport,
+            storage,
+            account_scope_id,
+            publisher=skill_bundle_publisher,
+            uploads=skill_files is not None,
         )
 
     @property
@@ -167,6 +180,7 @@ class GeminiManagedAgents:
 
 
 __all__ = [
+    "EnvironmentTransport",
     "GeminiCompletions",
     "NO_TOOLS_FUNCTION",
     "NO_TOOLS_TOOL",
@@ -192,6 +206,7 @@ __all__ = [
     "Records",
     "RetainedSkillDeployments",
     "SkillBundlePublisher",
+    "SkillFiles",
     "Storage",
     "SDKTransport",
     "Transport",

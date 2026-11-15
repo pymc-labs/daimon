@@ -52,6 +52,19 @@ class SessionRecord:
     # Interaction id -> SHA-256 of each storage-mount header sent for it. Lets a
     # later turn or a restart clear that interaction's echo; never the token.
     mount_echo_digests: dict[str, list[str]] = field(default_factory=dict[str, list[str]])
+    # Uploaded skill ids still to place in the pre-created `environment_id`; while
+    # any remain, no turn starts. `left_out`: session skill ids it goes without.
+    uploading: tuple[str, ...] = ()
+    left_out: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class UploadedBundle:
+    """An uploaded skill version: its SKILL.md text and each other file's
+    (path, size, sha256). The bytes stay with the host until upload time."""
+
+    manifest: str
+    files: tuple[tuple[str, int, str], ...]
 
 
 @dataclass
@@ -64,6 +77,7 @@ class SkillRecord:
     deployments: dict[str, GCSBundleDeployment] = field(
         default_factory=dict[str, GCSBundleDeployment]
     )
+    uploads: dict[str, UploadedBundle] = field(default_factory=dict[str, UploadedBundle])
 
 
 @dataclass

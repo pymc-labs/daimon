@@ -11,7 +11,8 @@ import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from collections.abc import Set as AbstractSet
-from typing import Any, NoReturn, Protocol, cast
+from typing import Any, NoReturn, Protocol, cast, runtime_checkable
+from urllib.parse import quote
 
 import httpx
 from google import genai
@@ -41,6 +42,18 @@ class Transport(Protocol):
     async def open_stream(
         self, interaction_id: str, *, after: str | None = None
     ) -> AsyncIterator[Object]: ...
+
+
+@runtime_checkable
+class EnvironmentTransport(Protocol):
+    """The Environments API: one made before any interaction, to upload files into."""
+
+    async def create_environment(self, config: Mapping[str, JsonValue]) -> str: ...
+    async def upload_archive(
+        self, environment_id: str, path: str, archive: bytes, *, overwrite: bool
+    ) -> None: ...
+    async def list_files(self, environment_id: str, path: str) -> dict[str, int]: ...
+    async def delete_environment(self, environment_id: str) -> None: ...
 
 
 #: The one tool an agent request with no tools of its own allows: listing it keeps
@@ -573,6 +586,7 @@ class SDKTransport:
         # attempts=1 still retries once. Set the Interactions edge to zero.
         nextgen = client.aio._nextgen_client  # pyright: ignore[reportPrivateUsage]
         self._interactions = nextgen.with_options(max_retries=0).interactions
+        self._raw = nextgen.with_options(max_retries=0)
         self._files = client.aio.files
         self._models = client.aio.models
 
@@ -624,6 +638,92 @@ class SDKTransport:
 
     async def download_snapshot(self, environment_id: str) -> bytes:
         return await provider_call(self._files.download(file=f"files/environment-{environment_id}"))
+
+    def _environment_path(
+        self, environment_id: str, path: str = "", *, upload: bool = False
+    ) -> str:
+        prefix = "/upload" if upload else ""
+        name = quote(environment_id, safe="")
+        tail = f"/files/{quote(path)}" if path else ""
+        return f"{prefix}/{self._raw.api_version}/environments/{name}{tail}"
+
+    async def create_environment(self, config: Mapping[str, JsonValue]) -> str:
+        response = await provider_call(
+            self._raw.post(
+                f"/{self._raw.api_version}/environments",
+                cast_to=httpx.Response,
+                body=dict(config),
+                options={"headers": {"Api-Revision": API_REVISION}},
+            )
+        )
+        try:
+            return string(object_value(cast(JsonValue, response.json()))["id"])
+        except (KeyError, ValueError, TypeError):
+            raise ProviderError(
+                "upstream", retryable=False, native_code="malformed_environment"
+            ) from None
+
+    async def upload_archive(
+        self, environment_id: str, path: str, archive: bytes, *, overwrite: bool
+    ) -> None:
+        params = {"extract": "true", **({"overwrite": "true"} if overwrite else {})}
+        await provider_call(
+            self._raw.put(
+                # A trailing slash names the directory the archive unpacks into.
+                self._environment_path(environment_id, path.rstrip("/") + "/", upload=True),
+                cast_to=httpx.Response,
+                content=archive,
+                options={
+                    "headers": {
+                        "Api-Revision": API_REVISION,
+                        "Content-Type": "application/gzip",
+                    },
+                    "params": params,
+                },
+            )
+        )
+
+    async def list_files(self, environment_id: str, path: str) -> dict[str, int]:
+        """Each file's size under `path`, by its path relative to `path`."""
+        prefix = path.strip("/") + "/"
+        sizes: dict[str, int] = {}
+        token: str | None = None
+        for _ in range(100):
+            params = {"recursive": "true", **({"page_token": token} if token else {})}
+            response = await provider_call(
+                self._raw.get(
+                    self._environment_path(environment_id, path),
+                    cast_to=httpx.Response,
+                    options={"headers": {"Api-Revision": API_REVISION}, "params": params},
+                )
+            )
+            try:
+                body = object_value(cast(JsonValue, response.json()))
+                files = body.get("files") or []
+                for item in files if isinstance(files, list) else ():
+                    entry = object_value(item)
+                    size = entry.get("size_bytes", "0")  # an int64, sent as a string
+                    if entry.get("type", "FILE") == "FILE" and isinstance(size, str | int):
+                        listed = string(entry["path"]).lstrip("/")
+                        sizes[listed.partition(prefix)[2] or listed] = int(size)
+                next_token = body.get("next_page_token")
+            except (KeyError, ValueError, TypeError):
+                raise ProviderError(
+                    "upstream", retryable=False, native_code="malformed_file_list"
+                ) from None
+            if not isinstance(next_token, str) or not next_token:
+                return sizes
+            token = next_token
+        raise ProviderError("upstream", retryable=False, native_code="file_list_unbounded")
+
+    async def delete_environment(self, environment_id: str) -> None:
+        await provider_call(
+            self._raw.delete(
+                self._environment_path(environment_id),
+                cast_to=httpx.Response,
+                options={"headers": {"Api-Revision": API_REVISION}},
+            )
+        )
 
     async def create(self, request: Mapping[str, JsonValue]) -> Object:
         # An omitted list is made explicit here, but for an AGENT request an empty

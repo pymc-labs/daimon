@@ -2,10 +2,11 @@
 
 import asyncio
 import copy
+import logging
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import NoReturn
+from typing import NoReturn, Protocol
 from uuid import uuid4
 
 from pydantic import JsonValue
@@ -13,7 +14,16 @@ from pydantic import JsonValue
 from mux.contracts.actions import InputEvent, UserMessage, UserToolResult
 from mux.contracts.config import ConfigRevision
 from mux.contracts.events import Event, TextPart
-from mux.contracts.ids import ModelRef, Page, PageRequest, ResourceRef, Revision, Scope, ThreadRef
+from mux.contracts.ids import (
+    ModelRef,
+    Page,
+    PageRequest,
+    ResourceRef,
+    Revision,
+    Scope,
+    SkillRef,
+    ThreadRef,
+)
 from mux.contracts.receipts import (
     CancelReceipt,
     DeletionReceipt,
@@ -40,9 +50,19 @@ from mux.contracts.resources import (
     SessionExport,
     SessionFilter,
     SessionSpec,
+    SkillUpload,
     UpdatePlan,
 )
-from mux.drivers.gemini.bundles import inline_files, skill_sources, target_path, validate_targets
+from mux.drivers.gemini.bundles import (
+    UPLOAD_ROOT,
+    inline_files,
+    owned_skill,
+    skill_archive,
+    skill_sources,
+    target_path,
+    uploaded_pins,
+    validate_targets,
+)
 from mux.drivers.gemini.mcp_auth import (
     LEGACY_SERVER_NAME,
     GCSSecretResolver,
@@ -52,6 +72,7 @@ from mux.drivers.gemini.mcp_auth import (
     model_request,
     server_names,
     validate_intent,
+    validate_network,
 )
 from mux.drivers.gemini.normalize import OUTCOMES, actions, event, saved_events
 from mux.drivers.gemini.packages import package_sources
@@ -59,6 +80,7 @@ from mux.drivers.gemini.storage import Records, SessionRecord, Storage, owner, r
 from mux.drivers.gemini.transport import (
     NO_TOOLS_FUNCTION,
     NO_TOOLS_TOOL,
+    EnvironmentTransport,
     Object,
     OwnedStream,
     Transport,
@@ -91,6 +113,8 @@ re-created or resent. Callers bound the whole read with their own deadline.
 The backoff sleeps outside the storage transaction: holding the per-account
 lock for seconds would make sibling sessions on the account fail as busy.
 """
+
+log = logging.getLogger(__name__)
 
 
 def now() -> datetime:
@@ -130,6 +154,20 @@ def page_values[T](values: Sequence[T], page: PageRequest) -> Page[T]:
     )
 
 
+#: Waits between tries of one skill's upload; past them the skill is left out.
+UPLOAD_RETRY_DELAYS_S = (1.0, 4.0)
+
+
+class SkillFiles(Protocol):
+    """The host's bytes of an uploaded skill version, read only at session start.
+
+    Raise a `ProviderError`: a retryable one retries the session, any other
+    leaves that skill out.
+    """
+
+    async def __call__(self, scope: Scope, skill: SkillRef) -> SkillUpload: ...
+
+
 class Base:
     def __init__(
         self,
@@ -142,7 +180,9 @@ class Base:
         native_agent: Agent | None = None,
         max_output_tokens: int | None = None,
         thinking_level: str | None = None,
+        skill_files: SkillFiles | None = None,
     ) -> None:
+        self._skill_files = skill_files
         self._max_output_tokens = max_output_tokens
         self._thinking_level = thinking_level
         self._native_agent = native_agent
@@ -150,8 +190,13 @@ class Base:
         self._mcp_secrets = mcp_secrets
         self._gcs_secrets = gcs_secrets
 
-    def _mcp_request(self, records: Records, scope: Scope, spec: SessionSpec) -> Object:
-        """Rebuild owned intent before authentication; never trust a saved tool list."""
+    def _mcp_request(
+        self, records: Records, scope: Scope, spec: SessionSpec, *, omit: Sequence[str] = ()
+    ) -> Object:
+        """Rebuild owned intent before authentication; never trust a saved tool list.
+
+        `omit`: skill ids the session goes without (an upload that failed).
+        """
         self._check(scope, spec.agent, "agent")
         agent = records.agents.get(spec.agent.id)
         if agent is None or agent.ref != spec.agent:
@@ -193,9 +238,8 @@ class Base:
                 env.spec, files=inline_files(records, scope, self._account, env.spec.sources)
             )
         # A session's own skills (a template's copies) mount beside the agent's.
-        mounted = skill_sources(
-            records, scope, self._account, (*(agent.spec.skills or ()), *spec.skills)
-        )
+        pins = tuple(p for p in (*(agent.spec.skills or ()), *spec.skills) if p.id not in omit)
+        mounted = skill_sources(records, scope, self._account, pins)
         if mounted:
             configuration = object_value(environment)
             sources = configuration.get("sources", [])
@@ -777,45 +821,193 @@ class GeminiSessions(Base):
         async with self._storage.transaction() as records:
             id_ = self._creation(records, scope, key, digest)
             if id_ is not None:
-                return self._record(records, scope, self._ref(scope, id_, "session")).session
-            agent = records.agents.get(spec.agent.id)
-            if agent is None or agent.ref != spec.agent:
-                raise ScopeViolation(spec.agent.id, "no owned inline agent")
-            if agent.revision != spec.agent_revision:
-                raise ProviderError("conflict", retryable=False)
-            request = self._mcp_request(records, scope, spec)
-            id_ = str(uuid4())
-            session = Session(
-                ref=self._ref(scope, id_, "session"),
-                binding=ProviderBinding(
-                    id=string(ext.value["binding_id"]),
-                    thread=thread,
-                    provider="gemini",
-                    profile=PROFILE.profile_id,
-                    native_refs={"session": id_, "agent": spec.agent.id},
-                    generation=1,
-                    config_revision=spec.config_revision,
-                ),
-                continuity=Continuity(
-                    conversation="interaction_chain",
-                    workspace="native_reuse" if self._max_output_tokens is None else "none",
-                    processes="unknown" if self._max_output_tokens is None else "none",
-                    retention_known=True,
-                ),
-                requested_revision=spec.agent_revision,
-                effective_revision=spec.agent_revision,
-                state="idle",
+                prior = self._record(records, scope, self._ref(scope, id_, "session"))
+                if not prior.uploading:
+                    return prior.session
+            else:
+                id_ = self._new_session(
+                    records, scope, spec, key, digest, thread, string(ext.value["binding_id"])
+                )
+        # Past the transaction: an upload never holds the account's records.
+        return await self._prepare(scope, self._ref(scope, id_, "session"))
+
+    def _new_session(
+        self,
+        records: Records,
+        scope: Scope,
+        spec: SessionSpec,
+        key: str,
+        digest: str,
+        thread: ThreadRef,
+        binding_id: str,
+    ) -> str:
+        agent = records.agents.get(spec.agent.id)
+        if agent is None or agent.ref != spec.agent:
+            raise ScopeViolation(spec.agent.id, "no owned inline agent")
+        if agent.revision != spec.agent_revision:
+            raise ProviderError("conflict", retryable=False)
+        request = self._mcp_request(records, scope, spec)
+        id_ = str(uuid4())
+        session = Session(
+            ref=self._ref(scope, id_, "session"),
+            binding=ProviderBinding(
+                id=binding_id,
+                thread=thread,
+                provider="gemini",
+                profile=PROFILE.profile_id,
+                native_refs={"session": id_, "agent": spec.agent.id},
+                generation=1,
+                config_revision=spec.config_revision,
+            ),
+            continuity=Continuity(
+                conversation="interaction_chain",
+                workspace="native_reuse" if self._max_output_tokens is None else "none",
+                processes="unknown" if self._max_output_tokens is None else "none",
+                retention_known=True,
+            ),
+            requested_revision=spec.agent_revision,
+            effective_revision=spec.agent_revision,
+            state="idle",
+        )
+        pins = (*(agent.spec.skills or ()), *spec.skills)
+        records.sessions[id_] = SessionRecord(
+            owner(scope),
+            session,
+            spec,
+            agent.spec.model,
+            request,
+            mcp_server_names=server_names(agent.spec.mcp_servers or ()),
+            uploading=tuple(p.id for p in uploaded_pins(records, scope, self._account, pins)),
+        )
+        records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
+        return id_
+
+    async def _prepare(self, scope: Scope, ref: ResourceRef) -> Session:
+        """Make the environment and upload each large skill into it before any turn.
+
+        The id is saved before the uploads, so a retried create resumes. A skill that
+        will not upload is left out: its environment is replaced by one without it,
+        since its inline SKILL.md would name missing files.
+        """
+        environments = (
+            self._transport if isinstance(self._transport, EnvironmentTransport) else None
+        )
+        replaced = 0
+        while True:
+            async with self._storage.transaction() as records:
+                record = self._record(records, scope, ref)
+                if not record.uploading:
+                    return record.session
+                config = {
+                    k: v
+                    for k, v in object_value(record.request["environment"]).items()
+                    if k != "type"
+                }
+                sources = config.get("sources")
+                if (
+                    environments is None
+                    or self._skill_files is None
+                    or self._max_output_tokens is not None
+                    or replaced > 2
+                    or any(
+                        isinstance(source, dict)
+                        and source.get("type") != "inline"
+                        and source.get("type") != "repository"
+                        for source in (sources if isinstance(sources, list) else ())
+                    )
+                ):
+                    self._leave_out(records, scope, record, record.uploading)
+                    continue
+                validate_network({"environment": config})
+                agent = records.agents[record.spec.agent.id]
+                ids = set(record.uploading)
+                pending = tuple(
+                    p for p in (*(agent.spec.skills or ()), *record.spec.skills) if p.id in ids
+                )
+                environment_id = record.environment_id
+            if environment_id is None:
+                made = await environments.create_environment(config)
+                async with self._storage.transaction() as records:
+                    record = self._record(records, scope, ref)
+                    environment_id = record.environment_id or made
+                    record.environment_id = environment_id
+                    record.workspace_expires_at = now() + timedelta(days=7)
+                if environment_id != made:  # a concurrent create saved its own first
+                    await environments.delete_environment(made)
+            try:
+                failed = [p.id for p in pending if not await self._upload(scope, environment_id, p)]
+            except ProviderError as error:
+                if error.category != "not_found":
+                    raise
+                failed = None  # the environment is gone: make it again, with every skill
+            async with self._storage.transaction() as records:
+                record = self._record(records, scope, ref)
+                if failed == []:
+                    record.uploading = ()
+                    record.session = record.session.model_copy(
+                        update={"native": {"skills_left_out": list(record.left_out)}}
+                    )
+                    return record.session
+                record.environment_id = record.workspace_expires_at = None
+                if failed:
+                    self._leave_out(records, scope, record, tuple(failed))
+            replaced += 1
+            if failed:
+                try:
+                    await environments.delete_environment(environment_id)
+                except ProviderError as error:
+                    if error.category != "not_found":
+                        log.warning("gemini_environment_delete_failed category=%s", error.category)
+
+    def _leave_out(
+        self, records: Records, scope: Scope, record: SessionRecord, ids: Sequence[str]
+    ) -> None:
+        record.left_out = tuple(dict.fromkeys((*record.left_out, *ids)))
+        record.uploading = tuple(i for i in record.uploading if i not in record.left_out)
+        record.request = self._mcp_request(records, scope, record.spec, omit=record.left_out)
+        if not record.uploading:
+            record.session = record.session.model_copy(
+                update={"native": {"skills_left_out": list(record.left_out)}}
             )
-            records.sessions[id_] = SessionRecord(
-                owner(scope),
-                session,
-                spec,
-                agent.spec.model,
-                request,
-                mcp_server_names=server_names(agent.spec.mcp_servers or ()),
-            )
-            records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
-            return session
+
+    async def _upload(self, scope: Scope, environment_id: str, pin: SkillRef) -> bool:
+        """Place one skill's files; a 409 counts as done only once their sizes match."""
+        assert isinstance(self._transport, EnvironmentTransport), "checked by _prepare"
+        assert self._skill_files is not None and pin.version is not None, "checked by _prepare"
+        async with read_records(self._storage) as records:
+            uploaded = owned_skill(records, scope, self._account, pin.id).uploads[pin.version]
+        try:
+            archive = skill_archive(uploaded, await self._skill_files(scope, pin))
+        except ProviderError as error:
+            if error.retryable:
+                raise
+            log.warning("gemini_skill_files_unread category=%s", error.category)
+            return False
+        path = f"{UPLOAD_ROOT}/{pin.id}"
+        expected = {file: size for file, size, _ in uploaded.files}
+        overwrite = False
+        for delay in (*UPLOAD_RETRY_DELAYS_S, None):
+            try:
+                try:
+                    await self._transport.upload_archive(
+                        environment_id, path, archive, overwrite=overwrite
+                    )
+                except ProviderError as error:
+                    if error.category != "conflict":
+                        raise
+                listed = await self._transport.list_files(environment_id, path)
+                if all(listed.get(file) == size for file, size in expected.items()):
+                    return True
+                overwrite = True  # an earlier try left other bytes there
+            except ProviderError as error:
+                if error.category == "not_found":
+                    raise
+                if not error.retryable:
+                    log.warning("gemini_skill_upload_refused category=%s", error.category)
+                    return False
+            if delay is not None:
+                await asyncio.sleep(random.uniform(delay / 2, delay))
+        return False
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Session:
         return await self.retrying(lambda: self._retrieve(scope, ref))
@@ -999,7 +1191,10 @@ class GeminiEvents(Base):
         )
         async with self._storage.transaction() as records:
             record = self._record(records, scope, session)
-            expected = self._mcp_request(records, scope, record.spec)
+            if record.uploading:
+                # Its large skills are still uploading: create the session again first.
+                raise ProviderError("conflict", retryable=True, native_code="skill_upload_pending")
+            expected = self._mcp_request(records, scope, record.spec, omit=record.left_out)
             agent = records.agents[record.spec.agent.id]
             connections = agent.spec.mcp_servers or ()
             try:
@@ -1107,6 +1302,9 @@ class GeminiEvents(Base):
                 overrides["previous_interaction_id"] = record.current
                 if self._max_output_tokens is None:
                     overrides["environment"] = record.environment_id
+            elif record.environment_id is not None and self._max_output_tokens is None:
+                # Made before this first turn, with its large skills uploaded into it.
+                overrides["environment"] = record.environment_id
             request = await authenticated_template(
                 scope,
                 record.request,

@@ -1,6 +1,8 @@
 """Offline scripted transport and storage, explicitly test-only; never SDK discovery."""
 
 import asyncio
+import io
+import tarfile
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from copy import deepcopy
@@ -44,6 +46,42 @@ class FakeTransport:
         self.stream_closed = False
         self.snapshots: dict[str, bytes | ProviderError] = {}
         self.snapshot_reads: list[str] = []
+        # Environments made before any interaction: config and files (path -> size).
+        self.environments: dict[str, Object] = {}
+        self.environment_files: dict[str, dict[str, int]] = {}
+        self.uploads: list[tuple[str, str, bool]] = []
+        self.upload_errors: list[ProviderError] = []
+        self.deleted_environments: list[str] = []
+
+    async def create_environment(self, config: Mapping[str, JsonValue]) -> str:
+        id_ = f"environment-{len(self.environments) + 1}"
+        self.environments[id_] = deepcopy(dict(config))
+        self.environment_files[id_] = {}
+        return id_
+
+    async def upload_archive(
+        self, environment_id: str, path: str, archive: bytes, *, overwrite: bool
+    ) -> None:
+        self.uploads.append((environment_id, path, overwrite))
+        if self.upload_errors:
+            raise self.upload_errors.pop(0)
+        files = self.environment_files[environment_id]
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+            new = {f"{path}/{m.name}": m.size for m in tar.getmembers() if m.isfile()}
+        if not overwrite and set(new) & set(files):
+            raise ProviderError("conflict", retryable=False, native_error_code="http_409")
+        files.update(new)
+
+    async def list_files(self, environment_id: str, path: str) -> dict[str, int]:
+        files = self.environment_files.get(environment_id)
+        if files is None:
+            raise ProviderError("not_found", retryable=False)
+        return {k.removeprefix(path + "/"): v for k, v in files.items() if k.startswith(path + "/")}
+
+    async def delete_environment(self, environment_id: str) -> None:
+        self.deleted_environments.append(environment_id)
+        if self.environment_files.pop(environment_id, None) is None:
+            raise ProviderError("not_found", retryable=False)
 
     async def download_snapshot(self, environment_id: str) -> bytes:
         self.snapshot_reads.append(environment_id)
