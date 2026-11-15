@@ -314,3 +314,21 @@ def test_effort_belongs_to_the_agent_selection_and_not_the_default_backend() -> 
     )
     with pytest.raises(Exception, match="effort|selectable"):
         agent_selection("anthropic", None, AgentSettings(effort="low"))
+
+
+async def test_a_refused_edit_never_pays_for_a_source_capture(people) -> None:
+    """A capture may read every skill: a member, or an owner asking for shared
+    threads, is refused before one starts."""
+    service, agent, actors, _ = people
+    reads: list[BackendAgent] = []
+
+    async def capture(actual: BackendAgent) -> BackendAgent:
+        reads.append(actual)
+        return actual
+
+    service._capture_source = capture
+    with pytest.raises(AgentBackendRefused, match="owner or admin required"):
+        await service.set_backend(agent, "openai", 0, actors["member"])
+    with pytest.raises(AgentBackendRefused, match="admin required for shared threads"):
+        await service.set_settings(agent, AgentSettings(thread_mode="shared"), 0, actors["owner"])
+    assert reads == []

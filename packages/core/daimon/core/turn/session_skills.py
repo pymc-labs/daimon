@@ -23,7 +23,7 @@ import structlog
 from anthropic import AnthropicError, AsyncAnthropic
 from daimon.core.defaults.loader import parse_skill_markdown
 from daimon.core.defaults.ma_index import download_skill_version
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, TurnError
 from daimon.core.skill_zip import MAX_UNCOMPRESSED_BYTES
 from daimon.core.skills.ingest import SkillIngestError, retained_archive_files
 from daimon.core.skills.latest_versions import LATEST_VERSIONS
@@ -54,15 +54,16 @@ _DROP_NAME = re.compile(r"[A-Za-z0-9_.-]+")
 _MANIFEST_BYTES = 1024 * 1024
 
 
-def read_blip(error: BaseException) -> bool:
-    """Whether a skill read failed with a blip a retry can clear (a timeout, a 5xx or
-    429): it proves no loss, so it propagates and the caller retries, as a turn does."""
+def read_blip(error: BaseException) -> TurnError | None:
+    """The busy error a skill read's blip (a timeout, a 5xx or 429) becomes, else None.
+
+    A blip proves no loss, so it propagates and the caller retries, as a turn does.
+    """
     from daimon.core.channel_backend import transient_failure
-    from daimon.core.errors import TurnError
 
     busy = TurnError(kind="upstream", cause=error)
     busy.__cause__ = error
-    return transient_failure(busy)
+    return busy if transient_failure(busy) else None
 
 
 def attaches_session_skills(profile: Profile) -> bool:
@@ -317,8 +318,8 @@ async def _measure_one(
             sessionmaker, anthropic, scope=scope, record=record, skill_id=skill_id, version=version
         )
     except (AnthropicError, DaimonError, MuxError) as error:
-        if read_blip(error):
-            raise
+        if (busy := read_blip(error)) is not None:
+            raise busy from error
         log.warning("skill_size.measure_failed", skill_id=skill_id, error=type(error).__name__)
         return None
     row = measure_archive(tenant_id, skill_id, version, data)
@@ -467,8 +468,8 @@ async def measure_carried_skills(
         try:
             version = await latest_version(anthropic, scope, attached)
         except (AnthropicError, DaimonError, MuxError, ValueError) as error:
-            if read_blip(error):
-                raise
+            if (busy := read_blip(error)) is not None:
+                raise busy from error
             log.warning(
                 "source_capture.skill_unresolved", skill_id=attached.id, error=type(error).__name__
             )
@@ -509,8 +510,8 @@ async def channel_session_skills(
                 else skill.version
             )
         except (AnthropicError, DaimonError, MuxError, ValueError) as error:
-            if read_blip(error):
-                raise
+            if (busy := read_blip(error)) is not None:
+                raise busy from error
             log.warning(
                 "session_skills.unresolved", skill_id=skill.skill_id, error=type(error).__name__
             )

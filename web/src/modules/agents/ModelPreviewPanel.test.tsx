@@ -12,7 +12,7 @@ const preview: ModelPreview = {
 describe("ModelPreviewPanel", () => {
   it("lists what is lost, the shared limits, the cost and the threads", () => {
     render(<ModelPreviewPanel preview={preview} />)
-    for (const text of ["memory", "pricing skill", "Shared threads keep the first model", "Costs about the same", "Threads switch on their next message."]) {
+    for (const text of ["Memory", "Pricing skill", "Shared threads keep the first model", "Costs about the same", "Threads switch on their next message."]) {
       expect(screen.getByText(text), text).toBeInTheDocument()
     }
   })
@@ -25,7 +25,7 @@ describe("ModelPreviewPanel", () => {
   it("shows only the refusal when the pick can't go ahead", () => {
     render(<ModelPreviewPanel preview={{ ...preview, allowed: false, refusal: { line: "Ask an admin.", action: null } }} />)
     expect(screen.getByText("Ask an admin.")).toBeInTheDocument()
-    expect(screen.queryByText("memory"), "drops hidden").not.toBeInTheDocument()
+    expect(screen.queryByText("Memory"), "drops hidden").not.toBeInTheDocument()
   })
 
   it("renders nothing for a pick that stays on the provider", () => {

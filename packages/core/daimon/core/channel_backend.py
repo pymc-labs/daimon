@@ -1568,10 +1568,15 @@ class AgentBackendService:
             # A service built without a source capture would store no loss consent.
             raise AgentBackendRefused("source_unavailable")
         # Capture (slow: it may read every skill) before the lock; the lock only compares.
+        # Refuse a disallowed actor first, so only an allowed edit pays for a capture.
         async with self._sessions() as session:
+            admin = await self._authorize_edit(session, agent, actor)
             plan = await _plan_change(
                 session, agent, operation, backend, model, settings, expected_revision
             )
+        _, _, kept, _, _, wanted = plan
+        if wanted.thread_mode == "shared" and kept.thread_mode != "shared" and not admin:
+            raise AgentBackendRefused("admin_required_for_shared_threads")
         captured = None
         if plan[3] is not None and self._capture_source is not None:
             captured = await self._capture_source(agent)

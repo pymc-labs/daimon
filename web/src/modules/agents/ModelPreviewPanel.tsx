@@ -14,7 +14,7 @@ export function ModelPreviewPanel({ preview, className }: { preview: ModelPrevie
   }
   if (!preview.moves) return null
   const rows: [string, string[]][] = [
-    ["Stops working", preview.lost],
+    ["Stops working", preview.lost.map((w) => w.charAt(0).toUpperCase() + w.slice(1))],
     ["Shared threads", preview.shared_limits],
     ["Cost", preview.cost ? [preview.cost] : []],
     ["Threads", preview.threads ? [preview.threads] : []],

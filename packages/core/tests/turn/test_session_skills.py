@@ -15,6 +15,8 @@ from typing import Any
 import anthropic
 import httpx
 import pytest
+from daimon.core.channel_backend import transient_failure
+from daimon.core.errors import TurnError
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import publish_skill_version
 from daimon.core.skills.latest_versions import LATEST_VERSION_TTL_S, LatestVersionCache
@@ -317,7 +319,7 @@ async def test_a_blip_reading_a_skill_propagates_instead_of_dropping_it(
 
     monkeypatch.setattr(session_skills, "download_skill_version", blip)
     monkeypatch.setattr(session_skills, "latest_version", blip)
-    with pytest.raises(anthropic.APIStatusError):
+    with pytest.raises(TurnError) as raised:
         await session_skills.measure_carried_skills(
             db_session_factory,
             build_fake_anthropic(MARouter().dispatch),
@@ -326,6 +328,8 @@ async def test_a_blip_reading_a_skill_propagates_instead_of_dropping_it(
             carried=[SkillRef(id="s0", version=version, source="custom")],
             record=None,
         )
+    assert isinstance(raised.value.__cause__, anthropic.APIStatusError)
+    assert transient_failure(raised.value), "a turn says try again, not not set up"
 
 
 async def test_a_missing_skill_is_its_own_named_loss(
