@@ -406,6 +406,7 @@ async def latest_version(anthropic: AsyncAnthropic, scope: Scope, attached: Skil
     cached = LATEST_VERSIONS.get(scope.tenant_id, attached.id)
     if cached is not None:
         return cached
+    generation = LATEST_VERSIONS.generation()
     # Grant reads only for this id: a scoped catalogue walk hides custom skills.
     backend = managed_agents(anthropic, scope=scope, resources=frozenset({("skill", attached.id)}))
     record = await legacy_call(backend.skills.retrieve(scope, attached.id))
@@ -419,7 +420,7 @@ async def latest_version(anthropic: AsyncAnthropic, scope: Scope, attached: Skil
     ):
         raise ValueError("source skill has no concrete current version")
     assert pin.version is not None
-    LATEST_VERSIONS.put(scope.tenant_id, attached.id, pin.version)
+    LATEST_VERSIONS.put(scope.tenant_id, attached.id, pin.version, generation=generation)
     return pin.version
 
 

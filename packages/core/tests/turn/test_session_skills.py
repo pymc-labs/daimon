@@ -153,15 +153,26 @@ async def test_two_measures_of_one_version_share_its_download(
 def test_a_latest_version_is_remembered_until_its_ttl() -> None:
     now = [0.0]
     cache = LatestVersionCache(clock=lambda: now[0])
-    cache.put("t1", "s0", "3")
+    cache.put("t1", "s0", "3", generation=0)
     assert cache.get("t1", "s0") == "3", "a hit inside the TTL"
     assert cache.get("t2", "s0") is None, "another tenant asks for itself"
     now[0] = LATEST_VERSION_TTL_S
     assert cache.get("t1", "s0") is None, "expired at the TTL"
-    cache.put("t1", "s0", "3")
-    cache.put("t2", "s0", "3")
+    cache.put("t1", "s0", "3", generation=0)
+    cache.put("t2", "s0", "3", generation=0)
     cache.forget("s0")
     assert (cache.get("t1", "s0"), cache.get("t2", "s0")) == (None, None), "forgotten everywhere"
+
+
+def test_a_lookup_that_overlaps_a_publish_never_remembers_the_old_version() -> None:
+    """A read started before a publish here may return the old latest: never keep it."""
+    cache = LatestVersionCache()
+    started = cache.generation()
+    cache.forget("s0")  # published while the read was in flight
+    cache.put("t1", "s0", "2", generation=started)
+    assert cache.get("t1", "s0") is None, "the stale read is dropped, so the next one asks"
+    cache.put("t1", "s0", "3", generation=cache.generation())
+    assert cache.get("t1", "s0") == "3", "a read started after the publish is kept"
 
 
 async def test_a_version_daimon_publishes_is_seen_at_once_and_one_published_elsewhere_after_the_ttl(
