@@ -23,7 +23,7 @@ ingress:
 networkPolicy: {teamsEgress: {enabled: true, cidrs: [10.2.3.4/32]}}
 """
 # The chart's pilot release name; a second release must not reuse it.
-SHARED = ("acme",)
+PILOT_RELEASE = "acme"
 DEFAULT_SECRETS = {
     "daimon-host",
     "daimon-harness",
@@ -77,9 +77,7 @@ def secret_references(resources):
 class TeamsReleaseRenderTests(unittest.TestCase):
     def test_daimon_teams_render_has_no_shared_names(self):
         output, resources = render_teams()
-        lowered = output.lower()
-        for name in SHARED:
-            self.assertNotIn(name, lowered)
+        self.assertNotIn(PILOT_RELEASE, output.lower())
         for resource in resources:
             self.assertTrue(
                 resource["metadata"]["name"].startswith("daimon-teams-"),
@@ -144,10 +142,10 @@ elif name == 'helm' and args[:1] == ['list']:
 
 
 class TeamsReleaseScriptTests(unittest.TestCase):
-    def run_script(self, script, command, state, overrides=None):
+    def run_script(self, script, command, state, overrides=None, stub_source=STUB):
         stub = state / "stub"
         if not stub.exists():
-            stub.write_text(STUB)
+            stub.write_text(stub_source)
             add_kube_stub_support(stub)
             stub.chmod(0o755)
             for name in ("az", "kubectl", "helm"):
@@ -274,13 +272,8 @@ class TeamsReleaseScriptTests(unittest.TestCase):
                 "if name == 'az' and 'properties.model.name' in args:\n    print('gpt-5.4-mini')\n"
                 "elif name == 'az' and 'properties.endpoint' in args:",
             )
-            (state / "stub").write_text(stub_source)
-            add_kube_stub_support(state / "stub")
-            (state / "stub").chmod(0o755)
-            for name in ("az", "kubectl", "helm"):
-                (state / name).symlink_to(state / "stub")
             result, calls = self.run_script(
-                "aks.sh", ["probe"], state, {"AOAI_DEPLOYMENT": "gpt-5.4-mini"}
+                "aks.sh", ["probe"], state, {"AOAI_DEPLOYMENT": "gpt-5.4-mini"}, stub_source
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             probe = next(c for c in calls if c[0] == "kubectl" and "exec" in c)
