@@ -19,27 +19,36 @@ _PRUNE_AT = 4096
 class LatestVersionCache:
     def __init__(self, clock: Callable[[], float] = monotonic) -> None:
         self._clock = clock
-        self._entries: dict[tuple[str, str], tuple[float, str]] = {}
+        # Keyed by the source the lookup checked too: a hit is only for a ref like it.
+        self._entries: dict[tuple[str, str, str | None], tuple[float, str]] = {}
         self._generation = 0
 
     def generation(self) -> int:
         """Read before a lookup and pass to `put`: a `forget` since then drops its answer."""
         return self._generation
 
-    def get(self, tenant_id: str, skill_id: str) -> str | None:
-        entry = self._entries.get((tenant_id, skill_id))
+    def get(self, tenant_id: str, skill_id: str, source: str | None = "custom") -> str | None:
+        entry = self._entries.get((tenant_id, skill_id, source))
         if entry is None or entry[0] <= self._clock():
             return None
         return entry[1]
 
-    def put(self, tenant_id: str, skill_id: str, version: str, *, generation: int) -> None:
+    def put(
+        self,
+        tenant_id: str,
+        skill_id: str,
+        version: str,
+        *,
+        generation: int,
+        source: str | None = "custom",
+    ) -> None:
         if generation != self._generation:
             # A publish here overlapped the lookup, which may have read the old version.
             return
         now = self._clock()
         if len(self._entries) >= _PRUNE_AT:
             self._entries = {k: v for k, v in self._entries.items() if v[0] > now}
-        self._entries[(tenant_id, skill_id)] = (now + LATEST_VERSION_TTL_S, version)
+        self._entries[(tenant_id, skill_id, source)] = (now + LATEST_VERSION_TTL_S, version)
 
     def clear(self) -> None:
         """Forget everything; for test isolation only."""

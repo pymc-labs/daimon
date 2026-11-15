@@ -10,7 +10,9 @@ import time
 import uuid
 import zipfile
 from pathlib import Path
+from typing import Any
 
+import anthropic
 import httpx
 import pytest
 from daimon.core.mux_backend import resource_scope
@@ -286,3 +288,128 @@ async def test_a_cold_preview_of_the_default_agents_skills_fits_its_budget(
     hits.clear()
     assert set(await preview()) == set(sizes), "the warm preview reads the same sizes"
     assert hits == [], f"a warm preview asks the Skills API nothing: {hits}"
+
+
+def _api_error(status: int) -> anthropic.APIStatusError:
+    request = httpx.Request("GET", "https://api.example.com/v1/skills")
+    kind = {404: anthropic.NotFoundError, 429: anthropic.RateLimitError}.get(
+        status, anthropic.InternalServerError
+    )
+    return kind("upstream", response=httpx.Response(status, request=request), body=None)
+
+
+@pytest.mark.parametrize("version", ["1", "latest"])
+@pytest.mark.parametrize("status", [429, 503])
+async def test_a_blip_reading_a_skill_propagates_instead_of_dropping_it(
+    status: int,
+    version: str,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 429 or 5xx on the lookup or the download proves no loss: it reaches the
+    capture, which asks for a retry, instead of a bogus `skill:` drop."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+
+    async def blip(*_a: object, **_k: object) -> str:
+        raise _api_error(status)
+
+    monkeypatch.setattr(session_skills, "download_skill_version", blip)
+    monkeypatch.setattr(session_skills, "latest_version", blip)
+    with pytest.raises(anthropic.APIStatusError):
+        await session_skills.measure_carried_skills(
+            db_session_factory,
+            build_fake_anthropic(MARouter().dispatch),
+            scope=resource_scope(tenant_id=str(tenant.id)),
+            tenant_id=tenant.id,
+            carried=[SkillRef(id="s0", version=version, source="custom")],
+            record=None,
+        )
+
+
+async def test_a_missing_skill_is_its_own_named_loss(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 404 is permanent: that skill goes unmeasured, a loss of it alone."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+
+    async def gone(*_a: object, **_k: object) -> str:
+        raise _api_error(404)
+
+    monkeypatch.setattr(session_skills, "download_skill_version", gone)
+    monkeypatch.setattr(session_skills, "latest_version", gone)
+    pins, sizes = await session_skills.measure_carried_skills(
+        db_session_factory,
+        build_fake_anthropic(MARouter().dispatch),
+        scope=resource_scope(tenant_id=str(tenant.id)),
+        tenant_id=tenant.id,
+        carried=[
+            SkillRef(id="s0", version="1", source="custom"),
+            SkillRef(id="s1", version="latest", source="custom"),
+        ],
+        record=None,
+    )
+    assert sizes == {}, f"nothing measured: {sizes}"
+    assert session_skills.skill_losses(pins, ()) == ("skill:s0", "skill:s1"), "named losses"
+
+
+async def test_measures_read_with_different_scopes_never_share_a_download(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A joiner inherits the first caller's scope and record, so only a caller
+    reading the same way joins a measurement in flight."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    gate = asyncio.Event()
+    readers: list[str] = []
+
+    async def download(*_a: object, scope: Any, **_k: object) -> bytes:
+        readers.append(scope.account_id)
+        await gate.wait()
+        return ARCHIVE
+
+    monkeypatch.setattr(session_skills, "download_skill_version", download)
+    anthropic_client = build_fake_anthropic(MARouter().dispatch)
+    calls = [
+        asyncio.create_task(
+            session_skills.measure_skills(
+                db_session_factory,
+                anthropic_client,
+                scope=resource_scope(tenant_id=str(tenant.id), account_id=account),
+                tenant_id=tenant.id,
+                pins=(("s0", "1"),),
+            )
+        )
+        for account in ("a", "b")
+    ]
+    await asyncio.sleep(0.05)
+    gate.set()
+    await asyncio.gather(*calls)
+    assert sorted(readers) == ["a", "b"], f"each scope reads for itself: {readers}"
+
+
+async def test_a_remembered_latest_version_still_checks_the_skills_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hit is only for a ref whose source a lookup matched: one attached with
+    another source asks again and is refused, as a miss is."""
+    cache = LatestVersionCache()
+    monkeypatch.setattr(session_skills, "LATEST_VERSIONS", cache)
+    hits: list[str] = []
+    router = MARouter()
+    _serve_skills(router, {"s0": "1"}, hits)
+    client = build_fake_anthropic(router.dispatch)
+    scope = resource_scope(tenant_id=str(uuid.uuid4()))
+    custom = SkillRef(id="s0", version="latest", source="custom")
+    assert await session_skills.latest_version(client, scope, custom) == "1", "looked up"
+    with pytest.raises(ValueError, match="no concrete current version"):
+        await session_skills.latest_version(
+            client, scope, custom.model_copy(update={"source": "anthropic"})
+        )
+    assert len(hits) == 2, f"the other source asked again: {hits}"
