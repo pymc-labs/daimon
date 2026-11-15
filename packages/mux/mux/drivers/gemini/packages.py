@@ -1,4 +1,4 @@
-"""Environment packages, installed by a sandbox hook before the first tool call.
+"""Environment packages, installed in the background by a hook that gates sandbox tools.
 
 Gemini environments have no package field (Environments API reference), but a
 `pre_tool_execution` hook runs before every sandbox tool (Agent hooks guide), and
@@ -18,25 +18,52 @@ from mux.profiles import PACKAGE_MANAGERS
 # snapshot, so neither reads as the agent's output.
 HOOKS_TARGET = "/.agents/hooks.json"
 SCRIPT_TARGET = "/.agents/hooks-scripts/daimon-packages.sh"
-# Hooks default to 30 seconds and count a timeout as allow; installs take longer.
-TIMEOUT_SECONDS = 600
+# A sandbox tool call fails at about 300 seconds, hook time included, so a call
+# waits at most WAIT_SECONDS while the install runs on in the background. Hooks
+# count a timeout as allow, so the hook's own limit is only a backstop.
+WAIT_SECONDS = 90
+TIMEOUT_SECONDS = WAIT_SECONDS + 30
+ATTEMPTS = 3
+# A hung install is stopped (where `timeout` exists) and counts as a failed attempt.
+INSTALL_SECONDS = 1200
 
 _SCRIPT = """\
 #!/bin/sh
-# Installs the environment's packages once; later tool calls pass straight through.
+# Installs the environment's packages once, in a detached worker (`sh $0 run`).
 cat >/dev/null
-m="${{TMPDIR:-/tmp}}/.daimon-packages-{digest}"
-allow() {{ echo '{{"decision":"allow"}}'; exit 0; }}
-if [ -e "$m" ] || [ -e "$m.failed" ]; then allow; fi
-if ! mkdir "$m.lock" 2>/dev/null; then
-  i=0
-  while [ ! -e "$m" ] && [ ! -e "$m.failed" ] && [ "$i" -lt {wait} ]; do sleep 1; i=$((i+1)); done
-  allow
+m="${TMPDIR:-/tmp}/.daimon-packages-@digest@"
+l="$m.pid"
+if [ "$1" = run ]; then
+  echo $$ >"$l"
+  s=; [ "$(id -u)" = 0 ] || s="sudo -n"
+  if { @install@; } >"$m.log" 2>&1; then touch "$m"; else echo >>"$m.failed"; fi
+  [ "$(cat "$l")" = $$ ] && rm -f "$l"
+  exit 0
 fi
-s=; [ "$(id -u)" = 0 ] || s="sudo -n"
-if {{ {install}; }} >"$m.log" 2>&1; then touch "$m"; allow; fi
-touch "$m.failed"
-echo '{{"decision":"deny","reason":"Installing the environment packages failed; see '"$m.log"'"}}'
+allow() { echo '{"decision":"allow"}'; exit 0; }
+deny() { printf '{"decision":"deny","reason":"%s"}\\n' "$1"; exit 0; }
+d=; command -v setsid >/dev/null 2>&1 && d=setsid
+t=; command -v timeout >/dev/null 2>&1 && t="timeout @limit@"
+i=0
+until [ -e "$m" ]; do
+  p=$(cat "$l" 2>/dev/null)
+  if [ -e "$l" ]; then
+    # A killed install (or hook) leaves its pid behind; reclaim it so it retries.
+    if [ -n "$p" ] && ! kill -0 "$p" 2>/dev/null && [ ! -e "$m" ] &&
+      mv "$l" "$l.$$" 2>/dev/null; then
+      rm -f "$l.$$"; echo >>"$m.failed"; continue
+    fi
+  elif [ "$(cat "$m.failed" 2>/dev/null | wc -l)" -ge @attempts@ ]; then
+    mkdir "$m.told" 2>/dev/null || allow
+    r=$(tail -c 300 "$m.log" 2>/dev/null | tr -c 'A-Za-z0-9._:/=+-' ' ' | tr -s ' ')
+    deny "Installing the environment packages failed:$r (log $m.log). Tools now run without them."
+  elif (set -C; echo $$ >"$l") 2>/dev/null; then
+    $d $t sh "$0" run </dev/null >/dev/null 2>&1 &
+  fi
+  [ "$i" -ge @wait@ ] && deny "The environment packages are still installing; retry in a minute."
+  sleep 1; i=$((i+1))
+done
+allow
 """
 
 
@@ -63,7 +90,15 @@ def package_sources(packages: Mapping[str, tuple[str, ...]]) -> list[JsonValue]:
         return []
     digest = hashlib.sha256(json.dumps(wanted, sort_keys=True).encode()).hexdigest()[:16]
     install = " && ".join(_install(manager, names) for manager, names in wanted.items())
-    script = _SCRIPT.format(digest=digest, wait=TIMEOUT_SECONDS - 10, install=install)
+    script = _SCRIPT
+    for key, value in (
+        ("digest", digest),
+        ("wait", WAIT_SECONDS),
+        ("limit", INSTALL_SECONDS),
+        ("attempts", ATTEMPTS),
+        ("install", install),
+    ):
+        script = script.replace(f"@{key}@", str(value))
     hook = {"type": "command", "command": f"sh {SCRIPT_TARGET}", "timeout": TIMEOUT_SECONDS}
     hooks = {
         "daimon-packages": {
