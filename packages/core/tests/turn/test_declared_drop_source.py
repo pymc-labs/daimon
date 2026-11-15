@@ -923,3 +923,29 @@ def test_a_provider_sandbox_is_kept_only_for_a_plain_environment(
     assert classify_source_obligations(source, old, environment=None) == frozenset(), (
         "a consent that accepted the sandbox covers its parts"
     )
+
+
+def test_the_agents_own_line_names_a_lost_skill_not_its_id(captured):
+    plain = {"network": NetworkPolicy(), "packages": None, "sources": None, "native_config": None}
+    environment = captured.environment.model_copy(
+        update={"spec": captured.environment.spec.model_copy(update=plain)}
+    )
+    spec = captured.effective_spec.model_copy(
+        update={"skills": (SkillRef(id="skill_01a", version="1"),)}
+    )
+    source = captured.model_copy(update={"effective_spec": spec, "environment": environment})
+    model = ModelRef(provider="openai", id="gpt-6-luna")
+    target = AgentSpec(
+        name=spec.name, model=model, system=spec.system, tools=(), skills=(), mcp_servers=()
+    )
+    pinned = SourceRepresentation(
+        source_pin=source_preservation_pin(source),
+        target=target,
+        provider_execution=True,
+        unavailable_capabilities=("skill:skill_01a",),
+        skill_names={"skill_01a": "pdf-tools"},
+    )
+    source = source.model_copy(update={"representations": (pinned,)})
+    previewed = preview_source_drops(source, model)
+    assert previewed.declared_drops == ("skill:skill_01a",), "the loss stays keyed by id"
+    assert previewed.system.endswith("\n\nUnavailable capabilities: skill:pdf-tools.")

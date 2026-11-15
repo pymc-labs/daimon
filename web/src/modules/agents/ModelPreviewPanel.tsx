@@ -3,10 +3,6 @@ import { TriangleAlert } from "lucide-react"
 import { cn } from "@/lib/utils"
 import type { ModelPreview } from "./types"
 
-const DROP_LABEL: Record<string, string> = { memory: "Memory", sandbox: "Sandbox" }
-
-const dropLabel = (d: string) => DROP_LABEL[d] ?? d
-
 /** What a model pick drops, limits and costs, and what happens to threads. */
 export function ModelPreviewPanel({ preview, className }: { preview: ModelPreview; className?: string }) {
   if (preview.refusal) {
@@ -17,9 +13,8 @@ export function ModelPreviewPanel({ preview, className }: { preview: ModelPrevie
     )
   }
   if (!preview.moves) return null
-  const lost = [...new Set([...preview.drops.map(dropLabel), ...preview.skills, ...preview.servers, ...preview.capabilities])]
   const rows: [string, string[]][] = [
-    ["Stops working", lost],
+    ["Stops working", preview.lost],
     ["Shared threads", preview.shared_limits],
     ["Cost", preview.cost ? [preview.cost] : []],
     ["Threads", preview.threads ? [preview.threads] : []],

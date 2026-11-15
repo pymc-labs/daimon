@@ -1015,6 +1015,11 @@ def drop_word(drop: str, names: Mapping[str, str] | None = None) -> str:
     return _DROP_WORDS.get(drop, drop.replace("_", " "))
 
 
+def loss_word(drop: str, names: Mapping[str, str] | None = None) -> str:
+    """A declared loss in a list of what stops working: 'memory', 'pricing skill'."""
+    return drop_word(drop, names).removeprefix("its ")
+
+
 def drop_words(drops: Sequence[str], names: Mapping[str, str] | None = None) -> str:
     """'its saved keys, its memory and its sandbox': saved keys first, as the costliest."""
     ordered = sorted(drops, key=lambda item: (item != "credentials", item))

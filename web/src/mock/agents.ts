@@ -506,7 +506,7 @@ const dataStatus = (id: string): DataServerStatus => ({
 const DATA = "/api/agents/:id/nodes/data_server"
 
 const PREVIEW_BASE: ModelPreview = {
-  moves: false, allowed: true, skills: [], servers: [], capabilities: [], shared_limits: [], drops: [], cost: "", threads: "", digest: "", revision: 0, refusal: null,
+  moves: false, allowed: true, skills: [], servers: [], capabilities: [], shared_limits: [], lost: [], drops: [], cost: "", threads: "", digest: "", revision: 0, refusal: null,
 }
 const REFUSED = "gemini:gemini-4-argon"
 
@@ -516,7 +516,7 @@ function previewOf(from: Backend, value: string): ModelPreview {
   if (to === from) return PREVIEW_BASE
   if (value === REFUSED) return { ...PREVIEW_BASE, moves: true, allowed: false, refusal: { line: "Gemini 4 Argon can't run this agent here. Ask an admin.", action: null } }
   return {
-    ...PREVIEW_BASE, moves: true, drops: ["memory", "sandbox"], skills: ["Pricing playbook"], shared_limits: ["Shared threads keep the thread's first model"],
+    ...PREVIEW_BASE, moves: true, drops: ["memory", "sandbox", "skill:sk_pricing"], lost: ["memory", "sandbox", "Pricing playbook skill"], skills: ["Pricing playbook"], shared_limits: ["Shared threads keep the thread's first model"],
     cost: "Costs about the same per message", threads: "Threads switch on their next message.", digest: "d".repeat(64), revision: 4,
   }
 }

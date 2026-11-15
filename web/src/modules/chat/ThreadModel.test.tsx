@@ -16,7 +16,7 @@ const models = {
     { value: "openai:gpt-6-luna", label: "GPT-6 Luna", price: "$2 / $10", provider: "openai" },
   ],
 }
-const stays = { moves: false, allowed: true, skills: [], servers: [], capabilities: [], shared_limits: [], drops: [], cost: "", threads: "", digest: "", revision: 0, refusal: null }
+const stays = { moves: false, allowed: true, skills: [], servers: [], capabilities: [], shared_limits: [], lost: [], drops: [], cost: "", threads: "", digest: "", revision: 0, refusal: null }
 const moves = { ...stays, moves: true, drops: ["memory"], cost: "Costs about the same", threads: "This chat only.", digest: "d1", revision: 4 }
 
 const open = async (onChanged = vi.fn()) => {

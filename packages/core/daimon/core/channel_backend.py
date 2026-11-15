@@ -1056,7 +1056,7 @@ def switch_losses(
     lists them; a whole `skills` or `mcp` drop names each of the agent's own. A skill
     shows its name from `names`, else from the agent's captures, else its id.
     """
-    from daimon.core.confirmation import drop_word
+    from daimon.core.confirmation import loss_word
 
     names = loss_names(agent) if names is None else names
     skills: set[str] = set()
@@ -1073,7 +1073,7 @@ def switch_losses(
         elif drop.startswith("mcp_server:"):
             mcps.add(drop.removeprefix("mcp_server:"))
         else:
-            capabilities.add(drop_word(drop).removeprefix("its "))
+            capabilities.add(loss_word(drop))
     return tuple(sorted(skills)), tuple(sorted(mcps)), tuple(sorted(capabilities))
 
 

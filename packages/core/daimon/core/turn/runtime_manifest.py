@@ -7,7 +7,7 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import CodeType
@@ -1073,6 +1073,17 @@ def source_instructions_preserved(required: str | None, system: str | None) -> b
     )
 
 
+def unavailable_line(drops: Sequence[str], names: Mapping[str, str] | None = None) -> str:
+    """The agent's own line of what its copy lacks: a skill by its name, never its id."""
+    words = (
+        f"skill:{(names or {}).get(d.removeprefix('skill:'), d.removeprefix('skill:'))}"
+        if d.startswith("skill:")
+        else d
+        for d in drops
+    )
+    return "Unavailable capabilities: " + ", ".join(words) + "."
+
+
 def compose_source_instructions(
     required: str | None, system: str | None, *, deduplicate_prefix: bool = False
 ) -> str:
@@ -1508,6 +1519,8 @@ def preview_source_drops(
     source: BackendAgent, model: ModelRef, *, effort: Effort | None = None
 ) -> AgentSpec:
     """Derive explicit losses using the same complete source-preservation rule."""
+    from daimon.core.channel_backend import loss_names
+
     spec = source.effective_spec
     profile = backend_selection(model.provider).profile
     if (
@@ -1585,8 +1598,7 @@ def preview_source_drops(
         target = target.model_copy(
             update={
                 "system": compose_source_instructions(
-                    spec.system,
-                    "Unavailable capabilities: " + ", ".join(target.declared_drops) + ".",
+                    spec.system, unavailable_line(target.declared_drops, loss_names(source))
                 )
             }
         )
@@ -1844,6 +1856,8 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
             raise AgentBackendRefused("re_confirm", detail="model_unpinned")
         if not source_pin_matches(source, consent.source_pin):
             raise AgentBackendRefused("re_confirm", detail="source_pin")
+        from daimon.core.channel_backend import loss_names
+
         target = preview_source_drops(
             source,
             ModelRef(provider=revision.backend, id=revision.model or spec.model.id),
@@ -1853,6 +1867,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
             consent,
             target,
             source_system=spec.system,
+            names=loss_names(source),
             backend=revision.backend,
             model=revision.model,
             picked=setting.model,
