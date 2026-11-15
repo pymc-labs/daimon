@@ -44,14 +44,12 @@ from .test_gemini_runtime_transport import clients_for
 
 @pytest.fixture
 async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
-    from daimon.core.authz import Place
     from daimon.core.channel_backend import AgentBackendService
-    from daimon.core.scope import DeploymentDefault, ScopeContext
-    from daimon.core.turn.admission import capture_backend_source
+    from daimon.core.scope import DeploymentDefault
     from daimon.testing.asgi import mcp_session
 
-    # "unreadable_mcp": the source's MCP catalogue can't be read at consent, so the
-    # confirmed switch declares the MCP drop (the J2/J3 copy's path).
+    # "unreadable_mcp": the source's MCP catalogue refuses the read at consent, so
+    # the confirmed switch declares the MCP drop (the J2/J3 copy's path).
     unreadable_mcp = getattr(request, "param", None) == "unreadable_mcp"
     # "relay": the connector relay is on from consent onward.
     relay = getattr(request, "param", None) == "relay"
@@ -113,7 +111,7 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
         }
         if body["method"] == "tools/list":
             if unreadable_mcp:
-                return httpx.Response(503, json={"error": "offline"})
+                return httpx.Response(403, json={"error": "refused"})
             token = call.headers["Authorization"].removeprefix("Bearer ")
             result = (await mcp_session(source_mcp, token=token, method="tools/list"))["result"]
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
@@ -162,28 +160,9 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
     monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(manifest))
     monkeypatch.setenv(plan.api_key_env, "offline-template")
 
-    async def capture_bound_source(actual_source):
-        return await capture_backend_source(
-            request.deps,
-            actual_source,
-            context=ScopeContext(
-                tenant_id=request.tenant_id,
-                account_id=request.admission.account_id,
-                platform=request.platform,
-                channel_id=request.admission.origin_channel_id,
-                thread_id=request.thread_id,
-            ),
-            subject=actor.subject,
-            place=Place(
-                channel_id=request.thread_id, parent_channel_id=request.admission.origin_channel_id
-            ),
-            is_dm=False,
-            slack_turn_context_id=None,
-            private_dm_id=None,
-            external_user_id=request.external_user_id,
-        )
-
-    consenting = AgentBackendService(sessions, enabled=True, capture_source=capture_bound_source)
+    consenting = AgentBackendService(
+        sessions, enabled=True, capture_source=_bound_capture(request, actor)
+    )
     from mux.profiles import backend_selection
 
     # The admitted revision's model: the provider default unless a test picked one.
@@ -205,6 +184,36 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
     calls.clear()
     yield request, quote, native, calls, posts
     assert all(client.is_closed for client in clients)
+
+
+def _bound_capture(request, actor):
+    """The preview's capture, bound to this turn's verified place and person."""
+    from daimon.core.authz import Place
+    from daimon.core.scope import ScopeContext
+    from daimon.core.turn.admission import capture_backend_source
+
+    async def capture(actual_source):
+        return await capture_backend_source(
+            request.deps,
+            actual_source,
+            context=ScopeContext(
+                tenant_id=request.tenant_id,
+                account_id=request.admission.account_id,
+                platform=request.platform,
+                channel_id=request.admission.origin_channel_id,
+                thread_id=request.thread_id,
+            ),
+            subject=actor.subject,
+            place=Place(
+                channel_id=request.thread_id, parent_channel_id=request.admission.origin_channel_id
+            ),
+            is_dm=False,
+            slack_turn_context_id=None,
+            private_dm_id=None,
+            external_user_id=request.external_user_id,
+        )
+
+    return capture
 
 
 async def _prepared(request):
@@ -248,6 +257,59 @@ async def test_a_switch_that_dropped_mcp_is_served_with_no_mcp_and_no_credential
     async with request.deps.sessionmaker() as db:
         live = [row for row in await _tokens(db, request) if row.revoked_at is None]
     assert live == [], "no live MCP credential is left for this turn"
+
+
+def _blip(kind):
+    """What the catalogue read raises when the server is briefly unreachable or busy."""
+    from daimon.core.mcp_rpc import McpStatusError
+
+    if kind == "unreachable":
+        error = ValueError("MCP catalogue read failed")
+        error.__cause__ = ConnectionError("MCP catalogue unreachable")
+        return error
+    return McpStatusError(503 if kind == "server_error" else 429)
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("kind", ["unreachable", "server_error", "rate_limited"])
+async def test_a_catalogue_blip_at_a_turn_asks_for_a_retry_not_a_new_confirmation(
+    template, monkeypatch, kind
+):
+    from daimon.core.mcp_oauth import discovery
+
+    request, *_ = template
+
+    async def blip(_url, _token):
+        raise _blip(kind)
+
+    monkeypatch.setattr(discovery, "list_mcp_tools", blip)
+    with pytest.raises(AdmissionDenied) as refused:
+        await _prepared(request)
+    assert refused.value.cause == "preparation_busy", (
+        "a blip is retried; it never reads as the agent losing its MCP"
+    )
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("kind", ["unreachable", "server_error"])
+async def test_a_catalogue_blip_at_a_preview_records_no_loss(
+    template, consent_request, monkeypatch, kind
+):
+    from daimon.core.channel_backend import AgentBackendRefused
+    from daimon.core.mcp_oauth import discovery
+
+    request, *_ = template
+    _, _, source, actor, *_ = consent_request
+
+    async def blip(_url, _token):
+        raise _blip(kind)
+
+    monkeypatch.setattr(discovery, "list_mcp_tools", blip)
+    with pytest.raises(AgentBackendRefused) as refused:
+        await _bound_capture(request, actor)(source)
+    assert (refused.value.reason, refused.value.detail) == ("source_unavailable", None), (
+        "the preview says try again rather than quote MCP as lost"
+    )
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)

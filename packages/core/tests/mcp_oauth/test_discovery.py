@@ -267,3 +267,30 @@ async def test_live_tool_catalogue_uses_authenticated_paginated_protocol(monkeyp
             {"describe_agent", "list_my_sessions"}
         )
         assert len(calls) == 4 and all(call.method == "POST" for call in calls)
+
+
+@pytest.mark.parametrize(
+    ("failure", "retryable"),
+    [(httpx.ConnectTimeout("slow"), True), (httpx.TooManyRedirects("loop"), False)],
+)
+async def test_a_catalogue_read_that_never_reaches_the_server_is_retryable(
+    monkeypatch, failure, retryable
+):
+    from daimon.core.channel_backend import transient_failure
+    from daimon.core.errors import TurnError
+    from daimon.core.mcp_oauth.discovery import list_mcp_tools
+
+    def handle(_call):
+        raise failure
+
+    original = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: original(transport=httpx.MockTransport(handle), **kwargs),
+    )
+    with pytest.raises(ValueError) as refused:
+        await list_mcp_tools(_MCP_URL, "caller-only-offline")
+    assert "slow" not in str(refused.value), "the error carries fixed text only"
+    upstream = TurnError(kind="upstream", cause=refused.value)
+    assert transient_failure(upstream) is retryable, "only a lost connection is retried"

@@ -61,6 +61,7 @@ from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
+from daimon.core.errors import TurnError
 from daimon.core.features.model_input import (
     CHAT_KEYS,
     HISTORY_KEYS,
@@ -2723,6 +2724,11 @@ async def capture_backend_source(
             return captured
     except (APIError, TimeoutError) as error:
         raise channel_backend.AgentBackendRefused("source_unavailable") from error
+    except TurnError as error:
+        # A capture blip asks for a retry; it never confirms a loss.
+        if channel_backend.transient_failure(error):
+            raise channel_backend.AgentBackendRefused("source_unavailable") from error
+        raise
     except ScopeViolation as error:
         raise channel_backend.AgentBackendRefused("source_unavailable", detail="place") from error
 

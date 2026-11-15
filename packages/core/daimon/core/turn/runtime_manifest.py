@@ -1003,8 +1003,15 @@ async def _capture_source_capabilities(
         # Said once here, though: without it the agent silently loses its MCP
         # on the new provider (J2's Argon preview). Only our own fixed
         # sentences and code labels are logged, never a provider's or a validator's text.
-        from daimon.core.channel_backend import exception_labels
+        from daimon.core.channel_backend import exception_labels, transient_failure
+        from daimon.core.errors import TurnError
 
+        # A blip (a timeout, a lost connection, a 5xx or 429) proves no loss: the
+        # caller retries rather than confirm or run without MCP, tools and skills.
+        busy = TurnError(kind="upstream", cause=error)
+        busy.__cause__ = error
+        if transient_failure(busy):
+            raise busy from error
         log.warning(
             "source_capture.representation_skipped",
             error=type(error).__name__,
