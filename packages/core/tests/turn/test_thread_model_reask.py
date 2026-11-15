@@ -11,9 +11,10 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
-from daimon.core import thread_model_reask
+from daimon.core import model_switch, thread_model_reask
 from daimon.core.authz import Subject
 from daimon.core.channel_backend import BackendActor
+from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.thread_models import get_thread_choice
 from daimon.core.thread_model_flow import (
     ThreadConfirm,
@@ -149,9 +150,9 @@ async def stale(switching, monkeypatch):
 
     monkeypatch.setattr(thread_model_reask, "thread_actor", actor_of)
 
-    def at(version: int) -> StaleThread:
+    def at(version: int, *, attended: bool = True) -> StaleThread:
         return StaleThread(
-            deps=None,
+            deps=SimpleNamespace(membership_resolver=None),  # type: ignore[arg-type]
             settings=None,
             tenant_id=agent.tenant_id,
             platform="slack",
@@ -164,9 +165,10 @@ async def stale(switching, monkeypatch):
             ma_agent_id=MA_AGENT,
             agent_version=version,
             consent=thread.consent,
+            attended=attended,
         )
 
-    return SimpleNamespace(at=at, sessions=sessions, pick=pick)
+    return SimpleNamespace(at=at, sessions=sessions, pick=pick, tenant_id=agent.tenant_id)
 
 
 async def test_the_card_is_posted_once_after_an_agent_edit(stale):
@@ -227,3 +229,30 @@ async def test_a_slow_second_message_does_not_post_twice_while_one_is_in_flight(
     await drain_thread_reasks()
 
     assert len(cards) == 1
+
+
+@pytest.mark.parametrize("sender", ["may_switch", "unattended", "may_not_switch"])
+async def test_a_lossless_pick_after_an_agent_edit_when_sent_by_then_is_kept_only_by_who_may_switch(
+    stale, monkeypatch, sender
+):
+    monkeypatch.setattr(model_switch, "needs_switch_card", lambda _preview: False)
+    if sender == "may_not_switch":
+        async with stale.sessions.begin() as db:
+            policy = await load_access_policy(db, tenant_id=stale.tenant_id)
+            only_others = {"invoker_user_ids": ("someone-else",), "invoker_admin_bypass": False}
+            await set_access_policy(
+                db, tenant_id=stale.tenant_id, policy=policy.model_copy(update=only_others)
+            )
+    posted = _Posted()
+
+    spawn_thread_reask(
+        sessionmaker=stale.sessions,
+        notifier=posted,
+        stale=stale.at(2, attended=sender != "unattended"),
+    )
+    await drain_thread_reasks()
+
+    expected = 0 if sender == "may_switch" else 1
+    assert len(posted.cards) == expected, (
+        f"{sender}: only a sender who could press Switch keeps it without the card"
+    )

@@ -1519,6 +1519,7 @@ async def _admit_gates(
         # Deferred: the model switch modules it imports reach `channel_rules`, whose
         # import chain comes back through this package.
         from daimon.core import thread_model_reask
+        from daimon.core.turn.invocation import human_invocation
 
         thread_model_reask.spawn_thread_reask(
             sessionmaker=deps.sessionmaker,
@@ -1537,6 +1538,9 @@ async def _admit_gates(
                 ma_agent_id=agent.id,
                 agent_version=agent.version,
                 consent=chosen.consent,
+                attended=human_invocation(origin, attended),
+                category_id=category_id,
+                category_unresolved=category_unresolved,
             ),
         )
         return True
