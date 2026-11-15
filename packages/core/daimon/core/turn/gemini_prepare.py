@@ -212,8 +212,13 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     # A session keeps the sandbox it was created with, so a changed setup (a
     # template's carried environment) replaces it. A bare one records nothing,
     # which keeps every session created before setups were carried.
-    compiled = compile_environment(deployment.environment)
-    setup = "" if compiled == {"type": "remote", "sources": []} else request_digest(compiled)
+    # A model interaction (an output cap) has no sandbox to set up.
+    compiled = (
+        {}
+        if deployment.max_output_tokens is not None
+        else compile_environment(deployment.environment)
+    )
+    setup = "" if compiled in ({}, {"type": "remote", "sources": []}) else request_digest(compiled)
 
     async def created(era: str) -> ProviderBinding:
         agent = deployment.native_agent
