@@ -7,8 +7,8 @@ Run inside a conversation thread. With no choice it names the thread's model;
 with one it keeps that choice for every later reply (`daimon.core.thread_models`).
 Anyone who may start a turn in the thread may switch it, decided by the same
 access policy check admission makes. Where provider choice is on, the choices are
-the catalog with prices, and a pick that changes provider shows what changes and
-asks once (`daimon.core.thread_model_switch`). Asking in words reaches the same
+the catalog with prices, and a pick that loses something names it and asks once
+(`daimon.core.thread_model_switch.pick_thread_or_card`). Asking in words reaches the same
 setting through the agent's `set_thread_model` tool.
 """
 
@@ -27,15 +27,16 @@ from daimon.core import backend_capture, channel_backend
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import build_subject
 from daimon.core.errors import DaimonError, UserFacingError
-from daimon.core.model_switch import ModelSwitchPreview, SwitchRefusal, switch_fact_lines
+from daimon.core.model_switch import ModelSwitchPreview, SwitchRefusal
 from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.switch_card import CANCEL_LABEL, SWITCH_LABEL
+from daimon.core.thread_model_flow import thread_pick_result
 from daimon.core.thread_model_switch import (
-    APPLIES_TO,
     ThreadPick,
     confirm_thread_or_refusal,
+    pick_thread_or_card,
     pick_value,
-    preview_thread_or_refusal,
     thread_model_picker,
     thread_pick_for,
 )
@@ -65,7 +66,7 @@ _CONFIRM_TIMEOUT_SECONDS = 300.0
 
 
 class _ConfirmView(GuardedView):
-    """The one Confirm for a pick that changes what the conversation runs on."""
+    """Cancel, then Switch: the card for a pick that loses something."""
 
     def __init__(
         self,
@@ -85,7 +86,16 @@ class _ConfirmView(GuardedView):
         self._admin = admin
         self.confirm.disabled = not shown.allowed
 
-    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label=CANCEL_LABEL, style=discord.ButtonStyle.secondary)
+    async def cancel(
+        self, interaction: discord.Interaction, button: discord.ui.Button["_ConfirmView"]
+    ) -> None:
+        self._finalize()
+        await interaction.response.edit_message(
+            content="Nothing changed.", view=None, allowed_mentions=discord.AllowedMentions.none()
+        )
+
+    @discord.ui.button(label=SWITCH_LABEL, style=discord.ButtonStyle.primary)
     async def confirm(
         self, interaction: discord.Interaction, button: discord.ui.Button["_ConfirmView"]
     ) -> None:
@@ -104,15 +114,6 @@ class _ConfirmView(GuardedView):
             text += " Nothing changed."
         await interaction.edit_original_response(
             content=text, view=None, allowed_mentions=discord.AllowedMentions.none()
-        )
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(
-        self, interaction: discord.Interaction, button: discord.ui.Button["_ConfirmView"]
-    ) -> None:
-        self._finalize()
-        await interaction.response.edit_message(
-            content="Nothing changed.", view=None, allowed_mentions=discord.AllowedMentions.none()
         )
 
 
@@ -226,7 +227,7 @@ class ModelCog(commands.Cog):
     async def _pick(
         self, interaction: BotInteraction, tenant_id: uuid.UUID, thread: discord.Thread, choice: str
     ) -> tuple[str, discord.ui.View | None]:
-        """Keep a pick that needs no consent; otherwise show what changes and ask once."""
+        """Keep a pick that loses nothing; otherwise show the card that asks once."""
         runtime = _runtime_of(interaction)
         word = choice.strip().lower()
         legacy = word == "default" or not channel_backend.backend_selection_enabled(
@@ -246,30 +247,19 @@ class ModelCog(commands.Cog):
         if pick is None:
             raise UserFacingError("No agent answers in this conversation yet.")
         value = pick_value(choice)
-        shown = await preview_thread_or_refusal(pick, value, admin=admin)
-        if isinstance(shown, SwitchRefusal):
-            return f"{shown.line} Nothing changed.", None
-        if shown.preview is None:
-            done = await confirm_thread_or_refusal(
-                pick,
-                value,
-                thread_id=str(thread.id),
-                digest=shown.digest,
-                revision=shown.revision,
-                admin=admin,
-            )
-            return (done.note, None) if not isinstance(done, SwitchRefusal) else (done.line, None)
-        lines = switch_fact_lines(shown, agent_name=None, applies_to=APPLIES_TO)
-        text = "\n".join((*lines, "Confirm to switch this conversation."))
+        done = await pick_thread_or_card(pick, value, thread_id=str(thread.id), admin=admin)
+        result = thread_pick_result(value, done)
+        if not isinstance(done, ModelSwitchPreview):
+            return result.text, None
         view = _ConfirmView(
             allowed_user_id=interaction.user.id,
             pick=pick,
             value=value,
-            shown=shown,
+            shown=done,
             thread_id=str(thread.id),
             admin=admin,
         )
-        return text, view
+        return "\n".join(result.lines), view
 
     @model.autocomplete("choice")
     async def _choices(

@@ -20,7 +20,7 @@ from mux.contracts.ids import ModelRef
 
 THREAD = 222222222222222222
 CONFIRM = ThreadConfirm("openai:gpt-6", "a" * 64, 3)
-LINES = ("Model: GPT-6", "Cost: $2 per 1M tokens")
+LINES = ("Switch this conversation to GPT-6?", "Stops working: memory")
 
 
 def _runtime() -> DiscordRuntime:
@@ -62,15 +62,16 @@ def test_the_custom_id_carries_the_shown_revision_and_digest() -> None:
     assert (int(match["revision"]), match["digest"]) == (CONFIRM.revision, CONFIRM.digest)
 
 
-async def test_the_ask_again_card_is_posted_in_the_thread_with_one_confirm() -> None:
+async def test_the_ask_again_card_is_posted_in_the_thread_with_one_switch() -> None:
     client, send = _client()
 
     await module.discord_thread_reask_notifier(client)(_ask())
 
     client.get_channel.assert_called_once_with(THREAD)
     kwargs = send.call_args.kwargs
-    assert "Confirm to switch this conversation." in kwargs["embed"].description
+    assert kwargs["embed"].description == "\n".join(_ask().lines), "the card's own lines"
     (button,) = kwargs["view"].children
+    assert button.item.label == "Switch", "the same button as every switch card"
     assert button.custom_id == module.build_custom_id(CONFIRM)
 
 
