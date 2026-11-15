@@ -429,8 +429,10 @@ class DirectMessageCog(commands.Cog):
         server_name = guild.name if guild else tenant.external_id
 
         # The only message that carries the controls; /dm-settings shows them again.
+        continued = "Continuing your earlier conversation.\n" if conversation.history else ""
         await message.channel.send(
             f"Private conversation with {admission.config.agent_name} in {server_name}.\n"
+            f"{continued}"
             "Run `/dm-settings` to switch server or start a new conversation.",
             view=self._switch_control(
                 user_id=message.author.id,

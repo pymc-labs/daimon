@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -23,6 +24,7 @@ from daimon.core.output_runtime import AnthropicOutputRuntime
 from daimon.core.scope import ResolvedConfig
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.direct_messages import get_conversation, set_dm_agent_name, set_dm_enabled
+from daimon.core.stores.dm_carry_overs import put_carry_over
 from daimon.core.stores.tenants import set_provision_status
 from daimon.core.turn.admission import Admission, AdmissionGrant
 from daimon.core.turn.errors import AdmissionDenied
@@ -187,6 +189,36 @@ async def test_one_tenant_answers_original_without_public_history(db_session_fac
     assert "view" not in msg.channel.send.await_args_list[-1].kwargs, (
         "only the opening message carries the controls, never a reply"
     )
+
+
+async def test_first_start_continues_an_imported_earlier_conversation(
+    db_session_factory, monkeypatch
+):
+    cog, tenants, _fetch, _reply = await setup(db_session_factory, monkeypatch)
+    async with db_session_factory.begin() as session:
+        await put_carry_over(
+            session,
+            tenant_id=tenants[0].id,
+            platform="discord",
+            external_user_id="999",
+            source_name="Old Bot",
+            exported_at=datetime(2026, 3, 1, tzinfo=UTC),
+            history=[{"role": "user", "text": "earlier question"}],
+            context="Earlier conversation with Old Bot, exported 2026-03-01.",
+        )
+    msg = message()
+    await cog.on_message(msg)
+    first = msg.channel.send.await_args_list[0].args[0]
+    assert "Continuing your earlier conversation." in first
+    assert first.endswith("Run `/dm-settings` to switch server or start a new conversation.")
+    assert (await conversation(db_session_factory)).history == [
+        {"role": "user", "text": "earlier question"}
+    ]
+
+    # A later start has nothing left to continue and says nothing about it.
+    again = message(102)
+    await cog.on_message(again)
+    assert all("Continuing" not in sent_text(call) for call in again.channel.send.await_args_list)
 
 
 async def test_multiple_tenants_pending_messages_are_silent_and_selection_answers_once(
