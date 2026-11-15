@@ -76,7 +76,14 @@ from mux.drivers.gemini.mcp_auth import (
 )
 from mux.drivers.gemini.normalize import OUTCOMES, actions, event, saved_events
 from mux.drivers.gemini.packages import package_sources
-from mux.drivers.gemini.storage import Records, SessionRecord, Storage, owner, read_records
+from mux.drivers.gemini.storage import (
+    Records,
+    SessionRecord,
+    Storage,
+    UploadedBundle,
+    owner,
+    read_records,
+)
 from mux.drivers.gemini.transport import (
     NO_TOOLS_FUNCTION,
     NO_TOOLS_TOOL,
@@ -153,6 +160,9 @@ def page_values[T](values: Sequence[T], page: PageRequest) -> Page[T]:
         next_cursor=str(end) if end < len(ordered) else None,
     )
 
+
+#: `Session.native` key set on a session as it is created; a replayed create omits it.
+CREATED = "created"
 
 #: Waits between tries of one skill's upload; past them the skill is left out.
 UPLOAD_RETRY_DELAYS_S = (1.0, 4.0)
@@ -823,7 +833,15 @@ class GeminiSessions(Base):
             if id_ is not None:
                 prior = self._record(records, scope, self._ref(scope, id_, "session"))
                 if not prior.uploading:
-                    return prior.session
+                    # The mark says the session is new, so a host tells what it left out
+                    # once: a replay of the create is not new.
+                    native = prior.session.native
+                    kept = (
+                        {k: v for k, v in native.items() if k != CREATED}
+                        if isinstance(native, dict)
+                        else native
+                    )
+                    return prior.session.model_copy(update={"native": kept})
             else:
                 id_ = self._new_session(
                     records, scope, spec, key, digest, thread, string(ext.value["binding_id"])
@@ -868,6 +886,7 @@ class GeminiSessions(Base):
             requested_revision=spec.agent_revision,
             effective_revision=spec.agent_revision,
             state="idle",
+            native={CREATED: True},
         )
         pins = (*(agent.spec.skills or ()), *spec.skills)
         records.sessions[id_] = SessionRecord(
@@ -886,119 +905,195 @@ class GeminiSessions(Base):
         """Make the environment and upload each large skill into it before any turn.
 
         The id is saved before the uploads, so a retried create resumes. A skill that
-        will not upload is left out: its environment is replaced by one without it,
-        since its inline SKILL.md would name missing files.
+        will not upload is left out, and leaving one out drops the saved environment:
+        its inline SKILL.md would name missing files. Two creates of one key may run
+        this at once, so every write back acts only on the environment it worked in.
         """
         environments = (
             self._transport if isinstance(self._transport, EnvironmentTransport) else None
         )
         replaced = 0
         while True:
+            stale: str | None = None
+            pending: tuple[SkillRef, ...] = ()
+            manifests: dict[str, UploadedBundle] = {}
+            environment_id: str | None = None
             async with self._storage.transaction() as records:
                 record = self._record(records, scope, ref)
                 if not record.uploading:
                     return record.session
-                config = {
-                    k: v
-                    for k, v in object_value(record.request["environment"]).items()
-                    if k != "type"
-                }
-                sources = config.get("sources")
-                if (
-                    environments is None
-                    or self._skill_files is None
-                    or self._max_output_tokens is not None
-                    or replaced > 2
-                    or any(
-                        isinstance(source, dict)
-                        and source.get("type") != "inline"
-                        and source.get("type") != "repository"
-                        for source in (sources if isinstance(sources, list) else ())
+                config = self._environment_config(record)
+                if environments is None or self._skill_files is None or replaced > 2:
+                    plain = False
+                else:
+                    plain = self._plain_sources(config) and self._valid_network(config)
+                if not plain:
+                    stale = self._leave_out(records, scope, record, record.uploading)
+                else:
+                    agent = records.agents[record.spec.agent.id]
+                    ids = set(record.uploading)
+                    pending = tuple(
+                        p for p in (*(agent.spec.skills or ()), *record.spec.skills) if p.id in ids
                     )
-                ):
-                    self._leave_out(records, scope, record, record.uploading)
-                    continue
-                validate_network({"environment": config})
-                agent = records.agents[record.spec.agent.id]
-                ids = set(record.uploading)
-                pending = tuple(
-                    p for p in (*(agent.spec.skills or ()), *record.spec.skills) if p.id in ids
-                )
-                environment_id = record.environment_id
-            if environment_id is None:
-                made = await environments.create_environment(config)
+                    manifests = {
+                        p.id: owned_skill(records, scope, self._account, p.id).uploads[
+                            str(p.version)
+                        ]
+                        for p in pending
+                    }
+                    environment_id = record.environment_id
+            if not plain:
+                await self._discard(environments, stale)
+                continue
+            assert environments is not None, "checked above"
+            # Every file is read and packed before the environment exists: a skill the
+            # host can't supply is left out up front, not by replacing an environment.
+            archives = {p.id: await self._archive(scope, p, manifests[p.id]) for p in pending}
+            if unusable := tuple(i for i, archive in archives.items() if archive is None):
                 async with self._storage.transaction() as records:
                     record = self._record(records, scope, ref)
-                    environment_id = record.environment_id or made
-                    record.environment_id = environment_id
-                    record.workspace_expires_at = now() + timedelta(days=7)
-                if environment_id != made:  # a concurrent create saved its own first
-                    await environments.delete_environment(made)
+                    stale = self._leave_out(
+                        records, scope, record, [i for i in unusable if i in record.uploading]
+                    )
+                await self._discard(environments, stale)
+                continue
+            if environment_id is None:
+                try:
+                    made = await environments.create_environment(config)
+                except ProviderError as error:
+                    if error.retryable:
+                        raise
+                    log.warning("gemini_environment_create_refused category=%s", error.category)
+                    async with self._storage.transaction() as records:
+                        record = self._record(records, scope, ref)
+                        stale = self._leave_out(records, scope, record, record.uploading)
+                    await self._discard(environments, stale)
+                    continue
+                async with self._storage.transaction() as records:
+                    record = self._record(records, scope, ref)
+                    # Only into a record still waiting for an environment of this very
+                    # configuration: another create's, or a skill since left out, wins.
+                    saved = (
+                        record.environment_id is None
+                        and bool(record.uploading)
+                        and self._environment_config(record) == config
+                    )
+                    if saved:
+                        record.environment_id = made
+                        record.workspace_expires_at = now() + timedelta(days=7)
+                if not saved:
+                    await self._discard(environments, made)
+                    continue
+                environment_id = made
             try:
-                failed = [p.id for p in pending if not await self._upload(scope, environment_id, p)]
+                failed: list[str] | None = [
+                    p.id
+                    for p in pending
+                    if not await self._upload(environment_id, p, archives[p.id], manifests[p.id])
+                ]
             except ProviderError as error:
                 if error.category != "not_found":
                     raise
                 failed = None  # the environment is gone: make it again, with every skill
+            stale = None
             async with self._storage.transaction() as records:
                 record = self._record(records, scope, ref)
+                if record.environment_id != environment_id or not record.uploading:
+                    continue  # another create moved the record on; start from what it holds
                 if failed == []:
                     record.uploading = ()
                     record.session = record.session.model_copy(
-                        update={"native": {"skills_left_out": list(record.left_out)}}
+                        update={"native": {"skills_left_out": list(record.left_out), CREATED: True}}
                     )
                     return record.session
-                record.environment_id = record.workspace_expires_at = None
                 if failed:
-                    self._leave_out(records, scope, record, tuple(failed))
+                    stale = self._leave_out(records, scope, record, failed)
+                else:
+                    record.environment_id = record.workspace_expires_at = None
             replaced += 1
-            if failed:
-                try:
-                    await environments.delete_environment(environment_id)
-                except ProviderError as error:
-                    if error.category != "not_found":
-                        log.warning("gemini_environment_delete_failed category=%s", error.category)
+            await self._discard(environments, stale)
+
+    @staticmethod
+    def _environment_config(record: SessionRecord) -> Object:
+        return {k: v for k, v in object_value(record.request["environment"]).items() if k != "type"}
+
+    @staticmethod
+    def _plain_sources(config: Object) -> bool:
+        """Whether every source is one the pre-created environment can carry."""
+        sources = config.get("sources")
+        return all(
+            not isinstance(source, dict) or source.get("type") in ("inline", "repository")
+            for source in (sources if isinstance(sources, list) else ())
+        )
+
+    @staticmethod
+    def _valid_network(config: Object) -> bool:
+        try:
+            validate_network({"environment": config})
+        except ValueError:
+            return False
+        return True
+
+    @staticmethod
+    async def _discard(
+        environments: EnvironmentTransport | None, environment_id: str | None
+    ) -> None:
+        """Delete an environment nobody keeps; a failure only leaves it to expire."""
+        if environments is None or environment_id is None:
+            return
+        try:
+            await environments.delete_environment(environment_id)
+        except ProviderError as error:
+            if error.category != "not_found":
+                log.warning("gemini_environment_delete_failed category=%s", error.category)
 
     def _leave_out(
         self, records: Records, scope: Scope, record: SessionRecord, ids: Sequence[str]
-    ) -> None:
+    ) -> str | None:
+        """Go without these skills; returns the environment dropped, which the caller deletes.
+
+        The saved environment mounts their SKILL.md, so it can't stay.
+        """
+        if not ids:
+            return None
+        stale = record.environment_id
+        record.environment_id = record.workspace_expires_at = None
         record.left_out = tuple(dict.fromkeys((*record.left_out, *ids)))
         record.uploading = tuple(i for i in record.uploading if i not in record.left_out)
         record.request = self._mcp_request(records, scope, record.spec, omit=record.left_out)
         if not record.uploading:
             record.session = record.session.model_copy(
-                update={"native": {"skills_left_out": list(record.left_out)}}
+                update={"native": {"skills_left_out": list(record.left_out), CREATED: True}}
             )
+        return stale
 
-    async def _upload(self, scope: Scope, environment_id: str, pin: SkillRef) -> bool:
-        """Place one skill's files; a 409 counts as done only once their sizes match."""
-        assert isinstance(self._transport, EnvironmentTransport), "checked by _prepare"
-        assert self._skill_files is not None and pin.version is not None, "checked by _prepare"
-        async with read_records(self._storage) as records:
-            uploaded = owned_skill(records, scope, self._account, pin.id).uploads[pin.version]
+    async def _archive(self, scope: Scope, pin: SkillRef, uploaded: UploadedBundle) -> bytes | None:
+        """One skill's files packed and checked against its manifest; None: unusable."""
+        assert self._skill_files is not None, "checked by _prepare"
         try:
-            archive = skill_archive(uploaded, await self._skill_files(scope, pin))
+            return skill_archive(uploaded, await self._skill_files(scope, pin))
         except ProviderError as error:
             if error.retryable:
                 raise
             log.warning("gemini_skill_files_unread category=%s", error.category)
-            return False
+            return None
+
+    async def _upload(
+        self, environment_id: str, pin: SkillRef, archive: bytes | None, uploaded: UploadedBundle
+    ) -> bool:
+        """Place one skill's files in its own environment, then check their sizes."""
+        assert isinstance(self._transport, EnvironmentTransport), "checked by _prepare"
+        assert archive is not None, "checked by _prepare"
         path = f"{UPLOAD_ROOT}/{pin.id}"
         expected = {file: size for file, size, _ in uploaded.files}
-        overwrite = False
         for delay in (*UPLOAD_RETRY_DELAYS_S, None):
             try:
-                try:
-                    await self._transport.upload_archive(
-                        environment_id, path, archive, overwrite=overwrite
-                    )
-                except ProviderError as error:
-                    if error.category != "conflict":
-                        raise
+                # The environment was made for this session, so a conflict is only ever
+                # an earlier try of ours: replace it.
+                await self._transport.upload_archive(environment_id, path, archive, overwrite=True)
                 listed = await self._transport.list_files(environment_id, path)
                 if all(listed.get(file) == size for file, size in expected.items()):
                     return True
-                overwrite = True  # an earlier try left other bytes there
             except ProviderError as error:
                 if error.category == "not_found":
                     raise
@@ -1196,6 +1291,22 @@ class GeminiEvents(Base):
                 raise ProviderError("conflict", retryable=True, native_code="skill_upload_pending")
             expected = self._mcp_request(records, scope, record.spec, omit=record.left_out)
             agent = records.agents[record.spec.agent.id]
+            if record.current is None and record.environment_id is None:
+                # Their SKILL.md would mount with none of their files beside it.
+                mounted = uploaded_pins(
+                    records,
+                    scope,
+                    self._account,
+                    tuple(
+                        p
+                        for p in (*(agent.spec.skills or ()), *record.spec.skills)
+                        if p.id not in record.left_out
+                    ),
+                )
+                if mounted:
+                    raise ProviderError(
+                        "conflict", retryable=False, native_code="skill_environment_missing"
+                    )
             connections = agent.spec.mcp_servers or ()
             try:
                 validate_intent(
@@ -1353,7 +1464,10 @@ class GeminiEvents(Base):
             async with self._storage.transaction(after_dispatch=True) as records:
                 record = self._record(records, scope, session)
                 record.unknown_delivery = False
-            if exc.category == "not_found" and request.get("previous_interaction_id") is not None:
+            if exc.category == "not_found" and (
+                request.get("previous_interaction_id") is not None
+                or isinstance(request.get("environment"), str)
+            ):
                 raise ContinuityLost(
                     record.session.binding.id,
                     ("Gemini reused environment expired or history was lost.",),

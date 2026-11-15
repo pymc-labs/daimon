@@ -65,7 +65,9 @@ class FakeTransport:
         self.uploads.append((environment_id, path, overwrite))
         if self.upload_errors:
             raise self.upload_errors.pop(0)
-        files = self.environment_files[environment_id]
+        files = self.environment_files.get(environment_id)
+        if files is None:
+            raise ProviderError("not_found", retryable=False)
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
             new = {f"{path}/{m.name}": m.size for m in tar.getmembers() if m.isfile()}
         if not overwrite and set(new) & set(files):
