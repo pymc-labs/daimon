@@ -11,11 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The preview gets 90 seconds to read the agent's skills, and each skill it
   reads is kept even when the preview runs out of time, so a retry picks up
   where it stopped. The current version of a skill set to "latest" is looked
-  up at most every five minutes, or at once after Daimon publishes a new one.
-  The preview reads the agent's tools and skills once for every model it
-  offers. A skill too large to carry is named on the card. One confirmation
-  holds in every channel the agent answers in. A brief provider error or a
-  change during readying asks to try again, without asking to confirm again.
+  up at most every five minutes; the service that publishes a new one sees it
+  at once, other services within five minutes. The preview reads the agent's
+  tools and skills once for every model it offers. A skill too large to carry
+  is named on the card. One confirmation holds in every channel whose own
+  losses match it; a channel with its own skills, or a person's own servers,
+  can ask again. A brief provider error, or a change while the agent is set
+  up, asks to try again, without asking to confirm again.
 - **A model switch names what the provider's sandbox cannot keep.** On OpenAI
   and Gemini the sandbox keeps a plain default environment, but not installed
   packages, sandbox files or network rules, and the preview, the card and
