@@ -452,6 +452,8 @@ class Admission:
     # The model this conversation's people chose (`daimon.core.thread_models`),
     # already in `agent`; the session is created with it. None runs the agent's own.
     model_override: str | None = None
+    # The effort that session runs at when the people chose one; None keeps the agent's.
+    model_effort: str | None = None
     # A choice was kept but can't run here, so this turn runs the agent's own
     # model and says so.
     model_fell_back: bool = False
@@ -1966,6 +1968,7 @@ async def _admit_gates(
         platform_skill_ids=frozenset(skill.skill_id for skill in platform_skills),
         grant=grant,
         model_override=thread_model.model_override,
+        model_effort=thread_model.model_effort,
         model_fell_back=thread_model.fell_back,
         backend_switch_stale=backend_switch_stale,
         web=await _web_links(deps, tenant_id, principal.account_id, chat_admin=effective_admin),

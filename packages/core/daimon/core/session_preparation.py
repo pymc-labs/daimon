@@ -996,6 +996,7 @@ async def _prepare_session_for_turn_locked(
             mcp_hold=hold_key(admission.hold) if admission.shared_owner is None else None,
             # A held place's memory is its channel's, shared thread or not.
             memory_hold=admission.hold,
+            model_effort=admission.model_effort,
         )
         if fresh_start:
             decision = ReplaceSession(reasons=())

@@ -7,8 +7,9 @@ model. Admission applies it (`apply_thread_model`), so the session check sees
 a different desired model and replaces the session the way it does when an
 agent's model is edited, carrying the work over.
 
-A Claude pick is a Managed Agents session override: it names a model (and speed),
-never an effort. A pick on another provider, or Claude for an agent that runs
+A Claude pick is a Managed Agents session override: it names a model and keeps the
+agent's effort unless the conversation chose one (`/model`'s effort, which can also be
+chosen alone). A pick on another provider, or Claude for an agent that runs
 elsewhere, runs through `thread_backend` with the consent `thread_model_switch`
 stored. A choice that is no longer allowed falls back to the agent's own model
 and the turn says so (`MODEL_FALLBACK_NOTICE`).
@@ -36,6 +37,7 @@ from daimon.core.stores.thread_models import (
     clear_thread_model,
     get_thread_choice,
     get_thread_consent,
+    get_thread_effort,
     set_thread_model,
 )
 from mux.contracts.config import DEFAULT_BACKEND
@@ -48,7 +50,11 @@ THREAD_MODEL_CHOICES: Final[Mapping[str, str]] = {
     "haiku": "claude-haiku-5-5",
     "sonnet": "claude-sonnet-5-5",
     "opus": "claude-opus-5-5",
+    "fable": "claude-fable-5-2",
 }
+
+#: The efforts a conversation can pick, plus "default" for the agent's own.
+THREAD_EFFORTS: Final = ("low", "medium", "high", "xhigh", "max")
 
 MODEL_FALLBACK_NOTICE: Final = (
     "\n<model_notice>The model chosen for this conversation is not available here, so "
@@ -80,6 +86,21 @@ def resolve_choice(choice: str) -> str | None:
     return model_id
 
 
+def resolve_effort(effort: str | None) -> tuple[str | None, bool]:
+    """The effort a pick names and whether it returns to the agent's own; refuses the unknown."""
+    if effort is None or not effort.strip():
+        return None, False
+    word = effort.strip().lower()
+    if word == "default":
+        return None, True
+    if word not in THREAD_EFFORTS:
+        offered = ", ".join((*THREAD_EFFORTS, "default"))
+        raise ThreadModelRefused(
+            f"{effort.strip()} isn't an effort this conversation can use. Pick one of: {offered}."
+        )
+    return word, False
+
+
 def conversation_key(*, channel_id: str, thread_id: str | None, is_dm: bool) -> str | None:
     """The id a conversation's choice is kept under: its thread, or a DM's own channel."""
     if thread_id is not None:
@@ -93,6 +114,8 @@ class ThreadModelChange:
     """The model now chosen, None for the agent's own."""
     note: str
     """What to tell the person, in one sentence."""
+    effort: str | None = None
+    """The effort now chosen, None for the agent's own."""
 
 
 async def choose_thread_model(
@@ -101,28 +124,55 @@ async def choose_thread_model(
     tenant_id: uuid.UUID,
     platform: str,
     thread_id: str,
-    choice: str,
+    choice: str | None = None,
+    effort: str | None = None,
 ) -> ThreadModelChange:
-    """Keep `choice` for this conversation; refuses before any write."""
-    model_id = resolve_choice(choice)
+    """Keep `choice` and/or `effort` for this conversation; refuses before any write.
+
+    A pick without a model keeps the one already chosen, and one without an effort
+    keeps that. "default" returns the model (or, for the effort, the effort) to the
+    agent's own; "default" alone clears both.
+    """
+    if choice is None and effort is None:
+        raise ThreadModelRefused("Pick a model, an effort, or both.")
+    model_id = resolve_choice(choice) if choice is not None else None
+    chosen, reset = resolve_effort(effort)
     async with sessionmaker.begin() as session:
-        if model_id is None:
+        if choice is not None and model_id is None:
             await clear_thread_model(
                 session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
             )
-        else:
+        if model_id is not None or chosen is not None or reset:
             await set_thread_model(
                 session,
                 tenant_id=tenant_id,
                 platform=platform,
                 thread_id=thread_id,
                 model=model_id,
+                effort=chosen,
+                reset_effort=reset,
             )
-    if model_id is None:
-        note = "This conversation is back on the agent's own model from the next reply."
-    else:
-        note = f"This conversation runs on {model_label(model_id)} from the next reply."
-    return ThreadModelChange(model_id=model_id, note=note)
+        current = await get_thread_choice(
+            session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+        )
+        kept = await get_thread_effort(
+            session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+        )
+    shown_model = current.id if current is not None else None
+    return ThreadModelChange(
+        model_id=shown_model, note=_change_note(shown_model, kept), effort=kept
+    )
+
+
+def _change_note(model_id: str | None, effort: str | None) -> str:
+    if model_id is None and effort is None:
+        return "This conversation is back on the agent's own model from the next reply."
+    return f"This conversation runs on {_running(model_id, effort)} from the next reply."
+
+
+def _running(model_id: str | None, effort: str | None) -> str:
+    name = model_label(model_id) if model_id is not None else "the agent's own model"
+    return name if effort is None else f"{name} at {effort} effort"
 
 
 async def describe_thread_model(
@@ -136,9 +186,13 @@ async def describe_thread_model(
         choice = await get_thread_choice(
             session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
         )
-    if choice is None:
+        effort = await get_thread_effort(
+            session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+        )
+    if choice is None and effort is None:
         return "This conversation runs on the agent's own model."
-    return f"This conversation runs on {chosen_label(choice)}."
+    name = chosen_label(choice) if choice is not None else "the agent's own model"
+    return f"This conversation runs on {name if effort is None else f'{name} at {effort} effort'}."
 
 
 def chosen_label(choice: ModelRef) -> str:
@@ -184,14 +238,28 @@ async def may_choose_thread_model(
     return bool(authorize(policy, subject=subject, action=Action.START_TURN, place=place))
 
 
+def agent_effort(agent: BetaManagedAgentsAgent) -> str | None:
+    """The effort the agent's own model runs at, when it names one."""
+    effort = (agent.model.model_extra or {}).get("effort")
+    return effort if isinstance(effort, str) else None
+
+
 def with_model_override(
-    agent: BetaManagedAgentsAgent, model_override: str | None
+    agent: BetaManagedAgentsAgent, model_override: str | None, effort: str | None = None
 ) -> BetaManagedAgentsAgent:
-    """The agent as a turn runs it: the stored agent with the conversation's model, if any."""
-    if model_override is None:
+    """The agent as a turn runs it: the stored agent with the conversation's model, if any.
+
+    The agent's effort carries over to the picked model unless the conversation chose
+    one. Speed carries over only where the model stays the same.
+    """
+    if model_override is None and effort is None:
         return agent
+    model_id = model_override or agent.model.id
+    speed = agent.model.speed if model_id == agent.model.id else "standard"
+    kept = effort or agent_effort(agent)
+    extra = {} if kept is None else {"effort": kept}
     return agent.model_copy(
-        update={"model": BetaManagedAgentsModelConfig(id=model_override, speed="standard")}
+        update={"model": BetaManagedAgentsModelConfig(id=model_id, speed=speed, **extra)}
     )
 
 
@@ -201,6 +269,8 @@ class AppliedThreadModel:
     """The agent as this turn runs it: the chosen model in place of its own."""
     model_override: str | None
     """The id the session is created with, None when the agent's own model runs."""
+    model_effort: str | None
+    """The effort it is created with: the conversation's, else the agent's own."""
     fell_back: bool
     """A choice was kept but can't run here, so the agent's own model does."""
 
@@ -265,21 +335,40 @@ async def apply_thread_model(
     `thread_applied` says the turn already runs another provider's pick through
     `thread_backend`; such a pick is never a session override.
     """
-    unchanged = AppliedThreadModel(agent=agent, model_override=None, fell_back=False)
+    unchanged = AppliedThreadModel(
+        agent=agent, model_override=None, model_effort=None, fell_back=False
+    )
     if conversation_id is None:
         return unchanged
     choice = await get_thread_choice(
         session, tenant_id=tenant_id, platform=platform, thread_id=conversation_id
     )
+    effort = await get_thread_effort(
+        session, tenant_id=tenant_id, platform=platform, thread_id=conversation_id
+    )
     if choice is None:
-        return unchanged
+        if effort is None or not anthropic_backend or thread_applied:
+            return unchanged
+        # Only the effort was chosen: the agent's own model runs at it.
+        return AppliedThreadModel(
+            agent=with_model_override(agent, None, effort),
+            model_override=agent.model.id,
+            model_effort=effort,
+            fell_back=False,
+        )
     if choice.provider != DEFAULT_BACKEND:
-        return AppliedThreadModel(agent=agent, model_override=None, fell_back=not thread_applied)
+        return AppliedThreadModel(
+            agent=agent, model_override=None, model_effort=None, fell_back=not thread_applied
+        )
     model_id = choice.id
     if not anthropic_backend or not is_priced_claude_model(model_id):
-        return AppliedThreadModel(agent=agent, model_override=None, fell_back=True)
+        return AppliedThreadModel(
+            agent=agent, model_override=None, model_effort=None, fell_back=True
+        )
+    applied = with_model_override(agent, model_id, effort)
     return AppliedThreadModel(
-        agent=with_model_override(agent, model_id),
+        agent=applied,
         model_override=model_id,
+        model_effort=agent_effort(applied),
         fell_back=False,
     )

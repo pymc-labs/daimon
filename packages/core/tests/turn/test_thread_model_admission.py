@@ -69,6 +69,27 @@ async def test_the_chosen_model_runs_its_thread_across_turns_and_restarts(
     assert other.model_override is None
 
 
+async def test_a_chosen_effort_reaches_the_admission_with_or_without_a_model(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    pick = {"tenant_id": tenant.id, "platform": "discord", "thread_id": "thr-1"}
+    plain = await _admit_in(db_session_factory, tmp_path, tenant, "thr-1")
+    assert plain.model_effort is None
+
+    await choose_thread_model(db_session_factory, effort="low", **pick)
+    alone = await _admit_in(db_session_factory, tmp_path, tenant, "thr-1")
+    assert (alone.model_override, alone.model_effort) == (plain.agent.model.id, "low")
+
+    await choose_thread_model(db_session_factory, choice="opus", **pick)
+    both = await _admit_in(db_session_factory, tmp_path, tenant, "thr-1")
+    assert (both.model_override, both.model_effort) == ("claude-opus-5-5", "low")
+    other = await _admit_in(db_session_factory, tmp_path, tenant, "thr-2")
+    assert (other.model_override, other.model_effort) == (None, None)
+
+
 async def test_a_choice_no_longer_allowed_runs_the_agents_own_model_and_says_so(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

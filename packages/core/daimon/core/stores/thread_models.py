@@ -48,10 +48,23 @@ async def get_thread_choice(
             )
         )
     ).one_or_none()
-    if row is None:
+    if row is None or row.model is None:
         return None
     provider = _PROVIDER.validate_python(row.provider or DEFAULT_BACKEND)
     return ModelRef(provider=provider, id=row.model)
+
+
+async def get_thread_effort(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, thread_id: str
+) -> str | None:
+    """The effort chosen for this conversation, or None for the agent's own."""
+    return await session.scalar(
+        select(ThreadModelSetting.effort).where(
+            ThreadModelSetting.tenant_id == tenant_id,
+            ThreadModelSetting.platform == platform,
+            ThreadModelSetting.thread_id == thread_id,
+        )
+    )
 
 
 async def set_thread_model(
@@ -60,11 +73,23 @@ async def set_thread_model(
     tenant_id: uuid.UUID,
     platform: str,
     thread_id: str,
-    model: str,
+    model: str | None = None,
     provider: Provider | None = None,
+    effort: str | None = None,
+    reset_effort: bool = False,
 ) -> None:
-    """Choose `model`; `provider` None (or Claude's) keeps the legacy Claude-only row."""
+    """Choose `model` and/or `effort`; what is not given stays as it was.
+
+    `provider` None (or Claude's) keeps the legacy Claude-only row. `reset_effort`
+    returns the effort to the agent's own.
+    """
     stored = None if provider in (None, DEFAULT_BACKEND) else provider
+    chosen_effort = None if reset_effort else effort
+    changes: dict[str, object] = {"updated_at": func.now()}
+    if model is not None:
+        changes |= {"model": model, "provider": stored}
+    if reset_effort or effort is not None:
+        changes["effort"] = chosen_effort
     stmt = (
         pg_insert(ThreadModelSetting)
         .values(
@@ -72,13 +97,11 @@ async def set_thread_model(
             platform=platform,
             thread_id=thread_id,
             model=model,
-            provider=stored,
+            provider=stored if model is not None else None,
+            effort=chosen_effort,
             updated_at=func.now(),
         )
-        .on_conflict_do_update(
-            constraint="pk_thread_model_settings",
-            set_={"model": model, "provider": stored, "updated_at": func.now()},
-        )
+        .on_conflict_do_update(constraint="pk_thread_model_settings", set_=changes)
     )
     await session.execute(stmt)
     await session.flush()

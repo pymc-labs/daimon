@@ -149,6 +149,7 @@ class SessionSnapshot(BaseModel):
             "github_repo_script_resource_id",
             "mcp_hold",
             "memory_scope",
+            "model_effort",
             "identity_features",
         ):
             if not data.get(name):
@@ -165,6 +166,9 @@ class SessionSnapshot(BaseModel):
     ma_agent_id: str
     model_id: str
     model_speed: Literal["standard", "fast"] = "standard"
+    # The effort a conversation chose for the session (`daimon.core.thread_models`);
+    # None when the agent's own runs, and for every session from before it existed.
+    model_effort: str | None = None
 
     @property
     def pricing_id(self) -> str:
@@ -329,6 +333,8 @@ def fingerprint_identity(snapshot: SessionSnapshot) -> str:
         fields = (*fields, "mcp_hold")
     if snapshot.memory_scope is not None:
         fields = (*fields, "memory_scope")
+    if snapshot.model_effort is not None:
+        fields = (*fields, "model_effort")
     return _fingerprint(snapshot, fields)
 
 
@@ -378,8 +384,11 @@ def snapshot_from_created_session(
     mcp_hold: str | None = None,
     memory_scope: str | None = None,
     identity_features: tuple[tuple[str, str], ...] = (),
+    model_effort: str | None = None,
 ) -> SessionSnapshot:
     """Snapshot a session we just created, from the response plus what we sent.
+
+    `model_effort` is the effort the conversation's choice sent, if any.
 
     `memory_scope` is the isolation scope the creator built the session for,
     whether or not a store mounted.
@@ -418,6 +427,7 @@ def snapshot_from_created_session(
             "mcp_hold": mcp_hold,
             "memory_scope": memory_scope,
             "identity_features": identity_features,
+            "model_effort": model_effort,
         }
     )
     if sent_system is None:
@@ -731,6 +741,7 @@ def desired_snapshot(
     legacy_memory_servers: tuple[str, ...] = (),
     mcp_hold: str | None = None,
     memory_scope: str | None = None,
+    model_effort: str | None = None,
     github_transport: GithubTransport = "direct",
     repo_mount_path: str | None = None,
     repo_token_issued_at: int | None = None,
@@ -789,6 +800,7 @@ def desired_snapshot(
         chat_session_id=chat_session_id,
         mcp_hold=mcp_hold,
         memory_scope=memory_scope,
+        model_effort=model_effort,
         identity_features=identity_features,
         github_transport=github_transport,
         tools_sha256=hash_tools(

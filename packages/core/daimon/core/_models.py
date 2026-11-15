@@ -2795,6 +2795,10 @@ class ThreadModelSetting(Base):
     __tablename__ = "thread_model_settings"
     __table_args__ = (
         PrimaryKeyConstraint("tenant_id", "platform", "thread_id", name="pk_thread_model_settings"),
+        CheckConstraint(
+            "effort IN ('low', 'medium', 'high', 'xhigh', 'max')",
+            name="ck_thread_model_settings_effort",
+        ),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -2802,12 +2806,15 @@ class ThreadModelSetting(Base):
     )
     platform: Mapped[str] = mapped_column(Text)
     thread_id: Mapped[str] = mapped_column(Text)
-    model: Mapped[str] = mapped_column(Text, nullable=False)
+    # Null when only the effort was chosen: the agent's own model runs (0206).
+    model: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     # The model's provider; null is a Claude model chosen before providers could be (0197).
     provider: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The chosen effort; null keeps the agent's own (0206).
+    effort: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ThreadModelConsent(Base):

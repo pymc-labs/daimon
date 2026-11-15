@@ -499,6 +499,7 @@ async def create_ma_session(
             on_app_access=capture_app_access,
             channel_skills=identity.extra_skills(skills, admission.platform_skill_ids),
             model_override=admission.model_override,
+            model_effort=admission.model_effort,
             system_override=identity.system(admission.agent.system, platform),
             relay_session_key=mapping_id,
             identity=identity,
@@ -581,6 +582,7 @@ async def create_ma_session(
             mcp_hold=None if admission.shared_owner is not None else hold_key(admission.hold),
             memory_scope=memory_scope(admission.hold),
             identity_features=identity.stored(),
+            model_effort=admission.model_effort,
         ).model_copy(
             update={
                 "token_repo_urls": token_repo_urls,

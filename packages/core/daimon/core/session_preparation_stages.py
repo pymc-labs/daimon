@@ -340,6 +340,7 @@ async def desired_snapshot_for(
     mcp_hold: str | None = None,
     memory_hold: TurnHold | None = None,
     identity: SessionIdentity = DEFAULT_IDENTITY,
+    model_effort: str | None = None,
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would freeze.
 
@@ -463,6 +464,7 @@ async def desired_snapshot_for(
         identity_features=identity.stored(),
         mcp_hold=mcp_hold,
         memory_scope=memory_scope(memory_hold),
+        model_effort=model_effort,
         tool_safety=tool_safety,
         public_url=public_url,
     )

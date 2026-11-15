@@ -79,10 +79,16 @@ class CatalogSkill(NativeConfig):
     version: str | None = None
 
 
+class ModelConfig(NativeConfig):
+    id: str
+    speed: str | None = None
+    effort: str | None = None
+
+
 class AgentOverrides(NativeConfig):
     type: Literal["agent_with_overrides"]
     id: str
-    model: str | None = None
+    model: str | ModelConfig | None = None
     system: str | None = None
     mcp_servers: list[MCPServer] | None = None
     tools: list[AgentTool] | None = None
