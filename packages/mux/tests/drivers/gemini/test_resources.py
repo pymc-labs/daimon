@@ -614,6 +614,7 @@ async def test_first_turn_lists_the_agents_files_but_never_its_mounted_skills(
             f".agents/skills/{extra.id}/SKILL.md": b"# Edited by the agent",
             f".agents/skills/{extra.id}/scripts/run.py": b"print(1)\n",
             f".agents/skills/{own.id}/dashboard.html": b"<html>",
+            f".agents/skills/{own.id}/scripts/__pycache__/run.cpython-312.pyc": b"\x00",
             "report.md": b"# Report",
         }
     )
@@ -621,7 +622,7 @@ async def test_first_turn_lists_the_agents_files_but_never_its_mounted_skills(
     assert [a.filename for a in listed.data] == [
         f".agents/skills/{own.id}/dashboard.html",
         "report.md",
-    ], "installed skill files, even edited ones, are not outputs; files the agent made are"
+    ], "installed skill files, even edited ones, and Python caches are not outputs"
 
 
 @pytest.mark.asyncio

@@ -332,11 +332,12 @@ class GeminiArtifacts(Base):
                         "conflict", retryable=False, native_code="snapshot_turn_changed"
                     )
                 # The first snapshot holds every file Daimon mounted (skills, inputs);
-                # those were never the agent's work, so they are never outputs.
+                # those were never the agent's work, so they are never outputs. Nor is
+                # the bytecode Python caches when a skill script imports a sibling.
                 mounted = mounted_files(current.request.get("environment"), records.skills)
                 for path, data in sorted(files.items(), reverse=order == "desc"):
                     sha = hashlib.sha256(data).hexdigest()
-                    if mounted.covers(path, sha):
+                    if mounted.covers(path, sha) or "__pycache__" in path.split("/"):
                         continue
                     id_ = request_digest(
                         {
