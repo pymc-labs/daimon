@@ -115,6 +115,8 @@ class SkillSizeRow(BaseModel):
     largest_file_bytes: int
     file_count: int
     text_only: bool
+    manifest_bytes: int | None = None
+    """The SKILL.md's bytes; None: measured before they were kept, or unreadable."""
 
 
 class SkillCopyRow(BaseModel):

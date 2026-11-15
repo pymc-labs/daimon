@@ -86,3 +86,75 @@ def test_a_skill_loss_shows_its_name_on_every_surface() -> None:
     assert drop_words(drops, preview.skill_names) == (
         "its pdf-tools skill and its skill_01b skill"
     ), "the card's words show the name"
+
+
+def _zip(files: dict[str, bytes]) -> bytes:
+    import io
+    import zipfile
+
+    packed = io.BytesIO()
+    with zipfile.ZipFile(packed, "w") as archive:
+        for path, body in files.items():
+            archive.writestr(path, body)
+    return packed.getvalue()
+
+
+def _mux_spend(files: dict[str, bytes]) -> int | None:
+    """What mux installs of a bundle from the inline budget, or None if it refuses it."""
+    from mux.contracts.resources import SkillUpload, SkillUploadFile
+    from mux.drivers.gemini.bundles import fits_inline, validate_bundle
+    from mux.errors import UnsupportedCapability
+
+    bundle = SkillUpload(files=tuple(SkillUploadFile(path=p, content=b) for p, b in files.items()))
+    try:
+        validate_bundle(bundle, upload=True)
+    except (UnsupportedCapability, ValueError):
+        return None
+    # An inline bundle mounts every file; an uploaded one, only its SKILL.md.
+    return sum(map(len, files.values())) if fits_inline(bundle) else len(files["SKILL.md"])
+
+
+def test_the_skills_a_gemini_capture_keeps_are_the_ones_its_session_installs() -> None:
+    """Capture reads a skill's measured size; mux reads its bytes. Both keep the same
+    skills, and each spends the same inline bytes: a kept large skill really uploads."""
+    import uuid
+    from pathlib import Path
+
+    from daimon.core.turn.session_skills import fitting_skills, measure_archive, skill_spend
+    from mux.contracts.ids import SkillRef
+    from mux.drivers.gemini.bundles import MAX_BUNDLE_BYTES
+
+    mib, head = 1024 * 1024, b"---\nname: s\ndescription: Fixture.\n---\n"
+    style = Path(__file__).parents[4] / "defaults/skills/pymc-artifact-style"
+    shapes = {
+        "text": {"SKILL.md": head, "ref.md": b"a" * 1_000_000},
+        "default": {
+            p.relative_to(style).as_posix(): p.read_bytes()
+            for p in sorted(style.rglob("*"))
+            if p.is_file()
+        },
+        "binary": {"SKILL.md": head + b"b" * 200_000, "f.ttf": b"\xff" * (3 * mib)},
+        "big_manifest": {"SKILL.md": head + b"m" * mib, "f.bin": b"\xff" * mib},
+        "binary_manifest": {"SKILL.md": head + b"\xff", "f.bin": b"\xff" * (3 * mib)},
+        "over_cap": {"SKILL.md": head, "f.bin": b"\xff" * (29 * mib)},
+        "many_files": {"SKILL.md": head, **{f"f{i}.bin": b"\xff" for i in range(256)}},
+    }
+    kept = {"text", "default", "binary"}
+    profile = PROFILES["gemini.inline_reuse"]
+    tenant = uuid.uuid4()
+    sizes = {(sid, "1"): measure_archive(tenant, sid, "1", _zip(f)) for sid, f in shapes.items()}
+    for sid, files in shapes.items():
+        spend = skill_spend(profile, sizes[(sid, "1")])
+        assert spend == _mux_spend(files), sid
+        assert (spend is not None) == (sid in kept), sid
+    assert sum(map(len, shapes["default"].values())) > 4 * mib, "the default agent's own"
+    # Together: the kept set fits mux's shared inline cap, and the next one would not.
+    pins = tuple(SkillRef(id=sid, version="1") for sid in shapes)
+    session = fitting_skills(profile, pins, sizes)
+    assert {p.id for p in session} == kept
+    spent = [_mux_spend(shapes[p.id]) or 0 for p in session]
+    assert sum(spent) <= MAX_BUNDLE_BYTES
+    crowded = (*pins, SkillRef(id="text2", version="1"))
+    sizes[("text2", "1")] = sizes[("text", "1")]
+    assert "text2" not in {p.id for p in fitting_skills(profile, crowded, sizes)}
+    assert sum(spent) + spent[0] > MAX_BUNDLE_BYTES, "mux would refuse it too"

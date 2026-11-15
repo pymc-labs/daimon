@@ -1,10 +1,12 @@
 """Custom and channel skills a template carries to a provider that installs them per session.
 
-Capture measures each source skill once per version (`skill_sizes`); a skill over
-the profile's limit is a named `skill:<id>` loss, never a silent one. The turn
-uploads each remaining skill once per version (`skill_copies`) and attaches the
-copies to its session. A skill left out at the turn (a channel's, or one whose
-upload failed) is told to the agent (`missing_skills_notice`).
+Capture measures each source skill once per version (`skill_sizes`); a skill past
+the profile's inline and upload limits (`skill_spend`) is a named `skill:<id>`
+loss, never a silent one. The turn uploads each remaining skill once per version
+(`skill_copies`) and attaches the copies to its session; Gemini reads a large
+copy's files back at session start (`SessionSkillFiles`). A skill left out at the
+turn (a channel's, or one whose upload failed) is told to the agent
+(`missing_skills_notice`).
 """
 
 from __future__ import annotations
@@ -42,6 +44,7 @@ from mux.contracts.ports import Skills
 from mux.contracts.profile import Profile
 from mux.contracts.resources import Agent, AgentSpec, EnvironmentSpec, SkillUpload, SkillUploadFile
 from mux.errors import MuxError, ProviderError
+from pydantic import JsonValue
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -92,7 +95,7 @@ def fitting_skills(
     """The measured pins the profile installs, in order, together within `combined_bytes`.
 
     `reserved` is what the environment's own inline files (Gemini's package hook)
-    already spend of that budget; the skills get the rest.
+    already spend of that budget; the skills get the rest (`skill_spend`).
     """
     limits = profile.skill_limits
     combined = (
@@ -104,11 +107,10 @@ def fitting_skills(
     used = 0
     for pin in pins:
         row = sizes.get((pin.id, str(pin.version)))
-        if row is None or not skill_fits(profile, row):
+        spend = skill_spend(profile, row) if row is not None else None
+        if spend is None or (combined is not None and used + spend > combined):
             continue
-        if combined is not None and used + row.total_bytes > combined:
-            continue
-        used += row.total_bytes
+        used += spend
         kept.append(pin)
     return tuple(kept)
 
@@ -141,6 +143,32 @@ def skill_fits(profile: Profile, row: SkillSizeRow) -> bool:
     )
 
 
+def skill_spend(profile: Profile, row: SkillSizeRow) -> int | None:
+    """What an installed skill takes of the shared inline budget; None: it can't install.
+
+    A skill within the inline limits spends its bytes. One past them that fits the
+    upload tier (Gemini) uploads at session start and spends only its SKILL.md, the
+    one file mounted inline (mux `validate_targets` counts it).
+    """
+    if skill_fits(profile, row):
+        return row.total_bytes
+    inline, upload = profile.skill_limits, profile.skill_upload_limits
+    if (
+        inline is None
+        or upload is None
+        or row.manifest_bytes is None
+        or row.manifest_bytes > inline.file_bytes
+        or not upload.fits(
+            total_bytes=row.total_bytes,
+            largest_file_bytes=row.largest_file_bytes,
+            files=row.file_count,
+            text=row.text_only,
+        )
+    ):
+        return None
+    return row.manifest_bytes
+
+
 def measure_archive(tenant_id: uuid.UUID, skill_id: str, version: str, data: bytes) -> SkillSizeRow:
     """Size one source archive; one Daimon can't read counts as over every limit."""
     try:
@@ -163,6 +191,7 @@ def measure_archive(tenant_id: uuid.UUID, skill_id: str, version: str, data: byt
         except zipfile.BadZipFile:
             raise ValueError("source skill archive is unreadable") from None
         sizes = [info.file_size for info in infos]
+        # No manifest_bytes: an unreadable archive fits no tier.
         return SkillSizeRow(
             tenant_id=tenant_id,
             skill_id=skill_id,
@@ -182,6 +211,8 @@ def measure_archive(tenant_id: uuid.UUID, skill_id: str, version: str, data: byt
         largest_file_bytes=max(len(body) for body in files.values()),
         file_count=len(files),
         text_only=all(_is_text(body) for body in files.values()),
+        # mux mounts an uploaded skill's SKILL.md inline, so it must be text.
+        manifest_bytes=len(files["SKILL.md"]) if _is_text(files["SKILL.md"]) else None,
     )
 
 
@@ -238,6 +269,7 @@ async def measure_skills(
     tenant_id: uuid.UUID,
     pins: Iterable[tuple[str, str]],
     record: Agent | None = None,
+    manifests: bool = True,
 ) -> dict[tuple[str, str], SkillSizeRow]:
     """Each `(skill_id, version)`'s size, downloading only versions never measured.
 
@@ -245,7 +277,8 @@ async def measure_skills(
     only its own skill, and the next capture tries it again. A blip propagates
     instead (`read_blip`): it proves no loss. Each size is stored as
     soon as it is measured, by a task the caller's timeout or cancel never stops,
-    so a retry downloads only what a timed-out try left unmeasured.
+    so a retry downloads only what a timed-out try left unmeasured. `manifests`
+    is false for a profile with no upload tier, which never reads `manifest_bytes`.
     """
     wanted = tuple(dict.fromkeys(pins))
     # Taken before the read: one that finishes meanwhile is still joined, not redone.
@@ -256,18 +289,36 @@ async def measure_skills(
         if (task := _running((tenant_id, scope, owner, *pin))) is not None
     }
     async with sessionmaker() as db:
-        known = await get_skill_sizes(db, tenant_id=tenant_id, pins=wanted)
+        stored = await get_skill_sizes(db, tenant_id=tenant_id, pins=wanted)
+    # A readable row measured before manifest_bytes is measured again, once; until
+    # then (or if that read fails) its stored size still counts.
+    known = {
+        pin: row
+        for pin, row in stored.items()
+        if not manifests
+        or row.manifest_bytes is not None
+        or row.total_bytes > MAX_UNCOMPRESSED_BYTES
+    }
+    todo = [pin for pin in wanted if pin not in known]
     tasks = [
         running.get(pin)
         or _measuring(
             sessionmaker, anthropic, scope=scope, tenant_id=tenant_id, record=record, pin=pin
         )
-        for pin in wanted
-        if pin not in known
+        for pin in todo
     ]
-    measured = await asyncio.gather(*(asyncio.shield(task) for task in tasks))
-    fresh = {(row.skill_id, row.version): row for row in measured if row is not None}
-    return {**known, **fresh}
+    measured = await asyncio.gather(
+        *(asyncio.shield(task) for task in tasks), return_exceptions=True
+    )
+    fresh: dict[tuple[str, str], SkillSizeRow] = {}
+    for pin, row in zip(todo, measured, strict=True):
+        if isinstance(row, BaseException):
+            if pin not in stored:
+                raise row
+            log.warning("skill_size.remeasure_failed", skill_id=pin[0], error=type(row).__name__)
+        elif row is not None:
+            fresh[pin] = row
+    return {**stored, **fresh}
 
 
 #: A measurement's caller and source: the scope and record it reads with, by skill and version.
@@ -361,12 +412,14 @@ async def copy_skills(
     account_scope_id: str,
     pins: tuple[SkillRef, ...],
     record: Agent | None = None,
+    sources: dict[tuple[str, str], SkillRef] | None = None,
 ) -> tuple[tuple[SkillRef, ...], tuple[str, ...]]:
     """The provider's copy of each source skill version, uploading a version only once.
 
     Also returns a named `skill:<id>` loss for each pin that could not be copied:
     one bad archive or refused upload costs that skill alone, never the reply. A
-    retryable provider error propagates so the reply is retried.
+    retryable provider error propagates so the reply is retried. `sources` gets
+    each copy's source pin, by copy id and version.
     """
 
     async def copy(pin: SkillRef) -> SkillRef:
@@ -425,7 +478,7 @@ async def copy_skills(
     # One at a time: a provider's local record store may take a single writer.
     for pin in pins:
         try:
-            copies.append(await copy(pin))
+            copies.append(made := await copy(pin))
         except (AnthropicError, DaimonError, MuxError, ValueError) as error:
             # A transient failure retries with the reply; only a permanent one is a loss,
             # because the session is created once with whatever copied.
@@ -433,7 +486,55 @@ async def copy_skills(
                 raise
             log.warning("session_skills.copy_failed", skill_id=pin.id, error=type(error).__name__)
             losses.append(f"skill:{pin.id}")
+            continue
+        if sources is not None:
+            sources[(made.id, str(made.version))] = pin
     return tuple(copies), tuple(losses)
+
+
+class SessionSkillFiles:
+    """The source bytes of the skills a Gemini session uploads at start (mux `SkillFiles`).
+
+    `turn_session_skills` fills it before the session is created; mux reads it
+    then. What the session went without is told after (`tell_left_out`).
+    """
+
+    def __init__(
+        self, sessionmaker: async_sessionmaker[AsyncSession], anthropic: AsyncAnthropic
+    ) -> None:
+        self._sessionmaker, self._anthropic = sessionmaker, anthropic
+        self.sources: dict[tuple[str, str], SkillRef] = {}
+        self.record: Agent | None = None
+        self.losses: tuple[str, ...] = ()
+        self.names: dict[str, str] = {}
+
+    async def __call__(self, scope: Scope, skill: SkillRef) -> SkillUpload:
+        pin = self.sources.get((skill.id, str(skill.version)))
+        if pin is None or pin.version is None:
+            raise ProviderError("not_found", retryable=False)
+        try:
+            files = retained_archive_files(
+                await source_skill_archive(
+                    self._sessionmaker,
+                    self._anthropic,
+                    scope=scope,
+                    record=self.record,
+                    skill_id=pin.id,
+                    version=pin.version,
+                )
+            )
+        except ProviderError:
+            raise
+        except (AnthropicError, DaimonError, MuxError) as error:
+            busy = read_blip(error) is not None
+            raise ProviderError(
+                "upstream" if busy else "invalid_request", retryable=busy
+            ) from error
+        return SkillUpload(
+            files=tuple(
+                SkillUploadFile(path=path, content=body) for path, body in sorted(files.items())
+            )
+        )
 
 
 async def latest_version(anthropic: AsyncAnthropic, scope: Scope, attached: SkillRef) -> str:
@@ -551,6 +652,7 @@ async def channel_session_skills(
         scope=scope,
         tenant_id=request.tenant_id,
         pins=((p.id, str(p.version)) for p in pins),
+        manifests=profile.skill_upload_limits is not None,
     )
     kept = fitting_skills(profile, pins, sizes)
     return kept, (*unresolved, *skill_losses(pins, kept)), skill_names(sizes)
@@ -563,12 +665,15 @@ async def turn_session_skills(
     profile: Profile,
     scope: Scope,
     account_scope_id: str,
+    files: SessionSkillFiles | None = None,
 ) -> tuple[SkillRef, ...]:
     """The provider's copies of the custom and channel skills a template's session carries.
 
     An agent-origin template carries what its confirmed capture measured; a
     channel-origin one, the channel's own skills measured now. `skills` is
     called only when there is something to copy: no credential is read before.
+    With `files`, it is filled for the session's uploads, and the skills left out
+    are told once the session exists (`tell_left_out`).
     """
     from daimon.core.turn.runtime_manifest import represented_source
 
@@ -585,6 +690,8 @@ async def turn_session_skills(
         pins, left, names = await channel_session_skills(request, profile, scope)
         record = None
     copies: tuple[SkillRef, ...] = ()
+    if files is not None:
+        files.record, files.names = record, names
     if pins:
         copies, failed = await copy_skills(
             request.deps.sessionmaker,
@@ -596,11 +703,32 @@ async def turn_session_skills(
             account_scope_id=account_scope_id,
             pins=pins,
             record=record,
+            sources=files.sources if files is not None else None,
         )
         left = (*left, *failed)
-    if left:
+    if files is not None:
+        files.losses = left
+    elif left:
         await _tell_missing_skills(request, left, names)
     return copies
+
+
+async def tell_left_out(
+    request: ProviderPreparationRequest, files: SessionSkillFiles, native: JsonValue
+) -> None:
+    """Tell the agent the skills its new session goes without: copy losses, failed uploads.
+
+    mux names a failed upload by its copy id (`Session.native["skills_left_out"]`).
+    """
+    left = native.get("skills_left_out") if isinstance(native, dict) else None
+    by_copy = {copy_id: pin.id for (copy_id, _), pin in files.sources.items()}
+    failed = (
+        [f"skill:{by_copy.get(i, i)}" for i in left if isinstance(i, str)]
+        if isinstance(left, list)
+        else []
+    )
+    if losses := (*files.losses, *failed):
+        await _tell_missing_skills(request, losses, files.names)
 
 
 async def _tell_missing_skills(

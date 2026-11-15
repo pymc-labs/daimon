@@ -146,6 +146,8 @@ async def test_gemini_names_only_what_its_turn_loses(gemini_template, consent_re
     request, quote, *_ = gemini_template
     relay = "mcp_server:linear" not in quote.declared_drops
     await _one_reading(request, quote, consent_request, relay=relay)
+    # Its large default skill (fonts, images) uploads, so no skill is a loss.
+    assert not [d for d in quote.declared_drops if d.startswith("skill:")], quote.declared_drops
     # Web search maps to Google Search; Daimon's own web_fetch carries fetch.
     assert "builtin_tool:web_search" not in quote.declared_drops
     assert "builtin_tool:web_fetch" not in quote.declared_drops

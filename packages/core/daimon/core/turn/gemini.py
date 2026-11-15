@@ -68,6 +68,7 @@ from mux.drivers.gemini import (
     GeminiManagedAgents,
     MCPSecretResolver,
     SkillBundlePublisher,
+    SkillFiles,
     Storage,
     Transport,
     compile_agent,
@@ -178,8 +179,12 @@ def gemini_backend(
     scope: Scope,
     runtime: TurnRuntime,
     account_scope_id: str,
+    skill_files: SkillFiles | None = None,
 ) -> GeminiManagedAgents:
-    """Compose an explicit scoped runtime before a logical session exists."""
+    """Compose an explicit scoped runtime before a logical session exists.
+
+    `skill_files` lets a new session upload skills past the inline limits.
+    """
     required_model = _runtime_model(runtime)
     if config.profile != PROFILE or config.model != required_model:
         raise UnsupportedCapability(("gemini_host_flash_primary",), PROFILE)
@@ -231,6 +236,7 @@ def gemini_backend(
         mcp_secrets=supplied.mcp_secrets,
         gcs_secrets=supplied.gcs_secrets,
         skill_bundle_publisher=supplied.skill_bundle_publisher,
+        skill_files=skill_files,
     )
 
 

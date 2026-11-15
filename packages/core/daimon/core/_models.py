@@ -1214,6 +1214,8 @@ class SkillSize(Base):
     largest_file_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     file_count: Mapped[int] = mapped_column(Integer, nullable=False)
     text_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # The SKILL.md's bytes; NULL: measured before this column, or unreadable.
+    manifest_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     measured_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
