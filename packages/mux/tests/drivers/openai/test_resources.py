@@ -271,6 +271,31 @@ async def test_binary_artifact_pages_exact_bytes_and_truncation_is_typed_failure
 
 
 @pytest.mark.asyncio
+async def test_outputs_are_only_the_turns_published_artifacts_never_mounted_inputs() -> None:
+    """Unlike Gemini's workspace snapshot, OpenAI lists only what a turn published.
+
+    Mounted inputs are `/files` uploads and skills are hosted references; the listing
+    never reads either, so neither can come back as an output.
+    """
+    wire = Wire()
+    sdk, skill_port, port, _ = wire.ports()
+    await port.upload(
+        SCOPE, binary(), filename="binary.bin", media_type="application/octet-stream", key="upload"
+    )
+    await skill_port.create(SCOPE, bundle(), key="skill")
+    wire.requests.clear()
+    first = await port.list(SCOPE, SESSION, page=PageRequest(limit=1))
+    second = await port.list(SCOPE, SESSION, page=PageRequest(limit=1, cursor=first.next_cursor))
+    paths = {request.url.path for request in wire.requests}
+    assert paths == {"/v1/agents/sessions/session", "/v1/agents/sessions/session/artifacts"}, (
+        f"the listing reads only the session's published artifacts: {paths}"
+    )
+    listed = [artifact.ref.id for artifact in (*first.data, *second.data)]
+    assert all(id_.startswith("session:") for id_ in listed), f"no input file is listed: {listed}"
+    await sdk.close()
+
+
+@pytest.mark.asyncio
 async def test_uploaded_input_file_is_distinct_and_preserves_all_binary_bytes() -> None:
     wire = Wire()
     sdk, _, port, _ = wire.ports()
