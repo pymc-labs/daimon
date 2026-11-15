@@ -40,6 +40,8 @@ EVENT = {
     },
 }
 SETTLE_QUERY = {"order": "desc", "limit": 100, "types": ["span.model_request_end"]}
+# Automatic settles also list tool events, for Claude's web searches.
+SEARCH_TYPES = {"types": ["span.model_request_end", "agent.tool_use", "agent.tool_result"]}
 
 
 def _error(status: int) -> httpx.Response:
@@ -166,8 +168,8 @@ async def _cutoff(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
 @pytest.mark.parametrize(
     "cutoff,backlog,filters",
     [
-        (False, False, {}),
-        (True, False, {"created_at_gte": AT}),
+        (False, False, SEARCH_TYPES),
+        (True, False, {**SEARCH_TYPES, "created_at_gte": AT}),
         (True, True, {"created_at_lt": AT}),
     ],
 )
@@ -188,7 +190,8 @@ async def test_a_settle_reads_like_the_sdk_under_its_tenant_scope(
     client = build_async_anthropic(transport=httpx.MockTransport(_recorder(expected)))
     try:
         listed = [
-            e.id async for e in client.beta.sessions.events.list(SESSION, **SETTLE_QUERY, **filters)
+            e.id
+            async for e in client.beta.sessions.events.list(SESSION, **{**SETTLE_QUERY, **filters})
         ]
     finally:
         await client.close()

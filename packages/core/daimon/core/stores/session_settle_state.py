@@ -1,4 +1,4 @@
-"""Store for per-session settle state: pending settle requests, the backlog cutoff,
+"""Store for per-session settle state: pending settle requests, the billing cutoffs,
 and which turn an agent-chat send started (`unattended_turn`).
 
 Per `guideline:architecture`: this module does NOT swallow exceptions.
@@ -23,12 +23,29 @@ the operator's backlog settle does.
 """
 
 
+WEB_SEARCH_CUTOFF_ID = "web-search-cutoff"
+"""The row whose `covered_through` is when Claude web searches began to be billed.
+
+Written once by the migration that added search billing. Searches before it
+were never billed, so no settle bills them.
+"""
+
+
 async def backlog_cutoff(session: AsyncSession) -> datetime | None:
     """When this settle path was deployed (None on a database that never ran it)."""
+    return await _cutoff(session, BACKLOG_CUTOFF_ID)
+
+
+async def web_search_cutoff(session: AsyncSession) -> datetime | None:
+    """When Claude web searches began to be billed (None on a database that never ran it)."""
+    return await _cutoff(session, WEB_SEARCH_CUTOFF_ID)
+
+
+async def _cutoff(session: AsyncSession, row_id: str) -> datetime | None:
     return (
         await session.execute(
             select(SessionSettleState.covered_through).where(
-                SessionSettleState.managed_session_id == BACKLOG_CUTOFF_ID
+                SessionSettleState.managed_session_id == row_id
             )
         )
     ).scalar_one_or_none()

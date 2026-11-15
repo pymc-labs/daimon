@@ -4701,10 +4701,10 @@ class SessionSettleState(Base):
     `settle_requested_at` is written before the send and `settle_turn_event_id`
     (the send's own `user.message`) once it is accepted; both are cleared when
     that turn has been settled (`daimon.core.usage_sweep`). `covered_through`
-    is read only on the reserved `backlog-cutoff` row, where it records when
-    this settle path was deployed. `unattended_turn_event_id` is the latest
-    turn an agent-chat send started (`unattended_turn`), never cleared by a
-    settle.
+    is read only on the reserved cutoff rows: `backlog-cutoff`, when this
+    settle path was deployed, and `web-search-cutoff`, when search billing
+    was. `unattended_turn_event_id` is the latest turn an agent-chat send
+    started (`unattended_turn`), never cleared by a settle.
 
     The table keeps its original name; the former catch-up's cursor columns
     are no longer mapped and are dropped later. Private to

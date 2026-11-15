@@ -4,8 +4,10 @@
 `free_web_searches` (those the free allowance covered) and `paid_web_searches`
 (the latest revision's billed ones), so spend reads price them.
 `web_search_allowances` counts searches per provider account, allowance pool and
-calendar month, shared by every tenant on that account. Downgrading drops the
-columns and the table, so spend reads stop counting searches already debited.
+calendar month, shared by every tenant on that account. The `web-search-cutoff`
+row of `usage_reconcile_progress` records when Claude searches began to be
+billed, so settles never bill the earlier ones. Downgrading drops the columns,
+the table and the row, so spend reads stop counting searches already debited.
 
 downgrade: destructive
 """
@@ -38,10 +40,17 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("used >= 0", name="ck_web_search_allowances_used"),
     )
+    op.execute(
+        "INSERT INTO usage_reconcile_progress (managed_session_id, covered_through) "
+        "VALUES ('web-search-cutoff', now()) ON CONFLICT (managed_session_id) DO NOTHING"
+    )
 
 
 def downgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
+    op.execute(
+        "DELETE FROM usage_reconcile_progress WHERE managed_session_id = 'web-search-cutoff'"
+    )
     op.drop_table("web_search_allowances")
     for column in ("paid_web_searches", "free_web_searches", "web_searches"):
         op.drop_column("usage_events", column)
