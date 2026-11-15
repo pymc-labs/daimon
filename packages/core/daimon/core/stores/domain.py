@@ -1460,6 +1460,9 @@ class SourceRepresentation(_Facts):
     # Source skills, at concrete versions, the target installs per session (not on
     # its agent): every custom and channel skill within the profile's size limit.
     session_skills: tuple[SkillRef, ...] = ()
+    # The target runs the source's execution tools in the provider's own sandbox
+    # (an agent template: OpenAI's hosted bash, Gemini's code_execution).
+    provider_execution: bool = False
 
 
 class BackendAgent(_Facts):

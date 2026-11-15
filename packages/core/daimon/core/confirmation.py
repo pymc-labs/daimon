@@ -995,19 +995,21 @@ _DROP_WORDS: Mapping[str, str] = {
 }
 
 
+def drop_word(drop: str) -> str:
+    """Plain words for one declared loss: 'web search', 'its linear connector'."""
+    if drop.startswith("mcp_tool:"):
+        _, server, tool = drop.split(":", 2)
+        return f"the {tool} tool of {server}"
+    if drop.startswith("mcp_server:"):
+        return f"its {drop.removeprefix('mcp_server:')} connector"
+    if drop.startswith("skill:"):
+        return f"its {drop.removeprefix('skill:')} skill"
+    return _DROP_WORDS.get(drop, drop.replace("_", " "))
+
+
 def drop_words(drops: Sequence[str]) -> str:
     """'its saved keys, its memory and its sandbox': saved keys first, as the costliest."""
-    words: list[str] = []
-    for drop in sorted(drops, key=lambda item: (item != "credentials", item)):
-        if drop.startswith("mcp_tool:"):
-            _, server, tool = drop.split(":", 2)
-            words.append(f"the {tool} tool of {server}")
-        elif drop.startswith("mcp_server:"):
-            words.append(f"its {drop.removeprefix('mcp_server:')} connector")
-        elif drop.startswith("skill:"):
-            words.append(f"its {drop.removeprefix('skill:')} skill")
-        else:
-            words.append(_DROP_WORDS.get(drop, drop.replace("_", " ")))
+    words = [drop_word(d) for d in sorted(drops, key=lambda item: (item != "credentials", item))]
     return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
 
 

@@ -498,9 +498,12 @@ async def _capture_source_capabilities(
         request.admission.private_dm_id is not None
         or request.admission.slack_turn_context_id is not None
     )
+    origin = request.admission.origin_channel_id
     if (
         (private and not carries_caller_resources(request, capability_preview))
-        or request.admission.origin_channel_id is None
+        # An agent's own (channel-less) preview reads its wildcard templates only.
+        or origin is None
+        and not capability_preview
         or not capability_preview
         and (revision is None or request.admission.backend_revision_origin != "agent")
     ):
@@ -509,7 +512,8 @@ async def _capture_source_capabilities(
         selected = [
             row
             for row in rows
-            if row.get("source_capabilities") is not None
+            if origin is not None
+            and row.get("source_capabilities") is not None
             and row.get("platform") == request.platform
             and row.get("channel_id") == request.admission.origin_channel_id
             and (
@@ -531,7 +535,11 @@ async def _capture_source_capabilities(
             and row.get("template_capabilities") == "mcp"
             and row.get("tenant_id") == str(source.tenant_id)
             and row.get("platform") in (request.platform, _WILDCARD)
-            and row.get("channel_id") in (request.admission.origin_channel_id, _WILDCARD)
+            and (
+                row.get("channel_id") == _WILDCARD
+                or origin is not None
+                and row.get("channel_id") == origin
+            )
             and row.get("account_id") in (request.scope.account_id, _WILDCARD)
             and (
                 capability_preview
@@ -996,6 +1004,7 @@ async def _capture_source_capabilities(
                     environment=inputs.environment,
                     unavailable_capabilities=(*template_losses, *connector_losses),
                     session_skills=session_skills,
+                    provider_execution=template and bool(mapped_tools),
                 )
             )
         if len({item.target.model.model_dump_json() for item in represented}) != len(represented):
@@ -1455,6 +1464,8 @@ def classify_source_obligations(
     if target is None or not (
         native_retained
         or ("sandbox" in drops and environment is None and not resources)
+        # Its code runs in the provider's sandbox: execution is kept, not dropped.
+        or (represented is not None and represented.provider_execution and not resources)
         or (
             source.environment is not None
             and environment is not None

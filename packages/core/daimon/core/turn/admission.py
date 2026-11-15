@@ -2690,7 +2690,10 @@ async def capture_backend_source(
                 admission,
                 scope,
                 context.tenant_id,
-                context.platform or account.platform,
+                # An agent's own read is of its chat turns: its features are the tenant's.
+                account.platform
+                if explicit_target_name is not None
+                else context.platform or account.platform,
                 label,
                 context.thread_id or "",
                 context.account_id,

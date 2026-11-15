@@ -128,7 +128,15 @@ def same_losses(target: AgentSpec, consent: _BackendDropConsent) -> bool:
         # A template that lost the skills whole now attaches them, naming only
         # those over the provider's size limit: fewer losses than accepted.
         accepted = (accepted - {"skills"}) | {d for d in today if d.startswith("skill:")}
+    if "sandbox" in accepted and "sandbox" not in today and _runs_code(target):
+        # A template's code ran nowhere before; now the provider's sandbox runs it.
+        accepted -= {"sandbox"}
     return today == accepted
+
+
+def _runs_code(target: AgentSpec) -> bool:
+    """`target` carries a provider execution tool, so its code runs in their sandbox."""
+    return any(tool.name in ("bash", "code_execution") for tool in target.tools or ())
 
 
 def relayed_servers(target: AgentSpec) -> frozenset[str]:

@@ -2,10 +2,10 @@
 
 A template row ("root_materialization" + "template_capabilities": "mcp") has no
 operator capability inputs: capture represents the source's daimon-mcp toolset
-from its live catalogue, consent keeps it (skills, memory and sandbox stay
-declared drops), the host publishes the counterpart once, and each turn mints
-one registered caller credential in memory that `finalize` revokes. Only the
-HTTP edge is replaced; the MCP catalogue is the real verifier and middleware.
+from its live catalogue, consent keeps it (code runs in Gemini's sandbox), the
+host publishes the counterpart once, and each turn mints one registered caller
+credential in memory that `finalize` revokes. Only the HTTP edge is
+replaced; the MCP catalogue is the real verifier and middleware.
 """
 
 from __future__ import annotations
@@ -53,6 +53,8 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
     # "unreadable_mcp": the source's MCP catalogue can't be read at consent, so the
     # confirmed switch declares the MCP drop (the J2/J3 copy's path).
     unreadable_mcp = getattr(request, "param", None) == "unreadable_mcp"
+    # "relay": the connector relay is on from consent onward.
+    relay = getattr(request, "param", None) == "relay"
     request, service, source, actor, accepted, router, *_ = consent_request
     sessions = request.deps.sessionmaker
     router.add_environment_list(request.admission.environment)
@@ -79,8 +81,13 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
             turn_runtimes={},
             turn_runtime_factory=build_channel_runtime,
             state_store=PostgresStateStore(sessions),
+            **({"settings": object()} if relay else {}),
         ),
     )
+    if relay:
+        from daimon.core.features import snapshot
+
+        monkeypatch.setattr(snapshot, "deployment_on", lambda _s, k, _p: k == "mcp_connector_relay")
     native, calls, posts = {}, [], []
 
     def handle(call):

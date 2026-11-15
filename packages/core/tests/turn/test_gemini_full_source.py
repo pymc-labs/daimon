@@ -1239,6 +1239,35 @@ async def test_registered_chat_runtime_refuses_foreign_revoked_or_expanded_autho
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_an_admin_acting_as_themselves_is_a_provider_caller(full, monkeypatch):
+    """Admins' own turns reach the provider; a role outside the list never does."""
+    from daimon.core import mcp_auth
+    from daimon.core.stores.accounts import set_role
+    from daimon.core.stores.domain import Role
+
+    request, plan, _, _, _, posts, token, *_ = full
+    async with request.deps.sessionmaker.begin() as db:
+        await set_role(db, request.admission.account_id, Role.ADMIN)
+
+    async def validate():
+        await mcp_auth.validate_agent_mcp_token(
+            request.deps.sessionmaker,
+            token=token,
+            secret=request.deps.mcp.jwt_secret.get_secret_value().encode(),
+            scope=request.scope,
+            agent_id=plan.source_agent_id,
+            now=request.now(),
+            chat_execution=True,
+        )
+
+    await validate()
+    monkeypatch.setattr(mcp_auth, "PROVIDER_TOKEN_ROLES", frozenset({Role.USER}))
+    with pytest.raises(ValueError, match="invalid scoped agent token"):
+        await validate()
+    assert not posts
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("fault", ["register", "revoke"])
 async def test_optional_catalogue_registry_outage_preserves_native_preview(
     full, monkeypatch, fault
