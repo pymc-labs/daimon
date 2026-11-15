@@ -9,7 +9,7 @@ from typing import Literal
 
 from daimon.core._models import DirectMessageConversation, DmCarryOver
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import ColumnElement, delete, func, literal_column, select, tuple_
+from sqlalchemy import Boolean, ColumnElement, delete, func, literal_column, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,7 +38,7 @@ async def put_carry_over(
     context: str,
 ) -> PutResult:
     """Store or replace a waiting conversation; a taken one is never brought back."""
-    values = {
+    values: dict[str, object] = {
         "source_name": source_name,
         "exported_at": exported_at,
         "history": history,
@@ -56,7 +56,7 @@ async def put_carry_over(
                 where=DmCarryOver.consumed_at.is_(None),
             )
             # xmax is zero only on a row this statement inserted.
-            .returning(literal_column("(xmax = 0)"))
+            .returning(literal_column("(xmax = 0)", Boolean))
         )
     ).first()
     if inserted is None:

@@ -216,4 +216,18 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    raise NotImplementedError("Watch evidence and held timers must be retained")
+    op.execute("SET LOCAL lock_timeout = '5s'")
+    bind = op.get_bind()
+    schema = bind.dialect.identifier_preparer.quote_schema(
+        bind.scalar(sa.text("SELECT current_schema()"))
+    )
+    op.execute(f"DROP FUNCTION IF EXISTS {schema}.{SIGNATURE}")
+    op.drop_table("held_timers")
+    # A callback watch has no meaning without its port; its capabilities cascade.
+    op.execute("DELETE FROM watches WHERE source = 'callback'")
+    op.drop_constraint("ck_watches_delivery_source", "watches", type_="check")
+    op.create_check_constraint(
+        "ck_watches_delivery_source",
+        "watches",
+        "delivery = 'thread' OR source IN ('poll', 'mcp_poll')",
+    )
