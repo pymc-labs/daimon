@@ -384,6 +384,7 @@ async def _settle(deps: TurnDeps, *, session_id: str, scope: Scope, record: Usag
             scope=scope,
             record=record,
             deadline=time.monotonic() + SETTLE_BUDGET_S,
+            streamed=True,
         )
     except _anthropic.NotFoundError:
         # A deleted session: its events can no longer be listed.

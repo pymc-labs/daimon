@@ -5,12 +5,12 @@ searches its own stream delivers. Calls made while no stream was attached (a
 worker that died mid-turn, a ceiling, an interrupt) and every call of a
 headless agent-chat turn (MCP `start_turn`/`continue_turn`/`ask`, which never
 drive a stream) reach no recorder. `settle_session` is the one path that bills
-them: it lists the session's model calls and searches newest first, skips
-those already in `usage_events` (written in the same transaction as the ledger
-debit, so "has a usage row" means "has a debit"), and replays the rest
-through `record_turn_usage`. That recorder is idempotent on the
-`turn:<session>:<event>` key, so a call recorded concurrently by a live stream
-or another settle is debited once.
+them: it lists the session's model calls (and, where no stream drove the
+session, its searches) newest first, skips those already in `usage_events`
+(written in the same transaction as the ledger debit, so "has a usage row"
+means "has a debit"), and replays the rest through `record_turn_usage`. That
+recorder is idempotent on the `turn:<session>:<event>` key, so a call recorded
+concurrently by a live stream or another settle is debited once.
 
 Callers:
 
@@ -200,6 +200,7 @@ async def settle_session(
     max_pages: int | None = SETTLE_MAX_PAGES,
     deadline: float | None = None,
     backlog: bool = False,
+    streamed: bool = False,
 ) -> SettleResult:
     """Debit the session's model calls and web searches with no ledger row yet, newest first.
 
@@ -217,6 +218,11 @@ async def settle_session(
     stored progress: a settle cut short keeps every debit it wrote and reports
     itself incomplete, and the next settle reads the listing again, which is
     safe because a call with a usage row is never recorded twice.
+
+    `streamed`: a live stream drove the session and billed every search it or
+    its replays saw, so only calls are listed. Listing every tool result of a
+    long chat session at each turn end costs far more than the rare search a
+    cut stream misses.
 
     `scope` authorizes the read: the turn's admitted session scope, or the
     tenant of a validated session stamp. None reads under the platform scope
@@ -237,7 +243,7 @@ async def settle_session(
             async with sessionmaker() as s:
                 cutoff = await session_settle_state.backlog_cutoff(s)
                 search_floor = await session_settle_state.web_search_cutoff(s)
-            types = [_CALLS] if backlog else [_CALLS, *_SEARCHES]
+            types = [_CALLS] if backlog or streamed else [_CALLS, *_SEARCHES]
             query = EventQuery(order="desc", limit=_PAGE_SIZE, types=types)
             # Unset fields mean SDK omit; never turn them into explicit nulls.
             if cutoff is not None and not backlog:

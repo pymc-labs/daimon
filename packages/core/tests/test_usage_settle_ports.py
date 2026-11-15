@@ -40,7 +40,7 @@ EVENT = {
     },
 }
 SETTLE_QUERY = {"order": "desc", "limit": 100, "types": ["span.model_request_end"]}
-# Automatic settles also list tool events, for Claude's web searches.
+# A settle of a session no stream drove also lists tool events, for Claude's web searches.
 SEARCH_TYPES = {"types": ["span.model_request_end", "agent.tool_use", "agent.tool_result"]}
 
 
@@ -166,15 +166,22 @@ async def _cutoff(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
 
 
 @pytest.mark.parametrize(
-    "cutoff,backlog,filters",
+    "cutoff,backlog,streamed,filters",
     [
-        (False, False, SEARCH_TYPES),
-        (True, False, {**SEARCH_TYPES, "created_at_gte": AT}),
-        (True, True, {"created_at_lt": AT}),
+        (False, False, False, SEARCH_TYPES),
+        (True, False, False, {**SEARCH_TYPES, "created_at_gte": AT}),
+        # The stream billed the searches it saw: a streamed turn's settle lists calls only.
+        (True, False, True, {"created_at_gte": AT}),
+        (True, True, False, {"created_at_lt": AT}),
     ],
 )
 async def test_a_settle_reads_like_the_sdk_under_its_tenant_scope(
-    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch, cutoff, backlog, filters
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch,
+    cutoff,
+    backlog,
+    streamed,
+    filters,
 ):
     if cutoff:
         await _cutoff(db_session_factory)
@@ -199,7 +206,13 @@ async def test_a_settle_reads_like_the_sdk_under_its_tenant_scope(
     client = build_async_anthropic(transport=httpx.MockTransport(_recorder(actual)))
     try:
         result = await usage_sweep.settle_session(
-            client, db_session_factory, SESSION, record=None, scope=SCOPE, backlog=backlog
+            client,
+            db_session_factory,
+            SESSION,
+            record=None,
+            scope=SCOPE,
+            backlog=backlog,
+            streamed=streamed,
         )
     finally:
         await client.close()
