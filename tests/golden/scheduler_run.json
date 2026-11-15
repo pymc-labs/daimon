@@ -42,6 +42,7 @@
           "mcp_settings": {
             "fixture_type": "McpSettings"
           },
+          "membership_resolver": null,
           "on_session": {
             "fixture_type": "builtin_function_or_method"
           },
@@ -56,6 +57,7 @@
           },
           "personal_memory": false,
           "platform": "discord",
+          "runs_as_user": "u1",
           "sandbox": null,
           "session_factory": {
             "fixture_type": "async_sessionmaker"

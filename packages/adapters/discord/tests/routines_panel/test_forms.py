@@ -58,6 +58,7 @@ async def setup_panel(db_session_factory, monkeypatch, stub_anthropic):
         tenant = await make_tenant(session, platform="discord", workspace_id="123456")
     runtime = MagicMock(spec=DiscordRuntime)
     runtime.settings = SimpleNamespace()
+    runtime.turn_deps = SimpleNamespace(membership_resolver=None)
     runtime.sessionmaker = db_session_factory
     runtime.anthropic = stub_anthropic
     monkeypatch.setitem(globals(), "interaction", partial(interaction, runtime=runtime))

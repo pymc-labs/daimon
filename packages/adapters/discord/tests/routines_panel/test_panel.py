@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -69,7 +70,9 @@ def _make_state(entries: list[RoutineEntry], *, over_cap: int = 0) -> RoutinesPa
 
 
 def _make_runtime() -> DiscordRuntime:
-    return MagicMock(spec=DiscordRuntime)
+    runtime = MagicMock(spec=DiscordRuntime)
+    runtime.turn_deps = SimpleNamespace(membership_resolver=None)
+    return runtime
 
 
 def _find_button(view: discord.ui.LayoutView, label: str) -> discord.ui.Button[Any]:
@@ -292,6 +295,7 @@ class _SessionCM:
 
 def _runtime_with_session(session: Any) -> MagicMock:
     runtime = MagicMock(spec=DiscordRuntime)
+    runtime.turn_deps = SimpleNamespace(membership_resolver=None)
     runtime.sessionmaker = MagicMock(return_value=_SessionCM(session))
     return runtime
 

@@ -457,9 +457,10 @@ async def test_current_agent_policy_denial_prevents_source_read(runtime_watch, r
     from daimon.core.stores.access_policy import set_access_policy
 
     runtime, watch, _ = runtime_watch
+    # The owner is an admin without the required role: an admin does not qualify.
     runtime.membership_resolver.resolve.return_value = Membership(
         is_member=True,
-        role_ids=("123",),
+        role_ids=("999",),
         is_admin=True,
     )
     rule = (
