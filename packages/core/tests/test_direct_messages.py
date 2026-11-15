@@ -7,7 +7,9 @@ from typing import Any
 
 import pytest
 from daimon.core import direct_messages
-from daimon.core.direct_messages import reply_to_dm
+from daimon.core.direct_messages import bounded_turns, reply_to_dm
+from daimon.core.features.model_input import DmHistoryCap
+from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.stores.direct_messages import get_conversation
 from daimon.core.stores.domain import Role
 from daimon.core.turn.deps import TurnDeps
@@ -117,3 +119,19 @@ async def test_shutdown_settle_uses_owned_scope_and_cannot_interrupt_a_released_
         stored = await get_thread_session_by_id(session, id=mapping.id)
     assert stored is not None
     assert (stored.status == "dead") is (owns_claim and not interrupt_ack)
+
+
+def _turns(count: int, size: int = 10) -> list[TranscriptTurn]:
+    return [TranscriptTurn(role="user", text=f"{i:03d}".ljust(size, "x")) for i in range(count)]
+
+
+def test_bounded_turns_default_is_twelve_turns_and_sixteen_thousand_chars() -> None:
+    kept = bounded_turns(_turns(40))
+    assert [t.text[:3] for t in kept] == [f"{i:03d}" for i in range(28, 40)]
+    assert sum(len(t.text) for t in bounded_turns(_turns(40, 5_000))) == 16_000
+
+
+def test_bounded_turns_honours_a_raised_cap() -> None:
+    kept = bounded_turns(_turns(150), DmHistoryCap(turns=100))
+    assert len(kept) == 100 and kept[-1].text.startswith("149")
+    assert sum(len(t.text) for t in bounded_turns(_turns(150, 5_000), DmHistoryCap(100))) == 100_000

@@ -6,7 +6,9 @@ import uuid
 
 import pytest
 from daimon.core.features.model_input import (
+    DEFAULT_DM_HISTORY,
     FULL_HISTORY,
+    DmHistoryCap,
     HistoryDepth,
     SessionToolset,
     guidance_applies,
@@ -99,3 +101,15 @@ def test_a_limit_is_a_finite_number_read_the_same_way_everywhere() -> None:
         HistoryDepth.of(_snapshot(ResolvedFeature("history_depth", "12.0", "deployment"))).replay
         == 12
     )
+
+
+def test_dm_memory_defaults_to_twelve_and_scales_its_characters() -> None:
+    """The default keeps today's 12 messages and 16,000 characters; a raise scales both."""
+    spec = FEATURES["dm_history_depth"]
+    assert spec.default == "12"
+    assert (DEFAULT_DM_HISTORY.turns, DEFAULT_DM_HISTORY.chars) == (12, 16_000)
+    assert DmHistoryCap.of(None) == DEFAULT_DM_HISTORY, "a hand-built admission keeps the default"
+    found = resolve_feature(spec, [TierValue("workspace", "100"), TierValue("agent", "50")])
+    assert (found.value, found.tier) == ("50", "agent"), "a lower tier can only shrink it"
+    cap = DmHistoryCap.of(_snapshot(found))
+    assert (cap.turns, cap.chars) == (50, 50_000)

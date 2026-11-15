@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Direct message memory is a setting.** `dm_history_depth` sets how many earlier
+  messages each direct message reply carries: 12 (the default), 25, 50 or 100, at the
+  deployment, workspace and agent levels. The smallest setting wins. The history is
+  sent again with every reply, so a higher setting costs more.
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and
   the MCP tools. A run nobody started, such as a routine, never applies one at once.

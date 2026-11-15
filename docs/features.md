@@ -20,6 +20,7 @@ Where each feature can be set, and its default.
 | Feature | Key | Kind | Default | Deployment | Workspace | Agent | Channel | Thread | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Chat history | `history_depth` | Model input | 100 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Direct message memory | `dm_history_depth` | Model input | 12 messages | ✓ | ✓ | ✓ |  |  | Only Discord, Slack |
 | Setup guidance | `guidance` | Model input | On | ✓ | ✓ | ✓ |  |  |  |
 | Run commands | `tool.bash` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
 | Read files | `tool.read` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
@@ -174,6 +175,18 @@ How many earlier chat messages a new conversation reads, up to 100 from the thre
 | Values | `100` (100 messages), `50` (50 messages), `25` (25 messages), `10` (10 messages), `0` (None) |
 | Default | `100` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
+| Combines | Lowest wins |
+
+## Direct message memory
+
+How many earlier messages of a direct message conversation each reply carries. The history is sent again with every reply, so a higher setting costs more. The smallest setting wins.
+
+| | |
+| --- | --- |
+| Key | `dm_history_depth` |
+| Values | `12` (12 messages), `25` (25 messages), `50` (50 messages), `100` (100 messages) |
+| Default | `12` |
+| Levels | Deployment, Workspace, Agent |
 | Combines | Lowest wins |
 
 ## Setup guidance

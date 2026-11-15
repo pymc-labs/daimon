@@ -68,6 +68,7 @@ from daimon.core.features.model_input import (
     PER_TURN_KEYS,
     SESSION_KEYS,
     TURN_KEYS,
+    DmHistoryCap,
     HistoryDepth,
     SessionToolset,
     agent_toolset,
@@ -479,6 +480,11 @@ class Admission:
     def history_depth(self) -> HistoryDepth:
         """How much earlier chat a context builder reads at this place."""
         return HistoryDepth.of(self.features)
+
+    @property
+    def dm_history(self) -> DmHistoryCap:
+        """How much of a DM conversation a reply at this place carries."""
+        return DmHistoryCap.of(self.features)
 
     def feature_on(self, key: str) -> bool:
         """`key` at this place; a hand-built admission, or a key not resolved, keeps it on."""

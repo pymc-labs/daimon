@@ -28,7 +28,7 @@ PER_TURN_KEYS: Final[tuple[str, ...]] = (
 """Turn-bound switches each turn checks with `Admission.feature_on`."""
 MODEL_INPUT_KEYS: Final[tuple[str, ...]] = ("guidance", *SESSION_KEYS, *TURN_KEYS)
 
-HISTORY_KEYS: Final[tuple[str, ...]] = ("history_depth",)
+HISTORY_KEYS: Final[tuple[str, ...]] = ("history_depth", "dm_history_depth")
 CHAT_KEYS: Final[tuple[str, ...]] = (
     "completion_pings",
     "table_rendering",
@@ -69,6 +69,29 @@ class HistoryDepth:
 
 
 FULL_HISTORY: Final[HistoryDepth] = HistoryDepth()
+
+DM_CHARS_PER_TURN: Final[int] = 1_000
+DM_MIN_CHARS: Final[int] = 16_000
+
+
+@dataclass(frozen=True)
+class DmHistoryCap:
+    """How much of a DM conversation each reply carries: messages, and the characters they fill."""
+
+    turns: int = 12
+
+    @property
+    def chars(self) -> int:
+        return max(DM_MIN_CHARS, self.turns * DM_CHARS_PER_TURN)
+
+    @classmethod
+    def of(cls, features: FeatureSnapshot | None) -> DmHistoryCap:
+        """From a snapshot; none, or one without the key (a hand-built admission), reads 12."""
+        found = features.features.get("dm_history_depth") if features is not None else None
+        return cls() if found is None else cls(limit_int(found.value))
+
+
+DEFAULT_DM_HISTORY: Final[DmHistoryCap] = DmHistoryCap()
 
 
 @dataclass(frozen=True)

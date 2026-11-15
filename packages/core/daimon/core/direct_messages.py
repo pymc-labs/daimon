@@ -27,6 +27,7 @@ from daimon.core.config import load_turn_settings
 from daimon.core.confirmation import ConfirmationHook
 from daimon.core.context_prompt import TurnContext
 from daimon.core.errors import UserFacingError
+from daimon.core.features.model_input import DEFAULT_DM_HISTORY, DmHistoryCap
 from daimon.core.handoff_context import TranscriptTurn, render_previous_session
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_resolver import MAResolverMissError
@@ -271,11 +272,13 @@ def dm_permission_text(platform: ChatPlatform) -> str:
     )
 
 
-def bounded_turns(turns: Sequence[TranscriptTurn]) -> list[TranscriptTurn]:
-    """Keep a small text-only context, newest selected, oldest rendered first."""
-    remaining = 16_000
+def bounded_turns(
+    turns: Sequence[TranscriptTurn], cap: DmHistoryCap = DEFAULT_DM_HISTORY
+) -> list[TranscriptTurn]:
+    """Keep a bounded text-only context, newest selected, oldest rendered first."""
+    remaining = cap.chars
     selected: list[TranscriptTurn] = []
-    for turn in reversed(turns[-12:]):
+    for turn in reversed(turns[-cap.turns :]):
         if remaining <= 0:
             break
         text = turn.text[:remaining]
@@ -422,7 +425,10 @@ async def start_dm(
         source_thread_id=source_thread_id,
         source_thread_keys=sorted(set(source_thread_keys)),
         context=render_previous_session(
-            [TranscriptTurn(role="user", text=f"Source: {source_url}"), *bounded_turns(context)],
+            [
+                TranscriptTurn(role="user", text=f"Source: {source_url}"),
+                *bounded_turns(context, admission.dm_history),
+            ],
             from_agent_name="source conversation",
         ),
         memory_read_only=admission.memory_read_only,
@@ -878,7 +884,8 @@ async def reply_to_dm_result(
                 conversation.context
                 + "\n"
                 + render_previous_session(
-                    bounded_turns(previous), from_agent_name="private conversation"
+                    bounded_turns(previous, prepared.admission.dm_history),
+                    from_agent_name="private conversation",
                 )
             )
             answer, _session_id, outputs = await _run_admitted_dm_turn(
@@ -907,7 +914,8 @@ async def reply_to_dm_result(
                     *previous,
                     TranscriptTurn(role="user", text=text),
                     TranscriptTurn(role="agent", text=answer),
-                ]
+                ],
+                prepared.admission.dm_history,
             )
             history = [{"role": turn.role, "text": turn.text} for turn in turns]
             grant = prepared.admission.grant

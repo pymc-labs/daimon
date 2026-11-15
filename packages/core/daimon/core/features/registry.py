@@ -1093,6 +1093,28 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         platforms=frozenset({"discord", "slack", "teams"}),
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
+    FeatureSpec(
+        key="dm_history_depth",
+        name="Direct message memory",
+        category="model_input",
+        effect="limit",
+        values={
+            "12": "12 messages",
+            "25": "25 messages",
+            "50": "50 messages",
+            "100": "100 messages",
+        },
+        default="12",
+        tiers=("deployment", "workspace", "agent"),
+        binds="turn",
+        doc=(
+            "How many earlier messages of a direct message conversation each reply carries. "
+            "The history is sent again with every reply, so a higher setting costs more. "
+            "The smallest setting wins."
+        ),
+        platforms=_DM_PLATFORMS,
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
     *_MODEL_INPUT,
     *_SESSION_IDENTITY,
     *_CHAT_BEHAVIOUR,
