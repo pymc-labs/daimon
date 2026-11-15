@@ -251,6 +251,9 @@ class ProviderPreparationRequest:
     # The tenant's hosted OpenAI environment, created or reused for this turn by
     # `openai_environment.tenant_environment`; the code-default GPT row uses it.
     openai_environment_id: str | None = field(default=None, kw_only=True, compare=False, repr=False)
+    # A channel-less preview: every platform the agent answers on. Per-platform
+    # features resolve as the strictest across them; empty reads `platform` alone.
+    answers_on: tuple[str, ...] = field(default=(), kw_only=True)
 
 
 ProviderPreparation = Callable[[ProviderPreparationRequest], Awaitable[PreparedTurn]]

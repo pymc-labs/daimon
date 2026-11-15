@@ -133,8 +133,8 @@ Agent tools: list / get / create / update / fork / archive.
 | `fork_agent` | all callers | Make a copy of Daimon or another agent that you can edit under a new name. |
 | `get_agent` | all callers | Show what an agent can access: attached MCP servers and skills. |
 | `list_agents` | all callers | List agents visible here, including their attached ``mcp_servers`` and ``skills``. |
-| `request_agent_backend_switch` | all callers | Preview a requested agent backend switch, then Confirm in this chat. |
-| `set_agent_backend` | all callers | Set an enabled model provider, or clear the agent setting with backend=null. |
+| `request_agent_backend_switch` | all callers | Change an agent's model to another provider's: preview, then Confirm in this chat. |
+| `set_agent_backend` | all callers | Change which provider's model the agent uses, or clear it with backend=null. |
 | `set_agent_builtin_tool` | all callers | Turn one of an agent's built-in tools on or off, e.g. "turn off its web search". |
 | `update_agent` | all callers | Update an agent: change its instructions (system prompt), switch its model, or add existing skills such as build-models. |
 

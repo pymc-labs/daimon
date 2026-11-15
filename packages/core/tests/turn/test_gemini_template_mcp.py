@@ -2,10 +2,10 @@
 
 A template row ("root_materialization" + "template_capabilities": "mcp") has no
 operator capability inputs: capture represents the source's daimon-mcp toolset
-from its live catalogue, consent keeps it (skills, memory and sandbox stay
-declared drops), the host publishes the counterpart once, and each turn mints
-one registered caller credential in memory that `finalize` revokes. Only the
-HTTP edge is replaced; the MCP catalogue is the real verifier and middleware.
+from its live catalogue, consent keeps it (code runs in Gemini's sandbox), the
+host publishes the counterpart once, and each turn mints one registered caller
+credential in memory that `finalize` revokes. Only the HTTP edge is
+replaced; the MCP catalogue is the real verifier and middleware.
 """
 
 from __future__ import annotations
@@ -53,6 +53,8 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
     # "unreadable_mcp": the source's MCP catalogue can't be read at consent, so the
     # confirmed switch declares the MCP drop (the J2/J3 copy's path).
     unreadable_mcp = getattr(request, "param", None) == "unreadable_mcp"
+    # "relay": the connector relay is on from consent onward.
+    relay = getattr(request, "param", None) == "relay"
     request, service, source, actor, accepted, router, *_ = consent_request
     sessions = request.deps.sessionmaker
     router.add_environment_list(request.admission.environment)
@@ -79,8 +81,13 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
             turn_runtimes={},
             turn_runtime_factory=build_channel_runtime,
             state_store=PostgresStateStore(sessions),
+            **({"settings": object()} if relay else {}),
         ),
     )
+    if relay:
+        from daimon.core.features import snapshot
+
+        monkeypatch.setattr(snapshot, "deployment_on", lambda _s, k, _p: k == "mcp_connector_relay")
     native, calls, posts = {}, [], []
 
     def handle(call):
@@ -458,6 +465,32 @@ async def test_the_relay_mounts_a_user_connector_instead_of_losing_it(template, 
     token = await transport.mcp_secrets(request.scope, daimon.credential_ref, daimon.url)
     relayed = await transport.mcp_secrets(request.scope, linear.credential_ref, linear.url)
     assert relayed == token, "the relay authenticates the turn's own Daimon credential"
+
+
+@pytest.mark.parametrize("consent_request", [CONNECTOR_PARAMS], indirect=True)
+async def test_a_channel_less_read_keeps_a_connector_only_if_every_platform_relays(
+    template, monkeypatch
+):
+    """Where a copy answers on several platforms, the relay must be on on all of them."""
+    from daimon.core.features import snapshot
+
+    request, *_ = template
+    monkeypatch.setattr(
+        snapshot,
+        "deployment_on",
+        lambda _s, key, platform: key == "mcp_connector_relay" and platform == "slack",
+    )
+    request = replace(request, deps=replace(request.deps, settings=object()))
+    both = replace(request, answers_on=("discord", "slack"))
+    selected, _ = await _prepared(both)
+    assert "mcp_server:linear" in selected.target_spec.declared_drops, (
+        "discord has no relay: the connector is lost there, so it is named"
+    )
+    only = replace(request, answers_on=("slack",))
+    selected, _ = await _prepared(only)
+    assert "mcp_server:linear" not in selected.target_spec.declared_drops, (
+        "answering only on slack, the relay keeps it"
+    )
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from daimon.core.stores.domain import SourceRepresentation
 from daimon.core.turn.runtime_manifest import (
     classify_source_obligations,
     preview_source_drops,
@@ -11,7 +12,14 @@ from daimon.core.turn.runtime_manifest import (
 )
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, SkillRef
-from mux.contracts.resources import MCPConnection, ResourceBinding, ToolSpec, WorkspaceSource
+from mux.contracts.resources import (
+    AgentSpec,
+    MCPConnection,
+    NetworkPolicy,
+    ResourceBinding,
+    ToolSpec,
+    WorkspaceSource,
+)
 from mux.errors import UnsupportedCapability
 from pydantic import ValidationError
 
@@ -600,7 +608,7 @@ def test_represented_native_builtin_loss_requires_tools_even_on_the_same_provide
         ({"speed": "standard"}, True),
         ({"speed": "fast"}, True),
         ({"effort": None}, True),
-        ({"effort": "low"}, True),
+        ({"effort": "low"}, "effort_setting"),
         ({"effort": {"type": "medium"}, "speed": "standard"}, True),
     ],
 )
@@ -623,11 +631,15 @@ def test_model_controls_are_offered_only_for_valid_unrepresented_controls(
         provider=provider, id="gpt-6-luna" if provider == "openai" else "gemini-3.8-flash"
     )
     target = preview_source_drops(source, model)
-    assert target.declared_drops == (("model_controls", "sandbox") if required else ("sandbox",))
+    # An effort alone is named as such; any other lost control reads as model settings.
+    lost = "model_controls" if required is True else required
+    assert target.declared_drops == ((lost, "sandbox") if required else ("sandbox",)), (
+        "the lost control is named once"
+    )
     assert classify_source_obligations(source, target, environment=None) == frozenset()
     if required:
         omitted = target.model_copy(update={"declared_drops": ("sandbox",)})
-        assert classify_source_obligations(source, omitted, environment=None) == {"model_controls"}
+        assert classify_source_obligations(source, omitted, environment=None) == {lost}
 
 
 @pytest.mark.parametrize(
@@ -808,8 +820,8 @@ def test_a_source_effort_is_carried_only_when_the_target_states_one(captured):
     ref = ModelRef(provider="openai", id="gpt-6-luna")
     unstated = preview_source_drops(source, ref)
     stated = preview_source_drops(source, ref, effort="low")
-    assert "model_controls" in unstated.declared_drops
-    assert "model_controls" not in stated.declared_drops
+    assert "effort_setting" in unstated.declared_drops, "an effort alone is its own loss"
+    assert "effort_setting" not in stated.declared_drops, "a stated effort is carried"
     fast = ExtensionConfig(
         namespace="anthropic.model_config",
         version=1,
@@ -819,3 +831,65 @@ def test_a_source_effort_is_carried_only_when_the_target_states_one(captured):
         update={"effective_spec": spec.model_copy(update={"extensions": (fast,)})}
     )
     assert "model_controls" in preview_source_drops(still, ref, effort="low").declared_drops
+
+
+_FILES = (
+    WorkspaceSource(
+        kind="repository", target_path="/work/repo", repository_url="https://example.invalid/r.git"
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    "provider,model", [("openai", "gpt-6-luna"), ("gemini", "gemini-3.8-flash")]
+)
+@pytest.mark.parametrize(
+    "environment,lost",
+    [
+        ({}, ()),
+        ({"packages": {"pip": ("numpy",)}}, ("installed_packages",)),
+        ({"network": NetworkPolicy(mode="none")}, ("network_rules",)),
+        ({"network": NetworkPolicy(mode="limited", allowed_hosts=("a.test",))}, ("network_rules",)),
+        ({"sources": _FILES}, ("workspace_files",)),
+        (
+            {"packages": {"npm": ("left-pad",)}, "network": NetworkPolicy(mode="none")},
+            ("installed_packages", "network_rules"),
+        ),
+    ],
+)
+def test_a_provider_sandbox_is_kept_only_for_a_plain_environment(
+    captured, provider, model, environment, lost
+):
+    """The default sandbox keeps a plain environment; every other setting is a named loss."""
+    plain = {"network": NetworkPolicy(), "packages": None, "sources": None, "native_config": None}
+    spec = captured.environment.spec.model_copy(update={**plain, **environment})
+    source = captured.model_copy(
+        update={"environment": captured.environment.model_copy(update={"spec": spec})}
+    )
+    ref = ModelRef(provider=provider, id=model)
+    base = source.effective_spec
+    target = AgentSpec(
+        name=base.name,
+        description=base.description,
+        model=ref,
+        system=base.system,
+        tools=(),
+        skills=(),
+        mcp_servers=(),
+        metadata=base.metadata,
+    )
+    represented = SourceRepresentation(
+        source_pin=source_preservation_pin(source), target=target, provider_execution=True
+    )
+    source = source.model_copy(update={"representations": (represented,)})
+    drops = preview_source_drops(source, ref).declared_drops
+    assert drops == lost, "the sandbox is a loss only through the settings it cannot keep"
+    assert "sandbox" not in drops, "the whole sandbox is never named when finer words fit"
+    unaccepted = target.model_copy(update={"declared_drops": ()})
+    assert classify_source_obligations(source, unaccepted, environment=None) == set(lost), (
+        "preparation refuses a switch that did not accept each named loss"
+    )
+    old = target.model_copy(update={"declared_drops": ("sandbox",)})
+    assert classify_source_obligations(source, old, environment=None) == frozenset(), (
+        "a consent that accepted the sandbox covers its parts"
+    )

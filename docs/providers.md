@@ -21,7 +21,7 @@ in one conversation.
 | Web fetch | Yes | Through Daimon | Through Daimon | Through Daimon |
 | Web search | Yes | Not supported | Not supported | Not supported |
 | Output files | Yes | Yes | Yes | Yes, from harness 0.2.0 |
-| Reasoning effort | Yes | Low, medium, high | Low, medium, high | Not supported |
+| Reasoning effort | Yes | Low, medium, high | Agents take none | Not supported |
 | Spend limit for one reply | Yes | Daimon stops the reply | Holds only, no stop mid-turn | Not supported |
 | Routines | Yes | Yes | Yes | Not supported |
 | Workspace export and import | Yes | Not supported | Not supported | Not supported |
@@ -100,8 +100,8 @@ daimon agents convert <name> [--to openai|gemini|anthropic] [--yes]
 ```
 
 An admin runs it. Without `--to` it picks the first provider that has a key.
-Moving to OpenAI or Gemini keeps the agent's name, owner, and channel and agent
-rules, and retires the Claude original. Skills that exist only on Claude are
+Moving to OpenAI or Gemini changes the agent's model and keeps the same agent:
+its name, owner, channels and agent rules. Skills that exist only on Claude are
 left off, and the command names each one. `--to anthropic` makes it a Claude
 agent again with the same owner, threads, routines, memory, settings and grants.
 Both are safe to re-run after a failure. They are refused while the agent has
@@ -136,7 +136,8 @@ Memory settings show as needing setup.
   with the `host_call_gate` feature.
 - **Copies of itself.** `ask_helper` with `self` starts a fresh copy per ask.
   All copies of one message stop at $10 of spend together, and share no files.
-- **Effort.** Low, medium or high, kept with the model. Fast stays on Claude.
+- **Effort.** OpenAI takes low, medium or high, kept with the model; Gemini agents
+  take none. Fast stays on Claude.
 - **Spend limit.** The host prices a reply's usage while it runs, as the runtime
   file section below describes.
 

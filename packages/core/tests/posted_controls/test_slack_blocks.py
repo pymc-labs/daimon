@@ -175,7 +175,7 @@ def test_a_control_card_routes_each_button_by_its_own_custom_id(kind: str) -> No
 
     card = requested_switch_card(
         uuid.uuid4(),
-        title="Change the model provider?",
+        title="Change the model?",
         facts=("Researcher moves to OpenAI.",),
         requester_platform_user_id=REQUESTER,
         expires_at=dt.datetime.now(dt.UTC) + dt.timedelta(hours=1),

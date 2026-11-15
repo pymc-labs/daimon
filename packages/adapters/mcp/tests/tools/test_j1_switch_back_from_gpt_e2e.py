@@ -121,7 +121,7 @@ async def test_j1_a_gpt_root_switches_itself_back_to_claude_with_daimons_own_car
         message_id="card-message",
     )
     assert press is not None and press.applied, press
-    assert press.text.startswith("Switched Researcher to Anthropic.")
+    assert press.text.startswith("Researcher now uses Anthropic.")
     current = await service.current(await _agent(runtime, auth, agent))
     assert current is not None and current.backend in (None, "anthropic")
     async with runtime.session_factory() as session:

@@ -955,8 +955,9 @@ async def source_backend_for_copy(
     assert revision is not None
     if not channel_backend.backend_selection_enabled(runtime.settings.turn):
         raise ToolError(
-            f"{source_name} runs on {provider_name(backend)}, and choosing a model provider "
-            "is turned off here, so a copy of it can't start there. Nothing was created."
+            f"{source_name} runs on {provider_name(backend)}, and changing its model to "
+            "another provider's is turned off here, so a copy of it can't start there. "
+            "Nothing was created."
         )
     return backend, revision.model or backend_selection(backend).model or ""
 
@@ -1402,7 +1403,7 @@ async def _fork_agent_impl(
 
             raise ToolError(
                 f"A saved copy keeps {source_name}'s model; it can't become "
-                f"{model_name(requested)}. Make the copy, then request a model provider switch "
+                f"{model_name(requested)}. Make the copy, then request a model switch "
                 "for the copy. Nothing was created."
             )
     # Forking another agent is an admin's call: a fork routes nowhere and has no
@@ -1610,7 +1611,7 @@ _MISSING_WORDS: Final[Mapping[str, str]] = {
     "instructions": "instructions that can't be carried over unchanged",
     "source_definition": "a setting or attachment that provider can't represent",
     "source_context": "setup that couldn't be read completely",
-    "source_representation": "a saved version for that provider that is out of date",
+    "source_representation": "a saved setup for that provider that is out of date",
     "tools": "tools that must ask before publishing",
     "model_options": "model options that provider doesn't take",
 }
@@ -2027,7 +2028,7 @@ async def _post_own_switch_card(
         handoff_thread=(origin.platform, origin.parent_channel_id, origin.thread_id),
     )
     prompt = ConfirmationPrompt(
-        title="Change the model provider?",
+        title="Change the model?",
         requester_platform_user_id=auth.platform_user_id,
         expires_at=expires_at,
         admin=True,
@@ -2349,7 +2350,7 @@ async def _request_agent_backend_switch_impl(
                 account_id=auth.account_id,
                 subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS)),
             )
-            from daimon.core.turn.notices import conversations_follow_line, provider_name
+            from daimon.core.turn.notices import conversations_follow_line, uses_phrase
 
             before = await service.current(agent)
             if awaiting is not None:
@@ -2410,14 +2411,15 @@ async def _request_agent_backend_switch_impl(
                         else "something went wrong on our side."
                     )
                     raise ToolError(
-                        f"{agent_name} now uses {provider_name(target_backend)}, but this "
+                        f"{agent_name} now uses "
+                        f"{uses_phrase(target_backend, reference.model)}, but this "
                         f"conversation couldn't be handed to it: {why} Ask {agent_name} "
                         "in a new conversation."
                     ) from exc
             status = "changed"
             summary = (
-                f"Model provider changed. New conversations with {agent_name} use "
-                f"{provider_name(target_backend)}. "
+                f"{agent_name} now uses {uses_phrase(target_backend, reference.model)}. "
+                f"New conversations with {agent_name} use it. "
                 + conversations_follow_line(
                     agent_name,
                     target_backend,
@@ -2474,7 +2476,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             preview_only: bool = False,
             model: str | None = None,
         ) -> dict[str, JsonValue]:
-            """Set an enabled model provider, or clear the agent setting with backend=null.
+            """Change which provider's model the agent uses, or clear it with backend=null.
 
             The agent's owner or an admin, for direct coding-tool or API requests. Chat
             turns use request_agent_backend_switch so the requester confirms the preview.
@@ -2810,10 +2812,12 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             handoff_summary: Annotated[str | None, Field(max_length=2000)] = None,
             effort: Effort | None = None,
         ) -> AgentBackendSwitchInfo:
-            """Preview a requested agent backend switch, then Confirm in this chat.
+            """Change an agent's model to another provider's: preview, then Confirm in this chat.
 
             Use when an admin or the agent's owner asks to switch it to Anthropic, OpenAI
-            or Gemini. A member can make a copy they own and switch that copy.
+            or Gemini. It stays the same agent on a new model: say "Researcher now uses
+            Gemini 4 Argon", never a version, copy or variant. A member can make a copy
+            they own with fork_agent and switch that copy.
             If the named model isn't available, say that with the allowed list.
             optionally naming a model naturally: "switch Researcher to argon" or
             "switch Researcher to luna". For an Anthropic model change such as

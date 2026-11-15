@@ -23,7 +23,7 @@ import inspect
 import json
 import re
 import uuid
-from collections.abc import Awaitable, Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
@@ -38,6 +38,7 @@ from daimon.core.config import TurnSettings, load_selfhosted_settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.errors import DaimonError
+from daimon.core.finer_drops import FINER_DROPS
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import resource_scope
@@ -900,6 +901,7 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         "credentials",
         "repository",
         "files",
+        *FINER_DROPS,
     }
     causes: list[dict[str, object]] = []
     seen: set[int] = set()
@@ -1036,6 +1038,39 @@ def compatibility_missing(
     )
 
 
+def switch_losses(
+    drops: Sequence[str], agent: BackendAgent
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """A switch's unsupported skills, connections and capabilities: its declared drops.
+
+    The one reading of what a real turn on the target loses, for every surface that
+    lists them; a whole `skills` or `mcp` drop names each of the agent's own.
+    """
+    from daimon.core.confirmation import drop_word
+
+    skills: set[str] = set()
+    mcps: set[str] = set()
+    capabilities: set[str] = set()
+    for drop in drops:
+        if drop == "skills":
+            skills.update(i.name for i in agent.skills)
+        elif drop.startswith("skill:"):
+            skills.add(drop.removeprefix("skill:"))
+        elif drop == "mcp":
+            mcps.update(i.name for i in agent.mcps)
+        elif drop.startswith("mcp_server:"):
+            mcps.add(drop.removeprefix("mcp_server:"))
+        else:
+            capabilities.add(drop_word(drop).removeprefix("its "))
+    return tuple(sorted(skills)), tuple(sorted(mcps)), tuple(sorted(capabilities))
+
+
+def _refuse_named_agent_effort(target: Provider, settings: AgentSettings | None) -> None:
+    # Refused at save: such an agent would otherwise fail every message it is sent.
+    if settings is not None and settings.effort is not None and target in NAMED_AGENT_BACKENDS:
+        raise AgentBackendRefused("effort_not_offered", provider=target)
+
+
 def compatibility_preview(
     agent: BackendAgent,
     target_backend: Provider,
@@ -1045,22 +1080,50 @@ def compatibility_preview(
     cost_line: str = "Cost preview pending",
     model: str | None = None,
     settings: AgentSettings | None = None,
+    declared_drops: Sequence[str] | None = None,
 ) -> CompatibilityPreview:
-    """Pure preview from host-resolved agent facts and declared profile metadata."""
+    """Pure preview from host-resolved agent facts and declared profile metadata.
+
+    `declared_drops`, from a captured source, are what a real turn loses: the
+    unsupported lines then read them, not the profile's coarse predicate.
+    """
     if agent.tenant_id != tenant.tenant_id:
         raise AgentBackendRefused("tenant_mismatch")
-    # Refused at save: such an agent would otherwise fail every message it is sent.
-    if (
-        settings is not None
-        and settings.effort is not None
-        and target_backend in NAMED_AGENT_BACKENDS
-    ):
-        raise AgentBackendRefused("effort_not_offered", provider=target_backend)
+    _refuse_named_agent_effort(target_backend, settings)
     selection = agent_selection(target_backend, model, settings)
     profile = get_profile(selection.profile)
     from daimon.core.turn.runtime_manifest import source_translations
 
     translated = source_translations(agent, selection.profile)
+    required = {
+        c
+        for c in _required(settings)
+        if compatibility_missing(CompatibilityItem(name=c, requires=(c,)), target_backend, profile)
+    }
+    if declared_drops is not None:
+        skills, mcps, capabilities = switch_losses(declared_drops, agent)
+        capabilities = tuple(sorted({*capabilities, *(c.replace("_", " ") for c in required)}))
+    else:
+        skills = tuple(
+            sorted(
+                i.name for i in agent.skills if compatibility_missing(i, target_backend, profile)
+            )
+        )
+        mcps = tuple(
+            sorted(i.name for i in agent.mcps if compatibility_missing(i, target_backend, profile))
+        )
+        capabilities = tuple(
+            sorted(
+                {
+                    c
+                    for c in set(agent.required_capabilities) - set(translated)
+                    if compatibility_missing(
+                        CompatibilityItem(name=c, requires=(c,)), target_backend, profile
+                    )
+                }
+                | required
+            )
+        )
     preview = CompatibilityPreview(
         digest="",
         tenant_id=agent.tenant_id,
@@ -1068,24 +1131,9 @@ def compatibility_preview(
         target_backend=target_backend,
         setting_revision=setting_revision,
         policy_revision=tenant.revision,
-        unsupported_skills=tuple(
-            sorted(
-                i.name for i in agent.skills if compatibility_missing(i, target_backend, profile)
-            )
-        ),
-        unsupported_mcps=tuple(
-            sorted(i.name for i in agent.mcps if compatibility_missing(i, target_backend, profile))
-        ),
-        unsupported_capabilities=tuple(
-            sorted(
-                c
-                for c in (set(agent.required_capabilities) - set(translated))
-                | set(_required(settings))
-                if compatibility_missing(
-                    CompatibilityItem(name=c, requires=(c,)), target_backend, profile
-                )
-            )
-        ),
+        unsupported_skills=skills,
+        unsupported_mcps=mcps,
+        unsupported_capabilities=capabilities,
         shared_thread_limits=("Shared threads are unavailable on this selection.",)
         if not shared_threads_available(target_backend)
         else ("Shared threads stay per caller wherever a channel pins per-caller threads.",)
@@ -1257,10 +1305,25 @@ class AgentBackendService:
         target = target or DEFAULT_BACKEND
         settings = granted_settings(agent, target, model, settings)
         original = agent
+        proposed = None
         if capture is not None:
             agent = captured if captured is not None else await capture(agent)
             if (agent.tenant_id, agent.agent_id) != (original.tenant_id, original.agent_id):
                 raise AgentBackendRefused("tenant_mismatch")
+            _refuse_named_agent_effort(target, settings)
+            from daimon.core.turn.runtime_manifest import preview_source_drops
+
+            selection = agent_selection(target, model, settings)
+            try:
+                proposed = preview_source_drops(
+                    agent,
+                    ModelRef(provider=selection.backend, id=selection.model or agent.model or ""),
+                    effort=selection.effort,
+                )
+            except UnsupportedCapability as error:
+                raise AgentBackendRefused(
+                    "source_unsupported", provider=target, missing=tuple(error.missing)
+                ) from error
         preview = compatibility_preview(
             agent,
             target,
@@ -1271,23 +1334,13 @@ class AgentBackendService:
             else _default_cost(agent, target, model=model),
             model=model,
             settings=settings,
+            declared_drops=None if proposed is None else proposed.declared_drops,
         )
 
-        if capture is None:
+        if proposed is None:
             return preview
-        from daimon.core.turn.runtime_manifest import preview_source_drops, source_preservation_pin
+        from daimon.core.turn.runtime_manifest import source_preservation_pin
 
-        selection = agent_selection(target, model, settings)
-        try:
-            proposed = preview_source_drops(
-                agent,
-                ModelRef(provider=selection.backend, id=selection.model or agent.model or ""),
-                effort=selection.effort,
-            )
-        except UnsupportedCapability as error:
-            raise AgentBackendRefused(
-                "source_unsupported", provider=target, missing=tuple(error.missing)
-            ) from error
         consent = {
             "declared_drops": proposed.declared_drops,
             "source_pin": source_preservation_pin(agent),

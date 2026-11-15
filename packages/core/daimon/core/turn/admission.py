@@ -2505,6 +2505,7 @@ async def capture_backend_source(
     from daimon.core.mux_compat import retrieve_agent
     from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES
     from daimon.core.stores.accounts import get_account_with_tenant
+    from daimon.core.stores.identity import list_tenant_chat_platforms
     from daimon.core.turn.prepare import ProviderPreparationRequest
     from daimon.core.turn.runtime_manifest import capture_preparation_source
 
@@ -2518,6 +2519,11 @@ async def capture_backend_source(
                 account = await get_account_with_tenant(db, account_id=context.account_id)
                 policy = await load_access_policy(db, tenant_id=context.tenant_id)
                 config = await resolve_config(db, context=context, default=deps.deployment_default)
+                answers_on = (
+                    await list_tenant_chat_platforms(db, tenant_id=context.tenant_id)
+                    if explicit_target_name is not None
+                    else ()
+                )
             if account is None or account.tenant_id != context.tenant_id:
                 raise channel_backend.AgentBackendRefused("source_unavailable", detail="identity")
             if (
@@ -2690,7 +2696,10 @@ async def capture_backend_source(
                 admission,
                 scope,
                 context.tenant_id,
-                context.platform or account.platform,
+                # An agent's own read is of its chat turns: its features are the tenant's.
+                account.platform
+                if explicit_target_name is not None
+                else context.platform or account.platform,
                 label,
                 context.thread_id or "",
                 context.account_id,
@@ -2699,6 +2708,7 @@ async def capture_backend_source(
                 None,
                 datetime.now(UTC) + timedelta(seconds=30),
                 lambda: datetime.now(UTC),
+                answers_on=answers_on,
             )
             captured = await capture_preparation_source(
                 request, fresh=True, capability_preview=True
@@ -2748,12 +2758,35 @@ async def capture_admitted_backend_source(
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
     platform: str,
+    opened_thread_id: str | None = None,
+    opened_thread_parent_id: str | None = None,
 ) -> BackendAgent:
-    """A chat confirmation card's source capture: only its own turn's public admission."""
+    """A chat confirmation card's source capture: only its own turn's public admission.
+
+    `opened_thread_id` is the thread the turn opened for its reply after admission (a
+    Discord mention in a channel). The turn's origin, and so the switch tool's capture
+    and a copy's `forked_in` stamp, name that thread: the card must read the same place,
+    or a copy made in this turn reads as a bare agent and its card's digest never matches.
+    The thread counts only as a child of the channel the turn was admitted in
+    (`opened_thread_parent_id`); any other thread is not this turn's reply thread, so
+    the capture is refused and the card fails safe.
+    """
     from daimon.core.session_seal import is_private_conversation
 
     if admission is None or admission.grant is None or admission.account_id != account_id:
         raise channel_backend.AgentBackendRefused("source_unavailable")
+    if (
+        opened_thread_id is not None
+        and admission.origin_thread_id is None
+        and opened_thread_parent_id != admission.origin_channel_id
+    ):
+        raise channel_backend.AgentBackendRefused("source_context_unavailable")
+    thread_id = admission.origin_thread_id or opened_thread_id
+    place = admission.grant.run_place
+    if admission.origin_thread_id is None and opened_thread_id is not None:
+        place = replace(
+            place, channel_id=opened_thread_id, parent_channel_id=admission.origin_channel_id
+        )
     # Like the MCP caller's public-context gate: never a DM or private conversation.
     if (
         admission.grant.is_dm
@@ -2761,7 +2794,7 @@ async def capture_admitted_backend_source(
         or admission.slack_turn_context_id is not None
         or admission.origin_channel_id is None
         or is_private_conversation(admission.origin_channel_id)
-        or is_private_conversation(admission.origin_thread_id or "")
+        or is_private_conversation(thread_id or "")
     ):
         raise channel_backend.AgentBackendRefused("source_context_unavailable")
     return await capture_backend_source(
@@ -2772,10 +2805,10 @@ async def capture_admitted_backend_source(
             account_id=account_id,
             platform=platform,
             channel_id=admission.origin_channel_id,
-            thread_id=admission.origin_thread_id,
+            thread_id=thread_id,
         ),
         subject=admission.grant.subject,
-        place=admission.grant.run_place,
+        place=place,
         is_dm=False,
         slack_turn_context_id=None,
         private_dm_id=None,

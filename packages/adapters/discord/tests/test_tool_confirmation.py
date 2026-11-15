@@ -813,7 +813,7 @@ async def test_complete_backend_loss_list_survives_native_card_rendering(state):
         update={
             "admin": True,
             "action": "Switch Research. " + losses,
-            "denied_action": "Model provider unchanged",
+            "denied_action": "Model unchanged",
             "consequence": losses,
             "detail_lines": ("Optional skill: " + "x" * 1000,),
         }
@@ -997,6 +997,46 @@ async def test_runtime_hook_binds_pin_cards_to_the_admitted_origin_channel(
     )
     discord_confirmation_hook(channel, runtime=runtime, tenant_id=tenant, account_id=account)
     assert factory.call_args.kwargs["pin_channel"] is None, "no admitted channel, no pin card"
+
+
+async def test_a_reply_thread_card_captures_with_its_parent_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The source capture gets the thread and its parent, so only the turn's own thread counts."""
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from daimon.core import channel_backend, confirmation
+    from daimon.core.config import TurnSettings
+
+    runtime = MagicMock()
+    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    monkeypatch.setattr(confirmation, "backend_switch_callbacks", lambda *_a, **_k: (None, None))
+    made = MagicMock()
+    monkeypatch.setattr(channel_backend, "make_backend_service", made)
+    thread = MagicMock(spec=discord.Thread)
+    thread.id, thread.parent_id = 222, 111
+    discord_confirmation_hook(
+        thread,
+        runtime=runtime,
+        admission=SimpleNamespace(origin_channel_id="111"),  # pyright: ignore[reportArgumentType]
+        tenant_id=uuid4(),
+        account_id=uuid4(),
+    )
+    capture = made.call_args.kwargs["capture_source"]
+    assert capture.keywords["opened_thread_id"] == "222", "the thread the turn answers in"
+    assert capture.keywords["opened_thread_parent_id"] == "111", "and the channel it opened under"
+    made.reset_mock()
+    discord_confirmation_hook(
+        MagicMock(spec=discord.TextChannel),
+        runtime=runtime,
+        admission=SimpleNamespace(origin_channel_id="111"),  # pyright: ignore[reportArgumentType]
+        tenant_id=uuid4(),
+        account_id=uuid4(),
+    )
+    capture = made.call_args.kwargs["capture_source"]
+    assert capture.keywords["opened_thread_id"] is None, "a channel opens no thread"
+    assert capture.keywords["opened_thread_parent_id"] is None, "so it has no parent either"
 
 
 async def test_a_card_still_open_replies_once_mentioning_only_its_requester(monkeypatch) -> None:

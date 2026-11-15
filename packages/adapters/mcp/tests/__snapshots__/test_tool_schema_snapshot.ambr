@@ -7624,10 +7624,12 @@
     }),
     'request_agent_backend_switch': dict({
       'description': '''
-        Preview a requested agent backend switch, then Confirm in this chat.
+        Change an agent's model to another provider's: preview, then Confirm in this chat.
         <blank line>
         Use when an admin or the agent's owner asks to switch it to Anthropic, OpenAI
-        or Gemini. A member can make a copy they own and switch that copy.
+        or Gemini. It stays the same agent on a new model: say "Researcher now uses
+        Gemini 4 Argon", never a version, copy or variant. A member can make a copy
+        they own with fork_agent and switch that copy.
         If the named model isn't available, say that with the allowed list.
         optionally naming a model naturally: "switch Researcher to argon" or
         "switch Researcher to luna". For an Anthropic model change such as
@@ -9051,7 +9053,7 @@
     }),
     'set_agent_backend': dict({
       'description': '''
-        Set an enabled model provider, or clear the agent setting with backend=null.
+        Change which provider's model the agent uses, or clear it with backend=null.
         <blank line>
         The agent's owner or an admin, for direct coding-tool or API requests. Chat
         turns use request_agent_backend_switch so the requester confirms the preview.

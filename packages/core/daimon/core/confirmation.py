@@ -684,7 +684,7 @@ def prompt_for_tool_call(
         # No model-supplied compatibility text is accepted. The host hook must
         # reload and verify the preview before displaying this opt-in prompt.
         return ConfirmationPrompt(
-            title="Change the model provider?",
+            title="Change the model?",
             requester_platform_user_id=requester_platform_user_id,
             expires_at=now + timeout,
             admin=True,
@@ -990,24 +990,30 @@ _DROP_WORDS: Mapping[str, str] = {
     "files": "its files",
     "repository": "its repository",
     "model_controls": "its model settings",
+    "effort_setting": "its effort setting",
+    "installed_packages": "its installed packages",
+    "network_rules": "its network rules",
+    "workspace_files": "its sandbox files",
     "builtin_tool:web_fetch": "web fetch",
     "builtin_tool:web_search": "web search",
 }
 
 
+def drop_word(drop: str) -> str:
+    """Plain words for one declared loss: 'web search', 'its linear connector'."""
+    if drop.startswith("mcp_tool:"):
+        _, server, tool = drop.split(":", 2)
+        return f"the {tool} tool of {server}"
+    if drop.startswith("mcp_server:"):
+        return f"its {drop.removeprefix('mcp_server:')} connector"
+    if drop.startswith("skill:"):
+        return f"its {drop.removeprefix('skill:')} skill"
+    return _DROP_WORDS.get(drop, drop.replace("_", " "))
+
+
 def drop_words(drops: Sequence[str]) -> str:
     """'its saved keys, its memory and its sandbox': saved keys first, as the costliest."""
-    words: list[str] = []
-    for drop in sorted(drops, key=lambda item: (item != "credentials", item)):
-        if drop.startswith("mcp_tool:"):
-            _, server, tool = drop.split(":", 2)
-            words.append(f"the {tool} tool of {server}")
-        elif drop.startswith("mcp_server:"):
-            words.append(f"its {drop.removeprefix('mcp_server:')} connector")
-        elif drop.startswith("skill:"):
-            words.append(f"its {drop.removeprefix('skill:')} skill")
-        else:
-            words.append(_DROP_WORDS.get(drop, drop.replace("_", " ")))
+    words = [drop_word(d) for d in sorted(drops, key=lambda item: (item != "credentials", item))]
     return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
 
 
@@ -1398,11 +1404,11 @@ def backend_switch_callbacks(
                 else ()
             ),
         )
-        from daimon.core.turn.notices import conversations_follow_line, provider_name
+        from daimon.core.turn.notices import conversations_follow_line, provider_name, uses_phrase
         from mux.contracts.config import DEFAULT_BACKEND
 
         provider = provider_name(preview.target_backend)
-        target = provider + (f" ({preview.target_model})" if preview.target_model else "")
+        target = uses_phrase(preview.target_backend, preview.target_model)
         action = f"Switch {agent.name} to {target}"
         # Read before the switch is applied: the provider its shared threads stay on.
         setting = await service.current(agent)
@@ -1424,7 +1430,7 @@ def backend_switch_callbacks(
             update={
                 "title": action + "?",
                 "action": action,
-                "denied_action": "Model provider unchanged",
+                "denied_action": "Model unchanged",
                 "detail_lines": details,
                 "consequence": (
                     reach

@@ -43,7 +43,7 @@ HANDOFF_TOOLS = ("fork_agent", "hand_off_task")
 
 
 @asynccontextmanager
-async def handoff_mcp(request) -> AsyncIterator[object]:
+async def handoff_mcp(request, extra: tuple[str, ...] = ()) -> AsyncIterator[object]:
     """The real verifier, identity middleware and agent-chat search at the HTTP edge.
 
     The tools are offline stubs under their production names: what is checked
@@ -79,13 +79,13 @@ async def handoff_mcp(request) -> AsyncIterator[object]:
         sessionmaker=request.deps.sessionmaker,
     )
     mcp.add_middleware(identity)
-    for name in ("describe_agent", *HANDOFF_TOOLS, "request_agent_backend_switch"):
+    for name in ("describe_agent", *HANDOFF_TOOLS, "request_agent_backend_switch", *extra):
 
         async def stub() -> str:
             return "offline"
 
         mcp.tool(stub, name=name, description=f"{name} offline", tags={"agent-chat"})
-    mcp.add_transform(AgentChatAwareBM25SearchTransform(max_results=5))
+    mcp.add_transform(AgentChatAwareBM25SearchTransform(max_results=5, always_visible=[*extra]))
     try:
         yield mcp.http_app()
     finally:
@@ -136,6 +136,8 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
     legacy = isinstance(param, dict) and param.get("legacy", False)
     # {"shared": True}: the copy answers a shared thread.
     thread_mode = "shared" if isinstance(param, dict) and param.get("shared") else "per_caller"
+    # {"relay": True}: the connector relay is on from consent onward.
+    relay = isinstance(param, dict) and param.get("relay", False)
     request, _, source, actor, accepted, router, *_ = consent_request
     sessions = request.deps.sessionmaker
     router.add_environment_list(request.admission.environment)
@@ -160,8 +162,13 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
             turn_runtimes={},
             turn_runtime_factory=build_channel_runtime,
             state_store=PostgresStateStore(sessions),
+            **({"settings": object()} if relay else {}),
         ),
     )
+    if relay:
+        from daimon.core.features import snapshot
+
+        monkeypatch.setattr(snapshot, "deployment_on", lambda _s, k, _p: k == "mcp_connector_relay")
     wire = FullWire(scope.tenant_id)
     clients = clients_for(monkeypatch, wire.handle)
 

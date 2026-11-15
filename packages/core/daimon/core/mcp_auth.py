@@ -658,6 +658,8 @@ async def validate_agent_mcp_token(
     This checks the mint owner's own claims and registry facts; the MCP server
     still owns tool authorization. No provider id is substituted for the
     canonical Daimon agent identity, and a bearer never becomes a stored fact.
+    Any role holds its own token, an admin acting as themselves included, as on
+    a native chat turn; another account's or tenant's token is refused.
     """
     from daimon.core.stores.accounts import get_account_with_tenant
     from daimon.core.stores.mcp_tokens import get_mcp_token
@@ -689,7 +691,6 @@ async def validate_agent_mcp_token(
         if (
             identity is None
             or str(identity.tenant_id) != scope.tenant_id
-            or identity.role.value != "user"
             or row is None
             or row.kind != "agent"
             or row.scopes

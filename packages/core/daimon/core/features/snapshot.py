@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import cache
@@ -226,6 +226,15 @@ def deployment_on(settings: Settings, key: str, platform: str) -> bool:
     """Whether a deployment-only feature is on for `platform`: its value and its setup."""
     place = FeaturePlace(uuid.UUID(int=0), platform)
     return resolve_one(FEATURES[key], settings, place, ()).on
+
+
+def deployment_on_everywhere(settings: Settings, key: str, platforms: Sequence[str]) -> bool:
+    """Whether a deployment-only feature is on for every one of `platforms`.
+
+    The strictest reading, for an agent that answers on several platforms: a
+    capability counts as kept only where no platform turns it off.
+    """
+    return all(deployment_on(settings, key, platform) for platform in platforms)
 
 
 @dataclass(frozen=True)
