@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Direct messages take files, forwards and replies.** A picture or a file sent in a
+  direct message reaches the agent as it does in a channel, and a message with only a
+  picture is answered. A forwarded message is passed as untrusted content, and a
+  reply shows the message it answers. A forward is also passed in channels.
+- **Direct message bursts are answered once.** Messages sent while a reply is running
+  wait with an hourglass reaction and are answered together in the next turn. An
+  approval reply such as "yes" is always answered on its own. Held messages are dropped
+  with a notice if the bot restarts.
 - **Direct message memory is a setting.** `dm_history_depth` sets how many earlier
   messages each direct message reply carries: 12 (the default), 25, 50 or 100, at the
   deployment, workspace and agent levels. The smallest setting wins. The history is

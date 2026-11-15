@@ -22,7 +22,7 @@ import structlog
 import structlog.contextvars
 from daimon.adapters.discord import theme
 from daimon.adapters.discord.agent_setup.stale_picture import StalePictureChangeButton
-from daimon.adapters.discord.attachments import build_attachment_url_prefix
+from daimon.adapters.discord.attachments import prepare_attachments
 from daimon.adapters.discord.budget_notice import with_budget_notifier
 from daimon.adapters.discord.button_message import ButtonMessage
 from daimon.adapters.discord.checks import admin_caller, is_member_guild_admin, member_role_ids
@@ -30,6 +30,8 @@ from daimon.adapters.discord.context import (
     build_channel_context_xml,
     build_context_xml,
     build_delta_xml,
+    compose_queued_content,
+    forwarded_lines,
 )
 from daimon.adapters.discord.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.discord.errors import (
@@ -96,12 +98,6 @@ from daimon.adapters.discord.typed_stop import (
     is_stop_request,
 )
 from daimon.adapters.discord.views import STOP_NOT_ALLOWED, CancelView
-from daimon.adapters.discord.vision import (
-    build_image_url_prefix,
-    build_skipped_image_prefix,
-    download_as_image_blocks,
-    is_vision_image_attachment,
-)
 from daimon.adapters.discord.watch_access import require_watch_thread_access
 from daimon.core.agent_identity import AgentIdentity, identity_enabled_for, resolve_agent_identity
 from daimon.core.agent_pins import agent_pin_names
@@ -501,21 +497,6 @@ async def _resolve_agent_display_name(
             if name:
                 return str(name)
     return "the previous agent"
-
-
-def _compose_queued_content(messages: list[discord.Message]) -> str:
-    """Compose pending mention contents into a single composite user message.
-
-    Single-author: contents joined by blank lines so the model sees them as
-    one continuing thought from the same speaker. Multi-author: each prefixed
-    with ``[display_name]: `` so the agent can attribute who said what.
-    """
-    if not messages:
-        return ""
-    author_ids = {m.author.id for m in messages}
-    if len(author_ids) == 1:
-        return "\n\n".join(m.content for m in messages)
-    return "\n\n".join(f"[{m.author.display_name}]: {m.content}" for m in messages)
 
 
 def _log_bg_task_exception(task: asyncio.Task[Any]) -> None:
@@ -3532,7 +3513,7 @@ class DaimonBot(commands.Bot):
                     messages[0],
                     guild_id,
                     tenant_id,
-                    content_override=_compose_queued_content(messages),
+                    content_override=compose_queued_content(messages),
                     attachments_override=[a for m in messages for a in m.attachments],
                     admitted_message_ids=tuple(str(m.id) for m in messages),
                     query_messages=tuple(messages),
@@ -5671,11 +5652,7 @@ class DaimonBot(commands.Bot):
         attachments = (
             attachments_override if attachments_override is not None else message.attachments
         )
-        trigger_image_atts = [a for a in attachments if is_vision_image_attachment(a)]
-        data_atts = [a for a in attachments if not is_vision_image_attachment(a)]
         target = thread or message.channel
-
-        synthetic_prefix = build_attachment_url_prefix(data_atts)
 
         # --- Build user message (XML history for thread mentions, raw for channel) ---
         # Continuation turns (reused session with a watermark) use delta context
@@ -5751,22 +5728,16 @@ class DaimonBot(commands.Bot):
 
         # Inline only the trigger message's images as base64 vision blocks.
         # Images we can't inline (too large, too many, unsupported, fetch error)
-        # are not dropped — their signed CDN URL is surfaced below so the agent
-        # can still reach them (curl + read to view, or pass to an external API).
-        downloaded_blocks, images_skipped = await download_as_image_blocks(trigger_image_atts)
-        skipped_ids = {att.id for att, _ in images_skipped}
-        inlined_image_atts = [a for a in trigger_image_atts if a.id not in skipped_ids]
-        image_blocks = downloaded_blocks or None
-
-        # Surface a signed-CDN-URL line for every trigger image: inlined images
-        # get a handle they can forward to external APIs; skipped images get the
-        # only path left for the agent to reach them.
+        # are not dropped: their signed CDN URL is surfaced in the prefix so the
+        # agent can still reach them (curl + read to view, or pass to an external
+        # API). Inlined images get a URL line too, a handle for external APIs.
+        synthetic_prefix, image_blocks = await prepare_attachments(attachments)
+        # A forwarded message's content is untrusted text the person could see.
         synthetic_prefix = "\n".join(
             part
             for part in (
                 synthetic_prefix,
-                build_image_url_prefix(inlined_image_atts),
-                build_skipped_image_prefix(images_skipped),
+                "\n".join(forwarded_lines(query_messages or (message,))),
             )
             if part
         )

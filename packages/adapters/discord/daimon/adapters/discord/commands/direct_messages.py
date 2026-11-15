@@ -12,6 +12,7 @@ from weakref import WeakValueDictionary
 import anthropic
 import structlog
 from cachetools import TTLCache
+from daimon.adapters.discord.attachments import prepare_attachments
 from daimon.adapters.discord.bot import (
     GLOBAL_CAP_NOTICE,
     DaimonBot,
@@ -24,6 +25,12 @@ from daimon.adapters.discord.checks import (
     require_registered_guild,
 )
 from daimon.adapters.discord.commands.cold_dm_views import ServerSelector, ServerSwitch
+from daimon.adapters.discord.context import (
+    compose_queued_content,
+    forwarded_lines,
+    forwarded_names,
+    input_context,
+)
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
@@ -65,11 +72,13 @@ from daimon.core.stores.direct_messages import (
     set_dm_agent_name,
 )
 from daimon.core.stores.domain import Role, TenantRow
+from daimon.core.stores.pending_skill_adds import is_affirmative
 from daimon.core.stores.tenants import get_tenant, list_tenants_by_platform
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
 from daimon.core.turn.output import OutputAuthorization
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT
+from daimon.core.turn.thread_queue import ThreadQueue, group_by_author
 from daimon.core.turn_hold import RequesterOrg
 from daimon.core.workspace_settings import set_dms
 from sqlalchemy.exc import SQLAlchemyError
@@ -102,6 +111,9 @@ _DM_FAILURES = (
 )
 _DISCOVERY_FAILURE_NOTICE = "Couldn't open a private conversation. Please retry or ask an admin."
 _BUSY_NOTICE = "I'm still answering your last message.\nTry again once it's done, or press Stop."
+_DROPPED_NOTICE = "Your message wasn't sent. Please send it again."
+_EMPTY_NOTICE = "Send a text message to continue this conversation."
+_QUEUED_REACTION = "⌛"
 
 
 @dataclass(frozen=True)
@@ -112,6 +124,26 @@ class _DmRequest:
     author: discord.User | discord.Member
     channel: discord.DMChannel
     content: str = ""
+
+
+def _attachments(message: discord.Message | _DmRequest) -> list[discord.Attachment]:
+    """The files a message carries that an agent can use; a voice message is not one."""
+    return [
+        a
+        for a in getattr(message, "attachments", None) or ()
+        if not (isinstance(a, discord.Attachment) and a.is_voice_message())
+    ]
+
+
+def _has_input(message: discord.Message | _DmRequest) -> bool:
+    """Whether a message holds anything to answer: words, a file or a forwarded message.
+
+    A sticker or a voice message holds none."""
+    return bool(
+        message.content.strip()
+        or _attachments(message)
+        or getattr(message, "message_snapshots", None)
+    )
 
 
 @dataclass
@@ -139,6 +171,8 @@ class DirectMessageCog(commands.Cog):
         self._unloaded = False
         self._locks: WeakValueDictionary[tuple[int, int], asyncio.Lock] = WeakValueDictionary()
         self._pending: dict[tuple[int, int], _PendingSelection] = {}
+        self._replying: set[tuple[int, int]] = set()
+        self._queued: dict[tuple[int, int], list[discord.Message]] = {}
         self._switch_views: dict[tuple[int, int], ServerSwitch] = {}
         self._buckets: TTLCache[int, tuple[float, float]] = TTLCache[int, tuple[float, float]](
             10_000, 300
@@ -154,6 +188,9 @@ class DirectMessageCog(commands.Cog):
                 pending.view.complete()
         self._pending.clear()
         self._buckets.clear()
+        queued = [m for messages in self._queued.values() for m in messages]
+        self._queued.clear()
+        await self._drop_queued(queued)
 
     def _lock(self, key: tuple[int, int]) -> asyncio.Lock:
         lock = self._locks.get(key)
@@ -771,6 +808,11 @@ class DirectMessageCog(commands.Cog):
         # reply -- is in progress for the shutdown drain, not only the turn.
         with self.bot.runtime.turn_deps.running_turns.track():
             key = (message.author.id, message.channel.id)
+            if key in self._replying and _has_input(message) and not self._selecting(key):
+                # A reply is running: hold this message for the next turn, which
+                # answers everything sent meanwhile at once. No await before the append.
+                await self._hold(key, message)
+                return
             async with self._lock(key):
                 pending = self._pending.get(key)
                 if pending is not None:
@@ -778,15 +820,95 @@ class DirectMessageCog(commands.Cog):
                         self._suppress(message, "selection_pending")
                         return
                     del self._pending[key]
+                self._replying.add(key)
                 try:
-                    await self._reply(message)
-                except _DM_FAILURES as exc:
-                    log.warning(
-                        "discord.dm.discovery_failed",
-                        error_type=type(exc).__name__,
-                        user_id=str(message.author.id),
-                        reason="discovery_unavailable",
+                    await self._answer(message)
+                    await self._thread_queue.drain(
+                        key, compose=self._compose, run=self._answer_batch
                     )
+                finally:
+                    self._replying.discard(key)
+                    leftover = self._queued.pop(key, [])
+                    await self._drop_queued(leftover)
+
+    @property
+    def _thread_queue(self) -> ThreadQueue[tuple[int, int], discord.Message]:
+        return ThreadQueue(self._replying, self._queued, start_turn=lambda _key: None)
+
+    def _selecting(self, key: tuple[int, int]) -> bool:
+        pending = self._pending.get(key)
+        return pending is not None and monotonic() < pending.expires_at
+
+    async def _hold(self, key: tuple[int, int], message: discord.Message) -> None:
+        self._thread_queue.enqueue(key, message)
+        with contextlib.suppress(discord.HTTPException):
+            await message.add_reaction(_QUEUED_REACTION)
+
+    @staticmethod
+    def _compose(queued: list[discord.Message]) -> list[list[discord.Message]]:
+        """One turn for what arrived meanwhile, except an approval reply, which stands alone."""
+        groups: list[list[discord.Message]] = []
+        for author_messages in group_by_author(
+            queued, lambda m: m.author.id, separate=lambda _m: False
+        ):
+            run: list[discord.Message] = []
+            for held in author_messages:
+                if is_affirmative(held.content):
+                    if run:
+                        groups.append(run)
+                        run = []
+                    groups.append([held])
+                else:
+                    run.append(held)
+            if run:
+                groups.append(run)
+        return groups
+
+    async def _answer(
+        self, message: discord.Message, *, batch: tuple[discord.Message, ...] = ()
+    ) -> None:
+        try:
+            await self._reply(message, batch=batch)
+        except _DM_FAILURES as exc:
+            log.warning(
+                "discord.dm.discovery_failed",
+                error_type=type(exc).__name__,
+                user_id=str(message.author.id),
+                reason="discovery_unavailable",
+            )
+
+    async def _answer_batch(self, messages: list[discord.Message]) -> None:
+        key = (messages[0].author.id, messages[0].channel.id)
+        try:
+            if self._unloaded or self.bot.draining:
+                await self._drop_queued(messages)
+            elif self._selecting(key):
+                for message in messages:
+                    self._suppress(message, "selection_pending")
+            else:
+                await self._answer(messages[0], batch=tuple(messages))
+        finally:
+            await self._clear_queued_reactions(messages)
+
+    async def _clear_queued_reactions(self, messages: list[discord.Message]) -> None:
+        user = self.bot.user
+        if user is None:
+            return
+        for message in messages:
+            with contextlib.suppress(discord.HTTPException):
+                await message.remove_reaction(_QUEUED_REACTION, user)
+
+    async def _drop_queued(self, messages: list[discord.Message]) -> None:
+        """Tell the person messages held for a turn that will not run were not sent."""
+        if not messages:
+            return
+        await self._clear_queued_reactions(messages)
+        log.info("discord.dm.queued_dropped", dropped=len(messages))
+        with contextlib.suppress(discord.HTTPException):
+            await messages[0].channel.send(
+                embed=build_notice_embed(_DROPPED_NOTICE),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
     async def _explain_no_private_chat(
         self,
@@ -925,8 +1047,13 @@ class DirectMessageCog(commands.Cog):
         )
 
     async def _reply(
-        self, message: discord.Message | _DmRequest, *, expected_scope_id: str | None = None
+        self,
+        message: discord.Message | _DmRequest,
+        *,
+        expected_scope_id: str | None = None,
+        batch: tuple[discord.Message, ...] = (),
     ) -> None:
+        """Answer `message`, or the held `batch` it opens, in one turn."""
         assert isinstance(message.channel, discord.DMChannel)
         runtime = self.bot.runtime
         cards: list[DiscordTurnLifecycle] = []
@@ -966,10 +1093,13 @@ class DirectMessageCog(commands.Cog):
                 self._suppress(message, "active_access_revoked")
                 return
             role = Role.ADMIN if subject.is_admin else Role.USER
-            if not message.content.strip():
-                await message.channel.send(
-                    embed=build_notice_embed("Send a text message to continue this conversation.")
-                )
+            # The stand-in after a server pick has no content, files or snapshots.
+            messages = batch or (() if isinstance(message, _DmRequest) else (message,))
+            text = compose_queued_content(list(messages))
+            files = [a for held in messages for a in _attachments(held)]
+            forwards = forwarded_names(messages)
+            if not (text.strip() or files or forwarded_lines(messages)):
+                await message.channel.send(embed=build_notice_embed(_EMPTY_NOTICE))
                 return
             # A DM has no card: over the cap it waits under the typing
             # indicator. Only the process-wide cap applies, as before; a
@@ -1002,14 +1132,32 @@ class DirectMessageCog(commands.Cog):
                             allowed_mentions=discord.AllowedMentions.none(),
                         )
                         return
+                    discord_settings = runtime.settings.discord
+                    prefix, image_blocks = await prepare_attachments(files)
+                    context = await input_context(
+                        message.channel,
+                        messages,
+                        bot_user_id=self.bot.user.id if self.bot.user else None,
+                        bot_display_name=(
+                            discord_settings.bot_display_name if discord_settings else "daimon"
+                        ),
+                    )
                     reply = await reply_to_dm_result(
                         runtime.turn_deps,
                         platform="discord",
                         route_key=str(message.channel.id),
                         external_user_id=str(message.author.id),
                         message_id=str(message.id),
+                        merged_message_ids=tuple(str(held.id) for held in messages[1:]),
                         expected_scope_id=conversation.scope_id,
-                        text=message.content,
+                        text=text,
+                        prefix="\n".join(part for part in (context, prefix) if part),
+                        image_blocks=image_blocks,
+                        history_notes=[
+                            *(f"[attachment: {a.filename}]" for a in files),
+                            *(f"[attachment: {name}]" for name in forwards),
+                            *(["[forwarded message]"] if forwarded_lines(messages) else []),
+                        ],
                         role=role,
                         role_ids=subject.role_ids,
                         verified_membership=subject.verified_membership,

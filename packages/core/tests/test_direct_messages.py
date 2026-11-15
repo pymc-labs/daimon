@@ -91,7 +91,7 @@ async def test_shutdown_settle_uses_owned_scope_and_cannot_interrupt_a_released_
             platform=original.platform,
             route_key=original.route_key,
             external_user_id=original.external_user_id,
-            message_id="shutdown-test",
+            message_ids=("shutdown-test",),
             expected_scope_id=original.scope_id,
             now=now,
             active_until=now + timedelta(minutes=10),

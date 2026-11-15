@@ -164,7 +164,7 @@ async def test_duplicate_message_claims_and_routine_delivery_do_not_change_mappi
             platform="discord",
             route_key="555",
             external_user_id="999",
-            message_id="101",
+            message_ids=("101",),
             expected_scope_id=row.scope_id,
             now=now,
             active_until=now,
@@ -177,7 +177,7 @@ async def test_duplicate_message_claims_and_routine_delivery_do_not_change_mappi
                 platform="discord",
                 route_key="555",
                 external_user_id="999",
-                message_id="101",
+                message_ids=("101",),
                 expected_scope_id=row.scope_id,
                 now=now,
                 active_until=now,
@@ -654,3 +654,130 @@ async def test_dm_reply_names_the_session_whose_files_the_adapter_sends(
     assert (reply.outputs.session_id if reply.outputs else None) == files_session, (
         "only a Managed Agents session has a file listing to sweep"
     )
+
+
+async def test_claim_message_takes_every_unseen_id_of_a_merged_turn(db_session_factory) -> None:
+    from datetime import UTC, datetime
+
+    from daimon.core.stores.direct_messages import claim_message, finish_message, get_conversation
+    from daimon.testing.factories import make_account, make_dm_conversation, make_tenant
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+        row = await make_dm_conversation(session, tenant=tenant, account_id=account.id)
+    now = datetime.now(UTC)
+
+    async def claim(*ids: str):
+        async with db_session_factory.begin() as session:
+            claimed = await claim_message(
+                session,
+                platform=row.platform,
+                route_key=row.route_key,
+                external_user_id=row.external_user_id,
+                message_ids=ids,
+                expected_scope_id=row.scope_id,
+                now=now,
+                active_until=now,
+            )
+            if claimed is not None:
+                await finish_message(session, conversation=claimed, history=None)
+            return claimed
+
+    assert await claim("1", "2", "3") is not None
+    assert await claim("2", "3") is None, "all seen: a redelivery"
+    assert await claim("3", "4") is not None, "one unseen: the turn runs"
+    async with db_session_factory() as session:
+        stored = await get_conversation(
+            session,
+            platform=row.platform,
+            route_key=row.route_key,
+            external_user_id=row.external_user_id,
+        )
+    assert stored is not None and stored.recent_message_ids == ["1", "2", "3", "4"]
+
+
+async def test_dm_reply_carries_the_prefix_and_images_but_stores_names_only(
+    db_session_factory, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from daimon.core import direct_messages
+    from daimon.core.authz import AgentRef, Place, Surface, build_subject
+    from daimon.core.direct_messages import reply_to_dm_result
+    from daimon.core.turn.admission import AdmissionGrant
+    from daimon.core.turn.run import RunOutcome
+    from daimon.core.turn.state import TextBlock, TurnState
+
+    tenant, admission, deps = await seed(db_session_factory)
+    row = await start_cold_dm(
+        deps,
+        admission,
+        tenant_id=tenant.id,
+        workspace_id=tenant.external_id,
+        route_key="555",
+        external_user_id="999",
+    )
+    admission = replace(
+        admission,
+        grant=AdmissionGrant(
+            tenant_id=tenant.id,
+            subject=build_subject(is_admin=False, platform_user_id="999", verified_membership=True),
+            surface=Surface.DM,
+            turn_place=Place(),
+            agent=AgentRef.of("private"),
+            run_place=Place(),
+            channel_id=row.channel_id,
+            thread_id=row.scope_id,
+            is_dm=True,
+            cold_dm=True,
+            human_invocation=True,
+        ),
+    )
+    monkeypatch.setattr(direct_messages, "admit", AsyncMock(return_value=admission))
+    monkeypatch.setattr(
+        direct_messages,
+        "bind_session",
+        AsyncMock(return_value=SimpleNamespace(admission=admission)),
+    )
+    seen: dict[str, object] = {}
+
+    async def run(deps, prepared, **kwargs):
+        seen.update(kwargs)
+        return RunOutcome(
+            TurnState(content=[TextBlock(kind="text", text="a cat")]), "sesn_dm", None, False
+        )
+
+    monkeypatch.setattr(direct_messages, "run_prepared_turn", run)
+    blocks = [
+        {"type": "image", "source": {"type": "base64", "data": "x", "media_type": "image/png"}}
+    ]
+    reply = await reply_to_dm_result(
+        deps,
+        platform="discord",
+        route_key="555",
+        external_user_id="999",
+        message_id="101",
+        merged_message_ids=("102",),
+        expected_scope_id=row.scope_id,
+        text="what is this?",
+        prefix="[attachment] image `cat.png`: https://cdn.example/cat.png?sig=1",
+        image_blocks=blocks,
+        history_notes=["[attachment: cat.png]"],
+        role=Role.USER,
+        verified_membership=True,
+    )
+
+    assert reply is not None
+    assert seen["image_blocks"] is blocks, "the images reach the turn"
+    message = str(seen["user_message"])
+    assert "cdn.example/cat.png" in message and message.endswith("\nwhat is this?")
+    assert seen["request_text"] == "what is this?", "the person's own words, nothing added"
+    async with db_session_factory() as session:
+        stored = await get_conversation(
+            session, platform="discord", route_key="555", external_user_id="999"
+        )
+    assert stored is not None
+    assert stored.history[0] == {"role": "user", "text": "what is this?\n[attachment: cat.png]"}
+    assert "cdn.example" not in str(stored.history), "signed links are never stored"
+    assert stored.recent_message_ids[-2:] == ["101", "102"]

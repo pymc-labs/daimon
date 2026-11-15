@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import datetime
 
 from daimon.core._models import (
@@ -136,11 +137,16 @@ async def claim_message(
     platform: str,
     route_key: str,
     external_user_id: str,
-    message_id: str,
+    message_ids: Sequence[str],
     expected_scope_id: str,
     now: datetime,
     active_until: datetime,
 ) -> DirectMessageRow | None:
+    """Claim the conversation for the turn that answers `message_ids`.
+
+    A merged turn answers several messages. None means every one was seen before
+    (a redelivery); otherwise the unseen ids are recorded and the turn runs.
+    """
     row = await session.get(
         DirectMessageConversation, (platform, route_key, external_user_id), with_for_update=True
     )
@@ -151,14 +157,15 @@ async def claim_message(
         )
     if row.scope_id != expected_scope_id:
         raise UserFacingError("That private conversation changed. Please send your message again.")
-    if message_id in row.recent_message_ids:
+    unseen = [i for i in dict.fromkeys(message_ids) if i not in row.recent_message_ids]
+    if not unseen:
         return None
     if row.active_until is not None and row.active_until > now:
         raise DirectMessageBusy(
             "A reply is still running. Please send your message again after it finishes."
         )
     row.active_until = active_until
-    row.recent_message_ids = [*row.recent_message_ids[-49:], message_id]
+    row.recent_message_ids = [*row.recent_message_ids, *unseen][-50:]
     await session.flush()
     return DirectMessageRow.model_validate(row)
 

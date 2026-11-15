@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1076,3 +1077,168 @@ async def test_dm_card_edit_drops_the_transport_only_replacement_flag(
     sent.edit = AsyncMock()
     await built["edit"](sent, content="x", _allow_replacement=False)
     sent.edit.assert_awaited_once_with(content="x")
+
+
+def dm_message(message_id=101, content="hello", attachments=(), snapshots=()):
+    msg = message(message_id)
+    msg.content = content
+    msg.attachments = list(attachments)
+    msg.message_snapshots = list(snapshots)
+    msg.reference = None
+    msg.add_reaction = AsyncMock()
+    msg.remove_reaction = AsyncMock()
+    return msg
+
+
+def attachment(filename="photo.png", *, voice=False):
+    att = MagicMock(spec=discord.Attachment)
+    att.filename = filename
+    att.is_voice_message.return_value = voice
+    return att
+
+
+def snapshot(content="forwarded words"):
+    snap = MagicMock(spec=discord.MessageSnapshot)
+    snap.content = content
+    snap.embeds = []
+    snap.attachments = [
+        SimpleNamespace(filename="doc.pdf", url="https://cdn/doc", size=3, content_type=None)
+    ]
+    snap.created_at = datetime(2026, 4, 28, tzinfo=UTC)
+    return snap
+
+
+async def test_an_image_only_dm_is_answered_with_the_picture(db_session_factory, monkeypatch):
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    prepare = AsyncMock(return_value=("[attachment] photo.png", ["BLOCK"]))
+    monkeypatch.setattr(module, "prepare_attachments", prepare)
+    msg = dm_message(content="", attachments=[attachment()])
+    await cog.on_message(msg)
+    kwargs = reply.await_args.kwargs
+    assert kwargs["image_blocks"] == ["BLOCK"], "the picture reaches the turn"
+    assert kwargs["prefix"] == "[attachment] photo.png"
+    assert kwargs["history_notes"] == ["[attachment: photo.png]"], "history keeps the name only"
+    assert not any(
+        sent_text(call) == module._EMPTY_NOTICE for call in msg.channel.send.await_args_list
+    ), "a picture is something to answer"
+    await cog.cog_unload()
+
+
+async def test_a_data_file_dm_carries_its_link_without_blocks(db_session_factory, monkeypatch):
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    monkeypatch.setattr(
+        module, "prepare_attachments", AsyncMock(return_value=("[attachment] sales.csv", None))
+    )
+    await cog.on_message(dm_message(content="chart this", attachments=[attachment("sales.csv")]))
+    kwargs = reply.await_args.kwargs
+    assert kwargs["text"] == "chart this" and kwargs["image_blocks"] is None
+    assert "sales.csv" in kwargs["prefix"]
+    await cog.cog_unload()
+
+
+async def test_a_forwarded_dm_passes_the_forward_as_untrusted(db_session_factory, monkeypatch):
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    await cog.on_message(dm_message(content="", snapshots=[snapshot()]))
+    kwargs = reply.await_args.kwargs
+    assert 'trust="untrusted"' in kwargs["prefix"] and "forwarded words" in kwargs["prefix"]
+    assert kwargs["history_notes"] == ["[attachment: doc.pdf]", "[forwarded message]"]
+    assert "https://cdn/doc" not in "".join(kwargs["history_notes"]), "history keeps no URLs"
+    await cog.cog_unload()
+
+
+async def test_a_reply_to_an_earlier_message_carries_that_message(db_session_factory, monkeypatch):
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    earlier = MagicMock(spec=discord.Message)
+    earlier.id = 50
+    earlier.content = "the earlier answer"
+    earlier.author = SimpleNamespace(id=1, bot=True, display_name="daimon")
+    earlier.created_at = datetime(2026, 4, 28, tzinfo=UTC)
+    earlier.attachments = []
+    earlier.embeds = []
+    earlier.message_snapshots = []
+    earlier.jump_url = "https://discord.com/channels/@me/555/50"
+    msg = dm_message(content="and then?")
+    msg.reference = discord.MessageReference(
+        message_id=50, channel_id=555, type=discord.MessageReferenceType.reply
+    )
+    msg.reference.resolved = earlier
+    await cog.on_message(msg)
+    assert "the earlier answer" in reply.await_args.kwargs["prefix"]
+    await cog.cog_unload()
+
+
+@pytest.mark.parametrize("kind", ["nothing", "voice"])
+async def test_a_dm_with_nothing_to_answer_keeps_the_notice(db_session_factory, monkeypatch, kind):
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    files = [attachment("voice.ogg", voice=True)] if kind == "voice" else []
+    msg = dm_message(content="", attachments=files)
+    await cog.on_message(msg)
+    assert [sent_text(call) for call in msg.channel.send.await_args_list][
+        -1
+    ] == module._EMPTY_NOTICE
+    reply.assert_not_awaited()
+    await cog.cog_unload()
+
+
+async def hold_first_reply(db_session_factory, reply):
+    """Make the first turn wait until released, recording every turn's inputs."""
+    gate, started = asyncio.Event(), asyncio.Event()
+    turns = []
+
+    async def answer(deps, **kwargs):
+        turns.append(kwargs)
+        if len(turns) == 1:
+            started.set()
+            await gate.wait()
+        return private_reply(await conversation(db_session_factory))
+
+    reply.side_effect = answer
+    return gate, started, turns
+
+
+async def test_messages_sent_during_a_reply_are_answered_in_one_turn(
+    db_session_factory, monkeypatch
+):
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    gate, started, turns = await hold_first_reply(db_session_factory, reply)
+    first = dm_message(101, "one")
+    running = asyncio.create_task(cog.on_message(first))
+    await asyncio.wait_for(started.wait(), 5)
+    second, third = dm_message(102, "two"), dm_message(103, "three")
+    await asyncio.wait_for(cog.on_message(second), 1)
+    await asyncio.wait_for(cog.on_message(third), 1)
+    second.add_reaction.assert_awaited_once_with(module._QUEUED_REACTION)
+    gate.set()
+    await asyncio.wait_for(running, 5)
+    assert [t["text"] for t in turns] == ["one", "two\n\nthree"], "the burst is one turn"
+    assert turns[1]["message_id"] == "102" and turns[1]["merged_message_ids"] == ("103",)
+    second.remove_reaction.assert_awaited_once()
+    await cog.cog_unload()
+
+
+async def test_an_approval_reply_in_a_burst_stands_alone(db_session_factory, monkeypatch):
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    gate, started, turns = await hold_first_reply(db_session_factory, reply)
+    running = asyncio.create_task(cog.on_message(dm_message(101, "one")))
+    await asyncio.wait_for(started.wait(), 5)
+    for number, text in ((102, "two"), (103, "yes"), (104, "three")):
+        await cog.on_message(dm_message(number, text))
+    gate.set()
+    await asyncio.wait_for(running, 5)
+    assert [t["text"] for t in turns] == ["one", "two", "yes", "three"]
+    await cog.cog_unload()
+
+
+async def test_held_messages_are_dropped_with_a_notice_on_unload(db_session_factory, monkeypatch):
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    gate, started, turns = await hold_first_reply(db_session_factory, reply)
+    first = dm_message(101, "one")
+    running = asyncio.create_task(cog.on_message(first))
+    await asyncio.wait_for(started.wait(), 5)
+    held = dm_message(102, "two")
+    await cog.on_message(held)
+    await cog.cog_unload()
+    assert sent_text(held.channel.send.await_args_list[-1]) == module._DROPPED_NOTICE
+    gate.set()
+    await asyncio.wait_for(running, 5)
+    assert [t["text"] for t in turns] == ["one"], "nothing runs after the unload"

@@ -136,7 +136,7 @@ def _reply_target_id(msg: discord.Message) -> int | None:
     return reference.message_id if isinstance(reference.message_id, int) else None
 
 
-def _embed_text(msg: discord.Message) -> str:
+def _embed_text(msg: discord.Message | discord.MessageSnapshot) -> str:
     """Title and description text of ``msg``'s embeds.
 
     A bot answer or status card is an embed with no message text; without this a
@@ -287,6 +287,85 @@ async def _reply_target_lines(
     if not body:
         return []
     return untrusted_block("reply_targets", body, _HISTORY_SOURCE)
+
+
+def compose_queued_content(messages: list[discord.Message]) -> str:
+    """Compose pending mention contents into a single composite user message.
+
+    Single-author: contents joined by blank lines so the model sees them as
+    one continuing thought from the same speaker. Multi-author: each prefixed
+    with ``[display_name]: `` so the agent can attribute who said what.
+    """
+    if not messages:
+        return ""
+    author_ids = {m.author.id for m in messages}
+    if len(author_ids) == 1:
+        return "\n\n".join(m.content for m in messages)
+    return "\n\n".join(f"[{m.author.display_name}]: {m.content}" for m in messages)
+
+
+def forwarded_lines(messages: Sequence[discord.Message]) -> list[str]:
+    """The ``<forwarded>`` block for messages that forward another message, else nothing.
+
+    A forward carries a snapshot of the original: its text, embeds and attachments.
+    The person could see it, but it is someone else's text, so it is untrusted
+    content. Attachments are URL lines (the agent fetches them), never vision blocks.
+    """
+    body: list[str] = []
+    for message in messages:
+        for snapshot in getattr(message, "message_snapshots", None) or ():
+            text = snapshot.content or _embed_text(snapshot)
+            attrs = f" timestamp={quoteattr(snapshot.created_at.isoformat())}"
+            lines = [f"<message{attrs}>", escape(text)]
+            if snapshot.attachments:
+                lines.append("<attachments>")
+                for att in snapshot.attachments:
+                    lines.append(
+                        f"<attachment filename={quoteattr(att.filename)}"
+                        f" url={quoteattr(att.url)}"
+                        f" content_type={quoteattr(att.content_type or 'unknown')}"
+                        f" size={quoteattr(str(att.size))}/>"
+                    )
+                lines.append("</attachments>")
+            lines.append("</message>")
+            body.extend(lines)
+    return untrusted_block("forwarded", body, _HISTORY_SOURCE) if body else []
+
+
+def forwarded_names(messages: Sequence[discord.Message]) -> list[str]:
+    """File names of the attachments in the forwarded messages."""
+    return [
+        att.filename
+        for message in messages
+        for snapshot in getattr(message, "message_snapshots", None) or ()
+        for att in snapshot.attachments
+    ]
+
+
+async def input_context(
+    home: discord.abc.Messageable,
+    messages: Sequence[discord.Message],
+    *,
+    bot_user_id: int | None,
+    bot_display_name: str,
+) -> str:
+    """Reply targets and forwarded content of messages sent without a history rendering.
+
+    A direct message turn is the person's text alone; this adds what they replied to
+    and what they forwarded. Empty when neither applies. Never raises.
+    """
+    lines = [
+        *await _reply_target_lines(
+            home,
+            messages,
+            (),
+            bot_user_id=bot_user_id,
+            bot_display_name=bot_display_name,
+            omit_oversized_image_urls=False,
+        ),
+        *forwarded_lines(messages),
+    ]
+    return "\n".join(lines)
 
 
 def _render_message(

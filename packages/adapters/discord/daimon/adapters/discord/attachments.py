@@ -10,6 +10,15 @@ on a notebook workspace to publish, it uploads on demand via the
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
+from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
+from daimon.adapters.discord.vision import (
+    build_image_url_prefix,
+    build_skipped_image_prefix,
+    download_as_image_blocks,
+    is_vision_image_attachment,
+)
 from daimon.core.media.attachments import AttachedFile, attachment_lines
 
 import discord
@@ -46,3 +55,30 @@ def build_attachment_url_prefix(attachments: list[discord.Attachment]) -> str:
         )
         for attachment in attachments
     )
+
+
+async def prepare_attachments(
+    attachments: Sequence[discord.Attachment],
+) -> tuple[str, list[BetaManagedAgentsImageBlockParam] | None]:
+    """The prefix lines and inline vision blocks for a message's attachments.
+
+    Images the API can take become base64 blocks, with a URL line each. Data
+    files, and images that could not be inlined (too large, too many, unsupported,
+    a failed fetch), become signed-URL lines the agent fetches itself. Returns the
+    prefix (empty when nothing is attached) and the blocks (None when there are none).
+    """
+    images = [a for a in attachments if is_vision_image_attachment(a)]
+    data = [a for a in attachments if not is_vision_image_attachment(a)]
+    blocks, skipped = await download_as_image_blocks(images)
+    skipped_ids = {att.id for att, _ in skipped}
+    inlined = [a for a in images if a.id not in skipped_ids]
+    prefix = "\n".join(
+        part
+        for part in (
+            build_attachment_url_prefix(data),
+            build_image_url_prefix(inlined),
+            build_skipped_image_prefix(skipped),
+        )
+        if part
+    )
+    return prefix, blocks or None

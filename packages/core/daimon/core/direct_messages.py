@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 
 import anthropic
 import structlog
+from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.core.access_policy import (
     DM_SCOPE_PREFIX,
     TenantAccessPolicy,
@@ -630,6 +631,7 @@ async def _run_admitted_dm_turn(
     request_text: str | None = None,
     platform_channel_id: str | None = None,
     platform_message_id: str | None = None,
+    image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
 ) -> tuple[str, str, OutputRuntime | None]:
     """Run one admitted, bound private turn and return its final text and session.
 
@@ -687,6 +689,7 @@ async def _run_admitted_dm_turn(
                 external_user_id=external_user_id,
                 user_message=user_message,
                 request_text=request_text,
+                image_blocks=image_blocks,
                 lifecycle=lifecycle,
                 cancel=cancel,
                 reseed_user_message=reseed,
@@ -757,6 +760,10 @@ async def reply_to_dm_result(
     text: str,
     role: Role,
     role_ids: tuple[str, ...] = (),
+    merged_message_ids: Sequence[str] = (),
+    prefix: str = "",
+    image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
+    history_notes: Sequence[str] = (),
     verified_membership: bool | None = None,
     on_agent: Callable[[str], Awaitable[None]] | None = None,
     confirmation_for: Callable[[Admission], ConfirmationHook] | None = None,
@@ -766,7 +773,14 @@ async def reply_to_dm_result(
     """Admit every DM, serialize its scope, run a billed turn, retain bounded history.
 
     `platform_channel_id` is the DM channel as the platform's API names it, recorded
-    on the turn's origin with `message_id`.
+    on the turn's origin with `message_id`. A turn that merges several messages
+    names the others in `merged_message_ids`.
+
+    `text` is the person's own words. `prefix` is what the adapter adds before it
+    (attachment lines, quoted or forwarded content) and `image_blocks` are inline
+    images; both go to this turn only. The stored history keeps `text` and
+    `history_notes` (such as `[attachment: name]`), never the prefix, whose
+    signed links expire.
 
     A duplicate delivery returns None. The adapter verifies live membership
     and supplies the current role before entering; stored admin roles never
@@ -784,7 +798,7 @@ async def reply_to_dm_result(
                 platform=platform,
                 route_key=route_key,
                 external_user_id=external_user_id,
-                message_id=message_id,
+                message_ids=(message_id, *merged_message_ids),
                 expected_scope_id=expected_scope_id,
                 now=now,
                 active_until=now + timedelta(seconds=TURN_CEILING_S + 60),
@@ -897,7 +911,7 @@ async def reply_to_dm_result(
                 scope_id=conversation.scope_id,
                 external_user_id=external_user_id,
                 role=role,
-                prompt=f"{context}\n\n{text}",
+                prompt=f"{context}\n\n{prefix}\n{text}" if prefix else f"{context}\n\n{text}",
                 deadline=deadline,
                 destination=_dm_destination(deps, conversation, admission.slack_turn_context_id),
                 on_sealed=lambda: _quarantine(deps, conversation),
@@ -908,11 +922,12 @@ async def reply_to_dm_result(
                 request_text=text,
                 platform_channel_id=platform_channel_id,
                 platform_message_id=message_id if platform_channel_id is not None else None,
+                image_blocks=image_blocks,
             )
             turns = bounded_turns(
                 [
                     *previous,
-                    TranscriptTurn(role="user", text=text),
+                    TranscriptTurn(role="user", text="\n".join([text, *history_notes]).strip()),
                     TranscriptTurn(role="agent", text=answer),
                 ],
                 prepared.admission.dm_history,
