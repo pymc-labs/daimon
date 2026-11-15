@@ -136,8 +136,9 @@ dependencies before attempting delivery. Teams has its own
 `networkPolicy.teamsEgress.enabled` toggle and `cidrs` list:
 resolve the Bot Framework and Entra endpoint addresses to explicit `/32`s and
 keep them current. This policy selects the Teams, MCP and scheduler host pods,
-which all send to Teams, and never the harness; never turn off the global policy to enable Teams. Avoid broad
-policies: Kubernetes unions egress allowances across matching policies.
+which all send to Teams, and never the harness. Never turn off the global policy
+to enable Teams. Avoid broad policies: Kubernetes unions egress allowances across
+matching policies.
 
 NetworkPolicy defaults to deny harness egress except cluster DNS and the MCP
 pods/service port. AOAI/Blob destinations must be explicitly supplied as IPv4
@@ -559,10 +560,10 @@ removed. An incomplete deletion is a failed teardown, not a passing result.
 DELETE_NAMESPACE="$NAMESPACE" DELETE_AKS="$AKS" bash deploy/helm/daimon-selfhost/scripts/aks.sh teardown
 ```
 
-`teardown` refuses unless `DELETE_NAMESPACE` names the namespace.
-Without `DELETE_AKS` set to the cluster's name, it removes only the release
-and its namespace and keeps the cluster. The helper verifies its dedicated kubeconfig's API server before uninstalling
-the release, deleting the namespace or deleting AKS. Use the `teardown` helper
+`teardown` refuses unless `DELETE_NAMESPACE` names the namespace. Without
+`DELETE_AKS` set to the cluster's name, it removes only the release and its
+namespace and keeps the cluster. The helper verifies its dedicated kubeconfig's
+API server before uninstalling the release, deleting the namespace or deleting AKS. Use the `teardown` helper
 above so the target check runs before any destructive command.
 
 Retaining built images and model quota avoids rebuilds and model provisioning on
@@ -590,7 +591,8 @@ DELETE_RG="$RG" bash deploy/helm/daimon-selfhost/scripts/aks.sh remove
 rm -r "$AKS_STATE"
 ```
 
-`remove` refuses unless `DELETE_RG` repeats the resource group's name, then runs `az group delete -n "$RG" --yes -o none`. Verify no retained
+`remove` refuses unless `DELETE_RG` repeats the resource group's name, then
+runs `az group delete -n "$RG" --yes -o none`. Verify no retained
 node/data-disk resource group remains before saying billing has stopped. Avoid
 reusing a deleted AOAI name without handling its Azure soft-delete reservation.
 For overnight shutdown use teardown; a system node pool cannot generally scale to
@@ -648,9 +650,8 @@ bash deploy/helm/daimon-selfhost/scripts/aks.sh register
 A conversation is a channel ID (from the channel link), a group chat ID, or a
 person's 1:1 chat ID. A refused turn logs `selfhosted.grant_missing` in the Teams
 host log with its `channel_id`, which is how to find a 1:1 chat ID. The tenant
-is the Teams host's `DAIMON_TEAMS__TENANT_ID` setting.
-Each person gets one grant row per conversation, and the Teams tenant joins the
-harness binding. Anyone else, or any other conversation, is refused. Re-run
+is the Teams host's `DAIMON_TEAMS__TENANT_ID` setting. Each person gets one grant
+row per conversation, and the Teams tenant joins the harness binding. Anyone else, or any other conversation, is refused. Re-run
 `register` with the full map to add people; it restarts the Teams host.
 
 `register` is implemented in [`scripts/register.sh`](scripts/register.sh) and
@@ -714,10 +715,9 @@ and `teardown` (which keeps the cluster). `bootstrap` and `reinstall` create a
 cluster, and `egress-start` restarts the cluster's CoreDNS. `install`, `register`,
 `reinstall`, `teardown` and the egress commands refuse the defaults unless `RELEASE`
 and `NAMESPACE` are both exported. `install`, `register` and `teardown` also refuse a
-namespace that holds another Helm release. `egress-start` needs `RESTART_COREDNS=$AKS`.
-`install` creates and
-labels the namespace, and Helm creates cluster-wide PriorityClasses, so the
-installer needs cluster rights for both.
+namespace that holds another Helm release. `egress-start` needs
+`RESTART_COREDNS=$AKS`. `install` creates and labels the namespace, and Helm
+creates cluster-wide PriorityClasses, so the installer needs cluster rights for both.
 
 ```sh
 export RG=<resource-group> LOCATION=<region> ACR=<registry> AKS=<cluster> AOAI=<aoai-account>
