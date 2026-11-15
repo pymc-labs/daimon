@@ -2361,7 +2361,7 @@ class McpIdentitySettings(BaseModel):
             "request with a short-lived EdDSA token naming the agent, the workspace and, "
             "for a person's turn, who asked, the channel and the message. Daimon names the "
             "asker only while that person's turn is live in the calling session's thread. "
-            "A server may instead set auth to \"bearer\": Daimon then sends the key from "
+            'A server may instead set auth to "bearer": Daimon then sends the key from '
             "DAIMON_MCP_IDENTITY__BEARERS and no issuer or audience, and workspaces and "
             "agents (agent names that may use it) are required. Set requester_meta to true "
             "for a server that attributes writes to the requester: Daimon stamps each tool "
@@ -2376,8 +2376,8 @@ class McpIdentitySettings(BaseModel):
     bearers: Annotated[dict[str, SecretStr], NoDecode] = Field(
         default_factory=dict[str, SecretStr],
         description=(
-            "Keys for the servers whose auth is \"bearer\", by server name: a JSON object "
-            "such as {\"internal\": \"<key>\"}. Kept apart from "
+            'Keys for the servers whose auth is "bearer", by server name: a JSON object '
+            'such as {"internal": "<key>"}. Kept apart from '
             "DAIMON_MCP_IDENTITY__SERVERS so the key is set as a secret. Daimon sends the "
             "key as the server's bearer in place of the caller's own credential, which "
             "never reaches the server. Every bearer server needs one; no other server may "
