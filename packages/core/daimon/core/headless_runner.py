@@ -743,8 +743,11 @@ async def run_turn_impl(
                 session_id=session.id,
                 user_message=(
                     context_prompt(origin, fragments=fragments, system=session.agent.system)
+                    # Built-ins, search included, run only with the routine's sandbox
+                    # opt-in; the gate above disables them otherwise.
                     + sources_prefix(
-                        on=claude_searches(
+                        on=sandbox_tools
+                        and claude_searches(
                             [tool.model_dump(mode="json") for tool in session.agent.tools]
                         )
                     )
