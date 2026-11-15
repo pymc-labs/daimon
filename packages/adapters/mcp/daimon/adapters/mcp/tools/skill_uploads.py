@@ -538,7 +538,11 @@ async def _load_mcp_skill(
         url=url,
         credentials=credentials,
         relay_base=relay_base(str(public_url)) if public_url is not None else None,
-        relay_servers={configured.name: configured for configured in identity.servers},
+        relay_servers={
+            configured.name: configured
+            for configured in identity.servers
+            if configured.auth == "signed"
+        },
         relay_token=relay_token,
     )
     async with _mcp_http(access.verify) as http:

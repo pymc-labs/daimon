@@ -123,7 +123,12 @@ class DataServerNode:
             ]
             raise NodeConfigError(f"{env} needs {', '.join(missing)}")
         server = next(
-            (s for s in settings.mcp_identity.servers if s.name == config.identity_server), None
+            (
+                s
+                for s in settings.mcp_identity.servers
+                if s.name == config.identity_server and s.auth == "signed"
+            ),
+            None,
         )
         if server is None:
             raise NodeConfigError(

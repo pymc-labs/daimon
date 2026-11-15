@@ -2269,17 +2269,46 @@ class DirectMessagePolicy(BaseModel):
 
 
 class SignedIdentityServer(BaseModel):
-    """One remote MCP server that receives a signed caller identity on every request."""
+    """One remote MCP server reached through the identity relay.
+
+    `auth="signed"` sends a short-lived signed caller identity on every request.
+    `auth="bearer"` sends one configured key instead, for a server that attributes
+    writes to the requester (`requester_meta`) but trusts the key rather than a
+    signature. A bearer key is one shared credential, so such a server must name its
+    workspaces and agents.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
     url: str
-    issuer: str = Field(min_length=1)
-    audience: str = Field(min_length=1)
+    auth: Literal["signed", "bearer"] = "signed"
+    issuer: str = ""
+    audience: str = ""
     # Servers are deployment-wide: without a list any workspace's agents may use one.
     workspaces: frozenset[str] | None = None
     ca_certificate: str | None = None
+    requester_meta: bool = False
+    agents: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _auth_fields(self) -> SignedIdentityServer:
+        if self.auth == "signed":
+            if not self.issuer or not self.audience:
+                raise ValueError("a signed server needs an issuer and an audience")
+            return self
+        if self.issuer or self.audience:
+            raise ValueError("a bearer server takes no issuer or audience")
+        if not self.workspaces or not self.agents:
+            raise ValueError("a bearer server needs workspaces and agents")
+        return self
+
+    @field_validator("agents")
+    @classmethod
+    def _agent_names(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(not name for name in value):
+            raise ValueError("agents must be non-empty names")
+        return value
 
     @field_validator("url")
     @classmethod
@@ -2332,23 +2361,42 @@ class McpIdentitySettings(BaseModel):
             "request with a short-lived EdDSA token naming the agent, the workspace and, "
             "for a person's turn, who asked, the channel and the message. Daimon names the "
             "asker only while that person's turn is live in the calling session's thread. "
-            "The MCP service requires DAIMON_MCP_IDENTITY__SIGNING_KEY; chat workers use the "
-            "same server policy without the signing key. Default: [] (off)."
+            "A server may instead set auth to \"bearer\": Daimon then sends the key from "
+            "DAIMON_MCP_IDENTITY__BEARERS and no issuer or audience, and workspaces and "
+            "agents (agent names that may use it) are required. Set requester_meta to true "
+            "for a server that attributes writes to the requester: Daimon stamps each tool "
+            "call with the asker's user id, removing any value the caller supplied, and "
+            "with the conversation it came from, only while that person's turn is live. "
+            "The MCP service requires DAIMON_MCP_IDENTITY__SIGNING_KEY when any server is "
+            "signed; chat workers use the same server policy without the signing key. "
+            "Default: [] (off)."
         ),
     )
 
-    @field_validator("servers", mode="before")
+    bearers: Annotated[dict[str, SecretStr], NoDecode] = Field(
+        default_factory=dict[str, SecretStr],
+        description=(
+            "Keys for the servers whose auth is \"bearer\", by server name: a JSON object "
+            "such as {\"internal\": \"<key>\"}. Kept apart from "
+            "DAIMON_MCP_IDENTITY__SERVERS so the key is set as a secret. Daimon sends the "
+            "key as the server's bearer in place of the caller's own credential, which "
+            "never reaches the server. Every bearer server needs one; no other server may "
+            "have one. Default: {} (none)."
+        ),
+    )
+
+    @field_validator("servers", "bearers", mode="before")
     @classmethod
-    def _parse_json(cls, value: object) -> object:
+    def _parse_json(cls, value: object, info: ValidationInfo) -> object:
         if not isinstance(value, str):
             return value
         if not value.strip():
-            return []
+            return [] if info.field_name == "servers" else {}
         try:
             return json.loads(value)
         except json.JSONDecodeError as err:
             raise ValueError(
-                f"DAIMON_MCP_IDENTITY__SERVERS is not valid JSON "
+                f"DAIMON_MCP_IDENTITY__{(info.field_name or '').upper()} is not valid JSON "
                 f"(line {err.lineno}, column {err.colno})"
             ) from None
 
@@ -2367,6 +2415,25 @@ class McpIdentitySettings(BaseModel):
         if value is not None:
             load_signing_key(value.get_secret_value())
         return value
+
+    @model_validator(mode="after")
+    def _bearers_match_servers(self) -> McpIdentitySettings:
+        """Each bearer server has a usable key; a key never rides a signed server."""
+        bearer_servers = {server.name for server in self.servers if server.auth == "bearer"}
+        if set(self.bearers) != bearer_servers:
+            raise ValueError(
+                "DAIMON_MCP_IDENTITY__BEARERS must name exactly the servers whose auth is bearer"
+            )
+        for key in self.bearers.values():
+            value = key.get_secret_value()
+            if not value or not value.isascii() or not value.isprintable() or " " in value:
+                raise ValueError("a bearer key must be printable ASCII without spaces")
+        return self
+
+    @property
+    def needs_signing_key(self) -> bool:
+        """Whether any server is sent a signed identity, which needs `signing_key`."""
+        return any(server.auth == "signed" for server in self.servers)
 
 
 class AgentIdentitySettings(BaseModel):

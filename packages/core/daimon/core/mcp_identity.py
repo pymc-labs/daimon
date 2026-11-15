@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import uuid
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
@@ -32,6 +33,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_server_url import canonical_mcp_url
 from daimon.core.stores.domain import TurnOriginRow
+from daimon.core.turn_origin import origin_place
 
 #: Relay path under the app root; the server's configured name follows it.
 RELAY_PATH: Final = "/mcp-identity"
@@ -310,3 +312,116 @@ def matching_turn(
 
 def origin_turn_place(origin: TurnOriginRow) -> TurnPlace:
     return TurnPlace(channel_id=origin.platform_channel_id, message_id=origin.platform_message_id)
+
+
+#: `params._meta` keys a requester-aware server reads. Only the relay writes them.
+REQUESTER_META_KEY: Final = "requester_platform_user_id"
+CONVERSATION_META_KEY: Final = "requester_conversation"
+#: Platforms whose user and channel ids the requester fields may carry.
+REQUESTER_PLATFORMS: Final = frozenset({"discord"})
+
+
+class RequesterBodyError(ValueError):
+    """A relayed request body that cannot be stamped safely; the relay answers 400."""
+
+
+def requester_conversation(origin: TurnOriginRow) -> dict[str, str | None] | None:
+    """Where the person's live turn runs, as `requester_conversation`; None when unknown.
+
+    `channel_id` names the channel, thread or DM the conversation lives in;
+    `parent_channel_id` names a thread's channel and is None otherwise. Read from
+    the origin the platform adapter recorded, never from the caller's request.
+    """
+    if origin_place(origin) == "dm":
+        if not origin.platform_channel_id:
+            return None
+        return {
+            "place_type": "dm",
+            "channel_id": origin.platform_channel_id,
+            "parent_channel_id": None,
+        }
+    if not origin.thread_id or not origin.parent_channel_id:
+        return None
+    if origin.thread_id != origin.parent_channel_id:
+        return {
+            "place_type": "thread",
+            "channel_id": origin.thread_id,
+            "parent_channel_id": origin.parent_channel_id,
+        }
+    return {"place_type": "channel", "channel_id": origin.thread_id, "parent_channel_id": None}
+
+
+def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """A duplicated key is read first by some parsers and last by others."""
+    found: dict[str, object] = {}
+    for key, value in pairs:
+        if key in found:
+            raise RequesterBodyError("duplicate key in request body")
+        found[key] = value
+    return found
+
+
+def _refuse_constant(name: str) -> object:
+    raise RequesterBodyError(f"{name} is not valid JSON")
+
+
+def _stamp_message(
+    message: object, *, person: str | None, conversation: Mapping[str, str | None] | None
+) -> dict[str, object]:
+    if not isinstance(message, dict):
+        raise RequesterBodyError("a request body must be an object or an array of objects")
+    fields = cast("dict[str, object]", message)
+    method = fields.get("method")
+    if not isinstance(method, str) or method.strip().casefold() != "tools/call":
+        return fields
+    params = fields.get("params")
+    if not isinstance(params, dict):
+        raise RequesterBodyError("a tool call needs params")
+    call = cast("dict[str, object]", params)
+    # `meta` is the field's name without its alias: drop it so no parser reads it.
+    call.pop("meta", None)
+    existing = call.get("_meta")
+    meta: dict[str, object] = (
+        {k: v for k, v in cast("dict[str, object]", existing).items()}
+        if isinstance(existing, dict)
+        else {}
+    )
+    meta.pop(REQUESTER_META_KEY, None)
+    meta.pop(CONVERSATION_META_KEY, None)
+    if person is not None and conversation is not None:
+        meta[REQUESTER_META_KEY] = person
+        meta[CONVERSATION_META_KEY] = dict(conversation)
+    call["_meta"] = meta
+    return fields
+
+
+def stamp_requester(
+    body: bytes, *, person: str | None, conversation: Mapping[str, str | None] | None
+) -> bytes:
+    """The request body with each `tools/call` stamped with who asked and where.
+
+    Whatever the caller put under `params._meta` for either requester key is
+    removed first, so a value present was set here. With no `person` (a routine,
+    a foreign sender, two live turns) the keys are only removed. Strict: a body that
+    is not UTF-8 JSON, repeats a key, or holds a tool call without object params
+    raises `RequesterBodyError`. Other methods and responses pass through, but
+    the whole body is re-serialized so what was checked is what is sent.
+    """
+    try:
+        parsed = json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=_no_duplicate_keys,  # pyright: ignore[reportArgumentType]
+            parse_constant=_refuse_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as err:
+        raise RequesterBodyError("request body is not valid JSON") from err
+    if isinstance(parsed, list):
+        batch = cast("list[object]", parsed)
+        if not batch:
+            raise RequesterBodyError("a batch must not be empty")
+        out: object = [
+            _stamp_message(item, person=person, conversation=conversation) for item in batch
+        ]
+    else:
+        out = _stamp_message(parsed, person=person, conversation=conversation)
+    return json.dumps(out, separators=(",", ":"), ensure_ascii=False).encode("utf-8")

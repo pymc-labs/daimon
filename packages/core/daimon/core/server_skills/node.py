@@ -115,7 +115,12 @@ def skills_node_of(settings: Settings) -> SkillsNode | None:
     ):
         return None
     server = next(
-        (s for s in settings.mcp_identity.servers if s.name == config.identity_server), None
+        (
+            s
+            for s in settings.mcp_identity.servers
+            if s.name == config.identity_server and s.auth == "signed"
+        ),
+        None,
     )
     if server is None:
         return None
