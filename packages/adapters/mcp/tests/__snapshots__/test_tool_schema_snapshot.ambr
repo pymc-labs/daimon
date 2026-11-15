@@ -2840,7 +2840,14 @@
     }),
     'create_watch': dict({
       'description': '''
-        Watch a listed read tool from this conversation: a Discord reader or an MCP server's.
+        Watch a listed read tool from this conversation, or wake on posts to a secret link.
+        <blank line>
+        With source "callback" nothing is polled: Daimon DMs the owner a private link, and
+        each POST to it (up to 4 KiB of UTF-8 text) wakes the agent with that text as
+        evidence. The link is never shown in chat or in this result and cannot be shown
+        again; delete the watch and make a new one to change it. A callback watch needs
+        an end date (never `permanent`) and a deployment that has set a callback address.
+        The tool, server, arguments, projection, rule, interval and key fields are for polls.
         <blank line>
         Binds the current human owner, tenant, agent and exact Discord thread.
         `delivery` says where each report goes: "thread" (this thread, the default),
@@ -2978,7 +2985,10 @@
             'type': 'string',
           }),
           'source': dict({
-            'const': 'poll',
+            'enum': list([
+              'poll',
+              'callback',
+            ]),
             'type': 'string',
           }),
           'tool': dict({
