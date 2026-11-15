@@ -1273,8 +1273,8 @@ async def _pump(
         # open-ended (discord.HTTPException, Slack API errors, whatever a
         # future adapter raises). `Exception`, not `BaseException` --
         # CancelledError must still propagate so the render task stays
-        # cancellable; `drained()` remains the sole
-        # BaseException drain site in this module.
+        # cancellable; this module drops a `BaseException` only through
+        # `drained()`.
         #
         # On failure: log and return WITHOUT advancing `prev_cell[0]`. The
         # next tick delivers the state again -- no retry counter, no
