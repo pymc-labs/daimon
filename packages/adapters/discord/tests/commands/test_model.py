@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -19,9 +20,9 @@ from daimon.core.model_switch import ModelSwitchPreview, SwitchRefusal
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.thread_models import get_thread_model
+from daimon.core.stores.thread_models import get_thread_effort, get_thread_model
 from daimon.core.thread_models import ThreadModelChange
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_dm_conversation, make_tenant
 from daimon.testing.turn_fakes import deps_for
 from mux.contracts.ids import ModelRef
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -82,9 +83,9 @@ async def _registered_guild(
         await session.commit()
 
 
-async def _run(interaction: MagicMock, choice: str | None) -> str:
+async def _run(interaction: MagicMock, choice: str | None, effort: str | None = None) -> str:
     cog = ModelCog(MagicMock())
-    await cog.model.callback(cog, interaction, choice)  # pyright: ignore[reportArgumentType, reportCallIssue]
+    await cog.model.callback(cog, interaction, choice, effort)  # pyright: ignore[reportArgumentType, reportCallIssue]
     interaction.edit_original_response.assert_awaited_once()
     return interaction.edit_original_response.call_args.kwargs["content"]
 
@@ -144,7 +145,7 @@ async def test_outside_a_thread_it_points_at_one(
 
     content = await _run(_interaction(runtime, guild_id=guild_id, in_thread=False), "opus")
 
-    assert "Use /model inside a conversation thread." in content
+    assert "Use /model inside a conversation thread or a direct message." in content
     assert await _stored(db_session_factory, guild_id) is None
 
 
@@ -230,4 +231,90 @@ async def test_a_refused_pick_says_why_and_offers_no_confirm(
     sent = interaction.edit_original_response.call_args.kwargs
     assert sent["content"] == "Ask the agent's owner or an admin to move it. Nothing changed."
     assert sent["view"] is None
+    assert await _stored(db_session_factory, guild_id) is None
+
+
+_DM_CHANNEL_ID = 888
+_DM_SCOPE = "dm:test-model"
+
+
+def _dm_interaction(runtime: DiscordRuntime) -> MagicMock:
+    user = MagicMock(spec=discord.User)
+    user.id = 42
+    channel = MagicMock(spec=discord.DMChannel)
+    channel.id = _DM_CHANNEL_ID
+    interaction = MagicMock()
+    interaction.client.runtime = runtime
+    interaction.guild_id = None
+    interaction.guild = None
+    interaction.user = user
+    interaction.channel = channel
+    interaction.response.defer = AsyncMock()
+    interaction.edit_original_response = AsyncMock()
+    return interaction
+
+
+async def _dm_conversation(
+    db_session_factory: async_sessionmaker[AsyncSession], guild_id: int
+) -> uuid.UUID:
+    async with db_session_factory() as session:
+        tenant = await make_tenant(session, platform="discord", workspace_id=str(guild_id))
+        account = await make_account(session, tenant=tenant)
+        await make_dm_conversation(
+            session,
+            tenant=tenant,
+            account_id=account.id,
+            route_key=str(_DM_CHANNEL_ID),
+            external_user_id="42",
+            workspace_id=str(guild_id),
+            scope_id=_DM_SCOPE,
+        )
+        await session.commit()
+        return tenant.id
+
+
+async def test_a_direct_message_switches_its_own_conversation_and_keeps_the_effort(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id = await _dm_conversation(db_session_factory, 720000010)
+    runtime = _runtime(db_session_factory)
+    key = {"tenant_id": tenant_id, "platform": "discord", "thread_id": _DM_SCOPE}
+
+    assert await _run(_dm_interaction(runtime), None) == (
+        "This conversation runs on the agent's own model."
+    )
+    assert await _run(_dm_interaction(runtime), "fable", "high") == (
+        "This conversation runs on Fable 5.2 at high effort from the next reply."
+    )
+    assert await _run(_dm_interaction(runtime), "opus") == (
+        "This conversation runs on Opus 5.5 at high effort from the next reply."
+    )
+    assert await _run(_dm_interaction(runtime), None, "low") == (
+        "This conversation runs on Opus 5.5 at low effort from the next reply."
+    )
+    async with db_session_factory() as session:
+        assert await get_thread_model(session, **key) == "claude-opus-5-5"
+        assert await get_thread_effort(session, **key) == "low"
+
+
+async def test_a_direct_message_with_no_conversation_points_at_one(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    runtime = _runtime(db_session_factory)
+
+    content = await _run(_dm_interaction(runtime), "opus")
+
+    assert "Use /model inside a conversation thread or a direct message." in content
+
+
+async def test_an_unknown_effort_is_refused_and_changes_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    guild_id = 720000011
+    await _registered_guild(db_session_factory, guild_id)
+    runtime = _runtime(db_session_factory)
+
+    content = await _run(_interaction(runtime, guild_id=guild_id), "opus", "turbo")
+
+    assert "isn't an effort this conversation can use" in content
     assert await _stored(db_session_factory, guild_id) is None
