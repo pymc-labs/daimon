@@ -46,7 +46,7 @@ def test_watch_cli_reports_mapping_errors_and_thread_only_confirmation(
         monkeypatch.setattr(
             watch_commands.WatchExport,
             "model_validate_json",
-            lambda _: SimpleNamespace(watches=[object()]),
+            lambda _: SimpleNamespace(watches=[object()], timers=[]),
         )
         monkeypatch.setattr(
             watch_commands,

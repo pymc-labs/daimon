@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,15 +13,18 @@ from typing import Annotated
 import typer
 from daimon.adapters.cli.flags import JSON_OPTION
 from daimon.adapters.cli.runtime import build_runtime
-from daimon.core.config import load_settings
-from daimon.core.continuity.watch_imports import WatchExport
+from daimon.core.config import load_settings, load_watches_settings
+from daimon.core.continuity.held_timers import import_held_timer, settle_held_timers
+from daimon.core.continuity.watch_imports import ImportedCallbackWatch, WatchExport
 from daimon.core.stores.platform_names import get_user_names
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.watches import (
+    CallbackImport,
     NoticeReceipt,
     WatchActivity,
     confirm_import,
     get_watch,
+    import_callback_watch,
     import_watch,
     list_notice_receipts,
     list_tenant_watches,
@@ -164,25 +168,128 @@ def notices_command(
     typer.echo("sent: " + (", ".join(f"{kind}={n}" for kind, n in sent.items()) or "none"))
 
 
+def _write_urls(path: Path, urls: dict[str, str]) -> None:
+    """Merge into any earlier map and write it owner-only. The links are secrets."""
+    merged: dict[str, str] = {}
+    if path.exists():
+        merged = json.loads(path.read_text(encoding="utf-8"))
+    merged.update(urls)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(merged, indent=2))
+    path.chmod(0o600)
+
+
 @watches_app.command("import")
-def import_command(export_file: Path) -> None:
-    """Import a v1 JSON manifest, offline. Every watch starts paused; no key is copied."""
+def import_command(
+    export_file: Path,
+    tenant: Annotated[
+        uuid.UUID | None, typer.Option("--tenant", help="Tenant for callback watches and timers")
+    ] = None,
+    agent_id: Annotated[
+        str | None, typer.Option("--agent-id", help="Agent id that callback watches report to")
+    ] = None,
+    agent_name: Annotated[
+        str | None, typer.Option("--agent-name", help="Name of that agent")
+    ] = None,
+    urls_out: Annotated[
+        Path | None,
+        typer.Option("--urls-out", help="Write new callback links here (JSON, mode 0600)"),
+    ] = None,
+) -> None:
+    """Import a v1 JSON manifest, offline. Every watch starts paused; no key is copied.
+
+    Callback watches keep their token hash and get a new link, written only to
+    --urls-out as {source id: url}. Timers are held until `confirm-timers`.
+    """
     if export_file.stat().st_size > 1048576:
         raise typer.BadParameter("Watch export exceeds 1 MiB")
     manifest = WatchExport.model_validate_json(export_file.read_bytes())
+    callbacks = [w for w in manifest.watches if isinstance(w, ImportedCallbackWatch)]
+    others = [w for w in manifest.watches if not isinstance(w, ImportedCallbackWatch)]
+    if (callbacks or manifest.timers) and tenant is None:
+        raise typer.BadParameter("--tenant is required for callback watches and timers")
+    if callbacks:
+        if agent_id is None or agent_name is None:
+            raise typer.BadParameter("--agent-id and --agent-name are required for callbacks")
+        if urls_out is None:
+            raise typer.BadParameter("--urls-out is required for callback watches")
+        if load_watches_settings().callback_base_url is None:
+            raise typer.BadParameter("Set DAIMON_WATCHES__CALLBACK_BASE_URL first")
 
     async def run() -> None:
+        base = load_watches_settings().callback_base_url
+        urls: dict[str, str] = {}
         async with build_runtime(load_settings()) as runtime:
+            now = datetime.now(UTC)
             # Whole-file transaction: no half-import or lost owner notice on crash.
             async with runtime.sessionmaker.begin() as db:
-                rows = [
-                    await import_watch(db, entry, now=datetime.now(UTC))
-                    for entry in manifest.watches
-                ]
+                rows = [await import_watch(db, entry, now=now) for entry in others]
+                moved: list[CallbackImport] = []
+                for entry in callbacks:
+                    assert tenant is not None and agent_id and agent_name
+                    moved.append(
+                        await import_callback_watch(
+                            db,
+                            entry,
+                            tenant_id=tenant,
+                            agent_id=agent_id,
+                            agent_name=agent_name,
+                            now=now,
+                        )
+                    )
+                held: list[str] = []
+                for timer in manifest.timers:
+                    assert tenant is not None
+                    held.append(await import_held_timer(db, timer, tenant_id=tenant, now=now))
+                for item in moved:
+                    if item.token is not None and item.watch is not None:
+                        urls[item.legacy_id] = (
+                            f"{base}/callbacks/watches/{item.watch.id}/{item.token}"
+                        )
+                if urls and urls_out is not None:
+                    # Before the commit: a lost file would lose links nobody can recover.
+                    _write_urls(urls_out, urls)
             for row in rows:
                 detail = row.source_state.get("mapping_error")
                 suffix = f": {detail}" if detail else ""
                 typer.echo(f"{row.id} paused {row.source_state.get('reason')}{suffix}")
+            for item in moved:
+                if item.watch is None:
+                    typer.echo(f"callback {item.legacy_id} {item.outcome}")
+                    continue
+                note = " lifetime capped to 30 days" if item.capped else ""
+                typer.echo(
+                    f"{item.watch.id} paused {item.outcome} callback owner="
+                    f"{item.watch.owner_account_id} channel={item.watch.parent_channel_id} "
+                    f"thread={item.watch.thread_id}{note}"
+                    f"{' link written' if item.token else ''}"
+                )
+            if manifest.timers:
+                counts = {k: held.count(k) for k in ("held", "existing", "past")}
+                typer.echo("timers " + " ".join(f"{k}={n}" for k, n in counts.items()))
+
+    asyncio.run(run())
+
+
+@watches_app.command("confirm-timers")
+def confirm_timers_command(
+    tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
+    agent_id: Annotated[str, typer.Option("--agent-id")],
+    agent_name: Annotated[str, typer.Option("--agent-name")],
+) -> None:
+    """Schedule every held timer for this agent. Due, over-cap and DM-less ones are skipped."""
+
+    async def run() -> None:
+        async with build_runtime(load_settings()) as runtime:
+            counts = await settle_held_timers(
+                runtime.sessionmaker,
+                tenant_id=tenant,
+                agent_id=agent_id,
+                agent_name=agent_name,
+                now=datetime.now(UTC),
+            )
+        typer.echo(" ".join(f"{k}={n}" for k, n in sorted(counts.items())) or "no held timers")
 
     asyncio.run(run())
 
