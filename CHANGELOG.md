@@ -12,15 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Install the AKS chart as a second release on a shared cluster. The AKS scripts
   take `RELEASE`, `NAMESPACE`, `SECRET_PREFIX` and `VALUES_FILE`. An empty
-  `ingress.mcpHost` or `ingress.teamsHost` skips that Ingress. `teardown` keeps
-  the cluster unless `DELETE_AKS` names it, and `remove` needs `DELETE_RG`.
+  `ingress.mcpHost` or `ingress.teamsHost` skips that Ingress.
 
-- The AKS scripts' `install`, `register`, `reinstall` and `teardown` refuse to run
-  unless `RELEASE` and `NAMESPACE` are exported, and `teardown` needs
-  `DELETE_NAMESPACE` set to the namespace it deletes.
-
-- The AKS scripts' `install`, `register` and `teardown` refuse a namespace that holds
-  another Helm release, and `egress-start` needs `RESTART_COREDNS` set to the cluster name.
+- The AKS scripts refuse to change a release unless `RELEASE` and `NAMESPACE` are
+  exported, and refuse a namespace that holds another Helm release. Destructive
+  commands need the target's name repeated: `teardown` needs `DELETE_NAMESPACE` and
+  keeps the cluster unless `DELETE_AKS` names it, `remove` needs `DELETE_RG`, and
+  `egress-start` needs `RESTART_COREDNS`.
 
 - Let the AKS chart's MCP and scheduler pods reach Teams too, so agent tools and
   scheduled runs can post there; the harness still cannot.
