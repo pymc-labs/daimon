@@ -34,6 +34,7 @@ from daimon.adapters.cli.commands.selfhosted import selfhosted_app
 from daimon.adapters.cli.commands.sessions import sessions_app
 from daimon.adapters.cli.commands.skills import skills_app
 from daimon.adapters.cli.commands.smoke import smoke_command
+from daimon.adapters.cli.commands.tags import tags_app
 from daimon.adapters.cli.commands.tenants import tenants_app
 from daimon.adapters.cli.commands.usage import usage_app
 from daimon.adapters.cli.commands.watches import watches_app
@@ -70,6 +71,7 @@ app.add_typer(promo_app, name="promo")
 app.add_typer(github_app, name="github")
 app.add_typer(routines_app, name="routines")
 app.add_typer(watches_app, name="watches")
+app.add_typer(tags_app, name="tags")
 app.add_typer(features_app, name="features")
 app.command("run")(run_command)
 app.command("smoke")(smoke_command)
