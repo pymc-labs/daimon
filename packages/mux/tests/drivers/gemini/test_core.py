@@ -1128,14 +1128,13 @@ async def test_a_stop_observation_holds_no_lock_while_it_reads_the_provider(
     assert (await ma.sessions.retrieve(SCOPE, s.ref)).state == "idle"
 
 
-def test_thinking_level_compiles_into_the_model_or_the_agent_config() -> None:
+def test_thinking_level_when_compiled_then_only_a_model_interaction_carries_it() -> None:
+    """The API rejects agent_config.thinking_level, so an agent interaction refuses it."""
     spec = AgentSpec(name="a", model=ModelRef(provider="gemini", id="gemini-3.8-flash"))
-    assert "thinking_level" not in str(compile_agent(spec))
-    agent = compile_agent(spec, thinking_level="low")
-    assert agent["agent_config"] == {
-        "type": "antigravity",
-        "model": "gemini-3.8-flash",
-        "thinking_level": "low",
-    }
+    assert "thinking_level" not in str(compile_agent(spec)), "no effort, no thinking level"
+    with pytest.raises(UnsupportedCapability, match="agent_thinking_level"):
+        compile_agent(spec, thinking_level="low")
     model = compile_agent(spec, max_output_tokens=64, thinking_level="high")
-    assert model["generation_config"] == {"max_output_tokens": 64, "thinking_level": "high"}
+    assert model["generation_config"] == {"max_output_tokens": 64, "thinking_level": "high"}, (
+        "a model interaction sends effort in generation_config"
+    )

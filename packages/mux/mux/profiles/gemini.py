@@ -23,7 +23,7 @@ SESSION_NAMESPACE: Final = "gemini.session"
 #: fallback chain, and is selectable only while the host holds a current price.
 OPT_IN_MODELS: Final = ("gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen")
 
-# The agent's thinking level; the neutral names match.
+# A model interaction's thinking level (agent interactions take none); names match.
 _EFFORT: dict[Effort, str] = {"low": "low", "medium": "medium", "high": "high"}
 MIB = 1024 * 1024
 

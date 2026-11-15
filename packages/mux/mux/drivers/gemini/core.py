@@ -586,11 +586,11 @@ def compile_agent(
             result["system_instruction"] = spec.system
         model_request(result)
         return result
-    config: Object = {"type": "antigravity", "model": spec.model.id}
     if thinking_level is not None:
-        # google-genai 2.7 refuses generation_config beside `agent`: an agent
-        # interaction carries its settings in agent_config (extra items allowed).
-        config["thinking_level"] = thinking_level
+        # The API rejects it ("Unknown parameter 'thinking_level' at 'agent_config'",
+        # measured 2026-11-15); generation_config is refused beside `agent`.
+        refuse("agent_thinking_level")
+    config: Object = {"type": "antigravity", "model": spec.model.id}
     result = {
         "agent": BASE_AGENT,
         "agent_config": config,

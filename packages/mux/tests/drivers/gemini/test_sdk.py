@@ -550,9 +550,8 @@ async def test_a_429_names_a_zero_quota_apart_from_a_rate_limit(
         await client.aio.aclose()
 
 
-@pytest.mark.parametrize("capped", (False, True))
-async def test_sdk_effort_rides_the_field_the_request_type_accepts(capped: bool) -> None:
-    """google-genai 2.7 takes agent settings in agent_config, model ones in generation_config."""
+async def test_sdk_effort_when_a_model_interaction_then_rides_generation_config() -> None:
+    """google-genai 2.7 sends a model interaction's thinking level in generation_config."""
     from contextlib import AsyncExitStack
 
     from mux.contracts.ids import ModelRef
@@ -568,7 +567,7 @@ async def test_sdk_effort_rides_the_field_the_request_type_accepts(capped: bool)
 
     body = compile_agent(
         AgentSpec(name="chat", model=ModelRef(provider="gemini", id="gemini-3.8-flash")),
-        max_output_tokens=4096 if capped else None,
+        max_output_tokens=4096,
         thinking_level="low",
     )
     body.update(input=[{"type": "text", "text": "question"}], background=True, store=True)
@@ -578,8 +577,5 @@ async def test_sdk_effort_rides_the_field_the_request_type_accepts(capped: bool)
         stack.push_async_callback(client.aio.aclose)
         await SDKTransport(client).create(body)
     posted = json.loads(captured[0].content)
-    carrier, absent = (
-        ("generation_config", "agent_config") if capped else ("agent_config", "generation_config")
-    )
-    assert posted[carrier]["thinking_level"] == "low", f"effort is sent in {carrier}"
-    assert absent not in posted, f"{absent} is not sent for this request type"
+    assert posted["generation_config"]["thinking_level"] == "low", "a model interaction sends effort in generation_config"
+    assert "agent_config" not in posted, "a model interaction sends no agent_config"
