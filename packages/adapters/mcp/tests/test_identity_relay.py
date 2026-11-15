@@ -36,6 +36,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.thread_sessions import create_thread_session, mark_dead
 from daimon.core.stores.turn_origins import create_origin
 from daimon.testing.factories import make_platform_principal, make_tenant
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 
@@ -153,8 +154,9 @@ async def _chat_session(
 def _relay(
     factory: async_sessionmaker[AsyncSession],
     upstream: _Upstream,
-    key: SigningKey,
+    key: SigningKey | None,
     server: SignedIdentityServer = SERVER,
+    bearers: dict[str, SecretStr] | None = None,
 ) -> httpx.AsyncClient:
     app = Starlette()
     app.add_route(
@@ -163,7 +165,8 @@ def _relay(
             servers={server.name: server},
             auth=DaimonJWTVerifier(secret=SECRET, sessionmaker=factory),
             sessionmaker=factory,
-            tokens=IdentityTokenCache(key),
+            tokens=IdentityTokenCache(key) if key is not None else None,
+            bearers=bearers,
             clients={
                 server.name: httpx.AsyncClient(transport=httpx.MockTransport(upstream.handle))
             },
@@ -351,3 +354,241 @@ async def test_unreachable_server_is_a_bad_gateway_and_a_full_pool_a_retry(
     assert down.status_code == 502, "a server that cannot be reached is a 502"
     assert busy.status_code == 503, "every connection to the server is in use"
     assert busy.headers["retry-after"] == "5", "the caller is told when to retry"
+
+
+BEARER_KEY = "bearer-key-1"
+BEARER_SERVER = SignedIdentityServer(
+    name="tools",
+    url="https://tools.example.com/mcp",
+    auth="bearer",
+    workspaces=frozenset({"discord:guild-1"}),
+    agents=("Agent A", "Helper"),
+    requester_meta=True,
+)
+_BEARERS = {"tools": SecretStr(BEARER_KEY)}
+
+
+def _tool_call(**meta: object) -> str:
+    params: dict[str, object] = {"name": "send", "arguments": {"text": "hi"}}
+    if meta:
+        params["_meta"] = meta
+    return json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params})
+
+
+async def _post(client: httpx.AsyncClient, token: str, body: str | bytes) -> httpx.Response:
+    return await client.post(
+        "/mcp-identity/tools",
+        content=body,
+        headers={"authorization": f"Bearer {token}", "content-type": "application/json"},
+    )
+
+
+def _sent_meta(request: httpx.Request) -> dict[str, object]:
+    return json.loads(request.content)["params"]["_meta"]
+
+
+async def test_bearer_person_turn_is_stamped_and_the_key_replaces_the_credential(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    person = await _person(db_session_factory)
+    token, _ = await _chat_session(db_session_factory, person, "thread-1")
+    upstream = _Upstream()
+    async with _relay(
+        db_session_factory, upstream, None, BEARER_SERVER, bearers=_BEARERS
+    ) as client:
+        response = await _post(client, token, _tool_call())
+    assert response.status_code == 200, "the server's answer passes back"
+    (sent,) = upstream.requests
+    assert sent.headers["authorization"] == f"Bearer {BEARER_KEY}", "the configured key is sent"
+    assert token not in json.dumps(dict(sent.headers)), "the inbound credential stays here"
+    assert _sent_meta(sent) == {
+        "requester_platform_user_id": "user-1",
+        "requester_conversation": {
+            "place_type": "thread",
+            "channel_id": "thread-1",
+            "parent_channel_id": "chan-1",
+        },
+    }, "the live turn's asker and place are stamped"
+
+
+async def test_forged_requester_fields_are_replaced_on_a_person_turn(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    person = await _person(db_session_factory)
+    token, _ = await _chat_session(db_session_factory, person, "thread-1")
+    upstream = _Upstream()
+    forged = _tool_call(
+        requester_platform_user_id="666",
+        requester_conversation={"place_type": "dm", "channel_id": "evil"},
+    )
+    async with _relay(
+        db_session_factory, upstream, None, BEARER_SERVER, bearers=_BEARERS
+    ) as client:
+        await _post(client, token, forged)
+    meta = _sent_meta(upstream.requests[0])
+    assert meta["requester_platform_user_id"] == "user-1", "a forged asker is overwritten"
+    assert meta["requester_conversation"] != {"place_type": "dm", "channel_id": "evil"}, (
+        "a forged place is overwritten"
+    )
+
+
+async def test_forged_requester_fields_are_stripped_when_no_person_is_live(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    person = await _person(db_session_factory)
+    routine = await _token(db_session_factory, person, RelayBinding("Agent A"))
+    idle, _ = await _chat_session(db_session_factory, person, "thread-2", turn=False)
+    foreign, _ = await _chat_session(db_session_factory, person, "thread-3", foreign=True)
+    upstream = _Upstream()
+    forged = _tool_call(requester_platform_user_id="666", requester_conversation={"x": "y"})
+    async with _relay(
+        db_session_factory, upstream, None, BEARER_SERVER, bearers=_BEARERS
+    ) as client:
+        for token in (routine, idle, foreign):
+            await _post(client, token, forged)
+    assert len(upstream.requests) == 3, "the calls still go through, as the key owner's"
+    for case, request in zip(("routine", "idle", "foreign"), upstream.requests, strict=True):
+        assert _sent_meta(request) == {}, f"a {case} call carries no requester, forged or not"
+
+
+async def test_two_live_turns_and_a_replaced_session_stamp_no_requester(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    person = await _person(db_session_factory)
+    token, mapping_id = await _chat_session(db_session_factory, person, "thread-1")
+    await _chat_session(db_session_factory, person, "thread-1")  # a second turn in the thread
+    upstream = _Upstream()
+    async with _relay(
+        db_session_factory, upstream, None, BEARER_SERVER, bearers=_BEARERS
+    ) as client:
+        await _post(client, token, _tool_call(requester_platform_user_id="666"))
+        async with db_session_factory() as db, db.begin():
+            await mark_dead(db, id=mapping_id)
+        await _post(client, token, _tool_call(requester_platform_user_id="666"))
+    assert [_sent_meta(r) for r in upstream.requests] == [{}, {}], (
+        "ambiguous or stale turns name nobody"
+    )
+
+
+async def test_a_platform_the_server_does_not_understand_is_never_stamped(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory() as db, db.begin():
+        tenant = await make_tenant(db, platform="slack", workspace_id="T1")
+        principal = await make_platform_principal(
+            db, platform="slack", external_id="U1", tenant=tenant
+        )
+    person = _Person(
+        tenant.id,
+        principal.account_id,
+        derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_a"),
+    )
+    mapping_id = uuid.uuid4()
+    now = dt.datetime.now(dt.UTC)
+    async with db_session_factory() as db, db.begin():
+        await create_thread_session(
+            db, id=mapping_id, tenant_id=tenant.id, platform="slack", thread_id="t1",
+            account_id=person.account_id, ma_session_id="sess_t1", ma_agent_id="agent_a",
+        )  # fmt: skip
+        await create_origin(
+            db, tenant_id=tenant.id, account_id=person.account_id, platform="slack",
+            parent_channel_id="C1", thread_id="t1", responder_ma_agent_id="agent_a",
+            responder_name="Helper", configuration_target_ma_agent_id=None,
+            configuration_target_name=None, role=Role.USER,
+            expires_at=now + dt.timedelta(hours=1), now=now, sender_foreign=False,
+            shared_channel=False, platform_channel_id="C1", platform_message_id="m1",
+        )  # fmt: skip
+    token = await _token(db_session_factory, person, RelayBinding("Agent A", mapping_id))
+    server = BEARER_SERVER.model_copy(update={"workspaces": frozenset({"slack:T1"})})
+    upstream = _Upstream()
+    async with _relay(db_session_factory, upstream, None, server, bearers=_BEARERS) as client:
+        await _post(client, token, _tool_call(requester_platform_user_id="666"))
+    assert _sent_meta(upstream.requests[0]) == {}, "only platforms the field is defined for"
+
+
+async def test_batches_and_other_methods_follow_the_same_rule(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    person = await _person(db_session_factory)
+    token, _ = await _chat_session(db_session_factory, person, "thread-1")
+    upstream = _Upstream()
+    ping = {"jsonrpc": "2.0", "id": 2, "method": "ping"}
+    batch = json.dumps([json.loads(_tool_call(requester_platform_user_id="666")), ping])
+    async with _relay(
+        db_session_factory, upstream, None, BEARER_SERVER, bearers=_BEARERS
+    ) as client:
+        await _post(client, token, batch)
+        get = await client.get("/mcp-identity/tools", headers={"authorization": f"Bearer {token}"})
+        deleted = await client.delete(
+            "/mcp-identity/tools", headers={"authorization": f"Bearer {token}"}
+        )
+    sent = json.loads(upstream.requests[0].content)
+    assert sent[0]["params"]["_meta"]["requester_platform_user_id"] == "user-1", "batch call"
+    assert sent[1] == ping, "a non-call is untouched"
+    assert (get.status_code, deleted.status_code) == (200, 200), "GET and DELETE pass through"
+    assert [r.method for r in upstream.requests] == ["POST", "GET", "DELETE"]
+    assert all(r.headers["authorization"] == f"Bearer {BEARER_KEY}" for r in upstream.requests), (
+        "every method is sent with the key"
+    )
+    assert upstream.requests[1].content == b"", "a GET body is not rewritten"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not json",
+        b"[]",
+        b'{"method":"tools/call","params":{"_meta":{"requester_platform_user_id":"1",'
+        b'"requester_platform_user_id":"2"}}}',
+        b'{"method":"tools/call","params":"x"}',
+    ],
+)
+async def test_unreadable_call_bodies_are_refused_not_forwarded(
+    db_session_factory: async_sessionmaker[AsyncSession], body: bytes
+) -> None:
+    person = await _person(db_session_factory)
+    token, _ = await _chat_session(db_session_factory, person, "thread-1")
+    upstream = _Upstream()
+    async with _relay(
+        db_session_factory, upstream, None, BEARER_SERVER, bearers=_BEARERS
+    ) as client:
+        response = await _post(client, token, body)
+    assert response.status_code == 400, "a body that cannot be stamped is a 400"
+    assert upstream.requests == [], "nothing reaches the server unchecked"
+
+
+async def test_an_agent_outside_the_allowlist_is_refused(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    person = await _person(db_session_factory)
+    token, _ = await _chat_session(db_session_factory, person, "thread-1")
+    server = BEARER_SERVER.model_copy(update={"agents": ("Someone Else",)})
+    upstream = _Upstream()
+    async with _relay(db_session_factory, upstream, None, server, bearers=_BEARERS) as client:
+        refused = await _post(client, token, _tool_call())
+    assert refused.status_code == 403, "an agent the server does not list is refused"
+    assert upstream.requests == [], "the key is never sent for it"
+
+
+async def test_a_bearer_server_without_its_key_fails_closed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    person = await _person(db_session_factory)
+    token, _ = await _chat_session(db_session_factory, person, "thread-1")
+    upstream = _Upstream()
+    async with _relay(db_session_factory, upstream, None, BEARER_SERVER) as client:
+        response = await _post(client, token, _tool_call())
+    assert response.status_code == 503, "no key means no request, not an unauthenticated one"
+    assert upstream.requests == [], "nothing was forwarded"
+
+
+async def test_a_signed_server_does_not_stamp_unless_asked(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    person = await _person(db_session_factory)
+    token, _ = await _chat_session(db_session_factory, person, "thread-1")
+    upstream = _Upstream()
+    body = _tool_call(requester_platform_user_id="666")
+    async with _relay(db_session_factory, upstream, generate_signing_key()) as client:
+        await _post(client, token, body)
+    assert upstream.requests[0].content == body.encode(), "bodies pass byte for byte by default"

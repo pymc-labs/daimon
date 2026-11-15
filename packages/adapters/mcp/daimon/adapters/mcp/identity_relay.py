@@ -21,17 +21,22 @@ from daimon.core.config import SignedIdentityServer
 from daimon.core.mcp_identity import (
     RELAY_CLAIM,
     RELAY_PATH,
+    REQUESTER_PLATFORMS,
     IdentityTokenCache,
     RelayBinding,
+    RequesterBodyError,
     caller_claims,
     matching_turn,
     origin_turn_place,
     parse_relay_claim,
+    requester_conversation,
+    stamp_requester,
 )
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.thread_sessions import get_thread_session_by_id
 from daimon.core.stores.turn_origins import list_active_origins
 from fastmcp.server.auth.auth import TokenVerifier
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.background import BackgroundTask
 from starlette.requests import Request
@@ -131,10 +136,15 @@ def build_identity_relay_route(
     servers: Mapping[str, SignedIdentityServer],
     auth: TokenVerifier,
     sessionmaker: async_sessionmaker[AsyncSession],
-    tokens: IdentityTokenCache,
+    tokens: IdentityTokenCache | None,
     clients: Mapping[str, httpx.AsyncClient],
     clock: Callable[[], datetime],
+    bearers: Mapping[str, SecretStr] | None = None,
 ) -> Callable[[Request], Awaitable[Response]]:
+    """The relay route. `tokens` signs for servers whose auth is signed; `bearers` holds
+    the key of each server whose auth is bearer. A server with neither is refused (503)."""
+    keys = bearers or {}
+
     async def handler(request: Request) -> Response:
         server = servers.get(request.path_params["name"])
         if server is None:
@@ -162,6 +172,15 @@ def build_identity_relay_route(
         workspace = workspace if isinstance(workspace, str) else None
         if server.workspaces is not None and f"{platform}:{workspace}" not in server.workspaces:
             return Response(status_code=403)
+        # An allowlist names the agents that may use a server (a bearer server always has one).
+        if server.agents and binding.agent_name not in server.agents:
+            return Response(status_code=403)
+        bearer = keys.get(server.name)
+        if (server.auth == "bearer" and bearer is None) or (
+            server.auth == "signed" and tokens is None
+        ):
+            log.error("mcp_identity.relay_unconfigured", server=server.name)
+            return Response(status_code=503)
         person = claims.get("platform_user_id")
         body = await read_capped_body(request)
         if body is None:
@@ -180,22 +199,45 @@ def build_identity_relay_route(
         # people: the server must not apply a member's permissions to them.
         if origin is not None and (origin.sender_foreign or FOREIGN_HOME_CLAIM in claims):
             origin = None
-        identity = caller_claims(
-            issuer=server.issuer,
-            audience=server.audience,
-            agent_id=str(agent_id),
-            platform=platform,
-            workspace_id=workspace,
-            platform_user_id=person if isinstance(person, str) else None,
-            agent_name=origin.responder_name if origin is not None else binding.agent_name,
-            place=origin_turn_place(origin) if origin is not None else None,
-        )
         headers = {
             name: value
             for name in _REQUEST_HEADERS
             if (value := request.headers.get(name)) is not None
         }
-        headers["authorization"] = f"Bearer {tokens.token(identity, now=now)}"
+        if server.auth == "bearer":
+            assert bearer is not None
+            headers["authorization"] = f"Bearer {bearer.get_secret_value()}"
+        else:
+            assert tokens is not None
+            identity = caller_claims(
+                issuer=server.issuer,
+                audience=server.audience,
+                agent_id=str(agent_id),
+                platform=platform,
+                workspace_id=workspace,
+                platform_user_id=person if isinstance(person, str) else None,
+                agent_name=origin.responder_name if origin is not None else binding.agent_name,
+                place=origin_turn_place(origin) if origin is not None else None,
+            )
+            headers["authorization"] = f"Bearer {tokens.token(identity, now=now)}"
+        if server.requester_meta and request.method == "POST":
+            # Only a live person's turn names a requester: `origin` is None for a routine,
+            # a foreign sender, a replaced session or two turns at once.
+            conversation = requester_conversation(origin) if origin is not None else None
+            named = (
+                person
+                if origin is not None
+                and platform in REQUESTER_PLATFORMS
+                and isinstance(person, str)
+                and person
+                else None
+            )
+            try:
+                body = stamp_requester(
+                    body, person=named, conversation=conversation if named else None
+                )
+            except RequesterBodyError:
+                return Response(status_code=400)
         http = clients[server.name]
         upstream = http.build_request(
             request.method,
@@ -223,7 +265,8 @@ def build_identity_relay_route(
             "mcp_identity.request_relayed",
             server=server.name,
             status=response.status_code,
-            person=identity.sub is not None,
+            person=origin is not None,
+            auth=server.auth,
         )
         return StreamingResponse(
             response.aiter_bytes(),

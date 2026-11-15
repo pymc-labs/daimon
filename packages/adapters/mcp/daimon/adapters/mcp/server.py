@@ -188,10 +188,10 @@ def _validate_settings(
             "DAIMON_MCP__PUBLIC_URL is required — use the URL MA will dial, "
             "e.g. https://daimon-mcp.example.com/mcp"
         )
-    if settings.mcp_identity.servers and settings.mcp_identity.signing_key is None:
+    if settings.mcp_identity.needs_signing_key and settings.mcp_identity.signing_key is None:
         raise BootstrapError(
             "DAIMON_MCP_IDENTITY__SIGNING_KEY is required on the MCP service "
-            "when DAIMON_MCP_IDENTITY__SERVERS is set"
+            "when DAIMON_MCP_IDENTITY__SERVERS has a signed server"
         )
 
 
@@ -697,7 +697,6 @@ def create_mcp_app(
     )
     app.add_route("/healthz", _healthz, methods=["GET"])
     if relay_clients:
-        assert identity.signing_key is not None
         from daimon.adapters.mcp.identity_relay import (
             RELAY_METHODS,
             RELAY_ROUTE,
@@ -711,9 +710,12 @@ def create_mcp_app(
                 servers={server.name: server for server in identity.servers},
                 auth=effective_auth,
                 sessionmaker=effective_sessionmaker,
-                tokens=IdentityTokenCache(
-                    load_signing_key(identity.signing_key.get_secret_value())
+                tokens=(
+                    IdentityTokenCache(load_signing_key(identity.signing_key.get_secret_value()))
+                    if identity.signing_key is not None
+                    else None
                 ),
+                bearers=identity.bearers,
                 clients=relay_clients,
                 clock=lambda: datetime.now(UTC),
             ),
