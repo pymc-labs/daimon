@@ -93,28 +93,23 @@ async def test_real_root_model_survives_session_source_projection(
             mcp_servers=(),
             declared_drops=("memory", "sandbox", "mcp", "skills", "tools"),
         )
-        # Valid foreign model controls require their own explicit loss consent.
+        # Valid foreign model controls require their own explicit loss consent; an effort
+        # alone is named as such.
+        lost = "effort_setting" if speed is None else "model_controls"
         assert classify_source_obligations(projected, foreign, environment=None) == frozenset(
-            {"model_controls"}
+            {lost}
         )
-        assert "model_controls" in classify_source_obligations(
+        assert lost in classify_source_obligations(
             projected,
             foreign.model_copy(update={"extensions": target.extensions}),
             environment=None,
         )
-        consented = foreign.model_copy(
-            update={"declared_drops": (*foreign.declared_drops, "model_controls")}
-        )
+        consented = foreign.model_copy(update={"declared_drops": (*foreign.declared_drops, lost)})
         assert classify_source_obligations(projected, consented, environment=None) == frozenset()
         preview = preview_source_drops(projected, foreign.model)
-        assert preview.declared_drops == (
-            "mcp",
-            "memory",
-            "model_controls",
-            "sandbox",
-            "skills",
-            "tools",
-        )
+        assert preview.declared_drops == tuple(
+            sorted(("mcp", "memory", lost, "sandbox", "skills", "tools"))
+        ), "the lost control is named once, sorted among the drops"
         for invalid in ({**model, "effort": "invalid"}, {**model, "unknown": True}):
             invalid_spec = projected.effective_spec.model_copy(
                 update={

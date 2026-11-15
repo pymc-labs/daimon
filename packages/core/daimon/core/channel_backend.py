@@ -38,6 +38,7 @@ from daimon.core.config import TurnSettings, load_selfhosted_settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.errors import DaimonError
+from daimon.core.finer_drops import FINER_DROPS
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import resource_scope
@@ -900,6 +901,7 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         "credentials",
         "repository",
         "files",
+        *FINER_DROPS,
     }
     causes: list[dict[str, object]] = []
     seen: set[int] = set()

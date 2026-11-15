@@ -205,3 +205,28 @@ def test_a_switched_gemini_agent_keeps_its_consent_when_skills_attach() -> None:
     today = copy_for(**gemini, drops=("memory", "skill:huge"))
     assert holds(consent_for(then), today, GEMINI, "gemini"), "one skill is less than all"
     assert holds(consent_for(then), copy_for(**gemini), GEMINI, "gemini"), "every skill attaches"
+
+
+def test_a_consent_for_the_whole_sandbox_covers_the_parts_it_now_names() -> None:
+    """A sandbox accepted whole covers any of its parts, or none: no re-confirm storm."""
+    then = copy_for(drops=("memory", "sandbox"))
+    for parts in ((), ("installed_packages",), ("installed_packages", "network_rules")):
+        today = copy_for(drops=("memory", *parts))
+        assert holds(consent_for(then), today, "gpt-6-luna"), f"sandbox covers {parts}"
+
+
+def test_a_sandbox_part_the_consent_never_accepted_asks_again() -> None:
+    """Only the parts of what was accepted are covered: a new named loss is a gain."""
+    then = copy_for(drops=("memory", "installed_packages"))
+    today = copy_for(drops=("memory", "installed_packages", "network_rules"))
+    assert not holds(consent_for(then), today, "gpt-6-luna"), "network rules were never accepted"
+    gained = copy_for(drops=("memory", "workspace_files"))
+    assert not holds(consent_for(copy_for()), gained, "gpt-6-luna"), "no sandbox consent at all"
+
+
+def test_a_consent_for_model_settings_covers_a_lone_effort_setting() -> None:
+    """Effort alone is named on its own now; the model settings accepted before cover it."""
+    then = copy_for(drops=("memory", "model_controls"))
+    today = copy_for(drops=("memory", "effort_setting"))
+    assert holds(consent_for(then), today, "gpt-6-luna"), "effort is a part of the settings"
+    assert not holds(consent_for(copy_for()), today, "gpt-6-luna"), "never accepted: asks again"

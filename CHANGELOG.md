@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A model switch names what the provider's sandbox cannot keep.** On OpenAI
+  and Gemini the sandbox keeps a plain default environment, but not installed
+  packages, workspace files or network rules, and the preview, the card and
+  the tool text now say exactly which ("its installed packages", "its network
+  rules") instead of claiming the whole sandbox carries over. A lone effort
+  setting reads "its effort setting". A confirmation that accepted the sandbox
+  or the model settings still covers these parts, so nobody confirms twice.
 - **Changing an agent's model to another provider's says it is the same agent.**
   Cards, confirmations and tool results say "Researcher now uses Gemini 4
   Argon", never a version or copy of the agent.

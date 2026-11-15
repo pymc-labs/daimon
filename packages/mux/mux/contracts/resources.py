@@ -34,6 +34,7 @@ def _unique_declared_drops(values: tuple[str, ...]) -> tuple[str, ...]:
 
 
 # `credentials`: saved keys the target can't receive; it runs without them.
+# The last four are parts of `sandbox` and `model_controls`, named when a finer word fits.
 CapabilityDrop = Literal[
     "memory",
     "sandbox",
@@ -44,6 +45,10 @@ CapabilityDrop = Literal[
     "repository",
     "model_controls",
     "credentials",
+    "installed_packages",
+    "network_rules",
+    "workspace_files",
+    "effort_setting",
 ]
 # A concrete MCP tool can be unavailable while the rest of its server survives.
 MCPToolDrop = Annotated[

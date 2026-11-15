@@ -18,6 +18,7 @@ import structlog
 from daimon.core.config import get_repo_memory_settings
 from daimon.core.connector_relay import relay_key
 from daimon.core.errors import DaimonError
+from daimon.core.finer_drops import FINER_DROPS, sandbox_losses
 from daimon.core.host_web_fetch import WEB_FETCH_TOOL
 from daimon.core.self_helpers import MULTIAGENT, self_roster_extension, translates_self_roster
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
@@ -1093,7 +1094,7 @@ def _source_extension_obligation(
     native_target: AgentSpec | None = None,
     foreign_target: bool = False,
     target_effort: Effort | None = None,
-) -> Literal["model_controls", "source_definition"] | None:
+) -> Literal["model_controls", "effort_setting", "source_definition"] | None:
     if extension.version != 1:
         return "source_definition"
     if extension.namespace == MODEL_CONFIG_NAMESPACE:
@@ -1128,6 +1129,12 @@ def _source_extension_obligation(
             ):
                 return None
             if foreign_target:
+                # Effort alone is a named loss of its own: a provider that takes no
+                # effort (a named agent) leaves out exactly that setting.
+                if set(model) <= {"id", "speed", "effort"} and (
+                    model.get("speed") is None and model.get("effort") is not None
+                ):
+                    return "effort_setting"
                 return "model_controls"
         return "source_definition"
     if (
@@ -1325,7 +1332,8 @@ def classify_source_obligations(
                 target_effort=target_effort,
             )
             if obligation is not None and not (
-                obligation == "model_controls" and obligation in drops
+                obligation in ("model_controls", "effort_setting")
+                and (obligation in drops or FINER_DROPS.get(obligation) in drops)
             ):
                 missing.add(obligation)
     profile = get_profile(backend_selection(spec.model.provider).profile)
@@ -1465,11 +1473,20 @@ def classify_source_obligations(
             missing.add("source_definition")
     # Removing execution is explicit; retaining a source environment requires
     # its complete canonical policy, which native readback must also verify.
+    # Its code runs in the provider's sandbox, which keeps a plain default environment
+    # whole; each setting beyond it (packages, network, files) is a named loss, covered
+    # by a declared `sandbox`.
+    sandbox_parts = (
+        sandbox_losses(source.environment.spec if source.environment is not None else None)
+        if represented is not None and represented.provider_execution and not resources
+        else ("sandbox",)
+    )
+    if sandbox_parts != ("sandbox",) and "sandbox" not in drops:
+        missing.update(set(sandbox_parts) - set(drops))
     if target is None or not (
         native_retained
         or ("sandbox" in drops and environment is None and not resources)
-        # Its code runs in the provider's sandbox: execution is kept, not dropped.
-        or (represented is not None and represented.provider_execution and not resources)
+        or sandbox_parts != ("sandbox",)
         or (
             source.environment is not None
             and environment is not None

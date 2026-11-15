@@ -990,6 +990,10 @@ _DROP_WORDS: Mapping[str, str] = {
     "files": "its files",
     "repository": "its repository",
     "model_controls": "its model settings",
+    "effort_setting": "its effort setting",
+    "installed_packages": "its installed packages",
+    "network_rules": "its network rules",
+    "workspace_files": "its workspace files",
     "builtin_tool:web_fetch": "web fetch",
     "builtin_tool:web_search": "web search",
 }

@@ -32,6 +32,52 @@ OPENAI_AGENT = {
 #: Whole categories a real OpenAI or Gemini turn keeps: never a loss here.
 _KEPT = {"mcp", "memory", "skills", "tools", "sandbox", "credentials"}
 
+#: What the provider's bare default sandbox leaves out of an environment, by word.
+_FINER = {
+    "installed_packages": "its installed packages",
+    "network_rules": "its network rules",
+    "workspace_files": "its workspace files",
+}
+
+
+def _environment(*, packages: bool = False, network: bool = False) -> dict:
+    """A source environment on the wire: plain, or with packages and limited network."""
+    return {
+        "config": {
+            "type": "cloud",
+            "networking": (
+                {
+                    "type": "limited",
+                    "allowed_hosts": ["a.test"],
+                    "allow_mcp_servers": False,
+                    "allow_package_managers": False,
+                }
+                if network
+                else {"type": "unrestricted"}
+            ),
+            "packages": {
+                "apt": [],
+                "cargo": [],
+                "gem": [],
+                "go": [],
+                "npm": [],
+                "pip": ["numpy"] if packages else [],
+            },
+        }
+    }
+
+
+#: Source environments and the finer losses each one names (none for a plain one).
+ENVIRONMENTS = {
+    "plain": ({}, ()),
+    "packages": (_environment(packages=True), ("installed_packages",)),
+    "network": (_environment(network=True), ("network_rules",)),
+    "both": (
+        _environment(packages=True, network=True),
+        ("installed_packages", "network_rules"),
+    ),
+}
+
 
 @pytest.fixture
 async def source_mcp(consent_request):
@@ -39,7 +85,7 @@ async def source_mcp(consent_request):
         yield app
 
 
-async def _one_reading(request, quote, consent_request, *, relay: bool):
+async def _one_reading(request, quote, consent_request, *, relay: bool, finer=()):
     from daimon.core.channel_backend import switch_losses
     from daimon.core.confirmation import drop_words
     from daimon.core.stores.accounts import set_role
@@ -49,6 +95,13 @@ async def _one_reading(request, quote, consent_request, *, relay: bool):
 
     drops = quote.declared_drops
     assert not _KEPT & set(drops), drops
+    # The sandbox is kept for a plain environment; each other setting is named, never whole.
+    assert {d for d in drops if d in _FINER} == set(finer), (drops, finer)
+    for name in finer:
+        assert _FINER[name] in drop_words(drops), f"the card names {_FINER[name]}"
+        assert _FINER[name].removeprefix("its ") in switch_losses(drops, consent_request[2])[2], (
+            "the tool's text names it too"
+        )
     assert ("mcp_server:linear" in drops) is not relay
     assert not [d for d in drops if d.startswith("mcp_tool:")], drops
     assert quote.unsupported_mcps == (() if relay else ("linear",))
@@ -95,4 +148,33 @@ async def test_gemini_names_only_what_its_turn_loses(gemini_template, consent_re
 async def test_openai_names_only_what_its_turn_loses(openai_template, consent_request):  # noqa: F811
     request, quote, *_ = openai_template
     relay = "mcp_server:linear" not in quote.declared_drops
-    await _one_reading(request, quote, consent_request, relay=relay)
+    # The recorded OpenAI source environment installs packages; the bare sandbox has none.
+    await _one_reading(request, quote, consent_request, relay=relay, finer=("installed_packages",))
+
+
+def _cases(base):
+    return [(dict(base, environment=env), finer) for env, finer in ENVIRONMENTS.values()]
+
+
+@pytest.mark.parametrize(
+    "consent_request,finer",
+    _cases(GEMINI_CONNECTOR),
+    ids=list(ENVIRONMENTS),
+    indirect=["consent_request"],
+)
+async def test_gemini_environment_losses(gemini_template, consent_request, finer):  # noqa: F811
+    """Preview, card, consent and preparation name the same environment losses on Gemini."""
+    request, quote, *_ = gemini_template
+    await _one_reading(request, quote, consent_request, relay=False, finer=finer)
+
+
+@pytest.mark.parametrize(
+    "consent_request,finer",
+    _cases(OPENAI_AGENT),
+    ids=list(ENVIRONMENTS),
+    indirect=["consent_request"],
+)
+async def test_openai_environment_losses(openai_template, consent_request, finer):  # noqa: F811
+    """Preview, card, consent and preparation name the same environment losses on OpenAI."""
+    request, quote, *_ = openai_template
+    await _one_reading(request, quote, consent_request, relay=False, finer=finer)

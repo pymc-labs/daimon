@@ -1461,7 +1461,9 @@ class SourceRepresentation(_Facts):
     # its agent): every custom and channel skill within the profile's size limit.
     session_skills: tuple[SkillRef, ...] = ()
     # The target runs the source's execution tools in the provider's own sandbox
-    # (an agent template: OpenAI's hosted bash, Gemini's code_execution).
+    # (an agent template: OpenAI's hosted bash, Gemini's code_execution). That
+    # sandbox is a bare default one: `finer_drops.sandbox_losses` names what the
+    # source's environment had beyond it.
     provider_execution: bool = False
 
 
