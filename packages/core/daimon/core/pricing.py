@@ -441,9 +441,9 @@ def provider_cost_of(
     searches = web_search_cost(usage, price, paid_web_searches)
     if searches is None:
         return None
-    infrastructure_usd += searches
     with localcontext() as context:
         context.prec = 80
+        infrastructure_usd += searches
         if tokens is None:
             if (
                 usage.input_tokens is None
