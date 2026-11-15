@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Operators can move people in from another bot.** `daimon tags import` opts
+  listed Discord members out of being tagged. `daimon dms import` holds each
+  person's earlier private conversation for their first DM here, which starts
+  from it once and says it is continuing.
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and
   the MCP tools. A run nobody started, such as a routine, never applies one at once.
