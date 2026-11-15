@@ -1,8 +1,10 @@
 """Skills past the inline limits: uploaded into an environment made before the first turn."""
 
+import asyncio
 import io
 import json
 import tarfile
+from collections.abc import Callable
 from datetime import UTC, datetime
 from hashlib import sha256
 
@@ -20,8 +22,9 @@ from mux.drivers.gemini.bundles import (
     upload_manifest,
     validate_bundle,
 )
+from mux.drivers.gemini.catalog import native_definition
 from mux.drivers.gemini.transport import Object, SDKTransport
-from mux.errors import ProviderError, UnsupportedCapability
+from mux.errors import ContinuityLost, ProviderError, UnsupportedCapability
 from mux.state.memory import MemoryStateStore
 from mux.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.testing.isolated_sdk import build_gemini_client
@@ -156,12 +159,12 @@ async def test_a_large_binary_skill_is_uploaded_before_the_first_turn() -> None:
     assert f".agents/skills/{large.id}/SKILL.md" in targets(config)
     assert not any(t.startswith(f".agents/skills/{large.id}/fonts") for t in targets(config))
     assert f".agents/skills/{small.id}/ref.md" in targets(config)
-    assert transport.uploads == [(env, f".agents/skills/{large.id}", False)]
+    assert transport.uploads == [(env, f".agents/skills/{large.id}", True)]
     assert transport.environment_files[env] == {
         f".agents/skills/{large.id}/fonts/f.ttf": len(FONT),
         f".agents/skills/{large.id}/notes.md": 5,
     }
-    assert session.native == {"skills_left_out": []}
+    assert session.native == {"skills_left_out": [], "created": True}
     request = await send(ma, transport, session, env)
     assert request["environment"] == env
     # The uploaded files are installed, never the agent's outputs.
@@ -180,7 +183,7 @@ async def test_a_failed_upload_replaces_the_environment_without_that_skill() -> 
     large, kept, small = await pins(ma, LARGE, other, SMALL)
     transport.upload_errors.append(ProviderError("invalid_request", retryable=False))
     session = await start(ma, (large, kept, small))
-    assert session.native == {"skills_left_out": [large.id]}
+    assert session.native == {"skills_left_out": [large.id], "created": True}
     first, second = transport.environments
     assert transport.deleted_environments == [first]
     assert f".agents/skills/{large.id}/SKILL.md" not in targets(transport.environments[second])
@@ -200,7 +203,7 @@ async def test_when_every_upload_fails_the_session_runs_on_todays_path() -> None
     session = await start(ma, (large, small))
     # Bytes that differ from the pinned manifest never upload.
     assert transport.uploads == []
-    assert session.native == {"skills_left_out": [large.id]}
+    assert session.native == {"skills_left_out": [large.id], "created": True}
     request = await send(ma, transport, session, "e1")
     environment = request["environment"]
     assert isinstance(environment, dict)
@@ -208,15 +211,24 @@ async def test_when_every_upload_fails_the_session_runs_on_todays_path() -> None
     assert not any(large.id in t for t in targets(environment))
 
 
+class Crash(Exception):
+    """A process dying mid-upload."""
+
+
 @pytest.mark.asyncio
 async def test_a_crashed_start_resumes_in_its_saved_environment() -> None:
     transport, storage = FakeTransport(), MemoryStorage()
-    files = Files(LARGE)
-    files.errors.append(ProviderError("transient_network", retryable=True))
-    ma = driver(transport, storage, files)
+    ma = driver(transport, storage, Files(LARGE))
     (large,) = await pins(ma, LARGE)
-    with pytest.raises(ProviderError):
+    real = transport.upload_archive
+
+    async def crash(*args: object, **kwargs: object) -> None:
+        raise Crash
+
+    transport.upload_archive = crash  # type: ignore[method-assign]
+    with pytest.raises(Crash):
         await start(ma, (large,))
+    transport.upload_archive = real  # type: ignore[method-assign]
     (env,) = transport.environments
     async with storage.read() as records:
         (record,) = records.sessions.values()
@@ -226,19 +238,36 @@ async def test_a_crashed_start_resumes_in_its_saved_environment() -> None:
             SCOPE, record.session.ref, (UserMessage(content=(TextPart(text="hi"),)),), key="t"
         )
     assert pending.value.native_code == "skill_upload_pending" and pending.value.retryable
-    # An earlier try left the same files: the 409 counts as uploaded once sizes match.
+    # An earlier try left the same files: they are uploaded over, never trusted.
     transport.environment_files[env] = {
         f".agents/skills/{large.id}/fonts/f.ttf": len(FONT),
         f".agents/skills/{large.id}/notes.md": 5,
     }
     session = await start(ma, (large,))
     assert list(transport.environments) == [env]
-    assert transport.uploads == [(env, f".agents/skills/{large.id}", False)]
-    assert session.native == {"skills_left_out": []}
+    assert transport.uploads == [(env, f".agents/skills/{large.id}", True)]
+    assert session.native == {"skills_left_out": [], "created": True}
 
 
 @pytest.mark.asyncio
-async def test_other_bytes_left_by_an_earlier_try_are_overwritten() -> None:
+async def test_a_retryable_read_failure_makes_no_environment() -> None:
+    transport, storage = FakeTransport(), MemoryStorage()
+    files = Files(LARGE)
+    ma = driver(transport, storage, files)
+    (large,) = await pins(ma, LARGE)
+    files.errors.append(ProviderError("transient_network", retryable=True))
+    with pytest.raises(ProviderError) as busy:
+        await start(ma, (large,))
+    assert busy.value.retryable and not transport.environments
+    session = await start(ma, (large,))
+    assert len(transport.environments) == 1 and session.native == {
+        "skills_left_out": [],
+        "created": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_files_left_by_an_earlier_try_are_overwritten() -> None:
     transport, storage = FakeTransport(), MemoryStorage()
     ma = driver(transport, storage, Files(LARGE))
     (large,) = await pins(ma, LARGE)
@@ -252,9 +281,9 @@ async def test_other_bytes_left_by_an_earlier_try_are_overwritten() -> None:
     transport.create_environment = stale  # type: ignore[method-assign]
     session = await start(ma, (large,))
     (env,) = transport.environments
-    assert [u[2] for u in transport.uploads] == [False, True]
+    assert [u[2] for u in transport.uploads] == [True]
     assert transport.environment_files[env][f".agents/skills/{large.id}/notes.md"] == 5
-    assert session.native == {"skills_left_out": []}
+    assert session.native == {"skills_left_out": [], "created": True}
 
 
 @pytest.mark.asyncio
@@ -297,6 +326,204 @@ async def test_records_saved_before_uploads_still_decode() -> None:
     for record in dumped["skills"].values():
         del record["uploads"]
     assert adapter.validate_python(dumped) == records
+
+
+class Gated(FakeTransport):
+    """Holds each upload call (by arrival order) until its gate opens."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.arrived = 0
+        self.gates: dict[int, asyncio.Event] = {}
+        self.refused: dict[int, ProviderError] = {}
+
+    async def upload_archive(
+        self, environment_id: str, path: str, archive: bytes, *, overwrite: bool
+    ) -> None:
+        index, self.arrived = self.arrived, self.arrived + 1
+        if index in self.gates:
+            await self.gates[index].wait()
+        if index in self.refused:
+            raise self.refused[index]
+        await super().upload_archive(environment_id, path, archive, overwrite=overwrite)
+
+
+async def until(condition: Callable[[], bool]) -> None:
+    for _ in range(5000):
+        if condition():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("never reached")
+
+
+@pytest.mark.asyncio
+async def test_interleaved_creates_never_leave_a_skill_mounted_without_its_files() -> None:
+    transport, storage = Gated(), MemoryStorage()
+    first, second = bundle("first", **{"a.bin": FONT}), bundle("second", **{"b.bin": FONT})
+    ma = driver(transport, storage, Files(first, second))
+    pin_first, pin_second = await pins(ma, first, second)
+    for index in (0, 1, 3, 4):
+        transport.gates[index] = asyncio.Event()
+    transport.refused[0] = ProviderError("invalid_request", retryable=False)
+    one = asyncio.create_task(start(ma, (pin_first, pin_second)))
+    await until(lambda: transport.arrived == 1)  # one is uploading the first skill
+    two = asyncio.create_task(start(ma, (pin_first, pin_second)))
+    await until(lambda: transport.arrived == 2)  # two is uploading it into the same environment
+    transport.gates[0].set()  # one: refused, leaves the first skill out, replaces the environment
+    await until(lambda: transport.arrived == 4)
+    transport.gates[1].set()  # two: its environment is gone
+    for gate in transport.gates.values():
+        gate.set()
+    sessions = await asyncio.gather(one, two)
+    assert sessions[0].ref == sessions[1].ref
+    async with storage.read() as records:
+        record = records.sessions[sessions[0].ref.id]
+    assert record.left_out == (pin_first.id,) and record.uploading == ()
+    assert record.environment_id is not None
+    assert transport.environment_files[record.environment_id] == {
+        f".agents/skills/{pin_second.id}/b.bin": len(FONT)
+    }
+    environment = transport.environments[record.environment_id]
+    assert not any(pin_first.id in t for t in targets(environment))
+    request = await send(ma, transport, sessions[0], record.environment_id)
+    assert request["environment"] == record.environment_id
+
+
+@pytest.mark.asyncio
+async def test_a_vanished_environment_is_made_again_with_every_skill() -> None:
+    transport, storage = FakeTransport(), MemoryStorage()
+    ma = driver(transport, storage, Files(LARGE))
+    (large,) = await pins(ma, LARGE)
+    real = transport.upload_archive
+
+    async def vanish(environment_id: str, *args: object, **kwargs: object) -> None:
+        transport.upload_archive = real  # type: ignore[method-assign]
+        del transport.environment_files[environment_id]
+        await real(environment_id, *args, **kwargs)  # type: ignore[arg-type]
+
+    transport.upload_archive = vanish  # type: ignore[method-assign]
+    session = await start(ma, (large,))
+    first, second = transport.environments
+    assert session.native == {"skills_left_out": [], "created": True}
+    assert f".agents/skills/{large.id}/fonts/f.ttf" in transport.environment_files[second]
+    async with storage.read() as records:
+        assert records.sessions[session.ref.id].environment_id == second
+    assert first not in transport.environment_files
+
+
+@pytest.mark.asyncio
+async def test_a_refused_environment_falls_back_to_todays_path() -> None:
+    transport, storage = FakeTransport(), MemoryStorage()
+    ma = driver(transport, storage, Files(LARGE, SMALL))
+    large, small = await pins(ma, LARGE, SMALL)
+
+    async def refuse(config: Object) -> str:
+        raise ProviderError("invalid_request", retryable=False)
+
+    transport.create_environment = refuse  # type: ignore[method-assign]
+    session = await start(ma, (large, small))
+    assert session.native == {"skills_left_out": [large.id], "created": True}
+    request = await send(ma, transport, session, "e1")
+    environment = request["environment"]
+    assert isinstance(environment, dict)
+    assert f".agents/skills/{small.id}/SKILL.md" in targets(environment)
+    assert not any(large.id in t for t in targets(environment))
+
+
+@pytest.mark.asyncio
+async def test_leaving_everything_out_drops_a_saved_environment() -> None:
+    transport, storage = FakeTransport(), MemoryStorage()
+    ma = driver(transport, storage, Files(LARGE))
+    (large,) = await pins(ma, LARGE)
+    real = transport.upload_archive
+
+    async def crash(*args: object, **kwargs: object) -> None:
+        raise Crash
+
+    transport.upload_archive = crash  # type: ignore[method-assign]
+    with pytest.raises(Crash):
+        await start(ma, (large,))
+    transport.upload_archive = real  # type: ignore[method-assign]
+    (env,) = transport.environments
+    # The host can no longer supply files: the saved environment would mount a bare SKILL.md.
+    session = await start(driver(transport, storage, None), (large,))
+    assert session.native == {"skills_left_out": [large.id], "created": True}
+    assert transport.deleted_environments == [env]
+    async with storage.read() as records:
+        record = records.sessions[session.ref.id]
+    assert record.environment_id is None and record.workspace_expires_at is None
+    request = await send(ma, transport, session, "e1")
+    assert request["environment"] == {"type": "remote"}
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_skill_is_left_out_before_any_environment_exists() -> None:
+    transport, storage = FakeTransport(), MemoryStorage()
+    files = Files(LARGE, SMALL)
+    ma = driver(transport, storage, files)
+    large, small = await pins(ma, LARGE, SMALL)
+    files.errors.append(ProviderError("invalid_request", retryable=False))
+    session = await start(ma, (large, small))
+    assert session.native == {"skills_left_out": [large.id], "created": True}
+    assert (
+        transport.uploads == []
+        and not transport.environments
+        and not transport.deleted_environments
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_first_turn_in_a_missing_environment_is_continuity_lost() -> None:
+    transport, storage = FakeTransport(), MemoryStorage()
+    ma = driver(transport, storage, Files(LARGE))
+    (large,) = await pins(ma, LARGE)
+    session = await start(ma, (large,))
+    transport.responses.append(ProviderError("not_found", retryable=False))
+    with pytest.raises(ContinuityLost):
+        await ma.events.send(
+            SCOPE, session.ref, (UserMessage(content=(TextPart(text="hi"),)),), key="t1"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_first_turn_never_mounts_an_uploaded_skill_without_its_environment() -> None:
+    transport, storage = FakeTransport(), MemoryStorage()
+    ma = driver(transport, storage, Files(LARGE))
+    (large,) = await pins(ma, LARGE)
+    session = await start(ma, (large,))
+    async with storage.transaction() as records:
+        records.sessions[session.ref.id].environment_id = None
+    with pytest.raises(ProviderError) as refused:
+        await ma.events.send(
+            SCOPE, session.ref, (UserMessage(content=(TextPart(text="hi"),)),), key="t1"
+        )
+    assert refused.value.native_code == "skill_environment_missing"
+    assert not transport.requests
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_create_is_not_marked_new() -> None:
+    transport, storage = FakeTransport(), MemoryStorage()
+    ma = driver(transport, storage, Files(SMALL))
+    (small,) = await pins(ma, SMALL)
+    assert (await start(ma, (small,))).native == {"created": True}
+    replay = await start(ma, (small,))
+    native = replay.native
+    assert not (isinstance(native, dict) and native.get("created")), "the replay is not a creation"
+
+
+@pytest.mark.asyncio
+async def test_a_catalog_agent_refuses_an_uploaded_version() -> None:
+    storage = MemoryStorage()
+    ma = driver(FakeTransport(), storage, Files(LARGE))
+    (large,) = await pins(ma, LARGE)
+    spec = AgentSpec(
+        name="a", model=ModelRef(provider="gemini", id="gemini-3.8-flash"), skills=(large,)
+    )
+    async with storage.transaction() as records:
+        with pytest.raises(UnsupportedCapability) as refused:
+            native_definition(records, SCOPE, "project", spec, "agent-1")
+    assert refused.value.missing == ("catalog_uploaded_skill",)
 
 
 def raw(request: httpx.Request) -> str:
