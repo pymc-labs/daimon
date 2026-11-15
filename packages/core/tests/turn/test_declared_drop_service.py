@@ -243,3 +243,44 @@ async def test_revert_cannot_add_consent_to_an_unconfirmed_original(switching):
     assert len(reads) == 1
     assert (await service.current(agent)).local == 2
     assert await service.audit(agent.tenant_id) == before
+
+
+async def test_the_source_is_captured_before_the_policy_lock(switching, monkeypatch):
+    """A capture may read every skill: never while other edits wait on the tenant's lock."""
+    from contextlib import asynccontextmanager
+
+    from daimon.core import channel_backend
+
+    service, agent, actor, _, captured, _ = switching
+    locked, seen = [False], []
+    write = channel_backend.policy_store.policy_write_transaction
+
+    @asynccontextmanager
+    async def watched(*args, **kwargs):
+        async with write(*args, **kwargs) as session:
+            locked[0] = True
+            try:
+                yield session
+            finally:
+                locked[0] = False
+
+    async def capture(actual):
+        seen.append(locked[0])
+        return captured[0]
+
+    monkeypatch.setattr(channel_backend.policy_store, "policy_write_transaction", watched)
+    service._capture_source = capture
+    preview = await service.preview(agent, "openai")
+    revision = await service.set_backend(
+        agent,
+        "openai",
+        0,
+        actor,
+        accepted_drops=preview.declared_drops,
+        expected_preview_digest=preview.digest,
+    )
+    renewed = await service.renew_consent(
+        agent, expected=revision, account_id=None, reason="test", vouch=lambda _: True
+    )
+    assert renewed is not None and renewed.local == 2
+    assert seen == [False, False, False], "preview, change and renewal capture unlocked"

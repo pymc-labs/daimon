@@ -1047,6 +1047,56 @@ def loss_names(agent: BackendAgent) -> dict[str, str]:
     return {k: v for item in agent.representations for k, v in item.skill_names.items()}
 
 
+async def _plan_change(
+    session: AsyncSession,
+    agent: BackendAgent,
+    operation: Literal["set", "clear", "revert", "settings"],
+    backend: Provider | None,
+    model: str | None,
+    settings: AgentSettings | None,
+    expected_revision: int,
+) -> tuple[
+    AgentBackendRevision | None,
+    AgentBackendRevision | None,
+    AgentSettings,
+    Provider | None,
+    str | None,
+    AgentSettings,
+]:
+    """A change's current and previous revisions, kept settings and target, read anew."""
+    current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
+    kept = AgentSettings.of(current)
+    if operation == "settings":
+        # A settings change keeps the provider and model and states the rest anew.
+        backend = current.backend if current else None
+        model = current.model if current else None
+        settings = settings or AgentSettings()
+    elif operation in ("set", "clear"):
+        # Stated settings replace the agent's; otherwise those that still apply stay.
+        settings = settings if settings is not None else kept.for_backend(backend)
+    else:
+        settings = kept
+    if (current.local if current else 0) != expected_revision:
+        raise AgentBackendRefused("stale_revision")
+    previous = None
+    if operation == "revert":
+        if current is None:
+            raise AgentBackendRefused("no_previous_revision")
+        previous = (
+            await agent_backends.current(
+                session, agent.tenant_id, agent.agent_id, local=current.previous_local
+            )
+            if current.previous_local
+            else None
+        )
+        if current.previous_local is not None and previous is None:
+            raise AgentBackendRefused("no_previous_revision")
+        backend = previous.backend if previous else None
+        model = previous.model if previous else None
+        settings = AgentSettings.of(previous)
+    return current, previous, kept, backend, model, settings
+
+
 def switch_losses(
     drops: Sequence[str], agent: BackendAgent, names: Mapping[str, str] | None = None
 ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
@@ -1311,8 +1361,14 @@ class AgentBackendService:
         model: str | None = None,
         settings: AgentSettings | None = None,
         captured: BackendAgent | None = None,
+        *,
+        may_capture: bool = True,
     ) -> CompatibilityPreview:
+        """`may_capture` False: the caller holds the policy lock and captured beforehand."""
         capture = self._capture_source if target is not None else None
+        if capture is not None and captured is None and not may_capture:
+            # The revision changed since the capture's plan; the caller retries.
+            raise AgentBackendRefused("stale_revision")
         current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
         if settings is None:
             # A provider change keeps the agent's settings that still apply.
@@ -1511,48 +1567,32 @@ class AgentBackendService:
         if self._read_only:
             # A service built without a source capture would store no loss consent.
             raise AgentBackendRefused("source_unavailable")
+        # Capture (slow: it may read every skill) before the lock; the lock only compares.
+        async with self._sessions() as session:
+            plan = await _plan_change(
+                session, agent, operation, backend, model, settings, expected_revision
+            )
+        captured = None
+        if plan[3] is not None and self._capture_source is not None:
+            captured = await self._capture_source(agent)
         async with policy_store.policy_write_transaction(
             self._sessions, tenant_id=agent.tenant_id
         ) as session:
             admin = await self._authorize_edit(session, agent, actor)
-            current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
-            kept = AgentSettings.of(current)
-            if operation == "settings":
-                # A settings change keeps the provider and model and states the rest anew.
-                backend = current.backend if current else None
-                model = current.model if current else None
-                settings = settings or AgentSettings()
-            elif operation in ("set", "clear"):
-                # Stated settings replace the agent's; otherwise those that still apply stay.
-                settings = settings if settings is not None else kept.for_backend(backend)
-            else:
-                settings = kept
+            plan = await _plan_change(
+                session, agent, operation, backend, model, settings, expected_revision
+            )
+            current, previous, kept, backend, model, settings = plan
             local = current.local if current else 0
-            if local != expected_revision:
-                raise AgentBackendRefused("stale_revision")
-            previous = None
-            if operation == "revert":
-                if current is None:
-                    raise AgentBackendRefused("no_previous_revision")
-                previous = (
-                    await agent_backends.current(
-                        session, agent.tenant_id, agent.agent_id, local=current.previous_local
-                    )
-                    if current.previous_local
-                    else None
-                )
-                if current.previous_local is not None and previous is None:
-                    raise AgentBackendRefused("no_previous_revision")
-                backend = previous.backend if previous else None
-                model = previous.model if previous else None
-                settings = AgentSettings.of(previous)
             if settings.thread_mode == "shared" and kept.thread_mode != "shared" and not admin:
                 # Sharing applies in every channel the agent answers in unpinned, so
                 # it stays an admin's call until a destination can consent to it.
                 # TODO: a per-channel setting allowing shared threads, then owners too.
                 raise AgentBackendRefused("admin_required_for_shared_threads")
             settings = granted_settings(agent, backend or DEFAULT_BACKEND, model, settings)
-            preview = await self._preview(session, agent, backend, model, settings)
+            preview = await self._preview(
+                session, agent, backend, model, settings, captured, may_capture=False
+            )
             if not preview.allowed:
                 raise AgentBackendRefused("backend_not_allowed")
             previous_local = local or None
@@ -1767,6 +1807,10 @@ class AgentBackendService:
         consent = expected.drop_consent
         if not self.enabled or consent is None or self._capture_source is None:
             return None
+        # Capture before the lock; inside it only the revision and the drops are compared.
+        captured = await self._capture_source(agent)
+        if not vouch(captured):
+            return None
         async with policy_store.policy_write_transaction(
             self._sessions, tenant_id=agent.tenant_id
         ) as session:
@@ -1778,12 +1822,15 @@ class AgentBackendService:
             ):
                 return None
             settings = AgentSettings.of(current)
-            captured = await self._capture_source(agent)
-            if not vouch(captured):
-                return None
             try:
                 preview = await self._preview(
-                    session, agent, current.backend, current.model, settings, captured
+                    session,
+                    agent,
+                    current.backend,
+                    current.model,
+                    settings,
+                    captured,
+                    may_capture=False,
                 )
             except AgentBackendRefused:
                 return None
