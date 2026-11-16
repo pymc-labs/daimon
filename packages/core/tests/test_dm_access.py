@@ -14,6 +14,7 @@ from daimon.core.direct_messages import (
     DirectMessageAccessRevoked,
     DirectMessageMembershipUnknown,
     DirectMessageReply,
+    _require_turn_grant,  # pyright: ignore[reportPrivateUsage]
     require_dm_delivery,
     start_cold_dm,
     start_dm,
@@ -231,6 +232,32 @@ async def test_start_cold_dm_with_remember_pick_saves_the_agent(db_session_facto
     async with db_session_factory() as session:
         saved = await store.get_pick(session, tenant_id=tenant.id, account_id=account.id)
     assert saved is not None and saved.agent_name == "private", "the pick is remembered"
+
+
+async def test_start_cold_dm_on_slack_when_groups_admit_then_binds_the_dm_channel(
+    db_session_factory,
+):
+    """A Slack cold start keys the route by workspace but binds the DM channel; groups decide."""
+    tenant, _, admission, deps = await cold(db_session_factory)
+    async with db_session_factory.begin() as session:
+        await store.set_grant(
+            session, tenant_id=tenant.id, agent_name="private", who="listed", user_ids=[],
+            group_ids=["S1"], set_by=None, now=NOW,
+        )  # fmt: skip
+
+    async def start(groups):
+        return await start_cold_dm(
+            deps, admission, tenant_id=tenant.id, workspace_id="T1", route_key="T1:D1",
+            external_user_id="999", platform="slack", groups=groups, channel_id="D1",
+        )  # fmt: skip
+
+    with pytest.raises(AdmissionDenied):
+        await start(None)
+    row = await start(frozenset({"S1"}))
+    assert row is not None and row.channel_id == "D1", "the row names the DM channel"
+    with pytest.raises(DirectMessageAccessRevoked):
+        await _require_turn_grant(deps, admission, row, groups=frozenset())
+    await _require_turn_grant(deps, admission, row, groups=frozenset({"S1"}))
 
 
 async def reply_for(deps, admission, tenant):
