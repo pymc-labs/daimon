@@ -2,12 +2,27 @@
 # Run after install. No model calls; writes only credential-free IDs/grants.
 set -euo pipefail
 umask 077
-: "${ALLOW_TEST_TARIFFS:?set true for TEST rates, false for verified production rates}" "${AKS_STATE:?}" "${SELFHOSTED_MODEL:?}" "${SELFHOSTED_MODELS:?JSON tariff catalogue required}"
+: "${ALLOW_TEST_TARIFFS:?set true for TEST rates, false for verified production rates}" "${AKS_STATE:?}" "${RG:?export RG}" "${AOAI:?export AOAI}" "${SELFHOSTED_MODELS:?JSON tariff catalogue required}"
 cd "${SOURCE_ROOT:-$(git rev-parse --show-toplevel)}"
 chart=${CHART_DIR:-deploy/helm/daimon-selfhost}
 source "$chart/scripts/release.sh"
+source "$chart/scripts/model.sh"
 require_release_names register
 refuse_other_releases register
+# Checked before anything is written: AOAI_MODEL's own tariff, found by name, prices the
+# deployment turns run on, which must be AOAI_DEPLOYMENT and backed by AOAI_MODEL.
+tariff=$(python3 - <<'PY'
+import json
+import os
+model = os.environ['AOAI_MODEL']
+catalogue = json.loads(os.environ['SELFHOSTED_MODELS'])
+assert len(catalogue) == 1, 'Supply one explicitly priced accounting model'
+tariff = next((name for name in (model, model + '-TEST') if name in catalogue), None)
+assert tariff, f'SELFHOSTED_MODELS has no tariff named {model}, or {model}-TEST for TEST rates'
+print(tariff)
+PY
+)
+verify_runtime_deployment register
 kubectl -n "$NAMESPACE" exec -i "deploy/$PREFIX-mcp" -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon \
   env SELFHOSTED_MODEL="$SELFHOSTED_MODEL" TEAMS_GRANTS="${TEAMS_GRANTS:-}" \
   python - < "$chart/scripts/provision.py" > "$AKS_STATE/registration.json"
@@ -22,7 +37,7 @@ while read -r tenant; do
 done < <(python3 "$chart/scripts/runtime_grants.py" tenants "$AKS_STATE/registration.json")
 printf '%s\n' "$ids" > "$AKS_STATE/selfhosted-ids.json"
 python3 "$chart/scripts/runtime_grants.py" rows "$AKS_STATE/registration.json" "$AKS_STATE/selfhosted-ids.json" > "$AKS_STATE/runtime.json"
-python3 - "$AKS_STATE" "$PREFIX" "$SECRET_PREFIX" "$chart" <<'PY'
+python3 - "$AKS_STATE" "$PREFIX" "$SECRET_PREFIX" "$chart" "$tariff" <<'PY'
 import json
 import os
 import sys
@@ -33,9 +48,8 @@ from runtime_grants import tenants
 registration = json.loads((p/'registration.json').read_text())
 values = json.loads((p/'aks-values.json').read_text())
 mcp_port = values.get('services', {}).get('mcp', {}).get('port', 8765)
-model = os.environ['SELFHOSTED_MODEL']
+deployment, tariff = os.environ['SELFHOSTED_MODEL'], sys.argv[5]
 catalogue = json.loads(os.environ['SELFHOSTED_MODELS'])
-assert len(catalogue) == 1, 'Supply one explicitly priced accounting model'
 values.setdefault('host', {}).update(runtimeSecret=secret_prefix+'-runtime')
 values['host'].setdefault('env', {}).update({
     'DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS': json.dumps([dict(
@@ -44,7 +58,7 @@ values['host'].setdefault('env', {}).update({
     'DAIMON_TURN__PATH':'mux', 'DAIMON_TURN__CHANNEL_BACKENDS':'true',
     'DAIMON_SELFHOSTED__ADMISSION_ENABLED':'true',
     'DAIMON_MCP__PUBLIC_URL':f'https://{prefix}-mcp:{mcp_port}/mcp',
-    'DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS':json.dumps({model:next(iter(catalogue))}),
+    'DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS':json.dumps({deployment:tariff}),
     'DAIMON_BILLING__SELFHOSTED__MODELS':json.dumps(catalogue),
     'DAIMON_BILLING__SELFHOSTED__ALLOW_TEST_TARIFFS':os.environ['ALLOW_TEST_TARIFFS'],
 })

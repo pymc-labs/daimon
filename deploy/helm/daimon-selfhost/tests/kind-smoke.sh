@@ -123,7 +123,15 @@ import json, sys, yaml
 from pathlib import Path
 Path(sys.argv[2]).write_text(json.dumps(yaml.safe_load(Path(sys.argv[1]).read_text())))
 PYLOCAL
+# No Azure here: a local az answers registration's read-only deployment check.
+mkdir "$scratch/bin"
+cat > "$scratch/bin/az" <<'AZ'
+#!/usr/bin/env bash
+[[ "$*" == *properties.model.name* ]] && echo gpt-5.4-mini
+AZ
+chmod +x "$scratch/bin/az"
 AKS_STATE="$scratch" RELEASE=smoke NAMESPACE=daimon SELFHOSTED_MODEL=gpt-5.4-mini \
+  RG=offline AOAI=offline PATH="$scratch/bin:$PATH" \
   ALLOW_TEST_TARIFFS=true SELFHOSTED_MODELS='{"gpt-5.4-mini-TEST":[{"effective_from":"2026-10-21","input":"0.75","output":"4.5","cache_read":"0.075"}]}' \
   POST_RENDERER="$scratch/postrender" bash "$chart/scripts/register.sh"
 kubectl -n daimon get secret smoke-daimon-mcp-tls -o jsonpath='{.data.ca\.crt}' | sha256sum > "$scratch/ca-after"

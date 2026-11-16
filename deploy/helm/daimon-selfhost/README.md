@@ -62,8 +62,8 @@ The chart injects only
 the MI proxy exists; Workload Identity with the header-protected proxy remains
 the production identity path. There is no key in chart defaults. With neither key nor
 proxy the production harness refuses startup. The offline fixture injects a fake
-adapter separately and makes no model calls. The AKS recipe and smoke turns use
-`gpt-5.4-mini`. `HARNESS_LIVE_PROBE` is never
+adapter separately and makes no model calls. The smoke turns use `gpt-5.4-mini`, and
+the AKS recipe uses `AOAI_MODEL` (default `gpt-5.4-mini`). `HARNESS_LIVE_PROBE` is never
 set by this chart.
 
 The harness entrypoint prepares the HOME PVC as root-owned 0711 before validation,
@@ -264,11 +264,14 @@ or Blob container is created. Kubernetes cluster-admin rights are needed for the
 PodSecurity exception, CoreDNS ConfigMap and ephemeral-container egress probe.
 
 Obtain regional Dsv6 CPU quota/capacity for `Standard_D2s_v6` and an AOAI
-deployment of a supported model (we use **gpt-5.4-mini**). An existing account
-and deployment are reused without updating either. Set `AOAI` to that account's
-name and `AOAI_DEPLOYMENT` to its deployment name. If the account exists but the
-named deployment is missing, bootstrap fails clearly; provision it before retrying.
-For a new account, regional DataZoneStandard quota for gpt-5.4-mini is required.
+deployment of the one model the scripts allow: `AOAI_MODEL`, by default
+**gpt-5.4-mini**. Bootstrap, the probe and `register` refuse a deployment backed by
+any other model. An existing account and deployment are reused without updating either. Set
+`AOAI` to that account's name and `AOAI_DEPLOYMENT` to its deployment name, which
+defaults to the `AOAI_MODEL` name. If the account exists but the named deployment
+is missing, bootstrap fails clearly; provision it before retrying. Bootstrap creates
+a new account only with gpt-5.4-mini, which needs regional DataZoneStandard quota;
+for another model, create the account and its deployment first.
 Use a US/EU Data Zone region such as `eastus2`; do not silently switch to Global
 SKU or another model. Data Zone routing is within the selected US/EU zone,
 not a promise of processing within one Azure region. Microsoft documents B-series as
@@ -295,7 +298,7 @@ references, URLs and resolved endpoint IPs go into generated Helm values.
 ```sh
 export RG=daimon-selfhost LOCATION=eastus2
 export ACR=daimonacme12345 AKS=daimon-acme AOAI=daimon-acme-12345
-export AOAI_DEPLOYMENT=gpt-5.4-mini
+export AOAI_MODEL=gpt-5.4-mini AOAI_DEPLOYMENT=gpt-5.4-mini
 export RELEASE=acme NAMESPACE=acme
 export AKS_STATE=$(mktemp -d)
 bash deploy/helm/daimon-selfhost/scripts/aks.sh bootstrap
@@ -450,7 +453,7 @@ racing Postgres or starting scheduler against an unmigrated schema. Completed
 Job pods are excluded from subsequent pod-Ready waits. Failed migrations remain
 visible Job failures; do not enable traffic or hide a real migration error.
 
-The generated nonsecret values use ACR, gpt-5.4-mini, `azureOpenAI.apiKeySecretRef`, and
+The generated nonsecret values use ACR, `AOAI_DEPLOYMENT`, `azureOpenAI.apiKeySecretRef`, and
 current AOAI IPv4 `/32` addresses, resolved from the actual account hostname.
 The first live install resolved **`20.62.58.5/32`**. This is observed evidence,
 not a portable default: resolve your own endpoint at install time, as the helper
@@ -472,15 +475,17 @@ stays off until the host tenant/channel/billing grant is configured below. Host
 Anthropic URL is deliberately loopback port 9, so startup reconciliation cannot
 contact Anthropic even when another provider's defaults are present.
 
-The installer checks MCP `/healthz`. A separate **paid gpt-5.4-mini** C3 preflight
-checks model usage, a write tool and a second turn reading the same file. It
-requires matching write/read call IDs and the exact per-run persistence marker.
-`SELFHOSTED_MODEL` defaults to `AOAI_DEPLOYMENT` (default `gpt-5.4-mini`); the
-probe refuses a different deployment or any Sol model. Before invoking the
-harness, it queries Azure deployment metadata and requires the underlying model
-to be exactly `gpt-5.4-mini`, including for an alias such as `production`.
-Bootstrap applies the same check when reusing a deployment. Direct `live-c3.py`
-execution requires `AOAI_VERIFIED_MODEL=gpt-5.4-mini` from that metadata check:
+The installer checks MCP `/healthz`. A separate **paid** C3 preflight on the
+`AOAI_MODEL` deployment checks model usage, a write tool and a second turn reading
+the same file. It requires matching write/read call IDs and the exact per-run
+persistence marker. `SELFHOSTED_MODEL` defaults to `AOAI_DEPLOYMENT`; the probe
+refuses a different deployment, and a Sol model unless `AOAI_MODEL` names one.
+Before invoking the harness, it queries Azure deployment metadata and requires the
+underlying model to be exactly `AOAI_MODEL`, including for an alias such as
+`production`. Bootstrap applies the same check when reusing a deployment. Direct
+`live-c3.py` execution requires `AOAI_VERIFIED_MODEL` from that metadata check to
+equal `AOAI_MODEL`. The probe is paid at its model's rate, so it costs more on a
+larger model such as `gpt-6.1-sol`:
 
 ```sh
 bash deploy/helm/daimon-selfhost/scripts/aks.sh probe
@@ -557,7 +562,7 @@ Do not claim egress proof if any other NetworkPolicy admits broad harness egress
 For a disposable pilot, `teardown` removes the Helm release, namespace **including
 both PVCs and their data**, AKS cluster and managed node RG. Confirm backups or
 accept loss of all tenants, ledger, sessions and workspaces before running it.
-It keeps **ACR/images and AOAI/gpt-5.4-mini deployment**, plus the protected operator state;
+It keeps **ACR/images and the AOAI deployment**, plus the protected operator state;
 ACR/storage and AOAI usage remain billable. It checks the managed node RG was
 removed. An incomplete deletion is a failed teardown, not a passing result.
 
@@ -574,7 +579,7 @@ above so the target check runs before any destructive command.
 Retaining built images and model quota avoids rebuilds and model provisioning on
 the timed path. In the same shell, start the clock before re-creating AKS, run the
 same install, re-register the application state below, and stop only after the
-first successful **Daimon CLI/Teams** gpt-5.4-mini reply. Record timestamps and elapsed
+first successful **Daimon CLI/Teams** model reply. Record timestamps and elapsed
 seconds. Thirty minutes is a target, **not measured Azure evidence** from this
 lane; capacity, image pulls, RBAC propagation and application setup may exceed it.
 
@@ -619,9 +624,13 @@ production selfhosted CLI turn and the verified C3.9a MCP CA-bundle client.
 These commands use release `acme`, CLI caller `operator`, channel
 `selfhosted-operator`, and persistent CLI thread `aks-proof`.
 
+Like the probe, `register` refuses before it writes anything unless `SELFHOSTED_MODEL`
+is `AOAI_DEPLOYMENT` and Azure reports `AOAI_MODEL` as its model.
 The following is an explicit **TEST tariff**, not a quote of Azure's prices.
-For production, replace the accounting name/rates/date with your verified contract
-rates and set `ALLOW_TEST_TARIFFS=false`. Infrastructure is explicitly zero here and funded separately. Registration
+`SELFHOSTED_MODELS` holds one tariff, named after `AOAI_MODEL`, with `-TEST` for
+TEST rates; `register` also refuses a catalogue without it.
+For production, drop `-TEST`, use your verified contract rates/date
+and set `ALLOW_TEST_TARIFFS=false`. Infrastructure is explicitly zero here and funded separately. Registration
 creates a tenant with $2 signup credit and the default scoped agent/environment,
 an access policy permitting selfhosted (the schema also requires Anthropic), and the selfhosted channel configuration revision.
 It runs `daimon selfhosted init`, then writes the resulting
@@ -629,7 +638,6 @@ agent/environment IDs and configuration digest into the provider grant Secret.
 It makes no model calls. Retain these exports for reinstall:
 
 ```sh
-export SELFHOSTED_MODEL=gpt-5.4-mini
 export ALLOW_TEST_TARIFFS=true
 export SELFHOSTED_MODELS='{"gpt-5.4-mini-TEST":[{"effective_from":"2026-10-21","input":"0.75","output":"4.5","cache_read":"0.075"}]}'
 bash deploy/helm/daimon-selfhost/scripts/aks.sh register
@@ -689,7 +697,7 @@ billing and no exemption. Save its NDJSON (usage IDs and session IDs), the harne
 provider receipts and matching Postgres usage/ledger rows for independent token
 reconciliation. The direct `probe` helper is an optional paid C3 diagnostic and
 does not replace these two application turns. No real inference is performed by
-this lane's local tests. The recipe uses gpt-5.4-mini for every model turn.
+this lane's local tests. The recipe uses the `AOAI_MODEL` deployment for every model turn.
 
 ## Second release on a shared cluster
 

@@ -12,6 +12,7 @@ chart=${CHART_DIR:-deploy/helm/daimon-selfhost}
 : "${AKS_STATE:?export AKS_STATE to a private mktemp -d directory}"
 [[ -d "$AKS_STATE" ]] || { echo 'AKS_STATE must exist' >&2; exit 1; }
 source "$chart/scripts/release.sh"
+source "$chart/scripts/model.sh"
 case ${1:-} in
 install|register|reinstall|teardown|egress-start|egress-check) require_release_names "${1}" ;;
 esac
@@ -38,20 +39,6 @@ if [[ -z ${TAG:-} ]]; then
   fi
 fi
 export TAG
-export AOAI_DEPLOYMENT=${AOAI_DEPLOYMENT:-gpt-5.4-mini}
-export SELFHOSTED_MODEL=${SELFHOSTED_MODEL:-$AOAI_DEPLOYMENT}
-verify_aoai_model() {
-  AOAI_VERIFIED_MODEL=$(az cognitiveservices account deployment show -g "$RG" -n "$AOAI" \
-    --deployment-name "$AOAI_DEPLOYMENT" --query properties.model.name -o tsv) || {
-    echo "Existing AOAI account is missing or cannot read deployment $AOAI_DEPLOYMENT; provision it before bootstrap/probe" >&2
-    exit 1
-  }
-  if [[ ${AOAI_VERIFIED_MODEL,,} == *sol* || "$AOAI_VERIFIED_MODEL" != gpt-5.4-mini ]]; then
-    echo 'AOAI deployment must be backed by gpt-5.4-mini; Sol models are refused' >&2
-    exit 1
-  fi
-  export AOAI_VERIFIED_MODEL
-}
 bind_aks() {
   # A fresh, private file prevents inherited contexts or stale cluster credentials.
   kube_state=$(mktemp -d "$AKS_STATE/kubeconfig.XXXXXX")
@@ -106,6 +93,9 @@ bootstrap)
   if grep -Fxq -- "$AOAI" <<< "$accounts"; then
     verify_aoai_model
     echo "Reusing existing AOAI account and deployment $AOAI_DEPLOYMENT"
+  elif [[ $AOAI_MODEL != gpt-5.4-mini ]]; then
+    echo "bootstrap creates only gpt-5.4-mini; create account $AOAI with a $AOAI_MODEL deployment named $AOAI_DEPLOYMENT, then run bootstrap again" >&2
+    exit 1
   else
     az cognitiveservices account create -g "$RG" -n "$AOAI" -l "$LOCATION" \
       --kind OpenAI --sku S0 --custom-domain "$AOAI" -o none
@@ -212,13 +202,13 @@ turn)
     --tenant-id "$tenant" --thread aks-proof --message "${MESSAGE:?export MESSAGE}"
   ;;
 probe)
-  if [[ ${SELFHOSTED_MODEL,,} == *sol* || ${AOAI_DEPLOYMENT,,} == *sol* || "$SELFHOSTED_MODEL" != "$AOAI_DEPLOYMENT" ]]; then
-    echo 'Probe requires the configured AOAI_DEPLOYMENT; Sol models are refused' >&2
+  if [[ ${AOAI_DEPLOYMENT,,} == *sol* && ${AOAI_MODEL,,} != *sol* ]]; then
+    echo 'Probe refuses Sol models unless AOAI_MODEL names one' >&2
     exit 1
   fi
-  verify_aoai_model
+  verify_runtime_deployment probe
   bind_aks
-  kubectl -n "$NAMESPACE" exec -i deployment/"$PREFIX-mcp" -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon env HARNESS_URL="https://$PREFIX-harness:8088" AOAI_VERIFIED_MODEL="$AOAI_VERIFIED_MODEL" AOAI_DEPLOYMENT="$AOAI_DEPLOYMENT" SELFHOSTED_MODEL="$SELFHOSTED_MODEL" python - < "$chart/scripts/live-c3.py"
+  kubectl -n "$NAMESPACE" exec -i deployment/"$PREFIX-mcp" -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon env HARNESS_URL="https://$PREFIX-harness:8088" AOAI_MODEL="$AOAI_MODEL" AOAI_VERIFIED_MODEL="$AOAI_VERIFIED_MODEL" AOAI_DEPLOYMENT="$AOAI_DEPLOYMENT" SELFHOSTED_MODEL="$SELFHOSTED_MODEL" python - < "$chart/scripts/live-c3.py"
   ;;
 egress-start)
   kubectl -n kube-system create configmap coredns-custom --from-literal=log.override=log \

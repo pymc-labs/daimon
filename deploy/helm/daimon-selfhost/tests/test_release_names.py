@@ -128,7 +128,9 @@ name = Path(sys.argv[0]).name
 args = sys.argv[1:]
 with open(os.environ['STUB_LOG'], 'a') as output:
     output.write(json.dumps([name, *args]) + '\\n')
-if name == 'az' and 'properties.endpoint' in args:
+if name == 'az' and 'properties.model.name' in args:
+    print('gpt-5.4-mini')
+elif name == 'az' and 'properties.endpoint' in args:
     print('https://localhost')
 elif name == 'az' and 'key1' in args:
     print('offline-placeholder')
@@ -149,12 +151,10 @@ elif name == 'az' and args[:3] == ['acr', 'task', 'show-run']:
 
 
 class TeamsReleaseScriptTests(unittest.TestCase):
-    def run_script(
-        self, script, command, state, overrides=None, stub_source=STUB, cwd=CHART.parents[2]
-    ):
+    def run_script(self, script, command, state, overrides=None, cwd=CHART.parents[2]):
         stub = state / "stub"
         if not stub.exists():
-            stub.write_text(stub_source)
+            stub.write_text(STUB)
             add_kube_stub_support(stub)
             stub.chmod(0o755)
             for name in ("az", "kubectl", "helm"):
@@ -173,7 +173,7 @@ class TeamsReleaseScriptTests(unittest.TestCase):
             VALUES_FILE=str(state / "values.yaml"),
             ALLOW_TEST_TARIFFS="true",
             SELFHOSTED_MODEL="gpt-5.4-mini",
-            SELFHOSTED_MODELS=json.dumps({"fixture": {}}),
+            SELFHOSTED_MODELS=json.dumps({"gpt-5.4-mini-TEST": []}),
         )
         env.update({key: "offline" for key in ("RG", "LOCATION", "ACR", "AKS", "AOAI", "TAG")})
         env.update(overrides or {})
@@ -298,13 +298,8 @@ class TeamsReleaseScriptTests(unittest.TestCase):
     def test_probe_targets_the_release_harness(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)
-            stub_source = STUB.replace(
-                "if name == 'az' and 'properties.endpoint' in args:",
-                "if name == 'az' and 'properties.model.name' in args:\n    print('gpt-5.4-mini')\n"
-                "elif name == 'az' and 'properties.endpoint' in args:",
-            )
             result, calls = self.run_script(
-                "aks.sh", ["probe"], state, {"AOAI_DEPLOYMENT": "gpt-5.4-mini"}, stub_source
+                "aks.sh", ["probe"], state, {"AOAI_DEPLOYMENT": "gpt-5.4-mini"}
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             probe = next(c for c in calls if c[0] == "kubectl" and "exec" in c)

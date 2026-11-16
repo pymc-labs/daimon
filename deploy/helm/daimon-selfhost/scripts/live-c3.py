@@ -1,17 +1,22 @@
-"""Operator-run gpt-5.4-mini C3 preflight; executes inside the MCP container."""
+"""Operator-run C3 preflight on the AOAI_MODEL deployment; executes inside the MCP container."""
 
 import json
 import os
 import urllib.request
 from uuid import uuid4
 
-if os.environ.get("AOAI_VERIFIED_MODEL") != "gpt-5.4-mini":
-    raise SystemExit("Probe requires AOAI_VERIFIED_MODEL=gpt-5.4-mini from deployment metadata")
+# An empty setting counts as unset, as in model.sh, so the model is never empty.
+named = os.environ.get("AOAI_MODEL") or "gpt-5.4-mini"
+if os.environ.get("AOAI_VERIFIED_MODEL") != named:
+    raise SystemExit(f"Probe requires AOAI_VERIFIED_MODEL={named} from deployment metadata")
 
-deployment = os.environ.get("AOAI_DEPLOYMENT", "gpt-5.4-mini")
-model = os.environ.get("SELFHOSTED_MODEL", deployment)
-if "sol" in model.lower() or "sol" in deployment.lower() or model != deployment:
-    raise SystemExit("Probe requires the configured AOAI_DEPLOYMENT; Sol models are refused")
+deployment = os.environ.get("AOAI_DEPLOYMENT") or named
+model = os.environ.get("SELFHOSTED_MODEL") or deployment
+if model != deployment or ("sol" in deployment.lower() and "sol" not in named.lower()):
+    raise SystemExit(
+        "Probe requires the configured AOAI_DEPLOYMENT; "
+        "Sol models are refused unless AOAI_MODEL names one"
+    )
 
 base = os.environ.get("HARNESS_URL", "https://acme-daimon-harness:8088")
 token = os.environ["DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY"]
