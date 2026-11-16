@@ -96,7 +96,7 @@ class FeatureActor:
     read_builtins: Callable[[], Awaitable[Mapping[str, bool | None]]] | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class OperatorActor(FeatureActor):
     """The deployment operator at the CLI, who holds the database and has no chat identity.
 
@@ -105,8 +105,8 @@ class OperatorActor(FeatureActor):
     (`test_operator_actor.py` checks that). It names the operator and carries the stated
     reason, which the audit row records."""
 
-    operator: str = ""
-    reason: str = ""
+    operator: str
+    reason: str
 
     def __post_init__(self) -> None:
         if not self.operator.strip() or not self.reason.strip():

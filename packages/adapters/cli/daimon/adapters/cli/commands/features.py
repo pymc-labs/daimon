@@ -200,8 +200,11 @@ async def features_set(
     reason: str | None = None,
 ) -> None:
     spec = FEATURES[key]
-    if spec.authority.native and not (reason and reason.strip()):
+    reason = (reason or "").strip()
+    if spec.authority.native and not reason:
         raise StoreError(f"{spec.name} is set from the CLI only with --reason.")
+    if not spec.authority.native and reason:
+        raise StoreError(f"{spec.name} records no reason; --reason is only for approvals.")
     if spec.authority.native and not rt.settings.cli.local_user.strip():
         raise StoreError(f"{spec.name} needs cli.local_user, the operator's name, to be set.")
     target = await _target(rt, selector)
@@ -224,7 +227,7 @@ async def features_set(
             None,
             is_admin,
             operator=rt.settings.cli.local_user,
-            reason=reason or "",
+            reason=reason,
         )
     else:
         actor = FeatureActor(
@@ -389,7 +392,7 @@ def features_set_command(
     ] = None,
     reason: Annotated[
         str | None,
-        typer.Option("--reason", help="Why (required for approvals); recorded in the audit."),
+        typer.Option("--reason", help="Why; required for approvals, and only for them. Audited."),
     ] = None,
 ) -> None:
     """Set (or clear) one feature at one tier."""

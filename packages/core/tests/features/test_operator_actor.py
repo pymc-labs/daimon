@@ -109,22 +109,28 @@ async def test_other_actors_are_still_refused_even_when_admin_for_says_yes(
 
 
 @pytest.mark.parametrize(
-    ("kwargs", "match"),
+    ("operator", "reason", "surface", "via_agent_key", "match"),
     [
-        ({"operator": "", "reason": "why"}, "reason"),
-        ({"operator": "ops", "reason": "  "}, "reason"),
-        ({"operator": "ops", "reason": "why", "via_agent_key": True}, "agent key"),
-        ({"operator": "ops", "reason": "why", "surface": "chat"}, "agent key|CLI"),
+        ("", "why", "cli", False, "reason"),
+        ("ops", "  ", "cli", False, "reason"),
+        ("ops", "why", "cli", True, "agent key"),
+        ("ops", "why", "chat", False, "CLI"),
     ],
 )
 def test_an_operator_actor_needs_a_name_a_reason_and_the_cli(
-    kwargs: dict[str, object], match: str
+    operator: str, reason: str, surface: ChangeSurface, via_agent_key: bool, match: str
 ) -> None:
-    base: dict[str, object] = {"surface": "cli", "via_agent_key": False}
-    merged = base | kwargs
-    surface: ChangeSurface = merged.pop("surface")  # pyright: ignore[reportAssignmentType]
     with pytest.raises(ValueError, match=match):
-        OperatorActor(uuid.uuid4(), None, surface, None, _yes, **merged)  # pyright: ignore[reportArgumentType]
+        OperatorActor(
+            uuid.uuid4(),
+            None,
+            surface,
+            None,
+            _yes,
+            via_agent_key=via_agent_key,
+            operator=operator,
+            reason=reason,
+        )
 
 
 def _mentions_the_operator_type(tree: ast.AST) -> bool:

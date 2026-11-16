@@ -254,6 +254,29 @@ async def test_a_blank_operator_name_refuses_cleanly(
     assert _row(await _rows(rt, selector), "approvals")["value"] == "on"
 
 
+async def test_a_reason_on_a_feature_that_keeps_none_is_refused(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Only approvals audit a reason; elsewhere `--reason` would be dropped, so it is refused."""
+    rt = _runtime(db_session_factory, [])
+    selector = await _tenant(db_session_factory)
+    console, _ = _console()
+    with pytest.raises(StoreError, match="--reason is only for approvals"):
+        await features_set(
+            rt=rt,
+            console=console,
+            selector=selector,
+            key="progress_plans",
+            value="on",
+            reason="why",
+            tier=None,
+            agent=None,
+            channel=None,
+            thread=None,
+        )
+    assert _row(await _rows(rt, selector), "progress_plans")["source"] != "workspace"
+
+
 async def test_the_operator_sets_approvals_and_the_change_is_audited(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
