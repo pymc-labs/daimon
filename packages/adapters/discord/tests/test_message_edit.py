@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import discord
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.runtime import DiscordRuntime
@@ -220,16 +221,24 @@ async def test_a_thread_another_bot_opened_is_found_and_a_failed_lookup_is_logge
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     bot = _bot(db_session_factory)
-    message = MagicMock(spec=discord.Message, id=11)
-    message.channel = MagicMock(id=6)
+    message = MagicMock(spec=discord.Message)
+    message.id = 11
+    message.channel = SimpleNamespace(id=6)
     thread = MagicMock(spec=discord.Thread, parent_id=6)
     with patch.object(bot, "_channel_by_id", AsyncMock(return_value=thread)):
         assert await bot._thread_started_from(message) is thread, "the other bot's thread"  # pyright: ignore[reportPrivateUsage]
+    failures: list[Exception] = [
+        _http_error(HTTPStatus.NOT_FOUND),
+        _http_error(HTTPStatus.BAD_GATEWAY),
+        aiohttp.ClientConnectionError("reset"),
+    ]
     with capture_logs() as logs:
-        for status in (HTTPStatus.NOT_FOUND, HTTPStatus.BAD_GATEWAY):
-            lookup = AsyncMock(side_effect=_http_error(status))
-            with patch.object(bot, "_channel_by_id", lookup):
+        for failure in failures:
+            with patch.object(bot, "_channel_by_id", AsyncMock(side_effect=failure)):
                 found = await bot._thread_started_from(message)  # pyright: ignore[reportPrivateUsage]
-            assert found is None, f"no thread after a {status.value}"
-    events = [entry["event"] for entry in logs]
-    assert events == ["discord.thread_lookup_failed"], "only the failed lookup is logged"
+            assert found is None, f"no thread after {failure!r}"
+    logged = [(entry["event"], entry.get("status"), entry.get("error_type")) for entry in logs]
+    assert logged == [
+        ("discord.thread_lookup_failed", 502, None),
+        ("discord.thread_lookup_failed", None, "ClientConnectionError"),
+    ], "a missing thread stays quiet; a failure to reach Discord is logged"

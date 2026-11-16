@@ -110,6 +110,15 @@ class ForbiddenGateway(OfflineDiscordGateway):
         )
         raise error
 
+    async def get_channel(self, channel_id: int) -> dict[str, object]:
+        """Look up the thread on a message whose thread creation was refused: there is none."""
+        if not any(attempt.message_id == str(channel_id) for attempt in self.creations):
+            raise ValueError("unbound channel lookup refused by offline fixture")
+        raise discord.NotFound(
+            cast(Any, _ResponseFacts(status=404, reason="Not Found")),
+            {"code": 10003, "message": "Unknown Channel"},
+        )
+
     async def send_typing(self, channel_id: int) -> None:
         if channel_id != self.channel_id:
             raise ValueError("unbound typing refused by offline fixture")

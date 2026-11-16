@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import anthropic as _anthropic
 import discord
 import pytest
@@ -325,8 +326,10 @@ class TestNewThreadCreation:
         message.create_thread = AsyncMock(side_effect=RuntimeError("Discord unavailable"))  # pyright: ignore[reportAttributeAccessIssue]
         # Typing is best effort: a dropped connection must not stop the open.
         message.channel.typing = MagicMock(side_effect=ConnectionResetError("reset"))
+        unreachable = AsyncMock(side_effect=aiohttp.ClientConnectionError("Discord unavailable"))
 
-        await bot.on_message(message)
+        with patch.object(bot, "fetch_channel", unreachable):
+            await bot.on_message(message)
 
         # The failure is answered with exactly one red card reply, never a
         # channel-level "opening your chat" notice or a second error.
@@ -397,7 +400,7 @@ class TestNewThreadCreation:
         if lookup == "not_found":
             fetch = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "unknown"))
         elif lookup == "lookup_error":
-            fetch = AsyncMock(side_effect=RuntimeError("lookup failed"))
+            fetch = AsyncMock(side_effect=aiohttp.ClientConnectionError("lookup failed"))
 
         with (
             patch.object(bot, "get_channel", MagicMock(return_value=None)),

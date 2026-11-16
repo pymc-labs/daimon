@@ -3861,9 +3861,16 @@ class DaimonBot(commands.Bot):
             found = await self._channel_by_id(message.id)
         except discord.NotFound:
             return None
+        # On any failure to reach Discord the caller still shows the usual notice.
         except discord.HTTPException as exc:
-            # The caller still shows the usual notice.
             log.warning("discord.thread_lookup_failed", message_id=message.id, status=exc.status)
+            return None
+        except (aiohttp.ClientError, TimeoutError, OSError) as exc:
+            log.warning(
+                "discord.thread_lookup_failed",
+                message_id=message.id,
+                error_type=type(exc).__name__,
+            )
             return None
         if isinstance(found, discord.Thread) and found.parent_id == message.channel.id:
             return found
