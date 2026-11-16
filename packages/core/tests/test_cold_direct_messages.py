@@ -168,6 +168,7 @@ async def test_duplicate_message_claims_and_routine_delivery_do_not_change_mappi
             expected_scope_id=row.scope_id,
             now=now,
             active_until=now,
+            held_fence=None,
         )
         await finish_message(session, conversation=first, history=[{"role": "user", "text": "hi"}])
     async with db_session_factory.begin() as session:
@@ -181,6 +182,7 @@ async def test_duplicate_message_claims_and_routine_delivery_do_not_change_mappi
                 expected_scope_id=row.scope_id,
                 now=now,
                 active_until=now,
+                held_fence=None,
             )
             is None
         )

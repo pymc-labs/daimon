@@ -93,6 +93,7 @@ async def test_shutdown_settle_uses_owned_scope_and_cannot_interrupt_a_released_
             expected_scope_id=original.scope_id,
             now=now,
             active_until=now + timedelta(minutes=10),
+            held_fence=None,
         )
         assert claimed is not None
         if not owns_claim:

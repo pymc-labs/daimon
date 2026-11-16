@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -11,6 +12,7 @@ from daimon.core.session_preparation_stages import turn_blocks_change, turn_is_a
 from daimon.core.stores.direct_messages import (
     DirectMessageBusy,
     DirectMessageRow,
+    OwnerDmFence,
     claim_message,
     extend_claim,
     get_conversation,
@@ -110,6 +112,7 @@ async def test_a_dm_claim_extends_to_the_admitted_deadline(
             expected_scope_id=original.scope_id,
             now=_NOW,
             active_until=_NOW + timedelta(seconds=TURN_CEILING_S + 60),
+            held_fence=None,
         )
         assert claimed is not None
         same = await extend_claim(
@@ -129,7 +132,13 @@ async def test_a_dm_claim_extends_to_the_admitted_deadline(
 
 
 async def _claim(
-    session: AsyncSession, row: DirectMessageRow, message_id: str, *, at: datetime, minutes: int
+    session: AsyncSession,
+    row: DirectMessageRow,
+    message_id: str,
+    *,
+    at: datetime,
+    minutes: int,
+    fence: OwnerDmFence | None = None,
 ) -> DirectMessageRow | None:
     return await claim_message(
         session,
@@ -140,6 +149,7 @@ async def _claim(
         expected_scope_id=row.scope_id,
         now=at,
         active_until=at + timedelta(minutes=minutes),
+        held_fence=fence,
     )
 
 
@@ -151,11 +161,26 @@ async def test_a_dm_claim_left_by_a_dead_worker_does_not_block_for_hours(
         tenant = await make_tenant(session)
         account = await make_account(session, tenant=tenant)
         original = await make_dm_conversation(session, tenant=tenant, account_id=account.id)
-        left = await _claim(session, original, "m1", at=_NOW, minutes=181)
+    turn = functools.partial(
+        direct_messages.owner_dm_turn,
+        deps_for(None, db_session_factory),
+        platform=original.platform,
+        owner=original.external_user_id,
+        wait=False,
+    )
+    async with turn() as fence, db_session_factory.begin() as session:
+        left = await _claim(session, original, "m1", at=_NOW, minutes=181, fence=fence)
     assert left is not None, "the first message claims the conversation"
     later = _NOW + timedelta(minutes=10)
-    async with db_session_factory.begin() as session:
-        taken = await _claim(session, original, "m2", at=later, minutes=46)
+    with pytest.raises(DirectMessageBusy):
+        async with db_session_factory.begin() as session:
+            await _claim(session, original, "m2", at=later, minutes=46)
+    stranger = OwnerDmFence(original.platform, "someone-else")
+    with pytest.raises(ValueError, match="another DM owner"):
+        async with db_session_factory.begin() as session:
+            await _claim(session, original, "m2", at=later, minutes=46, fence=stranger)
+    async with turn() as fence, db_session_factory.begin() as session:
+        taken = await _claim(session, original, "m2", at=later, minutes=46, fence=fence)
         assert taken is not None, "the next message is admitted, not refused as busy"
         assert taken.active_until == later + timedelta(minutes=46), "it holds its own claim"
         assert not await holds_claim(session, conversation=left), "the dead claim lost the scope"

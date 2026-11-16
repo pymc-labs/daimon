@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 
 import structlog
@@ -32,6 +33,14 @@ class DirectMessageBusy(DaimonError):
 def owner_dm_fence(platform: str, owner: str) -> str:
     """The advisory fence each running DM turn of `owner` holds; it frees when the process dies."""
     return f"owner_dm:{platform}:{owner}"
+
+
+@dataclass(frozen=True, slots=True)
+class OwnerDmFence:
+    """Proof the caller holds `owner_dm_fence(platform, owner)`; made by `owner_dm_turn`."""
+
+    platform: str
+    owner: str
 
 
 class DirectMessageRow(BaseModel):
@@ -155,13 +164,17 @@ async def claim_message(
     expected_scope_id: str,
     now: datetime,
     active_until: datetime,
+    held_fence: OwnerDmFence | None,
 ) -> DirectMessageRow | None:
     """Claim the conversation for `message_id`; None for a duplicate delivery.
 
-    Call only while holding `owner_dm_fence`, which every claim's turn holds until it
-    finishes: an unexpired claim found here was left by a process that died, and is
-    taken over. Its turn, if somehow still running, fails `holds_claim` before writing.
+    Every claim's turn holds the owner's fence until it finishes, and the fence frees
+    when its process dies. So with `held_fence`, an unexpired claim was left by a dead
+    process and is taken over; its turn, if still running, fails `holds_claim` before
+    writing. Without it, an unexpired claim raises `DirectMessageBusy`.
     """
+    if held_fence is not None and held_fence != OwnerDmFence(platform, external_user_id):
+        raise ValueError("held_fence belongs to another DM owner")
     row = await session.get(
         DirectMessageConversation, (platform, route_key, external_user_id), with_for_update=True
     )
@@ -175,6 +188,10 @@ async def claim_message(
     if message_id in row.recent_message_ids:
         return None
     if row.active_until is not None and row.active_until > now:
+        if held_fence is None:
+            raise DirectMessageBusy(
+                "A reply is still running. Please send your message again after it finishes."
+            )
         structlog.get_logger(__name__).warning(
             "dm.claim_taken_over", platform=platform, left_until=row.active_until.isoformat()
         )

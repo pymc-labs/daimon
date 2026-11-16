@@ -362,6 +362,7 @@ async def test_concurrent_dm_claims_serialize_and_wrong_owner_has_no_route(
                 expected_scope_id=route.scope_id,
                 now=now,
                 active_until=now + timedelta(minutes=1),
+                held_fence=None,
             )
 
     results = await asyncio.gather(claim("one"), claim("two"), return_exceptions=True)
@@ -1860,6 +1861,7 @@ async def _claimed_dm(db_session, db_session_factory, *, ma_session_id):
             expected_scope_id=route.scope_id,
             now=now,
             active_until=now + timedelta(minutes=2),
+            held_fence=None,
         )
         await create_thread_session(
             session,

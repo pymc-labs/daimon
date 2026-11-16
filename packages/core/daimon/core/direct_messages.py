@@ -42,6 +42,7 @@ from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access
 from daimon.core.stores.direct_messages import (
     COLD_DM_ORIGIN,
     DirectMessageRow,
+    OwnerDmFence,
     claim_message,
     dm_enabled,
     extend_claim,
@@ -772,7 +773,7 @@ async def reply_to_dm_result(
     `card_for` shows the turn's progress; the card must recheck delivery access
     before each write, as the adapter does before sending the answer.
     """
-    async with owner_dm_turn(deps, platform=platform, owner=external_user_id, wait=True):
+    async with owner_dm_turn(deps, platform=platform, owner=external_user_id, wait=True) as fence:
         now = datetime.now(UTC)
         async with deps.sessionmaker.begin() as session:
             conversation = await claim_message(
@@ -784,6 +785,7 @@ async def reply_to_dm_result(
                 expected_scope_id=expected_scope_id,
                 now=now,
                 active_until=now + timedelta(seconds=TURN_CEILING_S + 60),
+                held_fence=fence,
             )
         if conversation is None:
             return None
@@ -1255,8 +1257,8 @@ async def require_dm_enabled(deps: TurnDeps, *, tenant_id: uuid.UUID) -> None:
 @asynccontextmanager
 async def owner_dm_turn(
     deps: TurnDeps, *, platform: str, owner: str, wait: bool
-) -> AsyncIterator[None]:
-    """Serialize local owner turns across tenants and adapter processes.
+) -> AsyncIterator[OwnerDmFence]:
+    """Serialize local owner turns across tenants and adapter processes; yield the held fence.
 
     An existing transaction advisory lock is sufficient: no persistent turn
     outcome or promise about remote activity after process loss is introduced.
@@ -1299,4 +1301,4 @@ async def owner_dm_turn(
                 message="The owner already has a DM turn running; this slot was skipped.",
             ) from error
     async with stack:
-        yield
+        yield OwnerDmFence(platform, owner)
