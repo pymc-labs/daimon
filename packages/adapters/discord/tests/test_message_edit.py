@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from http import HTTPStatus
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -17,6 +18,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing.settings_mock import mock_settings
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 from .harness import make_bot
 
@@ -65,6 +67,7 @@ def _edit(
     edited: bool = True,
     before_content: str | None = None,
     content: str = "hey <@999>",
+    author: bool = True,
 ) -> discord.RawMessageUpdateEvent:
     message_id = _snowflake(age)
     data: dict[str, Any] = {
@@ -73,9 +76,10 @@ def _edit(
         "edited_timestamp": datetime.now(UTC).isoformat() if edited else None,
         "channel_id": "6",
         "guild_id": "7",
-        "author": {"id": "42", "bot": bot_author},
         "mentions": [{"id": str(user)} for user in mentions],
     }
+    if author:
+        data["author"] = {"id": "42", "bot": bot_author}
     payload = MagicMock(spec=discord.RawMessageUpdateEvent)
     payload.message_id, payload.channel_id, payload.guild_id = message_id, 6, 7
     payload.data = data
@@ -96,13 +100,14 @@ async def _run_edit(
     *,
     fetched_bot: bool = False,
     thread: object | None = None,
+    fetch_error: discord.HTTPException | None = None,
 ) -> AsyncMock:
     """Deliver the edit; return the `on_message` mock that stands in for a turn."""
     message = MagicMock(spec=discord.Message)
     message.author = MagicMock(bot=fetched_bot)
     message.thread = thread
     channel = MagicMock(spec=discord.TextChannel)
-    channel.fetch_message = AsyncMock(return_value=message)
+    channel.fetch_message = AsyncMock(return_value=message, side_effect=fetch_error)
     on_message = AsyncMock()
     with (
         patch.object(bot, "_channel_by_id", AsyncMock(return_value=channel)),
@@ -178,3 +183,53 @@ async def test_a_message_that_already_has_a_thread_is_ignored(
         _bot(db_session_factory), _edit(mentions=[_BOT_ID]), thread=MagicMock(spec=discord.Thread)
     )
     assert on_message.await_count == 0, "no second answer where a thread exists"
+
+
+def _http_error(status: HTTPStatus) -> discord.HTTPException:
+    response = MagicMock(status=status.value, reason=status.phrase)
+    if status == HTTPStatus.NOT_FOUND:
+        return discord.NotFound(response, "gone")
+    return discord.HTTPException(response, "failed")
+
+
+async def test_a_partial_update_without_an_author_is_ignored(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Link previews update a message without its author: never a new request."""
+    on_message = await _run_edit(_bot(db_session_factory), _edit(mentions=[_BOT_ID], author=False))
+    assert on_message.await_count == 0, "no turn for an update with no author"
+
+
+async def test_an_edited_message_that_cannot_be_fetched_is_logged_unless_deleted(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    bot = _bot(db_session_factory)
+    with capture_logs() as logs:
+        gone = await _run_edit(
+            bot, _edit(mentions=[_BOT_ID]), fetch_error=_http_error(HTTPStatus.NOT_FOUND)
+        )
+        failed = await _run_edit(
+            bot, _edit(mentions=[_BOT_ID]), fetch_error=_http_error(HTTPStatus.BAD_GATEWAY)
+        )
+    assert gone.await_count == 0 and failed.await_count == 0, "no turn without the message"
+    events = [entry["event"] for entry in logs]
+    assert events == ["discord.edit_fetch_failed"], "only the failed fetch is logged"
+
+
+async def test_a_thread_another_bot_opened_is_found_and_a_failed_lookup_is_logged(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    bot = _bot(db_session_factory)
+    message = MagicMock(spec=discord.Message, id=11)
+    message.channel = MagicMock(id=6)
+    thread = MagicMock(spec=discord.Thread, parent_id=6)
+    with patch.object(bot, "_channel_by_id", AsyncMock(return_value=thread)):
+        assert await bot._thread_started_from(message) is thread, "the other bot's thread"  # pyright: ignore[reportPrivateUsage]
+    with capture_logs() as logs:
+        for status in (HTTPStatus.NOT_FOUND, HTTPStatus.BAD_GATEWAY):
+            lookup = AsyncMock(side_effect=_http_error(status))
+            with patch.object(bot, "_channel_by_id", lookup):
+                found = await bot._thread_started_from(message)  # pyright: ignore[reportPrivateUsage]
+            assert found is None, f"no thread after a {status.value}"
+    events = [entry["event"] for entry in logs]
+    assert events == ["discord.thread_lookup_failed"], "only the failed lookup is logged"

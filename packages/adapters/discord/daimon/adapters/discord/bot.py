@@ -2940,9 +2940,8 @@ class DaimonBot(commands.Bot):
         data = payload.data
         if not data.get("edited_timestamp"):
             return
-        # "author" is absent on partial updates such as link previews.
-        author: dict[str, Any] | None = data.get("author")  # type: ignore[assignment]
-        if author is None or author.get("bot"):
+        # "author" is absent on partial updates such as link previews, though typed as required.
+        if "author" not in data or data["author"].get("bot"):
             return
         if not any(user["id"] == str(self.user.id) for user in data.get("mentions", [])):
             return
@@ -2960,7 +2959,12 @@ class DaimonBot(commands.Bot):
             if not isinstance(channel, discord.abc.Messageable):
                 return
             message = await channel.fetch_message(payload.message_id)
-        except discord.HTTPException:
+        except discord.NotFound:
+            return  # deleted since the edit
+        except discord.HTTPException as exc:
+            log.warning(
+                "discord.edit_fetch_failed", message_id=payload.message_id, status=exc.status
+            )
             return
         if message.author.bot or message.thread is not None:
             return
@@ -3854,7 +3858,11 @@ class DaimonBot(commands.Bot):
         """The thread already opened on `message` (it shares the message's id), if any."""
         try:
             found = await self._channel_by_id(message.id)
-        except Exception:  # best effort: any miss keeps the usual notice
+        except discord.NotFound:
+            return None
+        except discord.HTTPException as exc:
+            # The caller still shows the usual notice.
+            log.warning("discord.thread_lookup_failed", message_id=message.id, status=exc.status)
             return None
         if isinstance(found, discord.Thread) and found.parent_id == message.channel.id:
             return found
