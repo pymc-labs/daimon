@@ -98,6 +98,10 @@ async def _deliver[A](
     found = await after_turn(check)
     try:
         place = await after_turn(lambda: open_place(found))
+    except (discord.Forbidden, discord.NotFound, LookupError):
+        log.info("timer.place_closed", row_id=str(row.id))
+        raise AdmissionDenied(reason="invoker_not_allowed") from None
+    try:
         for chunk in split_fenced(text, _DISCORD_MAX_CHARS, word_boundary=True):
             if sent:
                 await after_turn(check)
@@ -107,7 +111,7 @@ async def _deliver[A](
                 )
             )
             sent += 1
-    except (discord.Forbidden, discord.NotFound, LookupError):
+    except (discord.Forbidden, discord.NotFound):
         log.info("timer.place_closed", row_id=str(row.id))
         raise AdmissionDenied(reason="invoker_not_allowed") from None
     return sent

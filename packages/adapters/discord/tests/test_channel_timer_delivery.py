@@ -324,6 +324,35 @@ async def test_a_channel_that_refuses_the_post_settles_as_not_allowed() -> None:
     assert caught.value.reason == "invoker_not_allowed"
 
 
+async def test_a_lookup_error_while_sending_is_not_read_as_a_closed_place() -> None:
+    """Only opening the place may say it is gone; a send bug must not settle the timer as closed."""
+    delivery = Delivery()
+    delivery.channel.send.side_effect = LookupError("not a place error")
+
+    with pytest.raises(LookupError):
+        await delivery.run()
+
+    delivery.turn.assert_awaited_once()
+
+
+async def test_a_lookup_error_while_opening_the_place_settles_as_not_allowed() -> None:
+    """Opening the place raising `LookupError` means it is gone, so the timer settles."""
+    delivery = Delivery()
+
+    def gone(_id: int) -> discord.abc.Messageable:
+        raise LookupError("gone")
+
+    with pytest.raises(AdmissionDenied) as caught:
+        await deliver_channel_timer(
+            delivery.row,  # pyright: ignore[reportArgumentType]
+            check_access=delivery.check,
+            run_turn=delivery.turn,
+            channel_for=gone,
+        )
+
+    assert caught.value.reason == "invoker_not_allowed"
+
+
 # The wake path -------------------------------------------------------------------
 
 
