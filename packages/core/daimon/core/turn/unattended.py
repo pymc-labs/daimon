@@ -465,9 +465,7 @@ def session_rules_channel(session: BetaManagedAgentsSession, *, platform: str) -
     )
 
 
-def _grant_owner_check(
-    deps: TurnDeps, admission: Admission, tenant_id: uuid.UUID
-) -> PrincipalCheck:
+def grant_owner_check(deps: TurnDeps, admission: Admission, tenant_id: uuid.UUID) -> PrincipalCheck:
     """The per-send role check for the person a turn runs as."""
     grant = admission.grant
     return owner_principal_check(
@@ -556,7 +554,7 @@ async def dm_session_authority(
             session_factory=deps.sessionmaker,
             tenant_id=tenant_id,
             entry_point=entry_point,
-            principal_check=_grant_owner_check(deps, admission, tenant_id),
+            principal_check=grant_owner_check(deps, admission, tenant_id),
         )
 
     return posture, gate

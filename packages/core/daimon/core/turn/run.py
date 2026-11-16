@@ -162,8 +162,8 @@ from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.turn.unattended import (
     dm_session_authority,
+    grant_owner_check,
     is_provider_turn,
-    owner_principal_check,
     refuse_ungated_confirmation,
     require_native_unattended_capabilities,
     session_gate,
@@ -1941,16 +1941,7 @@ async def run_prepared_turn_impl(
                                 tenant_id=tenant_id,
                                 read_session=read_session,
                                 entry_point=unattended_entry_point(origin),
-                                principal_check=owner_principal_check(
-                                    deps.sessionmaker,
-                                    deps.membership_resolver,
-                                    tenant_id=tenant_id,
-                                    owner_user_id=(
-                                        admission.grant.subject.platform_user_id
-                                        if admission.grant is not None
-                                        else None
-                                    ),
-                                ),
+                                principal_check=grant_owner_check(deps, admission, tenant_id),
                             )
                         else:
                             from daimon.core.continuity.watch_turn import watch_capabilities
