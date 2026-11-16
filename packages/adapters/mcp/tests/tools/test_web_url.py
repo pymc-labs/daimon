@@ -72,10 +72,10 @@ def web_role(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 def no_sandbox_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
     """These tests read no database; a routine's sandbox status has its own tests."""
 
-    async def off(*_a: Any) -> None:
-        return None
+    async def off(_session: Any, rows: list[RoutineRow], _platform: str) -> dict[Any, None]:
+        return {row.id: None for row in rows}
 
-    monkeypatch.setattr(routines_tools, "opted_in_by", off)
+    monkeypatch.setattr(routines_tools, "opted_in_by_many", off)
 
 
 _WEB = WebSettings(public_url="https://app.example.com")  # type: ignore[call-arg]

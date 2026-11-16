@@ -57,8 +57,11 @@ async def test_list_routines_when_many_rows_then_links_resolved_once(monkeypatch
     async def fake_rows(_rt: Any, _auth: Any) -> list[RoutineRow]:
         return [_row() for _ in range(5)]
 
-    async def agent_opt_in(*_a: Any) -> str:
-        return "agent"
+    async def agent_opt_in(_session: Any, rows: list[RoutineRow], _platform: str) -> dict[Any, str]:
+        reads.append(len(rows))
+        return {row.id: "agent" for row in rows}
+
+    reads: list[int] = []
 
     opened: list[int] = []
 
@@ -70,7 +73,7 @@ async def test_list_routines_when_many_rows_then_links_resolved_once(monkeypatch
     monkeypatch.setattr(routines_mod, "tenant_links", fake_links)
     monkeypatch.setattr(routines_mod, "_auth", fake_auth)
     monkeypatch.setattr(routines_mod, "_list_routines_impl", fake_rows)
-    monkeypatch.setattr(routines_mod, "opted_in_by", agent_opt_in)
+    monkeypatch.setattr(routines_mod, "opted_in_by_many", agent_opt_in)
     mcp = FastMCP("t")
     runtime = SimpleNamespace(session_factory=session)
     routines_mod.register_routines_tools(mcp, cast(McpRuntime, runtime))
@@ -78,5 +81,6 @@ async def test_list_routines_when_many_rows_then_links_resolved_once(monkeypatch
     out = await tool.fn(None)  # pyright: ignore[reportAttributeAccessIssue]
     assert len(out) == 5, "one view per routine"
     assert all(v.web_url and v.sandbox_tools for v in out), "each carries its link and opt-in"
+    assert reads == [5], "the opt-ins of the whole list are read once"
     assert len(calls) == 1, "links are looked up once per call, not per row"
     assert len(opened) == 1, "the opt-ins are read in one session"

@@ -104,6 +104,28 @@ async def place_values(
     return [FeatureValueRow.model_validate(row) for row in rows]
 
 
+async def keyed_values(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    key: str,
+    agent_ids: Collection[str],
+    routine_ids: Collection[uuid.UUID],
+) -> list[FeatureValueRow]:
+    """One feature's rows at the workspace, at each of the agents and at each of the routines,
+    in one read, for a list of places."""
+    stmt = select(FeatureValue).where(
+        FeatureValue.tenant_id == tenant_id,
+        FeatureValue.key == key,
+        or_(
+            FeatureValue.tier == "workspace",
+            and_(FeatureValue.tier == "agent", FeatureValue.agent_id.in_(agent_ids)),
+            and_(FeatureValue.tier == "routine", FeatureValue.routine_id.in_(routine_ids)),
+        ),
+    )
+    return [FeatureValueRow.model_validate(row) for row in (await session.scalars(stmt)).all()]
+
+
 async def get_feature_value(
     session: AsyncSession, *, tenant_id: uuid.UUID, target: FeatureTarget, key: str
 ) -> FeatureValueRow | None:

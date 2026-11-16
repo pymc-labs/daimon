@@ -68,7 +68,12 @@ from daimon.core.membership_subject import resolve_subject
 from daimon.core.permissions import dm_source_limited
 from daimon.core.routine_delivery import discord_creator_may_post
 from daimon.core.routine_destinations import slack_may_deliver
-from daimon.core.routine_sandbox import change_sandbox, current_pin, opted_in_by, routine_place
+from daimon.core.routine_sandbox import (
+    change_sandbox,
+    current_pin,
+    opted_in_by_many,
+    routine_place,
+)
 from daimon.core.routine_service import (
     CallView,
     ChannelAgentName,
@@ -703,15 +708,15 @@ async def _views(
     """`rows` with their drawers, from links resolved once for the whole call."""
     links = await tenant_links(runtime, auth)
     async with runtime.session_factory() as session:
-        sandbox = [await opted_in_by(session, row, auth.platform or "") for row in rows]
+        sandbox = await opted_in_by_many(session, rows, auth.platform or "")
     return [
         RoutineView.model_validate(row, from_attributes=True).model_copy(
             update={
                 "web_url": None if links is None else links.routine(row.id),
-                "sandbox_tools": by is not None,
+                "sandbox_tools": sandbox[row.id] is not None,
             }
         )
-        for row, by in zip(rows, sandbox, strict=True)
+        for row in rows
     ]
 
 

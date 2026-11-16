@@ -18,6 +18,7 @@ from daimon.core.routine_sandbox import (
     change_sandbox,
     current_pin,
     opted_in_by,
+    opted_in_by_many,
     own_opt_in,
     routine_place,
     routine_sandbox,
@@ -40,6 +41,7 @@ from daimon.core.stores.feature_values import (
 from daimon.core.stores.routines import create_routine, delete_routine, update_routine
 from daimon.testing.factories import make_tenant
 from pydantic import PostgresDsn, SecretStr
+from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -358,6 +360,35 @@ async def test_a_dm_routine_takes_only_its_agent_on(
     assert await _pin(db_session_factory, row) == AGENT_PIN, "its own Off does not beat it"
     plain = row.model_copy(update={"destination_kind": None, "destination_id": None})
     assert await _pin(db_session_factory, plain) is None, "another routine takes its own Off"
+
+
+async def test_a_list_reads_its_opt_ins_in_one_query_per_workspace(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    """The batched read gives what the single read gives, with no query per routine."""
+    tenant = await make_tenant(db_session)
+    rows = [
+        await _routine(db_session, tenant=tenant, agent_id=agent)
+        for agent in ("agent_a", "agent_a", "agent_b", "agent_c")
+    ]
+    await _set(db_session_factory, rows[0], "routine", "on", pin=PIN)
+    await _set(db_session_factory, rows[2], "agent", "on", pin=AgentSandboxPin("agent_b", "d"))
+    await _set(db_session_factory, rows[1], "routine", "off")
+    statements: list[str] = []
+    engine = (await db_session.connection()).sync_engine
+
+    def count(_conn: Any, _cursor: Any, statement: str, *_rest: Any) -> None:
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", count)
+    async with db_session_factory() as session:
+        shown = await opted_in_by_many(session, rows, "discord")
+    event.remove(engine, "before_cursor_execute", count)
+    assert [shown[row.id] for row in rows] == ["routine", None, "agent", None], "who decides"
+    async with db_session_factory() as session:
+        each = [await opted_in_by(session, row, "discord") for row in rows]
+    assert each == [shown[row.id] for row in rows], "as the single read"
+    assert len(statements) == 1, f"one read for the whole list: {statements}"
 
 
 async def test_a_dm_routine_takes_no_on_of_its_own(db_session: AsyncSession) -> None:

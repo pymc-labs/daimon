@@ -51,6 +51,7 @@ from daimon.core.stores.domain import (
 )
 from daimon.core.stores.feature_values import (
     get_feature_value,
+    keyed_values,
     list_feature_values,
     place_values,
 )
@@ -70,6 +71,7 @@ __all__ = [
     "current_agent_pin",
     "current_pin",
     "opted_in_by",
+    "opted_in_by_many",
     "own_opt_in",
     "routine_place",
     "routine_sandbox",
@@ -327,13 +329,37 @@ async def _deciding(
     return _decision(row, settings, platform, stored)
 
 
+async def opted_in_by_many(
+    session: AsyncSession, rows: Sequence[RoutineRow], platform: str
+) -> dict[uuid.UUID, PinnedTier | None]:
+    """`opted_in_by` for every routine of a list in one read per workspace, so a list of
+    routines costs no read per row."""
+    found: dict[uuid.UUID, PinnedTier | None] = {}
+    for tenant_id in {row.tenant_id for row in rows}:
+        mine = [row for row in rows if row.tenant_id == tenant_id]
+        stored = await keyed_values(
+            session,
+            tenant_id=tenant_id,
+            key=SANDBOX_KEY,
+            agent_ids={row.agent_id for row in mine},
+            routine_ids={row.id for row in mine},
+        )
+        for row in mine:
+            decided = _decision(row, None, platform, stored)
+            found[row.id] = (
+                None
+                if decided is None or decided.pin is None
+                else "agent"
+                if decided.tier == "agent"
+                else "routine"
+            )
+    return found
+
+
 async def opted_in_by(session: AsyncSession, row: RoutineRow, platform: str) -> PinnedTier | None:
     """Whose pinned On the routine runs under, its own or its agent's; None when off.
     What every surface shows; each run also checks the pin still matches (`routine_sandbox`)."""
-    found = await _deciding(session, None, row, platform)
-    if found is None or found.pin is None:
-        return None
-    return "agent" if found.tier == "agent" else "routine"
+    return (await opted_in_by_many(session, [row], platform))[row.id]
 
 
 async def own_opt_in(
