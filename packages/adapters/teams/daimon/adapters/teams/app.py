@@ -1390,7 +1390,9 @@ class TeamsApp:
     async def _answer_burst(self, key: str, tenant_id: uuid.UUID, inbound: TeamsInbound) -> None:
         """A personal chat's burst, as on Discord and Slack (`DmBurst`): its first message
         waits for the rest (`dm_debounce_seconds`), and what arrives while it waits or a
-        turn runs joins it with 👀 (`_orchestrate`), so one turn answers each group.
+        turn runs joins it with 👀 (`_orchestrate`), so one turn answers each group. A chat
+        with no agent is routed first (`route_personal_chat`), held while the person picks;
+        a refusal or an expired pick settles the burst.
 
         Opened before any await, so no message slips past it into the chat's queue. As
         that queue's drain does, an error or cancellation leaves only the messages no turn
@@ -1398,20 +1400,37 @@ class TeamsApp:
         """
         burst = self._dm_bursts.open(key, inbound)
         taken: set[int] = set()
+        mark = self._burst_mark(tenant_id)
 
         async def answer(group: list[TeamsInbound]) -> None:
             taken.update(map(id, group))
             await self._run_turns(key, tenant_id, group)
 
         try:
+            routed = await route_personal_chat(
+                self.runtime,
+                inbound,
+                tenant_id=tenant_id,
+                post=self._post_to(inbound),
+                burst=burst,
+                mark=mark,
+            )
+            if not routed:
+                if not burst.stopped:  # one notice speaks for the whole burst
+                    await self._finish(await self._dm_bursts.end(key, burst))
+                return
             seconds = await debounce_seconds(
                 self.runtime.sessionmaker, self.runtime.settings, tenant_id, "teams"
             )
-            await burst.answer(seconds, self._burst_mark(tenant_id), answer)
+            await burst.answer(seconds, mark, answer)
         finally:
             left = await self._dm_bursts.end(key, burst)
             if left := [item for item in left if id(item) not in taken]:
                 self._pending.setdefault(key, []).extend(left)
+
+    def wake_dm(self, chat: str) -> None:
+        """An agent was picked for personal chat `chat`: its held burst, if here, looks now."""
+        self._dm_bursts.wake(chat)
 
     def _burst_mark(self, tenant_id: uuid.UUID) -> BurstMark[TeamsInbound]:
         """A burst's 👀, only where admission would let the message start a turn."""

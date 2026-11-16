@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
+from time import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -16,10 +18,12 @@ from daimon.adapters.teams.personal_chat import (
     TeamsDmPick,
     route_personal_chat,
 )
-from daimon.adapters.teams.runtime import DmPick, TeamsRuntime
+from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core import dm_debounce
 from daimon.core.authz import AgentRef
 from daimon.core.direct_messages import DM_AGENT_REFUSED, dm_permission_text
 from daimon.core.dm_access import DmAgent
+from daimon.core.dm_debounce import PICK_EXPIRED, DmBurst
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores import dm_access as dm_store
 from daimon.core.stores.direct_messages import set_dm_enabled
@@ -52,14 +56,24 @@ async def _route(
     inbound: TeamsInbound | None = None,
     *,
     runtime: TeamsRuntime | None = None,
+    burst: DmBurst[TeamsInbound] | None = None,
+    marks: list[tuple[str, bool]] | None = None,
 ) -> tuple[bool, list[MessageActivityInput]]:
     posted: list[MessageActivityInput] = []
 
     async def post(card: MessageActivityInput) -> None:
         posted.append(card)
 
+    async def mark(item: TeamsInbound, on: bool) -> None:
+        (marks if marks is not None else []).append((item.text, on))
+
     answered = await route_personal_chat(
-        runtime or build_teams_runtime(db), inbound or make_inbound(), tenant_id=TENANT, post=post
+        runtime or build_teams_runtime(db),
+        inbound or make_inbound(),
+        tenant_id=TENANT,
+        post=post,
+        burst=burst,
+        mark=mark,
     )
     return answered, posted
 
@@ -112,13 +126,14 @@ async def test_route_personal_chat_when_several_agents_then_offers_a_button_each
 ) -> None:
     _agents(monkeypatch, "alpha", "beta")
     answered, posted = await _route(db_session_factory)
-    assert not answered, "nothing answers until the person picks"
+    assert not answered, "with no burst to hold, nothing answers"
     body = _card(posted).get("body", [])
     actions = [a for block in body if block["type"] == "ActionSet" for a in block["actions"]]
     assert [(a["title"], a["verb"], a["data"]["agent"]) for a in actions] == [
         ("alpha", VERB, "alpha"),
         ("beta", VERB, "beta"),
     ], "one button per agent"
+    assert all(a["data"]["until"] > time() for a in actions), "each button carries its expiry"
     assert await _bound(db_session_factory) is None, "no agent pinned before the pick"
 
 
@@ -155,9 +170,9 @@ async def test_route_personal_chat_when_team_roster_unreadable_then_fails_closed
     assert await _bound(db_session_factory) is None, "nothing pinned"
 
 
-def _click(agent: str) -> Any:
+def _click(agent: str, until: int) -> Any:
     activity = SimpleNamespace(
-        value=SimpleNamespace(action=SimpleNamespace(data={"agent": agent})),
+        value=SimpleNamespace(action=SimpleNamespace(data={"agent": agent, "until": until})),
         conversation=SimpleNamespace(id=CONVERSATION_ID, conversation_type="personal"),
         reply_to_id="1700000000000",
         id="click-1",
@@ -169,49 +184,86 @@ def _click(agent: str) -> Any:
 
 
 async def _pick(
-    runtime: TeamsRuntime, monkeypatch: pytest.MonkeyPatch, agent: str
-) -> tuple[Any, list[TeamsInbound]]:
+    runtime: TeamsRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+    agent: str,
+    *,
+    wake: list[str],
+    until: int = 9_999_999_999,
+) -> Any:
     async def actor(*_: object, **__: object) -> Actor:
         return Actor(AAD_OBJECT_ID, TENANT, False, CONVERSATION_ID)
 
     monkeypatch.setattr(personal_chat, "card_actor", actor)
-    sent: list[TeamsInbound] = []
-    picker = TeamsDmPick(runtime, dispatch=sent.append)
-    return await picker._on_action(_click(agent)), sent  # pyright: ignore[reportPrivateUsage]
+    picker = TeamsDmPick(runtime, wake=wake.append)
+    return await picker._on_action(_click(agent, until))  # pyright: ignore[reportPrivateUsage]
 
 
+async def _held(
+    db: async_sessionmaker[AsyncSession], runtime: TeamsRuntime, first: TeamsInbound
+) -> tuple[asyncio.Task[tuple[bool, list[MessageActivityInput]]], DmBurst[TeamsInbound], list[Any]]:
+    """Route `first` with a burst, until the card is up and the burst holds."""
+    burst, marks = DmBurst(first, lambda item: item.text), list[tuple[str, bool]]()
+    routing = asyncio.create_task(_route(db, first, runtime=runtime, burst=burst, marks=marks))
+    while not marks:
+        await asyncio.sleep(0.01)
+    return routing, burst, marks
+
+
+@pytest.mark.parametrize("here", [True, False], ids=["this process", "another process"])
 async def test_dm_pick_when_allowed_then_pins_and_answers_every_held_message(
-    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    here: bool,
 ) -> None:
-    """Messages sent while the card is open join it, as on Slack: one card, one answer."""
+    """As on Discord and Slack: one card, 👀 while held, one answer for the burst."""
     _agents(monkeypatch, "alpha", "beta")
+    monkeypatch.setattr(dm_debounce, "RECHECK_S", 0.05)
     runtime = build_teams_runtime(db_session_factory)
-    first = await _route(db_session_factory, make_inbound("hello"), runtime=runtime)
-    later = await _route(db_session_factory, make_inbound("and this"), runtime=runtime)
-    assert (first[0], len(first[1])) == (False, 1), "the first message gets the card"
-    assert later == (False, []), "a later message waits on the same card"
+    routing, burst, marks = await _held(db_session_factory, runtime, make_inbound("hello"))
+    burst.add(make_inbound("and this"))
 
-    reply, sent = await _pick(runtime, monkeypatch, "beta")
+    woken: list[str] = []
+    reply = await _pick(runtime, monkeypatch, "beta", wake=woken)
+    if here:
+        burst.wake()  # the app wakes its own burst; another process's finds the binding
+    answered, posted = await asyncio.wait_for(routing, 5)
 
+    assert answered and len(posted) == 1, "the held burst answers once picked"
     assert await _bound(db_session_factory) == "beta", "the chat is pinned to the pick"
-    assert [i.text for i in sent] == ["hello\n\nand this"], "one turn answers both"
-    assert (sent[0].activity_id, sent[0].from_form) == ("click-1", True), "under the click's id"
+    assert [i.text for i in burst.unanswered] == ["hello", "and this"], "both wait for one turn"
+    assert marks == [("hello", True)], "the held message shows 👀"
+    assert woken == [CONVERSATION_ID], "the click wakes the chat's burst"
     assert "You chose beta." in str(reply.value), "the card says what was chosen"
-    assert CONVERSATION_ID not in runtime.dm_picks, "the choice is closed"
 
 
-async def test_dm_pick_when_nothing_is_held_then_asks_to_send_again(
+async def test_dm_pick_when_not_made_in_time_then_told_and_a_late_click_refused(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A card from an expired choice, or another process, pins but has nothing to answer."""
+    _agents(monkeypatch, "alpha", "beta")
+    monkeypatch.setattr(personal_chat, "PICK_SECONDS", 0.05)
+    runtime = build_teams_runtime(db_session_factory)
+    routing, _, _ = await _held(db_session_factory, runtime, make_inbound("hello"))
+    answered, posted = await asyncio.wait_for(routing, 5)
+    assert not answered, "nothing answers an unpicked burst"
+    assert PICK_EXPIRED.split("\n", 1)[0] in str(_card(posted[1:])), "the person is told"
+
+    woken: list[str] = []
+    reply = await _pick(runtime, monkeypatch, "alpha", wake=woken, until=int(time()) - 1)
+    assert PICK_EXPIRED.split("\n", 1)[0] in str(reply.value), "a late click is refused"
+    assert not woken and await _bound(db_session_factory) is None, "nothing pinned"
+
+
+async def test_dm_pick_when_the_process_stops_meanwhile_then_holds_nothing_unsaid(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The app keeps a stopped burst for the next boot, so no expiry is said."""
     _agents(monkeypatch, "alpha", "beta")
     runtime = build_teams_runtime(db_session_factory)
-    await _route(db_session_factory, runtime=runtime)
-    runtime.dm_picks[CONVERSATION_ID].expires_at = 0.0
-    reply, sent = await _pick(runtime, monkeypatch, "alpha")
-    assert not sent, "nothing to answer"
-    assert await _bound(db_session_factory) == "alpha", "the pick still pins the chat"
-    assert "Send your message again." in str(reply.value), "the person is told what to do"
+    routing, burst, _ = await _held(db_session_factory, runtime, make_inbound("hello"))
+    burst.stop()
+    answered, posted = await asyncio.wait_for(routing, 5)
+    assert (answered, len(posted)) == (False, 1), "only the card was posted"
 
 
 async def test_dm_pick_when_a_lock_names_another_agent_then_refused_unpinned(
@@ -229,9 +281,7 @@ async def test_dm_pick_when_a_lock_names_another_agent_then_refused_unpinned(
             set_by=None,
             now=_NOW,
         )
-    runtime = build_teams_runtime(db_session_factory)
-    runtime.dm_picks[CONVERSATION_ID] = DmPick(("alpha", "beta"), [make_inbound()], 1e12)
-    reply, sent = await _pick(runtime, monkeypatch, "beta")
+    woken: list[str] = []
+    reply = await _pick(build_teams_runtime(db_session_factory), monkeypatch, "beta", wake=woken)
     assert reply.value == DM_AGENT_REFUSED, "the lock refuses another agent"
-    assert not sent and await _bound(db_session_factory) is None, "nothing pinned or answered"
-    assert CONVERSATION_ID in runtime.dm_picks, "the held message waits for an allowed pick"
+    assert not woken and await _bound(db_session_factory) is None, "nothing pinned or woken"

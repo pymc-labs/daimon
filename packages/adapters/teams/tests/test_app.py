@@ -225,6 +225,37 @@ async def test_a_personal_chat_burst_shows_one_eyes_and_merges_what_comes_during
         )
 
 
+@pytest.mark.parametrize("stopping", [False, True], ids=["refused or unpicked", "stopping"])
+async def test_a_personal_chat_burst_not_routed_is_settled_or_kept_for_the_next_boot(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    routed_personal_chat: AsyncMock,
+    stopping: bool,
+) -> None:
+    """One notice speaks for the burst: what joined it is settled unanswered, or, when the
+    process stops during the pick, held for the next boot."""
+    teams = _app(db_session_factory, FakeSender())
+    one, two = make_inbound("one"), make_inbound("two")
+
+    async def route(*_: object, **__: object) -> bool:
+        await teams._orchestrate(two, TENANT)  # pyright: ignore[reportPrivateUsage]
+        if stopping:
+            teams.draining = True
+            teams._dm_bursts.stop()  # pyright: ignore[reportPrivateUsage]
+        return False
+
+    routed_personal_chat.side_effect = route
+    with (
+        patch.object(TeamsApp, "_run_turn", new=AsyncMock()) as turn,
+        patch.object(TeamsApp, "_finish", new=AsyncMock(return_value=[])) as finish,
+        patch.object(TeamsApp, "_hold", new=AsyncMock()) as hold,
+    ):
+        await teams._orchestrate(one, TENANT)  # pyright: ignore[reportPrivateUsage]
+    turn.assert_not_awaited()
+    settled, untouched = (hold, finish) if stopping else (finish, hold)
+    settled.assert_awaited_once_with([one, two])
+    untouched.assert_not_awaited()
+
+
 @pytest.mark.parametrize(("kind", "replay"), [("dm", 12), ("channel", 100)])
 def test_a_personal_chat_reads_as_much_history_as_a_dm_conversation(kind: Any, replay: int) -> None:
     admission = SimpleNamespace(history_depth=HistoryDepth(), dm_history=DmHistoryCap())
