@@ -424,6 +424,17 @@ class DirectMessageCog(commands.Cog):
                 return await self._start(
                     message, only.tenant, only.admission, expected_scope_id=None
                 )
+        await self._offer(message, candidates, expected_scope_id=expected_scope_id)
+        return None
+
+    async def _offer(
+        self,
+        message: discord.Message | _DmRequest,
+        candidates: list[_Choice],
+        *,
+        expected_scope_id: str | None,
+    ) -> None:
+        """Post a selector of servers or agents; a click starts the chosen conversation."""
         key = (message.author.id, message.channel.id)
         pending = _PendingSelection(message, expected_scope_id, monotonic() + SELECTION_SECONDS)
         self._pending[key] = pending
@@ -526,7 +537,6 @@ class DirectMessageCog(commands.Cog):
             raise
         pending.selector_id = sent.id
         view.message = sent
-        return None
 
     async def _start(
         self,
@@ -680,6 +690,10 @@ class DirectMessageCog(commands.Cog):
                 admission = found.admission
                 if found.unknown:
                     text = "Server membership is temporarily unavailable. Please retry."
+                elif tenant is not None and found.agents:
+                    choices = [_Choice(tenant, None, name) for name in found.agents]
+                    await self._offer(request, choices, expected_scope_id=current.scope_id)
+                    text = "Choose who to talk to below."
                 elif tenant is None or admission is None:
                     text = "Couldn't start a new conversation."
                 elif await self._start(

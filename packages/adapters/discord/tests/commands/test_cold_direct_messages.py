@@ -1507,6 +1507,30 @@ async def test_several_agents_offer_a_dropdown_and_remember_the_pick(
     await cog.cog_unload()
 
 
+async def test_new_command_offers_the_agents_when_the_person_must_choose(
+    db_session_factory, monkeypatch
+):
+    """With no default left, /new asks who to talk to rather than failing."""
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    two_agents(cog, tenants[0])
+    msg = message()
+    await cog.on_message(msg)
+    old = await conversation(db_session_factory)
+    async with db_session_factory.begin() as session:
+        await set_dm_agent_name(session, tenant_id=tenants[0].id, agent_name=None)
+    command = interaction(channel=msg.channel)
+    await cog.new.callback(cog, command)
+    assert command.followup.send.await_args.args[0] == "Choose who to talk to below."
+    assert (await conversation(db_session_factory)).scope_id == old.scope_id, "nothing yet"
+    view = selector(msg)
+    assert [label for _, label in view.servers] == ["private-0", "private-1"]
+    await view.choose(interaction(), f"{tenants[0].id}/private-1")
+    new = await conversation(db_session_factory)
+    assert new.scope_id != old.scope_id and new.tenant_id == old.tenant_id
+    assert new.history == [] and reply.await_count == 1, "the new conversation starts empty"
+    await cog.cog_unload()
+
+
 async def test_a_lock_names_the_agent_and_skips_the_dropdown(db_session_factory, monkeypatch):
     cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
     two_agents(cog, tenants[0])
