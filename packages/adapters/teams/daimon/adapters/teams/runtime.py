@@ -58,6 +58,11 @@ class TeamsRuntime:
     # This process's message admissions; `hold_owner_key` makes it read as alive.
     owner_key: int = field(default_factory=lambda: randbits(63))
 
+    @property
+    def anthropic_configured(self) -> bool:
+        """Whether this release holds an Anthropic key: without one, nothing may call Anthropic."""
+        return self.settings.anthropic.api_key is not None
+
 
 # How often the owner connection is checked; a relock retries from 1 s up to the cap.
 OWNER_WATCH_INTERVAL_S = 15.0

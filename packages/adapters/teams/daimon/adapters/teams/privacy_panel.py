@@ -150,7 +150,10 @@ class PrivacyPanel:
         try:
             runtime = self._runtime
             result = await purge_account(
-                sm=runtime.sessionmaker, account_id=account_id, anthropic=runtime.anthropic
+                sm=runtime.sessionmaker,
+                account_id=account_id,
+                # With no Anthropic key, what it holds is queued for a later sweep to delete.
+                anthropic=runtime.anthropic if runtime.anthropic_configured else None,
             )
             log.info(
                 "teams.privacy.deleted",

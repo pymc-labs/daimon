@@ -751,8 +751,7 @@ class TeamsApp:
             if item.unprompted or item.conversation_id in told:
                 continue
             told.add(item.conversation_id)
-            with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                await self._say(item, notice, error=error)
+            await self._try_say(item, notice, error=error)
 
     async def _hold_arrival(self, activity: MessageActivity, service_url: str | None) -> None:
         """A message landing while the process drains: admit and hold it if it would
@@ -834,7 +833,7 @@ class TeamsApp:
         settings = self.runtime.settings
         public_url = str(settings.mcp.public_url) if settings.mcp.public_url else None
         await provision_configured_tenant(
-            anthropic=None if settings.anthropic.api_key is None else self.runtime.anthropic,
+            anthropic=self.runtime.anthropic if self.runtime.anthropic_configured else None,
             sessionmaker=self.runtime.sessionmaker,
             defaults_root=settings.defaults_root,
             deployment_default=self.runtime.deployment_default,
@@ -1074,14 +1073,17 @@ class TeamsApp:
 
     def _ignored_unprompted(self, parsed: TeamsInbound) -> bool:
         """An unaddressed thread reply with participation off asks nothing: drop it."""
-        unwanted = (
-            parsed.unprompted
-            and not parsed.by_name
-            and not may_turn_on(self.runtime.settings, "participation", "teams")
-        )
+        unwanted = parsed.unprompted and not parsed.by_name and not self._participates()
         if unwanted:
             log.debug("teams.message.ignored", conversation_type="channel", reason="disabled")
         return unwanted
+
+    def _participates(self) -> bool:
+        """Whether an unaddressed reply may be judged: by an Anthropic model, so never
+        without its key."""
+        return self.runtime.anthropic_configured and may_turn_on(
+            self.runtime.settings, "participation", "teams"
+        )
 
     async def _plain_text_mentions_on(self, channel_id: str | None = None) -> bool:
         """Read the typed-mention setting for a message that already names the bot as text.
@@ -1101,7 +1103,7 @@ class TeamsApp:
         # Off: a root post stays unanswered and a thread reply is screened as before.
         if not await self._finish([inbound]):
             return
-        if inbound.unprompted and may_turn_on(self.runtime.settings, "participation", "teams"):
+        if inbound.unprompted and self._participates():
             await self._observe(dataclasses.replace(inbound, by_name=False))
 
     def start_wizard_turn(self, inbound: TeamsInbound) -> None:
@@ -1201,6 +1203,22 @@ class TeamsApp:
             inbound.conversation_id, notice_card(text, error=error), service_url=inbound.service_url
         )
 
+    async def _try_say(
+        self, inbound: TeamsInbound, text: str, *, sender_only: bool = False, error: bool = True
+    ) -> None:
+        """`_say` when nothing more can be done about a failed send: it is logged, not raised."""
+        try:
+            await self._say(inbound, text, sender_only=sender_only, error=error)
+        except TEAMS_SEND_ERRORS as exc:
+            status, error_code = send_error_details(exc)
+            log.warning(
+                "teams.notice.send_failed",
+                conversation_type=inbound.kind,
+                reason=type(exc).__name__,
+                status=status,
+                error_code=error_code,
+            )
+
     async def _may_post(self, channel_id: str, thread_id: str) -> bool:
         """True only for an unprotected target; a protected or unreadable one gets nothing."""
         return (await self._post_state(channel_id, thread_id)).may_post
@@ -1251,8 +1269,7 @@ class TeamsApp:
                 command = (
                     inbound.handover_agent_id is None and self._private.command(inbound) is not None
                 )
-                with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                    await self._say(inbound, _FAILED, sender_only=command)
+                await self._try_say(inbound, _FAILED, sender_only=command)
 
     async def _route(self, inbound: TeamsInbound) -> None:
         if self._recovery is not None:
@@ -1372,8 +1389,7 @@ class TeamsApp:
                     await self._hold(unstarted)
             elif unstarted:
                 for item in await self._finish(unstarted):
-                    with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                        await self._say(item, _FAILED)
+                    await self._try_say(item, _FAILED)
 
     @property
     def _thread_queue(self) -> ThreadQueue[str, TeamsInbound]:
@@ -1410,8 +1426,7 @@ class TeamsApp:
         except _TURN_ERRORS as exc:
             log.error("teams.turn.failed", conversation_id=inbound.conversation_id, exc_info=exc)
             capture_exception_with_scope(exc)
-            with contextlib.suppress(*TEAMS_SEND_ERRORS):
-                await self._say(inbound, _FAILED)
+            await self._try_say(inbound, _FAILED)
 
     async def _run_turn(
         self,
@@ -1461,7 +1476,9 @@ class TeamsApp:
             channel_id=inbound.channel_id,
             thread_id=inbound.thread_id if inbound.kind != "dm" else None,
             caller_id=inbound.user_id,
-            force=False,
+            # Without an Anthropic key only a selfhosted conversation can be answered:
+            # admission refuses any other before it reaches Anthropic.
+            force=not self.runtime.anthropic_configured,
         ):
             return await self._run_turn_observed_guarded(
                 inbound, tenant_id, handoff=handoff, reraise=reraise, continuation=continuation

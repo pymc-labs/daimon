@@ -111,6 +111,7 @@ class Replay:
             ("supersede", item.activity_id)
         )
         self.obj._say = self.say
+        self.obj._try_say = self.say
         self.obj._spawn = self.spawn
         self.obj.spawn = self.spawn
         # The base never removes ⌛, so removals stay out of the compared effects.

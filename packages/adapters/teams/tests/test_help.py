@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -121,7 +122,7 @@ async def test_send_help_picks_the_card_for_where_help_was_sent(
         tenant_id=uuid.uuid4(),
         args="",
         is_admin=False,
-        runtime=cast(TeamsRuntime, None),
+        runtime=cast(TeamsRuntime, SimpleNamespace(anthropic_configured=True)),
         send=send,
         asked_in=make_inbound(kind=asked_kind) if asked_kind else None,
     )

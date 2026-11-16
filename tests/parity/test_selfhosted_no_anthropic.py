@@ -303,7 +303,9 @@ async def test_selfhosted_adapter_turn_enters_guard_before_dispatch(
             managed_agents(client)
 
     app = MagicMock()
-    app.runtime = SimpleNamespace(sessionmaker=db_session_factory, anthropic=client)
+    app.runtime = SimpleNamespace(
+        sessionmaker=db_session_factory, anthropic=client, anthropic_configured=True
+    )
     if platform == "discord":
         app._orchestrate_observed_guarded = AsyncMock(side_effect=probe)
         message = MagicMock(spec=discord.Message)

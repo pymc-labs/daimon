@@ -32,7 +32,14 @@ from daimon.core.errors import DaimonError
 from daimon.core.features.service import FeatureActor
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.features.surface import parse_choice
-from daimon.core.settings_panel import PanelScreen, chat_actor, open_panel, press, tenant_agents
+from daimon.core.settings_panel import (
+    AgentLoader,
+    PanelScreen,
+    chat_actor,
+    open_panel,
+    press,
+    tenant_agents,
+)
 from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import Action, ActionSet, AdaptiveCard, CardElement, TextBlock
@@ -102,6 +109,11 @@ async def _actor(
     )
 
 
+def _agents(runtime: TeamsRuntime, tenant_id: uuid.UUID) -> AgentLoader | None:
+    """The agents a feature can be set for, listed from Anthropic: none without its key."""
+    return tenant_agents(runtime.anthropic, tenant_id) if runtime.anthropic_configured else None
+
+
 async def show_settings(context: CommandContext) -> None:
     runtime, asked = context.runtime, context.asked_in or context.inbound
     if asked.kind != "channel":
@@ -115,7 +127,7 @@ async def show_settings(context: CommandContext) -> None:
             runtime.settings,
             actor,
             place,
-            agents=tenant_agents(runtime.anthropic, context.tenant_id),
+            agents=_agents(runtime, context.tenant_id),
         )
     except (DaimonError, SQLAlchemyError) as exc:
         log.warning("teams.settings.failed", exc_info=exc)
@@ -169,7 +181,7 @@ class SettingsActions:
                 await _actor(self.runtime, actor.tenant_id, actor.user_id, actor.admin_for),
                 raw,
                 place,
-                agents=tenant_agents(self.runtime.anthropic, actor.tenant_id),
+                agents=_agents(self.runtime, actor.tenant_id),
             )
         except (DaimonError, SQLAlchemyError) as exc:
             log.warning("teams.settings.change_failed", exc_info=exc)

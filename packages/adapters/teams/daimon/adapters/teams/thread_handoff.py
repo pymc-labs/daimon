@@ -29,6 +29,7 @@ from daimon.adapters.teams.card_actions import (
     submitted_fields,
     toast,
 )
+from daimon.adapters.teams.commands import anthropic_refusal
 from daimon.adapters.teams.identity import (
     DENIED,
     TeamsInbound,
@@ -79,6 +80,9 @@ class TeamsThreadHandoff:
     async def on_action(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
     ) -> AdaptiveCardInvokeResponse:
+        # Switching names an agent read from Anthropic.
+        if refusal := anthropic_refusal(self._runtime, "Switching agents"):
+            return toast(refusal)
         return await guarded(self._on_action(ctx), toast(FAILED), "teams.thread_handoff.failed")
 
     async def _on_action(

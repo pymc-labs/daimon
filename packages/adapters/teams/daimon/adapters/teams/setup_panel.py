@@ -45,7 +45,7 @@ from daimon.adapters.teams.card_actions import (
     toast,
     web_links,
 )
-from daimon.adapters.teams.commands import CommandContext
+from daimon.adapters.teams.commands import CommandContext, anthropic_refusal
 from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import (
@@ -122,6 +122,8 @@ DM_ONLY = "Open setup from our 1:1 chat to start a setup conversation."
 STARTED = "Setup conversation started. Reply in this chat."
 ALREADY_ENDED = "This setup conversation has already ended."
 _NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# What a press here refuses on a release that holds no Anthropic key.
+_SETUP = "`setup`"
 
 
 _NEW_AGENT_TITLE = "New agent"
@@ -195,11 +197,18 @@ class SetupPanel:
     async def on_action(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
     ) -> AdaptiveCardInvokeResponse:
+        # Ending a setup conversation is the one press here that reads no agent.
+        if ctx.activity.value.action.data.get("op") != "end" and (
+            refusal := anthropic_refusal(self._runtime, _SETUP)
+        ):
+            return toast(refusal)
         return await _guarded(self._act(ctx), toast(FAILED))
 
     async def on_create_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
+        if refusal := anthropic_refusal(self._runtime, _SETUP):
+            return dialog_notice(_NEW_AGENT_TITLE, refusal)
         if await card_actor(self._runtime, ctx.activity) is None:
             return dialog_notice(_NEW_AGENT_TITLE, DENIED)
         return dialog(_NEW_AGENT_TITLE, cards.new_agent_form(_models(), {}))
@@ -207,11 +216,15 @@ class SetupPanel:
     async def on_create_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
     ) -> TaskModuleInvokeResponse:
+        if refusal := anthropic_refusal(self._runtime, _SETUP):
+            return dialog_message(refusal)
         return await _guarded(self._create(ctx), dialog_message(FAILED))
 
     async def on_token_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
+        if refusal := anthropic_refusal(self._runtime, _SETUP):
+            return _token_notice(refusal)
         return await _guarded(self._mint(ctx.activity), _token_notice(FAILED))
 
     async def on_token_submit(
@@ -232,11 +245,15 @@ class SetupPanel:
     async def on_skill_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
+        if refusal := anthropic_refusal(self._runtime, _SETUP):
+            return dialog_notice(_SKILL_TITLE, refusal)
         return await _guarded(self._skill_open(ctx.activity), dialog_notice(_SKILL_TITLE, FAILED))
 
     async def on_skill_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
     ) -> TaskModuleInvokeResponse:
+        if refusal := anthropic_refusal(self._runtime, _SETUP):
+            return dialog_message(refusal)
         return await _guarded(self._skill_submit(ctx), dialog_message(FAILED))
 
     async def _skill_target(self, actor: Actor, name: str) -> RosterAgent | None:
@@ -847,6 +864,8 @@ class SetupPanel:
         data = submitted_fields(activity.value.data)
         if data.get("op") != "mint":
             return await self._revoke(activity)
+        if refusal := anthropic_refusal(self._runtime, _SETUP):
+            return dialog_message(refusal)
         actor = await card_actor(self._runtime, activity)
         if actor is None:
             return dialog_message(DENIED)

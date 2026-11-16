@@ -33,6 +33,7 @@ from daimon.adapters.teams.card_actions import (
     error_text,
     submitted_fields,
 )
+from daimon.adapters.teams.commands import anthropic_refusal
 from daimon.adapters.teams.credential_repos import attach_imported_skills, store_agent_pat
 from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender
@@ -285,6 +286,8 @@ def oauthdialog(row: CredentialRequestRow, url: str) -> TaskModuleResponse:
 
 
 _REQUEST_TITLE = "Credential request"
+# An answer is saved to its agent at Anthropic, so it is refused without the key.
+_ANSWERING = "Answering credential requests"
 
 
 def _notice(text: str, row: CredentialRequestRow | None = None) -> TaskModuleResponse:
@@ -320,11 +323,15 @@ class TeamsCredentialRequests:
     async def on_dialog_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
+        if refusal := anthropic_refusal(self._runtime, _ANSWERING):
+            return _notice(refusal)
         return await _guarded(self._open(ctx.activity), _notice(FAILED))
 
     async def on_dialog_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
     ) -> TaskModuleInvokeResponse:
+        if refusal := anthropic_refusal(self._runtime, _ANSWERING):
+            return dialog_message(refusal)
         return await _guarded(self._submit(ctx.activity), dialog_message(FAILED))
 
     async def _checked(

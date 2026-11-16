@@ -495,6 +495,23 @@ async def test_a_failing_command_is_answered(
 
 
 @pytest.mark.usefixtures("provisioned_tenant")
+async def test_an_error_card_teams_refuses_is_logged(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender = FakeSender(fail_on={0})
+    teams = TeamsApp(
+        runtime=build_teams_runtime(db_session_factory),
+        sender=sender,
+        commands={"new": AsyncMock(side_effect=DaimonError("database unavailable"))},
+        bot_token=bot_token,
+    )
+    with structlog.testing.capture_logs() as logs:
+        await teams._handle(make_inbound("new"))
+    unsent = [log for log in logs if log["event"] == "teams.notice.send_failed"]
+    assert [(log["conversation_type"], log["reason"]) for log in unsent] == [("dm", "ConnectError")]
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
 async def test_a_failing_channel_command_is_answered_to_its_sender_alone(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

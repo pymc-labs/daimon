@@ -10,6 +10,7 @@ grants nothing.
 from __future__ import annotations
 
 import uuid
+from contextlib import nullcontext
 from datetime import UTC, datetime
 
 import structlog
@@ -26,7 +27,7 @@ from daimon.adapters.teams.card_actions import (
     toast,
     web_links,
 )
-from daimon.adapters.teams.commands import CommandContext
+from daimon.adapters.teams.commands import CommandContext, anthropic_refusal
 from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.routines_card import (
     FORM_FIELDS,
@@ -40,6 +41,7 @@ from daimon.adapters.teams.routines_card import (
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core import routine_service
 from daimon.core.admin_actions import DelegatedAction
+from daimon.core.anthropic_guard import without_anthropic
 from daimon.core.authz import build_subject
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -78,6 +80,8 @@ GONE = "This routine no longer exists."
 NOT_OWNER = "Only the routine's creator or an admin can do that."
 ADMIN_ONLY = "Only an admin can create routines."
 NEW_ROUTINE = "New routine"
+# A new routine names an agent, listed from Anthropic.
+_CREATING = "Creating a routine"
 _EVENT = "teams.routines.failed"
 
 
@@ -101,16 +105,23 @@ class RoutinesPanel:
     async def on_action(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
     ) -> AdaptiveCardInvokeResponse:
-        return await guarded(self._act(ctx.activity), toast(FAILED), _EVENT)
+        # Without an Anthropic key, a channel kept to its own agents is read from
+        # Daimon's own records.
+        with nullcontext() if self._runtime.anthropic_configured else without_anthropic():
+            return await guarded(self._act(ctx.activity), toast(FAILED), _EVENT)
 
     async def on_dialog_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
+        if refusal := anthropic_refusal(self._runtime, _CREATING):
+            return dialog_notice(NEW_ROUTINE, refusal)
         return await guarded(self._open(ctx.activity), dialog_notice(NEW_ROUTINE, FAILED), _EVENT)
 
     async def on_dialog_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
     ) -> TaskModuleInvokeResponse:
+        if refusal := anthropic_refusal(self._runtime, _CREATING):
+            return dialog_message(refusal)
         return await guarded(self._submit(ctx), dialog_message(FAILED), _EVENT)
 
     async def _panel(

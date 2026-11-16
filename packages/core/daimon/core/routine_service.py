@@ -20,6 +20,7 @@ from typing import Literal, Protocol
 from anthropic import AsyncAnthropic
 from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
 from daimon.core.agent_pins import agent_aliases
+from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.cron import InvalidScheduleError, validated_next_slot
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
@@ -33,6 +34,7 @@ from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import CatchUpPolicy, RoutineDestinationKind, RoutineRow
+from daimon.core.stores.selfhosted_resources import list_live_agent_facts
 from daimon.core.turn_hold import TurnHold
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -267,7 +269,11 @@ def isolation_view_loader(
             policy = await _load_policy(session, tenant_id)
         if not any_own_readers(policy):
             return CallView(viewer=RuleViewer(policy=policy))
-        agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
+        if anthropic_disabled():
+            async with sessionmaker() as session:
+                agents = await list_live_agent_facts(session, tenant_id=tenant_id)
+        else:
+            agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
         return CallView(
             viewer=RuleViewer(
                 policy,

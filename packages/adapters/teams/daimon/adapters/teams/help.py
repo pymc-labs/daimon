@@ -11,7 +11,7 @@ from collections.abc import Collection
 
 from daimon.adapters.teams.card_actions import heading
 from daimon.adapters.teams.commands import CommandContext
-from daimon.adapters.teams.private_replies import IN_THREAD
+from daimon.adapters.teams.private_replies import IN_THREAD, NEEDS_ANTHROPIC
 from daimon.core.platform_words import DESCRIPTIONS, WORDS, Action, Place
 from microsoft_teams.cards import AdaptiveCard, CardElement, Fact, FactSet, TextBlock
 
@@ -88,8 +88,12 @@ def help_card(
 
 
 async def send_help(context: CommandContext, *, names: Collection[str]) -> None:
-    """Answer in the card for where `help` was sent: `asked_in` when it moved to the 1:1 chat."""
+    """Answer in the card for where `help` was sent: `asked_in` when it moved to the 1:1 chat.
+
+    A release with no Anthropic key offers none of the commands that need it."""
     place = (context.asked_in or context.inbound).kind
+    if not context.runtime.anthropic_configured:
+        names = [name for name in names if name not in NEEDS_ANTHROPIC]
     await context.send_card(
         help_card(
             names,

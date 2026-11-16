@@ -1135,6 +1135,15 @@ async def _admit_gates(
     if anthropic_disabled() and (
         backend_revision is None or backend_revision.backend != LOOP.provider
     ):
+        # The IDs `build_selfhosted_runtime` logs when no grant matches, so an
+        # operator can grant this place and person.
+        _log.warning(
+            "selfhosted.grant_missing",
+            tenant_id=str(tenant_id),
+            platform=platform,
+            channel_id=channel_id,
+            account_id=str(principal.account_id),
+        )
         raise AdmissionDenied(reason="backend_unsupported")
 
     # --- Missing config check (before any MA call) ---

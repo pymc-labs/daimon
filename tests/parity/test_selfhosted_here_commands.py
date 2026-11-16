@@ -59,6 +59,7 @@ async def test_here_command_resolves_local_card_without_anthropic(
     runtime = SimpleNamespace(
         sessionmaker=db_session_factory,
         anthropic=cast(AsyncAnthropic, NoAnthropic()),
+        anthropic_configured=True,
         deployment_default=DeploymentDefault(agent_name="Local Researcher"),
         settings=Settings(
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),

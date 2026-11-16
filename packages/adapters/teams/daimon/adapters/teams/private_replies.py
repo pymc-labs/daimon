@@ -29,6 +29,7 @@ from daimon.adapters.teams.commands import (
     NO_CHAT_ACROSS_ORGS,
     CommandContext,
     CommandHandler,
+    anthropic_refusal,
     parse_command,
 )
 from daimon.adapters.teams.direct_chats import DirectChats
@@ -51,6 +52,9 @@ warnings.filterwarnings(
 
 # Commands answered privately in the thread; the rest keep the 1:1 chat.
 IN_THREAD = frozenset({"help", "here", "settings", "memory", "routines", "billing", "privacy"})
+# Commands that read their agents from Anthropic: a release with no Anthropic key
+# answers them with a notice where they were typed.
+NEEDS_ANTHROPIC = frozenset({"setup", "memory"})
 NOT_YET_PRIVATE = (
     "Private questions aren't supported yet. Mention {bot} here to ask openly, "
     "or ask me in our 1:1 chat."
@@ -201,6 +205,9 @@ class PrivateReplies:
             await self.tell_sender(inbound, notice.format(bot=bot))
             return
         name, args = command
+        if name in NEEDS_ANTHROPIC and (refusal := anthropic_refusal(self._runtime, f"`{name}`")):
+            await self.tell_sender(inbound, refusal)
+            return
         if inbound.kind == "dm":
             routed = await route_to_setup(self._runtime.sessionmaker, inbound, tenant_id)
             await self._invoke(name, args, routed, tenant_id, send=self._public(routed))

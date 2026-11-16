@@ -30,6 +30,7 @@ from daimon.adapters.teams.card_actions import (
     submitted_fields,
     web_links,
 )
+from daimon.adapters.teams.commands import anthropic_refusal
 from daimon.adapters.teams.deployment_admins import with_admin_team
 from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.runtime import TeamsRuntime
@@ -129,11 +130,16 @@ class ChannelSettingsDialog:
     async def on_open(
         self, ctx: ActivityContext[TaskFetchInvokeActivity]
     ) -> TaskModuleInvokeResponse:
+        # Opened from the setup card; its agents and environments come from Anthropic.
+        if refusal := anthropic_refusal(self._runtime, "`setup`"):
+            return dialog_notice(TITLE, refusal)
         return await _guarded(self._open(ctx.activity), dialog_notice(TITLE, FAILED))
 
     async def on_submit(
         self, ctx: ActivityContext[TaskSubmitInvokeActivity]
     ) -> TaskModuleInvokeResponse:
+        if refusal := anthropic_refusal(self._runtime, "`setup`"):
+            return dialog_message(refusal)
         return await _guarded(self._submit(ctx.activity), dialog_message(FAILED))
 
     async def _need_admin(self) -> str:

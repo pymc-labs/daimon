@@ -69,6 +69,8 @@ async def _load(context: CommandContext) -> HereCard:
             channel_id=asked.channel_id,
             thread_id=thread_id,
             caller_id=asked.user_id,
+            # Without an Anthropic key, every place is read from Daimon's own records.
+            force=not runtime.anthropic_configured,
         ),
         runtime.sessionmaker() as session,
     ):

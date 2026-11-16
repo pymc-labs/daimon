@@ -98,7 +98,7 @@ def _replies(
 
     names = ("help", "memory", "setup", "new")
     return PrivateReplies(
-        runtime=runtime or cast(TeamsRuntime, SimpleNamespace()),
+        runtime=runtime or cast(TeamsRuntime, SimpleNamespace(anthropic_configured=True)),
         sender=sender,
         commands=dict.fromkeys(names, _answer),
         direct=cast(Any, direct),

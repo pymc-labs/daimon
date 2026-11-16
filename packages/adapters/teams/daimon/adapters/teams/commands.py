@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+import structlog
 from daimon.adapters.teams.card import notice_card
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.runtime import TeamsRuntime
@@ -22,6 +23,8 @@ from daimon.core.stores.thread_sessions import get_live_thread_session
 from microsoft_teams.api import MessageActivityInput, SentActivity
 from microsoft_teams.cards import AdaptiveCard
 
+log = structlog.get_logger()
+
 CHANNEL_POINTER = "Commands work in our 1:1 chat. Open a chat with me and send `{name}` there."
 ANSWERED_IN_CHAT = "I've answered `{name}` in our 1:1 chat."
 NO_CHAT_ACROSS_ORGS = (
@@ -29,6 +32,7 @@ NO_CHAT_ACROSS_ORGS = (
     "Ask someone in the organisation that added Daimon."
 )
 NEW_IN_CHANNEL = "Each post is its own conversation: start a new post to begin afresh."
+NOT_ON_THIS_INSTALL = "{what} isn't available on this Daimon install.\n\nAsk whoever runs Daimon."
 
 
 @dataclass(frozen=True)
@@ -49,6 +53,15 @@ class CommandContext:
 
 
 CommandHandler = Callable[[CommandContext], Awaitable[None]]
+
+
+def anthropic_refusal(runtime: TeamsRuntime, what: str) -> str | None:
+    """The notice for `what`, which reads agents from Anthropic, on a release that holds
+    no Anthropic key, logged; None with a key."""
+    if runtime.anthropic_configured:
+        return None
+    log.info("teams.command.unavailable", what=what, reason="no_anthropic_key")
+    return NOT_ON_THIS_INSTALL.format(what=what)
 
 
 def parse_command(text: str, names: Mapping[str, CommandHandler]) -> tuple[str, str] | None:
