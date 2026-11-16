@@ -12,11 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Operators set `DAIMON_WATCHES__CALLBACK_BASE_URL`; a callback watch lasts the
   `callback_watch_lifetime` feature (30 days by default, or permanent) and a post
   may carry up to `DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES` (4 KiB by default).
-  `daimon watches import` also carries over such watches and held reminders, and
-  `confirm-timers` schedules them. Reminders fire in the private conversation, thread
-  or channel they came from, only while the agent may post there and the owner can
-  still see it. A rerun updates what is not yet confirmed, `--full` cancels what
-  the file dropped, and `unpause`, `renew` and `rotate-link` manage what came in.
+  `daimon watches import` also carries over such watches and held reminders from
+  every file of an export, and `daimon watches go-live` makes everything an import
+  holds for an agent live in one step, in place of `daimon watches confirm`.
+  Reminders fire in the private conversation, thread or channel they came from,
+  only while the agent may post there and the owner can still see it. A rerun
+  updates what has not gone live, `--full` cancels what no file of the run lists,
+  and `unpause`, `renew` and `rotate-link` manage what came in.
   Moving people in never messages them.
 - **Operators can move people in from another bot.** `daimon tags import` opts
   listed Discord members out of being tagged. `daimon dm import-history` holds

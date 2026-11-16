@@ -1,4 +1,4 @@
-"""Operator-only offline import and explicit binding confirmation."""
+"""Operator-only offline import of watches and reminders, and making them live."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import uuid
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -33,11 +34,11 @@ from daimon.core.stores.watches import (
     WatchRow,
     callback_lifetime,
     confirm_import,
-    get_watch,
     import_callback_watch,
     import_watch,
     list_notice_receipts,
     list_tenant_watches,
+    list_unconfirmed_imports,
     renew_callback_watch,
     rotate_callback_link,
     set_watch_limits,
@@ -46,8 +47,8 @@ from daimon.core.stores.watches import (
 )
 
 watches_app = typer.Typer(
-    help="List a tenant's watches and their owner-notice receipts, import paused watches, "
-    "confirm reviewed bindings and set daily firing limits."
+    help="List a tenant's watches and their owner-notice receipts, import paused watches "
+    "and reminders, make them live and set daily firing limits."
 )
 limits_app = typer.Typer(help="Daily firing limits for every watch, or one tenant's.")
 watches_app.add_typer(limits_app, name="limits")
@@ -236,7 +237,7 @@ def import_command(
 
     Give every file of one export in the same run. Their server must be the tenant's.
     Callback watches keep their token hash and get a new link, written only to
-    --urls-out as {source id: url}. Timers are held until `confirm-timers`. A rerun updates
+    --urls-out as {source id: url}. Timers are held until `go-live`. A rerun updates
     what nobody has confirmed yet; with --full it also cancels held timers that no
     file lists, and refuses a run whose files list no timers.
     """
@@ -379,27 +380,64 @@ def import_command(
     asyncio.run(run())
 
 
-@watches_app.command("confirm-timers")
-def confirm_timers_command(
+@watches_app.command("go-live")
+def go_live_command(
     tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
     agent_id: Annotated[str, typer.Option("--agent-id")],
     agent_name: Annotated[str, typer.Option("--agent-name")],
 ) -> None:
-    """Schedule every unpaused held timer for this agent. Due and over-cap ones are skipped."""
+    """Make everything an import holds for this agent live. Safe to rerun.
 
-    async def run() -> None:
+    Each imported watch is confirmed on the owner, channel and thread the import
+    printed, and resumes unless it was paused where it came from. Each unpaused held
+    timer still more than a minute away is scheduled once; a due one is skipped. A
+    watch that cannot go live is listed with the reason and stays as it was.
+    """
+
+    async def run() -> tuple[Counter[str], Counter[str]]:
+        watches: Counter[str] = Counter()
         async with build_runtime(load_settings()) as runtime:
             await check_agent(runtime, tenant_id=tenant, agent_id=agent_id, agent_name=agent_name)
-            counts = await settle_held_timers(
+            async with runtime.sessionmaker() as db:
+                held = await list_unconfirmed_imports(db, tenant_id=tenant, agent_id=agent_id)
+            for watch in held:
+                if watch.source_state.get("tool") == "read_thread":
+                    typer.echo(
+                        f"Warning: {watch.id} reads messages, which needs a thread ID. "
+                        "Channel and DM IDs are unsupported; use read_channel for channels.",
+                        err=True,
+                    )
+                try:
+                    async with runtime.sessionmaker.begin() as db:
+                        row = await confirm_import(
+                            db,
+                            watch.id,
+                            tenant_id=tenant,
+                            owner_account_id=watch.owner_account_id,
+                            agent_id=agent_id,
+                            parent_channel_id=watch.parent_channel_id,
+                            thread_id=watch.thread_id,
+                            now=datetime.now(UTC),
+                        )
+                except ValueError as exc:
+                    watches["refused"] += 1
+                    typer.echo(f"{watch.id} not live: {exc}")
+                    continue
+                watches["live" if row.status == "active" else "kept_paused"] += 1
+            timers = await settle_held_timers(
                 runtime.sessionmaker,
                 tenant_id=tenant,
                 agent_id=agent_id,
                 agent_name=agent_name,
                 now=datetime.now(UTC),
             )
-        typer.echo(" ".join(f"{k}={n}" for k, n in sorted(counts.items())) or "no held timers")
+        return watches, Counter({str(k): n for k, n in timers.items()})
 
-    asyncio.run(run())
+    watches, timers = asyncio.run(run())
+    typer.echo(
+        "watches " + " ".join(f"{k}={watches[k]}" for k in ("live", "kept_paused", "refused"))
+    )
+    typer.echo("timers " + (" ".join(f"{k}={n}" for k, n in sorted(timers.items())) or "none"))
 
 
 @watches_app.command("unpause")
@@ -493,49 +531,6 @@ def rotate_link_command(
                 typer.echo(url)
             else:
                 typer.echo(f"{watch_id} link written")
-
-    asyncio.run(run())
-
-
-@watches_app.command("confirm")
-def confirm_command(
-    watch_id: uuid.UUID,
-    tenant_id: uuid.UUID,
-    owner_account_id: uuid.UUID,
-    agent_id: str,
-    parent_channel_id: str,
-    thread_id: str,
-) -> None:
-    """Confirm a mapped import's exact binding. Page watches first need owner key rotation."""
-
-    async def run() -> None:
-        async with build_runtime(load_settings()) as runtime:
-            async with runtime.sessionmaker() as db:
-                named = await get_watch(db, watch_id)
-            if named is not None and named.tenant_id == tenant_id and named.agent_id == agent_id:
-                # Only a watch of this tenant and agent is checked; confirm_import refuses the rest.
-                await check_agent(
-                    runtime, tenant_id=tenant_id, agent_id=agent_id, agent_name=named.agent_name
-                )
-            async with runtime.sessionmaker.begin() as db:
-                current = await get_watch(db, watch_id)
-                if current is not None and current.source_state.get("tool") == "read_thread":
-                    typer.echo(
-                        "Warning: imported message reads require a thread ID. "
-                        "Channel and DM IDs are unsupported; use read_channel for channel sources.",
-                        err=True,
-                    )
-                row = await confirm_import(
-                    db,
-                    watch_id,
-                    tenant_id=tenant_id,
-                    owner_account_id=owner_account_id,
-                    agent_id=agent_id,
-                    parent_channel_id=parent_channel_id,
-                    thread_id=thread_id,
-                    now=datetime.now(UTC),
-                )
-            typer.echo(f"{row.id} {row.status}")
 
     asyncio.run(run())
 

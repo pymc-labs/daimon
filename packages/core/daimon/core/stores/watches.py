@@ -2011,6 +2011,24 @@ async def unpause_imported_watch(
     return result
 
 
+async def list_unconfirmed_imports(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: str
+) -> list[WatchRow]:
+    """Paused imported watches of one tenant's agent that nobody has confirmed yet."""
+    rows = await session.scalars(
+        select(Watch)
+        .where(
+            Watch.tenant_id == tenant_id,
+            Watch.agent_id == agent_id,
+            Watch.status == "paused",
+            Watch.source_state.has_key("legacy_id"),
+            Watch.source_state["confirmed"].astext == "false",
+        )
+        .order_by(Watch.created_at, Watch.id)
+    )
+    return [WatchRow.model_validate(row) for row in rows]
+
+
 async def confirm_import(
     session: AsyncSession,
     watch_id: uuid.UUID,

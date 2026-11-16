@@ -1,6 +1,7 @@
 """Operator import CLI is discoverable and rejects oversized exports before parsing."""
 
 import uuid
+from collections import Counter
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from types import SimpleNamespace
@@ -19,13 +20,12 @@ def test_watch_import_cli_rejects_oversized_manifest(tmp_path):
     assert result.exit_code == 2 and "exceeds 1 MiB" in result.output
 
 
-def test_watch_confirm_requires_all_binding_fields():
-    result = CliRunner().invoke(watches_app, ["confirm", "--help"])
-    assert result.exit_code == 0
-    assert "OWNER_ACCOUNT_ID" in result.output
+def test_go_live_needs_the_tenant_and_agent():
+    result = CliRunner().invoke(watches_app, ["go-live", "--tenant", str(uuid.uuid4())])
+    assert result.exit_code == 2 and "--agent-id" in result.output, result.output
 
 
-@pytest.mark.parametrize("action", ["import", "confirm"])
+@pytest.mark.parametrize("action", ["import", "go-live"])
 def test_watch_cli_reports_mapping_errors_and_thread_only_confirmation(
     tmp_path, monkeypatch, action
 ):
@@ -81,40 +81,42 @@ def test_watch_cli_reports_mapping_errors_and_thread_only_confirmation(
         assert result.exit_code == 0, result.output
         assert "source_unmapped: Unsupported paging arguments" in result.output
     else:
+        watch = SimpleNamespace(
+            id=identifier,
+            source_state={"tool": "read_thread"},
+            owner_account_id=uuid.uuid4(),
+            parent_channel_id="4241",
+            thread_id="4242",
+        )
         monkeypatch.setattr(
-            watch_commands,
-            "get_watch",
-            AsyncMock(
-                return_value=SimpleNamespace(
-                    source_state={"tool": "read_thread"},
-                    tenant_id=tenant,
-                    agent_id="agent",
-                    agent_name="helper",
-                )
-            ),
+            watch_commands, "list_unconfirmed_imports", AsyncMock(return_value=[watch])
         )
         check = AsyncMock()
         monkeypatch.setattr(watch_commands, "check_agent", check)
         confirm = AsyncMock(return_value=SimpleNamespace(id=identifier, status="active"))
         monkeypatch.setattr(watch_commands, "confirm_import", confirm)
+        monkeypatch.setattr(
+            watch_commands, "settle_held_timers", AsyncMock(return_value=Counter(scheduled=1))
+        )
         result = CliRunner().invoke(
             watches_app,
             [
-                "confirm",
-                identifier,
-                str(tenant),
-                str(uuid.uuid4()),
-                "agent",
-                "4241",
-                "4242",
+                *("go-live", "--tenant", str(tenant)),
+                *("--agent-id", "agent", "--agent-name", "helper"),
             ],
         )
         assert result.exit_code == 0, result.output
-        assert "require a thread ID" in result.output
-        assert "Channel and DM IDs are unsupported" in result.output
-        confirm.assert_awaited_once()
+        assert "needs a thread ID" in result.output, result.output
+        assert "Channel and DM IDs are unsupported" in result.output, result.output
+        assert "watches live=1 kept_paused=0 refused=0" in result.output, result.output
+        assert "timers scheduled=1" in result.output, result.output
         check.assert_awaited_once()
-        assert check.await_args.kwargs["agent_name"] == "helper"
+        assert check.await_args.kwargs["agent_name"] == "helper", "the agent is checked first"
+        bound = confirm.await_args.kwargs
+        assert (bound["owner_account_id"], bound["thread_id"]) == (
+            watch.owner_account_id,
+            "4242",
+        ), "each watch is confirmed on the binding the import printed"
 
 
 @pytest.mark.parametrize("as_json", [False, True])

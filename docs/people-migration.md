@@ -54,41 +54,46 @@ Erasing a person's data also erases a conversation still waiting for them.
 ## Watches and reminders
 
 ```bash
-daimon watches import watches.json --tenant TENANT_UUID \
+daimon watches import watches-1.json watches-2.json --tenant TENANT_UUID \
   --agent-id AGENT_ID --agent-name NAME --urls-out urls.json
-daimon watches confirm WATCH_UUID TENANT_UUID OWNER_ACCOUNT_UUID AGENT_ID PARENT_CHANNEL_ID THREAD_ID
-daimon watches confirm-timers --tenant TENANT_UUID --agent-id AGENT_ID --agent-name NAME
+daimon watches go-live --tenant TENANT_UUID --agent-id AGENT_ID --agent-name NAME
 ```
 
-The file lists at most 25 watches, plus `timers`. A callback watch keeps its
+Each file lists at most 25 watches, plus `timers`. Give every file of one export
+in the same run, which is one transaction. A callback watch keeps its
 token's SHA-256 and also gets a new private link. The links go only to
 `--urls-out` (mode 0600), as `{source id: url}`, merged with an earlier file;
 they are never printed. Set `DAIMON_WATCHES__CALLBACK_BASE_URL` first. Owners
 without an identity get one.
 
-The file must name the server (`guild_id`) of
+Every file must name the server (`guild_id`) of
 `--tenant`, and the agent must belong to it. A callback watch ends at its old
 expiry, and one already past it is skipped. One with no expiry, or longer than the
-`callback_watch_lifetime` setting (30 days by default), ends that long after it is
-confirmed; with the setting at `0` it is permanent. An owner already at the live-watch limit is skipped
-and counted, not an error. Rerunning issues no second link; a watch nobody has
-confirmed is updated from the file.
+`callback_watch_lifetime` setting (30 days by default), ends that long after it
+goes live; with the setting at `0` it is permanent. An owner already at the live-watch limit is skipped
+and counted, not an error. Rerunning issues no second link; a watch that has not
+gone live is updated from the file.
 
-Until a watch is confirmed, a post to either of its links answers a retryable
+Until a watch goes live, a post to either of its links answers a retryable
 `503`, so senders try again; a link nobody holds still gets the same `403`. An
-import nobody confirms lapses 30 days after it was imported.
-Entries and timers marked `paused` stay paused when confirmed: a watch waits for
+import that never goes live lapses 30 days after it was imported.
+Entries and timers marked `paused` stay paused at `go-live`: a watch waits for
 its owner to resume it, and a timer is never scheduled.
 
 Imported watches start paused and report to the owner's private conversation.
-Confirm each after checking its owner, channel and thread, which the import
-prints. `confirm` and `confirm-timers` check that the agent is an unarchived agent
-of the tenant, which must be a live Discord server. A timers-only `import` that is
-given `--agent-id` and `--agent-name` checks them too.
+Check each owner, channel and thread, which the import prints, then run
+`go-live`. It checks that the agent is an unarchived agent of the tenant, which
+must be a live Discord server, and makes every watch imported for that agent
+live on the owner, channel and thread the import printed: polled and callback
+watches resume. A page watch first needs a fresh signing key from its owner. A
+watch that cannot go live, such as one with an unmapped source, is listed with
+the reason and stays paused. Rerunning `go-live` is safe and picks up what was
+fixed since. A timers-only `import` that is given `--agent-id` and `--agent-name`
+checks them too.
 
-Timers are held, not scheduled. `confirm-timers` schedules each one that is
-still more than a minute away, once. Reminders set in a private conversation
-fire in that person's private messages, ones set in a thread fire in it and
+Timers are held, not scheduled. `go-live` schedules each one that is still more
+than a minute away, once; one already due is skipped. Reminders set in a private
+conversation fire in that person's private messages, ones set in a thread fire in it and
 one-off reminders set in a plain channel fire in that channel. A channel reminder
 runs unattended, as its owner, and only if the agent can still post there and the
 owner can still see it; otherwise it is settled with a reason and nothing is sent.
@@ -115,6 +120,7 @@ daimon watches renew WATCH_UUID --tenant TENANT_UUID       # 30 more days
 daimon watches rotate-link WATCH_UUID --tenant TENANT_UUID --urls-out link.json
 ```
 
-`unpause` releases timers or a confirmed watch that were paused in the old
-system. `rotate-link` replaces every link of a callback watch and shows the new
+`unpause` releases timers or a watch that went live paused because they were
+paused in the old system; rerun `go-live` to schedule released timers.
+`rotate-link` replaces every link of a callback watch and shows the new
 one once, or writes it to `--urls-out` (mode 0600).

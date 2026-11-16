@@ -221,7 +221,7 @@ rerunning it is idempotent.
 
 ```bash
 daimon watches import /private/watches.json
-daimon watches confirm WATCH_UUID TENANT_UUID OWNER_ACCOUNT_UUID AGENT_ID PARENT_CHANNEL_ID THREAD_ID
+daimon watches go-live --tenant TENANT_UUID --agent-id AGENT_ID --agent-name NAME
 ```
 
 Each entry carries `version: 1` fields for the source, tool, arguments,
@@ -232,7 +232,7 @@ signing keys, saved credentials, leases or unfinished wakes.
 `discord_read_messages` maps to `read_thread`, for thread ids only.
 `discord_read_channel_since` maps to `read_channel` and drops `since`. Other
 tools import as `source_unmapped`, and cannot be resumed. The owner is
-not messaged; the command output lists them. Confirm a watch only after checking every binding field.
+not messaged; the command output lists them. Run `go-live` only after checking every binding field.
 
 Callback entries (`source: "callback"`) carry `token_sha256`, the owner, channel
 and an optional `expires_at`; see

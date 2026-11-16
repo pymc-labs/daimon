@@ -1,4 +1,4 @@
-"""Operator import of timers and callback watches: tenant checks, reruns, unpause, renew, rotate."""
+"""Operator import of watches and timers: tenant checks, reruns, go-live, unpause, renew, rotate."""
 
 import asyncio
 import hashlib
@@ -13,6 +13,9 @@ from types import SimpleNamespace
 import pytest
 from daimon.adapters.cli.commands import watches as watch_commands
 from daimon.adapters.cli.commands.watches import watches_app
+from daimon.core.continuity.continuation import ContinuationRequest
+from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -20,6 +23,7 @@ from typer.testing import CliRunner
 
 GUILD = "777"
 TOKEN = "legacy-token-" + "ab" * 16
+GO_LIVE = ("go-live", "--tenant")
 
 
 @pytest.fixture
@@ -263,9 +267,9 @@ async def test_unpaused_watch_stays_active_when_the_file_is_imported_again(
     args = ("import", str(path), "--tenant", tenant, "--agent-id", "agent-1")
     args += ("--agent-name", "analyst", "--urls-out", str(tmp_path / "urls.json"))
     assert (await run(*args)).exit_code == 0
-    watch_id, owner = (await rows(operator, "SELECT id, owner_account_id FROM watches"))[0]
-    confirmed = await run("confirm", str(watch_id), tenant, str(owner), "agent-1", "900", "900")
-    assert confirmed.exit_code == 0, confirmed.output
+    watch_id = (await rows(operator, "SELECT id FROM watches"))[0][0]
+    live = await run(*GO_LIVE, tenant, "--agent-id", "agent-1", "--agent-name", "analyst")
+    assert live.exit_code == 0 and "kept_paused=1" in live.output, live.output
     assert (await run("unpause", "--tenant", tenant, "--watch-id", str(watch_id))).exit_code == 0
     assert await rows(operator, "SELECT status FROM watches") == [("active",)]
 
@@ -274,10 +278,7 @@ async def test_unpaused_watch_stays_active_when_the_file_is_imported_again(
     assert await rows(operator, "SELECT status FROM watches") == [("active",)]
 
 
-@pytest.mark.parametrize("command", ["confirm-timers", "confirm"])
-async def test_confirming_checks_the_agent_belongs_to_the_tenant(
-    operator, tmp_path, monkeypatch, command
-):
+async def test_going_live_checks_the_agent_belongs_to_the_tenant(operator, tmp_path, monkeypatch):
     async def found(*_args, **_kwargs):
         return SimpleNamespace(id="agent-1")
 
@@ -293,15 +294,9 @@ async def test_confirming_checks_the_agent_belongs_to_the_tenant(
         *("--agent-name", "analyst", "--urls-out", str(urls)),
     )
     assert imported.exit_code == 0, imported.output
-    watch_id, owner = (await rows(operator, "SELECT id, owner_account_id FROM watches"))[0]
     monkeypatch.setattr(watch_commands, "find_agent_by_daimon_tag", other)
-    if command == "confirm-timers":
-        args = ("confirm-timers", "--tenant", tenant, "--agent-id", "agent-1")
-        args += ("--agent-name", "analyst")
-    else:
-        args = ("confirm", str(watch_id), tenant, str(owner), "agent-1", "900", "900")
 
-    result = await run(*args)
+    result = await run(*GO_LIVE, tenant, "--agent-id", "agent-1", "--agent-name", "analyst")
 
     assert result.exit_code == 2 and "must name one agent" in result.output, result.output
     assert await rows(operator, "SELECT 1 FROM held_timers WHERE settled_at IS NOT NULL") == []
@@ -309,7 +304,7 @@ async def test_confirming_checks_the_agent_belongs_to_the_tenant(
 
 
 @pytest.mark.parametrize("state", ["archived", "slack"])
-async def test_confirm_timers_refuses_an_archived_or_other_platform_tenant(
+async def test_go_live_refuses_an_archived_or_other_platform_tenant(
     operator, tmp_path, monkeypatch, state
 ):
     async def found(*_args, **_kwargs):
@@ -322,10 +317,107 @@ async def test_confirm_timers_refuses_an_archived_or_other_platform_tenant(
     async with operator.factory.begin() as db:
         await db.execute(text(f"UPDATE tenants SET {change} WHERE id = :id"), {"id": tenant})
 
-    result = await run(
-        *("confirm-timers", "--tenant", tenant, "--agent-id", "agent-1"),
-        *("--agent-name", "analyst"),
-    )
+    result = await run(*GO_LIVE, tenant, "--agent-id", "agent-1", "--agent-name", "analyst")
 
     assert result.exit_code == 2 and "is archived" in result.output, result.output
     assert await rows(operator, "SELECT 1 FROM held_timers WHERE settled_at IS NOT NULL") == []
+
+
+async def bind_owner(operator) -> uuid.UUID:
+    """The owner's live thread with agent-1, which a polled watch reports to."""
+    async with operator.factory.begin() as db:
+        principal = await get_or_create_platform_principal(
+            db, tenant_id=operator.tenant.id, platform="discord", external_id="555"
+        )
+        await create_thread_session(
+            db,
+            tenant_id=operator.tenant.id,
+            platform="discord",
+            thread_id="4242",
+            channel_id="4241",
+            account_id=principal.account_id,
+            ma_session_id="session-bound",
+            ma_agent_id="agent-1",
+        )
+    return principal.account_id
+
+
+def poll_entry(operator, owner: uuid.UUID, legacy_id: str, **parts: object) -> dict[str, object]:
+    binding = ContinuationRequest(
+        tenant_id=operator.tenant.id,
+        platform="discord",
+        parent_channel_id="4241",
+        thread_id="4242",
+        requester_account_id=owner,
+        requester_external_user_id="555",
+        target_ma_agent_id="agent-1",
+        target_name="analyst",
+        requested_work=None,
+        reason="watch_fired",
+        idempotency_key=uuid.uuid4(),
+    )
+    return {
+        "legacy_id": legacy_id,
+        "os_binding": binding.model_dump(mode="json"),
+        "source": "poll",
+        "instructions": "Report changes.",
+        "tool": "discord_read_channel_since",
+        "arguments": {"channel_id": "4343"},
+        "expires_at": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+        **parts,
+    }
+
+
+async def test_go_live_makes_everything_an_import_held_live_once(operator, tmp_path, monkeypatch):
+    async def found(*_args, **_kwargs):
+        return SimpleNamespace(id="agent-1")
+
+    monkeypatch.setattr(watch_commands, "find_agent_by_daimon_tag", found)
+    tenant = str(operator.tenant.id)
+    owner = await bind_owner(operator)
+    polled = [poll_entry(operator, owner, "poll"), poll_entry(operator, owner, "held", paused=True)]
+    path = manifest(
+        tmp_path,
+        watches=[*polled, callback_entry()],
+        timers=[timer("soon"), timer("due"), {**timer("paused"), "paused": True}],
+    )
+    imported = await run(
+        *("import", str(path), "--tenant", tenant, "--agent-id", "agent-1"),
+        *("--agent-name", "analyst", "--urls-out", str(tmp_path / "urls.json")),
+    )
+    assert imported.exit_code == 0, imported.output
+    async with operator.factory.begin() as db:
+        await db.execute(text("UPDATE held_timers SET fire_at = now() WHERE source_id = 'due'"))
+
+    live = await run(*GO_LIVE, tenant, "--agent-id", "agent-1", "--agent-name", "analyst")
+
+    assert live.exit_code == 0, live.output
+    assert "watches live=2 kept_paused=1 refused=0" in live.output, live.output
+    assert "timers past=1 scheduled=1" in live.output, live.output
+    statuses = await rows(operator, "SELECT source, status FROM watches ORDER BY source, status")
+    assert statuses == [("callback", "active"), ("poll", "active"), ("poll", "paused")], (
+        "the callback and the poll go live; the one paused at the source waits"
+    )
+    held = await rows(operator, "SELECT source_id FROM held_timers WHERE settled_at IS NULL")
+    assert held == [("paused",)], "a timer paused at the source is never scheduled"
+
+    again = await run(*GO_LIVE, tenant, "--agent-id", "agent-1", "--agent-name", "analyst")
+
+    assert "watches live=0 kept_paused=0 refused=0" in again.output, again.output
+    assert "timers none" in again.output, again.output
+
+
+async def test_go_live_lists_a_watch_it_cannot_make_live(operator, tmp_path, monkeypatch):
+    async def found(*_args, **_kwargs):
+        return SimpleNamespace(id="agent-1")
+
+    monkeypatch.setattr(watch_commands, "find_agent_by_daimon_tag", found)
+    tenant = str(operator.tenant.id)
+    unmapped = poll_entry(operator, await bind_owner(operator), "poll", tool="unknown_tool")
+    assert (await run("import", str(manifest(tmp_path, watches=[unmapped])))).exit_code == 0
+
+    live = await run(*GO_LIVE, tenant, "--agent-id", "agent-1", "--agent-name", "analyst")
+
+    assert live.exit_code == 0 and "refused=1" in live.output, live.output
+    assert "not live: Unmapped imported sources" in live.output, live.output
+    assert await rows(operator, "SELECT status FROM watches") == [("paused",)]
