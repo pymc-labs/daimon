@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 
 from daimon.core.stores import dm_access
 from daimon.testing.factories import make_account, make_tenant
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -75,6 +76,37 @@ async def test_rules_when_added_moved_and_removed_then_positions_stay_contiguous
     assert not await dm_access.move_rule(
         db_session, tenant_id=tenant.id, position=9, to=0, now=NOW
     ), "moving an unknown position reports false"
+
+
+async def test_rules_when_two_writes_overlap_then_the_second_waits_and_both_are_kept(
+    db_session: AsyncSession, db_nullpool_engine: AsyncEngine
+) -> None:
+    """Rule writes rewrite the whole list, so a second one waits for the first to commit."""
+    factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    wrote, release = asyncio.Event(), asyncio.Event()
+
+    async def add(agent: str, *, hold: bool = False) -> None:
+        async with factory.begin() as session:
+            await dm_access.add_rule(
+                session, tenant_id=tenant.id, subject="everyone", subject_id=None,
+                agent_name=agent, locked=False, set_by=None, now=NOW,
+            )  # fmt: skip
+            if hold:
+                wrote.set()
+                await release.wait()
+
+    first = asyncio.create_task(add("a", hold=True))
+    await wrote.wait()
+    second = asyncio.create_task(add("b"))
+    await asyncio.sleep(0.2)
+    assert not second.done(), "the second write waits for the first to commit"
+    release.set()
+    await asyncio.gather(first, second)
+    async with factory() as session:
+        rules = await dm_access.list_rules(session, tenant_id=tenant.id)
+    assert [(r.position, r.agent_name) for r in rules] == [(0, "a"), (1, "b")], rules
 
 
 async def test_add_rule_when_subject_id_does_not_fit_the_subject_then_refuses(

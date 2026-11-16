@@ -15,7 +15,7 @@ from daimon.core.stores.domain import (
     DmRuleRow,
     DmRuleSubject,
 )
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -72,10 +72,23 @@ async def list_rules(session: AsyncSession, *, tenant_id: uuid.UUID) -> list[DmR
     return [DmRuleRow.model_validate(r) for r in rows]
 
 
+async def _lock_rules(session: AsyncSession, tenant_id: uuid.UUID) -> list[DmRuleRow]:
+    """The tenant's rules, read under a transaction lock every rule write takes first.
+
+    Each write rewrites the whole ordered list, so two at once would otherwise lose one
+    edit or collide on a position.
+    """
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"dm_rules:{tenant_id}"},
+    )
+    return await list_rules(session, tenant_id=tenant_id)
+
+
 async def _rewrite_rules(
     session: AsyncSession, tenant_id: uuid.UUID, rules: Sequence[DmRuleRow], now: datetime
 ) -> list[DmRuleRow]:
-    """Store `rules` as positions 0..n-1, replacing the tenant's list."""
+    """Store `rules` as positions 0..n-1, replacing the tenant's list (`_lock_rules` first)."""
     await session.execute(delete(DmRule).where(DmRule.tenant_id == tenant_id))
     out = [r.model_copy(update={"position": i}) for i, r in enumerate(rules)]
     for r in out:
@@ -120,7 +133,7 @@ async def add_rule(
     """Insert a rule at `position`, or at the end."""
     _check_subject(subject, subject_id)
     _check_lock(agent_name, locked)
-    rules = await list_rules(session, tenant_id=tenant_id)
+    rules = await _lock_rules(session, tenant_id)
     at = len(rules) if position is None else max(0, min(position, len(rules)))
     rule = DmRuleRow(
         tenant_id=tenant_id,
@@ -144,6 +157,7 @@ async def replace_rules(
     now: datetime,
 ) -> list[DmRuleRow]:
     """Replace every rule with `rules` (subject, subject id, agent, locked), in order."""
+    await _lock_rules(session, tenant_id)
     rows: list[DmRuleRow] = []
     for at, (subject, subject_id, agent_name, locked) in enumerate(rules):
         _check_subject(subject, subject_id)
@@ -166,7 +180,7 @@ async def remove_rule(
     session: AsyncSession, *, tenant_id: uuid.UUID, position: int, now: datetime
 ) -> bool:
     """Delete the rule at `position`; later rules close the gap. False when none."""
-    rules = await list_rules(session, tenant_id=tenant_id)
+    rules = await _lock_rules(session, tenant_id)
     if not 0 <= position < len(rules):
         return False
     del rules[position]
@@ -178,7 +192,7 @@ async def move_rule(
     session: AsyncSession, *, tenant_id: uuid.UUID, position: int, to: int, now: datetime
 ) -> bool:
     """Move the rule at `position` to `to`. False when `position` is out of range."""
-    rules = await list_rules(session, tenant_id=tenant_id)
+    rules = await _lock_rules(session, tenant_id)
     if not 0 <= position < len(rules):
         return False
     rule = rules.pop(position)
@@ -199,7 +213,7 @@ async def update_rule(
 ) -> DmRuleRow | None:
     """Change the agent and lock of the rule at `position`; None when there is none."""
     _check_lock(agent_name, locked)
-    rules = await list_rules(session, tenant_id=tenant_id)
+    rules = await _lock_rules(session, tenant_id)
     if not 0 <= position < len(rules):
         return None
     rules[position] = rules[position].model_copy(
@@ -281,7 +295,7 @@ async def delete_user_rules(
     deleted = 0
     for tenant_id in {t for t, _ in keys}:
         ids = {u for t, u in keys if t == tenant_id}
-        rules = await list_rules(session, tenant_id=tenant_id)
+        rules = await _lock_rules(session, tenant_id)
         kept = [r for r in rules if not (r.subject == "user" and r.subject_id in ids)]
         if len(kept) != len(rules):
             deleted += len(rules) - len(kept)
