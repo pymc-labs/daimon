@@ -47,6 +47,7 @@ from daimon.core.continuity.poll_tools import (
     require_listed,
     validate_mcp_poll,
 )
+from daimon.core.dm_access import member_roles, roles_by_membership
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_server_url import ascii_mcp_url, same_ascii_mcp_url
 from daimon.core.mcp_tool_call import McpCallError
@@ -211,7 +212,7 @@ async def private_key_delivery(
             runtime,
             auth,
             recipient_id=watch.owner_external_id,
-            groups=frozenset(str(role.id) for role in member.roles),
+            groups=member_roles(str(role.id) for role in member.roles),
         )
         dm = await member.create_dm()
         await dm.send(
@@ -327,7 +328,16 @@ async def require_delivery_allowed(
         if not enabled or not policy.allows(auth.platform_user_id):
             raise ToolError("Daimon cannot DM you here. Ask an admin or an owner.")
         await require_dm_recipient_allowed(runtime, auth, recipient_id=auth.platform_user_id)
-        await require_dm_grant(runtime, auth, recipient_id=auth.platform_user_id)
+        if auth.external_id is None:
+            raise ToolError("Missing team")
+        await require_dm_grant(
+            runtime,
+            auth,
+            recipient_id=auth.platform_user_id,
+            groups=roles_by_membership(
+                runtime.membership_resolver, tenant_id=auth.tenant_id, guild_id=auth.external_id
+            ),
+        )
         return
     async with rest_client(_require_bot_token(runtime)) as client:
         try:

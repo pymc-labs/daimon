@@ -9,7 +9,7 @@ import structlog
 from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.adapters.slack.user_groups import user_group_members
+from daimon.adapters.slack.user_groups import user_group_lookup
 from daimon.core.channel_budget_notice import BudgetNotice, BudgetNotifier
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.dm_access import sender_admits
@@ -30,7 +30,7 @@ def slack_budget_notifier(runtime: SlackRuntime) -> BudgetNotifier:
         policy = runtime.settings.direct_message_policies.get(
             notice.tenant_id, DirectMessagePolicy()
         )
-        members = user_group_members(runtime, client, team_id=notice.workspace_id)
+        groups = user_group_lookup(runtime, client, team_id=notice.workspace_id)
 
         async def admits(user_id: str) -> bool:
             return await sender_admits(
@@ -38,7 +38,7 @@ def slack_budget_notifier(runtime: SlackRuntime) -> BudgetNotifier:
                 tenant_id=notice.tenant_id,
                 agent_name=None,
                 user_id=user_id,
-                members=members,
+                groups=groups,
             )
 
         delivered = 0

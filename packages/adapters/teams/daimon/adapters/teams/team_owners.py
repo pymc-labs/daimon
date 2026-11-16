@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.core.dm_access import DmGroups, groups_by_members
 from daimon.core.native_admins import GroupLookupFailed, GroupMembers
 from daimon.core.teams_graph import GraphClient, GraphUnavailable
 
@@ -37,6 +38,14 @@ def team_member_lookup(runtime: TeamsRuntime, *, fresh: bool = False) -> GroupMe
         )
 
     return members
+
+
+def team_group_lookup(runtime: TeamsRuntime, *, fresh: bool = False) -> DmGroups:
+    """The teams a person is in, by the rosters of the teams the app is installed in.
+
+    The one DM group lookup for Teams; `fresh` skips the cache (a conversation's start).
+    """
+    return groups_by_members(team_member_lookup(runtime, fresh=fresh))
 
 
 def team_owner_lookup(runtime: TeamsRuntime, *, fresh: bool = False) -> GroupMembers | None:

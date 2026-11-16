@@ -27,12 +27,16 @@ from daimon.adapters.teams.card_actions import (
 )
 from daimon.adapters.teams.identity import DENIED, TeamsInbound, display_bot_name
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.adapters.teams.team_owners import team_member_lookup
+from daimon.adapters.teams.team_owners import team_group_lookup
 from daimon.core.authz import build_subject
 from daimon.core.direct_messages import DM_AGENT_REFUSED, dm_permission_text
-from daimon.core.dm_access import DmAgent, decide_dm, list_dm_agents, lookup_dm_groups
+from daimon.core.dm_access import (
+    DmAgent,
+    decide_dm,
+    list_dm_agents,
+    lookup_dm_groups,
+)
 from daimon.core.dm_routing import DmChoose, DmDecision, DmRefused, DmStart, DmUnchecked, Route
-from daimon.core.native_admins import GroupLookupFailed, GroupMembers
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.dm_access import set_pick
 from daimon.core.stores.identity import find_platform_principal
@@ -47,7 +51,13 @@ from microsoft_teams.apps import ActivityContext
 if TYPE_CHECKING:
     from daimon.adapters.teams.thread_reader import ThreadReader
 
-__all__ = ["UNCHECKED", "VERB", "TeamsDmPick", "chat_groups", "route_personal_chat"]
+__all__ = [
+    "UNCHECKED",
+    "VERB",
+    "TeamsDmPick",
+    "chat_groups",
+    "route_personal_chat",
+]
 
 log = structlog.get_logger()
 
@@ -59,17 +69,6 @@ _MAX_CHOICES: Final = 6
 Post = Callable[[MessageActivityInput], Awaitable[None]]
 
 
-def _members(runtime: TeamsRuntime, *, fresh: bool) -> GroupMembers:
-    lookup = team_member_lookup(runtime, fresh=fresh)
-    if lookup is not None:
-        return lookup
-
-    async def unknown(group_id: str) -> frozenset[str]:
-        raise GroupLookupFailed(f"no Graph access for team {group_id}")
-
-    return unknown
-
-
 async def chat_groups(
     runtime: TeamsRuntime, *, tenant_id: uuid.UUID, user_id: str, fresh: bool
 ) -> frozenset[str] | None:
@@ -78,7 +77,7 @@ async def chat_groups(
         runtime.sessionmaker,
         tenant_id=tenant_id,
         user_id=user_id.lower(),
-        members=_members(runtime, fresh=fresh),
+        groups=team_group_lookup(runtime, fresh=fresh),
     )
 
 

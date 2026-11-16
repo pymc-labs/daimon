@@ -3,14 +3,15 @@
 Loads grants, rules, the workspace default and a person's pick, reads which
 agents take DMs and whether the person may run them, and returns one decision.
 Group membership comes from the caller's `Subject` (Discord roles; `verified_membership`
-None means the platform could not say), or from `groups` an adapter looked up with
-`lookup_dm_groups` (Slack user groups, Teams teams). Unknown groups fail closed.
+None means the platform could not say), or from a `DmGroups` lookup the adapter injects:
+every path asks it through `resolve_groups`, so a grant or rule naming a group decides
+the same way on every path. Unknown groups fail closed.
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 
 import structlog
@@ -34,6 +35,7 @@ from daimon.core.dm_routing import (
     resolve,
 )
 from daimon.core.features.snapshot import FeaturePlace, feature_in
+from daimon.core.membership import MembershipResolver
 from daimon.core.native_admins import GroupLookupFailed, GroupMembers
 from daimon.core.stores import dm_access as store
 from daimon.core.stores.direct_messages import dm_enabled, get_dm_agent_name
@@ -102,12 +104,80 @@ def group_ids_of(routing: DmRouting) -> frozenset[str]:
     return frozenset(granted | ruled)
 
 
+DmGroups = Callable[[str, frozenset[str]], Awaitable[frozenset[str]]]
+"""Which of the named group ids a person is in now; raises `GroupLookupFailed`.
+
+Each platform's own groups: Discord roles (`member_roles`, `roles_by_membership`),
+Slack user groups and Teams teams (`groups_by_members`).
+"""
+
+
+def groups_by_members(members: GroupMembers | None) -> DmGroups:
+    """Groups from a per-group member lookup (Slack user groups, Teams teams).
+
+    None (no lookup wired, such as Teams without Graph) leaves every group unknown.
+    """
+
+    async def groups(user_id: str, wanted: frozenset[str]) -> frozenset[str]:
+        if members is None:
+            raise GroupLookupFailed("no group lookup")
+        return frozenset([g for g in sorted(wanted) if user_id in await members(g)])
+
+    return groups
+
+
+def member_roles(role_ids: Iterable[str]) -> DmGroups:
+    """The roles of a Discord member the caller has just fetched."""
+    held = frozenset(role_ids)
+
+    async def groups(user_id: str, wanted: frozenset[str]) -> frozenset[str]:
+        return wanted & held
+
+    return groups
+
+
+def roles_by_membership(
+    resolver: MembershipResolver | None,
+    *,
+    tenant_id: uuid.UUID,
+    guild_id: str,
+    fresh: bool = False,
+) -> DmGroups:
+    """A Discord member's current roles; no resolver or unknown membership raises."""
+
+    async def groups(user_id: str, wanted: frozenset[str]) -> frozenset[str]:
+        if resolver is None:
+            raise GroupLookupFailed("no membership lookup")
+        found = await resolver.resolve(tenant_id, guild_id, user_id, require_fresh=fresh)
+        if found.is_member is None:
+            raise GroupLookupFailed("membership unknown")
+        return wanted & frozenset(found.role_ids)
+
+    return groups
+
+
+async def resolve_groups(
+    lookup: DmGroups, user_id: str, wanted: frozenset[str], *, tenant_id: uuid.UUID
+) -> frozenset[str] | None:
+    """The groups of `wanted` that `user_id` is in; None when the platform could not say.
+
+    The one place a DM decision learns a person's groups. Only named groups are asked.
+    """
+    if not wanted:
+        return frozenset()
+    try:
+        return await lookup(user_id, wanted)
+    except GroupLookupFailed as exc:
+        log.info("dm_access.groups_unknown", tenant_id=str(tenant_id), reason=str(exc))
+        return None
+
+
 async def lookup_dm_groups(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     tenant_id: uuid.UUID,
     user_id: str,
-    members: GroupMembers,
+    groups: DmGroups,
 ) -> frozenset[str] | None:
     """The groups the workspace's grants and rules name that `user_id` is in; None if unknown.
 
@@ -115,17 +185,7 @@ async def lookup_dm_groups(
     """
     async with sessionmaker() as session:
         wanted = group_ids_of(await load_routing(session, tenant_id=tenant_id))
-    return await _groups_in(wanted, user_id, members, tenant_id=tenant_id)
-
-
-async def _groups_in(
-    wanted: frozenset[str], user_id: str, members: GroupMembers, *, tenant_id: uuid.UUID
-) -> frozenset[str] | None:
-    try:
-        return frozenset([g for g in sorted(wanted) if user_id in await members(g)])
-    except GroupLookupFailed as exc:
-        log.info("dm_access.groups_unknown", tenant_id=str(tenant_id), reason=str(exc))
-        return None
+    return await resolve_groups(groups, user_id, wanted, tenant_id=tenant_id)
 
 
 async def load_routing(session: AsyncSession, *, tenant_id: uuid.UUID) -> DmRouting:
@@ -258,38 +318,25 @@ async def _sending_grant(
     return (await load_routing(session, tenant_id=tenant_id)).grants.get(name, DmGrant())
 
 
-async def agent_dm_admits(
-    session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    agent_name: str | None,
-    user_id: str,
-    groups: frozenset[str] | None = None,
-) -> bool:
-    """Whether the sending agent's grant admits `user_id` to an agent-sent DM.
-
-    Locks only decide who answers, so they do not apply. A message with no sending
-    agent (a budget notice) uses the workspace default agent's grant, and none when
-    no default is set. Groups not known where the grant needs them: not admitted.
-    """
-    grant = await _sending_grant(session, tenant_id=tenant_id, agent_name=agent_name)
-    return grant is None or grant_admits(grant, Person(user_id, groups)) is True
-
-
 async def sender_admits(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     tenant_id: uuid.UUID,
     agent_name: str | None,
     user_id: str,
-    members: GroupMembers | None = None,
+    groups: DmGroups,
 ) -> bool:
-    """`agent_dm_admits`, looking up through `members` only the groups the grant names."""
+    """Whether the sending agent's grant admits `user_id` to an agent-sent DM.
+
+    Every agent-sent path (the DM tools, routines, watches, notices, support) calls
+    this with its platform's lookup. Locks only decide who answers, so they do not
+    apply. A message with no sending agent (a notice) uses the workspace default
+    agent's grant, and none when no default is set. Groups unknown: not admitted.
+    """
     async with sessionmaker() as session:
         grant = await _sending_grant(session, tenant_id=tenant_id, agent_name=agent_name)
     if grant is None:
         return True
-    groups = None
-    if members is not None and grant.group_ids and user_id not in grant.user_ids:
-        groups = await _groups_in(grant.group_ids, user_id, members, tenant_id=tenant_id)
-    return grant_admits(grant, Person(user_id, groups)) is True
+    wanted: frozenset[str] = frozenset() if user_id in grant.user_ids else grant.group_ids
+    found = await resolve_groups(groups, user_id, wanted, tenant_id=tenant_id)
+    return grant_admits(grant, Person(user_id, found)) is True

@@ -20,7 +20,7 @@ from daimon.adapters.slack.errors import bound_request_id, render_error
 from daimon.adapters.slack.gating import is_slack_connect_external
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime, admission_refusal_message
-from daimon.adapters.slack.user_groups import user_group_members
+from daimon.adapters.slack.user_groups import user_group_lookup
 from daimon.core.agent_identity import (
     AgentIdentity,
     identity_enabled_for,
@@ -246,7 +246,7 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 runtime.sessionmaker,
                 tenant_id=tenant_id,
                 user_id=user_id,
-                members=user_group_members(runtime, client, team_id=team_id, fresh=True),
+                groups=user_group_lookup(runtime, client, team_id=team_id, fresh=True),
             )
             await start_dm(
                 runtime.turn_deps,
@@ -450,7 +450,7 @@ async def _answer_burst(
             runtime.sessionmaker,
             tenant_id=tenant_id,
             user_id=user_id,
-            members=user_group_members(runtime, client, team_id=team_id),
+            groups=user_group_lookup(runtime, client, team_id=team_id),
         )
     answer = _answerer(runtime, client, conversation, key, role=role, groups=groups, thread=thread)
     await burst.answer(seconds, react, answer)
@@ -596,7 +596,7 @@ async def _decide_cold(
         runtime.sessionmaker,
         tenant_id=tenant_id,
         user_id=user_id,
-        members=user_group_members(runtime, client, team_id=team_id, fresh=True),
+        groups=user_group_lookup(runtime, client, team_id=team_id, fresh=True),
     )
     recipients = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
     if not recipients.allows(user_id):

@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from daimon.adapters.slack import direct_messages as dm_module
 from daimon.adapters.slack.blockkit import notice_fields
@@ -313,12 +314,15 @@ def _pick(agent: str) -> dict[str, Any]:
 
 @pytest.mark.parametrize(
     ("reply", "expected"),
-    [({"users": ["U1"]}, DmStart("ada", "only")), (None, DmUnchecked())],
+    [
+        ({"ok": True, "users": ["U1"]}, DmStart("ada", "only")),
+        ({"ok": False, "error": "missing_scope"}, DmUnchecked()),
+    ],
 )
 async def test_decide_cold_when_a_grant_lists_a_user_group_then_slack_membership_decides(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
-    reply: dict[str, Any] | None,
+    reply: dict[str, Any],
     expected: Route,
 ) -> None:
     tenant = await _dms_on(db_session_factory)
@@ -330,13 +334,14 @@ async def test_decide_cold_when_a_grant_lists_a_user_group_then_slack_membership
     agents = [DmAgent("ada", "ag_ada", AgentRef.of("ada"))]
     monkeypatch.setattr(dm_module, "list_dm_agents", AsyncMock(return_value=agents))
     client = _client(monkeypatch)
-    failure = SlackApiError("missing_scope", {"ok": False, "error": "missing_scope"})
-    client.usergroups_users_list = AsyncMock(
-        return_value=reply, side_effect=None if reply else failure
+    client.token = "xoxb-test"
+    runtime = _runtime(db_session_factory)
+    runtime.http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=reply))
     )
 
     decision, _ = await dm_module._decide_cold(  # pyright: ignore[reportPrivateUsage]
-        _runtime(db_session_factory), client, team_id="T_ROUTE", user_id="U1", role=Role.USER
+        runtime, client, team_id="T_ROUTE", user_id="U1", role=Role.USER
     )
 
     assert decision.route == expected, "the user group decides; a failed lookup fails closed"

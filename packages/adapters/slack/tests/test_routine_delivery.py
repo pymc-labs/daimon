@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from daimon.adapters.slack import routine_delivery as poster_mod
 from daimon.adapters.slack.routine_delivery import make_slack_routine_poster
@@ -55,6 +56,9 @@ def _poster(
     dm_policies: dict | None = None,
 ) -> tuple[Any, MagicMock]:
     client = MagicMock()
+    client.token = "xoxb-test"
+    # What Slack's usergroups.users.list answers; a test sets it for its grant.
+    client.user_group_reply = {"ok": True, "users": []}
     client.chat_postMessage = AsyncMock()
     client.users_info = AsyncMock(return_value={"user": {"id": "U1", "team_id": "T_ROUTINES"}})
     client.conversations_open = AsyncMock(return_value={"channel": {"id": "D_CREATOR"}})
@@ -81,6 +85,11 @@ def _poster(
             ),
             deployment_default=DeploymentDefault(),
             group_members=GroupMembersCache(),
+            http_client=httpx.AsyncClient(
+                transport=httpx.MockTransport(
+                    lambda _request: httpx.Response(200, json=client.user_group_reply)
+                )
+            ),
         ),
     )
     return make_slack_routine_poster(runtime), client
@@ -255,7 +264,6 @@ async def test_dm_fallback_when_the_routine_agents_grant_decides_then_lookup_err
 ) -> None:
     """A fallback DM needs the routine agent's DM grant; a failed group lookup denies."""
     from daimon.core.stores.dm_access import set_grant
-    from slack_sdk.errors import SlackApiError
 
     row = await _routine(db_session, kind="thread", destination_id="C1")
     await set_grant(
@@ -265,11 +273,11 @@ async def test_dm_fallback_when_the_routine_agents_grant_decides_then_lookup_err
     )  # fmt: skip
     await db_session.commit()
     post, client = _poster(db_session_factory, monkeypatch)
-    if isinstance(group_users, str):
-        error = SlackApiError(group_users, {"ok": False, "error": group_users})
-        client.usergroups_users_list = AsyncMock(side_effect=error)
-    else:
-        client.usergroups_users_list = AsyncMock(return_value={"users": group_users or []})
+    client.user_group_reply = (
+        {"ok": False, "error": group_users}
+        if isinstance(group_users, str)
+        else {"ok": True, "users": group_users or []}
+    )
 
     outcome = await post(row)
 

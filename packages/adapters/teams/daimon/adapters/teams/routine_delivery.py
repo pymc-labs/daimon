@@ -39,7 +39,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
 from daimon.core.channel_tidy import record_turn_post
 from daimon.core.config import DirectMessagePolicy
-from daimon.core.dm_access import sender_admits
+from daimon.core.dm_access import groups_by_members, sender_admits
 from daimon.core.message_split import split_fenced
 from daimon.core.native_admins import GroupMembers
 from daimon.core.routine_delivery import (
@@ -112,7 +112,7 @@ def make_teams_routine_poster(
                 tenant_id=row.tenant_id,
                 agent_name=row.agent_name,
                 user_id=creator,
-                members=team_members,
+                groups=groups_by_members(team_members),
             )
         ):
             return DeliveryOutcome(status="skipped", note=reason)

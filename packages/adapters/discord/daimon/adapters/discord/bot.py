@@ -666,13 +666,14 @@ class DaimonBot(commands.Bot):
             self.http = http_client
             self._connection.http = http_client
         self._ingress_clock = clock
-        self.runtime = with_budget_notifier(
-            runtime, self.open_member_dm, self.is_closed, client=self
-        )
         self.membership_resolver = GatewayMembershipResolver(self)
         self.runtime = replace(
-            self.runtime,
-            turn_deps=replace(self.runtime.turn_deps, membership_resolver=self.membership_resolver),
+            runtime,
+            turn_deps=replace(runtime.turn_deps, membership_resolver=self.membership_resolver),
+        )
+        # After the resolver: a notice's grant check reads the recipient's current roles.
+        self.runtime = with_budget_notifier(
+            self.runtime, self.open_member_dm, self.is_closed, client=self
         )
         # Local import: the re-ask card's module reaches the /model command module.
         from daimon.adapters.discord.thread_model_reask import with_thread_reask_notifier
@@ -3968,6 +3969,7 @@ class DaimonBot(commands.Bot):
                 dm_policy=lambda tenant_id: self.runtime.settings.direct_message_policies.get(
                     tenant_id, DirectMessagePolicy()
                 ),
+                membership_resolver=self.membership_resolver,
             )
             return
         if watch.delivery != "new_thread":

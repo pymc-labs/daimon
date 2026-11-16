@@ -5,10 +5,10 @@ from __future__ import annotations
 import re
 from typing import cast
 
-import aiohttp
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools import _dm_groups
 from daimon.adapters.mcp.tools._channel_policy import require_dm_grant, require_dm_recipient_allowed
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
@@ -27,33 +27,16 @@ from daimon.adapters.mcp.tools.slack._send import (
 )
 from daimon.adapters.mcp.tools.teams._direct import teams_direct_message
 from daimon.core.config import DirectMessagePolicy
-from daimon.core.native_admins import GroupLookupFailed, GroupMembers
+from daimon.core.dm_access import member_roles
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
 from slack_sdk.errors import SlackApiError
-from slack_sdk.web.async_client import AsyncWebClient
 
 _RECIPIENT = {
     "discord": r"[0-9]+",
     "slack": r"[UW][A-Z0-9]+",
     "teams": r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
 }
-
-
-def _user_groups(client: AsyncWebClient) -> GroupMembers:
-    """A Slack user group's members, for DM grants; any failure is `GroupLookupFailed`."""
-
-    async def members(group_id: str) -> frozenset[str]:
-        try:
-            response = await client.usergroups_users_list(usergroup=group_id)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-        except (TimeoutError, SlackApiError, aiohttp.ClientError) as exc:
-            raise GroupLookupFailed(type(exc).__name__) from exc
-        users: object = response.get("users")  # pyright: ignore[reportUnknownMemberType]  # SlackResponse.get is untyped
-        if not isinstance(users, list):
-            raise GroupLookupFailed("no users in the response")
-        return frozenset(str(user) for user in users)  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]  # JSON list
-
-    return members
 
 
 class DirectMessageResult(BaseModel):
@@ -106,7 +89,7 @@ async def send_direct_message_impl(
                     runtime,
                     auth,
                     recipient_id=recipient_id,
-                    groups=frozenset(str(role.id) for role in recipient.roles),
+                    groups=member_roles(str(role.id) for role in recipient.roles),
                 )
                 dm = await recipient.create_dm()
                 for chunk in chunks:
@@ -137,9 +120,13 @@ async def send_direct_message_impl(
                 or user.get("is_stranger")
             ):
                 raise ToolError("sender and recipient must be active human members here")
-        await require_dm_grant(
-            runtime, auth, recipient_id=recipient_id, members=_user_groups(client)
-        )
+        async with _dm_groups.slack_http() as http:
+            await require_dm_grant(
+                runtime,
+                auth,
+                recipient_id=recipient_id,
+                groups=_dm_groups.slack_groups(http, client, team_id=team_id),
+            )
         opened = await client.conversations_open(users=recipient_id)  # pyright: ignore[reportUnknownMemberType]
         channel = cast(dict[str, str], opened["channel"])["id"]
         identity_kwargs = await _agent_identity_kwargs(runtime, auth)

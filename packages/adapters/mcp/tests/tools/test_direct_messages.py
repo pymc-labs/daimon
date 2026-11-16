@@ -8,11 +8,12 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import httpx
 import pytest
 from aioresponses import aioresponses
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools import direct_messages
+from daimon.adapters.mcp.tools import _dm_groups, direct_messages
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -327,6 +328,7 @@ async def test_noncanonical_policy_denies_before_client_creation(
 async def test_require_dm_grant_when_the_senders_list_leaves_the_person_out_refuses(sessionmaker):
     """An agent-sent DM follows the sending agent's grant; the operator uses the default's."""
     from daimon.adapters.mcp.tools._channel_policy import require_dm_grant
+    from daimon.core.dm_access import groups_by_members, member_roles
     from daimon.core.stores import dm_access
     from daimon.core.stores.direct_messages import set_dm_agent_name
     from daimon.testing.factories import make_tenant
@@ -342,20 +344,21 @@ async def test_require_dm_grant_when_the_senders_list_leaves_the_person_out_refu
     runtime, auth = runtime_and_auth()
     runtime = replace(runtime, session_factory=sessionmaker)
     auth = replace(auth, tenant_id=tenant.id)
-    await require_dm_grant(runtime, auth, recipient_id="123")
-    await require_dm_grant(runtime, auth, recipient_id="9", groups=frozenset({"role1"}))
+    unknown = groups_by_members(None)
+    await require_dm_grant(runtime, auth, recipient_id="123", groups=unknown)
+    await require_dm_grant(runtime, auth, recipient_id="9", groups=member_roles(["role1"]))
     with pytest.raises(ToolError, match="may not send"):
-        await require_dm_grant(runtime, auth, recipient_id="9")
+        await require_dm_grant(runtime, auth, recipient_id="9", groups=unknown)
     with pytest.raises(ToolError, match="may not send"):
-        await require_dm_grant(runtime, auth, recipient_id="9", groups=frozenset({"other"}))
+        await require_dm_grant(runtime, auth, recipient_id="9", groups=member_roles(["other"]))
 
 
 @pytest.mark.parametrize(
     ("reply", "sent"),
     [
-        ({"payload": {"ok": True, "users": ["U456"]}}, True),
-        ({"payload": {"ok": True, "users": ["U999"]}}, False),
-        ({"payload": {"ok": False, "error": "missing_scope"}}, False),
+        ({"ok": True, "users": ["U456"]}, True),
+        ({"ok": True, "users": ["U999"]}, False),
+        ({"ok": False, "error": "missing_scope"}, False),
     ],
 )
 async def test_slack_dm_when_the_grant_names_a_user_group_then_its_lookup_decides(
@@ -382,14 +385,22 @@ async def test_slack_dm_when_the_grant_names_a_user_group_then_its_lookup_decide
     async def client_factory(runtime, *, team_id):
         return AsyncWebClient(token="xoxb-test")
 
+    def user_groups(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer xoxb-test", "the workspace's token"
+        return httpx.Response(200, json=reply)
+
     monkeypatch.setattr(direct_messages, "slack_web_client", client_factory)
+    monkeypatch.setattr(
+        _dm_groups,
+        "slack_http",
+        lambda: httpx.AsyncClient(transport=httpx.MockTransport(user_groups)),
+    )
     with aioresponses() as http:
         for user in ("U123", "U456"):
             http.get(
                 re.compile(rf"https://slack\.com/api/users\.info.*user={user}.*"),
                 payload={"ok": True, "user": {"id": user, "team_id": "T123"}},
             )
-        http.get(re.compile(r"https://slack\.com/api/usergroups\.users\.list.*"), **reply)
         http.post(
             re.compile(r"https://slack\.com/api/conversations\.open.*"),
             payload={"ok": True, "channel": {"id": "D123"}},

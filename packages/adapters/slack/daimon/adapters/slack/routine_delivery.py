@@ -29,7 +29,7 @@ from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.output_delivery import SLACK_MAX_BYTES_PER_FILE, build_output_poster
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.adapters.slack.user_groups import user_group_members
+from daimon.adapters.slack.user_groups import user_group_lookup
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
 from daimon.core.config import DirectMessagePolicy
@@ -260,7 +260,7 @@ def make_slack_routine_poster(
                 tenant_id=row.tenant_id,
                 agent_name=row.agent_name,
                 user_id=creator,
-                members=user_group_members(runtime, client, team_id=tenant.external_id),
+                groups=user_group_lookup(runtime, client, team_id=tenant.external_id),
             ):
                 return False
             current_policy = await clear_creator(runtime.sessionmaker, row, platform="slack")

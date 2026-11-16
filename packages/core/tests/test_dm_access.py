@@ -21,10 +21,13 @@ from daimon.core.direct_messages import (
 )
 from daimon.core.dm_access import (
     DmAgent,
-    agent_dm_admits,
     decide_dm,
+    groups_by_members,
     lookup_dm_groups,
+    member_roles,
     permits_dm,
+    resolve_groups,
+    roles_by_membership,
     sender_admits,
 )
 from daimon.core.dm_routing import DmChoose, DmRefused, DmStart
@@ -385,7 +388,7 @@ async def test_start_dm_refuses_an_agent_the_person_may_not_use(db_session_facto
         ("excluded", [], ["g1"], frozenset({"g2"}), True),
     ],
 )
-async def test_agent_dm_admits_by_the_sending_agents_grant(
+async def test_sender_admits_by_the_sending_agents_grant(
     db_session_factory, who, user_ids, group_ids, groups, expected
 ):
     """An agent-sent DM follows the sender's grant, and unknown groups fail closed."""
@@ -395,14 +398,14 @@ async def test_agent_dm_admits_by_the_sending_agents_grant(
             session, tenant_id=tenant.id, agent_name="ada", who=who,
             user_ids=user_ids, group_ids=group_ids, set_by=None, now=NOW,
         )  # fmt: skip
-    async with db_session_factory() as session:
-        admitted = await agent_dm_admits(
-            session, tenant_id=tenant.id, agent_name="ada", user_id="999", groups=groups
-        )
+    lookup = groups_by_members(None) if groups is None else member_roles(groups)
+    admitted = await sender_admits(
+        db_session_factory, tenant_id=tenant.id, agent_name="ada", user_id="999", groups=lookup
+    )
     assert admitted is expected, f"{who} {user_ids} {group_ids} {groups}"
 
 
-async def test_agent_dm_admits_ignores_a_lock_for_another_agent(db_session_factory):
+async def test_sender_admits_ignores_a_lock_for_another_agent(db_session_factory):
     """A lock decides who answers; it does not stop an agent from messaging the person."""
     tenant, _, _ = await seed(db_session_factory, "ada", "bob")
     async with db_session_factory.begin() as session:
@@ -410,32 +413,34 @@ async def test_agent_dm_admits_ignores_a_lock_for_another_agent(db_session_facto
             session, tenant_id=tenant.id, subject="everyone", subject_id=None,
             agent_name="bob", locked=True, set_by=None, now=NOW,
         )  # fmt: skip
-    async with db_session_factory() as session:
-        admitted = await agent_dm_admits(
-            session, tenant_id=tenant.id, agent_name="ada", user_id="999"
-        )
+    admitted = await sender_admits(
+        db_session_factory, tenant_id=tenant.id, agent_name="ada", user_id="999",
+        groups=groups_by_members(None),
+    )  # fmt: skip
     assert admitted, "the grant alone admits an agent-sent DM"
 
 
-async def test_agent_dm_admits_without_a_sender_uses_the_default_agents_grant(
+async def test_sender_admits_without_a_sender_uses_the_default_agents_grant(
     db_session_factory,
 ):
     """A budget notice has no sending agent: the workspace default's grant decides."""
     tenant, _, _ = await seed(db_session_factory, "ada")
+    none = groups_by_members(None)
+    assert await sender_admits(
+        db_session_factory, tenant_id=tenant.id, agent_name=None, user_id="1", groups=none
+    ), "no default agent: nothing to hold the notice to"
     async with db_session_factory.begin() as session:
-        assert await agent_dm_admits(session, tenant_id=tenant.id, agent_name=None, user_id="1"), (
-            "no default agent: nothing to hold the notice to"
-        )
         await set_dm_agent_name(session, tenant_id=tenant.id, agent_name="ada")
         await store.set_grant(
             session, tenant_id=tenant.id, agent_name="ada", who="listed",
             user_ids=["999"], group_ids=[], set_by=None, now=NOW,
         )  # fmt: skip
-    async with db_session_factory() as session:
-        admitted = [
-            await agent_dm_admits(session, tenant_id=tenant.id, agent_name=None, user_id=u)
-            for u in ("999", "1")
-        ]
+    admitted = [
+        await sender_admits(
+            db_session_factory, tenant_id=tenant.id, agent_name=None, user_id=u, groups=none
+        )
+        for u in ("999", "1")
+    ]
     assert admitted == [True, False], "the default agent's list decides"
 
 
@@ -471,13 +476,14 @@ async def test_lookup_dm_groups_when_grants_and_rules_name_groups_then_only_thos
         {"g1": frozenset({"999"}), "g2": frozenset(), "g3": frozenset({"999"})}, asked
     )
     groups = await lookup_dm_groups(
-        db_session_factory, tenant_id=tenant.id, user_id="999", members=members
+        db_session_factory, tenant_id=tenant.id, user_id="999", groups=groups_by_members(members)
     )
     assert groups == frozenset({"g1"}), "the person's named groups"
     assert sorted(asked) == ["g1", "g2"], "groups nobody names are never looked up"
     unknown = await lookup_dm_groups(
-        db_session_factory, tenant_id=tenant.id, user_id="999", members=group_members({})
-    )
+        db_session_factory, tenant_id=tenant.id, user_id="999",
+        groups=groups_by_members(group_members({})),
+    )  # fmt: skip
     assert unknown is None, "a failed lookup leaves the groups unknown"
 
 
@@ -502,7 +508,7 @@ async def test_sender_admits_when_the_grant_lists_groups_then_lookups_decide_and
         )  # fmt: skip
     admitted = await sender_admits(
         db_session_factory, tenant_id=tenant.id, agent_name="ada", user_id="999",
-        members=group_members(groups),
+        groups=groups_by_members(group_members(groups)),
     )  # fmt: skip
     assert admitted is expected, f"{user_ids} {groups}"
 
@@ -516,10 +522,37 @@ async def test_sender_admits_when_no_lookup_is_wired_then_group_grants_deny(db_s
             user_ids=[], group_ids=["g1"], set_by=None, now=NOW,
         )  # fmt: skip
     admitted = [
-        await sender_admits(db_session_factory, tenant_id=tenant.id, agent_name=n, user_id="999")
+        await sender_admits(
+            db_session_factory,
+            tenant_id=tenant.id,
+            agent_name=n,
+            user_id="999",
+            groups=groups_by_members(None),
+        )  # fmt: skip
         for n in ("ada", "bob")
     ]
     assert admitted == [False, True], "an unknown group denies; no row admits members"
+
+
+async def test_roles_by_membership_when_roles_are_known_then_only_named_ones_count():
+    """Discord roles come from the membership lookup; none wired or unknown fails closed."""
+    tenant_id = uuid.uuid4()
+
+    async def fetch(_tenant_id: uuid.UUID, _guild_id: str, user_id: str) -> Membership:
+        if user_id == "gone":
+            return Membership(is_member=None, role_ids=())
+        return Membership(is_member=True, role_ids=("staff", "other"))
+
+    resolver = CachedMembershipResolver(fetch)
+    lookup = roles_by_membership(resolver, tenant_id=tenant_id, guild_id="g")
+    wanted = frozenset({"staff", "client"})
+    found = [await resolve_groups(lookup, u, wanted, tenant_id=tenant_id) for u in ("1", "gone")]
+    assert found == [frozenset({"staff"}), None], "named roles held; unknown membership"
+    none = roles_by_membership(None, tenant_id=tenant_id, guild_id="g")
+    assert await resolve_groups(none, "1", wanted, tenant_id=tenant_id) is None, "no lookup"
+    assert await resolve_groups(none, "1", frozenset(), tenant_id=tenant_id) == frozenset(), (
+        "no named group needs no lookup"
+    )
 
 
 async def test_purge_account_when_person_has_dm_rows_then_they_are_erased_and_counted(

@@ -3823,6 +3823,52 @@ async def test_dm_fire_refuses_disabled_or_unverified_private_access(
     await client.close()
 
 
+async def test_dm_fire_holds_the_owner_to_the_agents_grant_by_their_server_roles(
+    db_session, db_session_factory, monkeypatch
+):
+    """A grant listing a role is checked against the owner's current roles."""
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.stores.direct_messages import set_dm_enabled
+
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="424242")
+    row = await create_routine(
+        db_session, tenant_id=tenant.id, created_by_user_id="123", agent_id="ag",
+        agent_name="daimon", cron_expr="0 9 * * *", timezone_="UTC",
+        trigger_message="summary", destination_kind="dm",
+    )  # fmt: skip
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
+    await db_session.commit()
+
+    async def member(_tenant, guild_id, _user):
+        assert guild_id == "424242"
+        return Membership(is_member=True, role_ids=("R1", "R9"))
+
+    seen = []
+
+    async def admits(*_a, agent_name, user_id, groups, **_k):
+        seen.append((agent_name, user_id, await groups(user_id, frozenset({"R1", "R2"}))))
+        return False
+
+    monkeypatch.setattr("daimon.adapters.scheduler.main.sender_admits", admits)
+    client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    fire = await _build_fire(
+        client=client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+        membership_resolver=CachedMembershipResolver(member),
+    )
+    with unittest.mock.patch("daimon.adapters.scheduler.main.run_turn") as turn:
+        await fire(row)
+        turn.assert_not_called()
+    assert seen == [("daimon", "123", frozenset({"R1"}))], "only the grant's roles are asked"
+    async with db_session_factory() as session:
+        after = await get_routine(session, row.id, tenant_id=tenant.id)
+    assert after is not None and after.last_error
+    await client.close()
+
+
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 @pytest.mark.parametrize("kind", ["channel", "thread"])
 async def test_legacy_public_routines_still_fire_with_unknown_creation_source(

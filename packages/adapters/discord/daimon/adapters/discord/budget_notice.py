@@ -14,7 +14,7 @@ from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.channel_budget_notice import BudgetNotice, BudgetNotifier
 from daimon.core.config import DirectMessagePolicy
-from daimon.core.dm_access import sender_admits
+from daimon.core.dm_access import roles_by_membership, sender_admits
 from daimon.core.stores.watches import (
     REFUSED,
     UNCLEAR,
@@ -47,7 +47,9 @@ def discord_budget_notifier(
         delivered = 0
 
         async def admits(user_id: str) -> bool:
-            return await _default_agent_admits(runtime, notice.tenant_id, user_id)
+            return await _default_agent_admits(
+                runtime, notice.tenant_id, notice.workspace_id, user_id
+            )
 
         for user_id in await notice.allowed_recipients(
             policies.get(notice.tenant_id, DirectMessagePolicy()), admits
@@ -97,11 +99,17 @@ def with_budget_notifier(
 
 
 async def _default_agent_admits(
-    runtime: DiscordRuntime, tenant_id: uuid.UUID, recipient_id: str
+    runtime: DiscordRuntime, tenant_id: uuid.UUID, guild_id: str, recipient_id: str
 ) -> bool:
-    """A notice has no sending agent: the workspace default agent's grant decides."""
+    """A notice has no sending agent: the workspace default agent's grant decides, by roles."""
     return await sender_admits(
-        runtime.turn_deps.sessionmaker, tenant_id=tenant_id, agent_name=None, user_id=recipient_id
+        runtime.turn_deps.sessionmaker,
+        tenant_id=tenant_id,
+        agent_name=None,
+        user_id=recipient_id,
+        groups=roles_by_membership(
+            runtime.turn_deps.membership_resolver, tenant_id=tenant_id, guild_id=guild_id
+        ),
     )
 
 
@@ -119,7 +127,7 @@ async def send_member_notice(
     policy = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
     if is_closed() or not policy.allows(recipient_id):
         return False
-    if not await _default_agent_admits(runtime, tenant_id, recipient_id):
+    if not await _default_agent_admits(runtime, tenant_id, workspace_id, recipient_id):
         return False
     return await _deliver_notice(
         open_dm, workspace_id=workspace_id, recipient_id=recipient_id, text=text
@@ -170,7 +178,7 @@ async def send_watch_notice(
     policy = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
     if is_closed() or not policy.allows(recipient_id):
         return None
-    if not await _default_agent_admits(runtime, tenant_id, recipient_id):
+    if not await _default_agent_admits(runtime, tenant_id, workspace_id, recipient_id):
         return None
     try:
         dm = await open_dm(int(workspace_id), int(recipient_id))

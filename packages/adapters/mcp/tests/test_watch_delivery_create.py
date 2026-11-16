@@ -28,7 +28,9 @@ def _runtime(policy: DirectMessagePolicy | None = None):
 
 
 TENANT = uuid.uuid4()
-AUTH = SimpleNamespace(platform="discord", platform_user_id="555", tenant_id=TENANT)
+AUTH = SimpleNamespace(
+    platform="discord", platform_user_id="555", tenant_id=TENANT, external_id="42"
+)
 
 
 def _origin(thread_id: str = "4242", parent_id: str = "4241"):
