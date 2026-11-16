@@ -107,13 +107,13 @@ async def test_shutdown_settle_uses_owned_scope_and_cannot_interrupt_a_released_
         assert anthropic is client and session_id == "owned-dm-session"
         assert scope.tenant_id == str(tenant.id) and scope.account_id == str(account.id)
         assert not scope.is_platform and not scope.is_legacy_host_authorized
-        assert scope.authorization_id == "dm-shutdown-drain" and timeout_s == 3.0
+        assert scope.authorization_id == "dm-cancelled-turn" and timeout_s == 3.0
         calls.append(session_id)
         return interrupt_ack
 
     monkeypatch.setattr(direct_messages, "interrupt_orphaned_session", interrupt)
     deps = replace(deps_for(client, db_session_factory), turn_path=None)
-    await direct_messages._settle_shutdown_cancelled_dm(deps, claimed)
+    await direct_messages._settle_cancelled_dm(deps, claimed)
     assert calls == (["owned-dm-session"] if owns_claim else [])
     async with db_session_factory() as session:
         stored = await get_thread_session_by_id(session, id=mapping.id)

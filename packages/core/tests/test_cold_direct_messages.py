@@ -542,10 +542,16 @@ async def test_dm_turn_renders_through_the_adapters_card(
     monkeypatch.setattr(direct_messages, "run_prepared_turn", run)
     card = object()
     built: list[tuple[Admission, asyncio.Event]] = []
+    claims: list[datetime | None] = []
 
-    def card_for(admitted, cancel):
-        built.append((admitted, cancel))
-        return card
+    def card_for(claimed):
+        claims.append(claimed.claimed_at)
+
+        def build(admitted, cancel):
+            built.append((admitted, cancel))
+            return card
+
+        return build
 
     with pytest.raises(Stop):
         await reply_to_dm_result(
@@ -565,6 +571,7 @@ async def test_dm_turn_renders_through_the_adapters_card(
         assert seen["lifecycle"] is card, "the DM turn renders through the adapter's card"
         assert admitted is admission
         assert seen["cancel"] is cancel, "the card's Stop button cancels this turn"
+        assert claims[0] is not None, "the card checks delivery against the turn's own claim"
     else:
         assert type(seen["lifecycle"]).__name__ == "_CollectReply", "no card renders nothing"
 

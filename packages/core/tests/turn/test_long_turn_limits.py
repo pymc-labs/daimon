@@ -88,22 +88,27 @@ async def test_a_ninety_minute_marker_stays_active_past_45_minutes(
 
 
 async def _claim(
-    session: AsyncSession, row: DirectMessageRow, message_id: str, *, at: datetime, minutes: int
+    session: AsyncSession,
+    row: DirectMessageRow,
+    message_id: str,
+    *,
+    at: datetime,
+    fence: OwnerDmFence | None = None,
 ) -> DirectMessageRow | None:
     return await claim_message(
         session,
-        fence=OwnerDmFence(row.platform, row.external_user_id),
+        fence=fence or OwnerDmFence(row.platform, row.external_user_id),
         route_key=row.route_key,
         message_id=message_id,
         expected_scope_id=row.scope_id,
-        claimed_at=at + timedelta(minutes=minutes),
+        claimed_at=at,
     )
 
 
 async def test_a_dm_claim_left_by_a_dead_worker_does_not_block_for_hours(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The next message, holding the owner's fence, takes over a 3-hour claim nobody runs."""
+    """The next message, holding the owner's fence, takes over a claim whose turn is gone."""
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session)
         account = await make_account(session, tenant=tenant)
@@ -116,28 +121,28 @@ async def test_a_dm_claim_left_by_a_dead_worker_does_not_block_for_hours(
         wait=False,
     )
     async with turn(), db_session_factory.begin() as session:
-        left = await _claim(session, original, "m1", at=_NOW, minutes=181)
+        left = await _claim(session, original, "m1", at=_NOW)
         with pytest.raises(DirectMessageAccessRevoked):
             async with turn():
                 pass
     assert left is not None, "the first message claims the conversation"
     later = _NOW + timedelta(minutes=10)
-    async with turn(), db_session_factory.begin() as session:
-        taken = await _claim(session, original, "m2", at=later, minutes=46)
+    async with turn() as fence, db_session_factory.begin() as session:
+        taken = await _claim(session, original, "m2", at=later, fence=fence)
         assert taken is not None, "the next message is admitted, not refused as busy"
-        assert taken.claimed_at == later + timedelta(minutes=46), "it holds its own claim"
+        assert taken.claimed_at == later, "it holds its own claim"
         assert not await holds_claim(session, conversation=left), "the dead claim lost the scope"
 
 
 async def test_a_new_dm_conversation_waits_only_for_a_live_turn(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A set claim is busy while its owner's fence is held, past its stored time or not."""
+    """A set claim is busy while its owner's fence is held, however old the claim is."""
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session)
         account = await make_account(session, tenant=tenant)
         original = await make_dm_conversation(session, tenant=tenant, account_id=account.id)
-        claimed = await _claim(session, original, "m1", at=_NOW - timedelta(days=1), minutes=46)
+        claimed = await _claim(session, original, "m1", at=_NOW - timedelta(days=1))
     assert claimed is not None, "the turn claims the conversation"
     fresh = original.model_copy(update={"scope_id": "dm:fresh", "history": []})
     deps = deps_for(None, db_session_factory)

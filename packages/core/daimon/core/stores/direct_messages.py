@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 import structlog
@@ -37,10 +38,31 @@ def owner_dm_fence(platform: str, owner: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class OwnerDmFence:
-    """Proof the caller holds `owner_dm_fence(platform, owner)`; only `owner_dm_turn` makes one."""
+    """The owner's fence as `owner_dm_turn` holds it, on connection `pid`.
+
+    `fence_held` checks the hold; one built without a `pid` proves none. `lost` is set
+    once the holder sees the fence gone.
+    """
 
     platform: str
     owner: str
+    pid: int = 0
+    lost: asyncio.Event = field(default_factory=asyncio.Event, compare=False, repr=False)
+
+
+async def fence_held(session: AsyncSession, fence: OwnerDmFence) -> bool:
+    """Whether `fence`'s connection still holds the owner's fence; a dropped one frees it."""
+    # The bigint key `try_fence(schema_scoped=True)` locks, split into two 32-bit halves.
+    held = await session.scalar(
+        text(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted"
+            " AND pid = :pid AND objsubid = 1"
+            " AND ((classid::bigint << 32) | objid::bigint)"
+            " = hashtextextended(current_schema() || ':' || :key, 0))"
+        ),
+        {"pid": fence.pid, "key": owner_dm_fence(fence.platform, fence.owner)},
+    )
+    return bool(held)
 
 
 class DirectMessageRow(BaseModel):
@@ -167,9 +189,11 @@ async def claim_message(
 ) -> DirectMessageRow | None:
     """Claim the conversation of `fence`'s owner for `message_id`; None for a duplicate delivery.
 
+    `claimed_at` identifies the claim: finish and delivery check it is still the set one.
     Each claim's turn holds the owner's fence until it finishes, and the fence frees when
-    its process dies. So a claim still set here was left by a dead process and is taken
-    over; its turn, if still running, fails `holds_claim` before writing.
+    its connection drops. So a claim still set here is taken over only while `fence` is
+    held, which proves the claim's own turn lost it; that turn then fails its claim checks.
+    Without that proof the claim is still live and this one is busy.
     """
     row = await session.get(
         DirectMessageConversation,
@@ -186,8 +210,13 @@ async def claim_message(
     if message_id in row.recent_message_ids:
         return None
     if row.claimed_at is not None:
+        if not await fence_held(session, fence):
+            raise DirectMessageBusy(
+                "Your previous message is still being answered.\n\n"
+                "Send this one again when the reply arrives."
+            )
         structlog.get_logger(__name__).warning(
-            "dm.claim_taken_over", platform=fence.platform, left_until=row.claimed_at.isoformat()
+            "dm.claim_taken_over", platform=fence.platform, claimed_at=row.claimed_at.isoformat()
         )
     row.claimed_at = claimed_at
     row.recent_message_ids = [*row.recent_message_ids[-49:], message_id]
@@ -219,7 +248,8 @@ async def finish_message(
     *,
     conversation: DirectMessageRow,
     history: list[dict[str, str]] | None,
-) -> None:
+) -> bool:
+    """Release `conversation`'s claim and keep `history`; False if the claim is no longer set."""
     row = (
         await session.execute(
             select(DirectMessageConversation)
@@ -232,12 +262,13 @@ async def finish_message(
             .with_for_update()
         )
     ).scalar_one_or_none()
-    if row is None or row.claimed_at != conversation.claimed_at:
-        return
+    if row is None or row.claimed_at is None or row.claimed_at != conversation.claimed_at:
+        return False
     row.claimed_at = None
     if history is not None:
         row.history = history
     await session.flush()
+    return True
 
 
 async def quarantine_conversation(
