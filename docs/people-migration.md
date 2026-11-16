@@ -89,10 +89,11 @@ fire in that person's private messages, ones set in a thread fire in it and
 one-off reminders set in a plain channel fire in that channel. A channel reminder
 runs unattended, as its owner, and only if the agent can still post there and the
 owner can still see it; otherwise it is settled with a reason and nothing is sent.
-Channel reminders whose channel id is not numeric are counted. Any past the 25 pending a
-person may hold are skipped. Notes and instructions over their limit are cut
-and counted; an empty note is fine. It prints a count per outcome. A settled
-timer keeps no text.
+
+Channel reminders whose channel id is not numeric are counted. Any past the 25
+pending a person may hold are skipped. Notes and instructions over their limit
+are cut and counted; an empty note is fine. The command prints a count per
+outcome. A settled timer keeps no text.
 
 A reminder that cannot start because Discord answers with a server error, a rate limit
 or a network failure is offered again, up to five times. Once its turn has run, sending

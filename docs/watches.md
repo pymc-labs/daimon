@@ -186,15 +186,17 @@ days.
 ## Callback watches
 
 `create_watch(source="callback")` polls nothing. Daimon DMs the owner a private
-link, and each `POST` of UTF-8 text to it, up to 4 KiB unless the deployment allows more
-(`DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES`, up to 512 KiB), wakes the agent once,
-with that text as untrusted evidence. The link is never returned in the tool
-result or shown in a channel, and a lost one cannot be shown again: delete the
-watch and make a new one. If the DM fails the watch is deleted. A callback
-watch always has an end date and reports to the owner's private conversation.
-It lasts 30 days by default; the `callback_watch_lifetime` feature (server admins,
-`DAIMON_FEATURES__CALLBACK_WATCH_LIFETIME`) sets 7, 30 or 90 days, or unlimited with
-`0`. It applies to new and imported watches, and `renew` restarts the clock.
+link, and each `POST` of UTF-8 text to it wakes the agent once, with that text
+as untrusted evidence. A post may be up to 4 KiB unless the deployment allows more
+(`DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES`, up to 512 KiB). The link is never
+returned in the tool result or shown in a channel. A lost one cannot be shown
+again: delete the watch and make a new one.
+
+If the DM fails the watch is deleted. A callback watch always has an end date and
+reports to the owner's private conversation. It lasts 30 days by default. The
+`callback_watch_lifetime` feature (server admins,
+`DAIMON_FEATURES__CALLBACK_WATCH_LIFETIME`) sets 7, 30 or 90 days, or unlimited
+with `0`. It applies to new and imported watches, and `renew` restarts the clock.
 
 Set the public address of the sidecar first:
 

@@ -33,7 +33,7 @@ async def operator(db_nullpool_engine, db_clean, monkeypatch):
 
     @asynccontextmanager
     async def runtime(_settings):
-        yield SimpleNamespace(sessionmaker=factory, anthropic=object())
+        yield SimpleNamespace(sessionmaker=factory, anthropic=object(), settings=None)
 
     monkeypatch.setattr(watch_commands, "build_runtime", runtime)
     monkeypatch.setattr(watch_commands, "load_settings", lambda: None)
