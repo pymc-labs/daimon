@@ -1488,3 +1488,43 @@ async def test_revocation_between_confirmations_leaves_the_second_unanswered(
         )
         assert await asyncio.wait_for(worker, timeout=5) is False
     assert [c["result"] for c in fake.confirmations] == ["allow"]
+
+
+async def test_the_worker_runs_to_the_unattended_run_limit_at_its_place(
+    monkeypatch: pytest.MonkeyPatch, factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Nobody watches an agent-chat turn: its worker follows the unattended run limit."""
+    from daimon.core.features.service import set_workspace_feature
+
+    async with factory.begin() as db:
+        await make_tenant(db, id=_TENANT_ID)
+        await set_workspace_feature(
+            db,
+            None,
+            tenant_id=_TENANT_ID,
+            platform="discord",
+            key="unattended_time_limit",
+            value="90",
+            account_id=None,
+            surface="cli",
+        )
+    real = safety.unattended_ceiling_s
+    read: list[float] = []
+
+    async def bounded(*args: Any, **kwargs: Any) -> float:
+        read.append(await real(*args, **kwargs))
+        return 0.05
+
+    monkeypatch.setattr(safety, "unattended_ceiling_s", bounded)
+    fake = FakeSession(frozen="always_ask")
+    fake.pause()
+    runtime = _runtime(fake, factory, _DISABLED)
+    worker = safety.watch_turn(
+        runtime,
+        _auth(platform="discord"),
+        _SESSION,
+        turn_event_id="evt_never_listed",
+        rules_channel_id="C1",
+    )
+    assert await asyncio.wait_for(worker, timeout=5) is False, "the worker stops at its limit"
+    assert read == [90 * 60.0], "the worker reads the tenant's unattended run limit"

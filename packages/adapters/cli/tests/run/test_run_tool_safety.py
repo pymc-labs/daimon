@@ -535,3 +535,46 @@ def _events_end() -> list[dict[str, Any]]:
         {"id": "evt_msg", "type": "agent.message", "content": [{"type": "text", "text": "ok"}]},
         {"id": "evt_end", "type": "session.status_idle", "stop_reason": {"type": "end_turn"}},
     ]
+
+
+async def test_an_operator_run_reads_the_unattended_run_limit(
+    monkeypatch: pytest.MonkeyPatch, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """`daimon run` is unattended: its deadline follows the tenant's unattended run limit."""
+    from datetime import UTC, datetime, timedelta
+
+    from daimon.adapters.cli.tenant import discover_tenant
+    from daimon.core.features.service import set_workspace_feature
+
+    async with db_session_factory() as db:
+        await set_workspace_feature(
+            db,
+            None,
+            tenant_id=await discover_tenant(db),
+            platform="cli",
+            key="unattended_time_limit",
+            value="90",
+            account_id=None,
+            surface="cli",
+        )
+        await db.commit()
+    deadlines: list[datetime | None] = []
+    conversation = cmd_mod.run_conversation
+
+    async def recorded(**kwargs: Any) -> int:
+        deadlines.append(kwargs["deadline"])
+        return await conversation(**kwargs)
+
+    monkeypatch.setattr(cmd_mod, "run_conversation", recorded)
+    before = datetime.now(UTC)
+    await _run(
+        monkeypatch,
+        db_session_factory,
+        _Session([], []),
+        _events_end(),
+        ToolSafetyPolicy(enabled=True),
+    )
+    (deadline,) = deadlines
+    assert deadline is not None, "the run passes its own deadline"
+    window = timedelta(minutes=90)
+    assert before + window <= deadline <= datetime.now(UTC) + window, "the tenant's 90 minutes"
