@@ -1655,6 +1655,7 @@ async def import_watch(
                 "legacy_id": definition.legacy_id,
                 "reason": reason,
                 "confirmed": False,
+                "keep_paused": definition.paused,
                 "tool": tool,
                 "arguments": arguments,
                 "mapping_error": mapping_error,
@@ -1763,6 +1764,7 @@ async def import_callback_watch(
             "legacy_id": definition.legacy_id,
             "reason": "awaiting_confirmation",
             "confirmed": False,
+            "keep_paused": definition.paused,
             "place_type": definition.place_type,
         },
     )
@@ -1824,6 +1826,14 @@ async def confirm_import(
         )
     row = await session.get(Watch, watch_id)
     assert row is not None
+    if row.source_state.get("keep_paused") is True:
+        # Paused where it came from: confirmed, but only its owner resumes it.
+        row.source_state = {**row.source_state, "confirmed": True, "reason": "owner_paused"}
+        await session.flush()
+        session.expire_all()
+        kept = await get_watch(session, watch_id)
+        assert kept is not None
+        return kept
     row.source_state = {**row.source_state, "confirmed": True}
     await session.flush()
     await resume_watch(session, watch_id, now=now)

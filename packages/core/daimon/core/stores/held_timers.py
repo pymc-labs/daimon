@@ -53,6 +53,7 @@ async def import_held_timer(
             place_type=definition.place_type,
             fire_at=definition.fire_at,
             note="" if past else definition.note,
+            paused=definition.paused,
             settled_at=now if past else None,
             outcome="past" if past else None,
         )
@@ -77,7 +78,11 @@ async def settle_held_timers(
         keys = list(
             await session.scalars(
                 select(HeldTimer.source_id)
-                .where(HeldTimer.tenant_id == tenant_id, HeldTimer.settled_at.is_(None))
+                .where(
+                    HeldTimer.tenant_id == tenant_id,
+                    HeldTimer.settled_at.is_(None),
+                    HeldTimer.paused.is_(False),
+                )
                 .order_by(HeldTimer.fire_at, HeldTimer.source_id)
             )
         )

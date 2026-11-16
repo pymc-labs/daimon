@@ -65,6 +65,11 @@ without an identity get one. Watches end at their old expiry; permanent ones
 and ones over 30 days end 30 days after import, and past ones are skipped.
 Rerunning adds nothing and issues no second link.
 
+Until a watch is confirmed, a post to either of its links answers a retryable
+`503`, so senders try again; a link nobody holds still gets the same `403`.
+Entries and timers marked `paused` stay paused when confirmed: a watch waits for
+its owner to resume it, and a timer is never scheduled.
+
 Imported watches start paused and report to the owner's private conversation.
 Confirm each after checking its owner, channel and thread, which the import
 prints.

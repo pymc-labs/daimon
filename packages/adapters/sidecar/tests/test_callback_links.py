@@ -287,9 +287,13 @@ async def test_import_keeps_the_old_token_and_mints_a_new_one_held_until_confirm
     watch = item.watch
     assert watch.status == "paused" and watch.delivery == "dm" and watch.session_id is None
     async with TestClient(TestServer(create_app(db_session_factory))) as client:
-        # Held: neither link works until an operator confirms the destination.
-        assert (await post(client, watch.id, item.token)).status == 403
-        assert (await post(client, watch.id, OLD_TOKEN)).status == 403
+        # Held: a live link answers a retryable 503 until an operator confirms the
+        # destination; an unknown one learns nothing.
+        for token in (item.token, OLD_TOKEN):
+            held = await post(client, watch.id, token)
+            assert held.status == 503 and held.headers["Retry-After"] == "300"
+        assert (await post(client, watch.id, "z" * 40)).status == 403
+        assert await count(db_session_factory, "watch_inbox") == 0
         async with db_session_factory.begin() as db:
             await watches.confirm_import(
                 db,
@@ -413,3 +417,40 @@ async def test_held_timers_stop_at_the_pending_cap(db_session_factory, moved):
     )
     assert dict(counts) == {"scheduled": 25, "capped": 2}
     assert len(await _pending_timers(db_session_factory)) == 25
+
+
+async def test_paused_import_stays_paused_when_confirmed(db_session_factory, moved):
+    item = await _import(db_session_factory, moved, paused=True)
+    assert item.watch is not None and item.token is not None
+    watch = item.watch
+    async with db_session_factory.begin() as db:
+        confirmed = await watches.confirm_import(
+            db,
+            watch.id,
+            tenant_id=moved.id,
+            owner_account_id=watch.owner_account_id,
+            agent_id="agent-new",
+            parent_channel_id="900",
+            thread_id="900",
+            now=datetime.now(UTC),
+        )
+    assert confirmed.status == "paused"
+    assert confirmed.source_state["confirmed"] is True
+    async with TestClient(TestServer(create_app(db_session_factory))) as client:
+        assert (await post(client, watch.id, item.token)).status == 403
+    assert await count(db_session_factory, "watch_inbox") == 0
+
+
+async def test_paused_timers_are_never_scheduled(db_session_factory, moved):
+    flat = _timer("paused-1")
+    flat = flat.model_copy(update={"paused": True})
+    now = datetime.now(UTC)
+    async with db_session_factory.begin() as db:
+        assert await import_held_timer(db, flat, tenant_id=moved.id, now=now) == "held"
+    counts = await settle_held_timers(
+        db_session_factory, tenant_id=moved.id, agent_id="agent-new", agent_name="analyst", now=now
+    )
+    assert not counts
+    assert len(await _pending_timers(db_session_factory)) == 0
+    async with db_session_factory() as db:
+        assert await db.scalar(text("SELECT settled_at IS NULL AND paused FROM held_timers"))

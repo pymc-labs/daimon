@@ -25,6 +25,7 @@ class ImportedWatch(BaseModel):
     baseline: dict[str, JsonValue] = Field(default_factory=dict)
     expires_at: datetime
     max_turns_per_day: int = Field(default=24, ge=1, le=120)
+    paused: bool = False
 
 
 PlaceType = Literal["direct-message", "thread", "channel", "mcp", "voice", "routine"]
@@ -43,6 +44,7 @@ class ImportedCallbackWatch(BaseModel):
     channel_id: str = Field(min_length=1, max_length=64)
     thread_id: str | None = Field(default=None, max_length=64)
     place_type: PlaceType
+    paused: bool = False
 
 
 class ImportedTimer(BaseModel):
@@ -56,6 +58,7 @@ class ImportedTimer(BaseModel):
     place_type: PlaceType
     fire_at: datetime
     note: str = Field(min_length=1, max_length=2000)
+    paused: bool = False
 
 
 class WatchExport(BaseModel):

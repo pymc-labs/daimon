@@ -77,6 +77,9 @@ def create_app(
             except DBAPIError as exc:
                 # Never log exception text/parameters, authorization headers or bodies.
                 state = getattr(exc.orig, "sqlstate", None)
+                if state == "55000":
+                    # A valid link whose watch awaits confirmation: senders retry.
+                    return web.Response(status=503, headers={"Retry-After": "300"})
                 return web.Response(
                     status=409
                     if state == "23505"

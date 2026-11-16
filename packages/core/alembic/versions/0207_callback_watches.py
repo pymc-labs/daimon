@@ -74,6 +74,12 @@ BEGIN
         END LOOP;
         IF difference = 0 THEN matched := true; END IF;
     END LOOP;
+    -- Only a sender holding a live token learns the watch is waiting: retry later.
+    IF found_watch AND matched AND w.source = 'callback' AND w.status = 'paused'
+       AND w.source_state->>'reason' = 'awaiting_confirmation'
+       AND (w.expires_at IS NULL OR w.expires_at > t) THEN
+        RAISE EXCEPTION 'callback held' USING ERRCODE='55000';
+    END IF;
     IF NOT found_watch OR NOT matched OR w.source <> 'callback'
        OR w.status <> 'active' OR (w.expires_at IS NOT NULL AND w.expires_at <= t)
        OR (w.max_fires IS NOT NULL AND w.fire_count >= w.max_fires)
@@ -205,6 +211,7 @@ def upgrade() -> None:
         ),
         sa.Column("settled_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("outcome", sa.Text(), nullable=True),
+        sa.Column("paused", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.PrimaryKeyConstraint("tenant_id", "source_id"),
         sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["account_id"], ["accounts.id"], ondelete="CASCADE"),

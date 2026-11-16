@@ -4094,6 +4094,10 @@ class HeldTimer(Base):
     )
     settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Paused where it came from: never scheduled, whatever is confirmed.
+    paused: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"), default=False
+    )
 
 
 class DirectMessagePolicy(Base):
