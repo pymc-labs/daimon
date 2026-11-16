@@ -214,6 +214,7 @@ from daimon.core.turn.errors import (
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.mutation_gate import initial_send_prefix
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
+from daimon.core.turn.other_apps import place_scrub_platform
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.output import OutputAuthorization
 from daimon.core.turn.prepare import PreparedTurn, admitted_session_scope, bind_session
@@ -1220,6 +1221,7 @@ class DaimonBot(commands.Bot):
                         output_client=self.runtime.anthropic,
                         membership_resolver=self.membership_resolver,
                         resolve_agent_names=self._routine_agent_names,
+                        settings=self.runtime.settings,
                         resolve_identity=lambda row, guild_id: resolve_routine_identity(
                             self.runtime.sessionmaker,
                             self.runtime.anthropic,
@@ -1730,7 +1732,21 @@ class DaimonBot(commands.Bot):
                                 )
                                 await session.commit()
                                 return
-                            result = await completed_orphan_text(self.runtime.anthropic, locked)
+                            result = await completed_orphan_text(
+                                self.runtime.anthropic,
+                                locked,
+                                scrub=await place_scrub_platform(
+                                    self.runtime.sessionmaker,
+                                    self.runtime.settings,
+                                    FeaturePlace.of(
+                                        locked.tenant_id,
+                                        "discord",
+                                        locked.channel_id,
+                                        locked.thread_id,
+                                        agent_id=locked.ma_agent_id,
+                                    ),
+                                ),
+                            )
                             transport = DiscordPostTransport(
                                 self, channel, name="Daimon", avatar_url=None, builtin=False
                             )
@@ -5228,6 +5244,7 @@ class DaimonBot(commands.Bot):
                                     if admission.backend_revision is not None
                                     else None
                                 ),
+                                keep_names=admission.shown("other_app_names", "discord"),
                             )
                     opened = await message.create_thread(
                         name=thread_name, auto_archive_duration=10080

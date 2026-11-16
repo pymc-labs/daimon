@@ -312,6 +312,8 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
 
 
 _KEPT = "A conversation keeps what it started with until /new."
+# Server admins only, no delegation, no owners (long jobs spend money in the background).
+_SERVER_ADMIN: Final = Authority(None, agent_owner=False)
 _FIXED_ON: Final[Mapping[str, str]] = {_GEMINI: "on", _OPENAI: "on"}
 _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
     FeatureSpec(
@@ -330,6 +332,22 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         ),
         backend_fixed={_OPENAI: "off"},
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
+    FeatureSpec(
+        key="other_app_names",
+        name="Name other apps",
+        category="model_input",
+        effect="model",
+        values=_ON_OFF,
+        default="off",
+        tiers=TIERS,
+        binds="session_identity",
+        doc=(
+            "Replies, posts and the agent's prompt keep the names and links of other chat apps. "
+            'Off replaces them with "another app". A conversation keeps the prompt it '
+            f"started with. {_KEPT}"
+        ),
+        authority=_SERVER_ADMIN,
     ),
     FeatureSpec(
         key="platform_skills",
@@ -444,8 +462,6 @@ _DM_PLATFORMS: Final = frozenset({"discord", "slack"})
 _DISCORD: Final = frozenset({"discord"})
 _CALL_GATE_PLATFORMS: Final = frozenset({"discord", "slack", "teams", "web"})
 _SETTINGS: Final = Authority(DelegatedAction.AGENT_SETTINGS)
-# Long jobs spend money in the background: server admins only, no delegation, no owners.
-_SERVER_ADMIN: Final = Authority(None, agent_owner=False)
 _CHANNELS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "channel")
 _ADMIN: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS)
 WEB_MODULES: Final[tuple[str, ...]] = (

@@ -17,6 +17,7 @@ from daimon.adapters.mcp.tools._channel_policy import (
     load_read_policy,
 )
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._other_apps import scrub_platform
 from daimon.adapters.mcp.tools._outbound import (
     MessageDraft,
     OutgoingPost,
@@ -212,7 +213,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         cross-tenant messages.
         """
         auth = await _auth(ctx)
-        content = scrub_other_platforms(content, auth.platform)
+        content = scrub_other_platforms(content, await scrub_platform(runtime, auth))
         await refuse_dm_to_opted_out(runtime, auth, recipient_id)
         [post] = await prepare_posts(
             runtime, auth, [OutgoingPost(text=content, place=recipient_id)], plan=plan
@@ -460,10 +461,11 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """
         auth = await _auth(ctx)
         drafts = [ThreadDraft(name=name, content=content), *(batch or [])]
+        scrub = await scrub_platform(runtime, auth, channel_id)
         drafts = [
             ThreadDraft(
-                name=scrub_other_platforms(d.name, auth.platform),
-                content=scrub_other_platforms(d.content, auth.platform),
+                name=scrub_other_platforms(d.name, scrub),
+                content=scrub_other_platforms(d.content, scrub),
             )
             for d in drafts
         ]
@@ -506,8 +508,9 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         auth = await _auth(ctx)
         if auth.platform == "slack":
             raise _slack_unsupported("rename_thread")
+        scrub = await scrub_platform(runtime, auth, thread_id)
         return await _rename_thread_impl(
-            runtime, auth, thread_id=thread_id, name=scrub_other_platforms(name, auth.platform)
+            runtime, auth, thread_id=thread_id, name=scrub_other_platforms(name, scrub)
         )
 
     @mcp.tool(tags={"discord"})  # pyright: ignore[reportArgumentType]
@@ -534,13 +537,12 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         auth = await _auth(ctx)
         if auth.platform == "slack":
             raise _slack_unsupported("set_display_identity")
+        scrub = await scrub_platform(runtime, auth)
         # MCP clients often send "" for an optional param they mean to omit.
         return await _set_display_identity_impl(
             runtime,
             auth,
-            display_name=scrub_other_platforms(display_name, auth.platform)
-            if display_name
-            else None,
+            display_name=scrub_other_platforms(display_name, scrub) if display_name else None,
             avatar_url=avatar_url or None,
             origin_context_id=origin_context_id or None,
         )
@@ -626,14 +628,19 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         unasked.
         """
         auth = await _auth(ctx)
+        scrubs = {
+            cid: await scrub_platform(runtime, auth, cid)
+            for cid in {channel_id, *(d.channel_id for d in batch or [])}
+        }
         drafts = [
             MessageDraft(
-                channel_id=channel_id, content=scrub_other_platforms(content, auth.platform)
+                channel_id=channel_id,
+                content=scrub_other_platforms(content, scrubs[channel_id]),
             ),
             *(
                 MessageDraft(
                     channel_id=d.channel_id,
-                    content=scrub_other_platforms(d.content, auth.platform),
+                    content=scrub_other_platforms(d.content, scrubs[d.channel_id]),
                 )
                 for d in batch or []
             ),

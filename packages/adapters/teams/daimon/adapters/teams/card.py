@@ -27,6 +27,7 @@ from daimon.core.platform_words import scrub_other_platforms
 from daimon.core.support_escalation import ASK_THE_TEAM, ESCALATE
 from daimon.core.teams_markdown import escape_dollars
 from daimon.core.turn.notices import TerminationNotice, fit_notice
+from daimon.core.turn.other_apps import scrub_platform
 from daimon.core.turn.progress_plans import progress_plans_shown
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.status_lines import (
@@ -101,7 +102,7 @@ def on_message(state: CardState, text: str) -> CardState:
     """A whole agent message joins the draft log; an empty one changes nothing."""
     if not text:
         return state
-    line = format_draft(scrub_other_platforms(text, "teams"))
+    line = format_draft(scrub_other_platforms(text, scrub_platform("teams")))
     earlier, latest = roll_draft(state.earlier_drafts, state.draft, line)
     return dataclasses.replace(state, earlier_drafts=earlier, draft=latest)
 
@@ -110,7 +111,9 @@ def on_draft(state: CardState, text: str) -> CardState:
     """A provider's preview of the message in progress revises the latest draft line."""
     if not text:
         return state
-    return dataclasses.replace(state, draft=format_draft(scrub_other_platforms(text, "teams")))
+    return dataclasses.replace(
+        state, draft=format_draft(scrub_other_platforms(text, scrub_platform("teams")))
+    )
 
 
 def on_activity(state: CardState, turn: TurnState) -> CardState:
@@ -124,11 +127,12 @@ def on_activity(state: CardState, turn: TurnState) -> CardState:
         turn.content, finished_ids=turn.finished_tool_ids, plan_shown=plan_shown
     )
     plan = format_plan_lines(turn.content) if plan_shown else ()
+    scrubbing = scrub_platform("teams")
     return dataclasses.replace(
         state,
         is_working=has_running_tool(turn.content),
-        tool_lines=tuple(scrub_other_platforms(line, "teams") for line in lines),
-        plan_lines=tuple(scrub_other_platforms(line, "teams") for line in plan),
+        tool_lines=tuple(scrub_other_platforms(line, scrubbing) for line in lines),
+        plan_lines=tuple(scrub_other_platforms(line, scrubbing) for line in plan),
     )
 
 

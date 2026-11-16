@@ -25,9 +25,11 @@ ORPHAN_RESULT_READ_TIMEOUT_S = 5.0
 
 
 async def completed_orphan_text(
-    anthropic_client: AsyncAnthropic, row: ThreadSessionRow
+    anthropic_client: AsyncAnthropic, row: ThreadSessionRow, *, scrub: str | None = "discord"
 ) -> str | None:
-    """Recover only a successful current turn; bound reads before closing its card."""
+    """Recover only a successful current turn; bound reads before closing its card.
+
+    `scrub` is the platform whose other apps' names the text loses; None keeps them."""
     try:
         async with asyncio.timeout(ORPHAN_RESULT_READ_TIMEOUT_S):
             scope = session_scope(
@@ -76,7 +78,7 @@ async def completed_orphan_text(
                 or state.stop_reason.type != "end_turn"
             ):
                 return None
-            return scrub_other_platforms(extract_final_response(state.content), "discord") or None
+            return scrub_other_platforms(extract_final_response(state.content), scrub) or None
     except (anthropic.APIError, TimeoutError, DaimonError) as err:
         log.warning(
             "turn.orphan_result_read_failed", thread_id=row.thread_id, error_type=type(err).__name__

@@ -30,7 +30,7 @@ from daimon.adapters.slack.output_delivery import SLACK_MAX_BYTES_PER_FILE, buil
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
-from daimon.core.config import DirectMessagePolicy
+from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.message_split import split_fenced
 from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.routine_delivery import (
@@ -42,6 +42,7 @@ from daimon.core.routine_delivery import (
     render_fallback_dm,
     render_fallback_post,
     resolve_routine_identity,
+    routine_keeps_names,
     routine_requester_name,
     tenant_dm_still_open,
 )
@@ -77,6 +78,7 @@ async def _dm_fallback(
     output_client: AsyncAnthropic,
     may_post: Callable[[], Awaitable[bool]],
     sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+    settings: Settings | None = None,
 ) -> DeliveryOutcome:
     creator = row.created_by_user_id
     if creator is None or not policy.allows(creator):
@@ -100,7 +102,13 @@ async def _dm_fallback(
                 sessionmaker,
                 tenant_id=row.tenant_id,
                 platform="slack",
-                text=render_fallback_dm(row, reason, platform="slack"),
+                text=render_fallback_dm(
+                    row,
+                    reason,
+                    platform="slack",
+                    keep_names=sessionmaker is not None
+                    and await routine_keeps_names(sessionmaker, settings, row, "slack"),
+                ),
             )
         )
         for chunk in split_fenced(text, 11800, word_boundary=True):
@@ -277,6 +285,7 @@ def make_slack_routine_poster(
                 output_client=runtime.anthropic,
                 may_post=fallback_guard,
                 sessionmaker=runtime.sessionmaker,
+                settings=runtime.settings,
             )
 
         target = delivery_target(row, platform="slack")
@@ -321,6 +330,9 @@ def make_slack_routine_poster(
                     text=render_fallback_post(
                         row,
                         platform="slack",
+                        keep_names=await routine_keeps_names(
+                            runtime.sessionmaker, runtime.settings, row, "slack"
+                        ),
                         requester_name=await routine_requester_name(
                             runtime.sessionmaker, row, "slack"
                         ),

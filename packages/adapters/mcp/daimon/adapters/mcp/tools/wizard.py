@@ -24,6 +24,7 @@ from typing import Final
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._other_apps import scrub_platform
 from daimon.adapters.mcp.tools._outbound import OutgoingPost, prepare_posts
 from daimon.adapters.mcp.tools.discord import (
     PostedWizard,
@@ -97,10 +98,11 @@ async def _post_wizard_impl(
 
     # `image_url` is server-populated: a caller-supplied value must never
     # reach the renderer, so it is stripped before validation even runs.
+    scrub = await scrub_platform(runtime, auth, channel_id)
     stripped_steps = [
-        _scrubbed_step(step.model_copy(update={"image_url": None}), auth.platform) for step in steps
+        _scrubbed_step(step.model_copy(update={"image_url": None}), scrub) for step in steps
     ]
-    prompt = scrub_other_platforms(prompt, auth.platform)
+    prompt = scrub_other_platforms(prompt, scrub)
     spec = _validated(prompt, stripped_steps)
     # A form is a post like any other: it says who asked and counts toward reach.
     # The attribution lengthens the head text, so the form is validated with it

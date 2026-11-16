@@ -15,6 +15,7 @@ from __future__ import annotations
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._other_apps import scrub_platform
 from daimon.adapters.mcp.tools.discord import (
     _post_app_install_button_impl,  # pyright: ignore[reportPrivateUsage]
 )
@@ -103,5 +104,5 @@ def register_github_app_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             runtime,
             auth,
             channel_id=channel_id,
-            purpose=scrub_other_platforms(purpose, auth.platform),
+            purpose=scrub_other_platforms(purpose, await scrub_platform(runtime, auth, channel_id)),
         )
