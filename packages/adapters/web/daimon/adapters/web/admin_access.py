@@ -7,6 +7,7 @@ from typing import Any
 
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.web.admin_common import WorkspaceAdmin, admin_of, listed_agents, refused
+from daimon.adapters.web.admin_dm import DmAccessChange, change_dm_access, dm_access_of
 from daimon.adapters.web.channel_names import channel_names
 from daimon.adapters.web.chat_json import agent_json
 from daimon.adapters.web.faces import avatars_of
@@ -23,6 +24,7 @@ class AccessChange(BaseModel):
     web: bool | None = None
     who: WebAgentWho | None = None
     groups: list[str] | None = Field(default=None, max_length=100)
+    dm: DmAccessChange | None = None
 
 
 def access_router(runtime: WebRuntime) -> APIRouter:
@@ -32,6 +34,7 @@ def access_router(runtime: WebRuntime) -> APIRouter:
         agents = await listed_agents(runtime, tenant_id)
         async with runtime.sessionmaker() as db:
             found = await web_admin.agent_access_rows(db, tenant_id, agents)
+            dm = await dm_access_of(runtime, db, tenant_id, agents)
         avatars = await avatars_of(runtime, tenant_id, agents)
         _, names_found = await channel_names(
             runtime, tenant_id, {r.fixed_to for r in found if r.fixed_to}
@@ -39,7 +42,10 @@ def access_router(runtime: WebRuntime) -> APIRouter:
         names = names_found.labels()
         by_id = {a.id: a for a in agents}
         return [
-            _access_json(by_id[r.agent_id], r, names, avatars.get(r.agent_id, "")) for r in found
+            _access_json(
+                by_id[r.agent_id], r, names, avatars.get(r.agent_id, ""), dm.get(r.agent_id)
+            )
+            for r in found
         ]
 
     @router.get("/agent-access")
@@ -56,16 +62,20 @@ def access_router(runtime: WebRuntime) -> APIRouter:
             raise HTTPException(status_code=404, detail="This agent isn't in the workspace.")
         try:
             async with runtime.sessionmaker.begin() as db:
-                [current] = await web_admin.agent_access_rows(db, tenant_id, agents)
-                changed = await web_admin.set_agent_access(
-                    db,
-                    admin_of(caller),
-                    runtime.now(),
-                    current,
-                    web=body.web,
-                    who=body.who,
-                    groups=body.groups,
-                )
+                [changed] = await web_admin.agent_access_rows(db, tenant_id, agents)
+                if body.dm is None or (body.model_fields_set - {"dm"}):
+                    changed = await web_admin.set_agent_access(
+                        db,
+                        admin_of(caller),
+                        runtime.now(),
+                        changed,
+                        web=body.web,
+                        who=body.who,
+                        groups=body.groups,
+                    )
+                if body.dm is not None:
+                    await change_dm_access(runtime, db, caller, agents[0], body.dm)
+                dm = await dm_access_of(runtime, db, tenant_id, agents)
         except WebAdminError as error:
             raise refused(error) from error
         return {
@@ -77,6 +87,7 @@ def access_router(runtime: WebRuntime) -> APIRouter:
             "groups": changed.groups,
             "fixed_to": changed.fixed_to,
             "fixed_name": None,
+            "dm": dm.get(agent_id),
         }
 
     return router
@@ -87,6 +98,7 @@ def _access_json(
     row: web_admin.AgentAccess,
     names: dict[str, str],
     avatar: str,
+    dm: dict[str, Any] | None,
 ) -> dict[str, Any]:
     return {
         "agent": agent_json(agent, avatar=avatar),
@@ -95,4 +107,5 @@ def _access_json(
         "groups": row.groups,
         "fixed_to": row.fixed_to,
         "fixed_name": None if row.fixed_to is None else names.get(row.fixed_to, UNNAMED_CHANNEL),
+        "dm": dm,
     }

@@ -76,6 +76,15 @@ _ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
     ("PATCH", "/api/admin/settings", {"default_agent": AGENT_ID}),
     ("PATCH", "/api/admin/settings", {"invokers": {"everyone": True}}),
     ("PATCH", "/api/admin/settings", {"providers": "default"}),
+    ("PATCH", f"/api/admin/agent-access/{AGENT_ID}", {"dm": {"who": "members"}}),
+    ("GET", "/api/admin/dm", None),
+    ("PATCH", "/api/admin/dm", {"default_agent": None}),
+    ("POST", "/api/admin/dm/rules", {"subject": "everyone"}),
+    ("PATCH", "/api/admin/dm/rules/0", {"locked": False}),
+    ("DELETE", "/api/admin/dm/rules/0", None),
+    ("GET", "/api/admin/dm/explain?user=u-1", None),
+    ("GET", "/api/admin/dm/people?q=a", None),
+    ("GET", "/api/admin/platform-groups", None),
 ]
 
 
@@ -434,6 +443,7 @@ async def test_turning_web_chat_off_hides_the_agent_from_members(
         "groups": [],
         "fixed_to": None,
         "fixed_name": None,
+        "dm": {"on": False, "who": "members", "users": [], "groups": []},
     }, "an agent nobody configured is on for everyone"
     assert changed.json()["web"] is False, changed.text
     assert agents == [], "a member no longer sees it"
