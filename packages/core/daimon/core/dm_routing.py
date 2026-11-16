@@ -162,7 +162,7 @@ def resolve(
     names = tuple(allowed)
     if rule is not None and rule.locked:
         target = rule.agent
-        if target is not None and target in names:
+        if target in names:
             return DmDecision(DmStart(target, "locked"), names, rule)
         return DmDecision(DmRefused("locked_unavailable"), names, rule)
     rule_agent = None if rule is None else rule.agent
