@@ -719,9 +719,14 @@ async def routine_execution(
     tenant_id: UUID,
     routine_id: UUID,
     *,
+    lifetime_s: float,
     register: bool = True,
 ) -> AsyncIterator[None]:
-    """A live, expiring grant ends with the scheduler fire, including cancellation."""
+    """A live grant ends with the scheduler fire, including cancellation.
+
+    `lifetime_s` is the fire's own outer bound, so a grant a dead process left
+    behind expires no later than its fire would have been stopped.
+    """
     identity = uuid4()
     if register:
         async with sessions() as session, session.begin():
@@ -730,7 +735,7 @@ async def routine_execution(
                     tenant_id=tenant_id,
                     id=identity,
                     routine_id=routine_id,
-                    expires_at=datetime.now(UTC) + timedelta(hours=1),
+                    expires_at=datetime.now(UTC) + timedelta(seconds=lifetime_s),
                 )
             )
     token = current_intake_execution.set((routine_id, identity))
