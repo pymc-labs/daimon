@@ -1048,11 +1048,15 @@ async def test_reimporting_an_unconfirmed_watch_refreshes_its_lifetime(db_sessio
             )
 
     first = await run(timedelta(days=7))
-    assert first.watch is not None and first.watch.source_state["lifetime_s"] == 7 * 86400
+    assert first.capped and first.watch is not None
+    assert first.watch.source_state["lifetime_s"] == 7 * 86400
     again = await run(timedelta(days=90))
-    assert again.outcome == "updated" and again.watch is not None
+    assert again.outcome == "updated" and again.capped and again.watch is not None
     assert again.watch.source_state["lifetime_s"] == 90 * 86400
     assert (await run(timedelta(days=90))).outcome == "existing"
+    free = await run(None)
+    assert free.outcome == "updated" and not free.capped and free.watch is not None
+    assert free.watch.source_state["lifetime_s"] is None
     async with db_session_factory.begin() as db:
         await watches.confirm_import(
             db,
@@ -1065,6 +1069,18 @@ async def test_reimporting_an_unconfirmed_watch_refreshes_its_lifetime(db_sessio
             now=datetime.now(UTC),
         )
     assert (await run(None)).outcome == "existing"
+
+
+async def test_a_rerun_after_the_source_ended_keeps_its_lifetime_uncapped(
+    db_session_factory, moved
+):
+    first = await _import(db_session_factory, moved)
+    assert first.watch is not None and not first.capped
+    kept = first.watch.source_state["lifetime_s"]
+    past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+    again = await _import(db_session_factory, moved, expires_at=past, instructions="New wording.")
+    assert again.outcome == "updated" and not again.capped and again.watch is not None
+    assert again.watch.source_state["lifetime_s"] == kept
 
 
 async def test_an_unlimited_watch_lists_as_permanent(db_session_factory, moved):

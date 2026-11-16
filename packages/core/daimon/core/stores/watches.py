@@ -1786,6 +1786,7 @@ async def import_callback_watch(
         left = definition.expires_at - now
         lifetime = left if lifetime_cap is None else min(left, lifetime_cap)
     lifetime_s = None if lifetime is None else int(lifetime.total_seconds())
+    # False for a past source: a rerun then keeps the lifetime it had.
     capped = lifetime_cap is not None and (
         definition.expires_at is None or definition.expires_at > now + lifetime_cap
     )
@@ -1827,7 +1828,9 @@ async def import_callback_watch(
         session.expire_all()
         refreshed = await get_watch(session, previous_id)
         assert refreshed is not None
-        return CallbackImport(definition.legacy_id, refreshed, None, "updated", truncated=truncated)
+        return CallbackImport(
+            definition.legacy_id, refreshed, None, "updated", capped=capped, truncated=truncated
+        )
     if expired:
         return CallbackImport(definition.legacy_id, None, None, "expired")
     held_until = now + MAX_LIFETIME
