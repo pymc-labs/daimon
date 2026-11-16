@@ -231,6 +231,18 @@ async def delete_user_rules(
     return deleted
 
 
+async def count_grants_listing(
+    session: AsyncSession, *, keys: Sequence[tuple[uuid.UUID, str]]
+) -> int:
+    """Grants whose user list holds one of these (tenant, platform user id) pairs."""
+    total = 0
+    for tenant_id in {t for t, _ in keys}:
+        ids = {u for t, u in keys if t == tenant_id}
+        grants = await list_grants(session, tenant_id=tenant_id)
+        total += sum(1 for g in grants.values() if ids.intersection(g.user_ids))
+    return total
+
+
 async def scrub_user_from_grants(
     session: AsyncSession, *, keys: Sequence[tuple[uuid.UUID, str]], now: datetime
 ) -> int:

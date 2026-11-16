@@ -24,14 +24,17 @@ from daimon.core.errors import UserFacingError
 from daimon.core.features.service import FeatureActor, change_feature
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.membership import CachedMembershipResolver, Membership
+from daimon.core.privacy import collect_purge_preview, held_lines
+from daimon.core.purge import purge_account
 from daimon.core.scope import ResolvedConfig
 from daimon.core.stores import dm_access as store
 from daimon.core.stores.direct_messages import set_dm_agent_name, set_dm_enabled
 from daimon.core.turn.admission import Admission, AdmissionGrant
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.turn_fakes import deps_for
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 POLICY = TenantAccessPolicy()
@@ -385,3 +388,59 @@ async def test_agent_dm_admits_without_a_sender_uses_the_default_agents_grant(
             for u in ("999", "1")
         ]
     assert admitted == [True, False], "the default agent's list decides"
+
+
+async def test_purge_account_when_person_has_dm_rows_then_they_are_erased_and_counted(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Erasure removes the pick, personal rules and listed-grant entry; others' stay."""
+    tenant = await make_tenant(db_session, workspace_id="G_DM_PURGE")
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session, platform="discord", external_id="77", tenant=tenant, account=account
+    )
+    await store.set_pick(
+        db_session, tenant_id=tenant.id, account_id=account.id, agent_name="a", now=NOW
+    )
+    for who in ("77", "88"):
+        await store.add_rule(
+            db_session,
+            tenant_id=tenant.id,
+            subject="user",
+            subject_id=who,
+            agent_name="a",
+            locked=False,
+            set_by=None,
+            now=NOW,
+        )
+    await store.set_grant(
+        db_session,
+        tenant_id=tenant.id,
+        agent_name="a",
+        who="listed",
+        user_ids=["77", "88"],
+        group_ids=["g1"],
+        set_by=None,
+        now=NOW,
+    )
+    await db_session.commit()
+
+    preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
+    report = await purge_account(sm=db_session_factory, account_id=account.id)
+
+    assert preview.dm_picks.count == 1, "the summary counts the pick"
+    assert preview.dm_rules.count == 1, "the summary counts the personal rule"
+    assert preview.dm_grant_users.count == 1, "the summary counts the grant entry"
+    assert "1 private conversation routing rule" in held_lines(preview), "the panel lists it"
+    assert (report.db.dm_picks, report.db.dm_rules, report.db.dm_grant_users) == (1, 1, 1), (
+        "the purge reports each"
+    )
+    async with db_session_factory() as fresh:
+        rules = await store.list_rules(fresh, tenant_id=tenant.id)
+        grant = (await store.list_grants(fresh, tenant_id=tenant.id))["a"]
+        assert await store.get_pick(fresh, tenant_id=tenant.id, account_id=account.id) is None, (
+            "the pick is gone"
+        )
+    assert [r.subject_id for r in rules] == ["88"], "only the other person's rule stays"
+    assert (grant.user_ids, grant.group_ids) == (("88",), ("g1",)), "only the entry is removed"
