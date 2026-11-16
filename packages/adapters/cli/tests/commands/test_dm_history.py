@@ -281,4 +281,4 @@ def test_cli_needs_the_agent(tmp_path: Path):
     path = tmp_path / "dms.json"
     path.write_text(json.dumps(body()))
     result = CliRunner().invoke(app, [*CLI, str(path), "--tenant", TENANT_ARG])
-    assert result.exit_code == 2 and "--agent" in result.output, result.output
+    assert result.exit_code == 2 and "--agent" in typer.unstyle(result.output), result.output

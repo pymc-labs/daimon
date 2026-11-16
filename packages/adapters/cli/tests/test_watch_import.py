@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import typer
 from daimon.adapters.cli.commands import watches as watch_commands
 from daimon.adapters.cli.commands.watches import watches_app
 from typer.testing import CliRunner
@@ -22,7 +23,7 @@ def test_watch_import_cli_rejects_oversized_manifest(tmp_path):
 
 def test_go_live_needs_the_tenant_and_agent():
     result = CliRunner().invoke(watches_app, ["go-live", "--tenant", str(uuid.uuid4())])
-    assert result.exit_code == 2 and "--agent-id" in result.output, result.output
+    assert result.exit_code == 2 and "--agent-id" in typer.unstyle(result.output), result.output
 
 
 @pytest.mark.parametrize("action", ["import", "go-live"])
