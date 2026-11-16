@@ -16,14 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Because the system prompt changed, existing Discord, Slack and Teams sessions
   are replaced once.
 - **An agent can turn off Ask a person for itself.** The setting now has an Agent
-  level. A button, reaction or form checks it at the agent of the conversation, so
-  other agents in the workspace keep the offer. An agent cannot turn it on above an
-  Off workspace.
+  level. A button, reaction or form checks it at the agent that wrote the answer,
+  so other agents in the workspace keep the offer. An agent cannot turn it on
+  above an Off workspace. When the check cannot be made, nothing is offered.
 - **The operator can set Approvals from the command line.** `daimon features set
   approvals <on|off> --reason "..."` works for a workspace, channel or thread,
   without a chat admin. The reason is required, and the audit log records the
-  operator, the old and new value and the reason. Chat users who are not admins
-  and agent keys are refused as before.
+  operator, the old and new value and the reason. Other features refuse
+  `--reason`. Chat users who are not admins and agent keys are refused as before.
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and
   the MCP tools. A run nobody started, such as a routine, never applies one at once.
