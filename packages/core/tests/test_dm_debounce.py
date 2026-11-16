@@ -161,3 +161,16 @@ def test_a_message_joins_only_an_open_window() -> None:
     newer = bursts.open("k", "next")
     bursts.close("k", window)
     assert bursts.join("k", "still open") and newer.items == ["next", "still open"]
+
+
+async def test_stopping_ends_every_wait_and_skips_later_ones() -> None:
+    """A burst opened just after the stop does not wait out its window either."""
+    bursts: DmDebouncer[str, str] = DmDebouncer()
+    waiting = bursts.open("a", "one")
+    started = monotonic()
+    settling = asyncio.create_task(waiting.settle(5.0))
+    await asyncio.sleep(0.05)
+    bursts.flush_all()
+    assert await settling == ["one"], "the open burst is answered as it is"
+    assert await bursts.open("b", "two").settle(5.0) == ["two"], "a later burst takes no wait"
+    assert monotonic() - started < 1.0, "neither waited out its window"

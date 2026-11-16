@@ -598,6 +598,18 @@ async def test_drain_and_close_flips_draining_and_calls_client_close() -> None:
     assert "close" in fake_client.call_log, "drain_and_close must await client.close()"
 
 
+async def test_drain_and_close_ends_a_waiting_dm_burst_at_once() -> None:
+    """A direct message burst is answered at the drain, not after its whole wait."""
+    app = _make_app()
+    burst = app.runtime.dm_bursts.open(("T1", "D1", "U1"), {"ts": "1.1"})
+    settling = asyncio.create_task(burst.settle(5.0))
+    await asyncio.sleep(0.05)
+
+    await app.drain_and_close(_FakeSocketClient())  # type: ignore[arg-type]
+
+    assert await asyncio.wait_for(settling, 1.0) == [{"ts": "1.1"}], "the wait ends at the drain"
+
+
 async def test_drain_and_close_waits_for_in_flight_tasks_before_closing() -> None:
     """drain_and_close polls _processing until empty, then closes."""
     fake_client = _FakeSocketClient()

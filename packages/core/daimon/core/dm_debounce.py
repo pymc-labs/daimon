@@ -114,6 +114,7 @@ class DmDebouncer[K: Hashable, T]:
 
     def __init__(self) -> None:
         self._open: dict[K, DmWindow[T]] = {}
+        self._stopping = False
 
     def join(self, key: K, item: T, *, flush: bool = False) -> bool:
         """Add `item` to the conversation's open window; False when none is open."""
@@ -125,6 +126,8 @@ class DmDebouncer[K: Hashable, T]:
 
     def open(self, key: K, first: T) -> DmWindow[T]:
         window = DmWindow(first)
+        if self._stopping:
+            window.flush()
         self._open[key] = window
         return window
 
@@ -134,5 +137,7 @@ class DmDebouncer[K: Hashable, T]:
             del self._open[key]
 
     def flush_all(self) -> None:
+        """End every wait now, and skip it for any window opened later: the process is stopping."""
+        self._stopping = True
         for window in self._open.values():
             window.flush()

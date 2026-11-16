@@ -3976,12 +3976,14 @@ class SlackApp:
     async def drain_and_close(self, client: AsyncBaseSocketModeClient) -> None:
         """Graceful shutdown drain.
 
-        Sets draining=True so new mentions are rejected, waits for acked
+        Sets draining=True so new mentions are rejected, ends every direct
+        message burst's wait so it is answered now, waits for acked
         mention handlers and ``_processing`` to drain (or the grace window to
         elapse), then closes the WebSocket client. Stays within the
         deployment's 60s kill timeout.
         """
         self.draining = True
+        self.runtime.dm_bursts.flush_all()
         log.info(
             "slack.draining",
             inflight_threads=len(self._processing),
