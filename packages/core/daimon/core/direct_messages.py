@@ -23,10 +23,11 @@ from daimon.core.access_policy import (
     DM_SCOPE_PREFIX,
     TenantAccessPolicy,
 )
-from daimon.core.authz import Action, Place, Surface, authorize
+from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_subject
 from daimon.core.config import load_turn_settings
 from daimon.core.confirmation import ConfirmationHook
 from daimon.core.context_prompt import TurnContext
+from daimon.core.dm_access import DmAgent, dm_agent_of, permits_dm
 from daimon.core.errors import UserFacingError
 from daimon.core.features.model_input import DEFAULT_DM_HISTORY, DmHistoryCap
 from daimon.core.handoff_context import TranscriptTurn, render_previous_session
@@ -54,6 +55,7 @@ from daimon.core.stores.direct_messages import (
     quarantine_conversation,
     start_conversation,
 )
+from daimon.core.stores.dm_access import set_pick
 from daimon.core.stores.domain import ChatPlatform, Role, TaskContinuationRow, TenantRow
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_turn_contexts import (
@@ -61,7 +63,7 @@ from daimon.core.stores.slack_turn_contexts import (
     delete_slack_turn_context,
 )
 from daimon.core.stores.tenants import get_tenant
-from daimon.core.stores.thread_agent_bindings import create_binding
+from daimon.core.stores.thread_agent_bindings import create_binding, get_binding
 from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     mark_dead,
@@ -204,8 +206,45 @@ async def require_dm_delivery(deps: TurnDeps, reply: DirectMessageReply) -> None
             raise DirectMessageAccessRevoked(
                 f"delivery_{decision.reason}", message="Private agent access revoked."
             )
+    await _require_dm_grant(deps, reply, subject=agent_subject, policy=policy)
     if membership_unknown:
         raise DirectMessageMembershipUnknown()
+
+
+async def _require_dm_grant(
+    deps: TurnDeps, reply: DirectMessageReply, *, subject: Subject, policy: TenantAccessPolicy
+) -> None:
+    """The bound agent must still admit this person: DMs on for it, its grant, and any lock.
+
+    The roles are the ones the rest of the check used, so a refusal here is proved revocation.
+    """
+    conversation = reply.conversation
+    names = reply.grant.agent.names
+    async with deps.sessionmaker() as session:
+        binding = await get_binding(
+            session,
+            tenant_id=conversation.tenant_id,
+            platform=conversation.platform,
+            parent_channel_id=conversation.channel_id,
+            thread_id=conversation.scope_id,
+        )
+        if binding is None or not names or names[0] is None:
+            raise DirectMessageAccessRevoked(
+                "delivery_agent_unbound", message="Private agent access revoked."
+            )
+        permitted = await permits_dm(
+            session,
+            deps.settings,
+            policy,
+            tenant_id=conversation.tenant_id,
+            platform=conversation.platform,
+            agent=DmAgent(names[0], binding.responder_ma_agent_id, reply.grant.agent),
+            subject=subject,
+        )
+    if not permitted:
+        raise DirectMessageAccessRevoked(
+            "delivery_dm_grant", message="Private agent access revoked."
+        )
 
 
 #: How many people one process remembers having told that private chats are off.
@@ -469,12 +508,16 @@ async def admit_cold_dm(
     role: Role,
     role_ids: tuple[str, ...],
     verified_membership: bool | None,
+    agent_name: str | None = None,
 ) -> Admission:
-    """Check a configured cold agent without creating one or changing channel routing."""
+    """Check a cold agent without creating one or changing channel routing.
+
+    `agent_name` is the agent routing chose; without one the workspace default answers.
+    """
     await require_dm_enabled(deps, tenant_id=tenant_id)
     async with deps.sessionmaker() as session:
         tenant = await get_tenant(session, tenant_id)
-        name = await get_dm_agent_name(session, tenant_id=tenant_id)
+        name = agent_name or await get_dm_agent_name(session, tenant_id=tenant_id)
     if not tenant_ready(tenant, platform="discord") or name is None:
         raise AdmissionDenied(reason="invoker_not_allowed")
     return await admit(
@@ -503,12 +546,15 @@ async def start_cold_dm(
     route_key: str,
     external_user_id: str,
     expected_scope_id: str | None = None,
+    remember_pick: bool = False,
 ) -> DirectMessageRow | None:
     """Create a source-free private scope, compare-and-setting the active route.
 
     A concurrent first message must reuse the winning conversation. An explicit
     switch names the scope it replaces, so a stale control cannot replace a
     newer selection. No configuration is written to the physical DM channel.
+    The agent must still admit the person when the route is set; `remember_pick`
+    saves it as their agent in this workspace (they chose it from a list).
     """
     conversation = DirectMessageRow(
         platform="discord",
@@ -535,11 +581,27 @@ async def start_cold_dm(
         )
         if (current.scope_id if current else None) != expected_scope_id:
             return None
-        if (
-            not await dm_enabled(session, tenant_id=tenant_id)
-            or await get_dm_agent_name(session, tenant_id=tenant_id) != admission.config.agent_name
+        dm_agent = dm_agent_of(admission.agent, admission.config.agent_name)
+        if not await dm_enabled(session, tenant_id=tenant_id) or not await permits_dm(
+            session,
+            deps.settings,
+            await load_dm_access_policy(session, tenant_id=tenant_id),
+            tenant_id=tenant_id,
+            platform="discord",
+            agent=dm_agent,
+            subject=admission.grant.subject
+            if admission.grant is not None
+            else build_subject(is_admin=False, platform_user_id=external_user_id),
         ):
             raise AdmissionDenied(reason="invoker_not_allowed")
+        if remember_pick:
+            await set_pick(
+                session,
+                tenant_id=tenant_id,
+                account_id=admission.account_id,
+                agent_name=dm_agent.name,
+                now=datetime.now(UTC),
+            )
         await start_conversation(session, conversation=conversation, now=datetime.now(UTC))
         if current is not None:
             # Retired mappings can never be reused by a later private turn.
