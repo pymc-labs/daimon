@@ -57,7 +57,8 @@ with the first agent that has DMs on and admits them, chosen like this:
    pick, the rule's agent and the server default. When several agents remain, a
    picker (a dropdown, or buttons on Teams) lets the person choose, and the choice is
    remembered for the next conversation. Messages sent before the choice wait for
-   it, up to five minutes, and are answered in one turn.
+   it, up to five minutes, and are answered in one turn. A refused choice ends the
+   wait at once.
 
 `/dm-me` in a channel follows the same rules and refuses a locked-out person
 with a private note. Handing a DM to another agent in the conversation is
@@ -148,7 +149,8 @@ gets role changes and departures at once.
   messages were not sent, except on Teams, which takes them up after the restart.
 - Discord DMs reach one process. On Slack and Teams, a pick made on another
   process is found within seconds; if two processes each offer a picker, the
-  first pick wins.
+  first pick wins. A pick refused on another process ends the wait only when the
+  picker expires.
 - Routine and watch reports never pick a server or join the active
   conversation's history.
 - Turning DMs off stops new turns and, on Discord, the delivery of answers

@@ -1435,6 +1435,10 @@ class TeamsApp:
         """An agent was picked for personal chat `chat`: its held burst, if here, looks now."""
         self._dm_bursts.wake(chat)
 
+    def refuse_dm(self, chat: str) -> None:
+        """A pick in personal chat `chat` was refused: its held burst, if here, ends now."""
+        self._dm_bursts.refuse(chat)
+
     def _burst_mark(self, tenant_id: uuid.UUID) -> BurstMark[TeamsInbound]:
         """A burst's 👀, only where admission would let the message start a turn."""
 

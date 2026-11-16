@@ -692,7 +692,8 @@ async def _pick(
     """Ask which agent answers, holding the burst until the conversation a pick starts.
 
     The pick may be handled by any process; the select carries its deadline in its block
-    id, so a late one is refused there. Unpicked, the select says the choice expired.
+    id, so a late one is refused there. Unpicked, the select says the choice expired; a
+    refused pick ends the hold at once, its refusal speaking for the burst.
     """
     text = "Choose who to talk to for this private conversation."
     options = [
@@ -714,7 +715,8 @@ async def _pick(
     posted = await client.chat_postMessage(channel=key[1], text=text, blocks=blocks)  # pyright: ignore[reportUnknownMemberType]
     conversation = await burst.hold(partial(_find_conversation, runtime, key), react, PICK_SECONDS)
     if conversation is None and not burst.stopped:
-        await runtime.dm_bursts.end(key, burst)  # the expired choice speaks for the burst
+        await runtime.dm_bursts.end(key, burst)
+    if conversation is None and not (burst.stopped or burst.refused):
         with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
             await client.chat_update(  # pyright: ignore[reportUnknownMemberType]
                 channel=key[1], ts=str(posted.get("ts") or ""), **notice_fields(PICK_EXPIRED)
@@ -764,6 +766,7 @@ async def handle_dm_agent_pick(runtime: SlackRuntime, payload: dict[str, Any]) -
         ):
             refusal = _UNCHECKED if isinstance(route, DmUnchecked) else DM_AGENT_REFUSED
             await client.chat_postMessage(channel=channel_id, **notice_fields(refusal))  # pyright: ignore[reportUnknownMemberType]
+            runtime.dm_bursts.refuse((team_id, channel_id, user_id))
             return
         await _start_cold(
             runtime,
@@ -779,6 +782,7 @@ async def handle_dm_agent_pick(runtime: SlackRuntime, payload: dict[str, Any]) -
         runtime.dm_bursts.wake((team_id, channel_id, user_id))
     except _ERRORS as exc:
         log.warning("slack.dm.pick_failed", error_type=type(exc).__name__)
+        runtime.dm_bursts.refuse((team_id, channel_id, user_id))
         with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
             await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel_id,

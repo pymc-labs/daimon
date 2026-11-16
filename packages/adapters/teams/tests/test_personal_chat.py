@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime
 from time import time
 from types import SimpleNamespace
@@ -196,13 +197,14 @@ async def _pick(
     agent: str,
     *,
     wake: list[str],
+    refuse: Callable[[str], None] = lambda _: None,
     until: int = 9_999_999_999,
 ) -> Any:
     async def actor(*_: object, **__: object) -> Actor:
         return Actor(AAD_OBJECT_ID, TENANT, False, CONVERSATION_ID)
 
     monkeypatch.setattr(personal_chat, "card_actor", actor)
-    picker = TeamsDmPick(runtime, wake=wake.append)
+    picker = TeamsDmPick(runtime, wake=wake.append, refuse=refuse)
     return await picker._on_action(_click(agent, until))  # pyright: ignore[reportPrivateUsage]
 
 
@@ -273,10 +275,13 @@ async def test_dm_pick_when_the_process_stops_meanwhile_then_holds_nothing_unsai
     assert (answered, len(posted)) == (False, 1), "only the card was posted"
 
 
-async def test_dm_pick_when_a_lock_names_another_agent_then_refused_unpinned(
+async def test_dm_pick_when_a_lock_names_another_agent_then_refused_and_the_hold_ends(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The refusal on the card speaks for the burst, so it ends at once with no expiry."""
     _agents(monkeypatch, "alpha", "beta")
+    runtime = build_teams_runtime(db_session_factory)
+    routing, burst, _ = await _held(db_session_factory, runtime, make_inbound("hello"))
     async with db_session_factory() as session, session.begin():
         await dm_store.add_rule(
             session,
@@ -289,6 +294,16 @@ async def test_dm_pick_when_a_lock_names_another_agent_then_refused_unpinned(
             now=_NOW,
         )
     woken: list[str] = []
-    reply = await _pick(build_teams_runtime(db_session_factory), monkeypatch, "beta", wake=woken)
-    assert reply.value == DM_AGENT_REFUSED, "the lock refuses another agent"
+    refused: list[str] = []
+
+    def refuse(chat: str) -> None:
+        refused.append(chat)
+        burst.refuse()
+
+    reply = await _pick(runtime, monkeypatch, "beta", wake=woken, refuse=refuse)
+    answered, posted = await asyncio.wait_for(routing, 5)
+
+    assert DM_AGENT_REFUSED.split("\n", 1)[0] in str(reply.value), "the lock refuses another"
+    assert refused == [CONVERSATION_ID], "the click ends the chat's held burst"
+    assert (answered, len(posted)) == (False, 1), "only the card was posted: no expiry"
     assert not woken and await _bound(db_session_factory) is None, "nothing pinned or woken"

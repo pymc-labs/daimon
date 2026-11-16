@@ -291,5 +291,15 @@ async def test_a_pick_not_made_in_time_or_cut_by_a_stop_holds_nothing() -> None:
     assert burst.stopped and monotonic() - started < 1.0
 
 
+async def test_a_refused_pick_ends_the_hold_at_once() -> None:
+    """The refusal speaks for the burst, so the caller posts no expiry."""
+    bursts: DmBursts[str, str] = DmBursts(str)
+    burst = bursts.open("k", "one")
+    asyncio.get_running_loop().call_later(0.05, bursts.refuse, "k")
+    started = monotonic()
+    assert await burst.hold(lambda: _found([]), _Turns().react, 5.0) is None
+    assert burst.refused and not burst.stopped and monotonic() - started < 1.0
+
+
 async def _found(pick: list[str]) -> str | None:
     return pick[0] if pick else None

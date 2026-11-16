@@ -415,22 +415,30 @@ async def test_cold_dm_when_the_process_stops_during_the_pick_then_the_held_are_
     }
 
 
-async def test_agent_pick_when_access_changed_meanwhile_then_refused(
+async def test_agent_pick_when_access_changed_meanwhile_then_refused_and_the_hold_ends(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tenant = await _dms_on(db_session_factory)
     client = _client(monkeypatch)
     runtime = _runtime(db_session_factory)
-    start, _ = _picking(monkeypatch, db_session_factory, tenant.tenant_id)
+    start, reply = _picking(monkeypatch, db_session_factory, tenant.tenant_id)
+    client.chat_postMessage.return_value = {"ts": "5.5"}
+    held = asyncio.create_task(
+        dm_module.handle_direct_message(runtime, _event(), team_id="T_ROUTE")
+    )
+    block = await _offered(client)
     _decided(monkeypatch, DmStart("ada", "locked"))
 
-    await dm_module.handle_dm_agent_pick(runtime, _pick("bob"))
+    await dm_module.handle_dm_agent_pick(runtime, _pick("bob", block["block_id"]))
+    await asyncio.wait_for(held, 2)
 
-    assert start.await_count == 0, "a lock set meanwhile wins"
+    assert start.await_count == 0 and reply.await_count == 0, "a lock set meanwhile wins"
     assert client.chat_postMessage.await_args.kwargs == {
         "channel": "D_COLD",
         **notice_fields(DM_AGENT_REFUSED),
     }, "the person is told to ask an admin"
+    updated = [c.kwargs["ts"] for c in client.chat_update.await_args_list]
+    assert updated == ["9.9"], "the refusal speaks for the burst: the choice never expires"
 
 
 def _pick(agent: str, until: str = "9999999999") -> dict[str, Any]:

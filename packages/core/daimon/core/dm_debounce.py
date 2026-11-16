@@ -74,6 +74,7 @@ class DmBurst[T]:
         self._wake = asyncio.Event()
         self._flush = is_affirmative(text_of(first))
         self._stopped = False
+        self._refused = False
 
     def add(self, item: T) -> None:
         """Join the burst. Never awaits, so a message cannot slip between a close and a join.
@@ -99,6 +100,15 @@ class DmBurst[T]:
         """Look again now: a pick was made."""
         self._wake.set()
 
+    def refuse(self) -> None:
+        """End the hold now: the pick was refused, and its refusal speaks for the burst."""
+        self._refused = True
+        self._wake.set()
+
+    @property
+    def refused(self) -> bool:
+        return self._refused
+
     async def hold[R](
         self,
         picked: Callable[[], Awaitable[R | None]],
@@ -106,7 +116,7 @@ class DmBurst[T]:
         seconds: float,
     ) -> R | None:
         """Hold every message, marked, until `picked` finds the pick; None once `seconds`
-        (`PICK_SECONDS`) pass or the process stops.
+        (`PICK_SECONDS`) pass, the pick is refused (`refuse`) or the process stops.
 
         The pick is durable, so a click any process handled is found: at once after
         `wake` or a message joining, else within `RECHECK_S`. What was held is then
@@ -120,7 +130,7 @@ class DmBurst[T]:
                 self._flush = True
                 return found
             remaining = deadline - monotonic()
-            if remaining <= 0:
+            if self._refused or remaining <= 0:
                 break
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._wake.wait(), min(RECHECK_S, remaining))
@@ -219,6 +229,11 @@ class DmBursts[K: Hashable, T]:
         """A pick was made for `key`: its held burst looks again now."""
         if (burst := self._open.get(key)) is not None:
             burst.wake()
+
+    def refuse(self, key: K) -> None:
+        """A pick for `key` was refused: its held burst ends now."""
+        if (burst := self._open.get(key)) is not None:
+            burst.refuse()
 
     def stop(self) -> None:
         """Skip every wait, now and in bursts opened later: the process is stopping."""

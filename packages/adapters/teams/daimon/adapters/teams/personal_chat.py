@@ -207,7 +207,7 @@ async def route_personal_chat(
     found = partial(_binding, runtime, tenant_id=tenant_id, chat=chat)
     if await burst.hold(found, mark, PICK_SECONDS) is not None:
         return True
-    if not burst.stopped:
+    if not (burst.stopped or burst.refused):  # a refusal spoke for the burst on its card
         await post(notice_card(PICK_EXPIRED))
     return False
 
@@ -215,12 +215,20 @@ async def route_personal_chat(
 class TeamsDmPick:
     """Agent choice clicks in a personal chat: recheck, pin, then wake the held burst.
 
-    A late click is refused by the expiry on its button; the holder already said so.
+    A late click is refused by the expiry on its button; the holder already said so. A
+    refused click ends the held burst at once.
     """
 
-    def __init__(self, runtime: TeamsRuntime, *, wake: Callable[[str], None]) -> None:
+    def __init__(
+        self,
+        runtime: TeamsRuntime,
+        *,
+        wake: Callable[[str], None],
+        refuse: Callable[[str], None],
+    ) -> None:
         self._runtime = runtime
         self._wake = wake
+        self._refuse = refuse
 
     async def on_action(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
@@ -247,7 +255,9 @@ class TeamsDmPick:
         route = decision.route
         chosen = isinstance(route, DmStart) and route.agent == name
         if not (chosen or decision.may_switch_to(name)):
-            return toast(UNCHECKED if isinstance(route, DmUnchecked) else DM_AGENT_REFUSED)
+            self._refuse(chat)
+            refusal = UNCHECKED if isinstance(route, DmUnchecked) else DM_AGENT_REFUSED
+            return replace_card(notice_adaptive_card(refusal))
         agent = next(a for a in agents if a.name == name)
         await _pin(
             runtime,
