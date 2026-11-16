@@ -13,7 +13,6 @@ import pytest
 from daimon.adapters.slack import direct_messages as dm_module
 from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.runtime import new_dm_bursts
-from daimon.core._models import Account
 from daimon.core.authz import AgentRef
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.direct_messages import DM_AGENT_REFUSED, ColdDmNotices
@@ -27,6 +26,7 @@ from daimon.core.stores.direct_messages import (
     start_conversation,
 )
 from daimon.core.stores.domain import Role
+from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import make_account, make_dm_conversation, make_tenant
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -249,9 +249,9 @@ async def test_cold_dm_when_another_message_started_it_then_that_conversation_an
 
     async def lose(*_: Any, **__: Any) -> None:
         async with db_session_factory.begin() as session:
-            account = Account(tenant_id=tenant.tenant_id)
-            session.add(account)
-            await session.flush()
+            account = await make_account(
+                session, tenant=await get_tenant(session, tenant.tenant_id)
+            )
             won = _row(tenant.tenant_id).model_copy(
                 update={"scope_id": "dm:won", "account_id": account.id}
             )
