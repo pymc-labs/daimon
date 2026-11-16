@@ -2710,7 +2710,8 @@
         ``C0123456789`` is ``C0123456789:1717171717.123456``).
         <blank line>
         Only create a thread when the user asked for one. Refused in channels the
-        workspace marked protected.
+        workspace marked protected. Pass this turn's origin_context_id to keep other
+        apps' names where the setting allows.
       ''',
       'parameters': dict({
         '$defs': dict({
@@ -2781,6 +2782,17 @@
           }),
           'name': dict({
             'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'plan': dict({
             'anyOf': list([
@@ -6514,13 +6526,25 @@
         Posts a link button in this channel opening GitHub's install page. It cannot
         tell whether installation happened. Installing alone neither verifies this
         tenant's access nor binds a working repo; use ``github_connect`` and
-        verify access through the requested operation afterwards.
+        verify access through the requested operation afterwards. Pass this turn's
+        origin_context_id to keep other apps' names where the setting allows.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
           'channel_id': dict({
             'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'purpose': dict({
             'type': 'string',
@@ -6536,6 +6560,9 @@
     'post_wizard': dict({
       'description': '''
         Post a multi-step form in the channel instead of asking in prose.
+        <blank line>
+        Pass this turn's origin_context_id to keep other apps' names where the setting
+        allows.
         <blank line>
         ``plan`` counts everything this turn posts outside this conversation: threads,
         places and people tagged; posts here need none. Past the limit the call is
@@ -6720,6 +6747,17 @@
         'properties': dict({
           'channel_id': dict({
             'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'plan': dict({
             'anyOf': list([
@@ -7397,13 +7435,25 @@
         Use when the user asks to rename or retitle a thread, including the
         one you are chatting in — ``thread_id`` is the thread's channel id.
         Anyone who can post in a thread daimon opened may rename it; other
-        threads need Manage Threads.
+        threads need Manage Threads. Pass this turn's origin_context_id to keep other
+        apps' names where the setting allows.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
           'name': dict({
             'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'thread_id': dict({
             'type': 'string',
@@ -8822,6 +8872,9 @@
       'description': '''
         Privately message one human member of the current workspace.
         <blank line>
+        Pass this turn's origin_context_id to keep other apps' names where the setting
+        allows.
+        <blank line>
         ``plan`` counts everything this turn posts outside this conversation: threads,
         places and people; a DM to anyone but the requester needs it.
         A person who asked never to be tagged is not messaged on someone else's
@@ -8867,6 +8920,17 @@
         'properties': dict({
           'content': dict({
             'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'plan': dict({
             'anyOf': list([
@@ -8932,7 +8996,8 @@
         of the channel or conversation. A group chat takes no files. Channels the
         workspace marked protected, and threads under them,
         refuse every post — tell the caller rather than retrying elsewhere
-        unasked.
+        unasked. Pass this turn's origin_context_id to keep other apps' names where
+        the setting allows.
       ''',
       'parameters': dict({
         '$defs': dict({
@@ -9025,6 +9090,17 @@
                   'type': 'string',
                 }),
                 'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
               }),
               dict({
                 'type': 'null',
