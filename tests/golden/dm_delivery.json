@@ -91,7 +91,7 @@
         "transfer_file_id": null,
         "transfer_kind": null,
         "updated_at": "<time:epoch+0s>",
-        "watermark_message_id": null
+        "watermark_message_id": "<id:25>"
       }
     ],
     "turn_outcomes": [
