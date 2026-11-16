@@ -27,6 +27,7 @@ import httpx
 import pytest
 import structlog
 from anthropic import AsyncAnthropic
+from daimon.adapters.teams import app as app_module
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.commands import NOT_ON_THIS_INSTALL
 from daimon.adapters.teams.http_service import TeamsHttpService
@@ -54,6 +55,7 @@ from .conftest import (
     CONVERSATION_ID,
     ENTRA_TENANT_ID,
     GROUP_CHAT_ID,
+    OTHER_AAD_OBJECT_ID,
     THREAD_ID,
     USER_NAME,
     SentRequest,
@@ -342,6 +344,50 @@ async def test_the_key_changes_only_what_an_unlisted_conversation_gets(
         }
 
     assert outcomes == {"listed": "served", "unlisted": unlisted}
+
+
+@pytest.mark.parametrize(("key", "closing"), [("held", app_module._FAILED), ("absent", REFUSAL)])
+async def test_a_person_not_granted_in_a_granted_conversation_gets_the_refusal_only_without_a_key(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+    closing: str,
+) -> None:
+    """A release with a key keeps its failure card here; only a keyless one gives the refusal."""
+    listed = "19:listed@thread.v2"
+    client = NoAnthropic()
+    with selfhosted_settings(monkeypatch):
+        await register(db_session_factory, tmp_path, monkeypatch, {listed: [AAD_OBJECT_ID]})
+        runtime = build_teams_runtime(db_session_factory, anthropic=cast(AsyncAnthropic, client))
+        if key == "absent":
+            runtime.settings.anthropic.api_key = None
+        deps = dataclasses.replace(runtime.turn_deps, channel_backends=True, turn_path="mux")
+        runtime = dataclasses.replace(runtime, turn_deps=deps)
+        message = make_group_activity(
+            conversation_id=listed, aad_object_id=OTHER_AAD_OBJECT_ID, activity_id="not-granted-1"
+        )
+        with structlog.testing.capture_logs() as logs:
+            async with running_service(runtime, teams_api_fake) as service:
+                await post_activity(service, message)
+                await settle(service.turns)
+    async with db_session_factory() as session:
+        principal = await find_platform_principal(
+            session, tenant_id=TENANT, platform="teams", external_id=OTHER_AAD_OBJECT_ID
+        )
+
+    assert principal is not None
+    card = teams_api_fake.activity_requests[-1]
+    assert notice(card) == closing
+    # The IDs to grant, in every line; with a key the failure path logs it more than once.
+    missing = {
+        (log["channel_id"], log["account_id"])
+        for log in logs
+        if log["event"] == "selfhosted.grant_missing"
+    }
+    assert missing == {(listed, str(principal.account_id))}
+    assert client.used == []
 
 
 @pytest.mark.parametrize(("key", "judged"), [("held", 1), ("absent", 0)])

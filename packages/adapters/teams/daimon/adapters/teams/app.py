@@ -1788,6 +1788,21 @@ class TeamsApp:
             if reraise:
                 raise
             return
+        except AdmissionDenied as err:
+            # Refused while preparing, as a selfhosted grant naming other people is: on a
+            # release with no Anthropic key the card closes with the words admission would
+            # give. With a key, the failure path answers.
+            if self.runtime.anthropic_configured:
+                raise
+            refusal = _admission_refusal(
+                err, tenant_id, in_dm=inbound.kind == "dm", foreign=inbound.is_foreign
+            )
+            if refusal is None:
+                raise
+            await lifecycle.close_with_notice(await with_admin_team_if_asked(self.runtime, refusal))
+            if reraise:
+                raise
+            return
 
         # The messages this turn answers and its status card are not history.
         skip = frozenset(filter(None, (*inbound.message_ids, lifecycle.message_id)))

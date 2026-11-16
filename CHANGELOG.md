@@ -81,6 +81,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from Anthropic say they are unavailable, and `help` leaves out `setup` and `memory`. Before, each called Anthropic and
   got an error or no reply. An error card Teams fails to deliver is logged.
 
+- With no Anthropic key, in a Teams conversation granted the selfhosted model, someone the grant does not name gets the
+  model provider refusal; before, their card closed with "Sorry, something went wrong".
+
 - A turn stuck reconnecting always ends at its time limit; before, it could keep reconnecting past it.
 
 - Verify the Helm harness CA mounts through production startup and post-drop MCP HTTPS calls; migrate saved installer state to the dedicated host harness-token Secret key.
