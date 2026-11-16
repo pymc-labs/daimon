@@ -8,6 +8,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import pytest
 from daimon.adapters.discord.support_escalation import (
     SupportEscalateButton,
     SupportModal,
@@ -15,7 +16,6 @@ from daimon.adapters.discord.support_escalation import (
     post_to_support_channel,
 )
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
-from daimon.core.admin_actions import DelegatedAction
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -23,13 +23,16 @@ from daimon.core.config import (
     Settings,
     SupportSettings,
 )
-from daimon.core.features.service import FeatureActor, change_feature
-from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.stores import accounts
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.domain import Role
-from daimon.core.stores.thread_sessions import create_thread_session
-from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+from daimon.core.stores.domain import FeatureTarget, Role
+from daimon.core.stores.feature_values import set_feature_value
+from daimon.testing.factories import (
+    make_account,
+    make_platform_principal,
+    make_tenant,
+    make_thread_session,
+)
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -57,14 +60,8 @@ async def _seed(
     )
     await accounts.set_role(session, account.id, Role.ADMIN)
     if agent is not None:
-        await create_thread_session(
-            session,
-            tenant_id=tenant.id,
-            platform="discord",
-            thread_id=_THREAD,
-            account_id=account.id,
-            ma_session_id="sess_1",
-            ma_agent_id=agent,
+        await make_thread_session(
+            session, tenant=tenant, account=account, thread_id=_THREAD, ma_agent_id=agent
         )
     await session.commit()
     return tenant.id
@@ -167,46 +164,30 @@ async def test_support_note_uses_the_escalation_channel(
     assert await _delivered(db_session_factory) == [True]
 
 
-async def _switch_off(
-    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, agent: str
-) -> None:
-    settings = _settings(_ESCALATION)
-
-    async def admin_for(_: DelegatedAction | None) -> bool:
-        return True
-
-    await change_feature(
-        sessionmaker,
-        settings,
-        FeatureActor(tenant_id, None, "web", None, admin_for),
-        key="support_escalation",
-        tier="agent",
-        value="off",
-        place=FeaturePlace.of(tenant_id, "discord", None, agent_id=agent),
-    )
-
-
-async def test_the_form_is_refused_for_an_agent_set_to_off(
-    db_session_factory: async_sessionmaker[AsyncSession],
+@pytest.mark.parametrize(
+    ("answering", "delivered"),
+    [("agent_off", []), ("agent_client", [True])],
+    ids=["its own agent is off", "another agent is off"],
+)
+async def test_the_form_follows_the_answering_agents_own_value(
+    db_session_factory: async_sessionmaker[AsyncSession], answering: str, delivered: list[bool]
 ) -> None:
     async with db_session_factory() as session:
-        tenant_id = await _seed(session, agent="agent_off")
-    await _switch_off(db_session_factory, tenant_id, "agent_off")
+        tenant_id = await _seed(session, agent=answering)
+        await set_feature_value(
+            session,
+            tenant_id=tenant_id,
+            target=FeatureTarget(tier="agent", agent_id="agent_off"),
+            key="support_escalation",
+            value="off",
+            set_by=None,
+            surface="web",
+        )
+        await session.commit()
     _bot, escalation, dm = await _submit(db_session_factory)
-    escalation.send.assert_not_awaited()
+    assert escalation.send.await_count == len(delivered), "posted only where it is offered"
     dm.send.assert_not_awaited()
-    assert await _delivered(db_session_factory) == [], "a refused form records nothing"
-
-
-async def test_the_form_still_works_for_another_agent_in_the_workspace(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    async with db_session_factory() as session:
-        tenant_id = await _seed(session, agent="agent_client")
-    await _switch_off(db_session_factory, tenant_id, "agent_off")
-    _bot, escalation, _dm = await _submit(db_session_factory)
-    escalation.send.assert_awaited_once()
-    assert await _delivered(db_session_factory) == [True], "another agent's form is delivered"
+    assert await _delivered(db_session_factory) == delivered, "recorded only where it is offered"
 
 
 async def test_a_teams_escalation_channel_spends_nothing_and_posts_nothing(

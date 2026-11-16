@@ -1,8 +1,9 @@
-"""A button, reaction or form re-checks "ask a person" at the conversation's agent."""
+"""A button, reaction or form re-checks "ask a person" at the agent that wrote the answer."""
 
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from daimon.core._models import ThreadSession
@@ -15,16 +16,16 @@ from daimon.core.config import (
     Settings,
     SupportSettings,
 )
-from daimon.core.features.registry import Tier
 from daimon.core.features.service import FeatureActor, change_feature
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.agent_posts import record_post
-from daimon.core.stores.thread_sessions import create_thread_session
+from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.support_offer import support_offered
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_tenant, make_thread_session
 from pydantic import PostgresDsn, SecretStr
-from sqlalchemy import delete, update
+from sqlalchemy import update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -43,46 +44,26 @@ def _settings() -> Settings:
     )
 
 
-def _admin(tenant_id: uuid.UUID) -> FeatureActor:
-    async def admin_for(_: DelegatedAction | None) -> bool:
-        return True
-
-    return FeatureActor(tenant_id, None, "web", None, admin_for)
-
-
-async def _thread(
-    db_session: AsyncSession, tenant_id: uuid.UUID, account_id: uuid.UUID, *, agent: str | None
+async def _value(
+    session: AsyncSession, tenant_id: uuid.UUID, value: str, *, agent: str | None = None
 ) -> None:
-    await create_thread_session(
-        db_session,
+    """`support_escalation` set at the workspace, or at `agent`'s own tier when given."""
+    await set_feature_value(
+        session,
         tenant_id=tenant_id,
-        platform="discord",
-        thread_id=THREAD,
-        account_id=account_id,
-        ma_session_id="sess_1",
-        ma_agent_id=agent,
+        target=FeatureTarget(tier="agent", agent_id=agent) if agent else FeatureTarget("workspace"),
+        key=KEY,
+        value=value,
+        set_by=None,
+        surface="web",
     )
-    await db_session.commit()
-
-
-async def _set(
-    factory: async_sessionmaker[AsyncSession],
-    tenant_id: uuid.UUID,
-    *,
-    tier: Tier,
-    value: str,
-    agent: str | None = None,
-) -> None:
-    place = FeaturePlace.of(tenant_id, "discord", None, agent_id=agent)
-    await change_feature(
-        factory, _settings(), _admin(tenant_id), key=KEY, tier=tier, value=value, place=place
-    )  # fmt: skip
+    await session.commit()
 
 
 async def _offered(
     factory: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
-    thread: str,
+    thread: str = THREAD,
     message_id: str = "m_unrecorded",
 ) -> bool:
     return await support_offered(
@@ -113,20 +94,10 @@ async def test_an_agent_set_to_off_is_not_offered_while_another_agent_still_is(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
-    account = await make_account(db_session, tenant=tenant)
-    await _thread(db_session, tenant.id, account.id, agent="agent_off")
-    await create_thread_session(
-        db_session,
-        tenant_id=tenant.id,
-        platform="discord",
-        thread_id="t2",
-        account_id=account.id,
-        ma_session_id="sess_2",
-        ma_agent_id="agent_client",
-    )
-    await db_session.commit()
-    await _set(db_session_factory, tenant.id, tier="agent", value="off", agent="agent_off")
-    assert not await _offered(db_session_factory, tenant.id, THREAD), "its own agent is off"
+    await make_thread_session(db_session, tenant=tenant, thread_id=THREAD, ma_agent_id="agent_off")
+    await make_thread_session(db_session, tenant=tenant, thread_id="t2", ma_agent_id="agent_client")
+    await _value(db_session, tenant.id, "off", agent="agent_off")
+    assert not await _offered(db_session_factory, tenant.id), "its own agent is off"
     assert await _offered(db_session_factory, tenant.id, "t2"), "a client agent keeps it"
 
 
@@ -135,21 +106,32 @@ async def test_a_thread_without_a_session_uses_the_workspace_value(
 ) -> None:
     tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
     await db_session.commit()
-    assert await _offered(db_session_factory, tenant.id, "none"), "on by default"
-    await _set(db_session_factory, tenant.id, tier="workspace", value="off")
-    assert not await _offered(db_session_factory, tenant.id, "none"), "the workspace decides"
+    assert await _offered(db_session_factory, tenant.id), "on by default"
+    await _value(db_session, tenant.id, "off")
+    assert not await _offered(db_session_factory, tenant.id), "the workspace decides"
 
 
 async def test_an_agent_cannot_turn_it_on_above_an_off_workspace(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
-    account = await make_account(db_session, tenant=tenant)
-    await _thread(db_session, tenant.id, account.id, agent="agent_1")
-    await _set(db_session_factory, tenant.id, tier="workspace", value="off")
+    await make_thread_session(db_session, tenant=tenant, thread_id=THREAD, ma_agent_id="agent_1")
+    await _value(db_session, tenant.id, "off")
+
+    async def admin_for(_: DelegatedAction | None) -> bool:
+        return True
+
     with pytest.raises(ChannelChangeRefused):
-        await _set(db_session_factory, tenant.id, tier="agent", value="on", agent="agent_1")
-    assert not await _offered(db_session_factory, tenant.id, THREAD), "off above is a ceiling"
+        await change_feature(
+            db_session_factory,
+            _settings(),
+            FeatureActor(tenant.id, None, "web", None, admin_for),
+            key=KEY,
+            tier="agent",
+            value="on",
+            place=FeaturePlace.of(tenant.id, "discord", None, agent_id="agent_1"),
+        )
+    assert not await _offered(db_session_factory, tenant.id), "off above is a ceiling"
 
 
 async def test_a_failed_lookup_or_read_refuses(
@@ -159,40 +141,37 @@ async def test_a_failed_lookup_or_read_refuses(
 ) -> None:
     tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
     await db_session.commit()
-    assert await _offered(db_session_factory, tenant.id, THREAD), "on by default"
+    assert await _offered(db_session_factory, tenant.id), "on by default"
 
     async def boom(*_a: object, **_k: object) -> None:
         raise OperationalError("select", {}, Exception("down"))
 
     with monkeypatch.context() as patch:
         patch.setattr("daimon.core.support_offer.get_post", boom)
-        assert not await _offered(db_session_factory, tenant.id, THREAD), "lookup failed"
+        assert not await _offered(db_session_factory, tenant.id), "lookup failed"
     monkeypatch.setattr("daimon.core.features.snapshot.resolve_features", boom)
-    assert not await _offered(db_session_factory, tenant.id, THREAD), "the read failed"
+    assert not await _offered(db_session_factory, tenant.id), "the read failed"
 
 
 async def test_the_agent_that_wrote_the_answer_decides_in_a_two_agent_thread(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
-    account = await make_account(db_session, tenant=tenant)
-    for n, agent in enumerate(("agent_off", "agent_on")):
-        await create_thread_session(
+    now = datetime.now(UTC)
+    for age, agent in ((2, "agent_off"), (1, "agent_on")):
+        await make_thread_session(
             db_session,
-            tenant_id=tenant.id,
-            platform="discord",
+            tenant=tenant,
             thread_id=THREAD,
-            account_id=account.id,
-            ma_session_id=f"sess_{n}",
             ma_agent_id=agent,
+            created_at=now - timedelta(minutes=age),
         )
-        await db_session.commit()  # one transaction would stamp both rows alike
     await _answer(db_session, tenant.id, "agent_off", "m_off")
-    await _set(db_session_factory, tenant.id, tier="agent", value="off", agent="agent_off")
-    assert not await _offered(db_session_factory, tenant.id, THREAD, "m_off"), (
+    await _value(db_session, tenant.id, "off", agent="agent_off")
+    assert not await _offered(db_session_factory, tenant.id, message_id="m_off"), (
         "the answer's own agent is off, though another is newer"
     )
-    assert await _offered(db_session_factory, tenant.id, THREAD), (
+    assert await _offered(db_session_factory, tenant.id), (
         "an answer with no record falls back to the newest agent"
     )
 
@@ -203,25 +182,23 @@ async def test_an_answer_outside_the_threads_sessions_still_names_its_agent(
     tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
     await _answer(db_session, tenant.id, "agent_off", "m_off")
     await _answer(db_session, tenant.id, "agent_plain", "m_plain")
-    await _set(db_session_factory, tenant.id, tier="agent", value="off", agent="agent_off")
-    assert not await _offered(db_session_factory, tenant.id, THREAD, "m_off"), "own value"
-    assert await _offered(db_session_factory, tenant.id, THREAD, "m_plain"), "workspace"
-    await _set(db_session_factory, tenant.id, tier="workspace", value="off")
-    assert not await _offered(db_session_factory, tenant.id, THREAD, "m_plain"), "workspace off"
+    await _value(db_session, tenant.id, "off", agent="agent_off")
+    assert not await _offered(db_session_factory, tenant.id, message_id="m_off"), "own value"
+    assert await _offered(db_session_factory, tenant.id, message_id="m_plain"), "workspace"
+    await _value(db_session, tenant.id, "off")
+    assert not await _offered(db_session_factory, tenant.id, message_id="m_plain"), "workspace off"
 
 
+@pytest.mark.parametrize("status", ["dead", "retired"])
 async def test_a_thread_with_only_ended_sessions_still_names_its_agent(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], status: str
 ) -> None:
     tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
-    account = await make_account(db_session, tenant=tenant)
-    for status in ("dead", "retired"):
-        await _thread(db_session, tenant.id, account.id, agent="agent_off")
-        await db_session.execute(
-            update(ThreadSession).where(ThreadSession.thread_id == THREAD).values(status=status)
-        )
-        await db_session.commit()
-        await _set(db_session_factory, tenant.id, tier="agent", value="off", agent="agent_off")
-        assert not await _offered(db_session_factory, tenant.id, THREAD), status
-        await db_session.execute(delete(ThreadSession).where(ThreadSession.thread_id == THREAD))
-        await db_session.commit()
+    row = await make_thread_session(
+        db_session, tenant=tenant, thread_id=THREAD, ma_agent_id="agent_off"
+    )
+    await db_session.execute(
+        update(ThreadSession).where(ThreadSession.id == row.id).values(status=status)
+    )
+    await _value(db_session, tenant.id, "off", agent="agent_off")
+    assert not await _offered(db_session_factory, tenant.id), f"a {status} session names it"
