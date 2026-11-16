@@ -56,6 +56,12 @@ THREAD_MODEL_CHOICES: Final[Mapping[str, str]] = {
 #: The efforts a conversation can pick, plus "default" for the agent's own.
 THREAD_EFFORTS: Final = ("low", "medium", "high", "xhigh", "max")
 
+
+def model_efforts(model_id: str) -> tuple[str, ...]:
+    """The efforts a Claude model takes: Haiku takes none, the others take every level."""
+    return () if "haiku" in model_id else THREAD_EFFORTS
+
+
 MODEL_FALLBACK_NOTICE: Final = (
     "\n<model_notice>The model chosen for this conversation is not available here, so "
     "this reply runs on the agent's own model. Tell the requester that in one plain "
@@ -138,6 +144,15 @@ async def choose_thread_model(
     model_id = resolve_choice(choice) if choice is not None else None
     chosen, reset = resolve_effort(effort)
     async with sessionmaker.begin() as session:
+        if chosen is not None:
+            running = model_id
+            if running is None and choice is None:
+                stored = await get_thread_choice(
+                    session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+                )
+                running = stored.id if stored is not None else None
+            if running is not None and chosen not in model_efforts(running):
+                raise ThreadModelRefused(f"{model_label(running)} doesn't take an effort.")
         if choice is not None and model_id is None:
             await clear_thread_model(
                 session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
@@ -250,13 +265,16 @@ def with_model_override(
     """The agent as a turn runs it: the stored agent with the conversation's model, if any.
 
     The agent's effort carries over to the picked model unless the conversation chose
-    one. Speed carries over only where the model stays the same.
+    one, and is dropped where the model takes none. Speed carries over only where the
+    model stays the same.
     """
     if model_override is None and effort is None:
         return agent
     model_id = model_override or agent.model.id
     speed = agent.model.speed if model_id == agent.model.id else "standard"
     kept = effort or agent_effort(agent)
+    if kept is not None and kept not in model_efforts(model_id):
+        kept = None
     extra = {} if kept is None else {"effort": kept}
     return agent.model_copy(
         update={"model": BetaManagedAgentsModelConfig(id=model_id, speed=speed, **extra)}
@@ -350,8 +368,11 @@ async def apply_thread_model(
         if effort is None or not anthropic_backend or thread_applied:
             return unchanged
         # Only the effort was chosen: the agent's own model runs at it.
+        applied = with_model_override(agent, None, effort)
+        if agent_effort(applied) is None:
+            return unchanged
         return AppliedThreadModel(
-            agent=with_model_override(agent, None, effort),
+            agent=applied,
             model_override=agent.model.id,
             model_effort=effort,
             fell_back=False,

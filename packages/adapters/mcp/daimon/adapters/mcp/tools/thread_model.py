@@ -17,7 +17,7 @@ Any other pick is kept on the first call.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -46,6 +46,7 @@ from daimon.core.thread_models import (
     ThreadModelChange,
     ThreadModelRefused,
     choose_thread_model,
+    resolve_effort,
 )
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -60,6 +61,10 @@ _UNATTENDED = (
     "Only someone in the conversation can change its model, and nobody started "
     "this run. Nothing was changed."
 )
+
+
+_EFFORT_NOT_CLAUDE = "The effort was not set: only Claude models take one."
+_EFFORT_OFF_CLAUDE = "The effort was not set: this agent doesn't run on Anthropic."
 
 
 @dataclass(frozen=True)
@@ -92,15 +97,32 @@ async def _set_thread_model_impl(
     origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     if not origin.attended:
         raise ToolError(_UNATTENDED)
+    try:
+        resolve_effort(effort)  # a bad effort refuses before anything changes
+    except ThreadModelRefused as exc:
+        raise ToolError(f"{exc} Nothing changed.") from exc
+    wants_effort = effort is not None and bool(effort.strip())
     if model is None or not model.strip():
-        if effort is None:
+        if not wants_effort:
             raise ToolError("Name a model, an effort, or both. Nothing changed.")
+        if await _off_claude(runtime, auth, origin):
+            raise ToolError(_EFFORT_OFF_CLAUDE + " Nothing changed.")
         return await _choose_claude(runtime, auth, origin, None, effort)
     result = await _set_model(runtime, auth, origin, model, digest, revision)
-    if effort is None or result.digest is not None:
+    if not wants_effort:
         return result
-    # The pick is kept (a card still waiting is not): keep the effort beside it.
+    if result.digest is not None:
+        return _with_note(result, "The effort is not set yet: ask again once they agree.")
+    if ":" in result.model and not result.model.startswith(f"{DEFAULT_BACKEND}:"):
+        return _with_note(result, _EFFORT_NOT_CLAUDE)
+    if await _off_claude(runtime, auth, origin):
+        return _with_note(result, _EFFORT_OFF_CLAUDE)
+    # The pick is kept as a Claude model: keep the effort beside it.
     return await _choose_claude(runtime, auth, origin, None, effort)
+
+
+def _with_note(result: ThreadModelResult, extra: str) -> ThreadModelResult:
+    return replace(result, note=f"{result.note} {extra}")
 
 
 async def _set_model(
@@ -274,8 +296,9 @@ def register_thread_model_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         model) or a model from ``list_models`` as ``provider:id``. ``effort`` is
         ``low``, ``medium``, ``high``, ``xhigh``, ``max`` or ``default`` (the
         agent's own), and may be given alone: "think harder" means a higher
-        ``effort``, not another model. A model pick keeps the chosen effort.
-        The conversation keeps the choice for every later reply until someone
+        ``effort``, not another model. A model pick keeps the chosen effort; only
+        Claude models take one, and the note says when it was not set. The
+        conversation keeps the choice for every later reply until someone
         changes it; the reply in progress keeps its model. Other conversations
         are unaffected.
 

@@ -9861,8 +9861,9 @@
         model) or a model from ``list_models`` as ``provider:id``. ``effort`` is
         ``low``, ``medium``, ``high``, ``xhigh``, ``max`` or ``default`` (the
         agent's own), and may be given alone: "think harder" means a higher
-        ``effort``, not another model. A model pick keeps the chosen effort.
-        The conversation keeps the choice for every later reply until someone
+        ``effort``, not another model. A model pick keeps the chosen effort; only
+        Claude models take one, and the note says when it was not set. The
+        conversation keeps the choice for every later reply until someone
         changes it; the reply in progress keeps its model. Other conversations
         are unaffected.
         <blank line>

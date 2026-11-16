@@ -283,11 +283,41 @@ async def test_a_model_pick_keeps_the_agents_effort_and_the_chosen_one_survives_
     await choose_thread_model(db_session_factory, choice="haiku", **pick)
     swapped = await _applied(db_session_factory, tenant.id)
     assert swapped.model_override == "claude-haiku-5-5"
-    assert swapped.model_effort == "low", "a new model keeps the chosen effort"
-    assert (
-        await describe_thread_model(db_session_factory, **{k: v for k, v in pick.items()})
-        == "This conversation runs on Haiku 5.5 at low effort."
+    assert swapped.model_effort is None, "Haiku takes no effort, so none is sent"
+    assert "effort" not in (swapped.agent.model.model_extra or {})
+
+
+async def test_a_model_that_takes_no_effort_drops_the_agents_and_refuses_a_chosen_one(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    pick = {"tenant_id": tenant.id, "platform": "discord", "thread_id": "T1"}
+    agent = _EFFORT_AGENT.model_copy(
+        update={
+            "model": BetaManagedAgentsModelConfig(
+                id="claude-sonnet-5-5", speed="standard", effort="max"
+            )
+        }
     )
+
+    await choose_thread_model(db_session_factory, choice="haiku", **pick)
+    async with db_session_factory() as session:
+        applied = await apply_thread_model(
+            session,
+            agent=agent,
+            tenant_id=tenant.id,
+            platform="discord",
+            conversation_id="T1",
+            anthropic_backend=True,
+        )
+    assert applied.model_override == "claude-haiku-5-5"
+    assert applied.model_effort is None, "the agent's max effort is not sent to Haiku"
+    with pytest.raises(ThreadModelRefused, match="Haiku 5.5 doesn't take an effort"):
+        await choose_thread_model(db_session_factory, effort="low", **pick)
+    with pytest.raises(ThreadModelRefused, match="Haiku 5.5 doesn't take an effort"):
+        await choose_thread_model(db_session_factory, choice="haiku", effort="low", **pick)
 
 
 async def test_an_effort_alone_runs_the_agents_own_model_and_default_hands_it_back(

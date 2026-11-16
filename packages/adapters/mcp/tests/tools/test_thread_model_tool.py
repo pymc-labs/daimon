@@ -505,6 +505,11 @@ async def test_an_effort_alone_or_beside_a_model_is_kept_for_a_direct_message_co
         assert both.note == "This conversation runs on Fable 5.2 at low effort from the next reply."
         with pytest.raises(ToolError, match="isn't an effort"):
             await _set_thread_model_impl(runtime, auth, origin_context_id=origin_id, effort="turbo")
+        with pytest.raises(ToolError, match="isn't an effort"):
+            # A bad effort refuses before the model changes.
+            await _set_thread_model_impl(
+                runtime, auth, origin_context_id=origin_id, model="opus", effort="turbo"
+            )
         with pytest.raises(ToolError, match="Name a model, an effort"):
             await _set_thread_model_impl(runtime, auth, origin_context_id=origin_id)
 
