@@ -515,15 +515,17 @@ async def accept_callback_event(
     The body is the event as sent. Nothing here reads, logs or keeps the token. A repeat
     of an event the port already holds returns that event's wake and adds nothing.
     """
-    if not load_watches_settings().enabled:
+    settings = load_watches_settings()
+    if not settings.enabled:
         raise ValueError("Watch producers disabled")
     result = await session.scalar(
-        text("SELECT accept_watch_callback(:watch,:token,:event,:body)"),
+        text("SELECT accept_watch_callback(:watch,:token,:event,:body,:max_body)"),
         {
             "watch": watch_id,
             "token": token,
             "event": callback_event_id(watch_id, body, now=now or datetime.now(UTC)),
             "body": body.decode("utf-8"),
+            "max_body": settings.callback_max_body_bytes,
         },
     )
     return None if result is None else uuid.UUID(str(result))
@@ -841,7 +843,7 @@ async def audit_sidecar_identity(session: AsyncSession) -> None:
                 AND oidvectortypes(p.proargtypes)='uuid, uuid, text, bigint, uuid, text, text, text'
                 AND p.prorettype='uuid'::regtype)
             OR (p.proname='accept_watch_callback'
-                AND oidvectortypes(p.proargtypes)='uuid, text, uuid, text'
+                AND oidvectortypes(p.proargtypes)='uuid, text, uuid, text, integer'
                 AND p.prorettype='uuid'::regtype)
             OR (p.proname='claim_watch_polls' AND p.pronargs=0
                 AND p.prorettype='jsonb'::regtype)

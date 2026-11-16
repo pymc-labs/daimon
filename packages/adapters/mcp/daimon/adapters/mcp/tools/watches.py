@@ -511,7 +511,8 @@ async def create_callback_watch(
     max_turns_per_day: int,
 ) -> WatchSummary:
     """A watch fed by posts to a secret link, which goes only to the owner's DMs."""
-    base = load_watches_settings().callback_base_url
+    settings = load_watches_settings()
+    base = settings.callback_base_url
     if base is None:
         raise ToolError("Callback watches are not set up on this Daimon")
     try:
@@ -535,7 +536,8 @@ async def create_callback_watch(
             content=(
                 f"Callback link for watch {watch.id}:\n"
                 f"{base}/callbacks/watches/{watch.id}/{token}\n"
-                "Anyone with this link can wake the watch with a POST body of up to 4 KiB. "
+                "Anyone with this link can wake the watch with a POST body of up to "
+                f"{settings.callback_max_body_bytes // 1024} KiB. "
                 "Keep it private. It is shown once and ends with the watch."
             ),
         )
@@ -1075,10 +1077,10 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Watch a listed read tool from this conversation, or wake on posts to a secret link.
 
         With source "callback" nothing is polled: Daimon DMs the owner a private link, and
-        each POST to it (up to 4 KiB of UTF-8 text) wakes the agent with that text as
-        evidence. The link is never shown in chat or in this result and cannot be shown
-        again; delete the watch and make a new one to change it. A callback watch needs
-        a deployment that has set a callback address. It lasts as long as whoever runs
+        each POST to it (UTF-8 text, 4 KiB unless the deployment allows more) wakes the agent
+        with that text as evidence. The link is never shown in chat or in this result and
+        cannot be shown again; delete the watch and make a new one to change it. A callback
+        watch needs a deployment that has set a callback address. It lasts as long as whoever runs
         Daimon allows (30 days unless they changed it, possibly unlimited), so
         `lifetime_days` and `permanent` do not apply to it.
         The tool, server, arguments, projection, rule, interval and key fields are for polls.

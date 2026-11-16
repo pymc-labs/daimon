@@ -883,3 +883,60 @@ async def test_a_new_callback_watch_may_last_as_long_as_the_setting_allows(
                 expires_at=end + timedelta(days=1),
                 now=now,
             )
+
+
+async def test_the_deployment_sets_the_body_cap_for_the_sidecar_and_the_database(
+    db_session_factory, link, monkeypatch
+):
+    watch, token = link
+    monkeypatch.setenv("DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES", str(256 * 1024))
+    async with TestClient(TestServer(create_app(db_session_factory))) as client:
+        assert (await post(client, watch.id, token, b"x" * (256 * 1024 + 1))).status == 413
+        for letter in (b"a", b"b", b"c"):
+            assert (await post(client, watch.id, token, letter * (256 * 1024))).status == 202
+    async with db_session_factory() as db:
+        evidence = await watches.list_evidence(db, watch.id)
+        assert [len(row.payload) for row in evidence] == [256 * 1024] * 3
+        wake = await get_continuation(db, idempotency_key=evidence[0].wake_key)
+        seed = await watches.watch_seed(db, wake, now=datetime.now(UTC))
+        # A wake carries at most 512 KiB of evidence: the newest post stays, older ones are counted.
+        assert seed is not None and "c" * 1000 in seed and "a" * 1000 not in seed
+        assert '"omitted": 2' in seed
+
+
+async def test_the_default_body_cap_is_unchanged(db_session_factory, link):
+    watch, token = link
+    assert watches.load_watches_settings().callback_max_body_bytes == 4096
+    async with TestClient(TestServer(create_app(db_session_factory))) as client:
+        assert (await post(client, watch.id, token, b"x" * 4097)).status == 413
+        assert (await post(client, watch.id, token, b"x" * 4096)).status == 202
+
+
+async def test_the_database_enforces_its_own_cap_whatever_the_caller_passes(
+    db_session_factory, link
+):
+    watch, token = link
+
+    async def call(size: int, cap: int | None) -> str:
+        try:
+            async with db_session_factory.begin() as db:
+                await db.scalar(
+                    text("SELECT accept_watch_callback(:w,:t,:e,:b,:m)"),
+                    {"w": watch.id, "t": token, "e": uuid.uuid4(), "b": "x" * size, "m": cap},
+                )
+        except Exception as exc:
+            return str(getattr(exc.__cause__, "sqlstate", None) or getattr(exc, "orig", exc))
+        return "accepted"
+
+    assert await call(5000, 4096) != "accepted"
+    assert await call(5000, None) != "accepted"
+    assert await call(4096, 1) == "accepted"  # Below the floor, the default 4 KiB applies.
+    assert await call(524289, 10_000_000) != "accepted"  # Above the ceiling, 512 KiB applies.
+    assert await call(524288, 10_000_000) == "accepted"
+
+
+@pytest.mark.parametrize("value", ["1023", "524289", "0", "-1"])
+def test_the_body_cap_setting_has_bounds(monkeypatch, value):
+    monkeypatch.setenv("DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES", value)
+    with pytest.raises(ValidationError):
+        watches.load_watches_settings()

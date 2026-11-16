@@ -2843,10 +2843,10 @@
         Watch a listed read tool from this conversation, or wake on posts to a secret link.
         <blank line>
         With source "callback" nothing is polled: Daimon DMs the owner a private link, and
-        each POST to it (up to 4 KiB of UTF-8 text) wakes the agent with that text as
-        evidence. The link is never shown in chat or in this result and cannot be shown
-        again; delete the watch and make a new one to change it. A callback watch needs
-        a deployment that has set a callback address. It lasts as long as whoever runs
+        each POST to it (UTF-8 text, 4 KiB unless the deployment allows more) wakes the agent
+        with that text as evidence. The link is never shown in chat or in this result and
+        cannot be shown again; delete the watch and make a new one to change it. A callback
+        watch needs a deployment that has set a callback address. It lasts as long as whoever runs
         Daimon allows (30 days unless they changed it, possibly unlimited), so
         `lifetime_days` and `permanent` do not apply to it.
         The tool, server, arguments, projection, rule, interval and key fields are for polls.

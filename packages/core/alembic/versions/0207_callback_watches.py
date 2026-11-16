@@ -1,12 +1,13 @@
 """Callback watches: a secret-URL ingress for senders that cannot sign, and held timers.
 
-`accept_watch_callback(watch, token, event, payload)` is the one function the sidecar
+`accept_watch_callback(watch, token, event, payload, max_body)` is the one function the sidecar
 may call for a bearer-token post. It compares sha256(token) with every live
 `watch_capabilities` row of operation `callback` in constant time (no early exit),
 refuses every failure the same way (42501), and then applies the same switches,
 rate limits, byte quotas and daily caps as the page and poll paths, under the same
 global lock. The body is the event as is; it is evidence, never an instruction.
-Only the hash is stored.
+Only the hash is stored. `max_body` is the deployment's body cap in bytes, kept between
+4 KiB and 512 KiB here whatever the caller says; the byte quotas grow with it.
 
 `watches.delivery` other than `thread` is now allowed for the `callback` source too.
 
@@ -25,11 +26,11 @@ down_revision: str | None = "0206_dm_carry_overs"
 branch_labels = None
 depends_on = None
 
-SIGNATURE = "accept_watch_callback(uuid,text,uuid,text)"
+SIGNATURE = "accept_watch_callback(uuid,text,uuid,text,integer)"
 
 CALLBACK_SQL = """
 CREATE OR REPLACE FUNCTION {schema}.accept_watch_callback(
-    p_watch uuid, p_token text, p_event uuid, p_payload text
+    p_watch uuid, p_token text, p_event uuid, p_payload text, p_max_body integer
 ) RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp AS $body$
 DECLARE
@@ -46,11 +47,12 @@ DECLARE
     i integer;
     matched boolean := false;
     found_watch boolean;
+    m integer := least(greatest(coalesce(p_max_body, 4096), 4096), 524288);
 BEGIN
     IF NOT coalesce((SELECT enabled FROM {schema}.watch_controls WHERE scope='global'),false)
        THEN RAISE EXCEPTION 'callback refused' USING ERRCODE='42501'; END IF;
     IF p_watch IS NULL OR p_event IS NULL OR p_payload IS NULL
-       OR octet_length(p_payload) NOT BETWEEN 1 AND 4096
+       OR octet_length(p_payload) NOT BETWEEN 1 AND m
        OR p_token IS NULL OR p_token !~ '^[A-Za-z0-9_-]{{16,128}}$' THEN
         RAISE EXCEPTION 'callback refused' USING ERRCODE='42501';
     END IF;
@@ -137,15 +139,15 @@ BEGIN
     IF (SELECT count(*) FROM {schema}.watch_inbox WHERE watch_id=w.id) >= 1000
        OR (SELECT count(*) FROM {schema}.watch_inbox) >= 100000
        OR (SELECT coalesce(sum(octet_length(payload)),0) FROM {schema}.watch_inbox
-           WHERE watch_id=w.id)+octet_length(p_payload)>131072
+           WHERE watch_id=w.id)+octet_length(p_payload)>greatest(131072,4*m)
        OR (SELECT coalesce(sum(octet_length(e.payload)),0) FROM {schema}.watch_inbox e
            JOIN {schema}.watches v ON v.id=e.watch_id WHERE v.owner_account_id=w.owner_account_id)
-           +octet_length(p_payload)>1048576
+           +octet_length(p_payload)>greatest(1048576,16*m)
        OR (SELECT coalesce(sum(octet_length(e.payload)),0) FROM {schema}.watch_inbox e
            JOIN {schema}.watches v ON v.id=e.watch_id WHERE v.tenant_id=w.tenant_id)
-           +octet_length(p_payload)>4194304
+           +octet_length(p_payload)>greatest(4194304,64*m)
        OR (SELECT coalesce(sum(octet_length(payload)),0) FROM {schema}.watch_inbox)
-           +octet_length(p_payload)>16777216 THEN
+           +octet_length(p_payload)>greatest(16777216,256*m) THEN
         RAISE EXCEPTION 'evidence quota' USING ERRCODE='54000';
     END IF;
     -- New evidence must not join a batch whose reader retention already expired.

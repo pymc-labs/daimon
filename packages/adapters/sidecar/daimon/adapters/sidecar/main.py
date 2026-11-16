@@ -39,9 +39,15 @@ def create_app(
     request_timeout_s: float = 10,
     max_requests_per_minute: int = 1200,
     max_watch_requests_per_minute: int = 120,
+    callback_max_body_bytes: int | None = None,
 ) -> web.Application:
-    """Only callback POST paths accept input; health is private at the proxy."""
-    app = web.Application(client_max_size=MAX_EVENT_BYTES)
+    """Only callback POST paths accept input; health is private at the proxy.
+
+    A token post may carry up to the deployment's `callback_max_body_bytes`; a signed
+    page event keeps its own smaller limit.
+    """
+    callback_cap = callback_max_body_bytes or load_watches_settings().callback_max_body_bytes
+    app = web.Application(client_max_size=max(MAX_EVENT_BYTES, callback_cap))
     active = 0
     recent: deque[float] = deque()
     per_watch: dict[uuid.UUID, deque[float]] = {}
@@ -114,12 +120,12 @@ def create_app(
 
         return handler
 
-    async def read_body(request: web.Request) -> bytes | None:
-        """The whole body, or None past the cap. Streaming bounds work without Content-Length."""
+    async def read_body(request: web.Request, limit: int) -> bytes | None:
+        """The whole body, or None past `limit`. Streaming bounds work without Content-Length."""
         body = bytearray()
         async for chunk in request.content.iter_chunked(4096):
             body.extend(chunk)
-            if len(body) > MAX_EVENT_BYTES:
+            if len(body) > limit:
                 return None
         return bytes(body)
 
@@ -146,7 +152,7 @@ def create_app(
         key = (signing_keys or {}).get(key_id)
         if key is None or request.headers.get("Content-Encoding", "identity") != "identity":
             return web.Response(status=403)
-        body = await read_body(request)
+        body = await read_body(request, MAX_EVENT_BYTES)
         if body is None:
             return web.Response(status=413)
         try:
@@ -178,7 +184,7 @@ def create_app(
             return web.Response(status=429)
         if request.headers.get("Content-Encoding", "identity") != "identity":
             return web.Response(status=400)
-        body = await read_body(request)
+        body = await read_body(request, callback_cap)
         if body is None:
             return web.Response(status=413)
         if not body:

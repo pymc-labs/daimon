@@ -1899,6 +1899,16 @@ under it once; unset refuses new callback watches and leaves existing ones worki
 Route /callbacks/watches/ on the sidecar to it, and keep proxy access logs off that
 path, since the secret is part of it.
 
+### `DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES`
+
+`int` · optional · default `4096`
+
+Largest body, in bytes, that one post to a callback watch link may carry; a larger post
+is refused. Default 4096 (4 KiB); up to 524288 (512 KiB). Raise it for senders that post
+a whole record, for example 262144 for 256 KiB. The per-watch, per-owner and per-server
+evidence limits grow with it, and a wake that would carry more than 512 KiB of evidence
+drops its oldest posts. Signed page events keep their own 4 KiB limit.
+
 ### `DAIMON_WATCHES__CHAT_TOOLS`
 
 `list[str]` · optional · default unset
