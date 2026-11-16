@@ -56,7 +56,8 @@ with the first agent that has DMs on and admits them, chosen like this:
 3. **Pick, rule agent, default.** Otherwise the first available of the person's
    pick, the rule's agent and the server default. When several agents remain, a
    picker (a dropdown, or buttons on Teams) lets the person choose, and the choice is
-   remembered for the next conversation.
+   remembered for the next conversation. Messages sent before the choice wait for
+   it, up to five minutes, and are answered in one turn.
 
 `/dm-me` in a channel follows the same rules and refuses a locked-out person
 with a private note. Handing a DM to another agent in the conversation is
@@ -86,8 +87,8 @@ When someone DMs the bot, Daimon looks for servers where they are a current
 member, pass the invoker policy and may use the DM agent.
 
 - **One server** starts a conversation and answers the message.
-- **Several servers** show a server picker only that person can use. It keeps
-  the message for five minutes and checks access again on the pick.
+- **Several servers** show a server picker only that person can use. It holds
+  their messages for five minutes and checks access again on the pick.
 - **None** runs no turn. A member refused by the invoker policy or the agent's
   role requirement is told they may not DM Daimon. Anyone else gets the
   `/dm-me` guidance, which names no server.
@@ -142,8 +143,12 @@ gets role changes and departures at once.
 
 - Discovery and server switching share three attempts per person, refilling
   one every 20 seconds. Running out is silent.
-- Pickers and buttons live in one process. A restart drops them, and the
-  person sends a new message.
+- A picker carries its own expiry: a late pick is refused, and the person sends
+  a new message. A process that stops while a pick is open says the held
+  messages were not sent, except on Teams, which takes them up after the restart.
+- Discord DMs reach one process. On Slack and Teams, a pick made on another
+  process is found within seconds; if two processes each offer a picker, the
+  first pick wins.
 - Routine and watch reports never pick a server or join the active
   conversation's history.
 - Turning DMs off stops new turns and, on Discord, the delivery of answers
