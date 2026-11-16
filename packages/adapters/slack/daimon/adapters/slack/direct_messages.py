@@ -35,6 +35,13 @@ from daimon.core.direct_messages import (
     sealed_channel_ids,
     start_dm,
 )
+from daimon.core.dm_debounce import (
+    DmDebouncer,
+    DmWindow,
+    bypasses_wait,
+    debounce_seconds,
+    split_approvals,
+)
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -50,6 +57,9 @@ from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger(__name__)
+_SEEN_REACTION = "eyes"
+_BURSTS: DmDebouncer[tuple[str, str, str], dict[str, Any]] = DmDebouncer()
+"""The burst each person is sending in each direct message, until its quiet window ends."""
 _ERRORS = (
     DaimonError,
     MAResolverMissError,
@@ -301,9 +311,24 @@ async def _explain_no_private_chat(
         log.warning("slack.dm.cold_notice_failed", error_type=type(exc).__name__)
 
 
+async def _react(
+    client: AsyncWebClient, *, channel_id: str, event: dict[str, Any], add: bool
+) -> None:
+    """Mark a message as seen while its burst is waited out, and clear the mark after."""
+    stamp = str(event.get("ts") or "")
+    with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
+        if add:
+            await client.reactions_add(name=_SEEN_REACTION, channel=channel_id, timestamp=stamp)  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs are untyped
+        else:
+            await client.reactions_remove(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs are untyped
+                name=_SEEN_REACTION, channel=channel_id, timestamp=stamp
+            )
+
+
 async def handle_direct_message(
     runtime: SlackRuntime, event: dict[str, Any], *, team_id: str
 ) -> None:
+    """Answer a direct message, or the burst of them it opens, in one turn."""
     if not is_direct_message_event(event) or is_slack_connect_external(event, team_id=team_id):
         return
     channel_id = str(event.get("channel") or "")
@@ -311,10 +336,33 @@ async def handle_direct_message(
     message_id = str(event.get("ts") or "")
     if not channel_id or not message_id:
         return
+    key = (team_id, channel_id, user_id)
+    text = str(event.get("text") or "")
+    # No await before this: a message sent meanwhile joins the burst instead of racing it.
+    if _BURSTS.join(key, event, flush=bypasses_wait(text)):
+        return
+    burst = _BURSTS.open(key, event)
+    try:
+        await _answer_burst(runtime, burst, event, team_id=team_id, key=key)
+    finally:
+        _BURSTS.close(key, burst)
+
+
+async def _answer_burst(
+    runtime: SlackRuntime,
+    burst: DmWindow[dict[str, Any]],
+    event: dict[str, Any],
+    *,
+    team_id: str,
+    key: tuple[str, str, str],
+) -> None:
+    channel_id = str(event.get("channel") or "")
+    user_id = str(event.get("user") or "")
     thread_ts = event.get("thread_ts")
     thread_kwargs = {"thread_ts": thread_ts} if thread_ts else {}
     route_key = f"{team_id}:{channel_id}"
     client: AsyncWebClient | None = None
+    seen: list[dict[str, Any]] = []
     try:
         async with runtime.sessionmaker() as session:
             conversation = await get_conversation(
@@ -335,9 +383,22 @@ async def handle_direct_message(
             )
             return
         role = await _live_role(client, user_id=user_id, team_id=team_id)
-        content = str(event.get("text") or "")
-        if not content.strip():
-            return
+        first_text = str(event.get("text") or "")
+        seconds = (
+            0.0
+            if not first_text.strip() or bypasses_wait(first_text)
+            else await debounce_seconds(
+                runtime.sessionmaker, runtime.settings, conversation.tenant_id, "slack"
+            )
+        )
+        reacting = client
+
+        async def mark(arrived: dict[str, Any]) -> None:
+            seen.append(arrived)
+            await _react(reacting, channel_id=channel_id, event=arrived, add=True)
+
+        events = await burst.settle(seconds, on_arrival=mark)
+        _BURSTS.close(key, burst)
         identity: AgentIdentity | None = None
 
         async def on_agent(name: str) -> None:
@@ -369,29 +430,35 @@ async def handle_direct_message(
             except (anthropic.APIError, SQLAlchemyError) as exc:
                 log.warning("slack.dm.identity_lookup_failed", error_type=type(exc).__name__)
 
-        answer = await reply_to_dm(
-            runtime.turn_deps,
-            platform="slack",
-            route_key=route_key,
-            external_user_id=user_id,
-            message_id=message_id,
-            platform_channel_id=channel_id,
-            expected_scope_id=conversation.scope_id,
-            text=content,
-            role=role,
-            on_agent=on_agent,
-        )
-        if answer is not None:
-            for offset in range(0, len(answer), 3500):
-                await post_as_agent(
-                    client,
-                    identity,
-                    channel=channel_id,
-                    text=answer[offset : offset + 3500],
-                    parse="none",
-                    unfurl_links=False,
-                    **thread_kwargs,
-                )
+        for group in split_approvals(events, lambda e: str(e.get("text") or "")):
+            texts = [str(e.get("text") or "") for e in group]
+            content = "\n\n".join(t for t in texts if t.strip())
+            if not content.strip():
+                continue
+            answer = await reply_to_dm(
+                runtime.turn_deps,
+                platform="slack",
+                route_key=route_key,
+                external_user_id=user_id,
+                message_id=str(group[0].get("ts") or ""),
+                merged_message_ids=tuple(str(e.get("ts") or "") for e in group[1:]),
+                platform_channel_id=channel_id,
+                expected_scope_id=conversation.scope_id,
+                text=content,
+                role=role,
+                on_agent=on_agent,
+            )
+            if answer is not None:
+                for offset in range(0, len(answer), 3500):
+                    await post_as_agent(
+                        client,
+                        identity,
+                        channel=channel_id,
+                        text=answer[offset : offset + 3500],
+                        parse="none",
+                        unfurl_links=False,
+                        **thread_kwargs,
+                    )
     except _ERRORS as exc:
         log.warning("slack.dm.turn_failed", error_type=type(exc).__name__)
         if client is not None:
@@ -403,3 +470,7 @@ async def handle_direct_message(
                     ),
                     **thread_kwargs,
                 )
+    finally:
+        if client is not None:
+            for arrived in seen:
+                await _react(client, channel_id=channel_id, event=arrived, add=False)

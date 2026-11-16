@@ -87,6 +87,7 @@ _NARROWED: dict[str, str] = {
     "direct_messages": "a workspace policy for DMs, which have no agent or thread to choose",
     "dm_memory_read_only": "a workspace policy for DMs, which have no agent or thread to choose",
     "dm_history_depth": "DMs have no channel or thread; an agent and its workspace set the memory",
+    "dm_debounce_seconds": "read before any agent is chosen, so only the workspace sets it",
     "tool_safety": "operator-only security switch",
     "host_call_gate": "operator-only rollback switch",
     "mcp_connector_relay": "operator-only rollback switch",

@@ -17,8 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a notice if the bot restarts or `/dm-me` moves the conversation.
 - **Direct message memory is a setting.** `dm_history_depth` sets how many earlier
   messages each direct message reply carries: 12 (the default), 25, 50 or 100, at the
-  deployment, workspace and agent levels. The smallest setting wins. The history is
-  sent again with every reply, so a higher setting costs more.
+  deployment, workspace and agent levels. The smallest setting wins. It applies to
+  Discord, Slack and web direct messages. A higher setting costs more.
+- **Direct messages wait for you to finish.** `dm_debounce_seconds` (3 by default, or
+  0, 1 or 5; 0 is off) holds a direct message until nothing new has arrived for that
+  long, up to ten seconds, then answers everything sent in one turn. Each message
+  gets an eyes reaction at once. An approval reply such as "yes" is never held. It
+  applies to Discord and Slack, set per workspace or deployment.
+- **Earlier turns are no longer sent again into a continuing session.** A Discord direct
+  message into a session that already holds the conversation sends only the new message.
+  A new, replaced or recovered session still gets the history.
 - **`/model` works in direct messages, with an effort choice.** `/model` in a direct
   message sets the model for that conversation, and a new `effort` option (low, medium,
   high, xhigh, max) sets how hard Claude thinks. Effort alone keeps the agent's model, and

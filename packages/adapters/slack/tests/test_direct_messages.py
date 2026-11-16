@@ -5,6 +5,7 @@ Admission, the live role lookup and the DM store are patched on the module.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -37,6 +38,7 @@ async def test_dm_policy_replies_use_workspace_words(
     monkeypatch: pytest.MonkeyPatch, role: Role, action: str, expected: str
 ) -> None:
     client = MagicMock()
+    client.reactions_add = client.reactions_remove = AsyncMock()
     client.chat_postEphemeral = AsyncMock()
     monkeypatch.setattr(dm_module, "resolve_web_client", AsyncMock(return_value=client))
     monkeypatch.setattr(dm_module, "_live_role", AsyncMock(return_value=role))
@@ -70,6 +72,7 @@ async def test_reply_in_dm_thread_stays_in_that_thread(
             source_channel_id=_CHANNEL,
         )
     client = MagicMock()
+    client.reactions_add = client.reactions_remove = AsyncMock()
     client.chat_postMessage = AsyncMock(return_value={"ok": True, "ts": "3.1"})
     monkeypatch.setattr(dm_module, "resolve_web_client", AsyncMock(return_value=client))
     monkeypatch.setattr(dm_module, "_live_role", AsyncMock(return_value=Role.USER))
@@ -114,6 +117,7 @@ async def test_error_in_dm_thread_stays_in_that_thread(
             source_channel_id=_CHANNEL,
         )
     client = MagicMock()
+    client.reactions_add = client.reactions_remove = AsyncMock()
     client.chat_postMessage = AsyncMock()
     monkeypatch.setattr(dm_module, "resolve_web_client", AsyncMock(return_value=client))
     monkeypatch.setattr(dm_module, "_live_role", AsyncMock(return_value=Role.USER))
@@ -155,6 +159,7 @@ async def test_dm_admits_and_records_the_channel_it_ran_in(
         return MagicMock(source_sealed=False, source_shared=False)
 
     client = MagicMock()
+    client.reactions_add = client.reactions_remove = AsyncMock()
     client.conversations_history = AsyncMock(return_value={"messages": []})
     client.conversations_open = AsyncMock(return_value={"channel": {"id": "D_NEW"}})
     client.chat_postMessage = AsyncMock()
@@ -204,6 +209,7 @@ async def test_a_later_dm_turn_over_its_source_budget_tells_the_member(
             source_channel_id=_CHANNEL,
         )
     client = MagicMock()
+    client.reactions_add = client.reactions_remove = AsyncMock()
     client.chat_postMessage = AsyncMock()
     monkeypatch.setattr(dm_module, "resolve_web_client", AsyncMock(return_value=client))
     monkeypatch.setattr(dm_module, "_live_role", AsyncMock(return_value=Role.USER))
@@ -241,6 +247,7 @@ async def test_excluded_workspace_dm_skips_agent_identity_lookup(
             source_channel_id=_CHANNEL,
         )
     client = MagicMock()
+    client.reactions_add = client.reactions_remove = AsyncMock()
     client.chat_postMessage = AsyncMock()
     monkeypatch.setattr(dm_module, "resolve_web_client", AsyncMock(return_value=client))
     monkeypatch.setattr(dm_module, "_live_role", AsyncMock(return_value=Role.USER))
@@ -298,6 +305,7 @@ async def test_a_failed_dm_turn_never_shows_the_provider_text(
         body={"error": {"message": leak}},
     )
     client = MagicMock()
+    client.reactions_add = client.reactions_remove = AsyncMock()
     client.chat_postMessage = AsyncMock()
     monkeypatch.setattr(dm_module, "resolve_web_client", AsyncMock(return_value=client))
     monkeypatch.setattr(dm_module, "_live_role", AsyncMock(return_value=Role.USER))
@@ -328,3 +336,109 @@ async def test_a_failed_dm_turn_never_shows_the_provider_text(
     )
     for private in ("sk-ant", "access_token", "api.internal.example"):
         assert private not in text, private
+
+
+async def _burst_setup(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    seconds: float,
+) -> tuple[MagicMock, MagicMock, AsyncMock]:
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="slack")
+        account = await make_account(session, tenant=tenant)
+        await make_dm_conversation(
+            session,
+            tenant=tenant,
+            account_id=account.id,
+            route_key=f"{_TEAM}:D_BURST",
+            external_user_id="U1",
+            workspace_id=_TEAM,
+            source_channel_id=_CHANNEL,
+        )
+    client = MagicMock()
+    client.reactions_add = AsyncMock()
+    client.reactions_remove = AsyncMock()
+    client.chat_postMessage = AsyncMock(return_value={"ok": True, "ts": "9.1"})
+    monkeypatch.setattr(dm_module, "resolve_web_client", AsyncMock(return_value=client))
+    monkeypatch.setattr(dm_module, "_live_role", AsyncMock(return_value=Role.USER))
+    monkeypatch.setattr(dm_module, "debounce_seconds", AsyncMock(return_value=seconds))
+    reply = AsyncMock(return_value="done")
+    monkeypatch.setattr(dm_module, "reply_to_dm", reply)
+    runtime = MagicMock()
+    runtime.sessionmaker = db_session_factory
+    runtime.settings.agent_identity.enabled = False
+    return runtime, client, reply
+
+
+def _dm(text: str, ts: str) -> dict[str, Any]:
+    return {
+        "type": "message",
+        "channel_type": "im",
+        "channel": "D_BURST",
+        "user": "U1",
+        "ts": ts,
+        "text": text,
+    }
+
+
+def _marks(call: AsyncMock) -> list[str]:
+    return [item.kwargs["timestamp"] for item in call.await_args_list]
+
+
+async def test_a_burst_of_dms_is_one_turn_after_the_quiet_gap(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, client, reply = await _burst_setup(db_session_factory, monkeypatch, 0.4)
+    first = asyncio.create_task(
+        dm_module.handle_direct_message(runtime, _dm("one", "1.1"), team_id=_TEAM)
+    )
+    await asyncio.sleep(0.1)
+    await dm_module.handle_direct_message(runtime, _dm("two", "1.2"), team_id=_TEAM)
+    await asyncio.sleep(0.05)
+    assert _marks(client.reactions_add) == ["1.1", "1.2"], "marked as soon as each arrives"
+    reply.assert_not_awaited()
+    await asyncio.sleep(0.15)
+    await dm_module.handle_direct_message(runtime, _dm("three", "1.3"), team_id=_TEAM)
+    await first
+    reply.assert_awaited_once()
+    kwargs = reply.await_args.kwargs
+    assert kwargs["text"] == "one\n\ntwo\n\nthree"
+    assert (kwargs["message_id"], kwargs["merged_message_ids"]) == ("1.1", ("1.2", "1.3"))
+    assert _marks(client.reactions_remove) == ["1.1", "1.2", "1.3"], "cleared after the turn"
+    client.chat_postMessage.assert_awaited_once()
+
+
+async def test_an_approval_reply_in_a_burst_is_its_own_turn_without_waiting(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, _client, reply = await _burst_setup(db_session_factory, monkeypatch, 5.0)
+    started = asyncio.get_running_loop().time()
+    first = asyncio.create_task(
+        dm_module.handle_direct_message(runtime, _dm("install it", "2.1"), team_id=_TEAM)
+    )
+    await asyncio.sleep(0.1)
+    await dm_module.handle_direct_message(runtime, _dm("yes", "2.2"), team_id=_TEAM)
+    await first
+    assert asyncio.get_running_loop().time() - started < 4.0
+    assert [call.kwargs["text"] for call in reply.await_args_list] == ["install it", "yes"]
+
+
+async def test_a_lone_approval_reply_is_never_held(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, client, reply = await _burst_setup(db_session_factory, monkeypatch, 5.0)
+    started = asyncio.get_running_loop().time()
+    await dm_module.handle_direct_message(runtime, _dm("yes", "3.1"), team_id=_TEAM)
+    assert asyncio.get_running_loop().time() - started < 4.0
+    reply.assert_awaited_once()
+    client.reactions_add.assert_not_awaited()
+
+
+async def test_a_debounce_of_zero_answers_each_dm_at_once(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime, client, reply = await _burst_setup(db_session_factory, monkeypatch, 0)
+    await dm_module.handle_direct_message(runtime, _dm("hello", "4.1"), team_id=_TEAM)
+    await dm_module.handle_direct_message(runtime, _dm("again", "4.2"), team_id=_TEAM)
+    assert [call.kwargs["text"] for call in reply.await_args_list] == ["hello", "again"]
+    client.reactions_add.assert_not_awaited()

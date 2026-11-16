@@ -47,6 +47,7 @@ Where each feature can be set, and its default.
 | Table images | `table_rendering` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ | Only Discord, Slack; Off by default on Slack |
 | Budget notices | `budget_notices` | Chat | On | ✓ | ✓ |  | ✓ |  |  |
 | Vote buttons | `message_feedback` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Direct message wait | `dm_debounce_seconds` | Chat | 3 seconds | ✓ | ✓ |  |  |  | Only Discord, Slack |
 | Other providers per conversation | `thread_providers` | Chat | Off | ✓ | ✓ | ✓ |  |  |  |
 | Repository memory | `repo_memory` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Context provider | `context_provider` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
@@ -552,6 +553,18 @@ Conversations may move to a direct message with the agent. The agent that answer
 | Default | `off` |
 | Levels | Deployment, Workspace |
 | Combines | Off above is a ceiling |
+
+## Direct message wait
+
+A direct message waits this long for the next one before the agent starts, so a burst of messages is answered in one turn instead of several. Off answers each message at once. However long the burst goes on, the wait ends after ten seconds. A reply to an approval is never held.
+
+| | |
+| --- | --- |
+| Key | `dm_debounce_seconds` |
+| Values | `3` (3 seconds), `0` (Off), `1` (1 second), `5` (5 seconds) |
+| Default | `3` |
+| Levels | Deployment, Workspace |
+| Combines | Most specific wins |
 
 ## Read-only memory in direct messages
 

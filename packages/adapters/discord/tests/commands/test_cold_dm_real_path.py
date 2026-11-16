@@ -202,20 +202,17 @@ def model_prompts(provider):
     ]
 
 
-async def test_different_simultaneous_first_messages_each_answer_once_in_one_scope(real_dm):
+async def test_different_simultaneous_first_messages_merge_into_one_turn_in_one_scope(real_dm):
     first, second = message(101), message(102)
     first.content, second.content = "first message", "second message"
     await asyncio.gather(real_dm.cog.on_message(first), real_dm.cog.on_message(second))
     row = await active(real_dm)
-    assert len(real_dm.provider.submissions) == 2
     prompts = model_prompts(real_dm.provider)
-    assert sum(prompt.endswith("\n\nfirst message") for prompt in prompts) == 1
-    assert sum(prompt.endswith("\n\nsecond message") for prompt in prompts) == 1
-    assert len(set(real_dm.provider.streams)) == 1, "both turns use the one new private session"
-    assert answers(first) == ["private answer"] and answers(second) == ["private answer"]
+    assert len(prompts) == 1, "the burst is answered by one turn"
+    assert prompts[0].endswith("\n\nfirst message\n\nsecond message")
+    assert len(answers(first)) + len(answers(second)) == 1
     assert [entry["text"] for entry in row.history if entry["role"] == "user"] == [
-        "first message",
-        "second message",
+        "first message\n\nsecond message"
     ]
     assert set(row.recent_message_ids) == {"101", "102"}
     async with real_dm.factory() as session:
@@ -368,3 +365,71 @@ async def test_moved_source_sealed_during_turn_is_quarantined_without_private_de
     assert all(
         session.archived_at is not None for session in real_dm.provider.state.sessions.values()
     )
+
+
+async def _known_conversation(real_dm, monkeypatch, seconds):
+    """A person with a conversation already open, and a debounce of `seconds`."""
+    await real_dm.cog.on_message(message(100))
+    assert len(real_dm.provider.submissions) == 1
+    monkeypatch.setattr(module, "debounce_seconds", AsyncMock(return_value=seconds))
+
+
+def _typed(text, message_id):
+    msg = message(message_id)
+    msg.content = text
+    return msg
+
+
+async def test_a_burst_waits_for_quiet_then_answers_once(real_dm, monkeypatch):
+    await _known_conversation(real_dm, monkeypatch, 0.4)
+    one, two, three = _typed("one", 201), _typed("two", 202), _typed("three", 203)
+    first = asyncio.create_task(real_dm.cog.on_message(one))
+    await asyncio.sleep(0.1)
+    await real_dm.cog.on_message(two)
+    await asyncio.sleep(0.05)
+    one.add_reaction.assert_awaited_once_with("👀")
+    two.add_reaction.assert_awaited_once_with("👀")
+    assert len(real_dm.provider.submissions) == 1, "no turn starts while the window is open"
+    await asyncio.sleep(0.2)
+    await real_dm.cog.on_message(three)
+    await first
+    prompts = model_prompts(real_dm.provider)
+    assert len(prompts) == 2, "three messages, one more turn"
+    assert prompts[-1].endswith("one\n\ntwo\n\nthree")
+    for msg in (one, two, three):
+        msg.remove_reaction.assert_awaited_with("👀", real_dm.cog.bot.user)
+    assert len(answers(one)) + len(answers(two)) + len(answers(three)) == 1, "one reply"
+    row = await active(real_dm)
+    assert {"201", "202", "203"} <= set(row.recent_message_ids)
+
+
+async def test_an_approval_reply_goes_straight_through(real_dm, monkeypatch):
+    await _known_conversation(real_dm, monkeypatch, 5.0)
+    started = asyncio.get_running_loop().time()
+    question, approval = _typed("check this", 301), _typed("yes", 302)
+    first = asyncio.create_task(real_dm.cog.on_message(question))
+    await asyncio.sleep(0.1)
+    await real_dm.cog.on_message(approval)
+    await first
+    assert asyncio.get_running_loop().time() - started < 4.0, "the window did not run its length"
+    prompts = model_prompts(real_dm.provider)
+    assert len(prompts) == 3, "the approval is its own turn"
+    assert prompts[1].endswith("check this") and prompts[2].endswith("yes")
+
+
+async def test_a_lone_approval_reply_is_never_held(real_dm, monkeypatch):
+    await _known_conversation(real_dm, monkeypatch, 5.0)
+    started = asyncio.get_running_loop().time()
+    approval = _typed("yes", 401)
+    await real_dm.cog.on_message(approval)
+    assert asyncio.get_running_loop().time() - started < 4.0
+    approval.add_reaction.assert_not_awaited()
+    assert model_prompts(real_dm.provider)[-1].endswith("yes")
+
+
+async def test_a_debounce_of_zero_answers_each_message_at_once(real_dm, monkeypatch):
+    await _known_conversation(real_dm, monkeypatch, 0)
+    msg = _typed("hello", 501)
+    await real_dm.cog.on_message(msg)
+    msg.add_reaction.assert_not_awaited()
+    assert len(real_dm.provider.submissions) == 2 and answers(msg) == ["private answer"]

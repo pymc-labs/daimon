@@ -734,6 +734,7 @@ async def reply_to_dm(
     text: str,
     role: Role,
     role_ids: tuple[str, ...] = (),
+    merged_message_ids: Sequence[str] = (),
     verified_membership: bool | None = None,
     on_agent: Callable[[str], Awaitable[None]] | None = None,
     platform_channel_id: str | None = None,
@@ -745,6 +746,7 @@ async def reply_to_dm(
         route_key=route_key,
         external_user_id=external_user_id,
         message_id=message_id,
+        merged_message_ids=merged_message_ids,
         expected_scope_id=expected_scope_id,
         text=text,
         role=role,
@@ -912,8 +914,6 @@ async def reply_to_dm_result(
                     from_agent_name="private conversation",
                 )
             )
-            answer, _session_id, outputs = await _run_admitted_dm_turn(
-                deps,
             whole = f"{context}\n\n{prefix}\n{text}" if prefix else f"{context}\n\n{text}"
             # A session that continues already holds the earlier turns; a new or replaced
             # one has seen none, and a recovery rebuilds `whole` for the same reason.
@@ -926,6 +926,8 @@ async def reply_to_dm_result(
             async def reseed_whole() -> str:
                 return whole
 
+            answer, _session_id, outputs = await _run_admitted_dm_turn(
+                deps,
                 prepared,
                 tenant_id=conversation.tenant_id,
                 platform=platform,

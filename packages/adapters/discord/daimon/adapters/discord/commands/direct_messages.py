@@ -57,6 +57,7 @@ from daimon.core.direct_messages import (
     start_dm,
     tenant_ready,
 )
+from daimon.core.dm_debounce import DmDebouncer, DmWindow, bypasses_wait, debounce_seconds
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -115,6 +116,7 @@ _BUSY_NOTICE = "I'm still answering your last message.\nTry again once it's done
 _DROPPED_NOTICE = "Your message wasn't sent. Please send it again."
 _EMPTY_NOTICE = "Send a text message to continue this conversation."
 _QUEUED_REACTION = "⌛"
+_SEEN_REACTION = "👀"
 
 
 @dataclass(frozen=True)
@@ -174,6 +176,8 @@ class DirectMessageCog(commands.Cog):
         self._pending: dict[tuple[int, int], _PendingSelection] = {}
         self._replying: set[tuple[int, int]] = set()
         self._queued: dict[tuple[int, int], list[discord.Message]] = {}
+        # A burst waiting out its quiet window, before its turn starts.
+        self._bursts: DmDebouncer[tuple[int, int], discord.Message] = DmDebouncer()
         # The conversation each held message was sent into, by message id.
         self._held_scope: dict[int, str] = {}
         self._switch_views: dict[tuple[int, int], ServerSwitch] = {}
@@ -183,6 +187,7 @@ class DirectMessageCog(commands.Cog):
 
     async def cog_unload(self) -> None:
         self._unloaded = True
+        self._bursts.flush_all()
         for view in self._switch_views.values():
             view.stop()
         self._switch_views.clear()
@@ -816,6 +821,11 @@ class DirectMessageCog(commands.Cog):
                 # answers everything sent meanwhile at once. No await before the append.
                 await self._hold(key, message)
                 return
+            if _has_input(message) and self._bursts.join(
+                key, message, flush=bypasses_wait(message.content)
+            ):
+                # The burst's first message waits for this one; it answers them together.
+                return
             async with self._lock(key):
                 pending = self._pending.get(key)
                 if pending is not None:
@@ -823,9 +833,15 @@ class DirectMessageCog(commands.Cog):
                         self._suppress(message, "selection_pending")
                         return
                     del self._pending[key]
+                burst = self._bursts.open(key, message)
+                try:
+                    waited, messages = await self._wait_for_burst(burst, message)
+                finally:
+                    self._bursts.close(key, burst)
+                # No await since the burst closed: a message from here on is held.
                 self._replying.add(key)
                 try:
-                    await self._answer(message)
+                    await self._answer_burst(messages, waited=waited)
                     await self._thread_queue.drain(
                         key, compose=self._compose, run=self._answer_batch
                     )
@@ -833,6 +849,48 @@ class DirectMessageCog(commands.Cog):
                     self._replying.discard(key)
                     leftover = self._queued.pop(key, [])
                     await self._drop_queued(leftover)
+
+    async def _wait_for_burst(
+        self, burst: DmWindow[discord.Message], first: discord.Message
+    ) -> tuple[bool, list[discord.Message]]:
+        """Hold the first message until the person stops sending; whether a wait applied."""
+        seconds, scope_id = 0.0, None
+        if _has_input(first) and not bypasses_wait(first.content):
+            async with self.bot.runtime.sessionmaker() as session:
+                found = await get_conversation(
+                    session,
+                    platform="discord",
+                    route_key=str(first.channel.id),
+                    external_user_id=str(first.author.id),
+                )
+            if found is not None:
+                scope_id = found.scope_id
+                seconds = await debounce_seconds(
+                    self.bot.runtime.sessionmaker,
+                    self.bot.runtime.settings,
+                    found.tenant_id,
+                    "discord",
+                )
+
+        async def seen(message: discord.Message) -> None:
+            # The conversation it was sent into, so /dm-me meanwhile drops it with a notice.
+            if scope_id is not None:
+                self._held_scope[message.id] = scope_id
+            with contextlib.suppress(discord.HTTPException):
+                await message.add_reaction(_SEEN_REACTION)
+
+        messages = await burst.settle(
+            seconds, on_arrival=seen, stop=lambda: self._unloaded or self.bot.draining
+        )
+        return seconds > 0, messages
+
+    async def _answer_burst(self, messages: list[discord.Message], *, waited: bool) -> None:
+        """One turn for each run of ordinary messages; an approval reply stands alone."""
+        for group in self._compose(messages):
+            if waited:
+                await self._answer_batch(group, emoji=_SEEN_REACTION)
+            else:
+                await self._answer(group[0], batch=tuple(group) if len(group) > 1 else ())
 
     @property
     def _thread_queue(self) -> ThreadQueue[tuple[int, int], discord.Message]:
@@ -892,22 +950,26 @@ class DirectMessageCog(commands.Cog):
                 reason="discovery_unavailable",
             )
 
-    async def _answer_batch(self, messages: list[discord.Message]) -> None:
+    async def _answer_batch(
+        self, messages: list[discord.Message], *, emoji: str = _QUEUED_REACTION
+    ) -> None:
         key = (messages[0].author.id, messages[0].channel.id)
         try:
             if self._unloaded or self.bot.draining:
-                await self._drop_queued(messages)
+                await self._drop_queued(messages, emoji=emoji)
             elif self._selecting(key):
                 for message in messages:
                     self._suppress(message, "selection_pending")
             else:
-                messages = await self._without_moved(messages)
+                messages = await self._without_moved(messages, emoji=emoji)
                 if messages:
                     await self._answer(messages[0], batch=tuple(messages))
         finally:
-            await self._clear_queued_reactions(messages)
+            await self._clear_queued_reactions(messages, emoji=emoji)
 
-    async def _without_moved(self, messages: list[discord.Message]) -> list[discord.Message]:
+    async def _without_moved(
+        self, messages: list[discord.Message], *, emoji: str = _QUEUED_REACTION
+    ) -> list[discord.Message]:
         """Drop, with a notice, messages held in a conversation /dm-me has since replaced."""
         first = messages[0]
         async with self.bot.runtime.sessionmaker() as session:
@@ -923,10 +985,12 @@ class DirectMessageCog(commands.Cog):
             m for m in messages if self._held_scope.get(m.id, current.scope_id) != current.scope_id
         ]
         if moved:
-            await self._drop_queued(moved)
+            await self._drop_queued(moved, emoji=emoji)
         return [m for m in messages if m not in moved]
 
-    async def _clear_queued_reactions(self, messages: list[discord.Message]) -> None:
+    async def _clear_queued_reactions(
+        self, messages: list[discord.Message], *, emoji: str = _QUEUED_REACTION
+    ) -> None:
         for message in messages:
             self._held_scope.pop(message.id, None)
         user = self.bot.user
@@ -934,13 +998,15 @@ class DirectMessageCog(commands.Cog):
             return
         for message in messages:
             with contextlib.suppress(discord.HTTPException):
-                await message.remove_reaction(_QUEUED_REACTION, user)
+                await message.remove_reaction(emoji, user)
 
-    async def _drop_queued(self, messages: list[discord.Message]) -> None:
+    async def _drop_queued(
+        self, messages: list[discord.Message], *, emoji: str = _QUEUED_REACTION
+    ) -> None:
         """Tell the person messages held for a turn that will not run were not sent."""
         if not messages:
             return
-        await self._clear_queued_reactions(messages)
+        await self._clear_queued_reactions(messages, emoji=emoji)
         log.info("discord.dm.queued_dropped", dropped=len(messages))
         with contextlib.suppress(discord.HTTPException):
             await messages[0].channel.send(

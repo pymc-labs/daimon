@@ -573,6 +573,29 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         authority=_ADMIN,
     ),
     FeatureSpec(
+        key="dm_debounce_seconds",
+        name="Direct message wait",
+        category="chat",
+        effect="display",
+        values={
+            "3": "3 seconds",
+            "0": "Off",
+            "1": "1 second",
+            "5": "5 seconds",
+        },
+        default="3",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        doc=(
+            "A direct message waits this long for the next one before the agent starts, so a "
+            "burst of messages is answered in one turn instead of several. Off answers each "
+            "message at once. However long the burst goes on, the wait ends after ten "
+            "seconds. A reply to an approval is never held."
+        ),
+        platforms=_DM_PLATFORMS,
+        authority=_ADMIN,
+    ),
+    FeatureSpec(
         key="dm_memory_read_only",
         name="Read-only memory in direct messages",
         category="guardrails",
