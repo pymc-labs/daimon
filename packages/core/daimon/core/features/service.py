@@ -62,6 +62,7 @@ from daimon.core.stores.domain import (
     ChangeSurface,
     ChannelSetting,
     FeatureTarget,
+    FeatureValueRow,
     SandboxPin,
     pin_json,
 )
@@ -770,17 +771,21 @@ async def clear_pinned_on(
     tenant_id: uuid.UUID,
     key: str,
     target: FeatureTarget,
-    revision: int | None = None,
+    seen: FeatureValueRow | None = None,
 ) -> bool:
     """Clear a pinned feature's On at an agent or routine `target` in the caller's
     transaction, once what it covered changed: an edit, a drift, a move to another agent id.
-    An Off stays. With `revision`, only while the value is still that one, so a fresh opt-in
-    is kept. Recorded as a `system` change; returns whether it cleared one."""
+    An Off stays. With `seen`, only while the row still has its revision and pin: a revision
+    restarts at 1 when the row is deleted and set again, so the pin tells a fresh opt-in from
+    the one `seen` read, which is kept. Recorded as a `system` change; returns whether it
+    cleared one."""
     spec = FEATURES[key]
     assert spec.pinned, f"{key} has no pin"
     await lock_tenant(session, tenant_id)
     found = await get_feature_value(session, tenant_id=tenant_id, target=target, key=key)
-    if found is None or found.value != "on" or revision not in (None, found.revision):
+    if found is None or found.value != "on":
+        return False
+    if seen is not None and (found.revision, found.pin) != (seen.revision, seen.pin):
         return False
     tenant = await get_tenant(session, tenant_id)
     place = FeaturePlace(

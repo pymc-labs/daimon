@@ -32,7 +32,11 @@ from daimon.core.stores.domain import (
     pin_json,
     stored_pin,
 )
-from daimon.core.stores.feature_values import list_feature_values, set_feature_value
+from daimon.core.stores.feature_values import (
+    get_feature_value,
+    list_feature_values,
+    set_feature_value,
+)
 from daimon.core.stores.routines import create_routine, delete_routine, update_routine
 from daimon.testing.factories import make_tenant
 from pydantic import PostgresDsn, SecretStr
@@ -222,6 +226,28 @@ async def test_a_routine_drift_clears_only_the_opt_in_it_ran_under(
     assert (last.before, last.after, last.surface) == (on, None, "system"), (
         "recorded as Daimon's own change, with what the On covered"
     )
+
+
+async def test_a_stale_clear_keeps_an_opt_in_set_again_after_a_delete(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    """A revision restarts at 1 once the row is deleted, so the pin must tell the opt-ins apart."""
+    row = await _routine(db_session)
+    await _set(db_session_factory, row, "routine", "on", pin=PIN)
+    stale = await routine_sandbox(db_session_factory, SETTINGS, row, platform="discord")
+    await _set(db_session_factory, row, "routine", DEFAULT)
+    await _set(db_session_factory, row, "routine", "on", pin=NEWER)
+    async with db_session_factory() as session:
+        found = await get_feature_value(
+            session,
+            tenant_id=row.tenant_id,
+            target=FeatureTarget("routine", routine_id=row.id),
+            key=SANDBOX_KEY,
+        )
+    assert found is not None and found.revision == 1, "the revision repeats after a delete"
+    assert stale is not None
+    await stale.on_drift()
+    assert await _pin(db_session_factory, row) == NEWER, "the fresh opt-in is kept"
 
 
 async def test_an_agent_drift_keeps_the_agent_opt_in(

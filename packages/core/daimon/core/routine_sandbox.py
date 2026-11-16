@@ -360,7 +360,7 @@ async def clear_agent_opt_ins(session: AsyncSession, *, tenant_id: uuid.UUID, ag
                 tenant_id=tenant_id,
                 key=SANDBOX_KEY,
                 target=target,
-                revision=found.revision,
+                seen=found,
             )
     return cleared
 
@@ -404,7 +404,7 @@ async def routine_sandbox(
                     tenant_id=row.tenant_id,
                     key=SANDBOX_KEY,
                     target=FeatureTarget("routine", routine_id=row.id),
-                    revision=decided.revision,
+                    seen=decided,
                 )
         except Exception:  # the run already went ahead without built-ins
             log.exception("routine.sandbox_drift_clear_failed", routine_id=str(row.id))
