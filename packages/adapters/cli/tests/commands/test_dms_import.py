@@ -55,7 +55,7 @@ async def test_import_holds_each_conversation_and_skips_empty_ones(db_session_fa
         tenant = await make_tenant(db, platform="discord", workspace_id="777")
     export = CarryOverExport.model_validate(body())
 
-    counts = await import_carry_overs(db_session_factory, tenant_id=tenant.id, export=export)
+    counts = await import_carry_overs(db_session_factory, tenant_id=tenant.id, exports=[export])
 
     assert (counts["new"], counts["empty"]) == (1, 1)
     held = await taken(db_session_factory, tenant.id, "1")
@@ -67,18 +67,20 @@ async def test_repeat_updates_waiting_ones_and_never_revives_used_ones(db_sessio
     async with db_session_factory.begin() as db:
         tenant = await make_tenant(db, platform="discord", workspace_id="777")
     export = CarryOverExport.model_validate(body())
-    await import_carry_overs(db_session_factory, tenant_id=tenant.id, export=export)
+    await import_carry_overs(db_session_factory, tenant_id=tenant.id, exports=[export])
 
-    again = await import_carry_overs(db_session_factory, tenant_id=tenant.id, export=export)
+    again = await import_carry_overs(db_session_factory, tenant_id=tenant.id, exports=[export])
     assert again["updated"] == 1 and again["new"] == 0
     assert await taken(db_session_factory, tenant.id, "1") is not None
 
-    after = await import_carry_overs(db_session_factory, tenant_id=tenant.id, export=export)
+    after = await import_carry_overs(db_session_factory, tenant_id=tenant.id, exports=[export])
     assert after["consumed"] == 1
     assert await taken(db_session_factory, tenant.id, "1") is None
 
 
-async def test_people_who_already_have_a_private_conversation_are_skipped(db_session_factory):
+async def test_people_who_already_have_a_private_conversation_still_get_theirs_at_next_new(
+    db_session_factory,
+):
     async with db_session_factory.begin() as db:
         tenant = await make_tenant(db, platform="discord", workspace_id="777")
         account = await make_account(db, tenant=tenant)
@@ -104,10 +106,11 @@ async def test_people_who_already_have_a_private_conversation_are_skipped(db_ses
         )
     export = CarryOverExport.model_validate(body())
 
-    counts = await import_carry_overs(db_session_factory, tenant_id=tenant.id, export=export)
+    counts = await import_carry_overs(db_session_factory, tenant_id=tenant.id, exports=[export])
 
-    assert counts["existing"] == 1 and counts["new"] == 0
-    assert await taken(db_session_factory, tenant.id, "1") is None
+    assert counts["existing"] == 1 and counts["new"] == 1, counts
+    held = await taken(db_session_factory, tenant.id, "1")
+    assert held is not None, "the earlier conversation waits for their next /new"
 
 
 async def test_other_server_or_unknown_tenant_changes_nothing(db_session_factory):
@@ -117,15 +120,55 @@ async def test_other_server_or_unknown_tenant_changes_nothing(db_session_factory
         await import_carry_overs(
             db_session_factory,
             tenant_id=tenant.id,
-            export=CarryOverExport.model_validate(body(guild="888")),
+            exports=[CarryOverExport.model_validate(body(guild="888"))],
         )
     with pytest.raises(typer.BadParameter, match="No such tenant"):
         await import_carry_overs(
             db_session_factory,
             tenant_id=uuid.uuid4(),
-            export=CarryOverExport.model_validate(body()),
+            exports=[CarryOverExport.model_validate(body())],
         )
     assert await taken(db_session_factory, tenant.id, "1") is None
+
+
+def _turns(*texts: str) -> list[dict[str, str]]:
+    return [
+        {"role": "user", "text": t, "at": f"2026-03-01T10:0{i}:00Z"} for i, t in enumerate(texts)
+    ]
+
+
+async def test_one_person_in_several_files_is_merged_not_replaced(db_session_factory):
+    async with db_session_factory.begin() as db:
+        tenant = await make_tenant(db, platform="discord", workspace_id="777")
+    one = body(users=[{"external_user_id": "1", "turns": _turns("first", "shared")}])
+    two = body(users=[{"external_user_id": "1", "turns": _turns("shared", "third")}])
+
+    counts = await import_carry_overs(
+        db_session_factory,
+        tenant_id=tenant.id,
+        exports=[CarryOverExport.model_validate(one), CarryOverExport.model_validate(two)],
+    )
+
+    assert counts["new"] == 1, "one person is one carry-over"
+    held = await taken(db_session_factory, tenant.id, "1")
+    assert held is not None
+    text = json.dumps(held.history)
+    assert "first" in text and "third" in text, "turns from both files are kept"
+
+
+async def test_one_person_from_different_sources_fails_loudly(db_session_factory):
+    async with db_session_factory.begin() as db:
+        tenant = await make_tenant(db, platform="discord", workspace_id="777")
+    one = body(users=[{"external_user_id": "1", "turns": _turns("a")}])
+    two = {**body(users=[{"external_user_id": "1", "turns": _turns("b")}]), "source_name": "Other"}
+
+    with pytest.raises(typer.BadParameter, match="different sources"):
+        await import_carry_overs(
+            db_session_factory,
+            tenant_id=tenant.id,
+            exports=[CarryOverExport.model_validate(one), CarryOverExport.model_validate(two)],
+        )
+    assert await taken(db_session_factory, tenant.id, "1") is None, "nothing was written"
 
 
 def test_cli_rejects_oversized_file(tmp_path: Path):
@@ -158,15 +201,15 @@ def test_cli_rejects_a_file_with_the_wrong_shape(tmp_path: Path, mutate):
     assert result.exit_code != 0
 
 
-def test_cli_imports_each_file_and_prints_counts(tmp_path: Path, monkeypatch):
+def test_cli_imports_all_files_in_one_run_and_prints_counts(tmp_path: Path, monkeypatch):
     @asynccontextmanager
     async def runtime(_settings):
         yield SimpleNamespace(sessionmaker=object())
 
-    seen: list[str] = []
+    seen: list[list[str]] = []
 
-    async def fake(sessionmaker, *, tenant_id, export):
-        seen.append(export.guild_id)
+    async def fake(sessionmaker, *, tenant_id, exports):
+        seen.append([e.guild_id for e in exports])
         from collections import Counter
 
         return Counter(new=2, existing=1)
@@ -182,7 +225,5 @@ def test_cli_imports_each_file_and_prints_counts(tmp_path: Path, monkeypatch):
         app, ["dms", "import", str(first), str(second), "--tenant", TENANT_ARG]
     )
 
-    assert result.exit_code == 0 and seen == ["1", "2"]
-    assert "a.json: 2 new, 0 updated, 0 already used, 1 already have a private conversation" in (
-        result.output
-    )
+    assert result.exit_code == 0 and seen == [["1", "2"]], result.output
+    assert "2 files: 2 new, 0 updated, 0 already used, 1 already have a private" in result.output
