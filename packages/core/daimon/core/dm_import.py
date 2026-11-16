@@ -37,9 +37,7 @@ async def import_dm_policies(
     """Apply each env policy as stored access; the steps taken (or, dry, that would be)."""
 
     async def actor(tenant_id: uuid.UUID) -> DmActor:
-        principal = await get_or_create_cli_principal(
-            session, tenant_id=tenant_id, os_user=os_user
-        )
+        principal = await get_or_create_cli_principal(session, tenant_id=tenant_id, os_user=os_user)
         return DmActor(tenant_id, principal.account_id, now)
 
     steps: list[str] = []
@@ -54,9 +52,7 @@ async def import_dm_policies(
                 steps.append(f"{tenant.external_id}: turn private messages off")
                 if not dry_run:
                     by = (await actor(tenant_id)).account_id
-                    await set_dm_enabled(
-                        session, tenant_id=tenant_id, enabled=False, account_id=by
-                    )
+                    await set_dm_enabled(session, tenant_id=tenant_id, enabled=False, account_id=by)
             continue
         grants = await store.list_grants(session, tenant_id=tenant_id)
         for agent in await agents_of(tenant_id):
@@ -64,10 +60,10 @@ async def import_dm_policies(
             if have is not None and have.who == "excluded":
                 steps.append(f"{tenant.external_id}: kept the exclusions on {agent.name}")
                 continue
-            listed = have is not None and have.who == "listed"
-            kept = have.user_ids if listed else ()
+            listed = have if have is not None and have.who == "listed" else None
+            kept = () if listed is None else listed.user_ids
             users = tuple(dict.fromkeys((*kept, *policy.recipient_ids)))
-            if listed and have.user_ids == users:
+            if listed is not None and listed.user_ids == users:
                 continue
             steps.append(f"{tenant.external_id}: list {len(users)} people on {agent.name}")
             if not dry_run:
@@ -78,6 +74,6 @@ async def import_dm_policies(
                     agent.name,
                     who="listed",
                     user_ids=users,
-                    group_ids=have.group_ids if listed else (),
+                    group_ids=() if listed is None else listed.group_ids,
                 )
     return steps
