@@ -23,7 +23,6 @@ from daimon.adapters.mcp.identity_relay import (
     build_identity_relay_route,
     build_relay_clients,
 )
-from daimon.core._models import Routine
 from daimon.core.config import SignedIdentityServer
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_chat_mcp_token
@@ -39,7 +38,7 @@ from daimon.core.stores.thread_sessions import create_thread_session, mark_dead
 from daimon.core.stores.turn_origins import bind_origin_session, create_origin
 from daimon.testing.factories import make_platform_principal, make_tenant
 from pydantic import SecretStr
-from sqlalchemy import update
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
 
@@ -585,7 +584,8 @@ async def test_an_ownership_change_after_the_run_started_credits_nobody(
         await _post(client, token, _tool_call())
         async with db_session_factory() as db, db.begin():
             await db.execute(
-                update(Routine).where(Routine.id == routine_id).values(created_by_user_id="user-2")
+                text("UPDATE routines SET created_by_user_id = 'user-2' WHERE id = :id"),
+                {"id": routine_id},
             )
         await _post(client, token, _tool_call())
     first, second = (_sent_meta(r) for r in upstream.requests)
