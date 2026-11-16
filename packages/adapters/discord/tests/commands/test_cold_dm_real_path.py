@@ -38,7 +38,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from structlog.testing import capture_logs
 
-from .test_cold_direct_messages import interaction, message, selector
+from .test_cold_direct_messages import interaction, message, offered, selector
 
 
 class _Provider:
@@ -238,12 +238,13 @@ async def test_concurrent_selector_clicks_submit_original_once(real_dm):
     async with real_dm.factory.begin() as session:
         await set_dm_enabled(session, tenant_id=real_dm.tenants[1].id, enabled=True)
     msg = message()
-    await real_dm.cog.on_message(msg)
+    task = await offered(real_dm.cog, msg)
     view = selector(msg)
     await asyncio.gather(
         view.choose(interaction(), str(real_dm.tenants[0].id)),
         view.choose(interaction(), str(real_dm.tenants[1].id)),
     )
+    await asyncio.wait_for(task, 10)
     row = await active(real_dm)
     assert len(real_dm.provider.submissions) == 1
     assert answers(msg) == ["private answer"]

@@ -178,6 +178,22 @@ def selector(msg):
     )
 
 
+async def offered(cog, msg):
+    """Send `msg`, which waits for the pick, and return its task once the selector is up."""
+    task = asyncio.create_task(cog.on_message(msg))
+    for _ in range(200):
+        if any(
+            isinstance(c.kwargs.get("view"), module.ServerSelector)
+            for c in msg.channel.send.await_args_list
+        ):
+            return task
+        if task.done():
+            await task
+            break
+        await asyncio.sleep(0.01)
+    raise AssertionError("no selector was offered")
+
+
 def interaction(selector_id=888, user=999, route=555, channel=None):
     it = MagicMock(spec=discord.Interaction)
     it.id = 7777
@@ -213,28 +229,30 @@ async def test_one_tenant_answers_original_without_public_history(db_session_fac
     )
 
 
-async def test_multiple_tenants_pending_messages_are_silent_and_selection_answers_once(
+async def test_multiple_tenants_hold_every_message_for_the_pick_and_answer_once(
     db_session_factory, monkeypatch
 ):
     cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch, count=2)
     msg = message()
-    await cog.on_message(msg)
+    task = await offered(cog, msg)
     view = selector(msg)
     assert await conversation(db_session_factory) is None
     later = message(102)
-    await cog.on_message(later)
+    await asyncio.wait_for(cog.on_message(later), 1)
     later.channel.send.assert_not_awaited()
+    later.add_reaction.assert_awaited_once_with(module._SEEN_REACTION)
     reply.assert_not_awaited()
     assert not await view.interaction_check(interaction(user=111))
     assert not await view.interaction_check(interaction(route=666))
     await view.choose(interaction(selector_id=777), str(tenants[1].id))
     assert await conversation(db_session_factory) is None
     await view.choose(interaction(), str(tenants[1].id))
+    await asyncio.wait_for(task, 5)
     row = await conversation(db_session_factory)
     assert row.tenant_id == tenants[1].id
-    assert reply.await_count == 1
+    assert reply.await_count == 1, "the held messages are one turn"
     assert reply.await_args.kwargs["message_id"] == "101"
-    assert reply.await_args.kwargs["text"] == "original private question"
+    assert reply.await_args.kwargs["merged_message_ids"] == ("102",)
     await view.choose(interaction(), str(tenants[1].id))
     assert reply.await_count == 1
     view._expiry.cancel()
@@ -335,24 +353,30 @@ async def test_ineligible_tenant_gets_only_generic_guidance(
 async def test_selection_rechecks_membership_and_expiry(db_session_factory, monkeypatch):
     cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch, count=2)
     msg = message()
-    await cog.on_message(msg)
+    task = await offered(cog, msg)
     view = selector(msg)
     fetch.return_value = Membership(is_member=False)
     await view.choose(interaction(), str(tenants[0].id))
+    await asyncio.wait_for(task, 5)
     assert await conversation(db_session_factory) is None
     reply.assert_not_awaited()
-    view._expiry.cancel()
-    view.stop()
     fetch.return_value = Membership(is_member=True)
-    await cog.on_message(message(103))
+    expired = message(103)
+    task = await offered(cog, expired)
     pending = cog._pending[(999, 555)]
     pending.expires_at = 0
-    await cog.on_message(message(104))
+    cog._bursts.wake((999, 555))
+    await asyncio.wait_for(task, 5)
+    reply.assert_not_awaited()  # an expired pick answers nothing
+    last = message(104)
+    task = await offered(cog, last)
     assert cog._pending[(999, 555)] is not pending
-    for call in msg.channel.send.await_args_list:
-        if isinstance(call.kwargs.get("view"), module.ServerSelector):
-            call.kwargs["view"]._expiry.cancel()
-            call.kwargs["view"].stop()
+    await selector(last).choose(interaction(), str(tenants[0].id))
+    await asyncio.wait_for(task, 5)
+    assert reply.await_args.kwargs["message_id"] == "104"
+    for shown in (view, selector(expired), selector(last)):
+        shown._expiry.cancel()
+        shown.stop()
 
 
 async def test_revoked_active_conversation_never_discovers_other_tenant(
@@ -534,15 +558,17 @@ async def test_expired_selector_requests_new_message_and_cleans_pending(
 ):
     cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch, count=2)
     msg = message()
-    await cog.on_message(msg)
+    task = await offered(cog, msg)
     view = selector(msg)
     cog._pending[(999, 555)].expires_at = 0
     click = interaction()
     await view.choose(click, str(tenants[0].id))
     assert "expired" in click.response.send_message.await_args.args[0]
-    reply.assert_not_awaited()
     await view.on_timeout()
     view.stop()
+    await asyncio.wait_for(task, 5)
+    reply.assert_not_awaited()
+    msg.channel.send.assert_awaited_once()  # the expired selector speaks for the burst
     assert (999, 555) not in cog._pending
     assert "Send a new message" in view.message.edit.await_args.kwargs["content"]
 
@@ -732,7 +758,7 @@ async def test_selector_recheck_operational_failure_is_generic_and_consumes_sele
     cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch, count=2)
     try:
         msg = message()
-        await cog.on_message(msg)
+        task = await offered(cog, msg)
         view = selector(msg)
         msg.channel.send.reset_mock()
         monkeypatch.setattr(
@@ -741,6 +767,7 @@ async def test_selector_recheck_operational_failure_is_generic_and_consumes_sele
             AsyncMock(side_effect=AdmissionDenied(reason="backend_unsupported")),
         )
         await view.choose(interaction(), str(tenants[0].id))
+        await asyncio.wait_for(task, 5)
         msg.channel.send.assert_awaited_once()
         assert msg.channel.send.await_args.args == (module._DISCOVERY_FAILURE_NOTICE,)
         assert (999, 555) not in cog._pending
@@ -1491,12 +1518,14 @@ async def test_several_agents_offer_a_dropdown_and_remember_the_pick(
     async with db_session_factory.begin() as session:
         await set_dm_agent_name(session, tenant_id=tenants[0].id, agent_name=None)
     msg = message()
-    await cog.on_message(msg)
+    task = await offered(cog, msg)
     assert await conversation(db_session_factory) is None, "nothing starts before a choice"
     view = selector(msg)
     assert [label for _, label in view.servers] == ["private-0", "private-1"]
     assert "who to talk to" in sent_text(msg.channel.send.await_args_list[0])
     await view.choose(interaction(), f"{tenants[0].id}/private-1")
+    await asyncio.wait_for(task, 5)
+    assert reply.await_count == 1, "the message waited for the pick is answered"
     row = await conversation(db_session_factory)
     assert row is not None and row.tenant_id == tenants[0].id, "the choice starts the DM"
     async with db_session_factory() as session:

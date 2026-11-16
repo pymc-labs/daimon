@@ -6,6 +6,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from time import monotonic
 from typing import Any, Literal
 from weakref import WeakValueDictionary
@@ -440,6 +441,12 @@ class DirectMessageCog(commands.Cog):
         self._pending[key] = pending
 
         async def choose(interaction: discord.Interaction, selected: str) -> None:
+            try:
+                await pick(interaction, selected)
+            finally:
+                self._bursts.wake(key)  # after the lock: the held burst answers in the pick
+
+        async def pick(interaction: discord.Interaction, selected: str) -> None:
             async with self._lock(key):
                 if (
                     self._pending.get(key) is not pending
@@ -488,15 +495,13 @@ class DirectMessageCog(commands.Cog):
                     return
                 if found.admission is None:
                     return
-                conversation = await self._start(
+                await self._start(
                     message,
                     tenant,
                     found.admission,
                     expected_scope_id=expected_scope_id,
                     remember_pick=agent is not None,
                 )
-                if conversation is not None and expected_scope_id is None:
-                    await self._reply(message, expected_scope_id=conversation.scope_id)
 
         several = len({choice.tenant.id for choice in candidates}) > 1
         picking_agent = any(choice.agent is not None for choice in candidates)
@@ -513,6 +518,7 @@ class DirectMessageCog(commands.Cog):
         def expire() -> None:
             if self._pending.get(key) is pending:
                 del self._pending[key]
+                self._bursts.wake(key)
 
         view = ServerSelector(
             user_id=key[0],
@@ -595,8 +601,7 @@ class DirectMessageCog(commands.Cog):
                         "This conversation changed. Use its latest switch control.", ephemeral=True
                     )
                     return
-                pending = self._pending.get(key)
-                if pending is not None and monotonic() < pending.expires_at:
+                if self._open_pick(key) is not None:
                     log.info(
                         "discord.dm.suppressed",
                         user_id=str(user_id),
@@ -668,8 +673,7 @@ class DirectMessageCog(commands.Cog):
                     "This conversation changed. Use its latest controls.", ephemeral=True
                 )
                 return
-            pending = self._pending.get(key)
-            if pending is not None and monotonic() < pending.expires_at:
+            if self._open_pick(key) is not None:
                 await interaction.response.send_message(
                     "Choose a server first, or wait for the selector to expire.", ephemeral=True
                 )
@@ -916,22 +920,39 @@ class DirectMessageCog(commands.Cog):
             # The turn waiting or running here answers this message too.
             await burst.mark(message, self._react)
             return
-        # The whole accepted DM -- slot wait, preparation, the turn and its
+        # The whole accepted DM -- slot wait, preparation, the pick, the turn and its
         # reply -- is in progress for the shutdown drain, not only the turn.
         with self.bot.runtime.turn_deps.running_turns.track():
             burst = self._bursts.open(key, message)
             try:
                 async with self._lock(key):
                     found = await self._conversation(message)
+                    fresh = found is None
+                    if fresh and self._open_pick(key) is None:
+                        found = await self._open(message)
+                    pending = self._open_pick(key)
+                if pending is not None:
+                    # Outside the lock, which the pick takes: every message waits for it,
+                    # then goes where the pick, or its expiry, left the conversation.
+                    settled = partial(self._settled, key, pending)
+                    await burst.hold(settled, self._react, SELECTION_SECONDS)
+                    if burst.stopped:
+                        return  # what was held is told it was not sent
+                    found = await self._conversation(message)
+                if found is None:
+                    # The refusal, the failed pick or the expired selector speaks for the burst.
+                    await self._bursts.end(key, burst)
+                    return
+                async with self._lock(key):
                     seconds = 0.0
-                    scope_id = None if found is None else found.scope_id
-                    if found is not None:
+                    if not fresh:
                         seconds = await debounce_seconds(
                             self.bot.runtime.sessionmaker,
                             self.bot.runtime.settings,
                             found.tenant_id,
                             "discord",
                         )
+                    scope_id: str | None = found.scope_id
 
                     async def answer(group: list[discord.Message]) -> None:
                         nonlocal scope_id
@@ -942,6 +963,35 @@ class DirectMessageCog(commands.Cog):
                 # An error no turn handled, or a cancellation: nothing left goes unheard.
                 if await self._bursts.end(key, burst):
                     await self._tell_dropped(message.channel)
+
+    async def _open(self, message: discord.Message) -> DirectMessageRow | None:
+        """The conversation a first message starts; None once it offered a pick or said why not."""
+        try:
+            return await self._discover(message)
+        except _DM_FAILURES as exc:
+            log.warning(
+                "discord.dm.discovery_failed",
+                error_type=type(exc).__name__,
+                user_id=str(message.author.id),
+                reason="discovery_unavailable",
+            )
+            with contextlib.suppress(discord.HTTPException):
+                await message.channel.send(
+                    _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
+                )
+            return None
+
+    def _open_pick(self, key: tuple[int, int]) -> _PendingSelection | None:
+        pending = self._pending.get(key)
+        return pending if pending is not None and monotonic() < pending.expires_at else None
+
+    async def _settled(self, key: tuple[int, int], pending: _PendingSelection) -> bool | None:
+        """True once `pending` was picked or expired; None while it is open or its pick runs.
+
+        Only the process holding the gateway lease (`__main__.start_when_leased`) gets DMs,
+        so the selector and the burst it holds live in one process.
+        """
+        return None if self._open_pick(key) is pending or self._lock(key).locked() else True
 
     async def _conversation(self, message: discord.Message | _DmRequest) -> DirectMessageRow | None:
         async with self.bot.runtime.sessionmaker() as session:
@@ -961,26 +1011,15 @@ class DirectMessageCog(commands.Cog):
                 await message.remove_reaction(_SEEN_REACTION, self.bot.user)
 
     async def _answer(self, group: list[discord.Message], scope_id: str | None) -> str | None:
-        """One turn for `group`, sent into `scope_id`; the conversation the next one goes to.
-
-        While a server pick is pending, the pick answers instead.
-        """
+        """One turn for `group`, sent into `scope_id`; the conversation the next one goes to."""
         first = group[0]
-        key = (first.author.id, first.channel.id)
-        pending = self._pending.get(key)
-        if pending is not None and monotonic() < pending.expires_at:
-            for message in group:
-                self._suppress(message, "selection_pending")
-            return scope_id
-        self._pending.pop(key, None)
         try:
             return await self._reply(first, expected_scope_id=scope_id, batch=tuple(group))
         except _DM_FAILURES as exc:
             log.warning(
-                "discord.dm.discovery_failed",
+                "discord.dm.reply_failed",
                 error_type=type(exc).__name__,
                 user_id=str(first.author.id),
-                reason="discovery_unavailable",
             )
             with contextlib.suppress(discord.HTTPException):
                 await first.channel.send(
@@ -1135,28 +1174,21 @@ class DirectMessageCog(commands.Cog):
 
     async def _reply(
         self,
-        message: discord.Message | _DmRequest,
+        message: discord.Message,
         *,
-        expected_scope_id: str | None = None,
-        batch: tuple[discord.Message, ...] = (),
+        expected_scope_id: str | None,
+        batch: tuple[discord.Message, ...],
     ) -> str | None:
-        """Answer `message`, or the held `batch` it opens, in one turn.
+        """Answer the held `batch` `message` opens, in one turn, in `expected_scope_id`.
 
         The conversation it answered in, or that replaced `expected_scope_id`.
         """
         conversation = await self._conversation(message)
-        if expected_scope_id is not None and (
-            conversation is None or conversation.scope_id != expected_scope_id
-        ):
-            # A stale server pick, or messages sent before /dm-me moved the conversation.
-            self._suppress(message, "conversation_moved" if batch else "selection_superseded")
-            if batch:
-                await self._tell_dropped(message.channel)
+        if conversation is None or conversation.scope_id != expected_scope_id:
+            # Messages sent before /dm-me moved the conversation.
+            self._suppress(message, "conversation_moved")
+            await self._tell_dropped(message.channel)
             return None if conversation is None else conversation.scope_id
-        if conversation is None:
-            conversation = await self._discover(message)
-            if conversation is None:
-                return None
         await self._turn(message, conversation, batch)
         return conversation.scope_id
 
