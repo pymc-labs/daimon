@@ -543,20 +543,20 @@ the channel and the message. Daimon names the asker only while that person's tur
 live in the calling session's thread. A server may instead set auth to "bearer": Daimon
 then sends the key from DAIMON_MCP_IDENTITY__BEARERS and no issuer or audience, and
 workspaces and agents (agent names that may use it) are required. Set requester_meta to
-true for a server that attributes writes to the requester: Daimon stamps each tool call
-with the asker's user id, removing any value the caller supplied, and with the
-conversation it came from, only while that person's turn is live. The MCP service
-requires DAIMON_MCP_IDENTITY__SIGNING_KEY when any server is signed; chat workers use
-the same server policy without the signing key. Default: [] (off).
+true for a server that attributes writes to the requester: Daimon removes any requester
+fields the caller supplied and stamps each tool call with who it is for and where: the
+asker while their turn is live, or the person an unattended run acts for. The MCP
+service requires DAIMON_MCP_IDENTITY__SIGNING_KEY when any server is signed; chat
+workers use the same server policy without the signing key. Default: [] (off).
 
 ### `DAIMON_MCP_IDENTITY__BEARERS`
 
 `dict[str, SecretStr]` · optional · default unset · secret
 
 Keys for the servers whose auth is "bearer", by server name: a JSON object such as
-{"internal": "&lt;key&gt;"}. Kept apart from DAIMON_MCP_IDENTITY__SERVERS so the key is
-set as a secret. Daimon sends the key as the server's bearer in place of the caller's
-own credential, which never reaches the server. Every bearer server needs one; no other
+{"tools": "&lt;key&gt;"}. Kept apart from DAIMON_MCP_IDENTITY__SERVERS so the key is set
+as a secret. Daimon sends the key as the server's bearer in place of the caller's own
+credential, which never reaches the server. Every bearer server needs one; no other
 server may have one. Default: {} (none).
 
 ## Hub
