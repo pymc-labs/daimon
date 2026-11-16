@@ -386,6 +386,7 @@ class DiscordTurnLifecycle(OutputGate):
         acknowledgment_managed: bool = False,
         render_tables: bool = False,
         answer_message_cap: int = ANSWER_MESSAGES,
+        model_marks: tuple[str, ...] = (),
         clock: Callable[[], float] = time.monotonic,
         adopt_message_ref: discord.Message | None = None,
         adopt_pending_progress: DiscordTurnLifecycle | None = None,
@@ -417,6 +418,7 @@ class DiscordTurnLifecycle(OutputGate):
         self._render_tables = render_tables
         # The terminal answer/card takes one of these messages.
         self._answer_message_cap = answer_message_cap
+        self._model_marks = model_marks
         self._send = self.guarded_output(send)
         self._request_id = request_id
         self._sessionmaker = sessionmaker
@@ -584,7 +586,19 @@ class DiscordTurnLifecycle(OutputGate):
         """
         if self._unprompted:
             return
+        await self._mark_model()
         await self._maybe_flush(initial=True)
+
+    async def _mark_model(self) -> None:
+        """React on the trigger message with the model and effort emoji the bot asked for."""
+        if not self._model_marks or self._trigger_message is None:
+            return
+        for mark in self._model_marks:
+            try:
+                await self._trigger_message.add_reaction(mark)
+            except discord.HTTPException:
+                log.warning("turn.model_reaction_failed", exc_info=True)
+                return
 
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
         # Cheap local tap per the hardened TurnLifecycle contract:

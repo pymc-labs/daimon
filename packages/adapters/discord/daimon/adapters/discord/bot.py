@@ -138,6 +138,7 @@ from daimon.core.github_request_expiry import run_request_expiry_poller
 from daimon.core.ma import ORPHAN_INTERRUPT_TIMEOUT_S, interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.model_reactions import model_marks
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.output_delivery import NoticedFiles
@@ -201,7 +202,13 @@ from daimon.core.thread_naming import (
     naming_text,
     strip_mentions,
 )
-from daimon.core.turn.admission import AdmissionDenied, MissingTurnConfigError, admit, backend_facts
+from daimon.core.turn.admission import (
+    Admission,
+    AdmissionDenied,
+    MissingTurnConfigError,
+    admit,
+    backend_facts,
+)
 from daimon.core.turn.bookkeeping import release_turn_markers
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.errors import (
@@ -239,6 +246,7 @@ from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
 from daimon.core.turn_queue import TurnQueue
+from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Scope
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from mux.profiles import get_profile
@@ -304,6 +312,7 @@ _DRAIN_NOTICES_S: float = 10.0
 # only 5 of 16 tenants' skills before 429ing; the agent reconcile then failed
 # attaching skills the sweep had never created.
 _SWEEP_CONCURRENCY = 2
+_MODEL_MARKED_LIMIT = 2000
 # What a tenant reconcile returns: True on success, False on failure, or the
 # task already reconciling that tenant when the in-flight guard skipped this
 # call (None only if that task could not be identified).
@@ -732,6 +741,8 @@ class DaimonBot(commands.Bot):
         # Threads whose running turn lost its thread (deleted) or its right to write
         # to it (archived), so the card lifecycle and the bot agree on one answer.
         self._thread_stops = ThreadStops()
+        # The emoji last shown on a thread's trigger message, so a change shows again.
+        self._model_marked: dict[int, tuple[str, ...]] = {}
         # Continuation dispatches skipped because the thread was processing,
         # keyed by thread id: re-run when the thread is released (see
         # `_release_thread`). Last writer wins; a dispatch reads every pending
@@ -3807,6 +3818,25 @@ class DaimonBot(commands.Bot):
         finally:
             await self._release_and_clear(thread.id, tenant_id, clear_reactions=False)
 
+    def _model_marks(self, admission: Admission, thread_id: int) -> tuple[str, ...]:
+        """The model and effort emoji for this turn's trigger message, when the setting is on
+        and they differ from the pair last shown in this thread."""
+        if not admission.shown("model_reactions", "discord"):
+            return ()
+        backend = admission.backend_revision
+        if backend is not None and backend.backend not in (None, DEFAULT_BACKEND):
+            model_id, effort = backend.model, backend.effort
+        else:
+            model_id = admission.agent.model.id
+            effort = (admission.agent.model.model_extra or {}).get("effort")
+        marks = model_marks(model_id, effort if isinstance(effort, str) else None)
+        if self._model_marked.get(thread_id) == marks:
+            return ()
+        self._model_marked[thread_id] = marks
+        while len(self._model_marked) > _MODEL_MARKED_LIMIT:
+            del self._model_marked[next(iter(self._model_marked))]
+        return marks
+
     async def _thread_started_from(self, message: discord.Message) -> discord.Thread | None:
         """The thread already opened on `message` (it shares the message's id), if any."""
         try:
@@ -4319,6 +4349,7 @@ class DaimonBot(commands.Bot):
                 notify_on_completion=admission.shown("completion_pings"),
                 render_tables=admission.shown("table_rendering"),
                 answer_message_cap=admission.answer_message_cap,
+                model_marks=self._model_marks(admission, thread.id),
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
@@ -5374,6 +5405,7 @@ class DaimonBot(commands.Bot):
                 acknowledgment_managed=True,
                 render_tables=admission.shown("table_rendering"),
                 answer_message_cap=admission.answer_message_cap,
+                model_marks=self._model_marks(admission, thread.id),
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,

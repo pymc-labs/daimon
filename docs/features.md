@@ -45,6 +45,7 @@ Where each feature can be set, and its default.
 | Thread titles | `thread_naming` | Chat | On | ✓ | ✓ |  | ✓ |  | Only Discord |
 | Typed mentions | `plain_text_mentions` | Chat | Off | ✓ | ✓ |  | ✓ |  |  |
 | Completion pings | `completion_pings` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Model reactions | `model_reactions` | Chat | Off |  | ✓ | ✓ |  |  | Only Discord |
 | Table images | `table_rendering` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ | Only Discord, Slack; Off by default on Slack |
 | Budget notices | `budget_notices` | Chat | On | ✓ | ✓ |  | ✓ |  |  |
 | Vote buttons | `message_feedback` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
@@ -503,6 +504,18 @@ The person who asked is pinged when a long answer is finished.
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
 | Deprecated | `DAIMON_COMPLETION_PINGS` |
+
+## Model reactions
+
+The first message in a thread, and the first after the model or effort changes, gets an emoji for the model and one for the effort it runs on.
+
+| | |
+| --- | --- |
+| Key | `model_reactions` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Workspace, Agent |
+| Combines | Most specific wins |
 
 ## Table images
 

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Model and effort reactions in Discord.** A new setting, off by default, reacts
+  to the first message in a thread, and to the first after the model or effort
+  changes, with an emoji for the model and one for the effort.
 - **An answer message cap setting.** In Discord, an answer posts up to 5 messages
   as before, and past that is attached as a file. A setting from 1 to 1000
   changes the cap for a workspace, agent, channel or thread.

@@ -512,6 +512,14 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         env_map="completion_pings",
     ),
     _shown(
+        "model_reactions",
+        "Model reactions",
+        "The first message in a thread, and the first after the model or effort changes, gets "
+        "an emoji for the model and one for the effort it runs on.",
+        tiers=("workspace", "agent"),
+        platforms=frozenset({"discord"}),
+    ),
+    _shown(
         "table_rendering",
         "Table images",
         "Tables in an answer are drawn as an image or a native table instead of text.",
