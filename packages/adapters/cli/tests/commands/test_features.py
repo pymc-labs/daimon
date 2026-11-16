@@ -212,7 +212,7 @@ async def test_diff_lists_only_the_features_two_agents_differ_on(
     [
         ("approvals", None, "ops", "only with --reason"),
         ("approvals", "   ", "ops", "only with --reason"),
-        ("approvals", "bridge", "  ", "needs cli.local_user"),
+        ("approvals", "integration", "  ", "needs cli.local_user"),
         ("progress_plans", "why", "ops", "--reason is only for approvals"),
     ],
 )
@@ -257,7 +257,7 @@ async def test_the_operator_sets_approvals_and_the_change_is_audited(
         selector=selector,
         key="approvals",
         value="off",
-        reason="bridge writes run unattended",
+        reason="integration writes run unattended",
         tier=None,
         agent=None,
         channel=None,
@@ -268,7 +268,7 @@ async def test_the_operator_sets_approvals_and_the_change_is_audited(
         events = await list_events(session, tenant_id=uuid.UUID(cast(str, selector.tenant_id)))
     (event,) = [e for e in events if e.tool_name == "approval_gate"]
     assert event.platform_user_id == f"operator:{rt.settings.cli.local_user}", "operator named"
-    assert event.reason == "server:inherit->off (bridge writes run unattended)", event.reason
+    assert event.reason == "server:inherit->off (integration writes run unattended)", event.reason
     assert event.outcome == "allowed", "the change is recorded as allowed"
 
 

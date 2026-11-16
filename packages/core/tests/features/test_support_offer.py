@@ -95,10 +95,10 @@ async def test_an_agent_set_to_off_is_not_offered_while_another_agent_still_is(
 ) -> None:
     tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
     await make_thread_session(db_session, tenant=tenant, thread_id=THREAD, ma_agent_id="agent_off")
-    await make_thread_session(db_session, tenant=tenant, thread_id="t2", ma_agent_id="agent_client")
+    await make_thread_session(db_session, tenant=tenant, thread_id="t2", ma_agent_id="agent_other")
     await _value(db_session, tenant.id, "off", agent="agent_off")
     assert not await _offered(db_session_factory, tenant.id), "its own agent is off"
-    assert await _offered(db_session_factory, tenant.id, "t2"), "a client agent keeps it"
+    assert await _offered(db_session_factory, tenant.id, "t2"), "another agent keeps it"
 
 
 async def test_a_thread_without_a_session_uses_the_workspace_value(

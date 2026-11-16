@@ -45,7 +45,7 @@ async def _yes(_: DelegatedAction | None) -> bool:
     return True
 
 
-def _operator(tenant_id: uuid.UUID, reason: str = "unattended bridge") -> OperatorActor:
+def _operator(tenant_id: uuid.UUID, reason: str = "unattended integration") -> OperatorActor:
     return OperatorActor(tenant_id, None, "cli", None, _yes, operator="ops", reason=reason)
 
 
@@ -73,10 +73,10 @@ async def test_the_operator_sets_approvals_and_the_audit_row_names_who_and_why(
     tenant = await make_tenant(db_session)
     await db_session.commit()
     await _set(db_session_factory, _operator(tenant.id))
-    await _set(db_session_factory, _operator(tenant.id, "client channel"), tier="channel")
+    await _set(db_session_factory, _operator(tenant.id, "external channel"), tier="channel")
     assert [(e.platform_user_id, e.reason) for e in await _audit_rows(db_session, tenant.id)] == [
-        ("operator:ops", "server:inherit->off (unattended bridge)"),
-        ("operator:ops", "c1:inherit->off (client channel)"),
+        ("operator:ops", "server:inherit->off (unattended integration)"),
+        ("operator:ops", "c1:inherit->off (external channel)"),
     ], "each operator change is audited with operator, old and new value and the reason"
 
 
@@ -133,7 +133,8 @@ def test_only_the_cli_entrypoint_builds_an_operator_actor() -> None:
     service = REPO / "packages/core/daimon/core/features/service.py"
     users = {
         path.relative_to(REPO).as_posix()
-        for path in (REPO / "packages").rglob("*.py")
+        for root in ("packages", "apps")
+        for path in (REPO / root).rglob("*.py")
         if "tests" not in path.parts and path != service and "OperatorActor" in path.read_text()
     }
     assert users == {"packages/adapters/cli/daimon/adapters/cli/commands/features.py"}, users
