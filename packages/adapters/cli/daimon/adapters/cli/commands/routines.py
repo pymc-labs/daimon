@@ -38,7 +38,7 @@ from daimon.core.discord_destination import DiscordRestDestinationResolver
 from daimon.core.discord_membership import DiscordRestMembershipResolver, verify_discord_source
 from daimon.core.errors import StoreError, UserFacingError
 from daimon.core.features.registry import DEFAULT
-from daimon.core.features.service import FeatureActor, change_feature
+from daimon.core.features.service import FeatureActor
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.membership import MembershipResolver
@@ -52,10 +52,10 @@ from daimon.core.routine_move import (
     seed_scheduler_action,
 )
 from daimon.core.routine_sandbox import (
-    SANDBOX_KEY,
     AgentSandboxPin,
     SandboxPin,
     SandboxPinUnavailable,
+    change_agent_sandbox,
     change_routine_sandbox,
     current_agent_pin,
     own_opt_in,
@@ -649,6 +649,11 @@ async def run_agent_sandbox_tools(
         pin,
     ):
         console.print(f"Agent {label}: already {_value_words(value)}.")
+        if value != "on" and agent_name is not None:
+            console.print(
+                "If the opt-in sits on another agent id, find it with "
+                "`routines sandbox-tools-list` and use --agent-id."
+            )
         return
     detail = f" ({_pin_words(pin)})" if pin else ""
     console.print(f"Agent {label}: set {_value_words(value)}{detail}")
@@ -656,19 +661,24 @@ async def run_agent_sandbox_tools(
         console.print("Dry run: nothing written.")
         return
     try:
-        await change_feature(
+        await change_agent_sandbox(
             rt.sessionmaker,
             rt.settings,
             target.actor,
-            key=SANDBOX_KEY,
-            tier="agent",
+            agent_id=agent_id,
+            platform=target.platform,
             value=value,
-            place=place,
             pin=pin,
         )
     except ChannelChangeRefused as exc:
         raise UserFacingError(str(exc)) from exc
     console.print(f"Sandbox tools {_value_words(value)} for agent {label}.")
+    if pin is not None:
+        console.print(
+            "The opt-in names this agent id and the environment's name, so an environment "
+            "recreated under the same name keeps built-ins. It covers every routine of the "
+            "agent without a value of its own, DM routines included."
+        )
 
 
 async def run_sandbox_tools(

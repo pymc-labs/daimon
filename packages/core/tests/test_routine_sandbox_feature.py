@@ -15,6 +15,7 @@ from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.routine_sandbox import (
     SANDBOX_KEY,
     builtins_allowed,
+    change_agent_sandbox,
     change_routine_sandbox,
     own_opt_in,
     routine_opt_in_pin,
@@ -276,9 +277,17 @@ async def test_a_dm_routine_takes_no_on_of_its_own(db_session: AsyncSession) -> 
 async def test_setting_the_same_value_and_pin_again_writes_nothing(
     db_session: AsyncSession, db_session_factory: Sessions
 ) -> None:
-    """change_routine_sandbox is idempotent on the routine's own value and pin."""
+    """The routine's and the agent's writers are idempotent on their own value and pin."""
     row = await _routine(db_session)
     write: dict[str, Any] = {"platform": "discord", "value": "on", "pin": PIN}
     first = await change_routine_sandbox(db_session_factory, SETTINGS, _actor(row), row, **write)
     again = await change_routine_sandbox(db_session_factory, SETTINGS, _actor(row), row, **write)
     assert first is not None and again is None, "the second write is a no-op"
+    agent: dict[str, Any] = {"agent_id": "agent_a", "platform": "discord", "value": "on"}
+    first = await change_agent_sandbox(
+        db_session_factory, SETTINGS, _actor(row), **agent, pin=AGENT_PIN
+    )
+    again = await change_agent_sandbox(
+        db_session_factory, SETTINGS, _actor(row), **agent, pin=AGENT_PIN
+    )
+    assert first is not None and again is None, "the same for the agent's own value"

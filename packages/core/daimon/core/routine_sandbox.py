@@ -58,6 +58,7 @@ __all__ = [
     "SandboxPin",
     "SandboxPinUnavailable",
     "builtins_allowed",
+    "change_agent_sandbox",
     "change_routine_sandbox",
     "clear_agent_opt_ins",
     "current_agent_pin",
@@ -331,6 +332,26 @@ async def change_routine_sandbox(
         value=value,
         place=place,
         pin=pin,
+    )
+
+
+async def change_agent_sandbox(
+    sessions: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    actor: FeatureActor,
+    *,
+    agent_id: str,
+    platform: str,
+    value: str,
+    pin: AgentSandboxPin | None,
+) -> FeatureChange | None:
+    """Set an agent's own `routine_sandbox_tools` (`DEFAULT` clears it), an On with the pin
+    from `current_agent_pin`; None when it already holds that value and pin."""
+    place = FeaturePlace.of(actor.tenant_id, platform, None, agent_id=agent_id)
+    if await own_opt_in(sessions, place, "agent") == (None if value == DEFAULT else value, pin):
+        return None
+    return await change_feature(
+        sessions, settings, actor, key=SANDBOX_KEY, tier="agent", value=value, place=place, pin=pin
     )
 
 

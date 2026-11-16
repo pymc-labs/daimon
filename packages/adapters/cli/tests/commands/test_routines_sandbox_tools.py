@@ -231,6 +231,32 @@ async def test_off_by_agent_id_reaches_a_renamed_agent(
     lookup.assert_not_awaited()
 
 
+async def test_agent_opt_in_prints_what_the_pin_follows_and_covers(
+    db_session_factory: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Turning an agent on says the pin follows the environment's name and what it covers."""
+    [row] = await _routines(db_session_factory, 1)
+    pin = AgentSandboxPin("ag", "default")
+    monkeypatch.setattr(routines_cli, "current_agent_pin", AsyncMock(return_value=pin))
+    text = await _agent_run(db_session_factory, row.tenant_id)
+    assert "recreated under the same name keeps built-ins" in text, "the pin follows the name"
+    assert "without a value of its own, DM routines included" in text, "what it covers"
+
+
+async def test_off_by_a_reused_name_points_at_the_list(
+    db_session_factory: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A name that now means another agent changes nothing and says where to look."""
+    [row] = await _routines(db_session_factory, 1)
+    monkeypatch.setattr(
+        routines_cli, "find_agent_by_daimon_tag", AsyncMock(return_value=ma_agent(id="other"))
+    )
+    text = await _agent_run(db_session_factory, row.tenant_id, value="off")
+    assert "set off" in text, "the name's agent has no value yet"
+    text = await _agent_run(db_session_factory, row.tenant_id, value="off")
+    assert "already off" in text and "sandbox-tools-list" in text, "told how to find the holder"
+
+
 async def test_the_list_shows_agents_then_routines(
     db_session_factory: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
