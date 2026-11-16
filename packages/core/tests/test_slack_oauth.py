@@ -83,12 +83,13 @@ def test_slack_bot_scopes_constant_contains_required_v3_day1_scopes() -> None:
         "files:write",  # post-turn delivery of session output artifacts
         "channels:read",  # channel tools: public channel metadata + membership checks
         "groups:read",  # channel tools: private channel metadata + membership checks
+        "usergroups:read",  # DM grants and rules that name a user group
     }
     assert required <= set(SLACK_BOT_SCOPES), (
         "SLACK_BOT_SCOPES must include all v3.0 day-1 bot scopes"
     )
     assert {"im:history", "im:write"} <= set(SLACK_BOT_SCOPES)
-    assert len(SLACK_BOT_SCOPES) == 13
+    assert len(SLACK_BOT_SCOPES) == 14
     assert "chat:write.customize" not in slack_bot_scopes()
     assert "chat:write.customize" in slack_bot_scopes(identity_enabled=True)
 

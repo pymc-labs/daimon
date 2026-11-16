@@ -9,8 +9,9 @@ routine can mention people but never broadcast (`<!channel>`, `<!here>`).
 
 When the destination cannot be used — protected, or Slack refuses the post —
 the result goes to the routine's creator by direct message instead, if the
-tenant's direct-message policy allows them and they are still an active human
-member of the workspace (the same rule as the direct-message tool). The creator
+tenant's direct-message policy and the routine agent's DM grant allow them and
+they are still an active human member of the workspace (the same rule as the
+direct-message tool). The creator
 is checked before any of this: an unreadable policy or a creator no longer
 allowed to invoke the agent gets nothing — no post and no direct message.
 """
@@ -28,9 +29,11 @@ from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.output_delivery import SLACK_MAX_BYTES_PER_FILE, build_output_poster
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.adapters.slack.user_groups import user_group_members
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
 from daimon.core.config import DirectMessagePolicy
+from daimon.core.dm_access import sender_admits
 from daimon.core.message_split import split_fenced
 from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.routine_delivery import (
@@ -250,6 +253,15 @@ def make_slack_routine_poster(
                 row.tenant_id, DirectMessagePolicy()
             )
             if creator is None or not current_dm_policy.allows(creator):
+                return False
+            # The routine's agent grant must admit the creator; locks don't apply.
+            if not await sender_admits(
+                runtime.sessionmaker,
+                tenant_id=row.tenant_id,
+                agent_name=row.agent_name,
+                user_id=creator,
+                members=user_group_members(runtime, client, team_id=tenant.external_id),
+            ):
                 return False
             current_policy = await clear_creator(runtime.sessionmaker, row, platform="slack")
             if not isinstance(current_policy, TenantAccessPolicy) or keeps_routine_inside(

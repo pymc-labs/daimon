@@ -83,6 +83,7 @@ oauth_config:
       - files:write
       - channels:read
       - groups:read
+      - usergroups:read
     # Requested only when a member opts in via "Connect Slack"; reads then run
     # with that member's own permissions. See docs/slack.md for the trust model.
     user:

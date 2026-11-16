@@ -12,6 +12,7 @@ from daimon.adapters.slack.routine_delivery import make_slack_routine_poster
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_identity import AgentIdentity
+from daimon.core.native_admins import GroupMembersCache
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import RoutineRow
@@ -79,6 +80,7 @@ def _poster(
                 direct_message_policies=dm_policies if dm_policies is not None else {}
             ),
             deployment_default=DeploymentDefault(),
+            group_members=GroupMembersCache(),
         ),
     )
     return make_slack_routine_poster(runtime), client
@@ -231,6 +233,48 @@ async def test_slack_refusing_the_channel_falls_back_to_a_dm(
     outcome = await post(row)
 
     assert (outcome.status, outcome.note) == ("delivered", "dm_fallback:destination_unavailable")
+
+
+@pytest.mark.parametrize(
+    ("user_ids", "group_users", "delivered"),
+    [
+        (["U1"], None, True),
+        (["U9"], None, False),
+        ([], ["U1"], True),
+        ([], ["U9"], False),
+        ([], "missing_scope", False),
+    ],
+)
+async def test_dm_fallback_when_the_routine_agents_grant_decides_then_lookup_errors_deny(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    user_ids: list[str],
+    group_users: list[str] | str | None,
+    delivered: bool,
+) -> None:
+    """A fallback DM needs the routine agent's DM grant; a failed group lookup denies."""
+    from daimon.core.stores.dm_access import set_grant
+    from slack_sdk.errors import SlackApiError
+
+    row = await _routine(db_session, kind="thread", destination_id="C1")
+    await set_grant(
+        db_session, tenant_id=row.tenant_id, agent_name="daimon", who="listed",
+        user_ids=user_ids, group_ids=[] if group_users is None else ["S1"], set_by=None,
+        now=row.created_at,
+    )  # fmt: skip
+    await db_session.commit()
+    post, client = _poster(db_session_factory, monkeypatch)
+    if isinstance(group_users, str):
+        error = SlackApiError(group_users, {"ok": False, "error": group_users})
+        client.usergroups_users_list = AsyncMock(side_effect=error)
+    else:
+        client.usergroups_users_list = AsyncMock(return_value={"users": group_users or []})
+
+    outcome = await post(row)
+
+    assert (outcome.status == "delivered") is delivered, outcome
+    assert client.chat_postMessage.await_count == int(delivered), "the DM only when admitted"
 
 
 @pytest.mark.parametrize(

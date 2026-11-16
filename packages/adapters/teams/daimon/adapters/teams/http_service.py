@@ -61,7 +61,11 @@ from daimon.adapters.teams.setup_panel import SetupPanel
 from daimon.adapters.teams.support import VERB as SUPPORT_VERB
 from daimon.adapters.teams.support import SupportCommand
 from daimon.adapters.teams.support import enabled as support_enabled
-from daimon.adapters.teams.team_owners import fetch_team_owner_ids
+from daimon.adapters.teams.team_owners import (
+    fetch_team_member_ids,
+    fetch_team_owner_ids,
+    team_member_lookup,
+)
 from daimon.adapters.teams.thread_handoff import TeamsThreadHandoff
 from daimon.adapters.teams.thread_model import VERB as THREAD_MODEL_VERB
 from daimon.adapters.teams.thread_model import ThreadModelActions, show_model
@@ -281,7 +285,11 @@ def create_teams_http_service(
         # `spawn` is bound below, before any read: the drain waits for a demotion.
         in_background=lambda coro: spawn(coro, name="teams.admin_demotion"),
     )
-    runtime = dataclasses.replace(runtime, team_owners=owner_reads)
+    runtime = dataclasses.replace(
+        runtime,
+        team_owners=owner_reads,
+        team_members=runtime.team_members or functools.partial(fetch_team_member_ids, graph),
+    )
 
     async def channel_type(team_id: str, channel_id: str) -> str | None:
         api = teams_app.api.from_service_url(SERVICE_URL)
@@ -423,6 +431,7 @@ def create_teams_http_service(
             tenant_id=installs.tenant_id,
             dm_policies=runtime.settings.direct_message_policies,
             feed=feed,
+            team_members=team_member_lookup(runtime),
         ),
     )
 

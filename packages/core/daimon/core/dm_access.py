@@ -2,8 +2,9 @@
 
 Loads grants, rules, the workspace default and a person's pick, reads which
 agents take DMs and whether the person may run them, and returns one decision.
-Group membership comes from the caller's `Subject` (`verified_membership` None
-means the platform could not say, so group-based checks fail closed).
+Group membership comes from the caller's `Subject` (Discord roles; `verified_membership`
+None means the platform could not say), or from `groups` an adapter looked up with
+`lookup_dm_groups` (Slack user groups, Teams teams). Unknown groups fail closed.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
+import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import TenantAccessPolicy
@@ -32,10 +34,13 @@ from daimon.core.dm_routing import (
     resolve,
 )
 from daimon.core.features.snapshot import FeaturePlace, feature_in
+from daimon.core.native_admins import GroupLookupFailed, GroupMembers
 from daimon.core.stores import dm_access as store
 from daimon.core.stores.direct_messages import dm_enabled, get_dm_agent_name
 from daimon.core.stores.selfhosted_resources import list_live_agent_facts
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+log = structlog.get_logger()
 
 
 @dataclass(frozen=True)
@@ -82,11 +87,45 @@ async def list_dm_agents(
     return [dm_agent_of(a) for a in agents if MA_METADATA_KEY_READER_OF not in a.metadata]
 
 
-def person_of(subject: Subject) -> Person:
-    """The sender as routing sees them; groups are their roles when membership was verified."""
+def person_of(subject: Subject, groups: frozenset[str] | None = None) -> Person:
+    """The sender as routing sees them: looked-up `groups`, else verified roles."""
     user_id = subject.platform_user_id or ""
-    groups = frozenset(subject.role_ids) if subject.verified_membership is True else None
+    if groups is None and subject.verified_membership is True:
+        groups = frozenset(subject.role_ids)
     return Person(user_id, groups)
+
+
+def group_ids_of(routing: DmRouting) -> frozenset[str]:
+    """Every group a grant or rule names: all a decision for this workspace may need."""
+    granted = {g for grant in routing.grants.values() for g in grant.group_ids}
+    ruled = {r.subject_id for r in routing.rules if r.subject == "group" and r.subject_id}
+    return frozenset(granted | ruled)
+
+
+async def lookup_dm_groups(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    user_id: str,
+    members: GroupMembers,
+) -> frozenset[str] | None:
+    """The groups the workspace's grants and rules name that `user_id` is in; None if unknown.
+
+    Read before any session that decides, so a slow platform holds no connection or lock.
+    """
+    async with sessionmaker() as session:
+        wanted = group_ids_of(await load_routing(session, tenant_id=tenant_id))
+    return await _groups_in(wanted, user_id, members, tenant_id=tenant_id)
+
+
+async def _groups_in(
+    wanted: frozenset[str], user_id: str, members: GroupMembers, *, tenant_id: uuid.UUID
+) -> frozenset[str] | None:
+    try:
+        return frozenset([g for g in sorted(wanted) if user_id in await members(g)])
+    except GroupLookupFailed as exc:
+        log.info("dm_access.groups_unknown", tenant_id=str(tenant_id), reason=str(exc))
+        return None
 
 
 async def load_routing(session: AsyncSession, *, tenant_id: uuid.UUID) -> DmRouting:
@@ -145,11 +184,13 @@ async def decide_dm(
     agents: Sequence[DmAgent],
     subject: Subject,
     account_id: uuid.UUID | None,
+    groups: frozenset[str] | None = None,
 ) -> DmDecision:
     """Which of `agents` a person's DM reaches, from grants, rules, their pick and the default.
 
     A workspace with DMs off admits nobody. Pass every agent to choose among them, or one
     to ask whether the person may use it: the decision is then `DmStart` for that agent.
+    `groups` are the ones `lookup_dm_groups` found; None takes them from `subject`.
     """
     if not await dm_enabled(session, tenant_id=tenant_id):
         return DmDecision(DmRefused("no_agent"))
@@ -172,7 +213,7 @@ async def decide_dm(
         for agent in agents
     ]
     return resolve(
-        person_of(subject),
+        person_of(subject, groups),
         candidates,
         routing.grants,
         routing.rules,
@@ -190,6 +231,7 @@ async def permits_dm(
     platform: str,
     agent: DmAgent,
     subject: Subject,
+    groups: frozenset[str] | None = None,
 ) -> bool:
     """Whether this person may DM this agent: on, runnable, granted, and no lock names another."""
     decision = await decide_dm(
@@ -201,8 +243,19 @@ async def permits_dm(
         agents=[agent],
         subject=subject,
         account_id=None,
+        groups=groups,
     )
     return isinstance(decision.route, DmStart) and decision.route.agent == agent.name
+
+
+async def _sending_grant(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_name: str | None
+) -> DmGrant | None:
+    """The grant an agent-sent DM is held to; None when there is no agent to hold it to."""
+    name = agent_name or await get_dm_agent_name(session, tenant_id=tenant_id)
+    if name is None:
+        return None
+    return (await load_routing(session, tenant_id=tenant_id)).grants.get(name, DmGrant())
 
 
 async def agent_dm_admits(
@@ -219,8 +272,24 @@ async def agent_dm_admits(
     agent (a budget notice) uses the workspace default agent's grant, and none when
     no default is set. Groups not known where the grant needs them: not admitted.
     """
-    name = agent_name or await get_dm_agent_name(session, tenant_id=tenant_id)
-    if name is None:
+    grant = await _sending_grant(session, tenant_id=tenant_id, agent_name=agent_name)
+    return grant is None or grant_admits(grant, Person(user_id, groups)) is True
+
+
+async def sender_admits(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_name: str | None,
+    user_id: str,
+    members: GroupMembers | None = None,
+) -> bool:
+    """`agent_dm_admits`, looking up through `members` only the groups the grant names."""
+    async with sessionmaker() as session:
+        grant = await _sending_grant(session, tenant_id=tenant_id, agent_name=agent_name)
+    if grant is None:
         return True
-    grants = (await load_routing(session, tenant_id=tenant_id)).grants
-    return grant_admits(grants.get(name, DmGrant()), Person(user_id, groups)) is True
+    groups = None
+    if members is not None and grant.group_ids and user_id not in grant.user_ids:
+        groups = await _groups_in(grant.group_ids, user_id, members, tenant_id=tenant_id)
+    return grant_admits(grant, Person(user_id, groups)) is True

@@ -8,7 +8,8 @@ channel's roster, the rule the channel tools apply.
 
 When the destination cannot be used (protected, gone, the creator no longer
 in it, or Teams refuses the post) the result goes to the creator's 1:1 chat
-instead, if the tenant's direct-message policy allows them, unless the
+instead, if the tenant's direct-message policy and the routine agent's DM
+grant allow them, unless the
 destination lies in an isolated channel, whose results never leave it. The creator is
 cleared before any of this: an unreadable policy or a creator no longer allowed
 to invoke the agent gets nothing.
@@ -38,7 +39,9 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
 from daimon.core.channel_tidy import record_turn_post
 from daimon.core.config import DirectMessagePolicy
+from daimon.core.dm_access import sender_admits
 from daimon.core.message_split import split_fenced
+from daimon.core.native_admins import GroupMembers
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
     clear_creator,
@@ -66,10 +69,12 @@ def make_teams_routine_poster(
     tenant_id: uuid.UUID,
     dm_policies: Mapping[uuid.UUID, DirectMessagePolicy],
     feed: ActivityFeed | None = None,
+    team_members: GroupMembers | None = None,
 ) -> Callable[[RoutineRow], Awaitable[DeliveryOutcome]]:
     """The poster for `tenant_id`'s routines; another organisation's rows are skipped.
 
     `feed` sends the creator a notice for a result posted in a channel; None sends none.
+    `team_members` resolves the teams a DM grant names; None leaves them unknown.
     """
 
     async def record(
@@ -99,7 +104,17 @@ def make_teams_routine_poster(
     async def dm_fallback(row: RoutineRow, reason: str) -> DeliveryOutcome:
         creator = row.created_by_user_id
         policy = dm_policies.get(row.tenant_id, DirectMessagePolicy())
-        if creator is None or not policy.allows(creator):
+        if (
+            creator is None
+            or not policy.allows(creator)
+            or not await sender_admits(
+                sessionmaker,
+                tenant_id=row.tenant_id,
+                agent_name=row.agent_name,
+                user_id=creator,
+                members=team_members,
+            )
+        ):
             return DeliveryOutcome(status="skipped", note=reason)
         target = delivery_target(row, platform="teams")
         try:

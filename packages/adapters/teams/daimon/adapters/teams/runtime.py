@@ -54,6 +54,9 @@ class TeamsRuntime:
     # Owners of the admin team by Entra group id; None (no Graph) admits nobody
     # by team. Production wires `fetch_team_owner_ids`.
     team_owners: GroupMembers | None = None
+    # Everyone in a team by Entra group id, for DM grants and rules naming it; None
+    # (no Graph) leaves such groups unknown. Production wires `fetch_team_member_ids`.
+    team_members: GroupMembers | None = None
     group_members: GroupMembersCache = field(default_factory=GroupMembersCache)
     # This process's message admissions; `hold_owner_key` makes it read as alive.
     owner_key: int = field(default_factory=lambda: randbits(63))

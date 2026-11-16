@@ -18,12 +18,20 @@ from daimon.core.direct_messages import (
     start_cold_dm,
     start_dm,
 )
-from daimon.core.dm_access import DmAgent, agent_dm_admits, decide_dm, permits_dm
+from daimon.core.dm_access import (
+    DmAgent,
+    agent_dm_admits,
+    decide_dm,
+    lookup_dm_groups,
+    permits_dm,
+    sender_admits,
+)
 from daimon.core.dm_routing import DmChoose, DmRefused, DmStart
 from daimon.core.errors import UserFacingError
 from daimon.core.features.service import FeatureActor, change_feature
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.membership import CachedMembershipResolver, Membership
+from daimon.core.native_admins import GroupLookupFailed
 from daimon.core.privacy import collect_purge_preview, held_lines
 from daimon.core.purge import purge_account
 from daimon.core.scope import ResolvedConfig
@@ -388,6 +396,89 @@ async def test_agent_dm_admits_without_a_sender_uses_the_default_agents_grant(
             for u in ("999", "1")
         ]
     assert admitted == [True, False], "the default agent's list decides"
+
+
+def group_members(groups: dict[str, frozenset[str]], asked: list[str] | None = None):
+    """A platform group lookup over `groups`; a missing group fails like an API error."""
+
+    async def members(group_id: str) -> frozenset[str]:
+        if asked is not None:
+            asked.append(group_id)
+        if group_id not in groups:
+            raise GroupLookupFailed("missing_scope")
+        return groups[group_id]
+
+    return members
+
+
+async def test_lookup_dm_groups_when_grants_and_rules_name_groups_then_only_those_are_checked(
+    db_session_factory,
+):
+    """Only groups a grant or rule names are looked up; a failed lookup means unknown."""
+    tenant, _, _ = await seed(db_session_factory, "ada")
+    async with db_session_factory.begin() as session:
+        await store.set_grant(
+            session, tenant_id=tenant.id, agent_name="ada", who="listed",
+            user_ids=[], group_ids=["g1"], set_by=None, now=NOW,
+        )  # fmt: skip
+        await store.add_rule(
+            session, tenant_id=tenant.id, subject="group", subject_id="g2",
+            agent_name="ada", locked=False, set_by=None, now=NOW,
+        )  # fmt: skip
+    asked: list[str] = []
+    members = group_members(
+        {"g1": frozenset({"999"}), "g2": frozenset(), "g3": frozenset({"999"})}, asked
+    )
+    groups = await lookup_dm_groups(
+        db_session_factory, tenant_id=tenant.id, user_id="999", members=members
+    )
+    assert groups == frozenset({"g1"}), "the person's named groups"
+    assert sorted(asked) == ["g1", "g2"], "groups nobody names are never looked up"
+    unknown = await lookup_dm_groups(
+        db_session_factory, tenant_id=tenant.id, user_id="999", members=group_members({})
+    )
+    assert unknown is None, "a failed lookup leaves the groups unknown"
+
+
+@pytest.mark.parametrize(
+    ("user_ids", "groups", "expected"),
+    [
+        (["999"], {}, True),
+        ([], {"g1": frozenset({"999"})}, True),
+        ([], {"g1": frozenset({"1"})}, False),
+        ([], {}, False),
+    ],
+)
+async def test_sender_admits_when_the_grant_lists_groups_then_lookups_decide_and_errors_deny(
+    db_session_factory, user_ids, groups, expected
+):
+    """An agent-sent DM looks up the grant's groups; a failed lookup denies."""
+    tenant, _, _ = await seed(db_session_factory, "ada")
+    async with db_session_factory.begin() as session:
+        await store.set_grant(
+            session, tenant_id=tenant.id, agent_name="ada", who="listed",
+            user_ids=user_ids, group_ids=["g1"], set_by=None, now=NOW,
+        )  # fmt: skip
+    admitted = await sender_admits(
+        db_session_factory, tenant_id=tenant.id, agent_name="ada", user_id="999",
+        members=group_members(groups),
+    )  # fmt: skip
+    assert admitted is expected, f"{user_ids} {groups}"
+
+
+async def test_sender_admits_when_no_lookup_is_wired_then_group_grants_deny(db_session_factory):
+    """Without a group lookup a group-only grant fails closed; members grants still pass."""
+    tenant, _, _ = await seed(db_session_factory, "ada", "bob")
+    async with db_session_factory.begin() as session:
+        await store.set_grant(
+            session, tenant_id=tenant.id, agent_name="ada", who="listed",
+            user_ids=[], group_ids=["g1"], set_by=None, now=NOW,
+        )  # fmt: skip
+    admitted = [
+        await sender_admits(db_session_factory, tenant_id=tenant.id, agent_name=n, user_id="999")
+        for n in ("ada", "bob")
+    ]
+    assert admitted == [False, True], "an unknown group denies; no row admits members"
 
 
 async def test_purge_account_when_person_has_dm_rows_then_they_are_erased_and_counted(

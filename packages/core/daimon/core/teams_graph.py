@@ -184,6 +184,7 @@ class ChangeNotificationBatch(_Model):
 
 
 MAX_OWNER_PAGES = 5
+MAX_MEMBER_PAGES = 20
 """Owner pages read before giving up; a team has at most 100 owners."""
 
 
@@ -299,22 +300,37 @@ class GraphClient:
         Needs `TeamMember.Read.Group`; a team that never granted it raises
         `GraphUnavailable`, as does an owner list longer than `MAX_OWNER_PAGES`.
         """
+        return await self._team_member_ids(group_id, owners=True, max_pages=MAX_OWNER_PAGES)
+
+    async def list_team_member_ids(self, group_id: str) -> frozenset[str]:
+        """The Entra object ids (lower-case) of everyone in a team, owners included.
+
+        Same consent as `list_team_owner_ids`; a roster longer than `MAX_MEMBER_PAGES`
+        raises `GraphUnavailable`, so a DM grant naming the team fails closed.
+        """
+        return await self._team_member_ids(group_id, owners=False, max_pages=MAX_MEMBER_PAGES)
+
+    async def _team_member_ids(
+        self, group_id: str, *, owners: bool, max_pages: int
+    ) -> frozenset[str]:
         url: str | None = f"{GRAPH_ROOT}/teams/{path_segment(group_id)}/members"
-        params: Mapping[str, str] | None = {"$filter": "roles/any(r:r eq 'owner')"}
-        owners: set[str] = set()
-        for _ in range(MAX_OWNER_PAGES):
+        params: Mapping[str, str] | None = (
+            {"$filter": "roles/any(r:r eq 'owner')"} if owners else None
+        )
+        found: set[str] = set()
+        for _ in range(max_pages):
             if url is None:
-                return frozenset(owners)
+                return frozenset(found)
             page = _parse(GraphMemberPage, await self.send("GET", url, params=params))
-            owners.update(
+            found.update(
                 member.user_id.lower()
                 for member in page.value
-                if member.user_id and "owner" in member.roles
+                if member.user_id and (not owners or "owner" in member.roles)
             )
             url, params = page.next_link, None
         if url is None:
-            return frozenset(owners)
-        raise GraphUnavailable("too many owner pages")
+            return frozenset(found)
+        raise GraphUnavailable("too many member pages")
 
     async def create_subscription(
         self,

@@ -21,6 +21,7 @@ from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
 from daimon.core.mcp_oauth import McpTokenProbe, probe_bearer_token
+from daimon.core.native_admins import GroupMembersCache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
@@ -50,6 +51,8 @@ class SlackRuntime:
     # One connection pool for every workspace's per-event AsyncWebClient; None
     # (tests) lets slack_sdk open a throwaway session per call.
     slack_http: aiohttp.ClientSession | None = None
+    # User group members for DM grants and rules (`user_groups`), a minute at most.
+    group_members: GroupMembersCache = field(default_factory=GroupMembersCache)
 
     @cached_property
     def fernet(self) -> MultiFernet:

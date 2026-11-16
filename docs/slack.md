@@ -39,6 +39,7 @@ then reinstall the app so the workspace approves the scopes:
 | `/github` command | The command from the manifest |
 | Private conversations | `im:history` and `im:write` scopes, the `message.im` event, the App Home messages tab |
 | Direct messages from agents | `im:write` scope |
+| [DM access](direct-messages.md) by user group | `usergroups:read` scope |
 | Slack Connect channels | The `channel_shared`, `channel_unshared` and `member_joined_channel` events |
 | Web access that follows workspace membership | The `team_join` and `user_change` events |
 | Channel lifecycle tracking | The `message.channels`, `message.groups` and channel archive, unarchive and delete events |

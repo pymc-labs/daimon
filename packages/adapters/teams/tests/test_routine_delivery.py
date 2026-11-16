@@ -119,6 +119,48 @@ async def test_an_unusable_destination_sends_the_result_to_the_creator(
         )
 
 
+@pytest.mark.parametrize(
+    ("user_ids", "team", "delivered"),
+    [
+        ([CREATOR], None, True),
+        (["someone-else"], None, False),
+        ([], frozenset({CREATOR}), True),
+        ([], frozenset(), False),
+        ([], "lookup fails", False),
+    ],
+)
+async def test_dm_fallback_when_the_routine_agents_grant_decides_then_lookup_errors_deny(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    user_ids: list[str],
+    team: frozenset[str] | str | None,
+    delivered: bool,
+) -> None:
+    """A fallback 1:1 needs the routine agent's DM grant; a failed team lookup denies."""
+    from daimon.core.native_admins import GroupLookupFailed
+    from daimon.core.stores.dm_access import set_grant
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="teams")
+        await set_grant(
+            session, tenant_id=tenant.id, agent_name="daimon", who="listed", user_ids=user_ids,
+            group_ids=[] if team is None else ["team-1"], set_by=None, now=datetime.now(UTC),
+        )  # fmt: skip
+
+    async def members(group_id: str) -> frozenset[str]:
+        if not isinstance(team, frozenset):
+            raise GroupLookupFailed("forbidden")
+        return team
+
+    teams = _Teams(post_status=404)
+    poster = make_teams_routine_poster(
+        db_session_factory, teams, tenant_id=tenant.id, dm_policies={}, team_members=members
+    )
+    outcome = await poster(_row(tenant_id=tenant.id))
+
+    assert (outcome.status == "delivered") is delivered, outcome
+    assert len(teams.posts) == int(delivered), "the 1:1 only when the grant admits the creator"
+
+
 async def test_a_protected_channel_is_never_posted_in(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
