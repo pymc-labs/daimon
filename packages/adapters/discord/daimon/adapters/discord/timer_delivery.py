@@ -223,7 +223,7 @@ async def require_channel_timer_access(
         ):
             raise ValueError("the channel is closed to the owner or to the bot")
     except (discord.Forbidden, discord.NotFound, ValueError) as error:
-        log.info("channel_timer.access_lost", row_id=str(row.id), error=str(error))
+        log.info("timer.access_lost", row_id=str(row.id), place="channel", error=str(error))
         raise AdmissionDenied(reason="invoker_not_allowed") from None
     return ChannelAccess(member=member, category_id=category_id)
 

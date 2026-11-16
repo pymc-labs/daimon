@@ -4001,7 +4001,7 @@ class DaimonBot(commands.Bot):
                     category_id=access.category_id,
                 )
             except DirectMessageAccessRevoked as error:
-                log.info("channel_timer.refused", reason=error.reason)
+                log.info("timer.refused", place="channel", reason=error.reason)
                 raise AdmissionDenied(reason="invoker_not_allowed") from None
             return reply.text
 
@@ -4021,7 +4021,7 @@ class DaimonBot(commands.Bot):
             try:
                 reply = await run_dm_timer(self.runtime.turn_deps, row, prompt=seed)
             except DirectMessageAccessRevoked as error:
-                log.info("dm_timer.refused", reason=error.reason)
+                log.info("timer.refused", place="dm", reason=error.reason)
                 raise AdmissionDenied(reason="invoker_not_allowed") from None
             return reply.text
 
