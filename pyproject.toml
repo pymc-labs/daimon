@@ -352,6 +352,7 @@ source_modules = [
     "daimon.core.session_mutation",
     "daimon.core.session_ports_compat",
     "daimon.core.output_ports_compat",
+    "daimon.core.discord_dm",
     "daimon.core.discord_membership",
     "daimon.core.membership",
     "daimon.core.membership_subject",
