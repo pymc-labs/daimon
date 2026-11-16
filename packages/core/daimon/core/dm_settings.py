@@ -1,4 +1,4 @@
-"""Admin changes to who a direct message reaches, for the web app and chat alike.
+"""Admin changes to who a direct message reaches, for the web app, chat and CLI alike.
 
 Each change is checked against the workspace's DM agents, written through the DM
 stores and leaves one audit row in the same transaction. Audit details name an
@@ -135,13 +135,30 @@ async def change_rule(
             now=actor.now,
         )
         await _audit(db, actor, "Changed DM rule", rule_text(after))
-    if to is not None and min(to, len(rules) - 1) != position:
+    if to is not None:
+        await _move(db, actor, after, position, max(0, min(to, len(rules) - 1)))
+    return True
+
+
+async def move_rule(db: AsyncSession, actor: DmActor, position: int, to: int) -> bool:
+    """Move a rule to `to`, kept within the list; False when there is no such rule."""
+    rules = await store.list_rules_for_update(db, tenant_id=actor.tenant_id)
+    if not 0 <= position < len(rules):
+        return False
+    rule = rules[position]
+    spec = DmRuleSpec(rule.subject, rule.subject_id, rule.agent_name, rule.locked)
+    await _move(db, actor, spec, position, max(0, min(to, len(rules) - 1)))
+    return True
+
+
+async def _move(db: AsyncSession, actor: DmActor, rule: DmRuleSpec, position: int, to: int) -> None:
+    if to != position:
         await store.move_rule(
             db, tenant_id=actor.tenant_id, position=position, to=to, now=actor.now
         )
-        moved = f"{subject_text(after)}: {position + 1} to {min(to, len(rules) - 1) + 1}"
-        await _audit(db, actor, "Moved DM rule", moved)
-    return True
+        await _audit(
+            db, actor, "Moved DM rule", f"{subject_text(rule)}: {position + 1} to {to + 1}"
+        )
 
 
 async def remove_rule(db: AsyncSession, actor: DmActor, position: int) -> bool:

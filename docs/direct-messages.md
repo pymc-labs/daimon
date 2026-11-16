@@ -75,8 +75,10 @@ daimon dm explain 123                  # who would answer, and why (groups read 
 daimon dm import-policies --dry-run      # see DAIMON_DIRECT_MESSAGE_POLICIES as stored access
 ```
 
-Add `--guild GUILD_ID` (or `--tenant`) to pick the server. Erasing a person
-removes their pick, their personal rules and their entry in any listed grant.
+Add `--guild GUILD_ID` (or `--tenant`) to pick the server. As in the web app,
+an unknown agent name is refused and each change is in the audit log. Erasing a
+person removes their pick, their personal rules and their entry in any listed
+grant.
 
 `DAIMON_DIRECT_MESSAGE_POLICIES` still applies and is checked in addition.
 The Discord service logs a warning when it is set; `daimon dm import-policies`

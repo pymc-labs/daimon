@@ -2,7 +2,9 @@
 
 Grants say who may DM an agent (everyone, only those listed, or all but those listed).
 Rules are ordered; the first that matches a person picks their agent, and a locked one
-decides alone. The default agent answers everyone else.
+decides alone. The default agent answers everyone else. Every change goes through
+`dm_settings`, as from the web app and chat: agent names are checked, and each change
+leaves an audit row.
 """
 
 from __future__ import annotations
@@ -18,17 +20,20 @@ from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import GUILD_OPTION, JSON_OPTION, TENANT_OPTION
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.adapters.cli.tenant import TenantSelector, discover_tenant, resolve_tenant_override
+from daimon.core import dm_settings
 from daimon.core.config import load_settings
-from daimon.core.dm_access import list_dm_agents
+from daimon.core.dm_access import DmAgent, list_dm_agents
 from daimon.core.dm_explain import explain_dm
 from daimon.core.dm_import import import_dm_policies
 from daimon.core.dm_routing import DmChoose, DmRefused, DmStart, DmUnchecked
+from daimon.core.dm_settings import DmActor, DmRuleSpec
 from daimon.core.errors import StoreError
 from daimon.core.stores import dm_access as store
-from daimon.core.stores.direct_messages import dm_enabled, get_dm_agent_name, set_dm_agent_name
+from daimon.core.stores.direct_messages import dm_enabled, get_dm_agent_name, set_dm_enabled
 from daimon.core.stores.domain import DmGrantMode
 from daimon.core.stores.tenants import get_tenant
 from rich.console import Console
+from sqlalchemy.ext.asyncio import AsyncSession
 
 dm_app = typer.Typer(help="Who may have a private conversation with which agent.")
 rule_app = typer.Typer(help="Ordered rules that send a person, a group or everyone to an agent.")
@@ -51,6 +56,16 @@ async def _tenant(rt: CliRuntime, selector: TenantSelector | None) -> uuid.UUID:
     async with rt.sessionmaker() as session, session.begin():
         override = await resolve_tenant_override(session, selector)
         return await discover_tenant(session, override=override)
+
+
+async def _agents(rt: CliRuntime, session: AsyncSession, tenant_id: uuid.UUID) -> list[DmAgent]:
+    return await list_dm_agents(
+        session, tenant_id=tenant_id, anthropic=rt.anthropic, records=rt.sessionmaker
+    )
+
+
+def _actor(tenant_id: uuid.UUID) -> DmActor:
+    return DmActor(tenant_id, None, datetime.now(UTC))
 
 
 def _emit(console: Console, data: object, lines: list[str], as_json: bool) -> None:
@@ -77,10 +92,9 @@ async def dm_default(
     tenant_id = await _tenant(rt, selector)
     async with rt.sessionmaker.begin() as session:
         if agent is not None or clear:
-            await set_dm_agent_name(session, tenant_id=tenant_id, agent_name=agent)
+            agents = await _agents(rt, session, tenant_id)
+            await dm_settings.set_default(session, _actor(tenant_id), agents, agent)
         if enabled is not None:
-            from daimon.core.stores.direct_messages import set_dm_enabled
-
             await set_dm_enabled(session, tenant_id=tenant_id, enabled=enabled)
         current = await get_dm_agent_name(session, tenant_id=tenant_id)
         on = await dm_enabled(session, tenant_id=tenant_id)
@@ -109,15 +123,17 @@ async def dm_access(
         raise typer.BadParameter("--user and --group need a mode: --mode listed|excluded")
     async with rt.sessionmaker.begin() as session:
         if mode is not None:
-            await store.set_grant(
+            agents = await _agents(rt, session, tenant_id)
+            dm_settings.require_agent(agents, agent)
+            chosen = next(a for a in agents if a.name == agent)
+            await dm_settings.set_grant(
                 session,
-                tenant_id=tenant_id,
-                agent_name=agent,
+                _actor(tenant_id),
+                chosen,
+                agent,
                 who=mode,
                 user_ids=users,
                 group_ids=groups,
-                set_by="cli",
-                now=datetime.now(UTC),
             )
         grant = (await store.list_grants(session, tenant_id=tenant_id)).get(agent)
     who = grant.who if grant else "members"
@@ -154,34 +170,23 @@ async def dm_rules(
 ) -> None:
     """List the rules, or add, remove or move one."""
     tenant_id = await _tenant(rt, selector)
-    now = datetime.now(UTC)
+    actor = _actor(tenant_id)
     async with rt.sessionmaker.begin() as session:
         if action == "add":
             chosen = [user is not None, group is not None, everyone]
             if sum(chosen) != 1:
                 raise typer.BadParameter("name exactly one of --user, --group, --everyone")
-            if agent is None and locked:
-                raise typer.BadParameter("a locked rule needs an --agent")
-            await store.add_rule(
-                session,
-                tenant_id=tenant_id,
-                subject="user" if user else "group" if group else "everyone",
-                subject_id=user or group,
-                agent_name=agent,
-                locked=locked,
-                set_by="cli",
-                position=position,
-                now=now,
-            )
+            subject = "user" if user else "group" if group else "everyone"
+            rule = DmRuleSpec(subject, user or group, agent, locked)
+            agents = await _agents(rt, session, tenant_id)
+            await dm_settings.add_rule(session, actor, agents, rule, position)
         elif action in ("remove", "move"):
             if position is None or (action == "move" and to is None):
                 raise typer.BadParameter("give the rule's position (and --to for a move)")
             done = (
-                await store.remove_rule(session, tenant_id=tenant_id, position=position, now=now)
+                await dm_settings.remove_rule(session, actor, position)
                 if action == "remove"
-                else await store.move_rule(
-                    session, tenant_id=tenant_id, position=position, to=to or 0, now=now
-                )
+                else await dm_settings.move_rule(session, actor, position, to or 0)
             )
             if not done:
                 raise StoreError(f"no rule at position {position}")

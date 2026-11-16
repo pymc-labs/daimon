@@ -18,10 +18,12 @@ from daimon.adapters.cli.commands.dm import (
 from daimon.adapters.cli.runtime import CliRuntime
 from daimon.adapters.cli.tenant import TenantSelector
 from daimon.core.config import DirectMessagePolicy, Settings
-from daimon.core.errors import StoreError
+from daimon.core.errors import StoreError, UserFacingError
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores.direct_messages import dm_enabled, set_dm_enabled
+from daimon.core.stores import dm_access as dm_store
+from daimon.core.stores import web_audit
+from daimon.core.stores.direct_messages import dm_enabled, get_dm_agent_name, set_dm_enabled
 from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from rich.console import Console
@@ -66,8 +68,10 @@ async def test_default_sets_shows_and_clears_the_default_agent(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """The default agent is stored per workspace and cleared with --clear."""
-    _, selector = await _tenant(db_session_factory)
-    rt = _runtime(db_session_factory, [])
+    tenant, selector = await _tenant(db_session_factory)
+    rt = _runtime(
+        db_session_factory, [_agent_json(agent_id="ag_a", name="ada", tenant_id=tenant.id)]
+    )
     console, out = _console()
     await dm_default(
         rt=rt, console=console, selector=selector, agent="ada", clear=False, as_json=True
@@ -114,6 +118,66 @@ async def test_access_and_rules_round_trip_and_explain_names_the_route(
     found = json.loads(out.getvalue())
     assert found["allowed"] == ["ada", "bob"], "the list admits them"
     assert found["groups"] == [], "no rule names a group, so none is looked up"
+
+
+async def test_writes_when_the_agent_is_unknown_then_refused_and_nothing_changes(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """As from the web app: a mistyped agent name is refused, not stored."""
+    tenant, selector = await _tenant(db_session_factory)
+    rt = _runtime(
+        db_session_factory, [_agent_json(agent_id="ag_a", name="ada", tenant_id=tenant.id)]
+    )
+    console, _ = _console()
+    with pytest.raises(UserFacingError, match="no agent called adaa"):
+        await dm_default(rt=rt, console=console, selector=selector, agent="adaa", clear=False)
+    with pytest.raises(UserFacingError, match="no agent called adaa"):
+        await dm_access(
+            rt=rt, console=console, selector=selector, agent="adaa", mode="listed",
+            users=["7"], groups=[],
+        )  # fmt: skip
+    with pytest.raises(UserFacingError, match="no agent called adaa"):
+        await dm_rules(
+            rt=rt, console=console, selector=selector, action="add", everyone=True, agent="adaa"
+        )
+    async with db_session_factory() as session:
+        assert await get_dm_agent_name(session, tenant_id=tenant.id) is None
+        assert await dm_store.list_grants(session, tenant_id=tenant.id) == {}
+        assert await dm_store.list_rules(session, tenant_id=tenant.id) == []
+        assert await web_audit.list_recent(session, tenant_id=tenant.id) == []
+
+
+async def test_writes_leave_one_audit_row_each(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The same rows as a change from the web app, with no person as the actor."""
+    tenant, selector = await _tenant(db_session_factory)
+    rt = _runtime(
+        db_session_factory, [_agent_json(agent_id="ag_a", name="ada", tenant_id=tenant.id)]
+    )
+    console, _ = _console()
+    await dm_default(rt=rt, console=console, selector=selector, agent="ada", clear=False)
+    await dm_access(
+        rt=rt, console=console, selector=selector, agent="ada", mode="listed",
+        users=["7"], groups=[],
+    )  # fmt: skip
+    for group in ("g1", "g2"):
+        await dm_rules(
+            rt=rt, console=console, selector=selector, action="add", group=group, agent="ada"
+        )
+    await dm_rules(rt=rt, console=console, selector=selector, action="move", position=1, to=0)
+    await dm_rules(rt=rt, console=console, selector=selector, action="remove", position=1)
+    async with db_session_factory() as session:
+        rows = await web_audit.list_recent(session, tenant_id=tenant.id)
+    assert sorted((r.action, r.detail) for r in rows) == [
+        ("Added DM rule", "Group g1 to ada"),
+        ("Added DM rule", "Group g2 to ada"),
+        ("Changed DM access", "Listed: 1 person"),
+        ("Changed DM default agent", "ada"),
+        ("Moved DM rule", "Group g2: 2 to 1"),
+        ("Removed DM rule", "Group g1 to ada"),
+    ]
+    assert all(r.actor_account_id is None for r in rows), "an operator, not a person"
 
 
 async def test_rule_remove_for_a_missing_position_fails(
