@@ -131,6 +131,7 @@ from daimon.core.stores.channel_skills import list_skill_channel_rules
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.github_access import MAX_SESSION_VAULT_CREDENTIALS
 from daimon.core.stores.github_issued_tokens import register_app_session_vault
+from daimon.core.thread_models import sent_effort
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolSafetyPolicy
 from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
@@ -1278,10 +1279,13 @@ async def create_session(
                     cast(Tool, tool.model_dump(mode="json", exclude_none=True)) for tool in tools
                 ],
             }
+            carried = (
+                None if model_override is None else sent_effort(agent, model_override, model_effort)
+            )
             if model_override is not None:
                 overrides["model"] = (
                     model_override
-                    if model_effort is None
+                    if carried is None
                     # The API takes an effort the SDK's param type doesn't list yet.
                     else cast(
                         BetaManagedAgentsModelConfigParams,
@@ -1290,7 +1294,7 @@ async def create_session(
                             "speed": agent.model.speed
                             if model_override == agent.model.id
                             else "standard",
-                            "effort": model_effort,
+                            "effort": carried,
                         },
                     )
                 )

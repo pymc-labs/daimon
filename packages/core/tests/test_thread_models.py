@@ -27,6 +27,7 @@ from daimon.core.thread_models import (
     describe_thread_model,
     may_choose_thread_model,
     resolve_choice,
+    sent_effort,
 )
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
@@ -273,8 +274,10 @@ async def test_a_model_pick_keeps_the_agents_effort_and_the_chosen_one_survives_
     await choose_thread_model(db_session_factory, choice="opus", **pick)
     kept = await _applied(db_session_factory, tenant.id)
     assert kept.model_override == "claude-opus-5-5"
-    assert kept.model_effort == "high", "the agent's own effort carries over"
+    assert kept.model_effort is None, "the agent's own effort is sent, not recorded as a choice"
     assert (kept.agent.model.model_extra or {}).get("effort") == "high"
+    assert sent_effort(_EFFORT_AGENT, "claude-opus-5-5", kept.model_effort) == "high"
+    assert sent_effort(_EFFORT_AGENT, "claude-haiku-5-5", None) is None
 
     change = await choose_thread_model(db_session_factory, effort="low", **pick)
     assert (change.model_id, change.effort) == ("claude-opus-5-5", "low")

@@ -174,12 +174,7 @@ def identity_change_reasons(
         (
             recorded.model_id != desired.model_id
             or recorded.model_speed != desired.model_speed
-            # A session from before efforts were recorded says None for whatever
-            # it runs at, so only a recorded one can differ: a deploy resets nothing.
-            or (
-                (recorded.model_effort_recorded or recorded.model_effort is not None)
-                and recorded.model_effort != desired.model_effort
-            ),
+            or recorded.model_effort != desired.model_effort,
             "model",
         ),
         (recorded.system_sha256 != desired.system_sha256, "system_prompt"),

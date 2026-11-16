@@ -950,9 +950,7 @@ def test_a_chosen_effort_is_session_identity_and_absent_when_unset() -> None:
     high = desired_snapshot(_agent(), model_effort="high", **kwargs)
     assert "model_effort" not in plain.model_dump(mode="json")
     assert low.model_dump(mode="json")["model_effort"] == "low"
-    made_plain = plain.model_copy(update={"model_effort_recorded": True})
-    assert identity_change_reasons(made_plain, low) == ("model",)
-    assert identity_change_reasons(plain, low) == (), "a session from before efforts is unchanged"
+    assert identity_change_reasons(plain, low) == ("model",)
     assert identity_change_reasons(low, high) == ("model",)
     assert identity_change_reasons(low, low) == ()
     assert len({fingerprint_identity(s) for s in (plain, low, high)}) == 3

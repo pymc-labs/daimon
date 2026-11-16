@@ -259,6 +259,14 @@ def agent_effort(agent: BetaManagedAgentsAgent) -> str | None:
     return effort if isinstance(effort, str) else None
 
 
+def sent_effort(
+    agent: BetaManagedAgentsAgent, model_override: str, chosen: str | None
+) -> str | None:
+    """The effort a session on `model_override` is created with: the chosen, else the agent's."""
+    kept = chosen or agent_effort(agent)
+    return kept if kept in model_efforts(model_override) else None
+
+
 def with_model_override(
     agent: BetaManagedAgentsAgent, model_override: str | None, effort: str | None = None
 ) -> BetaManagedAgentsAgent:
@@ -390,6 +398,8 @@ async def apply_thread_model(
     return AppliedThreadModel(
         agent=applied,
         model_override=model_id,
-        model_effort=agent_effort(applied),
+        # Only the conversation's own pick is a session identity; the agent's
+        # effort that carries over is sent (`sent_effort`) but not recorded.
+        model_effort=effort if effort in model_efforts(model_id) else None,
         fell_back=False,
     )
