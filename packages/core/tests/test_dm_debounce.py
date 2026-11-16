@@ -110,6 +110,7 @@ async def test_an_approval_reply_ends_the_wait_now() -> None:
 
 
 async def test_zero_seconds_takes_only_what_already_joined() -> None:
+    """With the wait off, a message that joined during the lookups is still marked held."""
     window = DmWindow("one")
     window.add("two")
     reacted: list[str] = []
@@ -118,9 +119,27 @@ async def test_zero_seconds_takes_only_what_already_joined() -> None:
         reacted.append(item)
 
     started = monotonic()
-    assert await window.settle(0, on_arrival=seen) == ["one", "two"]
-    assert not reacted, "no wait, no mark"
-    assert monotonic() - started < 0.2
+    assert await window.settle(0, on_arrival=seen) == ["one", "two"], "nothing more is awaited"
+    assert reacted == ["two"], "the first is answered at once; the one behind it was held"
+    assert monotonic() - started < 0.2, "no wait"
+
+
+async def test_the_cap_counts_from_the_first_message_not_the_wait(monkeypatch) -> None:
+    """Lookups between the first message and the wait do not extend the cap."""
+    monkeypatch.setattr(dm_debounce, "MAX_WAIT_S", 0.5)
+    window = DmWindow(0)
+    await asyncio.sleep(0.3)
+
+    async def keep_typing() -> None:
+        for number in range(1, 20):
+            window.add(number)
+            await asyncio.sleep(0.05)
+
+    typing = asyncio.create_task(keep_typing())
+    started = monotonic()
+    await window.settle(0.3)
+    typing.cancel()
+    assert monotonic() - started < 0.4, "the cap ends 0.5 s after the window opened"
 
 
 async def test_a_stop_signal_ends_the_wait() -> None:

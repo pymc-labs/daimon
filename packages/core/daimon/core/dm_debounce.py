@@ -2,7 +2,7 @@
 
 The first message of a burst opens a window; each later message from the same person in
 the same conversation joins it. The window closes once nothing new has arrived for the
-configured wait, or after ten seconds. A turn starts only then.
+configured wait, or ten seconds after it opened. A turn starts only then.
 """
 
 from __future__ import annotations
@@ -30,10 +30,7 @@ async def debounce_seconds(
     found = await place_feature(
         sessions, settings, FeaturePlace.of(tenant_id, platform, None), "dm_debounce_seconds"
     )
-    try:
-        return max(0.0, float(found.value))
-    except ValueError:
-        return 0.0
+    return float(found.value)
 
 
 def bypasses_wait(text: str) -> bool:
@@ -63,7 +60,7 @@ class DmWindow[T]:
 
     def __init__(self, first: T) -> None:
         self.items: list[T] = [first]
-        self._last = monotonic()
+        self._opened = self._last = monotonic()
         self._wake = asyncio.Event()
         self._flush = False
         self._seen = 0
@@ -89,15 +86,18 @@ class DmWindow[T]:
     ) -> list[T]:
         """Wait until nothing new has arrived for `seconds`, or the cap; the whole burst.
 
-        `on_arrival` runs once for each message as soon as it is seen, only while a wait
-        applies. With `seconds` of 0 the burst is whatever already joined.
+        The cap counts from the window's first message, so the lookups before the wait
+        do not extend it. With `seconds` of 0 the burst is whatever already joined.
+        `on_arrival` runs once for each held message as soon as it is seen: every one
+        while a wait applies, and otherwise those that joined behind the first.
         """
-        cap = monotonic() + MAX_WAIT_S
+        cap = self._opened + MAX_WAIT_S
         while True:
-            while on_arrival is not None and seconds > 0 and self._seen < len(self.items):
+            while on_arrival is not None and self._seen < len(self.items):
                 item = self.items[self._seen]
                 self._seen += 1
-                await on_arrival(item)
+                if seconds > 0 or self._seen > 1:
+                    await on_arrival(item)
             if seconds <= 0 or self._flush or stop():
                 break
             remaining = min(self._last + seconds, cap) - monotonic()
