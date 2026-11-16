@@ -184,8 +184,9 @@ class ChangeNotificationBatch(_Model):
 
 
 MAX_OWNER_PAGES = 5
-MAX_MEMBER_PAGES = 20
 """Owner pages read before giving up; a team has at most 100 owners."""
+MAX_MEMBER_PAGES = 20
+"""Roster pages read before giving up; a longer roster leaves the team's members unknown."""
 
 
 def is_graph_url(url: httpx.URL) -> bool:
