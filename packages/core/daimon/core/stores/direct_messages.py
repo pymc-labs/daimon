@@ -5,12 +5,14 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
+import structlog
 from daimon.core._models import (
     DirectMessageConversation,
     DirectMessagePolicy,
     ThreadAgentBinding,
 )
 from daimon.core.errors import DaimonError, UserFacingError
+from daimon.core.session_fence_retry import FenceUnavailable, try_fence
 from daimon.core.stores.thread_sessions import retire_dm_scope
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import delete, func, select, text, union
@@ -25,6 +27,11 @@ DM_SCOPE_PREFIX = "dm:"
 
 class DirectMessageBusy(DaimonError):
     """A previous message still owns this private conversation."""
+
+
+def owner_dm_fence(platform: str, owner: str) -> str:
+    """The advisory fence each running DM turn of `owner` holds; it frees when the process dies."""
+    return f"owner_dm:{platform}:{owner}"
 
 
 class DirectMessageRow(BaseModel):
@@ -120,7 +127,15 @@ async def start_conversation(
         with_for_update=True,
     )
     if row is not None and row.active_until is not None and row.active_until > now:
-        raise DirectMessageBusy("Wait for the current DM reply before starting a new conversation.")
+        # A free owner fence means the claim's turn is gone; held to commit, so none claims now.
+        try:
+            await try_fence(
+                session, owner_dm_fence(row.platform, row.external_user_id), schema_scoped=True
+            )
+        except FenceUnavailable:
+            raise DirectMessageBusy(
+                "Wait for the current DM reply before starting a new conversation."
+            ) from None
     values = conversation.model_dump()
     if row is None:
         session.add(DirectMessageConversation(**values))
@@ -141,6 +156,12 @@ async def claim_message(
     now: datetime,
     active_until: datetime,
 ) -> DirectMessageRow | None:
+    """Claim the conversation for `message_id`; None for a duplicate delivery.
+
+    Call only while holding `owner_dm_fence`, which every claim's turn holds until it
+    finishes: an unexpired claim found here was left by a process that died, and is
+    taken over. Its turn, if somehow still running, fails `holds_claim` before writing.
+    """
     row = await session.get(
         DirectMessageConversation, (platform, route_key, external_user_id), with_for_update=True
     )
@@ -154,8 +175,8 @@ async def claim_message(
     if message_id in row.recent_message_ids:
         return None
     if row.active_until is not None and row.active_until > now:
-        raise DirectMessageBusy(
-            "A reply is still running. Please send your message again after it finishes."
+        structlog.get_logger(__name__).warning(
+            "dm.claim_taken_over", platform=platform, left_until=row.active_until.isoformat()
         )
     row.active_until = active_until
     row.recent_message_ids = [*row.recent_message_ids[-49:], message_id]

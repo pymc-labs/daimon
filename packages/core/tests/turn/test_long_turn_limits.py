@@ -8,7 +8,15 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from daimon.core import direct_messages, session_fence_retry
 from daimon.core.session_preparation_stages import turn_blocks_change, turn_is_active
-from daimon.core.stores.direct_messages import claim_message, extend_claim
+from daimon.core.stores.direct_messages import (
+    DirectMessageBusy,
+    DirectMessageRow,
+    claim_message,
+    extend_claim,
+    get_conversation,
+    holds_claim,
+    start_conversation,
+)
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
     get_thread_session_by_id,
@@ -118,18 +126,69 @@ async def test_a_dm_claim_extends_to_the_admitted_deadline(
             session, conversation=claimed, active_until=_NOW + timedelta(minutes=120)
         )
         assert stale == claimed, "a claim that was already moved is not the caller's any more"
-    with pytest.raises(Exception, match="still running"):
-        async with db_session_factory.begin() as session:
-            await claim_message(
-                session,
-                platform=original.platform,
-                route_key=original.route_key,
-                external_user_id=original.external_user_id,
-                message_id="m2",
-                expected_scope_id=original.scope_id,
-                now=_NOW + timedelta(minutes=60),
-                active_until=_NOW + timedelta(minutes=200),
-            )
+
+
+async def _claim(
+    session: AsyncSession, row: DirectMessageRow, message_id: str, *, at: datetime, minutes: int
+) -> DirectMessageRow | None:
+    return await claim_message(
+        session,
+        platform=row.platform,
+        route_key=row.route_key,
+        external_user_id=row.external_user_id,
+        message_id=message_id,
+        expected_scope_id=row.scope_id,
+        now=at,
+        active_until=at + timedelta(minutes=minutes),
+    )
+
+
+async def test_a_dm_claim_left_by_a_dead_worker_does_not_block_for_hours(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The next message, holding the owner's fence, takes over a 3-hour claim nobody runs."""
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+        original = await make_dm_conversation(session, tenant=tenant, account_id=account.id)
+        left = await _claim(session, original, "m1", at=_NOW, minutes=181)
+    assert left is not None, "the first message claims the conversation"
+    later = _NOW + timedelta(minutes=10)
+    async with db_session_factory.begin() as session:
+        taken = await _claim(session, original, "m2", at=later, minutes=46)
+        assert taken is not None, "the next message is admitted, not refused as busy"
+        assert taken.active_until == later + timedelta(minutes=46), "it holds its own claim"
+        assert not await holds_claim(session, conversation=left), "the dead claim lost the scope"
+
+
+async def test_a_new_dm_conversation_waits_only_for_a_live_turn(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+        original = await make_dm_conversation(session, tenant=tenant, account_id=account.id)
+        claimed = await _claim(session, original, "m1", at=_NOW, minutes=181)
+    assert claimed is not None, "the turn claims the conversation"
+    fresh = original.model_copy(update={"scope_id": "dm:fresh", "history": []})
+    later = _NOW + timedelta(minutes=10)
+    deps = deps_for(None, db_session_factory)
+    async with direct_messages.owner_dm_turn(
+        deps, platform=original.platform, owner=original.external_user_id, wait=False
+    ):
+        with pytest.raises(DirectMessageBusy):
+            async with db_session_factory.begin() as session:
+                await start_conversation(session, conversation=fresh, now=later)
+    async with db_session_factory.begin() as session:
+        await start_conversation(session, conversation=fresh, now=later)
+    async with db_session_factory() as session:
+        stored = await get_conversation(
+            session,
+            platform=fresh.platform,
+            route_key=fresh.route_key,
+            external_user_id=fresh.external_user_id,
+        )
+    assert stored is not None and stored.scope_id == "dm:fresh", "a gone turn's claim is replaced"
 
 
 class _Db:
@@ -210,7 +269,7 @@ async def test_an_owner_dm_waits_no_longer_than_the_standard_window(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     waits: list[float | None] = []
-    real = direct_messages.try_fence
+    real = session_fence_retry.try_fence
 
     async def record(*args: object, timeout_s: float | None = None, **kwargs: object) -> None:
         waits.append(timeout_s)

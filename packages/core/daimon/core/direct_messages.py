@@ -50,6 +50,7 @@ from daimon.core.stores.direct_messages import (
     get_dm_agent_name,
     holds_claim,
     lock_route,
+    owner_dm_fence,
     quarantine_conversation,
     start_conversation,
 )
@@ -1275,7 +1276,7 @@ async def owner_dm_turn(
             # The holder may run for hours; a sender waits at most the standard window.
             await try_fence(
                 db,
-                f"owner_dm:{platform}:{owner}",
+                owner_dm_fence(platform, owner),
                 schema_scoped=True,
                 timeout_s=TURN_CEILING_S,
             )
