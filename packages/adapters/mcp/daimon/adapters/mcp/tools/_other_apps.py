@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import aiohttp
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -25,7 +26,7 @@ async def _discord_parent(runtime: McpRuntime, ref: str) -> str | None:
     try:
         async with rest_client(_require_bot_token(runtime)) as client:
             channel = await client.fetch_channel(int(ref))
-    except (ToolError, discord.HTTPException, ValueError) as exc:
+    except (ToolError, discord.DiscordException, aiohttp.ClientError, OSError, ValueError) as exc:
         raise LookupError(ref) from exc
     return str(channel.parent_id) if isinstance(channel, discord.Thread) else None
 
