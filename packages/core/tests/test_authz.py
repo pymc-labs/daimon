@@ -10,7 +10,7 @@ The channel default and channel environment rows have no guard in the model yet.
 from __future__ import annotations
 
 import pytest
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX, TenantAccessPolicy
 from daimon.core.authz import (
     Action,
     AgentRef,
@@ -1167,6 +1167,34 @@ def test_place_from_origin_maps_a_dm_scope_to_no_channel() -> None:
     )
     assert Place.from_origin(parent_channel_id="C1", thread_id=None) == Place(
         channel_id="C1", parent_channel_id="C1"
+    )
+
+
+def test_a_channel_timer_scope_is_its_parent_channel_for_every_rule() -> None:
+    """An unattended channel turn's `ch:` scope is a queue key, not a place."""
+    timer = Place.from_origin(parent_channel_id="C_ACME", thread_id=f"{CHANNEL_SCOPE_PREFIX}abc")
+    assert timer == INSIDE
+    for policy, place in (
+        (PINNED, timer),
+        (
+            PROTECTED,
+            Place.from_origin(parent_channel_id="C_PROT", thread_id=f"{CHANNEL_SCOPE_PREFIX}abc"),
+        ),
+    ):
+        normal = Place.from_origin(parent_channel_id=place.parent_channel_id, thread_id=None)
+        for action in (Action.RUN_AGENT, Action.START_TURN):
+            assert authorize(
+                policy, subject=MEMBER, action=action, agent=ACME, place=place
+            ) == authorize(policy, subject=MEMBER, action=action, agent=ACME, place=normal)
+    assert authorize(PINNED, subject=MEMBER, action=Action.RUN_AGENT, agent=ACME, place=timer)
+    assert not authorize(
+        PINNED,
+        subject=MEMBER,
+        action=Action.RUN_AGENT,
+        agent=ACME,
+        place=Place.from_origin(
+            parent_channel_id="C_OTHER", thread_id=f"{CHANNEL_SCOPE_PREFIX}abc"
+        ),
     )
 
 

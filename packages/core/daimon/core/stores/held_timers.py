@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from daimon.core._models import HeldTimer
+from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX
 from daimon.core.continuity.timers import MAX_PENDING_TIMERS
 from daimon.core.continuity.watch_imports import NOTE_LIMIT, clip
 from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX
@@ -44,8 +45,6 @@ ImportOutcome = Literal["held", "updated", "existing", "past", "unsupported"]
 
 #: Where an imported timer can wake: an owner's private conversation, a thread or a channel.
 SUPPORTED_PLACES = frozenset({"direct-message", "thread", "channel"})
-#: Queue scope of a channel timer: one per timer, the channel is the row's parent.
-CHANNEL_SCOPE_PREFIX = "ch:"
 #: What a timer with no note asks of the agent.
 EMPTY_NOTE_PROMPT = "A reminder you set has come due."
 

@@ -11,6 +11,7 @@ from daimon.adapters.mcp.tools import _own_card
 from daimon.adapters.mcp.tools.discord import _switch_card
 from daimon.adapters.mcp.tools.slack import _credential_button
 from daimon.adapters.mcp.tools.teams import _send
+from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX
 from daimon.core.posted_controls import PostedCard
 from daimon.core.stores.domain import Role, TurnOriginRow
 from daimon.core.switch_cards import requested_switch_card
@@ -70,6 +71,7 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, object]]
         (_origin("slack", "dm:abc"), {"channel_id": "channel-1", "thread_ts": None}),
         (_origin("teams", "19:chat@thread.v2"), {"thread_id": "19:chat@thread.v2"}),
         (_origin("discord"), {"channel_id": "thread-1"}),
+        (_origin("discord", f"{CHANNEL_SCOPE_PREFIX}{uuid.uuid4()}"), {"channel_id": "channel-1"}),
     ],
 )
 async def test_the_card_goes_to_the_origins_thread_on_each_platform(

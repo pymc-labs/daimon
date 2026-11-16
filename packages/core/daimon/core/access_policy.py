@@ -248,3 +248,12 @@ def is_invoker_allowed(
 
 
 DM_SCOPE_PREFIX = "dm:"
+# An unattended channel turn's queue scope; the real channel is the origin's parent.
+CHANNEL_SCOPE_PREFIX = "ch:"
+
+
+def place_thread_id(thread_id: str | None) -> str | None:
+    """The thread a turn origin stands in: none for a channel timer's queue scope."""
+    if thread_id is not None and thread_id.startswith(CHANNEL_SCOPE_PREFIX):
+        return None
+    return thread_id

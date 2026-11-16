@@ -17,6 +17,7 @@ from functools import cache
 from typing import Final, cast
 
 import structlog
+from daimon.core.access_policy import place_thread_id
 from daimon.core.config import Settings, get_repo_memory_settings
 from daimon.core.features.deployment import deployment_value
 from daimon.core.features.registry import (
@@ -62,7 +63,8 @@ class FeaturePlace:
         agent_id: str | None = None,
         backend: str | None = None,
     ) -> FeaturePlace:
-        """From a turn's ids; a thread equal to its channel is none."""
+        """From a turn's ids; a thread equal to its channel (or a timer's scope) is none."""
+        thread_id = place_thread_id(thread_id)
         if thread_id and platform == "slack" and ":" in thread_id:
             channel, _, thread_id = thread_id.partition(":")
             channel_id = channel_id or channel

@@ -22,6 +22,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.access_policy import (
     OPEN_ACCESS_POLICY,
     TenantAccessPolicy,
+    place_thread_id,
 )
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import agent_aliases, agent_pin_names
@@ -210,6 +211,7 @@ async def _load_view(
             agents = await list_agents_by_tenant(
                 runtime.client, tenant_id=auth.tenant_id, records=runtime.session_factory
             )
+    location_thread_id = place_thread_id(location_thread_id)
     if auth.agent_id is not None:
         location_channel_id = None
         location_thread_id = None

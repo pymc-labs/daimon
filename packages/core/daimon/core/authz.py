@@ -12,6 +12,7 @@ from daimon.core.access_policy import (
     TenantAccessPolicy,
     agent_invoker_roles,
     is_invoker_allowed,
+    place_thread_id,
 )
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_NAME,
@@ -233,8 +234,10 @@ class Place:
 
         A private DM conversation's scope id (``dm:…``) stands in for its
         thread id; a DM runs in no workspace channel, so it is outside every
-        agent rule, as ``admit(is_dm=True)`` treats it.
+        agent rule, as ``admit(is_dm=True)`` treats it. A channel timer's scope
+        (``ch:…``) is no thread: the turn runs in its parent channel.
         """
+        thread_id = place_thread_id(thread_id)
         if thread_id is not None and thread_id.startswith(DM_SCOPE_PREFIX):
             return cls()
         return cls(
