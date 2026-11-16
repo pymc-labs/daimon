@@ -14,8 +14,8 @@ from daimon.core.direct_messages import (
     DirectMessageAccessRevoked,
     DirectMessageMembershipUnknown,
     DirectMessageReply,
-    _require_turn_grant,  # pyright: ignore[reportPrivateUsage]
     require_dm_delivery,
+    require_dm_turn_grant,
     start_cold_dm,
     start_dm,
 )
@@ -256,8 +256,22 @@ async def test_start_cold_dm_on_slack_when_groups_admit_then_binds_the_dm_channe
     row = await start(frozenset({"S1"}))
     assert row is not None and row.channel_id == "D1", "the row names the DM channel"
     with pytest.raises(DirectMessageAccessRevoked):
-        await _require_turn_grant(deps, admission, row, groups=frozenset())
-    await _require_turn_grant(deps, admission, row, groups=frozenset({"S1"}))
+        await require_dm_turn_grant(
+            deps,
+            admission,
+            tenant_id=row.tenant_id,
+            platform=row.platform,
+            user_id=row.external_user_id,
+            groups=frozenset(),
+        )
+    await require_dm_turn_grant(
+        deps,
+        admission,
+        tenant_id=row.tenant_id,
+        platform=row.platform,
+        user_id=row.external_user_id,
+        groups=frozenset({"S1"}),
+    )
 
 
 async def reply_for(deps, admission, tenant):

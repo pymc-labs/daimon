@@ -254,11 +254,13 @@ async def _require_dm_grant(
         )
 
 
-async def _require_turn_grant(
+async def require_dm_turn_grant(
     deps: TurnDeps,
     admission: Admission,
-    conversation: DirectMessageRow,
     *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    user_id: str,
     groups: frozenset[str] | None,
 ) -> None:
     """The admitted agent must still admit this person; unknown groups fail closed."""
@@ -266,13 +268,13 @@ async def _require_turn_grant(
         permitted = await permits_dm(
             session,
             deps.settings,
-            await load_dm_access_policy(session, tenant_id=conversation.tenant_id),
-            tenant_id=conversation.tenant_id,
-            platform=conversation.platform,
+            await load_dm_access_policy(session, tenant_id=tenant_id),
+            tenant_id=tenant_id,
+            platform=platform,
             agent=dm_agent_of(admission.agent, admission.config.agent_name),
             subject=admission.grant.subject
             if admission.grant is not None
-            else build_subject(is_admin=False, platform_user_id=conversation.external_user_id),
+            else build_subject(is_admin=False, platform_user_id=user_id),
             groups=groups,
         )
     if not permitted:
@@ -983,7 +985,14 @@ async def reply_to_dm_result(
                     ),
                 )
             if platform != "discord":
-                await _require_turn_grant(deps, admission, conversation, groups=groups)
+                await require_dm_turn_grant(
+                    deps,
+                    admission,
+                    tenant_id=conversation.tenant_id,
+                    platform=conversation.platform,
+                    user_id=conversation.external_user_id,
+                    groups=groups,
+                )
             if on_agent is not None:
                 await on_agent(admission.agent.name)
             execution_id = uuid.uuid4() if platform == "slack" else None

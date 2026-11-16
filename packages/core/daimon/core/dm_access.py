@@ -192,7 +192,7 @@ async def decide_dm(
     to ask whether the person may use it: the decision is then `DmStart` for that agent.
     `groups` are the ones `lookup_dm_groups` found; None takes them from `subject`.
     """
-    if not await dm_enabled(session, tenant_id=tenant_id):
+    if not await dm_enabled(session, tenant_id=tenant_id, platform=platform):
         return DmDecision(DmRefused("no_agent"))
     routing = await load_routing(session, tenant_id=tenant_id)
     picked = (

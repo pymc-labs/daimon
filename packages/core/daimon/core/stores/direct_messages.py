@@ -268,13 +268,15 @@ async def set_dm_agent_name(
     await session.flush()
 
 
-async def dm_enabled(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
-    """The `direct_messages` feature for a workspace. Discord and Slack share the one
-    setting, so the platform here only has to be one that offers it."""
+async def dm_enabled(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str = "discord"
+) -> bool:
+    """The `direct_messages` feature for a workspace. Only the default differs by
+    platform (Teams starts on), so Discord stands for Discord and Slack."""
     # Imported here: the feature modules import the stores.
     from daimon.core.features.snapshot import FeaturePlace, feature_in
 
-    place = FeaturePlace(tenant_id, "discord")
+    place = FeaturePlace(tenant_id, platform)
     return (await feature_in(session, None, place, "direct_messages")).on
 
 

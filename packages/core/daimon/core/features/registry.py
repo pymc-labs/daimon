@@ -570,7 +570,9 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
             "agent takes part; an agent can opt out. Who may message each agent, and which agent "
             "a message reaches, is set apart from this."
         ),
-        platforms=_DM_PLATFORMS,
+        # Teams personal chats always reached an agent, so they stay on unless turned off.
+        platforms=_DM_PLATFORMS | {"teams"},
+        platform_defaults={"teams": "on"},
         authority=_ADMIN,
     ),
     FeatureSpec(

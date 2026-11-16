@@ -55,7 +55,7 @@ Where each feature can be set, and its default.
 | Shared memory | `memory_shared` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon; Always On on Gemini, OpenAI |
 | Channel memory | `memory_channel` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Private channel messages | `private_channel_messages` | Capability | On | ✓ |  |  |  |  | Needs setup by whoever runs Daimon; Only Teams |
-| Direct messages | `direct_messages` | Capability | Off | ✓ | ✓ | ✓ |  |  | Only Discord, Slack |
+| Direct messages | `direct_messages` | Capability | Off | ✓ | ✓ | ✓ |  |  | On by default on Teams |
 | Web app: chat | `web.chat` | Capability | On | ✓ | ✓ |  |  |  |  |
 | Web app: agents | `web.agents` | Capability | On | ✓ | ✓ |  |  |  |  |
 | Web app: channels | `web.channels` | Capability | On | ✓ | ✓ |  |  |  |  |
