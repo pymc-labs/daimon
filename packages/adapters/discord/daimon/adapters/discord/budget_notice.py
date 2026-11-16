@@ -101,6 +101,21 @@ def with_budget_notifier(
     )
 
 
+async def _recipient_allowed(
+    runtime: DiscordRuntime, policy: DirectMessagePolicy, tenant_id: uuid.UUID, user_id: str
+) -> bool:
+    # Only role mode needs the database and resolver.
+    if policy.mode != "role":
+        return policy.allows(user_id)
+    return await dm_policy_allows(
+        policy,
+        runtime.sessionmaker,
+        runtime.turn_deps.membership_resolver,
+        tenant_id=tenant_id,
+        user_id=user_id,
+    )
+
+
 async def send_member_notice(
     runtime: DiscordRuntime,
     open_dm: OpenDm,
@@ -113,13 +128,7 @@ async def send_member_notice(
 ) -> bool:
     """Existing private member-notice transport, also used for watch migration DMs."""
     policy = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
-    if is_closed() or not await dm_policy_allows(
-        policy,
-        runtime.sessionmaker,
-        runtime.turn_deps.membership_resolver,
-        tenant_id=tenant_id,
-        user_id=recipient_id,
-    ):
+    if is_closed() or not await _recipient_allowed(runtime, policy, tenant_id, recipient_id):
         return False
     try:
         dm = await open_dm(int(workspace_id), int(recipient_id))
@@ -160,13 +169,7 @@ async def send_watch_notice(
     closed or the bot blocked) is `REFUSED`.
     """
     policy = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
-    if is_closed() or not await dm_policy_allows(
-        policy,
-        runtime.sessionmaker,
-        runtime.turn_deps.membership_resolver,
-        tenant_id=tenant_id,
-        user_id=recipient_id,
-    ):
+    if is_closed() or not await _recipient_allowed(runtime, policy, tenant_id, recipient_id):
         return None
     try:
         dm = await open_dm(int(workspace_id), int(recipient_id))
