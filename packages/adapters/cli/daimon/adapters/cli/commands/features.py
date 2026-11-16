@@ -1,9 +1,8 @@
 """`daimon features list | get | set | diff`: every feature at a place, over the core service.
 
-The operator acts as an admin with no chat identity. Approvals (a chat admin's call) are set
-here only as an `OperatorActor`, which names the operator and needs `--reason`; the change is
-audited with both. The agent tier of a `tool.*` writes the agent's own
-built-in tool config.
+The operator acts as an admin with no chat identity. Approvals, a chat admin's call, need
+`--reason` and are audited under the operator's name, `cli.local_user`. The agent tier of a
+`tool.*` writes the agent's own built-in tool config.
 """
 
 from __future__ import annotations
@@ -219,23 +218,12 @@ async def features_set(
         return True
 
     actor: FeatureActor
+    who = (target.tenant_id, target.account_id, "cli", None, is_admin)
     if spec.authority.native:
-        actor = OperatorActor(
-            target.tenant_id,
-            target.account_id,
-            "cli",
-            None,
-            is_admin,
-            operator=rt.settings.cli.local_user,
-            reason=reason,
-        )
+        actor = OperatorActor(*who, operator=rt.settings.cli.local_user, reason=reason)
     else:
         actor = FeatureActor(
-            target.tenant_id,
-            target.account_id,
-            "cli",
-            None,
-            is_admin,
+            *who,
             write_builtin=builtin_writer(edit, actor=agent_actor, ma_agent_id=agent_id)
             if builtin and agent_id
             else None,
