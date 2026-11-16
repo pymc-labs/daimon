@@ -346,7 +346,8 @@ async def routine_sandbox(
     routine's own On is then cleared, so an admin approves the new agent or environment;
     an agent's is kept, as its other routines may still match.
     """
-    found = await place_guardrail(sessions, settings, routine_place(row, platform), SANDBOX_KEY)
+    place = routine_place(row, platform)
+    found = await place_guardrail(sessions, settings, place, "routine_sandbox_tools")
     if not found.on or found.tier not in ("agent", "routine"):
         return None
     tier: PinnedTier = "agent" if found.tier == "agent" else "routine"

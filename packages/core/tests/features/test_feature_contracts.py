@@ -23,6 +23,7 @@ from daimon.core.config import (
 from daimon.core.features.deployment import deployment_value
 from daimon.core.features.model_input import SESSION_KEYS, TOOL_KEYS
 from daimon.core.features.registry import (
+    CHAT_TIERS,
     FEATURES,
     TIERS,
     WEB_MODULES,
@@ -49,6 +50,8 @@ _MAY_WRITE = {
     "core/stores/feature_values.py",
     "core/channel_settings.py",
     "core/features/service.py",
+    # Daimon's own clear of a routine's sandbox On, in the routine edit's transaction.
+    "core/stores/sandbox_pins.py",
 }
 _LEGACY_MODE = {"progress_plans", "thread_participation"}
 
@@ -96,12 +99,14 @@ _NARROWED: dict[str, str] = {
     "long_jobs_max_deadline": "checked when a job starts, from its workspace and agent",
     "daily_model_cap": "counts the team's spend, so a workspace or agent limit",
     "thread_providers": "an agent owner's consent, checked when a conversation's model is picked",
+    "routine_sandbox_tools": "an admin's opt-in for routine runs, so a workspace, agent or routine",
     **{f"web.{module}": "workspace-only web app surface" for module in WEB_MODULES},
 }
 
 
-def test_every_feature_has_all_five_tiers_unless_narrowed_for_a_reason() -> None:
-    narrowed = {key for key, spec in FEATURES.items() if spec.tiers != TIERS}
+def test_every_feature_has_all_five_chat_tiers_unless_narrowed_for_a_reason() -> None:
+    """A feature sits at every chat tier unless a recorded reason narrows it."""
+    narrowed = {key for key, spec in FEATURES.items() if spec.tiers != CHAT_TIERS}
     assert narrowed == set(_NARROWED), (
         f"narrowed without a reason: {sorted(narrowed - set(_NARROWED))}; "
         f"listed but at every tier: {sorted(set(_NARROWED) - narrowed)}"
