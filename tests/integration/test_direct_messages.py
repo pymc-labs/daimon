@@ -30,6 +30,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.direct_messages import (
+    DirectMessageBusy,
     OwnerDmFence,
     claim_message,
     dm_enabled,
@@ -346,35 +347,36 @@ async def test_new_selection_resets_scope_and_rejects_a_stale_membership_check(
 async def test_concurrent_dm_claims_serialize_and_wrong_owner_has_no_route(
     db_session, db_session_factory, db_engine
 ):
+    """Two claims at once: one wins, the other is busy; another user finds no route."""
     tenant, deps, admission, sent, streams, created = await _setup(db_session, db_session_factory)
     route = await _start(tenant, deps, admission)
     now = datetime.now(UTC)
     independent = async_sessionmaker(db_engine, expire_on_commit=False)
-    turn = functools.partial(
-        core_direct_messages.owner_dm_turn, deps, platform="discord", owner="42", wait=False
-    )
-    async with turn() as fence:
-        with pytest.raises(core_direct_messages.DirectMessageAccessRevoked):
-            async with turn():
-                pass
+
+    async def claim(message_id):
         async with independent.begin() as session:
-            winner = await claim_message(
+            return await claim_message(
                 session,
-                fence=fence,
+                fence=OwnerDmFence("discord", "42"),
                 route_key="dm-42",
-                message_id="one",
+                message_id=message_id,
                 expected_scope_id=route.scope_id,
-                claimed_at=now + timedelta(minutes=1),
+                claimed_at=now,
             )
-    assert winner is not None, "the fence holder claims the conversation"
+
+    results = await asyncio.gather(claim("one"), claim("two"), return_exceptions=True)
+    assert sum(isinstance(result, DirectMessageBusy) for result in results) == 1, (
+        f"exactly one claim is busy: {results}"
+    )
+    winner = next(result for result in results if not isinstance(result, BaseException))
     async with db_session_factory.begin() as session:
         assert (
             await get_conversation(
                 session, platform="discord", route_key="dm-42", external_user_id="wrong"
             )
             is None
-        )
-        await finish_message(session, conversation=winner, history=[])
+        ), "another user has no route"
+        assert await finish_message(session, conversation=winner, history=[]), "winner finishes"
 
 
 async def test_a_dm_turn_whose_owner_fence_drops_stops_instead_of_running_on(
