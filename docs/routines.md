@@ -43,9 +43,14 @@ numbers"). Each platform also has a panel:
   an agent, schedule, timezone and message. The creator or an admin can pause,
   resume or delete one.
 
-The CLI creates owner-DM routines (`daimon routines create`), sets
+The CLI creates routines for an owner (`daimon routines create`), sets
 [sandbox tools](unattended.md#opt-a-routine-into-sandbox-tools) and
 [moves routines in from another system](routine-migration.md).
+
+`--destination dm` delivers to the owner. `--destination channel` or `thread`
+with `--destination-id` delivers there, after the checks chat applies: the owner
+must be a verified member who can post in it, in this server, and the tenant's
+access rules must allow it. `--dry-run` runs every check and saves nothing.
 
 `create_routine` refuses a caller with no platform user identity (a CLI-only
 token), an unknown IANA timezone, an unparseable cron expression and an

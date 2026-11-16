@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Operators can create channel and thread routines from the command line.**
+  `daimon routines create --destination channel` or `thread`, with
+  `--destination-id`, makes a routine for a verified member who owns it, is
+  attributed and is budgeted for it. The same checks as creating one in chat
+  run once: the owner must be able to post there, the channel must be in the
+  server, and the tenant's access rules must allow it. A thread's permissions
+  come from its parent channel. `--dry-run` runs every check and saves nothing.
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and
   the MCP tools. A run nobody started, such as a routine, never applies one at once.

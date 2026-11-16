@@ -6,7 +6,7 @@ forthcoming NOT NULL flip, this command walks every routine whose
 `agent_name IS NULL`, retrieves the agent from MA, and writes the daimon-tag
 into the row.
 
-Owner-DM creation is available to operators; interactive edits use chat tools
+Operators create owner-DM and channel or thread routines; interactive edits use chat tools
 and the adapters' `/routines` command. `sandbox-tools` is the operator's
 switch for a routine's built-in sandbox tools, one routine or a confirmed list
 of them (the cutover), with a dry run.
@@ -31,8 +31,10 @@ from daimon.core.config import DirectMessagePolicy, load_settings
 from daimon.core.cron import validated_next_slot
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.discord_destination import DiscordRestDestinationResolver
 from daimon.core.discord_membership import DiscordRestMembershipResolver, verify_discord_source
 from daimon.core.errors import StoreError, UserFacingError
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
@@ -49,9 +51,19 @@ from daimon.core.routine_sandbox import (
     current_pin,
     pin_of,
 )
+from daimon.core.routine_service import (
+    DestinationResolver,
+    Happened,
+    NewRoutine,
+    RoutineCaller,
+    RoutineEnv,
+    RoutineRefused,
+)
+from daimon.core.routine_service import create_routine as create_routine_checked
 from daimon.core.routines import routine_for_reader
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import dm_enabled
+from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.routine_move import pause_for_handback, rollback_rows, seed_routines
 from daimon.core.stores.routines import (
@@ -69,6 +81,7 @@ from daimon.core.stores.tenants import get_tenant
 from pydantic import JsonValue, ValidationError
 from rich.console import Console
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 _log = structlog.get_logger(__name__)
 
@@ -171,15 +184,35 @@ def create_command(
     schedule: Annotated[str, typer.Option("--schedule")],
     timezone: Annotated[str, typer.Option("--timezone")],
     trigger: Annotated[str, typer.Option("--trigger")],
-    destination: Annotated[Literal["dm"], typer.Option("--destination")],
+    destination: Annotated[
+        Literal["dm", "channel", "thread"],
+        typer.Option(
+            "--destination", help="Where results go: the owner's DM, a channel or a thread."
+        ),
+    ],
+    destination_id: Annotated[
+        str | None,
+        typer.Option("--destination-id", help="The channel or thread id; not used for dm."),
+    ] = None,
     source_channel: Annotated[str | None, typer.Option("--source-channel")] = None,
     paused: Annotated[
         bool, typer.Option("--paused", help="Create paused, with no next fire time scheduled.")
     ] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
 ) -> None:
-    """Create a Discord owner-DM routine; --owner is the sole recipient."""
-    del destination  # Typer validates the only supported operator destination.
+    """Create a Discord routine for --owner, who is its owner and, for dm, sole recipient.
+
+    A channel or thread destination must be one the owner could post in, the same
+    checks as creating the routine in chat.
+    """
+    if (destination == "dm") != (destination_id is None):
+        raise UserFacingError(
+            "Give --destination-id with channel or thread, and not with dm."
+            if destination == "dm"
+            else f"--destination {destination} needs --destination-id."
+        )
+    if destination != "dm" and source_channel is not None:
+        raise UserFacingError("--source-channel is only for dm; a channel routine posts there.")
     settings = load_settings()
 
     if settings.discord is None:
@@ -188,6 +221,23 @@ def create_command(
 
     async def run() -> None:
         async with build_runtime(settings) as rt:
+            if destination != "dm":
+                await run_create_channel_routine(
+                    rt=rt,
+                    console=Console(highlight=False),
+                    tenant_id=tenant,
+                    owner=owner,
+                    agent_name=agent,
+                    schedule=schedule,
+                    timezone=timezone,
+                    trigger=trigger,
+                    kind=destination,
+                    destination_id=cast("str", destination_id),
+                    paused=paused,
+                    dry_run=dry_run,
+                    resolver=DiscordRestMembershipResolver(bot_token),
+                )
+                return
             await run_create_dm_routine(
                 rt=rt,
                 console=Console(highlight=False),
@@ -299,6 +349,102 @@ async def run_create_dm_routine(
             enabled=not paused,
             next_fire_at=None if paused else next_fire,
         )
+    console.print(f"Created routine {row.id}.")
+
+
+class _DryRun(Exception):
+    """Raised inside the creating transaction so a dry run rolls back."""
+
+
+async def run_create_channel_routine(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    tenant_id: uuid.UUID,
+    owner: str,
+    agent_name: str,
+    schedule: str,
+    timezone: str,
+    trigger: str,
+    kind: Literal["channel", "thread"],
+    destination_id: str,
+    resolver: MembershipResolver,
+    dry_run: bool = False,
+    paused: bool = False,
+    destination_resolver: DestinationResolver | None = None,
+) -> None:
+    """Create a routine that posts to a channel or thread, as the owner would in chat.
+
+    The owner is the routine's owner, attribution and budget source. Every check
+    chat applies runs once, in `create_routine`; the operator choosing the agent
+    stands in for the owner talking to it. A dry run does all of it, then rolls back.
+    """
+    if not owner.isdecimal():
+        raise UserFacingError("The owner must be a Discord user ID.")
+    if not trigger.strip():
+        raise UserFacingError("A trigger message is required.")
+    async with rt.sessionmaker() as session:
+        tenant = await get_tenant(session, tenant_id)
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+    if tenant is None or tenant.archived_at is not None or tenant.platform != "discord":
+        raise UserFacingError("Select an active Discord tenant.")
+    subject = await resolve_subject(
+        rt.sessionmaker, resolver, tenant_id=tenant_id, user_id=owner, require_fresh=True
+    )
+    if subject.verified_membership is not True or not authorize(
+        policy, subject=subject, action=Action.ACT_FOR_CREATOR, surface=Surface.ROUTINE
+    ):
+        raise UserFacingError("The owner is not a verified, allowed tenant member.")
+    agent = await find_agent_by_daimon_tag(
+        rt.anthropic, tenant_id=tenant_id, name=agent_name, records=rt.sessionmaker
+    )
+    if agent is None:
+        raise UserFacingError(f"No agent named {agent_name!r} found for this tenant.")
+    if destination_resolver is None:
+        if rt.settings.discord is None:
+            raise UserFacingError("Discord bot credentials are required to verify the destination.")
+        destination_resolver = DiscordRestDestinationResolver(
+            rt.settings.discord.bot_token.get_secret_value(),
+            guild_id=tenant.external_id,
+            owner_id=owner,
+        )
+
+    async def stop_if_dry(_session: AsyncSession, _happened: Happened, _row: RoutineRow) -> None:
+        if dry_run:
+            raise _DryRun
+
+    env = RoutineEnv(
+        sessionmaker=rt.sessionmaker,
+        anthropic=rt.anthropic,
+        resolve_destination=destination_resolver,
+        on_change=stop_if_dry,
+    )
+    caller = RoutineCaller(
+        tenant_id=tenant_id,
+        subject=subject,
+        platform="discord",
+        own_agent_ids=frozenset({derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)}),
+    )
+    new = NewRoutine(
+        agent_name=agent_name,
+        cron_expr=schedule,
+        timezone=timezone,
+        trigger_message=trigger,
+        enabled=not paused,
+        destination_kind=kind,
+        destination_id=destination_id,
+    )
+    try:
+        row = await create_routine_checked(env, caller, new)
+    except RoutineRefused as exc:
+        raise UserFacingError(str(exc)) from exc
+    except _DryRun:
+        console.print(
+            f"Owner: {owner}; destination: {kind} {destination_id}\n"
+            "Dry run: no routine created. "
+            + ("Would be created paused." if paused else "Would be created enabled.")
+        )
+        return
     console.print(f"Created routine {row.id}.")
 
 

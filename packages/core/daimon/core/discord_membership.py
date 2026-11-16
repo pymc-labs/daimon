@@ -18,7 +18,7 @@ import httpx
 from daimon.core.membership import CachedMembershipResolver, Membership
 
 
-async def _discord_get(client: httpx.AsyncClient, path: str) -> httpx.Response:
+async def discord_get(client: httpx.AsyncClient, path: str) -> httpx.Response:
     for _ in range(3):
         response = await client.get(path)
         if response.status_code != 429:
@@ -30,9 +30,7 @@ async def _discord_get(client: httpx.AsyncClient, path: str) -> httpx.Response:
     raise ValueError("server rate limit exhausted")
 
 
-def _discord_client(
-    bot_token: str, transport: httpx.AsyncBaseTransport | None
-) -> httpx.AsyncClient:
+def discord_client(bot_token: str, transport: httpx.AsyncBaseTransport | None) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         base_url="https://discord.com/api/v10/",
         headers={"Authorization": f"Bot {bot_token}"},
@@ -57,8 +55,8 @@ class DiscordRestMembershipResolver(CachedMembershipResolver):
         del tenant_id  # Tenant binding is enforced by the caller and cache key.
         if not guild_id.isdecimal() or not user_id.isdecimal():
             return Membership()
-        async with _discord_client(self._bot_token, self._transport) as client:
-            member = await _discord_get(client, f"guilds/{guild_id}/members/{user_id}")
+        async with discord_client(self._bot_token, self._transport) as client:
+            member = await discord_get(client, f"guilds/{guild_id}/members/{user_id}")
             if member.status_code == 404:
                 return Membership(is_member=False)
             member.raise_for_status()
@@ -75,9 +73,9 @@ class DiscordRestMembershipResolver(CachedMembershipResolver):
             if len(set(cast("list[str]", raw_roles))) != len(values):
                 return Membership()
             roles = tuple(r for r in cast("list[str]", raw_roles) if r != guild_id)
-            guild = await _discord_get(client, f"guilds/{guild_id}")
+            guild = await discord_get(client, f"guilds/{guild_id}")
             guild.raise_for_status()
-            role_response = await _discord_get(client, f"guilds/{guild_id}/roles")
+            role_response = await discord_get(client, f"guilds/{guild_id}/roles")
             role_response.raise_for_status()
             guild_data = cast("dict[str, object]", guild.json())
             if guild_data.get("id") != guild_id or not isinstance(guild_data.get("owner_id"), str):
@@ -131,9 +129,9 @@ async def verify_discord_source(
     try:
         async with (
             asyncio.timeout(10),
-            _discord_client(bot_token, transport) as client,
+            discord_client(bot_token, transport) as client,
         ):
-            response = await _discord_get(client, f"channels/{channel_id}")
+            response = await discord_get(client, f"channels/{channel_id}")
             response.raise_for_status()
             raw: object = response.json()
             if not isinstance(raw, dict):
@@ -152,7 +150,7 @@ async def verify_discord_source(
                 or not parent_id.isdecimal()
             ):
                 raise StoreError("the source thread has no valid parent")
-            response = await _discord_get(client, f"channels/{parent_id}")
+            response = await discord_get(client, f"channels/{parent_id}")
             response.raise_for_status()
             raw_parent: object = response.json()
             if not isinstance(raw_parent, dict):
