@@ -679,8 +679,10 @@ async def test_timer_rerun_updates_unsettled_rows_and_full_cancels_the_missing(
     now = datetime.now(UTC)
     async with db_session_factory.begin() as db:
         for sid in ("keep", "drop", "paused"):
-            await import_held_timer(db, _timer(sid, note=sid), tenant_id=moved.id, now=now)
-        moved_fire = _timer("keep", minutes=120, note="changed", paused=True)
+            timer = _timer(sid, note=sid, paused=sid == "keep")
+            await import_held_timer(db, timer, tenant_id=moved.id, now=now)
+        # What a rerun says about `paused` is ignored: only the first import counts.
+        moved_fire = _timer("keep", minutes=120, note="changed", paused=False)
         again = await import_held_timer(db, moved_fire, tenant_id=moved.id, now=now)
         assert again.outcome == "updated", again
         cancelled = await cancel_missing_timers(
