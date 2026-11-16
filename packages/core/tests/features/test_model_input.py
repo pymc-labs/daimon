@@ -95,9 +95,7 @@ def test_channel_background_follows_its_setting_and_chat_history_still_caps_it()
     assert (found.value, found.tier) == ("50", "agent"), "the most specific tier decides"
     fifty = HistoryDepth.of(_snapshot(found))
     assert (fifty.replay, fifty.backfill) == (100, 50), "50 reads 50 channel messages"
-    capped = HistoryDepth.of(
-        _snapshot(found, ResolvedFeature("history_depth", "25", "workspace"))
-    )
+    capped = HistoryDepth.of(_snapshot(found, ResolvedFeature("history_depth", "25", "workspace")))
     assert capped.backfill == 25, "chat history at 25 caps the channel read at 25"
     assert HistoryDepth.of(_snapshot()).backfill == 25, "the default reads 25"
     assert HistoryDepth.of(None).backfill == 25, "a hand-built admission reads 25"

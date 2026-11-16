@@ -4190,7 +4190,7 @@ class DaimonBot(commands.Bot):
             admitted_name=admission.agent.name,
             asking_ma_agent_id=asking_ma_agent_id,
         )
-        turn_deadline_at = turn_deadline(now=datetime.now(UTC))
+        turn_deadline_at = turn_deadline(now=datetime.now(UTC), ceiling_s=admission.turn_ceiling_s)
         agent = admission.agent
         try:
             async with self.runtime.sessionmaker.begin() as identity_session:
@@ -5449,7 +5449,8 @@ class DaimonBot(commands.Bot):
         # bind/create (bind_session) plus the driver pump (run_prepared_turn)
         # as ONE shared budget -- admit() and the queue wait are outside it.
         turn_deadline_at = turn_deadline(
-            now=self._ingress_clock() if self._ingress_clock is not None else datetime.now(UTC)
+            now=self._ingress_clock() if self._ingress_clock is not None else datetime.now(UTC),
+            ceiling_s=admission.turn_ceiling_s,
         )
 
         discord_settings = self.runtime.settings.discord

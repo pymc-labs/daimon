@@ -708,7 +708,7 @@ async def run_wizard_submit_turn_observed(
         # site had NO timeout of any kind before this phase -- the old
         # 45-minute wait_for lived only in bot.py's mention path, so a
         # wizard-submit turn could hang forever.
-        turn_deadline_at = turn_deadline(now=datetime.now(UTC))
+        turn_deadline_at = turn_deadline(now=datetime.now(UTC), ceiling_s=admission.turn_ceiling_s)
 
         # --- Stage two: bind_session -- bind_session(). Always reuses
         # the thread's existing session: the form lives in the conversation

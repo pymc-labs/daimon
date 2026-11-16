@@ -64,6 +64,7 @@ from daimon.core.stores.thread_sessions import (
 )
 from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_intents
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.core.turn.ceiling import TURN_CEILING_S
 from daimon.core.turn.posture import Billed, BillingPosture
 from daimon.core.turn.prepare import ContinuityOutcome
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
@@ -1458,6 +1459,7 @@ async def test_initial_card_post_failure_keeps_prepared_intent(
     # What the turn controls read: on the default provider, no move (M03).
     admission.backend_revision = None
     admission.backend_follow = None
+    admission.turn_ceiling_s = TURN_CEILING_S
     admission.agent.model.id = "claude-haiku-5-5"
     admission.agent.name = "test-agent"
     admission.agent.model.id = "claude-sonnet-4-6"
@@ -1512,6 +1514,7 @@ async def test_initial_card_timestamp_write_failure_prevents_turn_and_preserves_
     # What the turn controls read: on the default provider, no move (M03).
     admission.backend_revision = None
     admission.backend_follow = None
+    admission.turn_ceiling_s = TURN_CEILING_S
     admission.agent.model.id = "claude-haiku-5-5"
     admission.agent.name = "test-agent"
     admission.agent.model.id = "claude-sonnet-4-6"
@@ -1571,6 +1574,7 @@ async def test_terminal_render_followed_by_raise_still_retires_card_intent(
     # What the turn controls read: on the default provider, no move (M03).
     admission.backend_revision = None
     admission.backend_follow = None
+    admission.turn_ceiling_s = TURN_CEILING_S
     admission.agent.model.id = "claude-haiku-5-5"
     admission.account_id = tenant.account_id
     admission.agent.id = "agent_test_id"
@@ -1678,6 +1682,7 @@ async def test_cancelled_initial_card_post_keeps_prepared_intent(
     # What the turn controls read: on the default provider, no move (M03).
     admission.backend_revision = None
     admission.backend_follow = None
+    admission.turn_ceiling_s = TURN_CEILING_S
     admission.agent.model.id = "claude-haiku-5-5"
     admission.agent.name = "test-agent"
     admission.agent.model.id = "claude-sonnet-4-6"

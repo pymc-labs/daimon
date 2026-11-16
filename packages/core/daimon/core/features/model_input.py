@@ -29,6 +29,8 @@ PER_TURN_KEYS: Final[tuple[str, ...]] = (
 MODEL_INPUT_KEYS: Final[tuple[str, ...]] = ("guidance", *SESSION_KEYS, *TURN_KEYS)
 
 HISTORY_KEYS: Final[tuple[str, ...]] = ("history_depth", "channel_history")
+LIMIT_KEYS: Final[tuple[str, ...]] = ("turn_time_limit",)
+"""Limits every admitted turn reads."""
 CHAT_KEYS: Final[tuple[str, ...]] = (
     "completion_pings",
     "table_rendering",
@@ -65,7 +67,7 @@ class HistoryDepth:
 
     @classmethod
     def of(cls, features: FeatureSnapshot | None) -> HistoryDepth:
-        """From a snapshot; none, or one without a key (a hand-built admission), reads the defaults."""
+        """From a snapshot; none, or one without a key (a hand-built admission), reads defaults."""
         if features is None:
             return cls()
         replay = features.features.get("history_depth")
@@ -77,6 +79,13 @@ class HistoryDepth:
 
 
 FULL_HISTORY: Final[HistoryDepth] = HistoryDepth()
+
+
+def turn_limit_minutes(features: FeatureSnapshot | None) -> int | None:
+    """The turn time limit in minutes; None, for a hand-built admission or a snapshot without
+    the key, leaves the built-in ceiling."""
+    found = features.features.get("turn_time_limit") if features is not None else None
+    return None if found is None else limit_int(found.value)
 
 
 @dataclass(frozen=True)

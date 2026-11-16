@@ -75,6 +75,7 @@ Where each feature can be set, and its default.
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Long job dollar cap | `long_jobs_max_usd` | Limit | $5 | ✓ | ✓ | ✓ |  |  |  |
 | Long job time limit | `long_jobs_max_deadline` | Limit | 70 minutes | ✓ | ✓ | ✓ |  |  |  |
+| Turn time limit | `turn_time_limit` | Limit | 45 minutes |  | ✓ | ✓ |  |  |  |
 | New threads per reply | `outbound_threads` | Limit | 2 threads | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Places per reply | `outbound_places` | Limit | 2 places | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | People tagged per reply | `outbound_people` | Limit | 5 people | ✓ | ✓ | ✓ | ✓ | ✓ |  |
@@ -807,6 +808,18 @@ The longest one long job may run. The smallest setting wins.
 | Levels | Deployment, Workspace, Agent |
 | Combines | Lowest wins |
 | Deprecated | `DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES` |
+
+## Turn time limit
+
+The longest one answer may take before it is stopped. The smallest setting wins. Routines, watches and agent-to-agent chats keep the standard limit.
+
+| | |
+| --- | --- |
+| Key | `turn_time_limit` |
+| Values | `180` (180 minutes), `90` (90 minutes), `45` (45 minutes) |
+| Default | `45` |
+| Levels | Workspace, Agent |
+| Combines | Lowest wins |
 
 ## Posting to others
 

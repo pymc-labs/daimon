@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A turn time limit setting.** Server admins can let one answer run for 90 or 180
+  minutes instead of 45, for a workspace or an agent; the smallest setting wins.
+  Routines, watches and agent-to-agent chats keep the standard limit.
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and
   the MCP tools. A run nobody started, such as a routine, never applies one at once.

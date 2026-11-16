@@ -384,7 +384,7 @@ class WebTurns:
     ) -> None:
         deps, key, tenant_id = self.deps, thread_key(thread.id), thread.tenant_id
         place = place_of(thread.person_id)
-        deadline = turn_deadline(now=datetime.now(UTC))
+        deadline = turn_deadline(now=datetime.now(UTC), ceiling_s=admission.turn_ceiling_s)
         try:
             prepared = await bind_session(
                 deps,

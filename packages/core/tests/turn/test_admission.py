@@ -41,6 +41,7 @@ from daimon.core.turn.admission import (
     MissingTurnConfigError,
     admit,
 )
+from daimon.core.turn.ceiling import TURN_CEILING_S, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.ma import resolved_agent_env_router
@@ -617,6 +618,58 @@ async def test_admit_happy_path_returns_admission_with_retrieved_agent_and_accou
     assert admission.account_id == principal.account_id, (
         "account_id must match the principal resolved for this (platform, external_id)"
     )
+
+
+async def test_admission_turn_ceiling_follows_the_turn_time_limit_setting(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The default stays 45 minutes; a workspace setting of 90 extends it; authority still caps."""
+    tenant = await make_tenant(db_session)
+    await make_tenant_config(
+        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
+    )
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await db_session.commit()
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+
+    async def ceiling() -> float:
+        admission = await admit(
+            deps,
+            origin="chat",
+            tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
+            platform="discord",
+            external_user_id="user-1",
+            channel_id="chan-1",
+            now=_NOW,
+        )
+        assert isinstance(admission, Admission), "the turn is admitted"
+        return admission.turn_ceiling_s
+
+    assert await ceiling() == TURN_CEILING_S == 45 * 60.0, "the default stays 45 minutes"
+    await set_workspace_feature(
+        db_session,
+        None,
+        tenant_id=tenant.id,
+        platform="discord",
+        key="turn_time_limit",
+        value="90",
+        account_id=None,
+        surface="cli",
+    )
+    await db_session.commit()
+    extended = await ceiling()
+    assert extended == 90 * 60.0, "a workspace setting of 90 minutes extends the turn"
+    capped = turn_deadline(
+        now=_NOW, ceiling_s=extended, authority_deadline=_NOW + timedelta(minutes=10)
+    )
+    assert capped == _NOW + timedelta(minutes=10), "retained authority still caps the limit"
 
 
 async def test_admit_reads_the_daimon_tools_the_agent_has_ask_or_deny_rules_on(

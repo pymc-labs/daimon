@@ -65,6 +65,7 @@ from daimon.core.errors import TurnError
 from daimon.core.features.model_input import (
     CHAT_KEYS,
     HISTORY_KEYS,
+    LIMIT_KEYS,
     PER_TURN_KEYS,
     SESSION_KEYS,
     TURN_KEYS,
@@ -72,6 +73,7 @@ from daimon.core.features.model_input import (
     SessionToolset,
     agent_toolset,
     builtins_of,
+    turn_limit_minutes,
 )
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.resolver import ResolvedFeature
@@ -129,6 +131,7 @@ from daimon.core.stores.thread_sessions import get_thread_session_at
 from daimon.core.thread_models import apply_thread_model, conversation_key, thread_backend
 from daimon.core.thread_release import apply_thread_release, release_due, release_now
 from daimon.core.turn.approvals import daimon_rule_set_for
+from daimon.core.turn.ceiling import TURN_CEILING_S
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
@@ -479,6 +482,13 @@ class Admission:
     def history_depth(self) -> HistoryDepth:
         """How much earlier chat a context builder reads at this place."""
         return HistoryDepth.of(self.features)
+
+    @property
+    def turn_ceiling_s(self) -> float:
+        """How long a turn here may run before it is stopped: the turn time limit set at this
+        place, else the built-in 45 minutes."""
+        minutes = turn_limit_minutes(self.features)
+        return TURN_CEILING_S if minutes is None else minutes * 60.0
 
     def feature_on(self, key: str) -> bool:
         """`key` at this place; a hand-built admission, or a key not resolved, keeps it on."""
@@ -1985,6 +1995,7 @@ async def _admit_gates(
                         *PER_TURN_KEYS,
                         *IDENTITY_KEYS,
                         *HISTORY_KEYS,
+                        *LIMIT_KEYS,
                         *CHAT_KEYS,
                     )
                 )

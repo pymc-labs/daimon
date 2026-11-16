@@ -2818,7 +2818,9 @@ class SlackApp:
             # run_prepared_turn fail immediately at its first await with a
             # ceiling TurnError. Bounding the interstitial itself is separate,
             # deferred work.
-            turn_deadline_at = turn_deadline(now=datetime.now(UTC))
+            turn_deadline_at = turn_deadline(
+                now=datetime.now(UTC), ceiling_s=admission.turn_ceiling_s
+            )
 
             # --- Stage two: bind_session (find-or-create, mapping write,
             # recorder binding) -- bind_session(). As on Discord,
@@ -3544,7 +3546,9 @@ class SlackApp:
             admitted_name=follow_admission.agent.name,
             asking_ma_agent_id=asking_ma_agent_id,
         )
-        follow_deadline = turn_deadline(now=datetime.now(UTC))
+        follow_deadline = turn_deadline(
+            now=datetime.now(UTC), ceiling_s=follow_admission.turn_ceiling_s
+        )
         follow_prepared = await bind_session(
             self.runtime.turn_deps,
             follow_admission,

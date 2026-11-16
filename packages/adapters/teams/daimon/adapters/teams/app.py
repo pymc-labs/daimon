@@ -1760,7 +1760,7 @@ class TeamsApp:
         if bare and self._reader is None:
             await lifecycle.close_with_notice(_NO_CONTEXT)
             return
-        deadline = turn_deadline(now=datetime.now(UTC))
+        deadline = turn_deadline(now=datetime.now(UTC), ceiling_s=admission.turn_ceiling_s)
         try:
             prepared = await bind_session(
                 deps,

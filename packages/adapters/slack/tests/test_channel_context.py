@@ -47,6 +47,7 @@ from daimon.core.features.model_input import FULL_HISTORY
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
 from daimon.core.turn.admission import AdmissionGrant
+from daimon.core.turn.ceiling import TURN_CEILING_S
 from daimon.core.turn.prepare import ContinuityOutcome
 from daimon.core.untrusted import UNTRUSTED_NOTE
 from slack_sdk.web.async_client import AsyncWebClient
@@ -426,6 +427,7 @@ async def _first_turn(
     # What the turn controls read: on the default provider, no move (M03).
     admission.backend_revision = None
     admission.backend_follow = None
+    admission.turn_ceiling_s = TURN_CEILING_S
     admission.history_depth = FULL_HISTORY
     admission.agent.model.id = "claude-haiku-5-5"
     admission.account_id = tenant.account_id
