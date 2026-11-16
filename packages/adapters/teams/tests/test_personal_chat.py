@@ -16,6 +16,7 @@ from daimon.adapters.teams.personal_chat import (
     TeamsDmPick,
     route_personal_chat,
 )
+from daimon.adapters.teams.runtime import DmPick, TeamsRuntime
 from daimon.core.authz import AgentRef
 from daimon.core.direct_messages import DM_AGENT_REFUSED, dm_permission_text
 from daimon.core.dm_access import DmAgent
@@ -47,7 +48,10 @@ def _agents(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
 
 
 async def _route(
-    db: async_sessionmaker[AsyncSession], inbound: TeamsInbound | None = None
+    db: async_sessionmaker[AsyncSession],
+    inbound: TeamsInbound | None = None,
+    *,
+    runtime: TeamsRuntime | None = None,
 ) -> tuple[bool, list[MessageActivityInput]]:
     posted: list[MessageActivityInput] = []
 
@@ -55,7 +59,7 @@ async def _route(
         posted.append(card)
 
     answered = await route_personal_chat(
-        build_teams_runtime(db), inbound or make_inbound(), tenant_id=TENANT, post=post
+        runtime or build_teams_runtime(db), inbound or make_inbound(), tenant_id=TENANT, post=post
     )
     return answered, posted
 
@@ -151,14 +155,6 @@ async def test_route_personal_chat_when_team_roster_unreadable_then_fails_closed
     assert await _bound(db_session_factory) is None, "nothing pinned"
 
 
-class _Reader:
-    def __init__(self, seed: str | None) -> None:
-        self.seed = seed
-
-    async def latest_user_message(self, **_: object) -> str | None:
-        return self.seed
-
-
 def _click(agent: str) -> Any:
     activity = SimpleNamespace(
         value=SimpleNamespace(action=SimpleNamespace(data={"agent": agent})),
@@ -173,38 +169,48 @@ def _click(agent: str) -> Any:
 
 
 async def _pick(
-    db: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-    agent: str,
-    *,
-    seed: str | None = "hello",
+    runtime: TeamsRuntime, monkeypatch: pytest.MonkeyPatch, agent: str
 ) -> tuple[Any, list[TeamsInbound]]:
     async def actor(*_: object, **__: object) -> Actor:
         return Actor(AAD_OBJECT_ID, TENANT, False, CONVERSATION_ID)
 
     monkeypatch.setattr(personal_chat, "card_actor", actor)
     sent: list[TeamsInbound] = []
-    reader: Any = _Reader(seed)
-    picker = TeamsDmPick(build_teams_runtime(db), dispatch=sent.append, reader=reader)
+    picker = TeamsDmPick(runtime, dispatch=sent.append)
     return await picker._on_action(_click(agent)), sent  # pyright: ignore[reportPrivateUsage]
 
 
-async def test_dm_pick_when_allowed_then_pins_and_answers_the_waiting_message(
+async def test_dm_pick_when_allowed_then_pins_and_answers_every_held_message(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Messages sent while the card is open join it, as on Slack: one card, one answer."""
     _agents(monkeypatch, "alpha", "beta")
-    reply, sent = await _pick(db_session_factory, monkeypatch, "beta")
+    runtime = build_teams_runtime(db_session_factory)
+    first = await _route(db_session_factory, make_inbound("hello"), runtime=runtime)
+    later = await _route(db_session_factory, make_inbound("and this"), runtime=runtime)
+    assert (first[0], len(first[1])) == (False, 1), "the first message gets the card"
+    assert later == (False, []), "a later message waits on the same card"
+
+    reply, sent = await _pick(runtime, monkeypatch, "beta")
+
     assert await _bound(db_session_factory) == "beta", "the chat is pinned to the pick"
-    assert [i.text for i in sent] == ["hello"], "the waiting message is answered"
+    assert [i.text for i in sent] == ["hello\n\nand this"], "one turn answers both"
+    assert (sent[0].activity_id, sent[0].from_form) == ("click-1", True), "under the click's id"
     assert "You chose beta." in str(reply.value), "the card says what was chosen"
+    assert CONVERSATION_ID not in runtime.dm_picks, "the choice is closed"
 
 
-async def test_dm_pick_when_message_unreadable_then_asks_to_send_again(
+async def test_dm_pick_when_nothing_is_held_then_asks_to_send_again(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A card from an expired choice, or another process, pins but has nothing to answer."""
     _agents(monkeypatch, "alpha", "beta")
-    reply, sent = await _pick(db_session_factory, monkeypatch, "alpha", seed=None)
+    runtime = build_teams_runtime(db_session_factory)
+    await _route(db_session_factory, runtime=runtime)
+    runtime.dm_picks[CONVERSATION_ID].expires_at = 0.0
+    reply, sent = await _pick(runtime, monkeypatch, "alpha")
     assert not sent, "nothing to answer"
+    assert await _bound(db_session_factory) == "alpha", "the pick still pins the chat"
     assert "Send your message again." in str(reply.value), "the person is told what to do"
 
 
@@ -223,6 +229,9 @@ async def test_dm_pick_when_a_lock_names_another_agent_then_refused_unpinned(
             set_by=None,
             now=_NOW,
         )
-    reply, sent = await _pick(db_session_factory, monkeypatch, "beta")
+    runtime = build_teams_runtime(db_session_factory)
+    runtime.dm_picks[CONVERSATION_ID] = DmPick(("alpha", "beta"), [make_inbound()], 1e12)
+    reply, sent = await _pick(runtime, monkeypatch, "beta")
     assert reply.value == DM_AGENT_REFUSED, "the lock refuses another agent"
     assert not sent and await _bound(db_session_factory) is None, "nothing pinned or answered"
+    assert CONVERSATION_ID in runtime.dm_picks, "the held message waits for an allowed pick"

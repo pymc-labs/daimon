@@ -3,16 +3,19 @@
 A chat is pinned by a hand-over binding on the chat itself, the one Switch to
 agent writes. A chat with none is routed on its first message
 (`daimon.core.dm_routing`): one agent starts at once, several get a card of
-buttons, and a refusal says why. Each turn rechecks the pinned agent's grant
-with the cached team rosters (`daimon.core.direct_messages.require_dm_turn_grant`).
+buttons whose pick answers the messages held until then, and a refusal says why.
+Each turn rechecks the pinned agent's grant with the cached team rosters
+(`daimon.core.direct_messages.require_dm_turn_grant`).
 """
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final
+from time import monotonic
+from typing import Final
 
 import structlog
 from daimon.adapters.teams.card import notice_adaptive_card, notice_card
@@ -25,8 +28,8 @@ from daimon.adapters.teams.card_actions import (
     submitted_fields,
     toast,
 )
-from daimon.adapters.teams.identity import DENIED, TeamsInbound, display_bot_name
-from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.adapters.teams.identity import DENIED, TeamsInbound
+from daimon.adapters.teams.runtime import DmPick, TeamsRuntime
 from daimon.adapters.teams.team_owners import team_group_lookup
 from daimon.core.authz import build_subject
 from daimon.core.direct_messages import DM_AGENT_REFUSED, dm_permission_text
@@ -48,9 +51,6 @@ from microsoft_teams.api import (
 )
 from microsoft_teams.apps import ActivityContext
 
-if TYPE_CHECKING:
-    from daimon.adapters.teams.thread_reader import ThreadReader
-
 __all__ = [
     "UNCHECKED",
     "VERB",
@@ -65,6 +65,7 @@ VERB: Final = "dm_pick_agent"
 UNCHECKED: Final = "I couldn't check your access just now.\n\nTry again in a minute."
 _CHOOSE: Final = "Several agents can answer you here.\n\nChoose one."
 _MAX_CHOICES: Final = 6
+_PICK_SECONDS: Final = 300.0
 
 Post = Callable[[MessageActivityInput], Awaitable[None]]
 
@@ -182,6 +183,8 @@ async def route_personal_chat(
         )
         return True
     if isinstance(route, DmChoose):
+        if _hold(runtime, chat, route.agents, inbound):
+            return False
         choices = [button(VERB, name, "pick", agent=name) for name in route.agents[:_MAX_CHOICES]]
         await post(notice_card(_CHOOSE, actions=choices, error=False))
         return False
@@ -189,19 +192,26 @@ async def route_personal_chat(
     return False
 
 
-class TeamsDmPick:
-    """Agent choice clicks in a personal chat: recheck, pin, then answer the waiting message."""
+def _hold(runtime: TeamsRuntime, chat: str, agents: tuple[str, ...], inbound: TeamsInbound) -> bool:
+    """Keep `inbound` for the chat's pick; True when an open choice of the same agents takes
+    it, so no second card is posted (as Slack holds a DM's burst)."""
+    picks, now = runtime.dm_picks, monotonic()
+    for stale in [key for key, pick in picks.items() if pick.expires_at <= now]:
+        del picks[stale]
+    if (open_pick := picks.get(chat)) is not None and open_pick.agents == agents:
+        open_pick.held.append(inbound)
+        return True
+    held = [] if open_pick is None else open_pick.held
+    picks[chat] = DmPick(agents, [*held, inbound], now + _PICK_SECONDS)
+    return False
 
-    def __init__(
-        self,
-        runtime: TeamsRuntime,
-        *,
-        dispatch: Callable[[TeamsInbound], None],
-        reader: ThreadReader,
-    ) -> None:
+
+class TeamsDmPick:
+    """Agent choice clicks in a personal chat: recheck, pin, then answer the held messages."""
+
+    def __init__(self, runtime: TeamsRuntime, *, dispatch: Callable[[TeamsInbound], None]) -> None:
         self._runtime = runtime
         self._dispatch = dispatch
-        self._reader = reader
 
     async def on_action(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
@@ -236,35 +246,27 @@ class TeamsDmPick:
             remember_pick=True,
         )
         log.info("teams.dm.picked", agent=name)
-        seed = await self._reader.latest_user_message(
-            conversation_id=chat,
-            channel_id=chat,
-            user_id=actor.user_id,
-            team_id=None,
-            team_group_id=None,
-            before=activity.reply_to_id,
-            kind="personal",
+        pick = runtime.dm_picks.pop(chat, None)
+        held = (
+            []
+            if pick is None or pick.expires_at <= monotonic()
+            else [item for item in pick.held if item.user_id.lower() == actor.user_id.lower()]
         )
-        if seed is None:
+        if not held:
+            # Expired, or held by another process: nothing here to answer.
             return replace_card(
                 notice_adaptive_card(f"You chose {name}.\n\nSend your message again.", error=False)
             )
-        settings = runtime.settings.teams
-        assert settings is not None
+        # One turn for what was held, under the click's id: a form's, naming no message.
         self._dispatch(
-            TeamsInbound(
-                kind="dm",
-                entra_tenant_id=settings.tenant_id,
-                user_id=actor.user_id,
-                conversation_id=chat,
-                channel_id=chat,
+            dataclasses.replace(
+                held[-1],
                 activity_id=activity.id,
-                text=seed,
-                service_url=activity.service_url,
-                bot_name=display_bot_name(activity.recipient.name),
-                user_name=activity.from_.name,
+                from_form=True,
+                text="\n\n".join(item.text for item in held),
+                files=tuple(file for item in held for file in item.files),
+                composed_ids=(),
                 timestamp=datetime.now(UTC).isoformat(),
-                sender_id=activity.from_.id,
             )
         )
         return replace_card(notice_adaptive_card(f"You chose {name}.", error=False))

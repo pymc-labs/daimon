@@ -472,7 +472,6 @@ def create_teams_http_service(
     dm_pick = personal_chat.TeamsDmPick(
         runtime,
         dispatch=turns._dispatch_inbound,  # pyright: ignore[reportPrivateUsage]  # verified message ingress
-        reader=reader,
     )
     teams_app.on_card_action_execute(personal_chat.VERB, dm_pick.on_action)
     teams_app.on_dialog_open(routines_card.CREATE_DIALOG, routines.on_dialog_open)

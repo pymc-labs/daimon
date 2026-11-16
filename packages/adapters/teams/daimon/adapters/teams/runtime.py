@@ -16,6 +16,7 @@ from asyncpg import (  # pyright: ignore[reportMissingTypeStubs]
     InternalClientError,
     PostgresError,
 )
+from daimon.adapters.teams.identity import TeamsInbound
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.channel_budget_notice import drain_budget_notices
 from daimon.core.config import Settings
@@ -33,6 +34,15 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
 log = structlog.get_logger()
+
+
+@dataclass
+class DmPick:
+    """An open agent choice in a personal chat: who may be picked, and the messages it answers."""
+
+    agents: tuple[str, ...]
+    held: list[TeamsInbound]
+    expires_at: float
 
 
 @dataclass(frozen=True)
@@ -60,6 +70,8 @@ class TeamsRuntime:
     group_members: GroupMembersCache = field(default_factory=GroupMembersCache)
     # This process's message admissions; `hold_owner_key` makes it read as alive.
     owner_key: int = field(default_factory=lambda: randbits(63))
+    # Open agent choices by personal chat id, until picked or expired.
+    dm_picks: dict[str, DmPick] = field(default_factory=dict[str, DmPick])
 
 
 # How often the owner connection is checked; a relock retries from 1 s up to the cap.
