@@ -563,11 +563,12 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         effect="capability",
         values=_ON_OFF,
         default="off",
-        tiers=("deployment", "workspace"),
+        tiers=("deployment", "workspace", "agent"),
         binds="turn",
         doc=(
-            "Conversations may move to a direct message with the agent. The agent that answers "
-            "there is the team's DM agent, which is chosen apart from this."
+            "People may talk to the agent in a direct message. Turned on for the workspace, every "
+            "agent takes part; an agent can opt out. Who may message each agent, and which agent "
+            "a message reaches, is set apart from this."
         ),
         platforms=_DM_PLATFORMS,
         authority=_ADMIN,

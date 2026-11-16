@@ -55,7 +55,7 @@ Where each feature can be set, and its default.
 | Shared memory | `memory_shared` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon; Always On on Gemini, OpenAI |
 | Channel memory | `memory_channel` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Private channel messages | `private_channel_messages` | Capability | On | ✓ |  |  |  |  | Needs setup by whoever runs Daimon; Only Teams |
-| Direct messages | `direct_messages` | Capability | Off | ✓ | ✓ |  |  |  | Only Discord, Slack |
+| Direct messages | `direct_messages` | Capability | Off | ✓ | ✓ | ✓ |  |  | Only Discord, Slack |
 | Web app: chat | `web.chat` | Capability | On | ✓ | ✓ |  |  |  |  |
 | Web app: agents | `web.agents` | Capability | On | ✓ | ✓ |  |  |  |  |
 | Web app: channels | `web.channels` | Capability | On | ✓ | ✓ |  |  |  |  |
@@ -544,14 +544,14 @@ Every message in private and shared channels is read through Microsoft Graph, no
 
 ## Direct messages
 
-Conversations may move to a direct message with the agent. The agent that answers there is the team's DM agent, which is chosen apart from this.
+People may talk to the agent in a direct message. Turned on for the workspace, every agent takes part; an agent can opt out. Who may message each agent, and which agent a message reaches, is set apart from this.
 
 | | |
 | --- | --- |
 | Key | `direct_messages` |
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
-| Levels | Deployment, Workspace |
+| Levels | Deployment, Workspace, Agent |
 | Combines | Off above is a ceiling |
 
 ## Direct message wait
