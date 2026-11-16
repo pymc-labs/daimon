@@ -177,38 +177,30 @@ async def lock_preparation(
     await try_fence(session, key)
 
 
-def turn_is_active(row: ThreadSessionRow, *, now: dt.datetime) -> bool:
-    """Is a turn still plausibly running on this mapping?
-
-    A marker older than the turn's ceiling cannot belong to a live turn — the
-    turn that wrote it either cleared it or died with its process — so an
-    abandoned marker must not defer every later change forever. The ceiling is
-    the standard one, or the marker's stored deadline when a time limit allowed longer.
-    """
-    if row.active_turn_message_id is None or row.active_turn_started_at is None:
-        return False
-    # Import lazily: turn.__init__ re-exports run, which imports these stages.
-    from daimon.core.turn.ceiling import marker_window_s
-
-    window = marker_window_s(
-        started_at=row.active_turn_started_at, deadline=row.active_turn_deadline
-    )
-    return (now - row.active_turn_started_at).total_seconds() < window
-
-
-async def turn_blocks_change(
+async def turn_is_active(
     row: ThreadSessionRow,
     *,
     now: dt.datetime,
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> bool:
-    """`turn_is_active`, unless the marker names a worker that is gone.
+    """Is a turn still plausibly running on this mapping?
 
-    A turn that died with its worker leaves its marker, and a long time limit
-    would hold it for hours; a marker whose owner no longer holds its lock
-    cannot belong to a live turn, whatever deadline it stored.
+    A marker older than the turn's ceiling, or naming a worker that is gone, cannot belong
+    to a live turn: the turn that wrote it either cleared it or died with its process, so
+    an abandoned marker must not defer every later change. The ceiling is the standard
+    one, or the stored deadline when a time limit allowed longer.
     """
-    if not turn_is_active(row, now=now):
+    if row.active_turn_message_id is None or row.active_turn_started_at is None:
+        return False
+    # Import lazily: turn.__init__ re-exports run, which imports these stages.
+    from daimon.core.turn.ceiling import TURN_CEILING_S
+
+    window = TURN_CEILING_S
+    if row.active_turn_deadline is not None:
+        window = max(
+            window, (row.active_turn_deadline - row.active_turn_started_at).total_seconds()
+        )
+    if (now - row.active_turn_started_at).total_seconds() >= window:
         return False
     if row.active_turn_owner_key is None:
         return True

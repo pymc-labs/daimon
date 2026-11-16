@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from daimon.core import direct_messages, session_fence_retry
 from daimon.core.direct_messages import DirectMessageAccessRevoked
-from daimon.core.session_preparation_stages import turn_blocks_change, turn_is_active
+from daimon.core.session_preparation_stages import turn_is_active
 from daimon.core.stores.direct_messages import (
     DirectMessageBusy,
     DirectMessageRow,
@@ -25,10 +25,8 @@ from daimon.core.stores.thread_sessions import (
     mark_turn_active,
 )
 from daimon.core.turn.ceiling import (
-    LONGEST_TURN_CEILING_S,
     TURN_CEILING_S,
     current_turn_deadline,
-    marker_window_s,
     turn_deadline,
 )
 from daimon.testing.factories import (
@@ -44,30 +42,21 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 _NOW = datetime(2026, 11, 1, 12, 0, 0, tzinfo=UTC)
 
 
-def test_the_marker_window_follows_the_turns_own_deadline() -> None:
-    ninety = _NOW + timedelta(minutes=90)
-    assert marker_window_s(started_at=_NOW, deadline=None) == TURN_CEILING_S, "legacy rows"
-    assert marker_window_s(started_at=_NOW, deadline=ninety) == 90 * 60.0
-    short = _NOW + timedelta(minutes=15)
-    assert marker_window_s(started_at=_NOW, deadline=short) == TURN_CEILING_S, "never below 45"
-    far = _NOW + timedelta(days=2)
-    assert marker_window_s(started_at=_NOW, deadline=far) == LONGEST_TURN_CEILING_S
-
-
 def test_retained_authority_still_caps_a_ninety_minute_limit() -> None:
     capped = turn_deadline(
         now=_NOW, ceiling_s=90 * 60.0, authority_deadline=_NOW + timedelta(minutes=20)
     )
-    assert capped == _NOW + timedelta(minutes=20)
+    assert capped == _NOW + timedelta(minutes=20), "the earlier authority deadline wins"
 
 
 async def test_a_ninety_minute_marker_stays_active_past_45_minutes(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """A marker stands for its stored deadline, never less than the standard 45 minutes."""
+    deadlines = (None, _NOW + timedelta(minutes=15), _NOW + timedelta(minutes=90))
     async with db_session_factory.begin() as session:
-        legacy = await make_thread_session(session)
-        long = await make_thread_session(session)
-        for mapping, deadline in ((legacy, None), (long, _NOW + timedelta(minutes=90))):
+        mappings = [await make_thread_session(session) for _ in deadlines]
+        for mapping, deadline in zip(mappings, deadlines, strict=True):
             await mark_turn_active(
                 session,
                 id=mapping.id,
@@ -76,24 +65,26 @@ async def test_a_ninety_minute_marker_stays_active_past_45_minutes(
                 deadline=deadline,
             )
     async with db_session_factory() as session:
-        legacy = await get_thread_session_by_id(session, id=legacy.id)
-        long = await get_thread_session_by_id(session, id=long.id)
-    assert legacy is not None and long is not None
-    assert legacy.active_turn_deadline is None
-    for minutes, legacy_active, long_active in (
-        (40, True, True),
-        (50, False, True),
-        (80, False, True),
-        (95, False, False),
+        rows = [await get_thread_session_by_id(session, id=mapping.id) for mapping in mappings]
+    legacy, short, long = rows
+    assert legacy is not None and short is not None and long is not None, "markers stored"
+    assert legacy.active_turn_deadline is None, "a marker without a time limit stores no deadline"
+    for minutes, expected in (
+        (40, [True, True, True]),
+        (50, [False, False, True]),
+        (95, [False] * 3),
     ):
         now = _NOW + timedelta(minutes=minutes)
-        assert turn_is_active(legacy, now=now) is legacy_active, f"legacy at {minutes} minutes"
-        assert turn_is_active(long, now=now) is long_active, f"90-minute at {minutes} minutes"
+        active = [
+            await turn_is_active(row, now=now, sessionmaker=db_session_factory)
+            for row in (legacy, short, long)
+        ]
+        assert active == expected, f"legacy, 15- and 90-minute markers at {minutes} minutes"
     async with db_session_factory.begin() as session:
         await clear_active_turn(session, id=long.id)
     async with db_session_factory() as session:
         cleared = await get_thread_session_by_id(session, id=long.id)
-    assert cleared is not None and cleared.active_turn_deadline is None
+    assert cleared is not None and cleared.active_turn_deadline is None, "clearing drops it"
 
 
 async def _claim(
@@ -201,7 +192,7 @@ async def test_a_fence_waits_as_long_as_the_running_turn_may(
         await session_fence_retry.try_fence(_Db(), "k")  # type: ignore[arg-type]
     finally:
         current_turn_deadline.reset(token)
-    assert len(waits) == 1 and abs(waits[0] - expected_s) < 5
+    assert len(waits) == 1 and abs(waits[0] - expected_s) < 5, f"waited {waits}"
 
 
 async def test_a_dead_workers_long_marker_stops_blocking(
@@ -234,7 +225,7 @@ async def test_a_dead_workers_long_marker_stops_blocking(
             assert dead is not None and live is not None and unowned is not None
             now = datetime.now(UTC)
             blocks = [
-                await turn_blocks_change(row, now=now, sessionmaker=db_session_factory)
+                await turn_is_active(row, now=now, sessionmaker=db_session_factory)
                 for row in (dead, live, unowned)
             ]
         finally:
