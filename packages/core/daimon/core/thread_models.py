@@ -57,9 +57,36 @@ THREAD_MODEL_CHOICES: Final[Mapping[str, str]] = {
 THREAD_EFFORTS: Final = ("low", "medium", "high", "xhigh", "max")
 
 
+_NO_XHIGH: Final = ("low", "medium", "high", "max")
+
+#: The efforts each Claude model takes, from Anthropic's model documentation. A model
+#: not listed (Haiku 4.5 and older, or an id not confirmed) takes none.
+_MODEL_EFFORTS: Final[Mapping[str, tuple[str, ...]]] = {
+    **dict.fromkeys(
+        (
+            "claude-fable-5",
+            "claude-fable-5-1",
+            "claude-fable-5-2",
+            "claude-mythos-5-1",
+            "claude-mythos-5-2",
+            "claude-opus-5-5",
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-sonnet-5-5",
+            "claude-sonnet-5",
+            "claude-haiku-5-5",
+        ),
+        THREAD_EFFORTS,
+    ),
+    "claude-opus-4-6": _NO_XHIGH,
+    "claude-sonnet-4-6": _NO_XHIGH,
+}
+
+
 def model_efforts(model_id: str) -> tuple[str, ...]:
-    """The efforts a Claude model takes: Haiku takes none, the others take every level."""
-    return () if "haiku" in model_id else THREAD_EFFORTS
+    """The efforts a Claude model takes; none for a model not confirmed to take any."""
+    return _MODEL_EFFORTS.get(model_id, ())
 
 
 MODEL_FALLBACK_NOTICE: Final = (
@@ -174,9 +201,17 @@ async def choose_thread_model(
             session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
         )
     shown_model = current.id if current is not None else None
+    kept = _shown_effort(shown_model, kept)
     return ThreadModelChange(
         model_id=shown_model, note=_change_note(shown_model, kept), effort=kept
     )
+
+
+def _shown_effort(model_id: str | None, effort: str | None) -> str | None:
+    """The stored effort, only where the model it runs on takes it."""
+    if effort is None or model_id is None:
+        return effort
+    return effort if effort in model_efforts(model_id) else None
 
 
 def _change_note(model_id: str | None, effort: str | None) -> str:
@@ -204,6 +239,8 @@ async def describe_thread_model(
         effort = await get_thread_effort(
             session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
         )
+    if choice is not None and choice.provider == DEFAULT_BACKEND:
+        effort = _shown_effort(choice.id, effort)
     if choice is None and effort is None:
         return "This conversation runs on the agent's own model."
     name = chosen_label(choice) if choice is not None else "the agent's own model"

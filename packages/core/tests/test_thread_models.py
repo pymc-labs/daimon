@@ -19,6 +19,7 @@ from daimon.core.stores.thread_models import (
     set_thread_model,
 )
 from daimon.core.thread_models import (
+    _MODEL_EFFORTS,  # pyright: ignore[reportPrivateUsage]
     THREAD_MODEL_CHOICES,
     ThreadModelRefused,
     apply_thread_model,
@@ -26,6 +27,7 @@ from daimon.core.thread_models import (
     conversation_key,
     describe_thread_model,
     may_choose_thread_model,
+    model_efforts,
     resolve_choice,
     sent_effort,
 )
@@ -277,7 +279,8 @@ async def test_a_model_pick_keeps_the_agents_effort_and_the_chosen_one_survives_
     assert kept.model_effort is None, "the agent's own effort is sent, not recorded as a choice"
     assert (kept.agent.model.model_extra or {}).get("effort") == "high"
     assert sent_effort(_EFFORT_AGENT, "claude-opus-5-5", kept.model_effort) == "high"
-    assert sent_effort(_EFFORT_AGENT, "claude-haiku-5-5", None) is None
+    assert sent_effort(_EFFORT_AGENT, "claude-haiku-5-5", None) == "high"
+    assert sent_effort(_EFFORT_AGENT, "claude-haiku-4-5", None) is None
 
     change = await choose_thread_model(db_session_factory, effort="low", **pick)
     assert (change.model_id, change.effort) == ("claude-opus-5-5", "low")
@@ -286,14 +289,19 @@ async def test_a_model_pick_keeps_the_agents_effort_and_the_chosen_one_survives_
     await choose_thread_model(db_session_factory, choice="haiku", **pick)
     swapped = await _applied(db_session_factory, tenant.id)
     assert swapped.model_override == "claude-haiku-5-5"
-    assert swapped.model_effort is None, "Haiku takes no effort, so none is sent"
-    assert "effort" not in (swapped.agent.model.model_extra or {})
+    assert swapped.model_effort == "low", "a new model keeps the chosen effort"
+    assert (
+        await describe_thread_model(db_session_factory, **pick)
+        == "This conversation runs on Haiku 5.5 at low effort."
+    )
 
 
 async def test_a_model_that_takes_no_effort_drops_the_agents_and_refuses_a_chosen_one(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delitem(_MODEL_EFFORTS, "claude-haiku-5-5")
     tenant = await make_tenant(db_session)
     await db_session.commit()
     pick = {"tenant_id": tenant.id, "platform": "discord", "thread_id": "T1"}
@@ -305,7 +313,15 @@ async def test_a_model_that_takes_no_effort_drops_the_agents_and_refuses_a_chose
         }
     )
 
-    await choose_thread_model(db_session_factory, choice="haiku", **pick)
+    await choose_thread_model(db_session_factory, choice="opus", effort="low", **pick)
+    moved = await choose_thread_model(db_session_factory, choice="haiku", **pick)
+    assert (moved.effort, moved.note) == (
+        None,
+        "This conversation runs on Haiku 5.5 from the next reply.",
+    ), "a stored effort the picked model does not take is not shown"
+    assert await describe_thread_model(db_session_factory, **pick) == (
+        "This conversation runs on Haiku 5.5."
+    )
     async with db_session_factory() as session:
         applied = await apply_thread_model(
             session,
@@ -321,6 +337,14 @@ async def test_a_model_that_takes_no_effort_drops_the_agents_and_refuses_a_chose
         await choose_thread_model(db_session_factory, effort="low", **pick)
     with pytest.raises(ThreadModelRefused, match="Haiku 5.5 doesn't take an effort"):
         await choose_thread_model(db_session_factory, choice="haiku", effort="low", **pick)
+
+
+def test_each_model_takes_only_the_efforts_confirmed_for_it() -> None:
+    for model_id in THREAD_MODEL_CHOICES.values():
+        assert model_efforts(model_id) == ("low", "medium", "high", "xhigh", "max")
+    assert model_efforts("claude-opus-4-6") == ("low", "medium", "high", "max")
+    assert model_efforts("claude-haiku-4-5") == ()
+    assert model_efforts("claude-unknown") == ()
 
 
 async def test_an_effort_alone_runs_the_agents_own_model_and_default_hands_it_back(
