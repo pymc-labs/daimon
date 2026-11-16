@@ -35,6 +35,46 @@ Upgrade every Discord process before naming an agent, since older ones do not
 recognise a conversation with no source channel. The bot token must be set on
 the scheduler and MCP processes too, for the membership checks below.
 
+## Choose who may DM which agent
+
+Each agent has a DM grant, and each server has a default agent, ordered rules
+and, per person, an optional pick. A person's private conversation starts
+with the first agent that has DMs on and admits them, chosen like this:
+
+1. **Grants.** An agent admits `members` (the default: every member), only
+   those `listed` (people or roles), or everyone `excluded` (all but those
+   listed). A role id in a grant needs a live role lookup; if it fails, the
+   agent is treated as closed for that person.
+2. **Rules.** The first rule that matches the person (by user, role or
+   everyone) names an agent. A **locked** rule decides alone: the person's pick
+   is ignored, and if its agent is unavailable to them they are refused.
+3. **Pick, rule agent, default.** Otherwise the first available of the person's
+   pick, the rule's agent and the server default. When several agents remain, a
+   dropdown (server and agent) lets the person choose, and the choice is
+   remembered for the next conversation.
+
+`/dm-me` in a channel follows the same rules and refuses a locked-out person
+with a private note. Handing a DM to another agent in the conversation is
+held to the same grant. Agents that send a DM by themselves (the
+`send_direct_message` tool, watches, routines and budget notices) are held to
+the sending agent's grant only; locks do not apply.
+
+```bash
+daimon dm default AGENT --enabled        # default agent, DMs on
+daimon dm access AGENT --mode listed --user 123 --group 456
+daimon dm rule add --group 456 --agent AGENT --locked
+daimon dm rule list | move | remove
+daimon dm explain 123                  # who would answer, and why
+daimon dm import-policies --dry-run      # see DAIMON_DIRECT_MESSAGE_POLICIES as stored access
+```
+
+Add `--guild GUILD_ID` (or `--tenant`) to pick the server. Erasing a person
+removes their pick, their personal rules and their entry in any listed grant.
+
+`DAIMON_DIRECT_MESSAGE_POLICIES` still applies and is checked in addition.
+The Discord service logs a warning when it is set; `daimon dm import-policies`
+copies it into stored access so it can be removed.
+
 ## What a person sees
 
 When someone DMs the bot, Daimon looks for servers where they are a current

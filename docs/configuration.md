@@ -108,7 +108,8 @@ JSON object.
 Per-tenant DM recipient policies keyed by tenant UUID (normalized at load; invalid keys
 rejected). Default is members (live membership required). Set mode=disabled to disable
 DMs, or mode=allowlist with recipient_ids to restrict delivery to listed members.
-Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object.
+Checked in addition to per-agent DM access; `daimon dm import-policies` copies it into
+stored access. Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object.
 
 ### `DAIMON_TABLE_RENDERING`
 

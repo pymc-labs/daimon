@@ -213,7 +213,9 @@ bots, inactive, external and anonymous users are rejected. It sends at most
 19,000 characters as plain text, with no attachments and no cross-tenant
 delivery. The default policy is tenant members. Set a tenant to `allowlist`
 (with `recipient_ids`) or `disabled` in `DAIMON_DIRECT_MESSAGE_POLICIES`
-([configuration.md](configuration.md#daimon_direct_message_policies)).
+([configuration.md](configuration.md#daimon_direct_message_policies)). The
+sending agent's DM grant must also admit the recipient; an unknown role lookup
+refuses ([direct messages](direct-messages.md#choose-who-may-dm-which-agent)).
 
 ### Opt-in DM conversations
 
