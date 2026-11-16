@@ -1,4 +1,4 @@
-"""The wait before a direct message starts a turn: setting, window and approvals."""
+"""The wait before a direct message starts a turn: setting, bursts and approvals."""
 
 from __future__ import annotations
 
@@ -7,13 +7,7 @@ from time import monotonic
 
 import pytest
 from daimon.core import dm_debounce
-from daimon.core.dm_debounce import (
-    DmDebouncer,
-    DmWindow,
-    bypasses_wait,
-    debounce_seconds,
-    split_approvals,
-)
+from daimon.core.dm_debounce import DmBurst, DmBursts, debounce_seconds, split_approvals
 from daimon.core.features.registry import FEATURES
 from daimon.core.stores.domain import FeatureTarget
 from daimon.core.stores.feature_values import set_feature_value
@@ -49,128 +43,205 @@ async def test_the_wait_follows_the_workspace_setting(db_session_factory, platfo
         )
 
 
-def test_an_approval_reply_is_never_held() -> None:
-    assert bypasses_wait("yes") and bypasses_wait("Yes, please!")
-    assert not bypasses_wait("yes but not now") and not bypasses_wait("what is this?")
-
-
 def test_approvals_stand_alone_between_runs_of_ordinary_messages() -> None:
     texts = ["a", "b", "yes", "c", "ok", "ok", "d"]
     groups = split_approvals(texts, lambda text: text)
     assert groups == [["a", "b"], ["yes"], ["c"], ["ok"], ["ok"], ["d"]]
     assert split_approvals(["a", "b"], lambda text: text) == [["a", "b"]]
+    assert split_approvals(["yes but not now"], str) == [["yes but not now"]], "not an approval"
+
+
+class _Turns:
+    """Records each turn's group and every mark put on or taken off."""
+
+    def __init__(self, during=None) -> None:
+        self.groups: list[list[str]] = []
+        self.marks: list[tuple[str, bool]] = []
+        self._during = during
+
+    async def react(self, item: str, on: bool) -> None:
+        self.marks.append((item, on))
+
+    async def answer(self, group: list[str]) -> None:
+        self.groups.append(group)
+        if self._during is not None:
+            await self._during(group)
 
 
 async def _later(delay: float, action) -> None:
     await asyncio.sleep(delay)
-    action()
+    await action()
 
 
-async def test_the_window_closes_after_a_quiet_gap_with_every_message() -> None:
-    window = DmWindow("one")
-    reacted: list[str] = []
+async def test_a_burst_is_answered_after_a_quiet_gap_in_one_turn() -> None:
+    burst = DmBurst("one", str)
+    turns = _Turns()
 
-    async def seen(item: str) -> None:
-        reacted.append(item)
+    async def second() -> None:
+        burst.add("two")
+        await burst.mark("two", turns.react)
 
     started = monotonic()
-    later = asyncio.create_task(_later(0.15, lambda: window.add("two")))
-    messages = await window.settle(0.3, on_arrival=seen)
+    later = asyncio.create_task(_later(0.15, second))
+    await burst.answer(0.3, turns.react, turns.answer)
     await later
-    assert messages == ["one", "two"]
-    assert reacted == ["one", "two"], "each message is marked once, as it arrives"
+    assert turns.groups == [["one", "two"]], "one turn answers both"
+    assert turns.marks == [("one", True), ("two", True), ("one", False), ("two", False)], (
+        "each message is marked while it waits and unmarked when its turn ends"
+    )
     assert 0.4 <= monotonic() - started < 1.0, "the gap restarts at the second message"
+    assert burst.closed and not burst.unanswered
+
+
+async def _first_turn_at(burst: DmBurst[str], started: float) -> float:
+    """When the first turn starts, while someone keeps typing every 0.05 s."""
+    first: list[float] = []
+
+    async def during(group: list[str]) -> None:
+        first.append(monotonic() - started)
+        burst.stop()  # the rest is answered at once
+
+    async def keep_typing() -> None:
+        for number in range(1, 40):
+            burst.add(str(number))
+            await asyncio.sleep(0.05)
+
+    typing = asyncio.create_task(keep_typing())
+    await burst.answer(0.3, _Turns().react, _Turns(during).answer)
+    typing.cancel()
+    return first[0]
 
 
 async def test_a_steady_stream_is_cut_off_at_the_cap(monkeypatch) -> None:
     monkeypatch.setattr(dm_debounce, "MAX_WAIT_S", 0.5)
-    window = DmWindow(0)
-
-    async def keep_typing() -> None:
-        for number in range(1, 20):
-            await asyncio.sleep(0.1)
-            window.add(number)
-
-    typing = asyncio.create_task(keep_typing())
     started = monotonic()
-    messages = await window.settle(0.3)
-    elapsed = monotonic() - started
-    typing.cancel()
-    assert 0.45 <= elapsed < 0.9, "closed by the cap, not the quiet gap"
-    assert len(messages) >= 4
+    assert 0.45 <= await _first_turn_at(DmBurst("0", str), started) < 0.9, (
+        "the cap starts the turn though the quiet gap never came"
+    )
 
 
-async def test_an_approval_reply_ends_the_wait_now() -> None:
-    window = DmWindow("question")
+async def test_an_approval_reply_ends_the_wait_and_stands_alone() -> None:
+    burst = DmBurst("question", str)
+    turns = _Turns()
+
+    async def approve() -> None:
+        burst.add("yes")
+
     started = monotonic()
-    later = asyncio.create_task(_later(0.05, lambda: window.add("yes", flush=True)))
-    messages = await window.settle(5.0)
+    later = asyncio.create_task(_later(0.05, approve))
+    await burst.answer(5.0, turns.react, turns.answer)
     await later
-    assert messages == ["question", "yes"] and monotonic() - started < 1.0
+    assert turns.groups == [["question"], ["yes"]], "the approval gets its own turn"
+    assert monotonic() - started < 1.0, "no wait once it arrives"
 
 
-async def test_zero_seconds_takes_only_what_already_joined() -> None:
-    """With the wait off, a message that joined during the lookups is still marked held."""
-    window = DmWindow("one")
-    window.add("two")
-    reacted: list[str] = []
+async def test_an_approval_alone_is_answered_unmarked() -> None:
+    turns = _Turns()
+    await DmBurst("yes", str).answer(5.0, turns.react, turns.answer)
+    assert turns.groups == [["yes"]] and turns.marks == [], "nothing waited"
 
-    async def seen(item: str) -> None:
-        reacted.append(item)
 
+async def test_zero_seconds_answers_at_once_and_still_merges_what_joined() -> None:
+    """With the wait off, a message that joined during the lookups is held and merged."""
+    burst = DmBurst("one", str)
+    turns = _Turns()
+    burst.add("two")
+    await burst.mark("two", turns.react)
     started = monotonic()
-    assert await window.settle(0, on_arrival=seen) == ["one", "two"], "nothing more is awaited"
-    assert reacted == ["two"], "the first is answered at once; the one behind it was held"
+    await burst.answer(0, turns.react, turns.answer)
+    assert turns.groups == [["one", "two"]], "nothing more is awaited"
+    assert turns.marks == [("two", True), ("two", False)], "only the held one was marked"
     assert monotonic() - started < 0.2, "no wait"
 
 
 async def test_the_cap_counts_from_the_first_message_not_the_wait(monkeypatch) -> None:
     """Lookups between the first message and the wait do not extend the cap."""
     monkeypatch.setattr(dm_debounce, "MAX_WAIT_S", 0.5)
-    window = DmWindow(0)
+    burst = DmBurst("0", str)
     await asyncio.sleep(0.3)
+    assert await _first_turn_at(burst, monotonic()) < 0.4, "the cap ends 0.5 s after it opened"
 
-    async def keep_typing() -> None:
-        for number in range(1, 20):
-            window.add(number)
-            await asyncio.sleep(0.05)
 
-    typing = asyncio.create_task(keep_typing())
+async def test_messages_sent_during_a_turn_are_answered_by_the_next() -> None:
+    burst: DmBurst[str]
+    marks_during: list[list[tuple[str, bool]]] = []
+
+    async def during(group: list[str]) -> None:
+        if group == ["one"]:
+            burst.add("two")
+            await burst.mark("two", turns.react)
+        marks_during.append(list(turns.marks))
+
+    turns = _Turns(during)
+    burst = DmBurst("one", str)
+    await burst.answer(0.05, turns.react, turns.answer)
+    assert turns.groups == [["one"], ["two"]], "the second turn answers what the first missed"
+    assert ("one", False) in marks_during[1] and ("two", False) not in marks_during[1], (
+        "the first is unmarked after its turn; the second stays marked through its own"
+    )
+    assert turns.marks[-1] == ("two", False)
+
+
+async def test_a_mark_after_its_turn_ended_comes_off_at_once() -> None:
+    burst = DmBurst("one", str)
+    turns = _Turns()
+    burst.add("two")
+    await burst.answer(0, turns.react, turns.answer)
+    await burst.mark("two", turns.react)
+    assert turns.marks == [("two", True), ("two", False)], "no mark is left behind"
+
+
+async def test_a_failure_leaves_the_rest_unanswered_and_unmarked() -> None:
+    async def fail(group: list[str]) -> None:
+        raise RuntimeError("down")
+
+    bursts: DmBursts[str, str] = DmBursts(str)
+    burst = bursts.open("k", "one")
+    turns = _Turns()
+    burst.add("two")
+    await burst.mark("two", turns.react)
+    with pytest.raises(RuntimeError):
+        await burst.answer(0, turns.react, fail)
+    assert await bursts.end("k", burst) == ["one", "two"], "the caller tells the person"
+    assert turns.marks[-1] == ("two", False) and await bursts.end("k", burst) == [], "once"
+
+
+async def test_stopping_ends_a_wait_now() -> None:
+    burst = DmBurst("one", str)
+    turns = _Turns()
+    asyncio.get_running_loop().call_later(0.05, burst.stop)
     started = monotonic()
-    await window.settle(0.3)
-    typing.cancel()
-    assert monotonic() - started < 0.4, "the cap ends 0.5 s after the window opened"
+    await burst.answer(5.0, turns.react, turns.answer)
+    assert turns.groups == [["one"]] and monotonic() - started < 1.0, "answered as it is"
 
 
-async def test_a_stop_signal_ends_the_wait() -> None:
-    window = DmWindow("one")
-    started = monotonic()
-    flag = {"stop": False}
-    asyncio.get_running_loop().call_later(0.1, lambda: flag.update(stop=True))
-    await window.settle(5.0, stop=lambda: flag["stop"])
-    assert monotonic() - started < 2.0, "noticed within one slice"
+def test_a_message_joins_only_an_open_burst() -> None:
+    bursts: DmBursts[str, str] = DmBursts(str)
+    assert bursts.join("k", "early") is None
+    burst = bursts.open("k", "first")
+    assert bursts.join("k", "second") is burst and burst.unanswered == ["first", "second"]
+    burst.closed = True
+    assert bursts.join("k", "late") is None, "a closed burst takes nothing more"
 
 
-def test_a_message_joins_only_an_open_window() -> None:
-    bursts: DmDebouncer[str, str] = DmDebouncer()
-    assert not bursts.join("k", "early")
-    window = bursts.open("k", "first")
-    assert bursts.join("k", "second") and window.items == ["first", "second"]
-    bursts.close("k", window)
-    assert not bursts.join("k", "late"), "after the close, a message opens its own window"
+async def test_ending_a_stale_burst_keeps_the_newer_one() -> None:
+    bursts: DmBursts[str, str] = DmBursts(str)
+    old = bursts.open("k", "first")
     newer = bursts.open("k", "next")
-    bursts.close("k", window)
-    assert bursts.join("k", "still open") and newer.items == ["next", "still open"]
+    await bursts.end("k", old)
+    assert bursts.join("k", "still open") is newer and newer.unanswered == ["next", "still open"]
 
 
 async def test_stopping_ends_every_wait_and_skips_later_ones() -> None:
-    """A burst opened just after the stop does not wait out its window either."""
-    bursts: DmDebouncer[str, str] = DmDebouncer()
-    waiting = bursts.open("a", "one")
+    """A burst opened just after the stop does not wait either."""
+    bursts: DmBursts[str, str] = DmBursts(str)
+    turns = _Turns()
     started = monotonic()
-    settling = asyncio.create_task(waiting.settle(5.0))
+    waiting = asyncio.create_task(bursts.open("a", "one").answer(5.0, turns.react, turns.answer))
     await asyncio.sleep(0.05)
-    bursts.flush_all()
-    assert await settling == ["one"], "the open burst is answered as it is"
-    assert await bursts.open("b", "two").settle(5.0) == ["two"], "a later burst takes no wait"
-    assert monotonic() - started < 1.0, "neither waited out its window"
+    bursts.stop()
+    await waiting
+    await bursts.open("b", "two").answer(5.0, turns.react, turns.answer)
+    assert turns.groups == [["one"], ["two"]], "both answered as they are"
+    assert monotonic() - started < 1.0, "neither waited"
+    assert ("two", True) not in turns.marks, "a burst that never waits is never marked"

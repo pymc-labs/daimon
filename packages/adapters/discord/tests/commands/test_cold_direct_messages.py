@@ -1232,7 +1232,7 @@ async def test_messages_sent_during_a_reply_are_answered_in_one_turn(
     second, third = dm_message(102, "two"), dm_message(103, "three")
     await asyncio.wait_for(cog.on_message(second), 1)
     await asyncio.wait_for(cog.on_message(third), 1)
-    second.add_reaction.assert_awaited_once_with(module._QUEUED_REACTION)
+    second.add_reaction.assert_awaited_once_with(module._SEEN_REACTION)
     gate.set()
     await asyncio.wait_for(running, 5)
     assert [t["text"] for t in turns] == ["one", "two\n\nthree"], "the burst is one turn"
@@ -1280,7 +1280,8 @@ async def test_an_approval_reply_in_a_burst_stands_alone(db_session_factory, mon
     await cog.cog_unload()
 
 
-async def test_held_messages_are_dropped_with_a_notice_on_unload(db_session_factory, monkeypatch):
+async def test_a_cancelled_burst_is_dropped_with_a_notice(db_session_factory, monkeypatch):
+    """A turn cut off at the end of the shutdown grace window tells its burst."""
     cog, _, _, reply = await setup(db_session_factory, monkeypatch)
     gate, started, turns = await hold_first_reply(db_session_factory, reply)
     first = dm_message(101, "one")
@@ -1288,11 +1289,13 @@ async def test_held_messages_are_dropped_with_a_notice_on_unload(db_session_fact
     await asyncio.wait_for(started.wait(), 5)
     held = dm_message(102, "two")
     await cog.on_message(held)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert sent_text(first.channel.send.await_args_list[-1]) == module._DROPPED_NOTICE
+    held.remove_reaction.assert_awaited_once_with(module._SEEN_REACTION, cog.bot.user)
+    assert [t["text"] for t in turns] == ["one"], "nothing runs after the cancel"
     await cog.cog_unload()
-    assert sent_text(held.channel.send.await_args_list[-1]) == module._DROPPED_NOTICE
-    gate.set()
-    await asyncio.wait_for(running, 5)
-    assert [t["text"] for t in turns] == ["one"], "nothing runs after the unload"
 
 
 async def known_burst(db_session_factory, monkeypatch, seconds):
@@ -1308,7 +1311,16 @@ def assert_eyes_off(cog, *messages):
     for msg in messages:
         msg.add_reaction.assert_awaited_once_with(module._SEEN_REACTION)
         msg.remove_reaction.assert_awaited_once_with(module._SEEN_REACTION, cog.bot.user)
-    assert not cog._reacted and not cog._held_scope, "no held message is still tracked"
+    assert not cog._bursts._open, "no burst is left open"
+
+
+async def in_its_wait(msg):
+    """Let the burst `msg` opened reach its wait, so a later message joins it there."""
+    for _ in range(200):
+        if msg.add_reaction.await_count:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the first message never started waiting")
 
 
 async def test_an_unhandled_error_tells_the_rest_of_the_burst_it_was_not_sent(
@@ -1319,7 +1331,7 @@ async def test_an_unhandled_error_tells_the_rest_of_the_burst_it_was_not_sent(
     reply.side_effect = RuntimeError("a bug in the turn")
     one, approval = dm_message(101, "one"), dm_message(102, "yes")
     running = asyncio.create_task(cog.on_message(one))
-    await asyncio.sleep(0.05)
+    await in_its_wait(one)
     await cog.on_message(approval)
     with pytest.raises(RuntimeError):
         await asyncio.wait_for(running, 5)
@@ -1354,23 +1366,17 @@ async def test_a_failed_lookup_tells_the_burst_it_was_not_sent(db_session_factor
     await cog.cog_unload()
 
 
-@pytest.mark.parametrize("stop", ["drain", "unload"])
-async def test_a_shutdown_mid_wait_drops_the_burst_with_a_notice(
-    db_session_factory, monkeypatch, stop
-):
-    """A drain or unload ends the wait at once; the burst is told it wasn't sent."""
+async def test_a_drain_mid_wait_answers_the_burst_at_once(db_session_factory, monkeypatch):
+    """A deploy goes unnoticed: the wait ends and the burst is answered before the close."""
     cog, reply = await known_burst(db_session_factory, monkeypatch, 5)
     one, two = dm_message(101, "one"), dm_message(102, "two")
     running = asyncio.create_task(cog.on_message(one))
-    await asyncio.sleep(0.05)
+    await in_its_wait(one)
     await cog.on_message(two)
-    if stop == "drain":
-        cog.bot.draining = True
-    else:
-        await cog.cog_unload()
+    await cog.on_drain()
     await asyncio.wait_for(running, 2)
-    assert reply.await_count == 1, "no turn starts once the process is stopping"
-    assert sent_text(one.channel.send.await_args_list[-1]) == module._DROPPED_NOTICE
+    assert reply.await_count == 2 and reply.await_args.kwargs["text"] == "one\n\ntwo"
+    assert all(sent_text(c) != module._DROPPED_NOTICE for c in one.channel.send.await_args_list)
     assert_eyes_off(cog, one, two)
     await cog.cog_unload()
 
@@ -1385,7 +1391,7 @@ async def test_a_burst_sent_before_dm_me_moved_the_conversation_is_dropped(
     cog, reply = await known_burst(db_session_factory, monkeypatch, 0.3)
     one = dm_message(101, "one")
     running = asyncio.create_task(cog.on_message(one))
-    await asyncio.sleep(0.05)
+    await in_its_wait(one)
     async with db_session_factory() as session, session.begin():
         await session.execute(
             update(DirectMessageConversation)
@@ -1405,7 +1411,7 @@ async def test_a_failed_turn_takes_the_eyes_off_the_burst(db_session_factory, mo
     reply.side_effect = DaimonError("the turn failed")
     one, two = dm_message(101, "one"), dm_message(102, "two")
     running = asyncio.create_task(cog.on_message(one))
-    await asyncio.sleep(0.05)
+    await in_its_wait(one)
     await cog.on_message(two)
     await asyncio.wait_for(running, 5)
     assert reply.await_count == 2, "the burst ran as one turn"

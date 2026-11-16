@@ -11,11 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   direct message reaches the agent as it does in a channel, and a message with only a
   picture is answered. A forwarded message is passed as untrusted content, and a
   reply shows the message it answers. A forward is also passed in channels.
-- **Direct message bursts are answered once.** Messages sent while a reply is running
-  wait with an hourglass reaction and are answered together in the next turn. An
-  approval reply such as "yes" is always answered on its own. Held messages are dropped
-  with a notice if the bot restarts or `/dm-me` moves the conversation. A message whose
-  turn cannot run is told it wasn't sent, and every reaction comes off.
 - **Direct message memory is a setting.** `dm_history_depth` sets how many earlier
   messages each direct message reply carries: 12 (the default), 25, 50 or 100, at the
   deployment, workspace and agent levels. The smallest setting wins. It applies to
@@ -23,9 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Direct messages wait for you to finish.** `dm_debounce_seconds` (3 by default, or
   0, 1 or 5; 0 is off) holds a direct message until nothing new has arrived for that
   long, up to ten seconds after the first, then answers everything sent in one turn.
-  Each held message gets an eyes reaction at once. An approval reply such as "yes" is
-  never held, and on Slack a restart ends the wait. It applies to Discord and Slack,
-  set per workspace or deployment.
+  Messages sent while a reply runs are answered together by the next one. Each held
+  message gets an eyes reaction until it is answered. An approval reply such as "yes"
+  is answered on its own, at once. A restart answers held messages at once. If
+  `/dm-me` moves the conversation or the turn cannot run, they are told they weren't
+  sent. It applies to Discord and Slack, set per workspace or deployment.
 - **Earlier turns are no longer sent again into a continuing session.** A Discord direct
   message into a session that already answered a turn sends only the new message. A new,
   replaced or recovered session, or one whose first turn failed, still gets the history.

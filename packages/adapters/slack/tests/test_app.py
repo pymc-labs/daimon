@@ -602,12 +602,21 @@ async def test_drain_and_close_ends_a_waiting_dm_burst_at_once() -> None:
     """A direct message burst is answered at the drain, not after its whole wait."""
     app = _make_app()
     burst = app.runtime.dm_bursts.open(("T1", "D1", "U1"), {"ts": "1.1"})
-    settling = asyncio.create_task(burst.settle(5.0))
+    groups: list[list[dict[str, str]]] = []
+
+    async def react(event: dict[str, str], on: bool) -> None:
+        pass
+
+    async def answer(group: list[dict[str, str]]) -> None:
+        groups.append(group)
+
+    answering = asyncio.create_task(burst.answer(5.0, react, answer))
     await asyncio.sleep(0.05)
 
     await app.drain_and_close(_FakeSocketClient())  # type: ignore[arg-type]
 
-    assert await asyncio.wait_for(settling, 1.0) == [{"ts": "1.1"}], "the wait ends at the drain"
+    await asyncio.wait_for(answering, 1.0)
+    assert groups == [[{"ts": "1.1"}]], "the wait ends at the drain and the burst is answered"
 
 
 async def test_drain_and_close_waits_for_in_flight_tasks_before_closing() -> None:

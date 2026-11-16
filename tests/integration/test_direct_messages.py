@@ -819,14 +819,14 @@ async def test_slack_move_and_private_reply_use_real_core_and_http_transports(
 
     from aioresponses import aioresponses
     from daimon.adapters.slack.direct_messages import handle_direct_message, handle_dm_command
-    from daimon.core.dm_debounce import DmDebouncer
+    from daimon.adapters.slack.runtime import new_dm_bursts
     from slack_sdk.web.async_client import AsyncWebClient
 
     tenant, deps, admission, sent, streams, created = await _setup(
         db_session, db_session_factory, platform="slack", workspace="T1"
     )
     runtime = MagicMock()
-    runtime.dm_bursts = DmDebouncer()
+    runtime.dm_bursts = new_dm_bursts()
     runtime.turn_deps = deps
     runtime.sessionmaker = db_session_factory
     client = AsyncWebClient(token="xoxb-test", retry_handlers=[])

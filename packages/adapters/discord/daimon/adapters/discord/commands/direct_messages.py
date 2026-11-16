@@ -57,7 +57,7 @@ from daimon.core.direct_messages import (
     start_dm,
     tenant_ready,
 )
-from daimon.core.dm_debounce import DmDebouncer, DmWindow, bypasses_wait, debounce_seconds
+from daimon.core.dm_debounce import DmBursts, debounce_seconds
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -74,13 +74,11 @@ from daimon.core.stores.direct_messages import (
     set_dm_agent_name,
 )
 from daimon.core.stores.domain import Role, TenantRow
-from daimon.core.stores.pending_skill_adds import is_affirmative
 from daimon.core.stores.tenants import get_tenant, list_tenants_by_platform
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
 from daimon.core.turn.output import OutputAuthorization
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT
-from daimon.core.turn.thread_queue import ThreadQueue, group_by_author
 from daimon.core.turn_hold import RequesterOrg
 from daimon.core.workspace_settings import set_dms
 from sqlalchemy.exc import SQLAlchemyError
@@ -115,7 +113,6 @@ _DISCOVERY_FAILURE_NOTICE = "Couldn't open a private conversation. Please retry 
 _BUSY_NOTICE = "I'm still answering your last message.\nTry again once it's done, or press Stop."
 _DROPPED_NOTICE = "Your message wasn't sent. Please send it again."
 _EMPTY_NOTICE = "Send a text message to continue this conversation."
-_QUEUED_REACTION = "⌛"
 _SEEN_REACTION = "👀"
 
 
@@ -136,17 +133,6 @@ def _attachments(message: discord.Message | _DmRequest) -> list[discord.Attachme
         for a in getattr(message, "attachments", None) or ()
         if not (isinstance(a, discord.Attachment) and a.is_voice_message())
     ]
-
-
-def _has_input(message: discord.Message | _DmRequest) -> bool:
-    """Whether a message holds anything to answer: words, a file or a forwarded message.
-
-    A sticker or a voice message holds none."""
-    return bool(
-        message.content.strip()
-        or _attachments(message)
-        or getattr(message, "message_snapshots", None)
-    )
 
 
 @dataclass
@@ -174,14 +160,7 @@ class DirectMessageCog(commands.Cog):
         self._unloaded = False
         self._locks: WeakValueDictionary[tuple[int, int], asyncio.Lock] = WeakValueDictionary()
         self._pending: dict[tuple[int, int], _PendingSelection] = {}
-        self._replying: set[tuple[int, int]] = set()
-        self._queued: dict[tuple[int, int], list[discord.Message]] = {}
-        # A burst waiting out its quiet window, before its turn starts.
-        self._bursts: DmDebouncer[tuple[int, int], discord.Message] = DmDebouncer()
-        # The conversation each held message was sent into, by message id.
-        self._held_scope: dict[int, str] = {}
-        # The reaction on each held message, by message id, until its turn ends.
-        self._reacted: dict[int, str] = {}
+        self._bursts = DmBursts[tuple[int, int], discord.Message](lambda m: m.content)
         self._switch_views: dict[tuple[int, int], ServerSwitch] = {}
         self._buckets: TTLCache[int, tuple[float, float]] = TTLCache[int, tuple[float, float]](
             10_000, 300
@@ -189,7 +168,6 @@ class DirectMessageCog(commands.Cog):
 
     async def cog_unload(self) -> None:
         self._unloaded = True
-        self._bursts.flush_all()
         for view in self._switch_views.values():
             view.stop()
         self._switch_views.clear()
@@ -198,9 +176,6 @@ class DirectMessageCog(commands.Cog):
                 pending.view.complete()
         self._pending.clear()
         self._buckets.clear()
-        queued = [m for messages in self._queued.values() for m in messages]
-        self._queued.clear()
-        await self._drop_queued(queued)
 
     def _lock(self, key: tuple[int, int]) -> asyncio.Lock:
         lock = self._locks.get(key)
@@ -806,6 +781,11 @@ class DirectMessageCog(commands.Cog):
             await interaction.followup.send(embed=build_notice_embed(message), ephemeral=True)
 
     @commands.Cog.listener()
+    async def on_drain(self) -> None:
+        """The process is stopping: answer what is held without waiting for more."""
+        self._bursts.stop()
+
+    @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         if (
             self._unloaded
@@ -814,222 +794,88 @@ class DirectMessageCog(commands.Cog):
             or not isinstance(message.channel, discord.DMChannel)
         ):
             return
+        key = (message.author.id, message.channel.id)
+        if (burst := self._bursts.join(key, message)) is not None:
+            # The turn waiting or running here answers this message too.
+            await burst.mark(message, self._react)
+            return
         # The whole accepted DM -- slot wait, preparation, the turn and its
         # reply -- is in progress for the shutdown drain, not only the turn.
         with self.bot.runtime.turn_deps.running_turns.track():
-            key = (message.author.id, message.channel.id)
-            if key in self._replying and _has_input(message) and not self._selecting(key):
-                # A reply is running: hold this message for the next turn, which
-                # answers everything sent meanwhile at once. No await before the append.
-                await self._hold(key, message)
-                return
-            if _has_input(message) and self._bursts.join(
-                key, message, flush=bypasses_wait(message.content)
-            ):
-                # The burst's first message waits for this one; it answers them together.
-                return
-            async with self._lock(key):
-                pending = self._pending.get(key)
-                if pending is not None:
-                    if monotonic() < pending.expires_at:
-                        self._suppress(message, "selection_pending")
-                        return
-                    del self._pending[key]
-                burst = self._bursts.open(key, message)
-                # Every message taken in until its turn ends: the burst's own list, which
-                # later joiners land in, then whatever was held during the replies.
-                unanswered = burst.items
-                try:
-                    try:
-                        await self._wait_for_burst(burst, message)
-                    finally:
-                        self._bursts.close(key, burst)
-                    # No await since the burst closed: a message from here on is held.
-                    self._replying.add(key)
-                    try:
-                        await self._answer_in_order(unanswered)
-                        while held := self._queued.pop(key, []):
-                            unanswered.extend(held)
-                            await self._answer_in_order(unanswered)
-                    finally:
-                        self._replying.discard(key)
-                finally:
-                    # An error no turn handled, or a cancellation: nothing left goes unheard.
-                    unanswered.extend(self._queued.pop(key, []))
-                    await self._drop_queued(unanswered)
+            burst = self._bursts.open(key, message)
+            try:
+                async with self._lock(key):
+                    found = await self._conversation(message)
+                    seconds = 0.0
+                    scope_id = None if found is None else found.scope_id
+                    if found is not None:
+                        seconds = await debounce_seconds(
+                            self.bot.runtime.sessionmaker,
+                            self.bot.runtime.settings,
+                            found.tenant_id,
+                            "discord",
+                        )
 
-    async def _wait_for_burst(
-        self, burst: DmWindow[discord.Message], first: discord.Message
-    ) -> None:
-        """Hold the first message until the person stops sending."""
-        seconds, scope_id = 0.0, None
-        if _has_input(first) and not bypasses_wait(first.content):
-            async with self.bot.runtime.sessionmaker() as session:
-                found = await get_conversation(
-                    session,
-                    platform="discord",
-                    route_key=str(first.channel.id),
-                    external_user_id=str(first.author.id),
-                )
-            if found is not None:
-                scope_id = found.scope_id
-                seconds = await debounce_seconds(
-                    self.bot.runtime.sessionmaker,
-                    self.bot.runtime.settings,
-                    found.tenant_id,
-                    "discord",
-                )
+                    async def answer(group: list[discord.Message]) -> None:
+                        nonlocal scope_id
+                        scope_id = await self._answer(group, scope_id)
 
-        async def seen(message: discord.Message) -> None:
-            # The conversation it was sent into, so /dm-me meanwhile drops it with a notice.
-            if scope_id is not None:
-                self._held_scope[message.id] = scope_id
-            self._reacted[message.id] = _SEEN_REACTION
-            await self._react(message)
+                    await burst.answer(seconds, self._react, answer)
+            finally:
+                # An error no turn handled, or a cancellation: nothing left goes unheard.
+                if await self._bursts.end(key, burst):
+                    await self._tell_dropped(message.channel)
 
-        await burst.settle(
-            seconds, on_arrival=seen, stop=lambda: self._unloaded or self.bot.draining
-        )
-
-    async def _answer_in_order(self, unanswered: list[discord.Message]) -> None:
-        """One turn for each run of ordinary messages; each run leaves `unanswered` once
-        its turn ends. An approval reply stands alone."""
-        for group in self._compose(list(unanswered)):
-            await self._answer_batch(group)
-            answered = {m.id for m in group}
-            unanswered[:] = [m for m in unanswered if m.id not in answered]
-
-    @property
-    def _thread_queue(self) -> ThreadQueue[tuple[int, int], discord.Message]:
-        return ThreadQueue(self._replying, self._queued, start_turn=lambda _key: None)
-
-    def _selecting(self, key: tuple[int, int]) -> bool:
-        pending = self._pending.get(key)
-        return pending is not None and monotonic() < pending.expires_at
-
-    async def _hold(self, key: tuple[int, int], message: discord.Message) -> None:
-        self._thread_queue.enqueue(key, message)
-        self._reacted[message.id] = _QUEUED_REACTION
-        # After the append, so held messages keep their order, and before the reaction's
-        # await: a drain that ran first would answer the batch unchecked.
-        # A /dm-me during the reply changes this scope; the batch then drops instead.
+    async def _conversation(self, message: discord.Message | _DmRequest) -> DirectMessageRow | None:
         async with self.bot.runtime.sessionmaker() as session:
-            held_in = await get_conversation(
+            return await get_conversation(
                 session,
                 platform="discord",
                 route_key=str(message.channel.id),
                 external_user_id=str(message.author.id),
             )
-        if held_in is not None and message.id in self._reacted:
-            self._held_scope[message.id] = held_in.scope_id
-        await self._react(message)
 
-    async def _react(self, message: discord.Message) -> None:
-        """Put on a held message's reaction, unless its turn already ended."""
-        emoji = self._reacted.get(message.id)
-        if emoji is None:
-            return
+    async def _react(self, message: discord.Message, on: bool) -> None:
+        """Put the mark that says a message is held on, or take it off."""
         with contextlib.suppress(discord.HTTPException):
-            await message.add_reaction(emoji)
-        user = self.bot.user
-        if message.id not in self._reacted and user is not None:
-            # Its turn ended while the reaction was on its way: take it back off.
-            with contextlib.suppress(discord.HTTPException):
-                await message.remove_reaction(emoji, user)
+            if on:
+                await message.add_reaction(_SEEN_REACTION)
+            elif self.bot.user is not None:
+                await message.remove_reaction(_SEEN_REACTION, self.bot.user)
 
-    @staticmethod
-    def _compose(queued: list[discord.Message]) -> list[list[discord.Message]]:
-        """One turn for what arrived meanwhile, except an approval reply, which stands alone."""
-        groups: list[list[discord.Message]] = []
-        for author_messages in group_by_author(
-            queued, lambda m: m.author.id, separate=lambda _m: False
-        ):
-            run: list[discord.Message] = []
-            for held in author_messages:
-                if is_affirmative(held.content):
-                    if run:
-                        groups.append(run)
-                        run = []
-                    groups.append([held])
-                else:
-                    run.append(held)
-            if run:
-                groups.append(run)
-        return groups
+    async def _answer(self, group: list[discord.Message], scope_id: str | None) -> str | None:
+        """One turn for `group`, sent into `scope_id`; the conversation the next one goes to.
 
-    async def _answer(
-        self, message: discord.Message, *, batch: tuple[discord.Message, ...] = ()
-    ) -> None:
+        While a server pick is pending, the pick answers instead.
+        """
+        first = group[0]
+        key = (first.author.id, first.channel.id)
+        pending = self._pending.get(key)
+        if pending is not None and monotonic() < pending.expires_at:
+            for message in group:
+                self._suppress(message, "selection_pending")
+            return scope_id
+        self._pending.pop(key, None)
         try:
-            await self._reply(message, batch=batch)
+            return await self._reply(first, expected_scope_id=scope_id, batch=tuple(group))
         except _DM_FAILURES as exc:
             log.warning(
                 "discord.dm.discovery_failed",
                 error_type=type(exc).__name__,
-                user_id=str(message.author.id),
+                user_id=str(first.author.id),
                 reason="discovery_unavailable",
             )
             with contextlib.suppress(discord.HTTPException):
-                await message.channel.send(
+                await first.channel.send(
                     _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
                 )
+            return scope_id
 
-    async def _answer_batch(self, messages: list[discord.Message]) -> None:
-        """One turn for `messages`, then their reactions come off."""
-        key = (messages[0].author.id, messages[0].channel.id)
-        try:
-            if self._unloaded or self.bot.draining:
-                await self._drop_queued(messages)
-            elif self._selecting(key):
-                for message in messages:
-                    self._suppress(message, "selection_pending")
-            else:
-                messages = await self._without_moved(messages)
-                if messages:
-                    await self._answer(messages[0], batch=tuple(messages))
-        finally:
-            await self._clear_reactions(messages)
-
-    async def _without_moved(self, messages: list[discord.Message]) -> list[discord.Message]:
-        """Drop, with a notice, messages held in a conversation /dm-me has since replaced."""
-        first = messages[0]
-        async with self.bot.runtime.sessionmaker() as session:
-            current = await get_conversation(
-                session,
-                platform="discord",
-                route_key=str(first.channel.id),
-                external_user_id=str(first.author.id),
-            )
-        if current is None:
-            return messages
-        moved = [
-            m for m in messages if self._held_scope.get(m.id, current.scope_id) != current.scope_id
-        ]
-        if moved:
-            await self._drop_queued(moved)
-        return [m for m in messages if m not in moved]
-
-    async def _clear_reactions(self, messages: list[discord.Message]) -> None:
-        """Forget that `messages` were held and take off the reaction each one got."""
-        marked = [(m, self._reacted.pop(m.id, None)) for m in messages]
-        for message in messages:
-            self._held_scope.pop(message.id, None)
-        user = self.bot.user
-        if user is None:
-            return
-        for message, emoji in marked:
-            if emoji is not None:
-                with contextlib.suppress(discord.HTTPException):
-                    await message.remove_reaction(emoji, user)
-
-    async def _drop_queued(self, messages: list[discord.Message]) -> None:
+    async def _tell_dropped(self, channel: discord.abc.Messageable) -> None:
         """Tell the person messages taken in for a turn that will not run were not sent."""
-        if not messages:
-            return
-        await self._clear_reactions(messages)
-        log.info("discord.dm.queued_dropped", dropped=len(messages))
+        log.info("discord.dm.dropped")
         with contextlib.suppress(discord.HTTPException):
-            await messages[0].channel.send(
+            await channel.send(
                 embed=build_notice_embed(_DROPPED_NOTICE),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -1176,27 +1022,36 @@ class DirectMessageCog(commands.Cog):
         *,
         expected_scope_id: str | None = None,
         batch: tuple[discord.Message, ...] = (),
-    ) -> None:
-        """Answer `message`, or the held `batch` it opens, in one turn."""
-        assert isinstance(message.channel, discord.DMChannel)
-        runtime = self.bot.runtime
-        cards: list[DiscordTurnLifecycle] = []
-        async with runtime.sessionmaker() as session:
-            conversation = await get_conversation(
-                session,
-                platform="discord",
-                route_key=str(message.channel.id),
-                external_user_id=str(message.author.id),
-            )
+    ) -> str | None:
+        """Answer `message`, or the held `batch` it opens, in one turn.
+
+        The conversation it answered in, or that replaced `expected_scope_id`.
+        """
+        conversation = await self._conversation(message)
         if expected_scope_id is not None and (
             conversation is None or conversation.scope_id != expected_scope_id
         ):
-            self._suppress(message, "selection_superseded")
-            return
+            # A stale server pick, or messages sent before /dm-me moved the conversation.
+            self._suppress(message, "conversation_moved" if batch else "selection_superseded")
+            if batch:
+                await self._tell_dropped(message.channel)
+            return None if conversation is None else conversation.scope_id
         if conversation is None:
             conversation = await self._discover(message)
             if conversation is None:
-                return
+                return None
+        await self._turn(message, conversation, batch)
+        return conversation.scope_id
+
+    async def _turn(
+        self,
+        message: discord.Message | _DmRequest,
+        conversation: DirectMessageRow,
+        batch: tuple[discord.Message, ...],
+    ) -> None:
+        assert isinstance(message.channel, discord.DMChannel), "a DM turn runs in a DM"
+        runtime = self.bot.runtime
+        cards: list[DiscordTurnLifecycle] = []
         try:
             subject = await self._subject(conversation.tenant_id, message.author.id)
             async with runtime.sessionmaker() as session:

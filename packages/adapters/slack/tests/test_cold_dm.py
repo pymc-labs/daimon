@@ -8,9 +8,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from daimon.adapters.slack import direct_messages as dm_module
 from daimon.adapters.slack.blockkit import notice_fields
+from daimon.adapters.slack.runtime import new_dm_bursts
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.direct_messages import ColdDmNotices
-from daimon.core.dm_debounce import DmDebouncer
 from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.testing.factories import make_account, make_dm_conversation, make_tenant
 from slack_sdk.errors import SlackApiError
@@ -33,7 +33,7 @@ def fresh_notices(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _runtime(db_session_factory: async_sessionmaker[AsyncSession]) -> MagicMock:
     runtime = MagicMock()
-    runtime.dm_bursts = DmDebouncer()
+    runtime.dm_bursts = new_dm_bursts()
     runtime.sessionmaker = db_session_factory
     return runtime
 

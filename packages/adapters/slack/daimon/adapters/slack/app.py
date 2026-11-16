@@ -3983,7 +3983,7 @@ class SlackApp:
         deployment's 60s kill timeout.
         """
         self.draining = True
-        self.runtime.dm_bursts.flush_all()
+        self.runtime.dm_bursts.stop()
         log.info(
             "slack.draining",
             inflight_threads=len(self._processing),
