@@ -7,8 +7,13 @@ from collections.abc import Mapping
 import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import require_dm_grant
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient, TeamsMember
-from daimon.adapters.mcp.tools.teams._directory import installed_teams, require_client
+from daimon.adapters.mcp.tools.teams._directory import (
+    installed_teams,
+    require_client,
+    team_rosters,
+)
 from fastmcp.exceptions import ToolError
 
 _OTHER_ORGANISATION = (
@@ -48,6 +53,7 @@ async def teams_direct_message(
     """(1:1 chat id, message ids). A partial failure says how many were sent."""
     client, caller = require_client(runtime, auth)
     member = await _shared_member(runtime, auth, client, caller, recipient_id)
+    await require_dm_grant(runtime, auth, recipient_id=recipient_id, members=team_rosters(client))
     ids: list[str] = []
     try:
         chat = await client.open_personal_chat(member.id)

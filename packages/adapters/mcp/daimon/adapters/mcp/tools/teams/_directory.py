@@ -18,9 +18,10 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import ChannelReadPolicy
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
+from daimon.core.native_admins import GroupLookupFailed, GroupMembers
 from daimon.core.stores.domain import TeamsInstallationRow
 from daimon.core.stores.teams_installations import list_teams_installations
-from daimon.core.teams_graph import GraphClient
+from daimon.core.teams_graph import GraphClient, GraphUnavailable
 from fastmcp.exceptions import ToolError
 
 GENERAL = "General"
@@ -66,6 +67,19 @@ def require_client(runtime: McpRuntime, auth: AuthIdentity) -> tuple[TeamsBotCli
 
 def graph_for(client: TeamsBotClient) -> GraphClient:
     return GraphClient(client.http, client.graph_token)
+
+
+def team_rosters(client: TeamsBotClient) -> GroupMembers:
+    """A team's members by group id, for DM grants; a failed read is `GroupLookupFailed`."""
+    graph = graph_for(client)
+
+    async def members(group_id: str) -> frozenset[str]:
+        try:
+            return await graph.list_team_member_ids(group_id)
+        except GraphUnavailable as exc:
+            raise GroupLookupFailed(exc.reason) from exc
+
+    return members
 
 
 async def installed_teams(runtime: McpRuntime, auth: AuthIdentity) -> list[TeamsInstallationRow]:

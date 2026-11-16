@@ -46,10 +46,11 @@ from daimon.core.authz import (
     home_hold,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
-from daimon.core.dm_access import agent_dm_admits
+from daimon.core.dm_access import agent_dm_admits, sender_admits
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
 from daimon.core.mux_backend import resource_scope
+from daimon.core.native_admins import GroupMembers
 from daimon.core.permissions import (
     agent_permissions,
     any_agent_rules,
@@ -280,11 +281,13 @@ async def require_dm_grant(
     *,
     recipient_id: str,
     groups: frozenset[str] | None = None,
+    members: GroupMembers | None = None,
 ) -> None:
     """The sending agent's DM grant must admit the recipient; locks do not apply here.
 
     An identity with no agent (the operator, a user key) is held to the workspace
-    default agent's grant. An agent that cannot be resolved admits nobody.
+    default agent's grant. An agent that cannot be resolved admits nobody. Without
+    `groups`, `members` looks up the groups the grant names; a failed lookup refuses.
     """
     executing = auth.chat_agent_id or auth.agent_id
     name: str | None = None
@@ -305,10 +308,19 @@ async def require_dm_grant(
             name = None if agent is None else agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name
         if name is None:
             raise ToolError(_RUNS_IN_SEND_MSG)
-    async with runtime.session_factory() as db:
-        admitted = await agent_dm_admits(
-            db, tenant_id=auth.tenant_id, agent_name=name, user_id=recipient_id, groups=groups
+    if groups is None and members is not None:
+        admitted = await sender_admits(
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            agent_name=name,
+            user_id=recipient_id,
+            members=members,
         )
+    else:
+        async with runtime.session_factory() as db:
+            admitted = await agent_dm_admits(
+                db, tenant_id=auth.tenant_id, agent_name=name, user_id=recipient_id, groups=groups
+            )
     if not admitted:
         raise ToolError("this agent may not send direct messages to this person")
 

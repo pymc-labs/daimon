@@ -348,3 +348,62 @@ async def test_require_dm_grant_when_the_senders_list_leaves_the_person_out_refu
         await require_dm_grant(runtime, auth, recipient_id="9")
     with pytest.raises(ToolError, match="may not send"):
         await require_dm_grant(runtime, auth, recipient_id="9", groups=frozenset({"other"}))
+
+
+@pytest.mark.parametrize(
+    ("reply", "sent"),
+    [
+        ({"payload": {"ok": True, "users": ["U456"]}}, True),
+        ({"payload": {"ok": True, "users": ["U999"]}}, False),
+        ({"payload": {"ok": False, "error": "missing_scope"}}, False),
+    ],
+)
+async def test_slack_dm_when_the_grant_names_a_user_group_then_its_lookup_decides(
+    monkeypatch, sessionmaker, reply, sent
+):
+    """A Slack DM follows the sender's grant by user group; a failed lookup refuses."""
+    from daimon.core.stores import dm_access
+    from daimon.core.stores.direct_messages import set_dm_agent_name
+    from daimon.testing.factories import make_tenant
+
+    async with sessionmaker.begin() as session:
+        tenant = await make_tenant(session, platform="slack", workspace_id="T123")
+        await set_dm_agent_name(session, tenant_id=tenant.id, agent_name="ada")
+        await dm_access.set_grant(
+            session, tenant_id=tenant.id, agent_name="ada", who="listed",
+            user_ids=[], group_ids=["S1"], set_by=None, now=datetime(2026, 1, 1, tzinfo=UTC),
+        )  # fmt: skip
+    runtime, auth = runtime_and_auth("slack")
+    runtime, auth = (
+        replace(runtime, session_factory=sessionmaker),
+        replace(auth, tenant_id=tenant.id),
+    )
+
+    async def client_factory(runtime, *, team_id):
+        return AsyncWebClient(token="xoxb-test")
+
+    monkeypatch.setattr(direct_messages, "slack_web_client", client_factory)
+    with aioresponses() as http:
+        for user in ("U123", "U456"):
+            http.get(
+                re.compile(rf"https://slack\.com/api/users\.info.*user={user}.*"),
+                payload={"ok": True, "user": {"id": user, "team_id": "T123"}},
+            )
+        http.get(re.compile(r"https://slack\.com/api/usergroups\.users\.list.*"), **reply)
+        http.post(
+            re.compile(r"https://slack\.com/api/conversations\.open.*"),
+            payload={"ok": True, "channel": {"id": "D123"}},
+        )
+        http.post("https://slack.com/api/chat.postMessage", payload={"ok": True, "ts": "1.2"})
+        if sent:
+            result = await direct_messages.send_direct_message_impl(
+                runtime, auth, recipient_id="U456", content="hello"
+            )
+            assert result.channel_id == "D123", "a group member is reached"
+        else:
+            with pytest.raises(ToolError, match="may not send"):
+                await direct_messages.send_direct_message_impl(
+                    runtime, auth, recipient_id="U456", content="hello"
+                )
+            opened = [url for _, url in http.requests if "conversations.open" in str(url)]
+            assert not opened, "no DM is opened for a person the grant leaves out"
