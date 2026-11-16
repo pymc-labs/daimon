@@ -1723,14 +1723,7 @@ async def import_watch(
                 "mapping_error": mapping_error,
                 "interval": definition.interval,
                 "requested_daily_cap": definition.max_turns_per_day,
-                "notice_pending": reason == "source_unmapped"
-                and definition.tool
-                not in {
-                    "discord_read_messages",
-                    "discord_read_channel_since",
-                    "read_thread",
-                    "read_channel",
-                },
+                "notice_pending": False,  # An import never messages the owner.
             },
         )
     )
@@ -2086,7 +2079,6 @@ async def claim_import_notice(
             ),
             Watch.tenant_id.in_(select(Tenant.id).where(Tenant.archived_at.is_(None))),
             or_(
-                pending & (reason == "source_unmapped"),
                 lifecycle
                 & or_(
                     pending,
@@ -2190,8 +2182,6 @@ def notice_kind(status: str, state: dict[str, object]) -> str:
     reason = str(state.get("reason", ""))
     if status == "expired":
         return "expired"
-    if reason == "source_unmapped":
-        return "source_unmapped"
     if reason.startswith("Watch paused:"):
         return "paused"
     if reason == "tool_unlisted":

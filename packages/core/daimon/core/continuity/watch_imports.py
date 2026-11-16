@@ -14,8 +14,6 @@ from pydantic import (
     StringConstraints,
 )
 
-UNMAPPED_NOTICE = "this watch is paused: its source can't be polled here"
-
 #: What a stored instruction or timer note may hold. A longer one is cut and counted.
 INSTRUCTIONS_LIMIT = 2000
 NOTE_LIMIT = 2000

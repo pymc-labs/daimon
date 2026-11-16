@@ -209,13 +209,13 @@ async def test_first_start_continues_an_imported_earlier_conversation(
     msg = message()
     await cog.on_message(msg)
     first = msg.channel.send.await_args_list[0].args[0]
-    assert "Continuing your earlier conversation." in first
+    assert "Continuing" not in first and "earlier" not in first  # An import is silent.
     assert first.endswith("Run `/dm-settings` to switch server or start a new conversation.")
     assert (await conversation(db_session_factory)).history == [
         {"role": "user", "text": "earlier question"}
     ]
 
-    # A later start has nothing left to continue and says nothing about it.
+    # A later start has nothing left to continue and says the same.
     again = message(102)
     await cog.on_message(again)
     assert all("Continuing" not in sent_text(call) for call in again.channel.send.await_args_list)

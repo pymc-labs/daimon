@@ -1,4 +1,4 @@
-"""Offline import safety and queued private migration notices."""
+"""Offline import safety; an import never messages the owner."""
 
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from daimon.core.continuity.continuation import ContinuationRequest
-from daimon.core.continuity.watch_imports import UNMAPPED_NOTICE, ImportedWatch, WatchExport
+from daimon.core.continuity.watch_imports import ImportedWatch, WatchExport
 from daimon.core.continuity.watch_notices import poll_watch_notices
 from daimon.core.stores import watches
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -62,22 +62,17 @@ async def definition(db_session_factory, monkeypatch):
     )
 
 
-async def test_unmapped_import_is_paused_and_notice_never_resumes(db_session_factory, definition):
+async def test_unmapped_import_is_paused_silent_and_never_resumes(db_session_factory, definition):
     async with db_session_factory.begin() as db:
         row = await watches.import_watch(db, definition, now=datetime.now(UTC))
         assert row.status == "paused" and row.source_state["reason"] == "source_unmapped"
         assert row.source_state["confirmed"] is False
         assert row.baseline == {"value": False}
         assert await watches.claim_poll_watches(db) == []
+    # An import never messages the owner.
     deliver = AsyncMock(return_value=True)
     await poll_watch_notices(db_session_factory, deliver=deliver)
-    deliver.assert_awaited_once()
-    assert deliver.await_args.args[0].owner_external_id == "123"
-    assert deliver.await_args.args[2].endswith(f": {UNMAPPED_NOTICE}")
-    assert str(deliver.await_args.args[0].id) in deliver.await_args.args[2]
-    assert UNMAPPED_NOTICE == "this watch is paused: its source can't be polled here"
-    await poll_watch_notices(db_session_factory, deliver=deliver)
-    deliver.assert_awaited_once()
+    deliver.assert_not_awaited()
     async with db_session_factory.begin() as db:
         current = await watches.get_watch(db, row.id)
         assert current.status == "paused"
@@ -164,18 +159,6 @@ async def test_mapped_import_requires_exact_confirmation_before_poll_claim(
         await watches.set_watch_control(db, scope="global", enabled=True)
         claimed = await watches.claim_poll_watches(db)
         assert len(claimed) == 1 and claimed[0]["watch_id"] == str(row.id)
-
-
-async def test_failed_private_notice_is_retried_without_changing_status(
-    db_session_factory, definition
-):
-    async with db_session_factory.begin() as db:
-        row = await watches.import_watch(db, definition, now=datetime.now(UTC))
-    deliver = AsyncMock(return_value=False)
-    await poll_watch_notices(db_session_factory, deliver=deliver)
-    async with db_session_factory() as db:
-        row = await watches.get_watch(db, row.id)
-        assert row.status == "paused" and row.source_state["notice_pending"] is True
 
 
 def test_import_manifest_rejects_unknown_fields():

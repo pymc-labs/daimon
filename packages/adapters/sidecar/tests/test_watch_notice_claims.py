@@ -56,6 +56,14 @@ async def test_archived_tenant_notice_does_not_stop_batch(
         expected = await watches.import_watch(
             db, definition.model_copy(update={"os_binding": binding}), now=now
         )
+        # An import is silent, so both rows expire to be due a notice.
+        await db.execute(
+            text(
+                "UPDATE watches SET status='expired', expires_at=:at, source_state='{}' "
+                "WHERE id IN (:a, :b)"
+            ),
+            {"at": now - timedelta(minutes=5), "a": archived.id, "b": expected.id},
+        )
         # Give the archived row priority under the claim's creation ordering.
         await db.execute(
             text("UPDATE watches SET created_at=:created WHERE id=:id"),
