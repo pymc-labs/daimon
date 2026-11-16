@@ -7,13 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Choose the Azure OpenAI model for the AKS scripts with `AOAI_MODEL` (default `gpt-5.4-mini`).
+- Choose the Azure OpenAI model for the AKS scripts with `AOAI_MODEL`. Unset, the model stays
+  `gpt-5.4-mini` and the scripts produce the same values, grants and tariff mapping as before.
   Bootstrap, the probe and `register` refuse a deployment backed by any other model, Sol included
   unless `AOAI_MODEL` names it, and a probe is paid at its model's rate. Bootstrap creates only
-  `gpt-5.4-mini`. `register` also refuses a `SELFHOSTED_MODEL` other than `AOAI_DEPLOYMENT`,
-  prices usage by the `SELFHOSTED_MODELS` tariff named after `AOAI_MODEL`, with `-TEST` for TEST
-  rates, and refuses a catalogue without it. Run directly, `register.sh` needs `RG` and `AOAI`
-  for its Azure check.
+  `gpt-5.4-mini`. `register` has a new preflight before it writes anything: it refuses a
+  `SELFHOSTED_MODEL` other than `AOAI_DEPLOYMENT` and reads the deployment's model from Azure once,
+  so `register.sh` run directly needs `RG` and `AOAI`. It prices usage by the `SELFHOSTED_MODELS`
+  tariff named after `AOAI_MODEL`, with `-TEST` for TEST rates, and refuses a catalogue without it.
 
 - Let the AKS scripts run from a copy of the source outside a daimon checkout: set
   `SOURCE_ROOT` to the copy and `CHART_DIR` to the chart's path inside it.

@@ -348,12 +348,19 @@ az aks create -g "$RG" -n "$AKS" --node-count 1 --node-vm-size Standard_D2s_v6 \
   --enable-managed-identity --generate-ssh-keys --tier free --node-osdisk-size 64 -o none
 accounts=$(az cognitiveservices account list -g "$RG" --query '[].name' -o tsv)
 if grep -Fxq -- "$AOAI" <<< "$accounts"; then
-  az cognitiveservices account deployment show -g "$RG" -n "$AOAI" \
-    --deployment-name "$AOAI_DEPLOYMENT" -o none || {
-      echo "Existing AOAI account is missing or cannot read deployment $AOAI_DEPLOYMENT; provision it before bootstrap" >&2
+  AOAI_VERIFIED_MODEL=$(az cognitiveservices account deployment show -g "$RG" -n "$AOAI" \
+    --deployment-name "$AOAI_DEPLOYMENT" --query properties.model.name -o tsv) || {
+      echo "Existing AOAI account is missing or cannot read deployment $AOAI_DEPLOYMENT; provision it first" >&2
       exit 1
     }
+  [[ "$AOAI_VERIFIED_MODEL" == "$AOAI_MODEL" ]] || {
+    echo "AOAI deployment $AOAI_DEPLOYMENT must be backed by AOAI_MODEL=$AOAI_MODEL, not '$AOAI_VERIFIED_MODEL'" >&2
+    exit 1
+  }
   echo "Reusing existing AOAI account and deployment $AOAI_DEPLOYMENT"
+elif [[ $AOAI_MODEL != gpt-5.4-mini ]]; then
+  echo "bootstrap creates only gpt-5.4-mini; create account $AOAI with a $AOAI_MODEL deployment named $AOAI_DEPLOYMENT, then run bootstrap again" >&2
+  exit 1
 else
   az cognitiveservices account create -g "$RG" -n "$AOAI" -l "$LOCATION" \
     --kind OpenAI --sku S0 --custom-domain "$AOAI" -o none
@@ -625,7 +632,8 @@ These commands use release `acme`, CLI caller `operator`, channel
 `selfhosted-operator`, and persistent CLI thread `aks-proof`.
 
 Like the probe, `register` refuses before it writes anything unless `SELFHOSTED_MODEL`
-is `AOAI_DEPLOYMENT` and Azure reports `AOAI_MODEL` as its model.
+is `AOAI_DEPLOYMENT` and Azure reports `AOAI_MODEL` as its model. That check reads the
+deployment's model from Azure once, so `scripts/register.sh` run on its own needs `RG` and `AOAI`.
 The following is an explicit **TEST tariff**, not a quote of Azure's prices.
 `SELFHOSTED_MODELS` holds one tariff, named after `AOAI_MODEL`, with `-TEST` for
 TEST rates; `register` also refuses a catalogue without it.
