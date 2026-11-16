@@ -16,8 +16,8 @@ pin to the headless runner, which checks it against the run's own session
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 import structlog
@@ -33,7 +33,7 @@ from daimon.core.features.service import (
     change_feature,
     clear_pinned_on,
 )
-from daimon.core.features.snapshot import FeaturePlace, feature_in, place_guardrail
+from daimon.core.features.snapshot import FeaturePlace, place_guardrail, resolve_one
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent, retrieve_environment
 from daimon.core.rule_views import routine_destination_channel
@@ -49,7 +49,11 @@ from daimon.core.stores.domain import (
     SandboxPin,
     stored_pin,
 )
-from daimon.core.stores.feature_values import get_feature_value, list_feature_values
+from daimon.core.stores.feature_values import (
+    get_feature_value,
+    list_feature_values,
+    place_values,
+)
 from daimon.core.stores.scoped_config_read import resolve
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -278,17 +282,49 @@ def routine_place(row: RoutineRow, platform: str) -> FeaturePlace:
     )
 
 
+def _decision(
+    row: RoutineRow,
+    settings: Settings | None,
+    platform: str,
+    values: Sequence[FeatureValueRow],
+) -> FeatureValueRow | None:
+    """The agent's or the routine's own row that decides an On for the routine, from the
+    stored `values` of its feature (those of other places are ignored). A DM routine runs as
+    its owner's private conversation, so only its agent's On reaches it, never a routine tier."""
+    dm = row.destination_kind == "dm"
+    place = routine_place(row, platform)
+    if dm:
+        place = replace(place, routine_id=None)
+    own = [
+        value
+        for value in values
+        if value.key == SANDBOX_KEY
+        and (
+            value.tier == "workspace"
+            or (value.tier == "agent" and value.agent_id == row.agent_id)
+            or (value.tier == "routine" and not dm and value.routine_id == row.id)
+        )
+    ]
+    found = resolve_one(FEATURES[SANDBOX_KEY], settings, place, own)
+    if not found.on or found.tier not in ("agent", "routine"):
+        return None
+    return next((value for value in own if value.tier == found.tier), None)
+
+
 async def _deciding(
     session: AsyncSession, settings: Settings | None, row: RoutineRow, platform: str
 ) -> FeatureValueRow | None:
-    """The agent's or the routine's own row when it decides an On for the routine."""
-    place = routine_place(row, platform)
-    found = await feature_in(session, settings, place, "routine_sandbox_tools")
-    if not found.on or found.tier not in ("agent", "routine"):
-        return None
-    tier: PinnedTier = "agent" if found.tier == "agent" else "routine"
-    target = FeatureTarget(tier, agent_id=row.agent_id, routine_id=row.id)
-    return await get_feature_value(session, tenant_id=row.tenant_id, target=target, key=SANDBOX_KEY)
+    """`_decision` for one routine, from one read of its place."""
+    stored = await place_values(
+        session,
+        tenant_id=row.tenant_id,
+        agent_id=row.agent_id,
+        channel_id=None,
+        thread_key=None,
+        routine_id=row.id,
+        keys=(SANDBOX_KEY,),
+    )
+    return _decision(row, settings, platform, stored)
 
 
 async def opted_in_by(session: AsyncSession, row: RoutineRow, platform: str) -> PinnedTier | None:

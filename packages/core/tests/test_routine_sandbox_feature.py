@@ -60,17 +60,18 @@ async def _admin(_action: object) -> bool:
     return True
 
 
-async def _routine(db_session: AsyncSession) -> RoutineRow:
-    tenant = await make_tenant(db_session)
+async def _routine(db_session: AsyncSession, **kw: Any) -> RoutineRow:
+    tenant = kw.pop("tenant", None) or await make_tenant(db_session)
     row = await create_routine(
         db_session,
         tenant_id=tenant.id,
-        created_by_user_id="owner-1",
-        agent_id="agent_a",
+        created_by_user_id=kw.pop("owner", "owner-1"),
+        agent_id=kw.pop("agent_id", "agent_a"),
         agent_name="daimon",
         cron_expr="0 9 * * *",
         timezone_="UTC",
         trigger_message="nightly",
+        **kw,
     )
     await db_session.commit()
     return row
@@ -341,6 +342,22 @@ async def test_a_provider_move_clears_the_opt_ins_naming_the_old_agent(
         changes = await list_changes(session, tenant_id=row.tenant_id, channel_id=WORKSPACE_ID)
     assert [stored_pin(found) for found in rows] == [other_pin], "nothing is left on the old id"
     assert [c.surface for c in changes[:2]] == ["system", "system"], "both clears recorded"
+
+
+async def test_a_dm_routine_takes_only_its_agent_on(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    """A routine tier value never reaches a DM routine: its On is ignored, its Off does not
+    beat the agent's On."""
+    row = await _routine(db_session, owner="1234567890", destination_kind="dm")
+    await _set(db_session_factory, row, "routine", "on", pin=PIN)
+    assert await _pin(db_session_factory, row) is None, "its own On covers nothing"
+    await _set(db_session_factory, row, "agent", "on", pin=AGENT_PIN)
+    assert await _pin(db_session_factory, row) == AGENT_PIN, "its agent's On decides"
+    await _set(db_session_factory, row, "routine", "off")
+    assert await _pin(db_session_factory, row) == AGENT_PIN, "its own Off does not beat it"
+    plain = row.model_copy(update={"destination_kind": None, "destination_id": None})
+    assert await _pin(db_session_factory, plain) is None, "another routine takes its own Off"
 
 
 async def test_a_dm_routine_takes_no_on_of_its_own(db_session: AsyncSession) -> None:
