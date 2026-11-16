@@ -947,6 +947,25 @@ async def test_lead_details_reload_on_every_click_and_ignore_cached_prompt_lines
     assert load.await_count == 2
 
 
+def test_an_approval_card_shows_the_call_exactly() -> None:
+    """The card must show what will run, not a reworded copy of the call."""
+    call = ToolCall(
+        tool_use_id="tu_1",
+        server_name="linear",
+        tool_name="create_issue",
+        input={"title": "Move the Slack bot to Teams", "description": "Not Discord"},
+    )
+    prompt = prompt_for_tool_call(call, requester_platform_user_id="111", now=datetime.now(UTC))
+    card = build_confirmation_card(prompt, state="pending", token="tok_abcdefgh")
+    view = build_confirmation_view(card, prompt)
+
+    assert 'Create issue "Move the Slack bot to Teams"?' in _texts(view)[0]
+    assert card.detail_lines == (
+        "Title: Move the Slack bot to Teams",
+        "Description: Not Discord",
+    )
+
+
 async def test_runtime_hook_binds_pin_cards_to_the_admitted_origin_channel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
