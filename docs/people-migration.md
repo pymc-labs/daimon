@@ -44,9 +44,11 @@ characters, are quoted as untrusted context. The conversation waits with no
 expiry and is used once; a new conversation after that starts empty, and
 importing the file again never brings it back.
 
-People who already have a private conversation here are skipped, and the
-command reports them. Erasing a person's data also erases a conversation still
-waiting for them.
+People who already have a private conversation here get theirs at their next
+`/new`, in the same way, and the command reports them. A person who appears in
+several files has their turns merged when the files come from one export, and
+the command fails when they do not, so one history never replaces another.
+Erasing a person's data also erases a conversation still waiting for them.
 
 ## Watches and reminders
 
@@ -61,9 +63,12 @@ The file lists at most 25 watches, plus `timers`. A callback watch keeps its
 token's SHA-256 and also gets a new private link. The links go only to
 `--urls-out` (mode 0600), as `{source id: url}`, merged with an earlier file;
 they are never printed. Set `DAIMON_WATCHES__CALLBACK_BASE_URL` first. Owners
-without an identity get one. Watches end at their old expiry; permanent ones
-and ones over 30 days end 30 days after import, and past ones are skipped.
-Rerunning adds nothing and issues no second link.
+without an identity get one. The file must name the server (`guild_id`) of
+`--tenant`, and the agent must belong to it. A callback watch ends at its old
+expiry; a permanent one or one over 30 days ends 30 days after it is confirmed,
+and past ones are skipped. An owner already at the live-watch limit is skipped
+and counted, not an error. Rerunning issues no second link; a watch nobody has
+confirmed is updated from the file.
 
 Until a watch is confirmed, a post to either of its links answers a retryable
 `503`, so senders try again; a link nobody holds still gets the same `403`.
@@ -75,7 +80,22 @@ Confirm each after checking its owner, channel and thread, which the import
 prints.
 
 Timers are held, not scheduled. `confirm-timers` schedules each one that is
-still more than a minute away, once. Private-conversation reminders need that
-person's private conversation here; others are skipped, as are any past the 25
-pending a person may hold. It prints a count per outcome. A settled timer keeps
-no text.
+still more than a minute away, once. Reminders set in a private conversation
+fire in that person's private messages and ones set in a thread fire in it.
+Channel reminders are not imported and are counted. Any past the 25 pending a
+person may hold are skipped. Notes and instructions over their limit are cut
+and counted; an empty note is fine. It prints a count per outcome. A settled
+timer keeps no text.
+
+Rerun the import after fixing the file: held timers that nothing has scheduled
+are updated. With `--full` it also cancels held timers the file no longer lists.
+
+```bash
+daimon watches unpause --tenant TENANT_UUID --all-timers   # or --timer-id, --watch-id
+daimon watches renew WATCH_UUID --tenant TENANT_UUID       # 30 more days
+daimon watches rotate-link WATCH_UUID --tenant TENANT_UUID --urls-out link.json
+```
+
+`unpause` releases timers or a confirmed watch that were paused in the old
+system. `rotate-link` replaces every link of a callback watch and shows the new
+one once, or writes it to `--urls-out` (mode 0600).
