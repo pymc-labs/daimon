@@ -256,6 +256,45 @@ async def test_a_personal_chat_burst_not_routed_is_settled_or_kept_for_the_next_
     untouched.assert_not_awaited()
 
 
+async def test_a_personal_chat_message_queued_behind_other_work_waits_for_the_pick(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    routed_personal_chat: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A message that queued while saved work held the chat opens a burst once the chat
+    frees, so the pick answers it with what was sent meanwhile, as a first message does."""
+    teams = _app(db_session_factory, FakeSender())
+    monkeypatch.setattr(app_module, "debounce_seconds", AsyncMock(return_value=0.0))
+    busy, free = asyncio.Event(), asyncio.Event()
+    ran: list[str] = []
+
+    async def dispatch(*_: object) -> None:
+        busy.set()
+        await free.wait()
+
+    async def route(*_: object, burst: object = None, **__: object) -> bool:
+        assert burst is not None, "the queued message is held for the pick"
+        await teams._orchestrate(make_inbound("two"), TENANT)  # pyright: ignore[reportPrivateUsage]
+        return True
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        ran.append(inbound.text)
+
+    routed_personal_chat.side_effect = route
+    with (
+        patch.object(TeamsApp, "_run_turn", _turn),
+        patch.object(TeamsApp, "_dispatch_continuations", dispatch),
+    ):
+        held = asyncio.create_task(teams.dispatch_after_input(TENANT, CONVERSATION_ID, SERVICE_URL))
+        await busy.wait()
+        await teams._orchestrate(make_inbound("one"), TENANT)  # pyright: ignore[reportPrivateUsage]
+        assert routed_personal_chat.await_count == 0 and not ran, "it queues behind the work"
+        free.set()
+        await asyncio.wait_for(held, 5)
+    assert routed_personal_chat.await_count == 1, "the queued message is routed once"
+    assert ran == ["one\n\ntwo"], "the pick answers it and what came meanwhile in one turn"
+
+
 @pytest.mark.parametrize(("kind", "replay"), [("dm", 12), ("channel", 100)])
 def test_a_personal_chat_reads_as_much_history_as_a_dm_conversation(kind: Any, replay: int) -> None:
     admission = SimpleNamespace(history_depth=HistoryDepth(), dm_history=DmHistoryCap())

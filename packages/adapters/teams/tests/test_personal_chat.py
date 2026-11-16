@@ -67,12 +67,13 @@ async def _route(
     async def mark(item: TeamsInbound, on: bool) -> None:
         (marks if marks is not None else []).append((item.text, on))
 
+    inbound = inbound or make_inbound()
     answered = await route_personal_chat(
         runtime or build_teams_runtime(db),
-        inbound or make_inbound(),
+        inbound,
         tenant_id=TENANT,
         post=post,
-        burst=burst,
+        burst=burst or DmBurst(inbound, lambda item: item.text),
         mark=mark,
     )
     return answered, posted
@@ -121,12 +122,18 @@ async def test_route_personal_chat_when_bound_or_setup_then_answers_unrouted(
     assert (await _route(db_session_factory, setup))[0], "a setup chat is not routed"
 
 
-async def test_route_personal_chat_when_several_agents_then_offers_a_button_each(
+async def test_route_personal_chat_when_several_agents_then_holds_under_a_button_each(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The card is up and the burst waits for the pick; nothing answers until then."""
     _agents(monkeypatch, "alpha", "beta")
-    answered, posted = await _route(db_session_factory)
-    assert not answered, "with no burst to hold, nothing answers"
+    runtime = build_teams_runtime(db_session_factory)
+    routing, burst, marks = await _held(db_session_factory, runtime, make_inbound("hello"))
+    await asyncio.sleep(0.05)
+    assert not routing.done() and marks == [("hello", True)], "the message waits, marked"
+    burst.stop()
+    answered, posted = await asyncio.wait_for(routing, 5)
+    assert not answered, "unpicked, nothing answers"
     body = _card(posted).get("body", [])
     actions = [a for block in body if block["type"] == "ActionSet" for a in block["actions"]]
     assert [(a["title"], a["verb"], a["data"]["agent"]) for a in actions] == [

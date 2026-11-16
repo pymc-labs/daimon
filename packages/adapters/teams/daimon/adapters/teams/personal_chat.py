@@ -166,8 +166,8 @@ async def route_personal_chat(
     *,
     tenant_id: uuid.UUID,
     post: Post,
-    burst: DmBurst[TeamsInbound] | None = None,
-    mark: React[TeamsInbound] | None = None,
+    burst: DmBurst[TeamsInbound],
+    mark: React[TeamsInbound],
 ) -> bool:
     """True to answer `inbound`; False once the person was told why not.
 
@@ -204,8 +204,6 @@ async def route_personal_chat(
         button(VERB, name, "pick", agent=name, until=until) for name in route.agents[:_MAX_CHOICES]
     ]
     await post(notice_card(_CHOOSE, actions=choices, error=False))
-    if burst is None or mark is None:
-        return False
     found = partial(_binding, runtime, tenant_id=tenant_id, chat=chat)
     if await burst.hold(found, mark, PICK_SECONDS) is not None:
         return True

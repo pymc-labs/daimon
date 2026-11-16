@@ -254,8 +254,9 @@ class Replay:
                 channel="channel",
                 files=[dict(id=f"F{number}")],
             )
+        # A group chat: a personal chat's queued messages open a DM burst, which the base predates.
         return TeamsInbound(
-            kind="dm",
+            kind="group",
             entra_tenant_id=str(TENANT),
             user_id=str(author),
             conversation_id="chat",

@@ -1383,35 +1383,38 @@ class TeamsApp:
         self._supersede_batch(inbound)
         async with self._holding(key, ticket):
             if personal:
-                await self._answer_burst(key, tenant_id, inbound)
+                await self._answer_burst(key, tenant_id, [inbound])
             else:
                 await self._run_turns(key, tenant_id, [inbound])
 
-    async def _answer_burst(self, key: str, tenant_id: uuid.UUID, inbound: TeamsInbound) -> None:
+    async def _answer_burst(self, key: str, tenant_id: uuid.UUID, held: list[TeamsInbound]) -> None:
         """A personal chat's burst, as on Discord and Slack (`DmBurst`): its first message
         waits for the rest (`dm_debounce_seconds`), and what arrives while it waits or a
         turn runs joins it with 👀 (`_orchestrate`), so one turn answers each group. A chat
         with no agent is routed first (`route_personal_chat`), held while the person picks;
-        a refusal or an expired pick settles the burst.
+        a refusal or an expired pick settles the burst. Messages that queued behind other
+        work in the chat (`_run_turns`) open one too.
 
         Opened before any await, so no message slips past it into the chat's queue. As
         that queue's drain does, an error or cancellation leaves only the messages no turn
         took yet, and they go back to it, which `_holding` answers or holds.
         """
-        burst = self._dm_bursts.open(key, inbound)
+        burst = self._dm_bursts.open(key, held[0])
+        for item in held[1:]:
+            burst.add(item)
         taken: set[int] = set()
         mark = self._burst_mark(tenant_id)
 
         async def answer(group: list[TeamsInbound]) -> None:
             taken.update(map(id, group))
-            await self._run_turns(key, tenant_id, group)
+            await self._run_turns(key, tenant_id, group, burst=True)
 
         try:
             routed = await route_personal_chat(
                 self.runtime,
-                inbound,
+                held[0],
                 tenant_id=tenant_id,
-                post=self._post_to(inbound),
+                post=self._post_to(held[0]),
                 burst=burst,
                 mark=mark,
             )
@@ -1490,14 +1493,20 @@ class TeamsApp:
     def _thread_queue(self) -> ThreadQueue[str, TeamsInbound]:
         return ThreadQueue(self._processing, self._pending, start_turn=self._processing.start_turn)
 
-    async def _run_turns(self, key: str, tenant_id: uuid.UUID, queued: list[TeamsInbound]) -> None:
-        """One turn per author, composed of the messages its fence still held."""
+    async def _run_turns(
+        self, key: str, tenant_id: uuid.UUID, queued: list[TeamsInbound], *, burst: bool = False
+    ) -> None:
+        """One turn per author, composed of the messages its fence still held. Outside a
+        `burst`, a personal chat's queued messages open one, which routes them first."""
 
         async def run(batch: list[TeamsInbound]) -> None:
             self._reactions.clear_queued(batch)
             if self.draining:
                 # A turn started now would be cut off: `_holding` holds these instead.
                 self._pending.setdefault(key, []).extend(batch)
+                return
+            if not burst and batch[0].kind == "dm" and not batch[0].setup_thread_id:
+                await self._answer_burst(key, tenant_id, batch)
                 return
             kept = await self._finish(batch)  # one another process has drops alone
             if not kept:
@@ -1595,11 +1604,8 @@ class TeamsApp:
         """
         deps, role = self.runtime.turn_deps, await self._role(inbound)
         org, home_id = _requester_org(inbound)
+        # Routed by its burst (`_answer_burst`); the pinned agent's grant is rechecked below.
         personal = inbound.kind == "dm" and continuation is None and not inbound.setup_thread_id
-        if personal and not await route_personal_chat(
-            self.runtime, inbound, tenant_id=tenant_id, post=self._post_to(inbound)
-        ):
-            return
         try:
             admission = await admit(
                 deps,
