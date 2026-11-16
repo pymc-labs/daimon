@@ -30,39 +30,36 @@ Five MCP tools manage routines: `create_routine`, `list_routines`,
 `update_routine(enabled=False)`. The last run is in the `last_*` fields that
 `get_routine` returns.
 
-Chat is simplest: ask the agent ("every weekday at 9am, post the sales
-numbers"). Each platform also has a panel:
+Ask the agent in chat ("every weekday at 9am, post the sales
+numbers"). Each platform has a panel:
 
 - **Slack** `/routines` and **Teams** `routines` (in a 1:1 chat): workspace
   admins create and delete. The form's schedule field takes cron, such as
   `0 9 * * 1-5`, and the panel shows schedules in words.
-- **Web app** Routines page: members manage their own, admins all. Creating or
-  changing one needs a linked chat account. **Run now** makes an active routine
+- **Web app** Routines page: members manage their own, admins all. Changing one
+  needs a linked chat account. **Run now** makes an active routine
   due at once.
-- **Discord** `/routines` lists your own routines, or all of them for an admin.
-  **New** creates a routine for an agent, schedule, timezone and message, for
-  admins. The creator or an admin can pause, resume or delete one.
+- **Discord** `/routines` lists your routines, or all for an admin. Admins
+  create; the creator or an admin can pause, resume or delete.
 
 The CLI creates routines for an owner (`daimon routines create`), sets
 [sandbox tools](unattended.md#opt-a-routine-into-sandbox-tools) and
 [moves routines in from another system](routine-migration.md).
 
-`--destination dm` delivers to the owner. `--destination channel` or `thread`
-with `--destination-id` delivers there, after the checks chat applies: the owner
-must be a verified member who can post in it, in this server, and the tenant's
-access rules must allow it. `--dry-run` runs every check and saves nothing.
+`--destination dm|channel|thread` (with `--destination-id`) runs the checks
+below; `--dry-run` saves nothing.
 
-`create_routine` refuses a caller with no platform user identity (a CLI-only
+`create_routine` refuses a caller with no platform identity (a CLI-only
 token), an unknown IANA timezone, an unparseable cron expression and an
-`agent_name` that is not an agent in the tenant. The tenant always comes from
+`agent_name` that is not an agent in the tenant. The tenant comes from
 the caller's verified token.
 
 ### Set a destination
 
 Set `destination_kind` and `destination_id` together on `create_routine` or
 `update_routine`. Remove them with `update_routine(clear_destination=true)`.
-Changing the destination drops a result still pending for the old one. The
-tool checks, before saving, that:
+Changing it drops a result still pending for the old one. Before saving, the
+tool checks that:
 
 - the id has the platform's shape: a Slack thread is `<channel>:<ts>` and a
   Teams thread is `<channel>;messageid=<root>`;

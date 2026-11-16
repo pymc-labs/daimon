@@ -700,7 +700,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         doc=(
             "Ask shows a card with the destination and duration before the agent makes, "
             "edits or resumes a watch. Skip makes it without the card, with the default "
-            "destination and duration. Long jobs, watch key rotation and Fly sessions "
+            "destination and duration. Long jobs, watch key rotation and Fly launches "
             "keep asking. Only a server admin can change it."
         ),
         platforms=EVERY_PLATFORM,
