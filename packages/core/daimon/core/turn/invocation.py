@@ -14,13 +14,9 @@ def human_invocation(origin: str, attended: bool | None) -> bool:
     return origin in HUMAN_MESSAGE_ORIGINS and attended is not False
 
 
-#: Origins nobody is waiting on, when the caller does not say whether anyone is.
-UNATTENDED_ORIGINS = frozenset({"routine", "timer", "watch_fired", "watch_report", "job_finished"})
+def unattended_invocation(origin: str, attended: bool | None) -> bool:
+    """Nobody waits on this turn: its caller says so, or, unsaid, a routine started it.
 
-
-def unattended_turn(origin: str, attended: bool | None) -> bool:
-    """Nobody waits on this turn: its caller says so, or a routine or wake started it.
-
-    Decides the unattended tool rules and the unattended run limit alike.
+    Wakes always say. Decides the unattended tool rules and the unattended run limit alike.
     """
-    return attended is False or (attended is None and origin in UNATTENDED_ORIGINS)
+    return attended is False or (attended is None and origin == "routine")

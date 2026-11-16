@@ -757,9 +757,9 @@ async def test_unattended_turns_read_their_own_time_limit(
         await db_session.commit()
     assert await ceiling("chat") == 90 * 60.0, "a person's message follows the answer time limit"
     assert await ceiling("handoff") == 90 * 60.0, "a hand-over is a person's message"
-    for origin in ("routine", "timer", "watch_fired", "watch_report", "job_finished"):
-        assert await ceiling(origin) == 20 * 60.0, f"{origin} follows the unattended run limit"
-        assert await ceiling(origin, attended=False) == 20 * 60.0, f"a recorded {origin} too"
+    assert await ceiling("routine") == 20 * 60.0, "a routine follows the unattended run limit"
+    for origin in ("timer", "watch_fired", "watch_report", "job_finished"):
+        assert await ceiling(origin, attended=False) == 20 * 60.0, f"a {origin} wake follows it"
     for origin in ("confirmed_call", "private_input_applied", "github_access_ready"):
         assert await ceiling(origin, attended=True) == 90 * 60.0, (
             f"{origin} resumes for a person who is waiting: the answer time limit"
