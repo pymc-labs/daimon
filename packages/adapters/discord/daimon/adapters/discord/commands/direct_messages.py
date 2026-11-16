@@ -844,10 +844,9 @@ class DirectMessageCog(commands.Cog):
 
     async def _hold(self, key: tuple[int, int], message: discord.Message) -> None:
         self._thread_queue.enqueue(key, message)
-        with contextlib.suppress(discord.HTTPException):
-            await message.add_reaction(_QUEUED_REACTION)
-        # After the append, so held messages keep their order. A /dm-me during
-        # the reply changes this scope; the batch then drops instead of answering there.
+        # After the append, so held messages keep their order, and before the reaction's
+        # await: a drain that ran first would leak the entry and answer the batch unchecked.
+        # A /dm-me during the reply changes this scope; the batch then drops instead.
         async with self.bot.runtime.sessionmaker() as session:
             held_in = await get_conversation(
                 session,
@@ -857,6 +856,8 @@ class DirectMessageCog(commands.Cog):
             )
         if held_in is not None:
             self._held_scope[message.id] = held_in.scope_id
+        with contextlib.suppress(discord.HTTPException):
+            await message.add_reaction(_QUEUED_REACTION)
 
     @staticmethod
     def _compose(queued: list[discord.Message]) -> list[list[discord.Message]]:
