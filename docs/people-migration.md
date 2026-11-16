@@ -83,13 +83,14 @@ its owner to resume it, and a timer is never scheduled.
 Imported watches start paused and report to the owner's private conversation.
 Check each owner, channel and thread, which the import prints, then run
 `go-live`. It checks that the agent is an unarchived agent of the tenant, which
-must be a live Discord server, and makes every watch imported for that agent
-live on the owner, channel and thread the import printed: polled and callback
-watches resume. A page watch first needs a fresh signing key from its owner. A
-watch that cannot go live, such as one with an unmapped source, is listed with
-the reason and stays paused. Rerunning `go-live` is safe and picks up what was
-fixed since. A timers-only `import` that is given `--agent-id` and `--agent-name`
-checks them too.
+must be a live Discord server. A timers-only `import` that is given `--agent-id`
+and `--agent-name` checks them too.
+
+`go-live` makes every watch imported for that agent live on the owner, channel
+and thread the import printed: polled and callback watches resume. A page watch
+first needs a fresh signing key from its owner. A watch that cannot go live, such
+as one with an unmapped source, is listed with the reason and stays paused. Rerunning `go-live` is safe and picks up what was
+fixed since.
 
 Timers are held, not scheduled. `go-live` schedules each one that is still more
 than a minute away, once; one already due is skipped. Reminders set in a private
