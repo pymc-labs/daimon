@@ -3036,6 +3036,8 @@ async def _fire_with_fake_turn(
     send_dm=None,
     dm_mode: str | None = None,
     tenant_dms: bool = True,
+    ran_agent_name: str = "daimon",
+    fires: int = 1,
 ) -> tuple[RoutineRow, dict[str, object]]:
     from daimon.core.stores.direct_messages import set_dm_enabled
     from daimon.core.turn.state import ToolUseBlock, TurnState
@@ -3111,7 +3113,7 @@ async def _fire_with_fake_turn(
         return "agent_dest"
 
     async def fake_retrieve(*args: object, **kwargs: object) -> object:
-        return types.SimpleNamespace(name="daimon", metadata={})
+        return types.SimpleNamespace(name=ran_agent_name, metadata={})
 
     with (
         unittest.mock.patch("daimon.adapters.scheduler.main.run_turn", side_effect=fake_run_turn),
@@ -3126,7 +3128,8 @@ async def _fire_with_fake_turn(
             side_effect=fake_retrieve,
         ),
     ):
-        await fire(row)
+        for _ in range(fires):  # a repeat fires the row as first claimed
+            await fire(row)
     async with db_session_factory() as s:
         after = await get_routine(s, row.id, tenant_id=tenant.id)
     assert after is not None
@@ -4275,6 +4278,9 @@ async def _role_gated_fire(
     fetch: Callable[..., Awaitable[object]] | None,
     *,
     send_dm: _SentDms | None = None,
+    gated_name: str = "daimon",
+    ran_agent_name: str = "daimon",
+    fires: int = 1,
 ) -> tuple[RoutineRow, dict[str, object]]:
     from daimon.core.access_policy import AgentRule, TenantAccessPolicy
     from daimon.core.membership import CachedMembershipResolver
@@ -4285,9 +4291,11 @@ async def _role_gated_fire(
         monkeypatch,
         destination=None,
         agent_posts_to=None,
-        policy=TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("123",))}),
+        policy=TenantAccessPolicy(agent_rules={gated_name: AgentRule(invoker_role_ids=("123",))}),
         membership_resolver=CachedMembershipResolver(fetch) if fetch is not None else None,  # type: ignore[arg-type]
         send_dm=send_dm,
+        ran_agent_name=ran_agent_name,
+        fires=fires,
     )
 
 
@@ -4449,9 +4457,56 @@ async def test_a_paused_lapsed_routine_does_not_fire_or_dm_again(
 ) -> None:
     from daimon.core.stores.routines import pause_for_lapsed_role
 
-    after, _ = await _role_gated_fire(db_session, db_session_factory, monkeypatch, _lapsed(()))
+    rest = _SentDms()
+    after, seen = await _role_gated_fire(
+        db_session, db_session_factory, monkeypatch, _lapsed(()), send_dm=rest, fires=2
+    )
+    assert not seen and after.enabled is False
+    assert len(rest.sent) == 1, "the second claim of the same fire pauses nothing and tells nobody"
     async with db_session_factory() as session, session.begin():
         assert not await pause_for_lapsed_role(session, after, error="again"), "already paused"
+    async with db_session_factory() as session:
+        assert (await get_routine(session, after.id, tenant_id=after.tenant_id)) == after, (
+            "the repeat call leaves the first pause's record alone"
+        )
+
+
+async def test_a_role_the_resolved_agent_adds_pauses_the_routine_and_dms_the_owner(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The saved name is open; the agent it resolves to carries the gate."""
+    rest = _SentDms()
+    after, seen = await _role_gated_fire(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        _lapsed(()),
+        send_dm=rest,
+        gated_name="Reviewer",
+        ran_agent_name="Reviewer",
+    )
+    assert not seen, "the turn never started"
+    assert after.enabled is False and after.last_error == "owner_lacks_agent_role"
+    ((user, text),) = rest.sent
+    assert user == "U_DEST" and "paused" in text, "the owner is told once"
+
+
+async def test_a_role_the_resolved_agent_adds_lets_a_holder_run(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    after, seen = await _role_gated_fire(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        _lapsed(("123",)),
+        gated_name="Reviewer",
+        ran_agent_name="Reviewer",
+    )
+    assert seen and after.enabled is True and after.last_error is None
 
 
 async def test_routine_refuses_a_non_member_without_pausing(
