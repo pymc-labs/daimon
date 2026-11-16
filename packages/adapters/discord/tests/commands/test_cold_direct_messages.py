@@ -1366,14 +1366,18 @@ async def test_a_failed_lookup_tells_the_burst_it_was_not_sent(db_session_factor
     await cog.cog_unload()
 
 
-async def test_a_drain_mid_wait_answers_the_burst_at_once(db_session_factory, monkeypatch):
-    """A deploy goes unnoticed: the wait ends and the burst is answered before the close."""
+@pytest.mark.parametrize("stop", ["drain", "unload"])
+async def test_a_shutdown_mid_wait_answers_the_burst_at_once(db_session_factory, monkeypatch, stop):
+    """A deploy goes unnoticed: a drain or an unload ends the wait and answers the burst."""
     cog, reply = await known_burst(db_session_factory, monkeypatch, 5)
     one, two = dm_message(101, "one"), dm_message(102, "two")
     running = asyncio.create_task(cog.on_message(one))
     await in_its_wait(one)
     await cog.on_message(two)
-    await cog.on_drain()
+    if stop == "drain":
+        await cog.on_drain()
+    else:
+        await cog.cog_unload()
     await asyncio.wait_for(running, 2)
     assert reply.await_count == 2 and reply.await_args.kwargs["text"] == "one\n\ntwo"
     assert all(sent_text(c) != module._DROPPED_NOTICE for c in one.channel.send.await_args_list)

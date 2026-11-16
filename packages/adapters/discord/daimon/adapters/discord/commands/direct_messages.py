@@ -168,6 +168,7 @@ class DirectMessageCog(commands.Cog):
 
     async def cog_unload(self) -> None:
         self._unloaded = True
+        self._bursts.stop()
         for view in self._switch_views.values():
             view.stop()
         self._switch_views.clear()
