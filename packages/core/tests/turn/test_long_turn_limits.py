@@ -6,8 +6,8 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from daimon.core import session_fence_retry
-from daimon.core.session_preparation_stages import turn_is_active
+from daimon.core import direct_messages, session_fence_retry
+from daimon.core.session_preparation_stages import turn_blocks_change, turn_is_active
 from daimon.core.stores.direct_messages import claim_message, extend_claim
 from daimon.core.stores.thread_sessions import (
     clear_active_turn,
@@ -27,6 +27,8 @@ from daimon.testing.factories import (
     make_tenant,
     make_thread_session,
 )
+from daimon.testing.turn_fakes import deps_for
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _NOW = datetime(2026, 11, 1, 12, 0, 0, tzinfo=UTC)
@@ -164,3 +166,58 @@ async def test_a_fence_waits_as_long_as_the_running_turn_may(
     finally:
         current_turn_deadline.reset(token)
     assert len(waits) == 1 and abs(waits[0] - expected_s) < 5
+
+
+async def test_a_dead_workers_long_marker_stops_blocking(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A 180-minute marker whose worker is gone must not hold the session for hours."""
+    dead_key, live_key = 7_100_001, 7_100_002
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+        rows = [
+            await make_thread_session(session, tenant=tenant, account=account) for _ in range(3)
+        ]
+        for row, key in zip(rows, (dead_key, live_key, None), strict=True):
+            await mark_turn_active(
+                session,
+                id=row.id,
+                active_turn_message_id="m1",
+                now=datetime.now(UTC),
+                owner_key=key,
+                deadline=datetime.now(UTC) + timedelta(minutes=180),
+            )
+    async with db_session_factory() as holder:
+        await holder.execute(text("SELECT pg_advisory_lock(:key)"), {"key": live_key})
+        try:
+            async with db_session_factory() as session:
+                dead, live, unowned = [
+                    await get_thread_session_by_id(session, id=row.id) for row in rows
+                ]
+            assert dead is not None and live is not None and unowned is not None
+            now = datetime.now(UTC)
+            blocks = [
+                await turn_blocks_change(row, now=now, sessionmaker=db_session_factory)
+                for row in (dead, live, unowned)
+            ]
+        finally:
+            await holder.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": live_key})
+    assert blocks == [False, True, True], "only the marker of a worker that is gone is released"
+
+
+async def test_an_owner_dm_waits_no_longer_than_the_standard_window(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    waits: list[float | None] = []
+    real = direct_messages.try_fence
+
+    async def record(*args: object, timeout_s: float | None = None, **kwargs: object) -> None:
+        waits.append(timeout_s)
+        await real(*args, timeout_s=timeout_s, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(direct_messages, "try_fence", record)
+    deps = deps_for(None, db_session_factory)
+    async with direct_messages.owner_dm_turn(deps, platform="discord", owner="777", wait=True):
+        pass
+    assert waits == [TURN_CEILING_S], "a DM send never queues for hours behind a long turn"

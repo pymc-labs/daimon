@@ -66,6 +66,7 @@ from daimon.core.stores.domain import (
     UnsavedWorkChoice,
 )
 from daimon.core.stores.thread_sessions import record_snapshot
+from daimon.core.stores.worker_ownership import owner_is_alive
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn_hold import TurnHold
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -193,6 +194,26 @@ def turn_is_active(row: ThreadSessionRow, *, now: dt.datetime) -> bool:
         started_at=row.active_turn_started_at, deadline=row.active_turn_deadline
     )
     return (now - row.active_turn_started_at).total_seconds() < window
+
+
+async def turn_blocks_change(
+    row: ThreadSessionRow,
+    *,
+    now: dt.datetime,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> bool:
+    """`turn_is_active`, unless the marker names a worker that is gone.
+
+    A turn that died with its worker leaves its marker, and a long time limit
+    would hold it for hours; a marker whose owner no longer holds its lock
+    cannot belong to a live turn, whatever deadline it stored.
+    """
+    if not turn_is_active(row, now=now):
+        return False
+    if row.active_turn_owner_key is None:
+        return True
+    async with sessionmaker() as session:
+        return await owner_is_alive(session, row.active_turn_owner_key)
 
 
 def retry_after(preparation: SessionPreparationRow) -> dt.datetime:

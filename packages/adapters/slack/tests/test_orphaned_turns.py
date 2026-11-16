@@ -18,7 +18,7 @@ import asyncio
 import json
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -202,6 +202,30 @@ async def test_sweep_interrupts_the_orphaned_turns_ma_session(
     assert recorder.sent == [("sesn_orphan", "user.interrupt")], (
         "the orphaned turn's MA session must be interrupted exactly once"
     )
+    assert await list_orphaned_turns(db_session, platform="slack") == []
+
+
+async def test_sweep_clears_a_marker_whatever_deadline_it_stored(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """A turn allowed 180 minutes that died with its process is not held for the rest of them."""
+    fernet_key = Fernet.generate_key().decode()
+    mapping_id = await _seed_orphan(db_session_factory, fernet_key, team_id="T_LONG")
+    async with db_session_factory.begin() as s:
+        await mark_turn_active(
+            s,
+            id=mapping_id,
+            active_turn_message_id="1000000000.000001",
+            active_turn_channel_id="C_TEST",
+            now=_NOW,
+            deadline=_NOW + timedelta(minutes=180),
+        )
+    runtime = build_slack_runtime(fernet_key, db_session_factory)
+
+    await retire_orphaned_turns(runtime, now=_NOW + timedelta(minutes=1))
+
     assert await list_orphaned_turns(db_session, platform="slack") == []
 
 
