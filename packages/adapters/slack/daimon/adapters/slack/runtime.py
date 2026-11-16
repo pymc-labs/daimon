@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from functools import cached_property
+from typing import Any
 
 import aiohttp
 import httpx
@@ -18,6 +19,7 @@ from daimon.core.config import Settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
+from daimon.core.dm_debounce import DmDebouncer
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
 from daimon.core.mcp_oauth import McpTokenProbe, probe_bearer_token
@@ -50,6 +52,10 @@ class SlackRuntime:
     # One connection pool for every workspace's per-event AsyncWebClient; None
     # (tests) lets slack_sdk open a throwaway session per call.
     slack_http: aiohttp.ClientSession | None = None
+    # The burst each person is sending in each direct message, until its wait ends.
+    dm_bursts: DmDebouncer[tuple[str, str, str], dict[str, Any]] = field(
+        default_factory=DmDebouncer[tuple[str, str, str], dict[str, Any]]
+    )
 
     @cached_property
     def fernet(self) -> MultiFernet:

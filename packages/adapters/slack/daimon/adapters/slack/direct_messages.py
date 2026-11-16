@@ -36,7 +36,6 @@ from daimon.core.direct_messages import (
     start_dm,
 )
 from daimon.core.dm_debounce import (
-    DmDebouncer,
     DmWindow,
     bypasses_wait,
     debounce_seconds,
@@ -58,8 +57,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 log = structlog.get_logger(__name__)
 _SEEN_REACTION = "eyes"
-_BURSTS: DmDebouncer[tuple[str, str, str], dict[str, Any]] = DmDebouncer()
-"""The burst each person is sending in each direct message, until its quiet window ends."""
+_NOT_SENT = "Your message wasn't sent. Please send it again."
 _ERRORS = (
     DaimonError,
     MAResolverMissError,
@@ -338,14 +336,15 @@ async def handle_direct_message(
         return
     key = (team_id, channel_id, user_id)
     text = str(event.get("text") or "")
+    bursts = runtime.dm_bursts
     # No await before this: a message sent meanwhile joins the burst instead of racing it.
-    if _BURSTS.join(key, event, flush=bypasses_wait(text)):
+    if bursts.join(key, event, flush=bypasses_wait(text)):
         return
-    burst = _BURSTS.open(key, event)
+    burst = bursts.open(key, event)
     try:
         await _answer_burst(runtime, burst, event, team_id=team_id, key=key)
     finally:
-        _BURSTS.close(key, burst)
+        bursts.close(key, burst)
 
 
 async def _answer_burst(
@@ -356,6 +355,11 @@ async def _answer_burst(
     team_id: str,
     key: tuple[str, str, str],
 ) -> None:
+    """Answer every message the burst took in, or tell it why not.
+
+    A message stays unanswered until its turn ends or a notice speaks for it; whatever is
+    left when the burst stops is told it wasn't sent. Every mark comes off at the end.
+    """
     channel_id = str(event.get("channel") or "")
     user_id = str(event.get("user") or "")
     thread_ts = event.get("thread_ts")
@@ -363,7 +367,17 @@ async def _answer_burst(
     route_key = f"{team_id}:{channel_id}"
     client: AsyncWebClient | None = None
     seen: list[dict[str, Any]] = []
+    unanswered = burst.items
+
+    def spoken_for() -> None:
+        """One notice answers the whole burst: close it, so nothing joins after."""
+        runtime.dm_bursts.close(key, burst)
+        unanswered.clear()
+
     try:
+        client = await resolve_web_client(runtime, team_id=team_id)
+        if client is None:
+            return
         async with runtime.sessionmaker() as session:
             conversation = await get_conversation(
                 session, platform="slack", route_key=route_key, external_user_id=user_id
@@ -374,10 +388,8 @@ async def _answer_burst(
                 if conversation is not None
                 else derive_tenant_uuid(platform="slack", workspace_id=team_id),
             )
-        client = await resolve_web_client(runtime, team_id=team_id)
-        if client is None:
-            return
         if conversation is None or not dms_on:
+            spoken_for()
             await _explain_no_private_chat(
                 client, team_id=team_id, user_id=user_id, channel_id=channel_id, dms_on=dms_on
             )
@@ -398,7 +410,7 @@ async def _answer_burst(
             await _react(reacting, channel_id=channel_id, event=arrived, add=True)
 
         events = await burst.settle(seconds, on_arrival=mark)
-        _BURSTS.close(key, burst)
+        runtime.dm_bursts.close(key, burst)
         identity: AgentIdentity | None = None
 
         async def on_agent(name: str) -> None:
@@ -433,44 +445,90 @@ async def _answer_burst(
         for group in split_approvals(events, lambda e: str(e.get("text") or "")):
             texts = [str(e.get("text") or "") for e in group]
             content = "\n\n".join(t for t in texts if t.strip())
-            if not content.strip():
-                continue
-            answer = await reply_to_dm(
-                runtime.turn_deps,
-                platform="slack",
-                route_key=route_key,
-                external_user_id=user_id,
-                message_id=str(group[0].get("ts") or ""),
-                merged_message_ids=tuple(str(e.get("ts") or "") for e in group[1:]),
-                platform_channel_id=channel_id,
-                expected_scope_id=conversation.scope_id,
-                text=content,
-                role=role,
-                on_agent=on_agent,
-            )
-            if answer is not None:
-                for offset in range(0, len(answer), 3500):
-                    await post_as_agent(
-                        client,
-                        identity,
-                        channel=channel_id,
-                        text=answer[offset : offset + 3500],
-                        parse="none",
-                        unfurl_links=False,
-                        **thread_kwargs,
+            try:
+                if content.strip():
+                    answer = await reply_to_dm(
+                        runtime.turn_deps,
+                        platform="slack",
+                        route_key=route_key,
+                        external_user_id=user_id,
+                        message_id=str(group[0].get("ts") or ""),
+                        merged_message_ids=tuple(str(e.get("ts") or "") for e in group[1:]),
+                        platform_channel_id=channel_id,
+                        expected_scope_id=conversation.scope_id,
+                        text=content,
+                        role=role,
+                        on_agent=on_agent,
                     )
-    except _ERRORS as exc:
-        log.warning("slack.dm.turn_failed", error_type=type(exc).__name__)
-        if client is not None:
-            with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
-                await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                    channel=channel_id,
-                    **notice_fields(
-                        _error_message(exc, settings=runtime.settings, team_id=team_id)
-                    ),
-                    **thread_kwargs,
+                    if answer is not None:
+                        await _post_answer(
+                            client, identity, answer, channel_id=channel_id, thread=thread_kwargs
+                        )
+            except _ERRORS as exc:
+                await _tell_failure(
+                    runtime,
+                    client,
+                    exc,
+                    team_id=team_id,
+                    channel_id=channel_id,
+                    thread=thread_kwargs,
                 )
+            del unanswered[: len(group)]
+    except _ERRORS as exc:
+        spoken_for()
+        await _tell_failure(
+            runtime, client, exc, team_id=team_id, channel_id=channel_id, thread=thread_kwargs
+        )
     finally:
+        runtime.dm_bursts.close(key, burst)
+        if unanswered:
+            log.warning("slack.dm.not_sent", messages=len(unanswered), client=client is not None)
+            if client is not None:
+                with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
+                    await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                        channel=channel_id, **notice_fields(_NOT_SENT), **thread_kwargs
+                    )
         if client is not None:
             for arrived in seen:
                 await _react(client, channel_id=channel_id, event=arrived, add=False)
+
+
+async def _post_answer(
+    client: AsyncWebClient,
+    identity: AgentIdentity | None,
+    answer: str,
+    *,
+    channel_id: str,
+    thread: dict[str, Any],
+) -> None:
+    for offset in range(0, len(answer), 3500):
+        await post_as_agent(
+            client,
+            identity,
+            channel=channel_id,
+            text=answer[offset : offset + 3500],
+            parse="none",
+            unfurl_links=False,
+            **thread,
+        )
+
+
+async def _tell_failure(
+    runtime: SlackRuntime,
+    client: AsyncWebClient | None,
+    exc: Exception,
+    *,
+    team_id: str,
+    channel_id: str,
+    thread: dict[str, Any],
+) -> None:
+    """Log a failed DM turn and, when a client is at hand, tell the person why."""
+    log.warning("slack.dm.turn_failed", error_type=type(exc).__name__)
+    if client is None:
+        return
+    with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
+        await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+            channel=channel_id,
+            **notice_fields(_error_message(exc, settings=runtime.settings, team_id=team_id)),
+            **thread,
+        )
