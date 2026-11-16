@@ -1,4 +1,4 @@
-"""Each chat platform's session runs a system prompt that names no other platform.
+"""Each chat platform's session runs its own variant of the shipped system prompt.
 
 The shipped prompt covers all three, so every session runs its platform's variant,
 sent as the session's own override. Lines a tenant wrote are kept, even when they

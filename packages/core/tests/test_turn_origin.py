@@ -659,7 +659,7 @@ def test_controls_for_a_platform_with_no_chat_commands_carry_no_words() -> None:
     rendered = render_turn_origin(_origin(platform="cli"), effective_is_admin=False)
 
     assert "words" not in _controls(rendered)
-    assert "another chat app" not in rendered
+    assert "Daimon works" not in rendered, "no chat, so no sentence on where Daimon works"
 
 
 @pytest.mark.parametrize(("snapshot", "effective"), [(Role.USER, True), (Role.ADMIN, False)])
