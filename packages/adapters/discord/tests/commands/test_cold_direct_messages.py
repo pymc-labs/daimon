@@ -1293,3 +1293,152 @@ async def test_held_messages_are_dropped_with_a_notice_on_unload(db_session_fact
     gate.set()
     await asyncio.wait_for(running, 5)
     assert [t["text"] for t in turns] == ["one"], "nothing runs after the unload"
+
+
+async def known_burst(db_session_factory, monkeypatch, seconds):
+    """A cog whose person already has a conversation open, and a wait of `seconds`."""
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    await cog.on_message(dm_message(100, "hi"))
+    assert reply.await_count == 1, "the conversation opened with one answered turn"
+    monkeypatch.setattr(module, "debounce_seconds", AsyncMock(return_value=seconds))
+    return cog, reply
+
+
+def assert_eyes_off(cog, *messages):
+    for msg in messages:
+        msg.add_reaction.assert_awaited_once_with(module._SEEN_REACTION)
+        msg.remove_reaction.assert_awaited_once_with(module._SEEN_REACTION, cog.bot.user)
+    assert not cog._reacted and not cog._held_scope, "no held message is still tracked"
+
+
+async def test_an_unhandled_error_tells_the_rest_of_the_burst_it_was_not_sent(
+    db_session_factory, monkeypatch
+):
+    """An error no turn handles ends the burst; every message left is told, eyes off."""
+    cog, reply = await known_burst(db_session_factory, monkeypatch, 0.3)
+    reply.side_effect = RuntimeError("a bug in the turn")
+    one, approval = dm_message(101, "one"), dm_message(102, "yes")
+    running = asyncio.create_task(cog.on_message(one))
+    await asyncio.sleep(0.05)
+    await cog.on_message(approval)
+    with pytest.raises(RuntimeError):
+        await asyncio.wait_for(running, 5)
+    assert reply.await_count == 2, "the approval's own turn never ran after the error"
+    assert sent_text(one.channel.send.await_args_list[-1]) == module._DROPPED_NOTICE
+    assert_eyes_off(cog, one, approval)
+    await cog.cog_unload()
+
+
+async def test_a_failed_lookup_tells_the_burst_it_was_not_sent(db_session_factory, monkeypatch):
+    """The conversation read before the wait fails after a second message joined."""
+    from sqlalchemy.exc import OperationalError
+
+    cog, reply = await known_burst(db_session_factory, monkeypatch, 3)
+    release = asyncio.Event()
+
+    async def unreachable(session, **kwargs):
+        await release.wait()
+        raise OperationalError("select", {}, Exception("database unreachable"))
+
+    monkeypatch.setattr(module, "get_conversation", unreachable)
+    one, two = dm_message(101, "one"), dm_message(102, "two")
+    running = asyncio.create_task(cog.on_message(one))
+    await asyncio.sleep(0.05)
+    await cog.on_message(two)
+    release.set()
+    with pytest.raises(OperationalError):
+        await asyncio.wait_for(running, 5)
+    assert reply.await_count == 1, "no turn ran"
+    assert sent_text(one.channel.send.await_args_list[-1]) == module._DROPPED_NOTICE
+    assert one.channel.send.await_count == 1, "one notice for both messages"
+    await cog.cog_unload()
+
+
+@pytest.mark.parametrize("stop", ["drain", "unload"])
+async def test_a_shutdown_mid_wait_drops_the_burst_with_a_notice(
+    db_session_factory, monkeypatch, stop
+):
+    """A drain or unload ends the wait at once; the burst is told it wasn't sent."""
+    cog, reply = await known_burst(db_session_factory, monkeypatch, 5)
+    one, two = dm_message(101, "one"), dm_message(102, "two")
+    running = asyncio.create_task(cog.on_message(one))
+    await asyncio.sleep(0.05)
+    await cog.on_message(two)
+    if stop == "drain":
+        cog.bot.draining = True
+    else:
+        await cog.cog_unload()
+    await asyncio.wait_for(running, 2)
+    assert reply.await_count == 1, "no turn starts once the process is stopping"
+    assert sent_text(one.channel.send.await_args_list[-1]) == module._DROPPED_NOTICE
+    assert_eyes_off(cog, one, two)
+    await cog.cog_unload()
+
+
+async def test_a_burst_sent_before_dm_me_moved_the_conversation_is_dropped(
+    db_session_factory, monkeypatch
+):
+    """/dm-me during the wait: the burst is not answered in the new conversation."""
+    from daimon.core.stores.direct_messages import DirectMessageConversation
+    from sqlalchemy import update
+
+    cog, reply = await known_burst(db_session_factory, monkeypatch, 0.3)
+    one = dm_message(101, "one")
+    running = asyncio.create_task(cog.on_message(one))
+    await asyncio.sleep(0.05)
+    async with db_session_factory() as session, session.begin():
+        await session.execute(
+            update(DirectMessageConversation)
+            .where(DirectMessageConversation.route_key == "555")
+            .values(scope_id="private-moved")
+        )
+    await asyncio.wait_for(running, 5)
+    assert reply.await_count == 1, "nothing is answered in the new conversation"
+    assert sent_text(one.channel.send.await_args_list[-1]) == module._DROPPED_NOTICE
+    assert_eyes_off(cog, one)
+    await cog.cog_unload()
+
+
+async def test_a_failed_turn_takes_the_eyes_off_the_burst(db_session_factory, monkeypatch):
+    """A turn that fails with its own error notice still clears the burst's reactions."""
+    cog, reply = await known_burst(db_session_factory, monkeypatch, 0.2)
+    reply.side_effect = DaimonError("the turn failed")
+    one, two = dm_message(101, "one"), dm_message(102, "two")
+    running = asyncio.create_task(cog.on_message(one))
+    await asyncio.sleep(0.05)
+    await cog.on_message(two)
+    await asyncio.wait_for(running, 5)
+    assert reply.await_count == 2, "the burst ran as one turn"
+    assert sent_text(one.channel.send.await_args_list[-1]) != module._DROPPED_NOTICE, (
+        "the turn's own error is the notice"
+    )
+    assert_eyes_off(cog, one, two)
+    await cog.cog_unload()
+
+
+async def test_with_the_wait_off_a_message_sent_during_the_lookup_is_marked_and_merged(
+    db_session_factory, monkeypatch
+):
+    """Off answers at once, but a message that arrived meanwhile shows it was held."""
+    cog, reply = await known_burst(db_session_factory, monkeypatch, 0)
+    looked_up = asyncio.Event()
+    real_read = module.get_conversation
+
+    async def slow_read(session, **kwargs):
+        if not looked_up.is_set():
+            await looked_up.wait()
+        return await real_read(session, **kwargs)
+
+    monkeypatch.setattr(module, "get_conversation", slow_read)
+    one, two = dm_message(101, "one"), dm_message(102, "two")
+    running = asyncio.create_task(cog.on_message(one))
+    await asyncio.sleep(0.05)
+    await cog.on_message(two)
+    looked_up.set()
+    await asyncio.wait_for(running, 5)
+    assert reply.await_count == 2, "both messages went into one turn"
+    assert reply.await_args.kwargs["text"] == "one\n\ntwo"
+    one.add_reaction.assert_not_awaited()
+    two.add_reaction.assert_awaited_once_with(module._SEEN_REACTION)
+    two.remove_reaction.assert_awaited_once_with(module._SEEN_REACTION, cog.bot.user)
+    await cog.cog_unload()
