@@ -320,6 +320,48 @@ async def get_latest_thread_session(
     return ThreadSessionRow.model_validate(orm)
 
 
+async def last_model_marks(
+    session: AsyncSession, *, tenant_id: _uuid.UUID, platform: str, thread_id: str
+) -> tuple[str, ...] | None:
+    """The model and effort emoji a turn last showed in a thread.
+
+    `record_model_marks` writes them to every session of the thread, so the newest
+    marked row holds them. Only the emoji, never a session, is read across accounts.
+    """
+    marks = await session.scalar(
+        select(ThreadSession.model_marks)
+        .where(
+            ThreadSession.tenant_id == tenant_id,
+            ThreadSession.platform == platform,
+            ThreadSession.thread_id == thread_id,
+            ThreadSession.model_marks.is_not(None),
+        )
+        .order_by(ThreadSession.created_at.desc())
+        .limit(1)
+    )
+    return None if marks is None else tuple(marks)
+
+
+async def record_model_marks(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    thread_id: str,
+    marks: tuple[str, ...],
+) -> None:
+    """Record the emoji a turn has just shown in a thread, on each of the thread's sessions."""
+    await session.execute(
+        update(ThreadSession)
+        .where(
+            ThreadSession.tenant_id == tenant_id,
+            ThreadSession.platform == platform,
+            ThreadSession.thread_id == thread_id,
+        )
+        .values(model_marks=list(marks))
+    )
+
+
 async def create_thread_session(
     session: AsyncSession,
     *,

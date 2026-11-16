@@ -182,11 +182,13 @@ from daimon.core.stores.thread_sessions import (
     clear_active_turn,
     clear_active_turn_if_message_id,
     get_live_thread_session,
+    last_model_marks,
     list_live_thread_sessions,
     list_orphaned_turns,
     lock_orphaned_turn,
     mark_dead,
     mark_turn_active,
+    record_model_marks,
     update_watermark,
 )
 from daimon.core.stores.turn_card_intents import (
@@ -314,7 +316,6 @@ _DRAIN_NOTICES_S: float = 10.0
 _SWEEP_CONCURRENCY = 2
 MESSAGE_LEDGER_HORIZON = timedelta(minutes=60)
 """How long the message admission ledger remembers a message before it is pruned."""
-_MODEL_MARKED_LIMIT = 2000
 # What a tenant reconcile returns: True on success, False on failure, or the
 # task already reconciling that tenant when the in-flight guard skipped this
 # call (None only if that task could not be identified).
@@ -743,8 +744,6 @@ class DaimonBot(commands.Bot):
         # Threads whose running turn lost its thread (deleted) or its right to write
         # to it (archived), so the card lifecycle and the bot agree on one answer.
         self._thread_stops = ThreadStops()
-        # The emoji last shown on a thread's trigger message, so a change shows again.
-        self._model_marked: dict[int, tuple[str, ...]] = {}
         # Continuation dispatches skipped because the thread was processing,
         # keyed by thread id: re-run when the thread is released (see
         # `_release_thread`). Last writer wins; a dispatch reads every pending
@@ -3834,7 +3833,9 @@ class DaimonBot(commands.Bot):
         finally:
             await self._release_and_clear(thread.id, tenant_id, clear_reactions=False)
 
-    def _model_marks(self, admission: Admission, thread_id: int) -> tuple[str, ...]:
+    async def _model_marks(
+        self, admission: Admission, *, tenant_id: uuid.UUID, thread_id: int
+    ) -> tuple[str, ...]:
         """The model and effort emoji for a prompted turn's trigger message, when the setting
         is on and they differ from the pair last shown in this thread."""
         if not admission.shown("model_reactions", "discord"):
@@ -3846,13 +3847,13 @@ class DaimonBot(commands.Bot):
             model_id = admission.agent.model.id
             effort = (admission.agent.model.model_extra or {}).get("effort")
         marks = model_marks(model_id, effort if isinstance(effort, str) else None)
-        return () if self._model_marked.get(thread_id) == marks else marks
-
-    def _record_model_marks(self, thread_id: int, marks: tuple[str, ...]) -> None:
-        """Remember the pair a thread now shows. Held in memory: a restart marks it again."""
-        self._model_marked[thread_id] = marks
-        while len(self._model_marked) > _MODEL_MARKED_LIMIT:
-            del self._model_marked[next(iter(self._model_marked))]
+        if not marks:
+            return ()
+        async with self.runtime.sessionmaker() as session:
+            shown = await last_model_marks(
+                session, tenant_id=tenant_id, platform="discord", thread_id=str(thread_id)
+            )
+        return () if shown == marks else marks
 
     async def _thread_started_from(self, message: discord.Message) -> discord.Thread | None:
         """The thread already opened on `message` (it shares the message's id), if any."""
@@ -5411,7 +5412,7 @@ class DaimonBot(commands.Bot):
         self._thread_stops.watch(thread.id, cancel)
         self._typed_stops.watch(thread.id, requester_id=message.author.id, cancel=cancel)
 
-        marks_to_show = self._model_marks(admission, thread.id)
+        marks_to_show = await self._model_marks(admission, tenant_id=tenant_id, thread_id=thread.id)
 
         def _make_lifecycle(
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
@@ -5429,7 +5430,6 @@ class DaimonBot(commands.Bot):
                 render_tables=admission.shown("table_rendering"),
                 answer_message_cap=admission.answer_message_cap,
                 model_marks=marks_to_show,
-                on_model_marked=lambda: self._record_model_marks(thread.id, marks_to_show),
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
@@ -5720,6 +5720,15 @@ class DaimonBot(commands.Bot):
             reused=prepared.reused,
         )
         watch.session_id = prepared.ma_session_id
+        if lifecycle.model_marked:
+            async with self.runtime.sessionmaker.begin() as marks_session:
+                await record_model_marks(
+                    marks_session,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    thread_id=str(thread.id),
+                    marks=marks_to_show,
+                )
         # What happened to the workspace is the agent's to say, from the turn controls.
         session_state = (
             None

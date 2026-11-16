@@ -707,6 +707,8 @@ class ThreadSession(Base):
     active_turn_deadline: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # The model and effort emoji a turn on this session last showed in its thread.
+    model_marks: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
