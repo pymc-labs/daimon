@@ -784,17 +784,19 @@ async def test_dm_reply_carries_the_prefix_and_images_but_stores_names_only(
 
 
 @pytest.mark.parametrize(
-    ("reused", "state", "replayed"),
+    ("reused", "watermark", "state", "replayed"),
     [
-        (True, "continued", False),
-        (True, "updated", False),
-        (True, "replaced", True),
-        (False, "continued", True),
+        (True, "100", "continued", False),
+        (True, "100", "updated", False),
+        (True, None, "continued", True),
+        (True, "100", "replaced", True),
+        (False, None, "continued", True),
     ],
 )
 async def test_earlier_turns_are_replayed_only_into_a_new_or_replaced_session(
-    db_session_factory, monkeypatch, reused, state, replayed
+    db_session_factory, monkeypatch, reused, watermark, state, replayed
 ):
+    """Only a reused session that already answered here (a watermark) holds the history."""
     from types import SimpleNamespace
 
     from daimon.core import direct_messages
@@ -830,7 +832,10 @@ async def test_earlier_turns_are_replayed_only_into_a_new_or_replaced_session(
         ),
     )
     prepared = SimpleNamespace(
-        admission=admission, reused=reused, continuity=SimpleNamespace(state=state)
+        admission=admission,
+        reused=reused,
+        watermark=watermark,
+        continuity=SimpleNamespace(state=state),
     )
     monkeypatch.setattr(direct_messages, "admit", AsyncMock(return_value=admission))
     monkeypatch.setattr(direct_messages, "bind_session", AsyncMock(return_value=prepared))
@@ -856,5 +861,5 @@ async def test_earlier_turns_are_replayed_only_into_a_new_or_replaced_session(
             verified_membership=True,
         )
 
-    assert sent[-1].endswith("the new question")
-    assert ("an earlier question" in sent[-1]) is replayed
+    assert sent[-1].endswith("the new question"), "the new words always go last"
+    assert ("an earlier question" in sent[-1]) is replayed, "history goes only where it is missing"

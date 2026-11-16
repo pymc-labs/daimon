@@ -313,6 +313,35 @@ async def test_dm_scope_reuses_session_replays_history_bills_and_deduplicates(
         assert stored is not None and len(stored.history) == 4 and stored.active_until is None
 
 
+async def test_dm_session_whose_first_turn_failed_is_sent_the_whole_conversation(
+    db_session, db_session_factory, monkeypatch
+):
+    """A turn that fails after its session is bound leaves a session that saw nothing.
+
+    The next turn reuses that session, so it must still carry the source context; only
+    after a turn got through does a later one send just the new words.
+    """
+    tenant, deps, admission, sent, streams, _created = await _setup(db_session, db_session_factory)
+    route = await _start(tenant, deps, admission, context="the source thread")
+    real_run = core_direct_messages.run_prepared_turn
+
+    async def fail_before_delivery(*args, **kwargs):
+        raise DaimonError("the provider was unreachable")
+
+    monkeypatch.setattr(core_direct_messages, "run_prepared_turn", fail_before_delivery)
+    with pytest.raises(DaimonError):
+        await _reply(deps, route, content="lost question")
+    monkeypatch.setattr(core_direct_messages, "run_prepared_turn", real_run)
+    assert await _reply(deps, route, message_id="2", content="second question")
+    assert await _reply(deps, route, message_id="3", content="third question")
+
+    assert streams == ["ses_dm_1", "ses_dm_1"], "both answered turns reuse the bound session"
+    second, third = json.dumps(sent[-2]), json.dumps(sent[-1])
+    assert "the source thread" in second, "the session never got the context, so it is sent"
+    assert "the source thread" not in third, "a session that answered holds the context"
+    assert "second question" not in third
+
+
 async def test_policy_revocation_and_disable_refuse_existing_dm(db_session, db_session_factory):
     tenant, deps, admission, sent, streams, created = await _setup(db_session, db_session_factory)
     route = await _start(tenant, deps, admission)
