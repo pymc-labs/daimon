@@ -252,13 +252,17 @@ def make_discord_routine_poster(
                 )
             names = await resolve_agent_names(row)
             # The owner, freshly resolved: a role-gated agent delivers only for
-            # an owner who holds its roles.
-            owner = await resolve_subject(
-                sessionmaker,
-                membership_resolver,
-                tenant_id=row.tenant_id,
-                user_id=row.created_by_user_id or "",
-                require_fresh=True,
+            # an owner who holds its roles. A routine with no owner holds none.
+            owner = (
+                Subject()
+                if row.created_by_user_id is None
+                else await resolve_subject(
+                    sessionmaker,
+                    membership_resolver,
+                    tenant_id=row.tenant_id,
+                    user_id=row.created_by_user_id,
+                    require_fresh=True,
+                )
             )
             if not names or not authorize(
                 cleared,
