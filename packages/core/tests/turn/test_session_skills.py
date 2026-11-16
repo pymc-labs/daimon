@@ -26,7 +26,7 @@ from daimon.core.turn import session_skills
 from daimon.core.turn.admission import PREVIEW_CAPTURE_BUDGET_S
 from daimon.testing.factories import make_tenant
 from mux.contracts.ids import SkillRef
-from mux.drivers.gemini import SESSION_CREATED
+from mux.contracts.resources import SESSION_CREATED
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from mux.testing.isolated_sdk import build_async_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
