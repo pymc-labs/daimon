@@ -15,10 +15,10 @@ from typing import Any, Final, cast
 
 from daimon.core.features.registry import (
     BACKEND_NAMES,
-    CHAT_TIERS,
     DEFAULT,
     FEATURES,
     LOCKABLE,
+    TIERS,
     Category,
     FeatureSpec,
     Tier,
@@ -154,8 +154,7 @@ def parse_choice(raw: object) -> Choice | None:
         return None
     key, tier, value, *flag = parts
     spec = FEATURES.get(key)
-    # A chat card is never at a routine, so it offers no routine tier.
-    if spec is None or tier not in CHAT_TIERS or tier == "deployment":
+    if spec is None or tier not in TIERS or tier == "deployment":
         return None
     if value != DEFAULT and value not in spec.values:
         return None

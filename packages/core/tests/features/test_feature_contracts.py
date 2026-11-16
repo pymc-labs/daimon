@@ -23,8 +23,8 @@ from daimon.core.config import (
 from daimon.core.features.deployment import deployment_value
 from daimon.core.features.model_input import SESSION_KEYS, TOOL_KEYS
 from daimon.core.features.registry import (
-    CHAT_TIERS,
     FEATURES,
+    TIER_ORDER,
     TIERS,
     WEB_MODULES,
     FeatureSpec,
@@ -70,7 +70,7 @@ def test_every_feature_is_well_formed(spec: FeatureSpec) -> None:
     assert spec is FEATURES[spec.key]
     assert spec.default in spec.values
     tiers = spec.tiers
-    assert list(tiers) == sorted(tiers, key=TIERS.index), "tiers broadest first"
+    assert list(tiers) == sorted(tiers, key=TIER_ORDER.index), "tiers broadest first"
     assert not spec.legacy_env or "deployment" in tiers
 
 
@@ -102,9 +102,8 @@ _NARROWED: dict[str, str] = {
 }
 
 
-def test_every_feature_has_all_five_chat_tiers_unless_narrowed_for_a_reason() -> None:
-    """A feature sits at every chat tier unless a recorded reason narrows it."""
-    narrowed = {key for key, spec in FEATURES.items() if spec.tiers != CHAT_TIERS}
+def test_every_feature_has_all_five_tiers_unless_narrowed_for_a_reason() -> None:
+    narrowed = {key for key, spec in FEATURES.items() if spec.tiers != TIERS}
     assert narrowed == set(_NARROWED), (
         f"narrowed without a reason: {sorted(narrowed - set(_NARROWED))}; "
         f"listed but at every tier: {sorted(set(_NARROWED) - narrowed)}"
