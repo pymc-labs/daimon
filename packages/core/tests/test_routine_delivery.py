@@ -149,7 +149,6 @@ def test_routine_controls_carry_the_destination_platforms_words(
     assert controls["words"]["setup"] == setup
     assert admin in controls["words"]["admin"]
     assert "use `words` from these controls" in text
-    assert "Never name or hint at another chat app" in text
     assert "only place" not in text
 
 
@@ -806,24 +805,3 @@ async def test_delivery_failure_never_logs_signed_upload_url(db_session, db_sess
     assert sentinel not in str(logs)
     failures = [entry for entry in logs if entry["event"] == "routine.delivery_failed"]
     assert failures[0]["error_type"] == "RuntimeError"
-
-
-@pytest.mark.parametrize(
-    ("platform", "payload", "scrubbed"),
-    [
-        ("discord", "Sent to Discord, Slack and Teams.", "Sent to Discord, other apps."),
-        ("slack", "Sent to Discord or Microsoft Teams.", "Sent to another app."),
-        ("teams", "Sent to Discord and Slack.", "Sent to other apps."),
-    ],
-)
-def test_a_routine_result_never_names_another_chat_app(
-    platform: str, payload: str, scrubbed: str
-) -> None:
-    row = _row(delivery_payload=payload)
-    assert render_fallback_post(row, platform=platform).count(f"\n\n{scrubbed}\n") == 1
-    assert (
-        render_fallback_post(row, as_agent=True, platform=platform).count(f"\n\n{scrubbed}\n") == 1
-    )
-    dm = render_fallback_dm(row, "destination_unavailable", platform=platform)
-    assert dm.endswith(f"\n\n{scrubbed}")
-    assert render_fallback_post(row).endswith(payload), "no platform, no scrubbing"

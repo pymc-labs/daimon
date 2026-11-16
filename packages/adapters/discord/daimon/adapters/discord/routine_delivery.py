@@ -346,9 +346,7 @@ def make_discord_routine_poster(
                 return DeliveryOutcome(status="skipped", note="Fallback DM access changed.")
             dm = await open_dm(int(guild_id), int(creator))
             for chunk in split_fenced(
-                await _untagged(
-                    sessionmaker, row, render_fallback_dm(row, reason, platform="discord")
-                ),
+                await _untagged(sessionmaker, row, render_fallback_dm(row, reason)),
                 _DISCORD_MAX_CHARS,
                 word_boundary=True,
             ):

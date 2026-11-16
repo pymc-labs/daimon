@@ -85,17 +85,17 @@ def test_the_teams_prompt_defers_to_the_files_hint_for_a_person_with_no_one_to_o
 
 #: What Discord's and Slack's prompts hash to. A new hash replaces their sessions, so
 #: it moves only with a deliberate change to the shipped prompt.
-_PINNED_ON_MAIN = {
-    "discord": "13303be2407304db632faeef859d98abf179db73f072420aec68d776d698cddd",
-    "slack": "13fa944f1885f764f1b90ab3d9402464e456b182fd1562cc9a94504ea6f70ef9",
+_PINNED = {
+    "discord": "661bccea5fcd0879935e89e7a599ce71974901c0e24d36c22f39c6b5884240a7",
+    "slack": "130b352874a731beaf49c29f9d847615c529cd5d40bbde465b1a255e53443d49",
 }
 
 
-@pytest.mark.parametrize("platform", sorted(_PINNED_ON_MAIN))
-def test_the_discord_and_slack_prompts_are_byte_identical_to_main(platform: str) -> None:
+@pytest.mark.parametrize("platform", sorted(_PINNED))
+def test_the_discord_and_slack_prompts_are_pinned(platform: str) -> None:
     variant = system_for_platform(_shipped_system(), platform)
 
-    assert hash_system(variant) == _PINNED_ON_MAIN[platform]
+    assert hash_system(variant) == _PINNED[platform]
 
 
 @pytest.mark.parametrize("platform", [None, "cli", ""])
@@ -149,11 +149,10 @@ _PLACES = {
 
 
 @pytest.mark.parametrize("platform", _PLATFORMS)
-def test_each_variant_carries_the_rule_with_only_its_own_places(platform: str) -> None:
+def test_each_variant_carries_only_its_own_places(platform: str) -> None:
     variant = system_for_platform(_shipped_system(), platform)
 
     assert variant is not None
-    assert "Never name or hint at another chat app, and never say Daimon works in one." in variant
     assert _PLACES[platform] in variant
     assert "only place" not in variant.lower()
     for other in _PLATFORMS:

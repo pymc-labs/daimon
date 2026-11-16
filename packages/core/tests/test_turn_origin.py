@@ -602,10 +602,9 @@ def test_controls_carry_the_words_for_this_platform_and_place(
     assert words["setup"] == setup, label
     assert words["fresh_start"] == fresh_start, label
     assert "words" in rendered.split("\n")[2], "the prose tells the model to use them"
-    assert "Never name or hint at another chat app, and never say Daimon works in one." in rendered
 
 
-#: Where Daimon works on each platform, as the rule lists it: it never denies these.
+#: Where Daimon works on each platform, as the controls list it: it never denies these.
 _PLACES = {
     "discord": "In Discord, Daimon works in other servers, channels, threads and DMs.",
     "slack": "In Slack, Daimon works in other channels, DMs and workspaces it's installed in.",
@@ -625,10 +624,6 @@ def test_each_platforms_controls_list_the_places_daimon_works_there(platform: st
 
     assert _PLACES[platform] in rendered
     assert "only place" not in prose
-    assert 'put "another app" in place of another app\'s name' in rendered, (
-        "a quote swaps another app's name for a marker rather than dropping it, "
-        "so the meaning survives"
-    )
     for other in {"discord", "slack", "teams"} - {platform}:
         assert other not in prose, f"{platform} controls name {other}"
 

@@ -12,7 +12,6 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma import replay_events
 from daimon.core.mux_backend import managed_agents, resource_ref
 from daimon.core.mux_compat import legacy_call
-from daimon.core.platform_words import scrub_other_platforms
 from daimon.core.session_ports_compat import session_scope
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.core.turn.driver import current_turn_events
@@ -76,7 +75,7 @@ async def completed_orphan_text(
                 or state.stop_reason.type != "end_turn"
             ):
                 return None
-            return scrub_other_platforms(extract_final_response(state.content), "discord") or None
+            return extract_final_response(state.content) or None
     except (anthropic.APIError, TimeoutError, DaimonError) as err:
         log.warning(
             "turn.orphan_result_read_failed", thread_id=row.thread_id, error_type=type(err).__name__

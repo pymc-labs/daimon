@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Other chat apps' names are no longer replaced.** Replies, status lines, routine
+  posts, tool sends and edits, and Discord thread names keep whatever the model
+  wrote. The instruction not to name another chat app, and the quote clause that
+  went with it, are gone from the prompt; each platform's prompt still says where
+  Daimon works there. Because the system prompt changed, existing Discord and Slack
+  sessions are replaced once.
 - **An agent can turn off Ask a person for itself.** The setting now has an Agent
   level. A button, reaction or form checks it at the agent of the conversation, so
   other agents in the workspace keep the offer. An agent cannot turn it on above an

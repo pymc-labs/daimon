@@ -79,7 +79,6 @@ from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import render_termination_notice
-from daimon.core.turn.outbound import OtherAppsScrubbedLifecycle
 from daimon.core.turn.state import (
     McpServerFailure,
     TextBlock,
@@ -2230,25 +2229,6 @@ async def test_watch_revocation_between_chunks_rechecks_each_slack_write(fake_sl
         )
     assert count() - before == 1
     assert guard.failed
-
-
-async def test_nothing_posted_names_another_app(fake_slack_web_client: Any) -> None:
-    inner, *_ = _make_lifecycle(fake_slack_web_client)
-    lc = OtherAppsScrubbedLifecycle(inner, "slack")
-    await lc.post_initial()
-    await lc.on_sse_event(_message_event("Looking in Discord and Microsoft Teams"))
-    await lc.on_render(_running_tool_turn("discord_search_messages"))
-    inner._last_flush = 0.0  # pyright: ignore[reportPrivateUsage]
-    await lc.on_render(_running_tool_turn("discord_search_messages"))
-    live = _block_text(_last_update_blocks(fake_slack_web_client))
-    assert "Looking in other apps" in live
-    assert "Discord" not in live and "Teams" not in live
-
-    reply = "Use Slack, not Discord or Microsoft Teams. See https://discord.gg/abc."
-    await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text=reply)]))
-    final = _block_text(_last_update_blocks(fake_slack_web_client))
-    assert "Use Slack, not another app. See another app." in final
-    assert "Discord" not in final and "Teams" not in final
 
 
 @pytest.mark.asyncio

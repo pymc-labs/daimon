@@ -48,7 +48,6 @@ from daimon.core.tenant_balance import debit_amount
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.notices import render_termination_notice
-from daimon.core.turn.outbound import OtherAppsScrubbedLifecycle
 from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, TurnState
@@ -3433,39 +3432,6 @@ async def test_watch_revocation_between_chunks_rechecks_each_discord_write():
         )
     assert count() - before == 1
     assert guard.failed
-
-
-class TestOtherAppsNeverNamed:
-    """What a person on Discord reads never names Slack or Teams."""
-
-    async def test_draft_tool_lines_and_answer_are_posted_without_other_apps(self) -> None:
-        inner, sends, edits = _make_lifecycle()
-        lc = OtherAppsScrubbedLifecycle(inner, "discord")
-        await lc.on_sse_event(_message_event("Checking Slack and Microsoft Teams for it"))
-        tool = ToolUseBlock(
-            kind="tool_use", id="t1", type="agent.tool_use", name="slack_search", input={}
-        )
-        await lc.on_render(TurnState(content=[tool]))
-        card_text = sends[0]["embeds"][0].description
-        assert "Slack" not in card_text and "Teams" not in card_text
-        assert "> Checking other apps for it" in card_text
-
-        reply = "Use Discord, not Slack or Teams. See https://acme.slack.com/archives/C1."
-        await lc.on_terminal_success(_make_success_state(reply))
-        posted = "\n".join(
-            str(kwargs.get("content", "")) for kwargs in sends + [kwargs for _, kwargs in edits]
-        )
-        assert "Use Discord, not another app. See another app." in posted
-        assert "Slack" not in posted and "Teams" not in posted
-
-    async def test_a_sealed_answer_before_a_tool_call_is_scrubbed(self) -> None:
-        inner, sends, edits = _make_lifecycle()
-        lc = OtherAppsScrubbedLifecycle(inner, "discord")
-        sealed = "Here is the longer answer, which names Slack so that it is long enough. " * 10
-        tool = ToolUseBlock(kind="tool_use", id="t1", type="agent.tool_use", name="bash", input={})
-        await lc.on_render(TurnState(content=[TextBlock(kind="text", text=sealed), tool]))
-        posted = "\n".join(str(kwargs.get("content", "")) for kwargs in sends)
-        assert "another app" in posted and "Slack" not in posted
 
 
 async def test_terminal_success_when_opt_out_lookup_fails_then_answer_lands_unpinged() -> None:

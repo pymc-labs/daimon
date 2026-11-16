@@ -20,7 +20,7 @@ import re
 
 import structlog
 from daimon.core.context_prompt import FRAGMENT_MARKER
-from daimon.core.platform_words import one_platform_rule
+from daimon.core.platform_words import works_in_sentence
 from daimon.core.stores.domain import CHAT_PLATFORMS, ChatPlatform
 
 log = structlog.get_logger(__name__)
@@ -154,7 +154,7 @@ SHIPPED_PASSAGES: tuple[str, ...] = (
 def _swaps(platform: ChatPlatform) -> tuple[tuple[str, str], ...]:
     return (
         _EVERY_PLATFORM,
-        (_SHIPPED_FORMAT, f"{_FORMATTING[platform]}\n\n{one_platform_rule(platform)}"),
+        (_SHIPPED_FORMAT, f"{_FORMATTING[platform]}\n\n{works_in_sentence(platform)}"),
         _NEVER_ASSUME,
         (_FILES_SHIPPED, _FILES[platform]),
         (

@@ -110,8 +110,7 @@ def make_teams_routine_poster(
             chat = await teams.open_chat(member)
             delivery = uuid.uuid4()
             for chunk in split_fenced(
-                render_fallback_dm(row, reason, platform="teams")
-                + unsupported_files_note(payload_for(row)),
+                render_fallback_dm(row, reason) + unsupported_files_note(payload_for(row)),
                 TEAMS_LIMIT,
                 word_boundary=True,
             ):

@@ -18,7 +18,6 @@ from decimal import Decimal
 import structlog
 from anthropic import APIError, AsyncAnthropic
 from daimon.core.auxiliary_calls import AuxiliaryUnavailable
-from daimon.core.platform_words import scrub_other_platforms
 from daimon.core.thread_naming import (
     is_generic_thread_name,
     suggest_thread_name,
@@ -101,4 +100,4 @@ async def generate_thread_name(
         log.info("thread.naming_skipped", message_id=message_id, reason="generic_answer")
         return fallback
     log.info("thread.named", message_id=message_id)
-    return scrub_other_platforms(suggestion.name, "discord")
+    return suggestion.name
