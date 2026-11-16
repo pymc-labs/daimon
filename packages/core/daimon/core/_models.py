@@ -4931,9 +4931,10 @@ class Watch(Base):
             "delivery = 'thread' OR source IN ('poll', 'mcp_poll', 'callback')",
             name="ck_watches_delivery_source",
         ),
-        # Only an admin-approved polled watch may be permanent (no expiry).
+        # No expiry: an admin-approved polled watch, or a callback watch where the
+        # `callback_watch_lifetime` feature is unlimited.
         CheckConstraint(
-            "expires_at IS NOT NULL OR "
+            "expires_at IS NOT NULL OR source = 'callback' OR "
             "(permanent_approved_by IS NOT NULL AND source IN ('poll', 'mcp_poll'))",
             name="ck_watches_permanent",
         ),
@@ -5009,7 +5010,8 @@ class WatchCapability(Base):
     key_id: Mapped[str] = mapped_column(Text, nullable=False)
     generation: Mapped[int] = mapped_column(Integer, nullable=False)
     operation: Mapped[str] = mapped_column(Text, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # None only for the link of a callback watch with no expiry.
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 

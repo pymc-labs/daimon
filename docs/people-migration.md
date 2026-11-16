@@ -67,13 +67,14 @@ without an identity get one.
 The file must name the server (`guild_id`) of
 `--tenant`, and the agent must belong to it. A callback watch ends at its old
 expiry; a permanent one or one past the `callback_watch_lifetime` setting (30 days by
-default) ends that long after it is confirmed,
-and past ones are skipped. An owner already at the live-watch limit is skipped
+default) ends that long after it is confirmed, or never when the setting is
+unlimited, and past ones are skipped. An owner already at the live-watch limit is skipped
 and counted, not an error. Rerunning issues no second link; a watch nobody has
 confirmed is updated from the file.
 
 Until a watch is confirmed, a post to either of its links answers a retryable
-`503`, so senders try again; a link nobody holds still gets the same `403`.
+`503`, so senders try again; a link nobody holds still gets the same `403`. An
+import nobody confirms lapses 30 days after it was imported.
 Entries and timers marked `paused` stay paused when confirmed: a watch waits for
 its owner to resume it, and a timer is never scheduled.
 

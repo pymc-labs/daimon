@@ -9,7 +9,9 @@ global lock. The body is the event as is; it is evidence, never an instruction.
 Only the hash is stored. `max_body` is the deployment's body cap in bytes, kept between
 4 KiB and 512 KiB here whatever the caller says; the byte quotas grow with it.
 
-`watches.delivery` other than `thread` is now allowed for the `callback` source too.
+`watches.delivery` other than `thread` is now allowed for the `callback` source too, and
+a callback watch may have no expiry (the `callback_watch_lifetime` feature's unlimited);
+its links then have none either.
 
 `held_timers` keeps imported one-shot timers until an operator confirms them.
 Settling one empties its note and keeps the row, so a repeated import adds nothing.
@@ -61,7 +63,7 @@ BEGIN
     supplied := public.digest(convert_to(p_token,'UTF8'),'sha256');
     FOR c IN SELECT digest FROM {schema}.watch_capabilities
       WHERE watch_id=p_watch AND operation='callback' AND revoked_at IS NULL
-        AND expires_at > clock_timestamp() AND digest ~ '^[0-9a-f]{{64}}$'
+        AND (expires_at IS NULL OR expires_at > clock_timestamp()) AND digest ~ '^[0-9a-f]{{64}}$'
     LOOP
         stored := decode(c.digest,'hex');
         difference := 0;
@@ -83,7 +85,7 @@ BEGIN
     -- Every live digest is compared in full; a match never ends the scan early.
     FOR c IN SELECT digest FROM {schema}.watch_capabilities
       WHERE watch_id=p_watch AND operation='callback' AND revoked_at IS NULL
-        AND expires_at > t AND digest ~ '^[0-9a-f]{{64}}$'
+        AND (expires_at IS NULL OR expires_at > t) AND digest ~ '^[0-9a-f]{{64}}$'
     LOOP
         stored := decode(c.digest,'hex');
         difference := 0;
@@ -210,6 +212,14 @@ def upgrade() -> None:
         "watches",
         "delivery = 'thread' OR source IN ('poll', 'mcp_poll', 'callback')",
     )
+    op.drop_constraint("ck_watches_permanent", "watches", type_="check")
+    op.create_check_constraint(
+        "ck_watches_permanent",
+        "watches",
+        "expires_at IS NOT NULL OR source = 'callback' OR "
+        "(permanent_approved_by IS NOT NULL AND source IN ('poll', 'mcp_poll'))",
+    )
+    op.alter_column("watch_capabilities", "expires_at", nullable=True)
     op.execute(CALLBACK_SQL.format(schema=schema))
     op.execute(f"GRANT CREATE ON SCHEMA {schema} TO daimon_watch_ingress_owner")
     op.execute(f"REVOKE ALL ON FUNCTION {schema}.{SIGNATURE} FROM PUBLIC")
@@ -260,3 +270,11 @@ def downgrade() -> None:
         "watches",
         "delivery = 'thread' OR source IN ('poll', 'mcp_poll')",
     )
+    op.drop_constraint("ck_watches_permanent", "watches", type_="check")
+    op.create_check_constraint(
+        "ck_watches_permanent",
+        "watches",
+        "expires_at IS NOT NULL OR "
+        "(permanent_approved_by IS NOT NULL AND source IN ('poll', 'mcp_poll'))",
+    )
+    op.alter_column("watch_capabilities", "expires_at", nullable=False)

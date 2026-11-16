@@ -192,11 +192,12 @@ as untrusted evidence. A post may be up to 4 KiB unless the deployment allows mo
 returned in the tool result or shown in a channel. A lost one cannot be shown
 again: delete the watch and make a new one.
 
-If the DM fails the watch is deleted. A callback watch always has an end date and
-reports to the owner's private conversation. It lasts 30 days by default. The
-`callback_watch_lifetime` feature (server admins,
-`DAIMON_FEATURES__CALLBACK_WATCH_LIFETIME`) sets 7, 30 or 90 days, or unlimited
-with `0`. It applies to new and imported watches, and `renew` restarts the clock.
+If the DM fails the watch is deleted. A callback watch reports to the owner's
+private conversation and lasts 30 days by default. The `callback_watch_lifetime`
+feature (server admins, `DAIMON_FEATURES__CALLBACK_WATCH_LIFETIME`) sets 7, 30 or
+90 days, or no end date with `0`. Such a watch is permanent without counting
+toward the 5 above, and like them expires after 30 days paused. The setting
+applies to new and imported watches, and `renew` restarts the clock.
 
 Set the public address of the sidecar first:
 

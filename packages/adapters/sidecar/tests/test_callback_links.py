@@ -92,7 +92,7 @@ async def link(db_session_factory, monkeypatch):
             db,
             binding,
             instructions="Summarize the posted event.",
-            expires_at=now + timedelta(days=1),
+            lifetime=timedelta(days=1),
             now=now,
         )
     return watch, token
@@ -194,7 +194,7 @@ async def test_stopped_or_expired_watches_refuse(db_session_factory, link):
     assert await count(db_session_factory, "watch_inbox") == 0
 
 
-async def test_callback_watch_is_never_permanent(db_session_factory, link):
+async def test_only_an_admin_makes_a_page_watch_permanent(db_session_factory, link):
     watch, _ = link
     assert watch.expires_at is not None
     async with db_session_factory.begin() as db:
@@ -219,7 +219,7 @@ async def test_callback_watch_is_never_permanent(db_session_factory, link):
                 page_id=uuid.uuid4(),
                 expires_at=None,
                 now=datetime.now(UTC),
-                source="callback",
+                source="page_event",
                 permanent_approved_by=watch.owner_account_id,
             )
 
@@ -838,7 +838,28 @@ async def test_import_keeps_a_long_source_to_the_setting_and_unlimited_keeps_it_
     assert 89 * 86400 < free.watch.source_state["lifetime_s"] <= 90 * 86400
     never = await run("c" * 8 + "-1111-1111-1111-" + "1" * 12, None, None)
     assert not never.capped and never.watch is not None
-    assert never.watch.source_state["lifetime_s"] == int(watches.UNLIMITED_LIFETIME.total_seconds())
+    assert never.watch.source_state["lifetime_s"] is None
+    async with db_session_factory.begin() as db:
+        confirmed = await watches.confirm_import(
+            db,
+            never.watch.id,
+            tenant_id=moved.id,
+            owner_account_id=never.watch.owner_account_id,
+            agent_id="agent-new",
+            parent_channel_id="900",
+            thread_id="900",
+            now=datetime.now(UTC),
+        )
+        links = list(
+            await db.scalars(
+                text("SELECT expires_at FROM watch_capabilities WHERE watch_id=:w"),
+                {"w": never.watch.id},
+            )
+        )
+    assert confirmed.status == "active" and confirmed.expires_at is None
+    assert links == [None, None], links
+    async with TestClient(TestServer(create_app(db_session_factory))) as client:
+        assert (await post(client, never.watch.id, never.token)).status == 202
 
 
 async def test_an_unlimited_callback_watch_and_its_link_keep_working(db_session_factory, moved):
@@ -850,13 +871,66 @@ async def test_an_unlimited_callback_watch_and_its_link_keep_working(db_session_
             db, item.watch.id, tenant_id=moved.id, now=now, lifetime=None
         )
         links = list(await db.scalars(text("SELECT expires_at FROM watch_capabilities")))
-    assert renewed.expires_at == now + watches.UNLIMITED_LIFETIME
-    assert set(links) == {renewed.expires_at}
+    assert renewed.expires_at is None
+    assert links == [None, None], links
     async with db_session_factory.begin() as db:
+        token = await watches.rotate_callback_link(db, item.watch.id, tenant_id=moved.id, now=now)
+        rotated = await db.scalar(
+            text("SELECT expires_at FROM watch_capabilities WHERE revoked_at IS NULL")
+        )
+        assert rotated is None and token
         short = await watches.renew_callback_watch(
             db, item.watch.id, tenant_id=moved.id, now=now, lifetime=timedelta(days=7)
         )
+        links = list(
+            await db.scalars(
+                text("SELECT expires_at FROM watch_capabilities WHERE revoked_at IS NULL")
+            )
+        )
     assert short.expires_at == now + timedelta(days=7)
+    assert links == [short.expires_at]
+
+
+async def test_an_unlimited_import_kept_paused_counts_its_paused_days_from_confirmation(
+    db_session_factory, moved
+):
+    definition = ImportedCallbackWatch.model_validate(_manifest_watch(expires_at=None, paused=True))
+    start = datetime.now(UTC)
+    async with db_session_factory.begin() as db:
+        item = await watches.import_callback_watch(
+            db,
+            definition,
+            tenant_id=moved.id,
+            agent_id="agent-new",
+            agent_name="analyst",
+            now=start,
+            lifetime_cap=None,
+        )
+    assert item.watch is not None
+    confirm_at = start + timedelta(days=20)
+    async with db_session_factory.begin() as db:
+        kept = await watches.confirm_import(
+            db,
+            item.watch.id,
+            tenant_id=moved.id,
+            owner_account_id=item.watch.owner_account_id,
+            agent_id="agent-new",
+            parent_channel_id="900",
+            thread_id="900",
+            now=confirm_at,
+        )
+    assert kept.status == "paused" and kept.expires_at is None and kept.paused_at == confirm_at
+    late = confirm_at + watches.PAUSED_PERMANENT_EXPIRY + timedelta(minutes=1)
+    async with db_session_factory.begin() as db:
+        with pytest.raises(ValueError, match="cannot resume"):
+            await watches.unpause_imported_watch(db, item.watch.id, tenant_id=moved.id, now=late)
+    async with db_session_factory.begin() as db:
+        renewed = await watches.renew_callback_watch(
+            db, item.watch.id, tenant_id=moved.id, now=late, lifetime=None
+        )
+        assert renewed.paused_at == late, "renew restarts a paused watch's clock"
+        row = await watches.unpause_imported_watch(db, item.watch.id, tenant_id=moved.id, now=late)
+    assert row.status == "active" and row.expires_at is None
 
 
 async def test_a_new_callback_watch_may_last_as_long_as_the_setting_allows(
@@ -878,19 +952,28 @@ async def test_a_new_callback_watch_may_last_as_long_as_the_setting_allows(
             reason="watch_fired",
             idempotency_key=uuid.uuid4(),
         )
-        end = watches.callback_end(now, None)
-        watch, _token = await watches.register_callback_watch(
-            db, binding, instructions="Report.", expires_at=end, now=now
+        long, _token = await watches.register_callback_watch(
+            db, binding, instructions="Report.", lifetime=timedelta(days=90), now=now
         )
-        assert watch.expires_at == end
-        with pytest.raises(ValueError, match="lifetime"):
+        assert long.expires_at == now + timedelta(days=90)
+        # No expiry polls nothing, so these never count toward the permanent-watch limit.
+        made = [
             await watches.register_callback_watch(
-                db,
-                binding,
-                instructions="Report.",
-                expires_at=end + timedelta(days=1),
-                now=now,
+                db, binding, instructions="Report.", lifetime=None, now=now
             )
+            for _ in range(watches.MAX_PERMANENT_PER_OWNER + 1)
+        ]
+        links = list(
+            await db.scalars(
+                text("SELECT expires_at FROM watch_capabilities WHERE watch_id=:w"),
+                {"w": made[0][0].id},
+            )
+        )
+    assert all(watch.expires_at is None for watch, _ in made)
+    assert links == [None]
+    watch, token = made[0]
+    async with TestClient(TestServer(create_app(db_session_factory))) as client:
+        assert (await post(client, watch.id, token)).status == 202
 
 
 async def test_the_deployment_sets_the_body_cap_for_the_sidecar_and_the_database(
@@ -984,7 +1067,7 @@ async def test_reimporting_an_unconfirmed_watch_refreshes_its_lifetime(db_sessio
     assert (await run(None)).outcome == "existing"
 
 
-async def test_an_unlimited_watch_shows_no_expiry_in_lists(db_session_factory, moved):
+async def test_an_unlimited_watch_lists_as_permanent(db_session_factory, moved):
     from daimon.adapters.mcp.tools.watches import lasts, summary
 
     item = await _import(db_session_factory, moved, expires_at=None)
@@ -994,13 +1077,13 @@ async def test_an_unlimited_watch_shows_no_expiry_in_lists(db_session_factory, m
         forever = await watches.renew_callback_watch(
             db, item.watch.id, tenant_id=moved.id, now=now, lifetime=None
         )
-    assert lasts(forever.expires_at) == "no expiry"
+    assert lasts(forever.expires_at) == "permanent"
     listed = summary(forever)
-    assert listed.unlimited and listed.expires_at is None and not listed.permanent
+    assert listed.permanent and listed.expires_at is None
     async with db_session_factory.begin() as db:
         week = await watches.renew_callback_watch(
             db, item.watch.id, tenant_id=moved.id, now=now, lifetime=timedelta(days=7)
         )
     assert lasts(week.expires_at).startswith("until ")
     shown = summary(week)
-    assert not shown.unlimited and shown.expires_at == week.expires_at
+    assert not shown.permanent and shown.expires_at == week.expires_at

@@ -82,8 +82,6 @@ class WatchSummary(BaseModel):
     source_host: str | None = None
     delivery: WatchDelivery = "thread"
     permanent: bool = False
-    # A callback watch whose workspace sets no lifetime limit: expires_at is then None.
-    unlimited: bool = False
     max_turns_per_day: int = watches.DEFAULT_WATCH_CAP
     revision: int = 0
 
@@ -91,7 +89,6 @@ class WatchSummary(BaseModel):
 def summary(row: WatchRow, *, key_id: str | None = None) -> WatchSummary:
     reason = row.source_state.get("reason")
     server_url = row.source_state.get("server_url") if row.source == "mcp_poll" else None
-    unlimited = row.source == "callback" and watches.is_unlimited(row.expires_at)
     return WatchSummary(
         watch_id=row.id,
         source=row.source,
@@ -100,12 +97,11 @@ def summary(row: WatchRow, *, key_id: str | None = None) -> WatchSummary:
         thread_id=row.thread_id,
         parent_channel_id=row.parent_channel_id,
         agent_id=row.agent_id,
-        expires_at=None if unlimited else row.expires_at,
+        expires_at=row.expires_at,
         key_id=key_id,
         source_host=urlsplit(str(server_url)).hostname if server_url else None,
         delivery=row.delivery,
         permanent=row.expires_at is None,
-        unlimited=unlimited,
         max_turns_per_day=row.max_turns_per_day,
         revision=row.revision,
     )
@@ -445,14 +441,11 @@ async def create_watch_impl(
     )
     await require_delivery_allowed(runtime, auth, origin, delivery)
     if source == "callback":
-        async with runtime.session_factory.begin() as db:
-            lifetime = await watches.callback_lifetime(db, runtime.settings, auth.tenant_id)
         return await create_callback_watch(
             runtime,
             auth,
             binding,
             instructions=instructions,
-            expires_at=watches.callback_end(now, lifetime),
             now=now,
             delivery=delivery,
             max_turns_per_day=daily,
@@ -509,7 +502,6 @@ async def create_callback_watch(
     binding: ContinuationRequest,
     *,
     instructions: str,
-    expires_at: datetime,
     now: datetime,
     delivery: WatchDelivery,
     max_turns_per_day: int,
@@ -525,7 +517,7 @@ async def create_callback_watch(
                 db,
                 binding,
                 instructions=instructions,
-                expires_at=expires_at,
+                lifetime=await watches.callback_lifetime(db, runtime.settings, binding.tenant_id),
                 now=now,
                 delivery=delivery,
                 max_turns_per_day=max_turns_per_day,
@@ -816,11 +808,7 @@ EDITABLE = (
 
 def lasts(expires_at: datetime | None) -> str:
     """How long a watch runs, as its edit card shows it."""
-    if expires_at is None:
-        return "permanent"
-    if watches.is_unlimited(expires_at):
-        return "no expiry"
-    return f"until {expires_at:%Y-%m-%d %H:%M} UTC"
+    return "permanent" if expires_at is None else f"until {expires_at:%Y-%m-%d %H:%M} UTC"
 
 
 def editable(row: WatchRow) -> dict[str, JsonValue]:
@@ -1089,7 +1077,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         with that text as evidence. The link is never shown in chat or in this result and
         cannot be shown again; delete the watch and make a new one to change it. A callback
         watch needs a deployment that has set a callback address. It lasts as long as whoever runs
-        Daimon allows (30 days unless they changed it, possibly unlimited), so
+        Daimon allows (30 days unless they changed it; with no limit it is permanent), so
         `lifetime_days` and `permanent` do not apply to it.
         The tool, server, arguments, projection, rule, interval and key fields are for polls.
 
