@@ -131,11 +131,16 @@ Other follow-up turns that run for a person (such as a watch report) are
 checked the same way before each send. Long jobs and handoffs from an
 unattended turn stay refused.
 
-If the owner loses a role, the next run is skipped, the routine records
-`owner_lacks_agent_role`, and the routine's failure notice says so once until
-a run succeeds. An owner whose membership cannot be read gets no notice; the
-run is retried at the next fire. Changing a routine's owner (an edit by
-another admin) moves who must hold the roles. Handing a thread away from a
+If the owner loses a role, the next run is skipped and the routine is paused
+with the error `owner_lacks_agent_role`. On Discord the owner gets one direct
+message naming the routine and the missing role (when the direct-message
+policy allows it; the routine is paused either way). It stays paused until
+someone resumes it from the `/routines` panel; if the role is still missing it
+pauses again at its next run.
+
+An owner whose membership cannot be read is not paused or told; the run is
+retried at the next fire. Changing a routine's owner (an edit by another
+admin) moves who must hold the roles. Handing a thread away from a
 role-gated agent carries the transcript but skips the workspace checkpoint.
 
 ## How membership is checked

@@ -65,6 +65,7 @@ from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_routine
+from daimon.core.discord_dm import DiscordRest
 from daimon.core.discord_membership import DiscordRestMembershipResolver
 from daimon.core.github_app_session import (
     GitHubTokenMintUnavailable,
@@ -107,6 +108,7 @@ from daimon.core.routine_delivery import (
     DirectPost,
     agent_posted_to,
     delivery_target,
+    lapsed_role_text,
     placement_unknown_is_unsafe,
     record_routine_failure,
     render_routine_controls,
@@ -165,6 +167,7 @@ from daimon.core.stores.github_router_sessions import close_for_ma_session
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.routines import (
     clear_sandbox_drift,
+    pause_for_lapsed_role,
     record_result,
     update_routine_agent_id,
 )
@@ -365,6 +368,7 @@ async def _build_fire(
     membership_resolver: MembershipResolver | None = None,
     billing_config: BillingConfig | None = None,
     dm_turn_deps: TurnDeps | None = None,
+    discord_rest: DiscordRest | None = None,
 ) -> FireFn:
     """Construct the per-row ``fire`` callable consumed by ``run_one_tick``.
 
@@ -389,6 +393,9 @@ async def _build_fire(
         if settings.discord is not None
         else None
     )
+
+    if discord_rest is None and settings.discord is not None:
+        discord_rest = DiscordRest(settings.discord.bot_token.get_secret_value())
 
     turn_deps: list[TurnDeps] = [] if dm_turn_deps is None else [dm_turn_deps]
 
@@ -422,13 +429,47 @@ async def _build_fire(
             expected_row=row,
         )
 
-    async def _refuse_lapsed_role(s: AsyncSession, row: RoutineRow) -> None:
-        """Refuse a fire whose owner no longer holds the agent's roles; one notice per streak."""
-        await record_routine_failure(
-            s,
-            row,
-            error=OWNER_LACKS_ROLE_ERROR,
-            reason=TerminationReason.ADMISSION_DENIED,
+    async def _pause_for_lapsed_role(
+        s: AsyncSession,
+        row: RoutineRow,
+        *,
+        platform: str,
+        policy: TenantAccessPolicy | None,
+        names: tuple[str | None, ...],
+        held: tuple[str, ...],
+    ) -> None:
+        """Pause a routine whose owner lost a role its agent needs, and tell the owner once.
+
+        The pause is fenced on the claimed row, so only one fire wins it and later
+        fires never run. The DM is best effort: when it cannot be sent, the routine
+        is still paused.
+        """
+        if not await pause_for_lapsed_role(s, row, error=OWNER_LACKS_ROLE_ERROR):
+            return
+        log.info("routine.paused.owner_lacks_role", routine_id=str(row.id))
+        owner = row.created_by_user_id
+        if (
+            platform != "discord"
+            or owner is None
+            or discord_rest is None
+            or not settings.direct_message_policies.get(
+                row.tenant_id, DirectMessagePolicy()
+            ).allows(owner)
+        ):
+            return
+        tenant = await get_tenant(s, row.tenant_id)
+        unmet = tuple(
+            required
+            for required in (agent_invoker_roles(policy, names) if policy is not None else ())
+            if not set(held).intersection(required)
+        )
+        role_names = await discord_rest.role_names(tenant.external_id) if tenant else {}
+        await discord_rest.send_dm(
+            owner,
+            lapsed_role_text(
+                row,
+                tuple(tuple(role_names.get(rid, rid) for rid in required) for required in unmet),
+            ),
         )
 
     async def _refused_over_channel_budget(row: RoutineRow, *, platform: str) -> bool:
@@ -735,7 +776,14 @@ async def _build_fire(
                     reason=policy_error,
                 )
                 if policy_error == OWNER_LACKS_ROLE_ERROR:
-                    await _refuse_lapsed_role(s, row)
+                    await _pause_for_lapsed_role(
+                        s,
+                        row,
+                        platform=platform,
+                        policy=fire_policy,
+                        names=(row.agent_name,),
+                        held=fire_subject.role_ids,
+                    )
                 else:
                     await _refuse(s, row, policy_error)
                 return
@@ -864,7 +912,14 @@ async def _build_fire(
                 )
                 async with sm() as pin_s, pin_s.begin():
                     if refusal == OWNER_LACKS_ROLE_ERROR:
-                        await _refuse_lapsed_role(pin_s, row)
+                        await _pause_for_lapsed_role(
+                            pin_s,
+                            row,
+                            platform=platform,
+                            policy=fire_policy,
+                            names=ran_ref.names,
+                            held=fire_subject.role_ids,
+                        )
                     else:
                         await record_result(
                             pin_s, row.id, tail=None, error=refusal, expected_row=row

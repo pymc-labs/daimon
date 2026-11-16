@@ -3033,6 +3033,8 @@ async def _fire_with_fake_turn(
     agent_posts_to: str | None,
     policy: object | None = None,
     membership_resolver=None,
+    discord_rest=None,
+    dm_mode: str | None = None,
 ) -> tuple[RoutineRow, dict[str, object]]:
     from daimon.core.turn.state import ToolUseBlock, TurnState
 
@@ -3085,13 +3087,21 @@ async def _fire_with_fake_turn(
         on_state(TurnState(content=list(blocks)))
         return "Weekly summary: all green."
 
+    settings = _make_test_settings(monkeypatch)
+    if dm_mode is not None:
+        from daimon.core.config import DirectMessagePolicy
+
+        settings = settings.model_copy(
+            update={"direct_message_policies": {tenant.id: DirectMessagePolicy(mode=dm_mode)}}  # type: ignore[arg-type]
+        )
     fire = await _build_fire(
         client=AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999"),
         sm=db_session_factory,
-        settings=_make_test_settings(monkeypatch),
+        settings=settings,
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
         membership_resolver=membership_resolver,
+        discord_rest=discord_rest,
     )
 
     async def fake_resolve(*args: object, **kwargs: object) -> str:
@@ -4260,6 +4270,8 @@ async def _role_gated_fire(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     fetch: Callable[..., Awaitable[object]] | None,
+    *,
+    discord_rest: object | None = None,
 ) -> tuple[RoutineRow, dict[str, object]]:
     from daimon.core.access_policy import AgentRule, TenantAccessPolicy
     from daimon.core.membership import CachedMembershipResolver
@@ -4272,6 +4284,7 @@ async def _role_gated_fire(
         agent_posts_to=None,
         policy=TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("123",))}),
         membership_resolver=CachedMembershipResolver(fetch) if fetch is not None else None,  # type: ignore[arg-type]
+        discord_rest=discord_rest,
     )
 
 
@@ -4290,31 +4303,121 @@ async def test_routine_fires_role_gated_agent_for_owner_holding_the_role(
     assert after.last_error is None
 
 
-@pytest.mark.parametrize(
-    ("member", "roles", "admin", "error"),
-    [
-        (True, ("999",), True, "owner_lacks_agent_role"),
-        (True, (), False, "owner_lacks_agent_role"),
-        (False, (), False, "invoker_not_allowed"),
-    ],
-)
-async def test_routine_refuses_role_gated_agent_when_owner_lacks_the_role(
+class _FakeDiscordRest:
+    def __init__(self, *, accepts: bool = True) -> None:
+        self.accepts = accepts
+        self.sent: list[tuple[str, str]] = []
+
+    async def send_dm(self, user_id: str, text: str) -> bool:
+        self.sent.append((user_id, text))
+        return self.accepts
+
+    async def role_names(self, guild_id: str) -> dict[str, str]:
+        return {"123": "Staff"}
+
+
+def _lapsed(roles: tuple[str, ...]):  # type: ignore[no-untyped-def]
+    from daimon.core.membership import Membership
+
+    async def fetch(*_args: object) -> Membership:
+        return Membership(is_member=True, role_ids=roles, is_admin=roles == ("999",))
+
+    return fetch
+
+
+@pytest.mark.parametrize("roles", [("999",), ()])
+async def test_lapsed_role_pauses_the_routine_and_dms_the_owner_once(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
-    member: bool,
     roles: tuple[str, ...],
-    admin: bool,
-    error: str,
+) -> None:
+    """An admin without the role is no bypass; the owner hears once, in plain words."""
+    rest = _FakeDiscordRest()
+    after, seen = await _role_gated_fire(
+        db_session, db_session_factory, monkeypatch, _lapsed(roles), discord_rest=rest
+    )
+    assert not seen
+    assert after.last_error == "owner_lacks_agent_role"
+    assert after.enabled is False
+    assert after.next_fire_at is None
+    assert after.delivery_status is None, "no failure notice is queued for the destination"
+    ((user, text),) = rest.sent
+    assert user == "U_DEST"
+    assert "paused" in text and "Staff" in text and "/routines" in text
+
+
+async def test_lapsed_role_still_pauses_when_the_dm_cannot_be_sent(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rest = _FakeDiscordRest(accepts=False)
+    after, _ = await _role_gated_fire(
+        db_session, db_session_factory, monkeypatch, _lapsed(()), discord_rest=rest
+    )
+    assert after.enabled is False
+    assert len(rest.sent) == 1
+
+
+async def test_lapsed_role_pauses_without_a_dm_when_dms_are_disabled_or_unavailable(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.access_policy import AgentRule, TenantAccessPolicy
+    from daimon.core.membership import CachedMembershipResolver
+
+    rest = _FakeDiscordRest()
+
+    after, _ = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=None,
+        agent_posts_to=None,
+        policy=TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("123",))}),
+        membership_resolver=CachedMembershipResolver(_lapsed(())),
+        discord_rest=rest,
+        dm_mode="disabled",
+    )
+    assert after.enabled is False
+    assert not rest.sent
+    # No Discord credential at all: still paused.
+    bare, _ = await _role_gated_fire(db_session, db_session_factory, monkeypatch, _lapsed(()))
+    assert bare.enabled is False
+
+
+async def test_a_paused_lapsed_routine_does_not_fire_or_dm_again(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core.stores.routines import pause_for_lapsed_role
+
+    after, _ = await _role_gated_fire(db_session, db_session_factory, monkeypatch, _lapsed(()))
+    async with db_session_factory() as session, session.begin():
+        assert not await pause_for_lapsed_role(session, after, error="again"), "already paused"
+
+
+async def test_routine_refuses_a_non_member_without_pausing(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from daimon.core.membership import Membership
 
     async def fetch(*_args: object) -> Membership:
-        return Membership(is_member=member, role_ids=roles, is_admin=admin)
+        return Membership(is_member=False)
 
-    after, seen = await _role_gated_fire(db_session, db_session_factory, monkeypatch, fetch)
-    assert not seen, "an admin without the role is not a bypass"
-    assert after.last_error == error
+    rest = _FakeDiscordRest()
+    after, seen = await _role_gated_fire(
+        db_session, db_session_factory, monkeypatch, fetch, discord_rest=rest
+    )
+    assert not seen
+    assert after.last_error == "invoker_not_allowed"
+    assert after.enabled is True
+    assert not rest.sent
 
 
 async def test_routine_role_gated_agent_retries_when_membership_is_unreadable(

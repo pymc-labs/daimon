@@ -347,18 +347,25 @@ _ROUTINE_FAILURES: Final[dict[TerminationReason, tuple[str, str]]] = {
 }
 #: The error recorded when a routine's owner no longer holds a role its agent needs.
 OWNER_LACKS_ROLE_ERROR: Final = "owner_lacks_agent_role"
-#: Notices keyed by the recorded error rather than by why the turn ended. No role names.
-_ERROR_NOTICES: Final[dict[str, tuple[str, str]]] = {
-    OWNER_LACKS_ROLE_ERROR: (
-        "Its owner no longer has a role this agent needs, so it didn't run.",
-        _NEXT_RUN,
-    ),
-}
 _OTHER_FAILURE = ("Something went wrong while it was running.", _NEXT_RUN)
 _TURN_NOTICE_FAILURES = (
     TerminationReason.ADMISSION_BALANCE_DEPLETED,
     TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
 )
+
+
+def lapsed_role_text(row: RoutineRow, missing: tuple[tuple[str, ...], ...]) -> str:
+    """The one line sent to a routine's owner when it was paused for a lapsed role.
+
+    `missing` is each unmet requirement as the role names that would satisfy it.
+    """
+    needs = " and ".join(" or ".join(names) for names in missing) or "a role"
+    label = row.name or routine_phrase(row.cron_expr, row.timezone)
+    return (
+        f'Your routine "{label}" ({row.agent_name}) is paused because you no longer '
+        f"have the role it needs: {needs}. Once you have it back, resume the routine "
+        "from the /routines panel."
+    )
 
 
 def failure_notice_text(reason: TerminationReason, *, platform: str) -> str:
@@ -398,12 +405,8 @@ async def record_failure(
     that keeps failing stays quiet until a run succeeds (`queue_failure_notice`).
     """
     if reason is not None:
-        notice = (
-            "\n\n".join(_ERROR_NOTICES[error])
-            if error in _ERROR_NOTICES
-            else failure_notice_text(
-                reason, platform=await routine_platform(session, routine_id) or ""
-            )
+        notice = failure_notice_text(
+            reason, platform=await routine_platform(session, routine_id) or ""
         )
         if await queue_failure_notice(
             session, routine_id, notice=notice, expected_row=expected_row

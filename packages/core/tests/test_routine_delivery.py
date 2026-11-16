@@ -881,3 +881,18 @@ def test_a_routine_result_never_names_another_chat_app(
     dm = render_fallback_dm(row, "destination_unavailable", platform=platform)
     assert dm.endswith(f"\n\n{scrubbed}")
     assert render_fallback_post(row).endswith(payload), "no platform, no scrubbing"
+
+
+def test_lapsed_role_text_names_the_routine_and_the_missing_roles() -> None:
+    from types import SimpleNamespace
+
+    from daimon.core.routine_delivery import lapsed_role_text
+
+    row = SimpleNamespace(
+        name="Weekly digest", agent_name="helper", cron_expr="0 9 * * 1", timezone="UTC"
+    )
+    text = lapsed_role_text(row, (("Staff", "Lead"), ("Insiders",)))  # type: ignore[arg-type]
+    assert "Weekly digest" in text and "Staff or Lead and Insiders" in text
+    assert "/routines" in text
+    unnamed = SimpleNamespace(name=None, agent_name="helper", cron_expr="0 9 * * 1", timezone="UTC")
+    assert "Monday routine at 09:00 UTC" in lapsed_role_text(unnamed, ())  # type: ignore[arg-type]

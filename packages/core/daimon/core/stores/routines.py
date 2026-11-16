@@ -950,6 +950,31 @@ async def pause_routine(
     )
 
 
+async def pause_for_lapsed_role(session: AsyncSession, row: RoutineRow, *, error: str) -> bool:
+    """Pause the routine a fire was claimed as, recording `error`; caller owns the transaction.
+
+    Fenced on the claimed revision, so only one fire pauses it. It stays paused
+    until someone resumes it. Returns whether this call paused it.
+    """
+    result = cast(
+        "CursorResult[Any]",
+        await session.execute(
+            update(Routine)
+            .where(Routine.id == row.id, Routine.enabled.is_(True), _captured_routine(row))
+            .values(
+                enabled=False,
+                next_fire_at=None,
+                last_error=error,
+                handback_paused_at=None,
+                handback_enabled=None,
+                handback_next_fire_at=None,
+            )
+        ),
+    )
+    await session.flush()
+    return result.rowcount == 1
+
+
 async def resume_routine(
     session: AsyncSession,
     routine_id: _uuid.UUID,
