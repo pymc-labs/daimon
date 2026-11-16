@@ -41,6 +41,7 @@ from daimon.core.thread_handoff import (
     RecordedSession,
     ThreadHandoffRefused,
     hand_over_thread,
+    switch_dm_groups,
     switch_thread_on_request,
 )
 from daimon.core.turn_hold import TurnHold
@@ -1079,20 +1080,27 @@ async def test_an_owner_thread_never_routes_a_caller_with_no_account(
 
 
 async def _dm_switch(
-    factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, account_id: uuid.UUID
+    factory: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    *,
+    platform: str = "slack",
+    thread_id: str = "dm:abc",
+    dm_groups: frozenset[str] | None = None,
 ) -> ThreadAgentBindingRow:
     async with factory.begin() as session:
         return await hand_over_thread(
             session,
             tenant_id=tenant_id,
-            platform="slack",
+            platform=platform,
             parent_channel_id="D1",
-            thread_id="dm:abc",
+            thread_id=thread_id,
             caller=_caller(account_id, admin=True),
             destination=_RESEARCH,
             current_responder_ma_agent_id="agt_daimon",
             default=_DEFAULT,
             now=_NOW,
+            dm_groups=dm_groups,
         )
 
 
@@ -1138,3 +1146,66 @@ async def test_a_dm_switch_to_an_agent_that_does_not_admit_the_person_is_refused
     assert refused.value.refusal.reason == "dm_not_allowed", "the move names no access"
     async with db_session_factory() as session:
         assert await dm_store.get_pick(session, tenant_id=tenant.id, account_id=account_id) is None
+
+
+@pytest.mark.parametrize(("platform", "thread_id"), [("slack", "dm:abc"), ("teams", "a:chat1")])
+async def test_a_dm_switch_reads_the_persons_groups_for_a_group_grant(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    platform: str,
+    thread_id: str,
+) -> None:
+    """A grant listing a group admits its members; unknown groups refuse. Teams 1:1 chats too."""
+    tenant, account_id = await _dm_seed(db_session)
+    async with db_session_factory.begin() as session:
+        await dm_store.set_grant(
+            session, tenant_id=tenant.id, agent_name="research-bot", who="listed",
+            user_ids=[], group_ids=["G1"], set_by=None, now=_NOW,
+        )  # fmt: skip
+        # A Teams 1:1 chat is still a place for the agent rules: the agent answers there.
+        await set_fields(
+            session, scope=ChannelScopeRef(tenant_id=tenant.id, channel_id="D1"),
+            tenant_id=tenant.id, agent_name="research-bot",
+        )  # fmt: skip
+    asked: list[frozenset[str]] = []
+
+    async def lookup(user_id: str, wanted: frozenset[str]) -> frozenset[str]:
+        assert user_id == "U1"
+        asked.append(wanted)
+        return frozenset({"G1"})
+
+    groups = await switch_dm_groups(
+        db_session_factory, tenant_id=tenant.id, platform=platform,
+        thread_id=thread_id, user_id="U1", groups=lookup,
+    )  # fmt: skip
+    assert asked == [frozenset({"G1"})] and groups == frozenset({"G1"}), "the grant's groups"
+    with pytest.raises(ThreadHandoffRefused):
+        await _dm_switch(
+            db_session_factory, tenant.id, account_id, platform=platform, thread_id=thread_id
+        )
+    moved = await _dm_switch(
+        db_session_factory, tenant.id, account_id,
+        platform=platform, thread_id=thread_id, dm_groups=groups,
+    )  # fmt: skip
+    assert moved.responder_ma_agent_id == "agt_research", "a member of the group may switch"
+    async with db_session_factory() as session:
+        saved = await dm_store.get_pick(session, tenant_id=tenant.id, account_id=account_id)
+    assert saved is not None and saved.agent_name == "research-bot", "the pick is saved"
+
+
+async def test_switch_dm_groups_is_none_outside_a_dm_or_without_a_lookup(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async def lookup(_user_id: str, _wanted: frozenset[str]) -> frozenset[str]:
+        raise AssertionError("never asked outside a DM")
+
+    tenant_id = uuid.uuid4()
+    for platform, thread_id, groups in (
+        ("slack", "1700.1", lookup),
+        ("teams", "19:abc@thread.tacv2", lookup),
+        ("slack", "dm:abc", None),
+    ):
+        assert await switch_dm_groups(
+            db_session_factory, tenant_id=tenant_id, platform=platform,
+            thread_id=thread_id, user_id="U1", groups=groups,
+        ) is None  # fmt: skip

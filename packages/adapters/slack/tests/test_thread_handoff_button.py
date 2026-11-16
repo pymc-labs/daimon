@@ -75,6 +75,8 @@ async def _click(
         anthropic=build_fake_anthropic(router.dispatch),
         sessionmaker=db_session_factory,
         deployment_default=_DEFAULT,
+        http_client=None,
+        group_members=None,
     )
 
     async def _client(_runtime: Any, *, team_id: str) -> Any:

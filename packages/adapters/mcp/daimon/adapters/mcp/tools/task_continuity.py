@@ -27,6 +27,7 @@ from typing import Annotated, Literal, cast
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._dm_groups import handoff_dm_groups
 from daimon.adapters.mcp.tools._owner import may_own
 from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools._words import admin_noun
@@ -335,6 +336,9 @@ async def _hand_off_task_impl(
     readable = True
     queued = False
     moved: str | None = None
+    dm_groups = await handoff_dm_groups(
+        runtime, auth, platform=platform, thread_id=origin.thread_id
+    )
 
     try:
         # One transaction, decided under the tenant policy lock
@@ -366,6 +370,7 @@ async def _hand_off_task_impl(
                 now=datetime.now(UTC),
                 recorded=recorded,
                 membership_resolver=runtime.membership_resolver,
+                dm_groups=dm_groups,
             )
             recorded = await locked_thread_sessions(
                 session, tenant_id=auth.tenant_id, platform=platform, thread_id=origin.thread_id

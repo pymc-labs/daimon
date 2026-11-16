@@ -37,6 +37,7 @@ from daimon.adapters.teams.identity import (
     foreign_tenant,
 )
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.adapters.teams.team_owners import team_group_lookup
 from daimon.core.thread_handoff import handover_seed, switch_thread_on_request
 from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
 from microsoft_teams.apps import ActivityContext
@@ -128,6 +129,7 @@ class TeamsThreadHandoff:
             default=runtime.deployment_default,
             channel="this chat" if personal else "this channel",
             now=datetime.now(UTC),
+            dm_groups=team_group_lookup(runtime, fresh=True),
         )
         log.info(
             "thread_handoff.clicked", platform="teams", switched=outcome.switched, agent_id=agent_id

@@ -24,6 +24,13 @@ DM_SCOPE_PREFIX = "dm:"
 """Thread id prefix of a private conversation's scope."""
 
 
+def is_dm_thread(platform: str, thread_id: str) -> bool:
+    """A private conversation's scope, or a Teams personal chat (`a:…`), which is its own."""
+    return thread_id.startswith(DM_SCOPE_PREFIX) or (
+        platform == "teams" and thread_id.startswith("a:")
+    )
+
+
 class DirectMessageBusy(DaimonError):
     """A previous message still owns this private conversation."""
 

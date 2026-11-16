@@ -22,6 +22,7 @@ from daimon.adapters.slack.blockkit import notice_fields, notice_update_fields
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.adapters.slack.user_groups import user_group_lookup
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.thread_handoff import handover_seed, switch_thread_on_request
 from slack_sdk.errors import SlackApiError
@@ -126,6 +127,7 @@ async def handle_hand_over_click(
         default=runtime.deployment_default,
         channel=f"<#{channel_id}>",
         now=datetime.now(UTC),
+        dm_groups=user_group_lookup(runtime, client, team_id=team_id, fresh=True),
     )
     log.info(
         "thread_handoff.clicked", platform="slack", switched=outcome.switched, agent_id=agent_id
