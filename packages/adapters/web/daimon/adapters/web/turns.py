@@ -460,7 +460,8 @@ class WebTurns:
                     if m.seq < message.seq and m.content
                 ]
                 history = render_previous_session(
-                    bounded_turns(previous), from_agent_name=admission.agent.name
+                    bounded_turns(previous, admission.dm_history),
+                    from_agent_name=admission.agent.name,
                 )
                 return f"{controls}\n{history}\n\n{prefix}{message.content}"
 
