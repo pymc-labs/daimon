@@ -81,6 +81,7 @@ from mux.testing.drivers.anthropic.ma import (
 )
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 # Routine fires collect generated files; skip the real 6 s settle wait.
 pytestmark = pytest.mark.usefixtures("instant_routine_file_settle")
@@ -1884,10 +1885,13 @@ async def test_dm_routine_keeps_builtins_only_under_the_agent_opt_in(
                 account_id=None,
                 surface="cli",
             )
-    reply = await harness.routine()
+    with capture_logs() as logs:
+        reply = await harness.routine()
     assert _builtins_on(harness, reply.session_id) is kept, (
         "built-ins stay on only for the opted-in agent in its environment, under the guardrail"
     )
+    drifted = any(entry["event"] == "routine.sandbox_pin_mismatched" for entry in logs)
+    assert drifted is (environment == "other"), "only another environment is a drift"
     assert reply.text == "private answer"
 
 

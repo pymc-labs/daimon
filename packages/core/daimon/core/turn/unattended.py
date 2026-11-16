@@ -472,16 +472,13 @@ async def dm_session_authority(
         from daimon.core.routine_sandbox import builtins_allowed, run_matches_pin
 
         builtins = await run_matches_pin(
-            deps.anthropic,
-            sandbox.pin,
-            actual,
-            tenant_id=tenant_id,
-            records=deps.sessionmaker,
-        ) and await builtins_allowed(
-            deps.sessionmaker, deps.settings, tenant_id, "discord", actual.agent.id
+            deps.anthropic, sandbox.pin, actual, tenant_id=tenant_id, records=deps.sessionmaker
         )
         if not builtins:
             await sandbox.on_drift()
+        builtins = builtins and await builtins_allowed(
+            deps.sessionmaker, deps.settings, tenant_id, "discord", actual.agent.id
+        )
     posture = unattended_posture(
         deps.tool_safety,
         session=actual,
