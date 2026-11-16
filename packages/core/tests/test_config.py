@@ -68,23 +68,20 @@ def test_private_channel_messages_is_on_by_default_and_needs_a_teams_public_url(
 
 
 def test_discord_stale_card_age_exceeds_turn_ceiling_and_attempts_are_bounded() -> None:
-    from daimon.core.turn.ceiling import TURN_CEILING_S
+    from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
 
+    floor = int(LONGEST_TURN_CEILING_S) + 900
     defaults = DiscordSettings(bot_token=SecretStr("test"))
-    assert defaults.startup_replay_minutes == 0
-    assert defaults.turn_card_unrecoverable_after_s == 86400
-    assert defaults.turn_card_unrecoverable_after_attempts == 3
+    assert defaults.startup_replay_minutes == 0, "no replay by default"
+    assert defaults.turn_card_unrecoverable_after_s == 86400, "a day by default"
+    assert defaults.turn_card_unrecoverable_after_attempts == 3, "three passes by default"
     with pytest.raises(ValidationError):
-        DiscordSettings(
-            bot_token=SecretStr("test"), turn_card_unrecoverable_after_s=int(TURN_CEILING_S) + 899
-        )
+        DiscordSettings(bot_token=SecretStr("test"), turn_card_unrecoverable_after_s=floor - 1)
     with pytest.raises(ValidationError):
         DiscordSettings(bot_token=SecretStr("test"), turn_card_unrecoverable_after_attempts=1)
-    assert (
-        DiscordSettings(
-            bot_token=SecretStr("test"), turn_card_unrecoverable_after_s=int(TURN_CEILING_S) + 900
-        ).turn_card_unrecoverable_after_s
-        == int(TURN_CEILING_S) + 900
+    settings = DiscordSettings(bot_token=SecretStr("test"), turn_card_unrecoverable_after_s=floor)
+    assert settings.turn_card_unrecoverable_after_s == floor, (
+        "the longest turn time limit plus 15 minutes is allowed"
     )
 
 

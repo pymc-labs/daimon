@@ -750,9 +750,9 @@ turn_queue); continuation wakes keep their existing admission path.
 `int` · optional · default `86400`
 
 Minimum age in seconds before Discord can retire a card after definite recovery failure
-or repeated failed recovery passes. Must be at least the turn ceiling plus 15 minutes.
-Recovery runs at startup and periodically, and deletes a known pending card when the bot
-has Manage Messages permission.
+or repeated failed recovery passes. Must be at least the longest turn time limit (180
+minutes) plus 15 minutes. Recovery runs at startup and periodically, and deletes a known
+pending card when the bot has Manage Messages permission.
 
 ### `DAIMON_DISCORD__TURN_CARD_UNRECOVERABLE_AFTER_ATTEMPTS`
 
