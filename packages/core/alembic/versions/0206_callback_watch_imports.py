@@ -1,4 +1,4 @@
-"""Callback watches: a secret-URL ingress for senders that cannot sign, and held timers.
+"""Callback watches, held timers and DM carry-overs: what an operator import brings in.
 
 `accept_watch_callback(watch, token, payload, max_body)` is the one function the sidecar
 may call for a bearer-token post. It compares sha256(token) with every live
@@ -12,11 +12,13 @@ Only the hash is stored. `max_body` is the deployment's body cap in bytes, kept 
 4 KiB and 512 KiB here whatever the caller says; the byte quotas grow with it.
 
 `watches.delivery` other than `thread` is now allowed for the `callback` source too, and
-a callback watch may have no expiry (the `callback_watch_lifetime` feature's unlimited);
-its links then have none either.
+a callback watch may be permanent (the `callback_watch_lifetime` feature's unlimited);
+its links then have no expiry either.
 
-`held_timers` keeps imported one-shot timers until an operator confirms them.
-Settling one empties its note and keeps the row, so a repeated import adds nothing.
+`held_timers` keeps imported one-shot timers until an operator confirms them, and
+`dm_carry_overs` an earlier private conversation until the person's first DM here.
+Settling or taking one empties its words and keeps the row, so a repeated import adds
+nothing.
 
 downgrade: destructive
 """
@@ -25,8 +27,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "0207_callback_watches"
-down_revision: str | None = "0206_dm_carry_overs"
+revision = "0206_callback_watch_imports"
+down_revision: str | None = "0205_web_search_usage"
 branch_labels = None
 depends_on = None
 
@@ -256,6 +258,29 @@ def upgrade() -> None:
         ),
     )
     op.create_index("ix_held_timers_account", "held_timers", ["account_id"])
+    op.create_table(
+        "dm_carry_overs",
+        sa.Column("tenant_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("platform", sa.Text(), nullable=False),
+        sa.Column("external_user_id", sa.Text(), nullable=False),
+        sa.Column("source_name", sa.Text(), nullable=False),
+        sa.Column("exported_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("history", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column("context", sa.Text(), nullable=False),
+        sa.Column(
+            "imported_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.text("now()"),
+        ),
+        sa.Column("consumed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.PrimaryKeyConstraint(
+            "tenant_id", "platform", "external_user_id", name="pk_dm_carry_overs"
+        ),
+        sa.ForeignKeyConstraint(
+            ["tenant_id"], ["tenants.id"], ondelete="CASCADE", name="fk_dm_carry_overs_tenants"
+        ),
+    )
 
 
 def downgrade() -> None:
@@ -265,6 +290,7 @@ def downgrade() -> None:
         bind.scalar(sa.text("SELECT current_schema()"))
     )
     op.execute(f"DROP FUNCTION IF EXISTS {schema}.{SIGNATURE}")
+    op.drop_table("dm_carry_overs")
     op.drop_table("held_timers")
     # A callback watch has no meaning without its port; its capabilities cascade.
     op.execute("DELETE FROM watches WHERE source = 'callback'")
