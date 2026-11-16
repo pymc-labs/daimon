@@ -9,6 +9,7 @@ from datetime import datetime
 from daimon.core._models import (
     DirectMessageConversation,
     DirectMessagePolicy,
+    Tenant,
     ThreadAgentBinding,
 )
 from daimon.core.errors import DaimonError, UserFacingError
@@ -275,14 +276,15 @@ async def set_dm_agent_name(
     await session.flush()
 
 
-async def dm_enabled(
-    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str = "discord"
-) -> bool:
-    """The `direct_messages` feature for a workspace. Only the default differs by
-    platform (Teams starts on), so Discord stands for Discord and Slack."""
+async def dm_enabled(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
+    """The `direct_messages` feature for a workspace, at its own platform's default
+    (Teams starts on); off for a workspace that does not exist."""
     # Imported here: the feature modules import the stores.
     from daimon.core.features.snapshot import FeaturePlace, feature_in
 
+    platform = await session.scalar(select(Tenant.platform).where(Tenant.id == tenant_id))
+    if platform is None:
+        return False
     place = FeaturePlace(tenant_id, platform)
     return (await feature_in(session, None, place, "direct_messages")).on
 

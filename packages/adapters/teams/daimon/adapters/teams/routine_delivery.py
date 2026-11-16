@@ -106,7 +106,7 @@ def make_teams_routine_poster(
         creator = row.created_by_user_id
         policy = dm_policies.get(row.tenant_id, DirectMessagePolicy())
         async with sessionmaker() as session:
-            enabled = await dm_enabled(session, tenant_id=row.tenant_id, platform="teams")
+            enabled = await dm_enabled(session, tenant_id=row.tenant_id)
         if (
             not enabled
             or creator is None

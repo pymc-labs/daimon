@@ -15,6 +15,7 @@ from daimon.core.routine_delivery import DeliveryOutcome
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_posts import get_post, list_reply_posts
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -85,6 +86,9 @@ async def _post(
     row: RoutineRow,
     feed: ActivityFeed | None = None,
 ) -> DeliveryOutcome:
+    async with factory.begin() as session:
+        if await get_tenant(session, TENANT) is None:
+            await make_tenant(session, platform="teams", id=TENANT)
     poster = make_teams_routine_poster(factory, teams, tenant_id=TENANT, dm_policies={}, feed=feed)
     return await poster(row)
 
@@ -165,7 +169,7 @@ async def test_a_protected_channel_is_never_posted_in(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with db_session_factory.begin() as session:
-        tenant = await make_tenant(session)
+        tenant = await make_tenant(session, platform="teams")
         await set_access_policy(
             session,
             tenant_id=tenant.id,
@@ -199,7 +203,7 @@ async def test_an_isolated_channels_result_never_falls_back_to_a_dm(
     the creator's 1:1 chat, as on Discord and Slack; a row saved without its channel
     is placed by its thread id."""
     async with db_session_factory.begin() as session:
-        tenant = await make_tenant(session)
+        tenant = await make_tenant(session, platform="teams")
         await set_access_policy(
             session,
             tenant_id=tenant.id,
@@ -290,7 +294,7 @@ async def _shared_tenant_row(
     from daimon.core.stores.shared_channels import mark_channel_shared
 
     async with factory.begin() as session:
-        tenant = await make_tenant(session)
+        tenant = await make_tenant(session, platform="teams")
         await mark_channel_shared(
             session, tenant_id=tenant.id, platform="teams", channel_id=CHANNEL, source="platform"
         )
@@ -347,7 +351,7 @@ async def test_a_posted_result_is_recorded_so_its_agent_can_tidy_it(
     """Each posted message is the routine's agent's, requested by its creator,
     keyed by the thread it is in (a channel post roots its own) or the 1:1 chat."""
     async with db_session_factory.begin() as session:
-        tenant = await make_tenant(session)
+        tenant = await make_tenant(session, platform="teams")
     kind = "thread" if ";" in destination else "channel"
     row = _row(tenant_id=tenant.id, destination_kind=kind, destination_id=destination)
     poster = make_teams_routine_poster(
@@ -372,7 +376,7 @@ async def test_a_long_channel_results_chunks_are_one_reply(
 ) -> None:
     """Each chunk roots its own thread, so the delivery groups them for delete_reply."""
     async with db_session_factory.begin() as session:
-        tenant = await make_tenant(session)
+        tenant = await make_tenant(session, platform="teams")
     teams = _Teams()
     payload = " ".join(f"word{i}" for i in range(1200))
     row = _row(
@@ -413,7 +417,7 @@ async def test_a_part_posted_before_a_failure_stays_recorded(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with db_session_factory.begin() as session:
-        tenant = await make_tenant(session)
+        tenant = await make_tenant(session, platform="teams")
     long = "word " * 1_000
     row = _row(tenant_id=tenant.id, delivery_payload=long, last_result_tail=long)
     poster = make_teams_routine_poster(

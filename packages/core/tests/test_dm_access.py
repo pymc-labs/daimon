@@ -40,7 +40,7 @@ from daimon.core.privacy import collect_purge_preview, held_lines
 from daimon.core.purge import purge_account
 from daimon.core.scope import ResolvedConfig
 from daimon.core.stores import dm_access as store
-from daimon.core.stores.direct_messages import set_dm_agent_name, set_dm_enabled
+from daimon.core.stores.direct_messages import dm_enabled, set_dm_agent_name, set_dm_enabled
 from daimon.core.turn.admission import Admission, AdmissionGrant
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
@@ -88,6 +88,20 @@ async def test_decide_dm_with_dms_off_refuses(db_session_factory):
         await set_dm_enabled(session, tenant_id=tenant.id, enabled=False)
     decision = await decide(db_session_factory, tenant, agents)
     assert decision.route == DmRefused("no_agent"), "DMs off admit nobody"
+
+
+@pytest.mark.parametrize(
+    ("platform", "on"), [("discord", False), ("slack", False), ("teams", True)]
+)
+async def test_dm_enabled_when_unset_then_the_workspace_platform_default_holds(
+    db_session_factory, platform, on
+):
+    """Every caller gets the workspace's own platform default (Teams starts on)."""
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform=platform, workspace_id=f"{platform}-1")
+    async with db_session_factory() as session:
+        assert await dm_enabled(session, tenant_id=tenant.id) is on, platform
+        assert not await dm_enabled(session, tenant_id=uuid.uuid4()), "no workspace, no DMs"
 
 
 async def test_decide_dm_with_one_open_agent_starts_it(db_session_factory):
