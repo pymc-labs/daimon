@@ -409,8 +409,10 @@ async def create_watch_impl(
         raise ToolError("Page-event watches are unavailable until a page-event producer exists")
     assert auth.platform_user_id is not None
     if source == "callback" and permanent:
-        raise ToolError("A callback watch cannot be permanent")
-    if not permanent and not 1 <= lifetime_days <= 30:
+        raise ToolError(
+            "A callback watch cannot be permanent; its lifetime is set by whoever runs Daimon"
+        )
+    if source != "callback" and not permanent and not 1 <= lifetime_days <= 30:
         raise ToolError("Watch lifetime must be 1 to 30 days")
     # Left out, the default daily limit; the firing SQL still holds it to the ceiling.
     approver = await admin_approval(
@@ -439,13 +441,14 @@ async def create_watch_impl(
     )
     await require_delivery_allowed(runtime, auth, origin, delivery)
     if source == "callback":
-        assert expires_at is not None
+        async with runtime.session_factory.begin() as db:
+            lifetime = await watches.callback_lifetime(db, runtime.settings, auth.tenant_id)
         return await create_callback_watch(
             runtime,
             auth,
             binding,
             instructions=instructions,
-            expires_at=expires_at,
+            expires_at=watches.callback_end(now, lifetime),
             now=now,
             delivery=delivery,
             max_turns_per_day=daily,
@@ -1075,7 +1078,9 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         each POST to it (up to 4 KiB of UTF-8 text) wakes the agent with that text as
         evidence. The link is never shown in chat or in this result and cannot be shown
         again; delete the watch and make a new one to change it. A callback watch needs
-        an end date (never `permanent`) and a deployment that has set a callback address.
+        a deployment that has set a callback address. It lasts as long as whoever runs
+        Daimon allows (30 days unless they changed it, possibly unlimited), so
+        `lifetime_days` and `permanent` do not apply to it.
         The tool, server, arguments, projection, rule, interval and key fields are for polls.
 
         Binds the current human owner, tenant, agent and exact Discord thread.

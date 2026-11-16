@@ -31,6 +31,7 @@ from daimon.core.stores.watches import (
     OwnerCapExceeded,
     WatchActivity,
     WatchRow,
+    callback_lifetime,
     confirm_import,
     get_watch,
     import_callback_watch,
@@ -278,7 +279,7 @@ def import_command(
         async with build_runtime(load_settings()) as runtime:
             await check_targets(runtime)
             now = datetime.now(UTC)
-            # Whole-file transaction: no half-import or lost owner notice on crash.
+            # Whole-file transaction: no half-import on crash.
             async with runtime.sessionmaker.begin() as db:
                 rows: list[WatchRow] = []
                 over_cap = 0
@@ -288,6 +289,11 @@ def import_command(
                     except OwnerCapExceeded:
                         over_cap += 1
                 moved: list[CallbackImport] = []
+                cap = (
+                    await callback_lifetime(db, runtime.settings, tenant)
+                    if callbacks and tenant is not None
+                    else None
+                )
                 for entry in callbacks:
                     assert tenant is not None and agent_id and agent_name
                     moved.append(
@@ -298,6 +304,7 @@ def import_command(
                             agent_id=agent_id,
                             agent_name=agent_name,
                             now=now,
+                            lifetime_cap=cap,
                         )
                     )
                 held: list[TimerImport] = []
@@ -329,7 +336,7 @@ def import_command(
                 if item.watch is None:
                     typer.echo(f"callback {item.legacy_id} {item.outcome}")
                     continue
-                note = " lifetime capped to 30 days" if item.capped else ""
+                note = f" lifetime capped to {cap.days} days" if item.capped and cap else ""
                 typer.echo(
                     f"{item.watch.id} paused {item.outcome} callback owner="
                     f"{item.watch.owner_account_id} channel={item.watch.parent_channel_id} "
@@ -417,14 +424,19 @@ def unpause_command(
 def renew_command(
     watch_id: uuid.UUID, tenant: Annotated[uuid.UUID, typer.Option("--tenant")]
 ) -> None:
-    """Give a callback watch and its links another 30 days from now."""
+    """Give a callback watch and its links a fresh lifetime from now (set by the
+    callback_watch_lifetime feature; 30 days unless a server admin changed it)."""
 
     async def run() -> None:
         async with build_runtime(load_settings()) as runtime:
             async with runtime.sessionmaker.begin() as db:
                 try:
                     row = await renew_callback_watch(
-                        db, watch_id, tenant_id=tenant, now=datetime.now(UTC)
+                        db,
+                        watch_id,
+                        tenant_id=tenant,
+                        now=datetime.now(UTC),
+                        lifetime=await callback_lifetime(db, runtime.settings, tenant),
                     )
                 except ValueError as exc:
                     raise typer.BadParameter(str(exc)) from None

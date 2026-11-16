@@ -93,6 +93,7 @@ _NARROWED: dict[str, str] = {
     "require_routine_destination": "read when a routine is created, at the workspace",
     "long_jobs_max_usd": "checked when a job starts, from its workspace and agent",
     "long_jobs_max_deadline": "checked when a job starts, from its workspace and agent",
+    "callback_watch_lifetime": "a server admin's limit, read when a callback watch is made",
     "daily_model_cap": "counts the team's spend, so a workspace or agent limit",
     "thread_providers": "an agent owner's consent, checked when a conversation's model is picked",
     **{f"web.{module}": "workspace-only web app surface" for module in WEB_MODULES},

@@ -12,6 +12,7 @@ from decimal import Decimal
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from daimon.adapters.sidecar.main import create_app
+from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.watch_imports import (
     ImportedCallbackWatch,
@@ -19,6 +20,8 @@ from daimon.core.continuity.watch_imports import (
     WatchExport,
 )
 from daimon.core.stores import tenant_ledger, watches
+from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.held_timers import (
     EMPTY_NOTE_PROMPT,
     cancel_missing_timers,
@@ -31,7 +34,7 @@ from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.testing.factories import make_tenant
 from daimon.testing.watch_fixtures import install_poll_ports
-from pydantic import ValidationError
+from pydantic import PostgresDsn, SecretStr, ValidationError
 from sqlalchemy import text
 
 pytestmark = pytest.mark.fresh_schema
@@ -407,14 +410,17 @@ async def test_held_timers_do_not_fire_until_confirmed_and_settle_once(db_sessio
                 first,
             )
         ]
-    assert results == ["held", "past", "held", "unsupported", "existing"], results
+    assert results == ["held", "past", "held", "held", "existing"], results
     assert await _pending_timers(db_session_factory) == []
     counts = await settle_held_timers(
         db_session_factory, tenant_id=moved.id, agent_id="agent-new", agent_name="analyst", now=now
     )
-    assert dict(counts) == {"scheduled": 2}, "a DM timer is scheduled like any other"
+    assert dict(counts) == {"scheduled": 3}, "a DM or channel timer is scheduled like any other"
     pending = await _pending_timers(db_session_factory)
-    assert [p[2] for p in pending] == ["later", "private"], pending
+    assert [p[2] for p in pending] == ["later", "private", "shared"], pending
+    assert pending[2][0] == "900" and pending[2][1].startswith("ch:"), (
+        "a channel timer fires in its channel under a private scope"
+    )
     assert pending[0][:2] == ("900", "901"), "a thread timer wakes the thread it names"
     assert pending[1][0].startswith("dm:") and pending[1][0] == pending[1][1], (
         "a DM timer carries a private scope, never a channel id"
@@ -425,7 +431,7 @@ async def test_held_timers_do_not_fire_until_confirmed_and_settle_once(db_sessio
     assert dict(again) == {}
     async with db_session_factory() as db:
         notes = list(await db.scalars(text("SELECT note FROM held_timers")))
-    assert notes == ["", "", ""], "settled rows keep no note"
+    assert notes == ["", "", "", ""], "settled rows keep no note"
 
 
 async def test_held_timers_stop_at_the_pending_cap(db_session_factory, moved):
@@ -741,3 +747,139 @@ def test_exporter_shapes_are_accepted():
                 }
             ]
         )
+
+
+def _settings(**extra):
+    return Settings.model_validate(
+        {
+            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
+            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
+            **extra,
+        }
+    )
+
+
+async def _choose(factory, tenant, value):
+    async with factory.begin() as db:
+        await set_feature_value(
+            db,
+            tenant_id=tenant.id,
+            target=FeatureTarget("workspace"),
+            key="callback_watch_lifetime",
+            value=value,
+            set_by=None,
+            surface="chat",
+        )
+
+
+async def _lifetime(factory, tenant, settings=None):
+    async with factory() as db:
+        return await watches.callback_lifetime(db, settings, tenant.id)
+
+
+async def test_callback_lifetime_is_thirty_days_unless_a_server_admin_changes_it(
+    db_session_factory, moved
+):
+    assert await _lifetime(db_session_factory, moved) == timedelta(days=30)
+    await _choose(db_session_factory, moved, "0")
+    assert await _lifetime(db_session_factory, moved) is None
+    await _choose(db_session_factory, moved, "7")
+    assert await _lifetime(db_session_factory, moved) == timedelta(days=7)
+
+
+async def test_the_deployment_sets_the_lifetime_and_a_workspace_cannot_loosen_it(
+    db_session_factory, moved
+):
+    kept = _settings(features={"callback_watch_lifetime": "14"})
+    assert await _lifetime(db_session_factory, moved, kept) == timedelta(days=14)
+    await _choose(db_session_factory, moved, "0")
+    assert await _lifetime(db_session_factory, moved, kept) == timedelta(days=14)
+    unlimited = _settings(features={"callback_watch_lifetime": "0"})
+    await _choose(db_session_factory, moved, "7")
+    assert await _lifetime(db_session_factory, moved, unlimited) == timedelta(days=7)
+    assert await _lifetime(db_session_factory, moved, _settings(features={})) == timedelta(days=7)
+
+
+async def test_import_keeps_a_long_source_to_the_setting_and_unlimited_keeps_it_all(
+    db_session_factory, moved
+):
+    async def run(legacy_id, expires_at, cap):
+        definition = ImportedCallbackWatch.model_validate(
+            _manifest_watch(legacy_id=legacy_id, expires_at=expires_at)
+        )
+        async with db_session_factory.begin() as db:
+            return await watches.import_callback_watch(
+                db,
+                definition,
+                tenant_id=moved.id,
+                agent_id="agent-new",
+                agent_name="analyst",
+                now=datetime.now(UTC),
+                lifetime_cap=cap,
+            )
+
+    ninety = (datetime.now(UTC) + timedelta(days=90)).isoformat()
+    week = await run("a" * 8 + "-1111-1111-1111-" + "1" * 12, ninety, timedelta(days=7))
+    assert (
+        week.capped
+        and week.watch is not None
+        and week.watch.source_state["lifetime_s"] == 7 * 86400
+    )
+    free = await run("b" * 8 + "-1111-1111-1111-" + "1" * 12, ninety, None)
+    assert not free.capped and free.watch is not None
+    assert 89 * 86400 < free.watch.source_state["lifetime_s"] <= 90 * 86400
+    never = await run("c" * 8 + "-1111-1111-1111-" + "1" * 12, None, None)
+    assert not never.capped and never.watch is not None
+    assert never.watch.source_state["lifetime_s"] == int(watches.UNLIMITED_LIFETIME.total_seconds())
+
+
+async def test_an_unlimited_callback_watch_and_its_link_keep_working(db_session_factory, moved):
+    item = await _import(db_session_factory, moved, expires_at=None)
+    assert item.watch is not None
+    now = datetime.now(UTC)
+    async with db_session_factory.begin() as db:
+        renewed = await watches.renew_callback_watch(
+            db, item.watch.id, tenant_id=moved.id, now=now, lifetime=None
+        )
+        links = list(await db.scalars(text("SELECT expires_at FROM watch_capabilities")))
+    assert renewed.expires_at == now + watches.UNLIMITED_LIFETIME
+    assert set(links) == {renewed.expires_at}
+    async with db_session_factory.begin() as db:
+        short = await watches.renew_callback_watch(
+            db, item.watch.id, tenant_id=moved.id, now=now, lifetime=timedelta(days=7)
+        )
+    assert short.expires_at == now + timedelta(days=7)
+
+
+async def test_a_new_callback_watch_may_last_as_long_as_the_setting_allows(
+    db_session_factory, link
+):
+    template, _ = link
+    now = datetime.now(UTC)
+    async with db_session_factory.begin() as db:
+        binding = ContinuationRequest(
+            tenant_id=template.tenant_id,
+            platform="discord",
+            parent_channel_id="4241",
+            thread_id="4242",
+            requester_account_id=template.owner_account_id,
+            requester_external_user_id="123",
+            target_ma_agent_id="agent-bound",
+            target_name="analyst",
+            requested_work=None,
+            reason="watch_fired",
+            idempotency_key=uuid.uuid4(),
+        )
+        end = watches.callback_end(now, None)
+        watch, _token = await watches.register_callback_watch(
+            db, binding, instructions="Report.", expires_at=end, now=now
+        )
+        assert watch.expires_at == end
+        with pytest.raises(ValueError, match="lifetime"):
+            await watches.register_callback_watch(
+                db,
+                binding,
+                instructions="Report.",
+                expires_at=end + timedelta(days=1),
+                now=now,
+            )
