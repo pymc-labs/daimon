@@ -13,7 +13,7 @@ import structlog
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.channel_budget_notice import BudgetNotice, BudgetNotifier
-from daimon.core.config import DirectMessagePolicy
+from daimon.core.config import env_dm_policy
 from daimon.core.dm_access import roles_by_membership, sender_admits
 from daimon.core.stores.watches import (
     REFUSED,
@@ -52,7 +52,7 @@ def discord_budget_notifier(
             )
 
         for user_id in await notice.allowed_recipients(
-            policies.get(notice.tenant_id, DirectMessagePolicy()), admits
+            env_dm_policy(policies, notice.tenant_id), admits
         ):
             if is_closed():
                 log.info("channel_budget.notice_undelivered", err_type="ClientClosed")
@@ -124,7 +124,7 @@ async def send_member_notice(
     text: str,
 ) -> bool:
     """Existing private member-notice transport, also used for watch migration DMs."""
-    policy = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
+    policy = env_dm_policy(runtime.settings.direct_message_policies, tenant_id)
     if is_closed() or not policy.allows(recipient_id):
         return False
     if not await _default_agent_admits(runtime, tenant_id, workspace_id, recipient_id):
@@ -175,7 +175,7 @@ async def send_watch_notice(
     An owner Discord will never deliver to (a bot, gone from the server, DMs
     closed or the bot blocked) is `REFUSED`.
     """
-    policy = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
+    policy = env_dm_policy(runtime.settings.direct_message_policies, tenant_id)
     if is_closed() or not policy.allows(recipient_id):
         return None
     if not await _default_agent_admits(runtime, tenant_id, workspace_id, recipient_id):

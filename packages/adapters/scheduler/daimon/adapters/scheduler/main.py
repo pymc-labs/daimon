@@ -55,8 +55,8 @@ from daimon.core.channel_backend import effective_thread_backend, is_selfhosted_
 from daimon.core.compute_fly import FlyComputeProvider
 from daimon.core.compute_sessions import ComputeSessions
 from daimon.core.config import (
-    DirectMessagePolicy,
     Settings,
+    env_admits,
     get_repo_memory_settings,
     load_settings,
 )
@@ -559,9 +559,9 @@ async def _build_fire(
             if row.destination_kind == "dm" and (
                 platform != "discord"
                 or not await dm_enabled(s, tenant_id=row.tenant_id)
-                or not settings.direct_message_policies.get(
-                    row.tenant_id, DirectMessagePolicy()
-                ).allows(row.created_by_user_id)
+                or not env_admits(
+                    settings.direct_message_policies, row.tenant_id, row.created_by_user_id
+                )
                 or not granted
             ):
                 await _refuse(s, row, "routine DMs are disabled or the owner is not allowed")

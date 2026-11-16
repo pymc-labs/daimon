@@ -11,7 +11,7 @@ from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.adapters.slack.user_groups import user_group_lookup
 from daimon.core.channel_budget_notice import BudgetNotice, BudgetNotifier
-from daimon.core.config import DirectMessagePolicy
+from daimon.core.config import env_dm_policy
 from daimon.core.dm_access import sender_admits
 from daimon.core.turn.deps import TurnDeps
 from slack_sdk.errors import SlackApiError
@@ -27,9 +27,7 @@ def slack_budget_notifier(runtime: SlackRuntime) -> BudgetNotifier:
         if client is None:
             return 0
         text = notice.text(f"<#{notice.channel_id}>")
-        policy = runtime.settings.direct_message_policies.get(
-            notice.tenant_id, DirectMessagePolicy()
-        )
+        policy = env_dm_policy(runtime.settings.direct_message_policies, notice.tenant_id)
         groups = user_group_lookup(runtime, client, team_id=notice.workspace_id)
 
         async def admits(user_id: str) -> bool:

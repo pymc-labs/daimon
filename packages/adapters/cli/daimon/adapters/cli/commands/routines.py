@@ -27,7 +27,7 @@ import typer
 from anthropic import APIStatusError
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_agent_ref
-from daimon.core.config import DirectMessagePolicy, load_settings
+from daimon.core.config import env_admits, load_settings
 from daimon.core.cron import validated_next_slot
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -233,10 +233,8 @@ async def run_create_dm_routine(
         if tenant is None or tenant.archived_at is not None or tenant.platform != "discord":
             raise UserFacingError("Select an active Discord tenant.")
         policy = await load_access_policy(session, tenant_id=tenant_id)
-        if not await dm_enabled(
-            session, tenant_id=tenant_id
-        ) or not rt.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy()).allows(
-            owner
+        if not await dm_enabled(session, tenant_id=tenant_id) or not env_admits(
+            rt.settings.direct_message_policies, tenant_id, owner
         ):
             raise UserFacingError("Routine DMs are disabled or the owner is not allowed.")
         source_thread_id = None

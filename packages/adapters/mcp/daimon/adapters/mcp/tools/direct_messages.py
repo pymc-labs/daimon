@@ -26,7 +26,7 @@ from daimon.adapters.mcp.tools.slack._send import (
     _post_with_identity,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.teams._direct import teams_direct_message
-from daimon.core.config import DirectMessagePolicy
+from daimon.core.config import env_dm_policy
 from daimon.core.dm_access import member_roles
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
@@ -62,7 +62,7 @@ async def send_direct_message_impl(
         recipient_id = recipient_id.lower()  # Entra ids compare case-insensitively
     if re.fullmatch(_RECIPIENT[auth.platform], recipient_id) is None:
         raise ToolError("recipient_id must be one platform user ID, not a mention or channel")
-    policy = runtime.settings.direct_message_policies.get(auth.tenant_id, DirectMessagePolicy())
+    policy = env_dm_policy(runtime.settings.direct_message_policies, auth.tenant_id)
     if not policy.allows(recipient_id):
         raise ToolError("direct messages to this recipient are not allowed here")
     await require_dm_recipient_allowed(runtime, auth, recipient_id=recipient_id)

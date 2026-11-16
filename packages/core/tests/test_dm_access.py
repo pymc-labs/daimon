@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import AgentRef, Place, Surface, build_subject
+from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.direct_messages import (
     DirectMessageAccessRevoked,
     DirectMessageMembershipUnknown,
@@ -109,6 +110,32 @@ async def test_decide_dm_with_one_open_agent_starts_it(db_session_factory):
     tenant, _, agents = await seed(db_session_factory, "a")
     decision = await decide(db_session_factory, tenant, agents)
     assert decision.route == DmStart("a", "only"), "one agent in play starts directly"
+
+
+async def test_decide_dm_when_the_env_policy_leaves_them_out_then_start_and_permit_refuse(
+    db_session_factory,
+):
+    """The deprecated env allowlist holds with the stored access, as on delivery."""
+    tenant, _, agents = await seed(db_session_factory, "a")
+    for listed, admitted in ((["999"], True), (["7"], False)):
+        settings = Settings(
+            _env_file=None,  # pyright: ignore[reportCallIssue]
+            database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
+            direct_message_policies={
+                tenant.id: DirectMessagePolicy(mode="allowlist", recipient_ids=listed)
+            },
+        )
+        async with db_session_factory() as session:
+            decision = await decide_dm(
+                session, settings, POLICY, tenant_id=tenant.id, platform="discord",
+                agents=agents, subject=ADA, account_id=None,
+            )  # fmt: skip
+            permitted = await permits_dm(
+                session, settings, POLICY, tenant_id=tenant.id, platform="discord",
+                agent=agents[0], subject=ADA,
+            )  # fmt: skip
+        assert (decision.route == DmStart("a", "only")) is admitted, listed
+        assert permitted is admitted, listed
 
 
 async def test_decide_dm_with_agent_opted_out_drops_it(db_session_factory):

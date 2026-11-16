@@ -45,6 +45,7 @@ from daimon.core.authz import (
     build_agent_ref,
     home_hold,
 )
+from daimon.core.config import env_admits
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.dm_access import DmGroups, sender_admits
 from daimon.core.ma_identity import derive_agent_uuid
@@ -282,7 +283,10 @@ async def require_dm_grant(
     An identity with no agent (the operator, a user key) is held to the workspace
     default agent's grant. An agent that cannot be resolved admits nobody. `groups`
     is the platform's lookup for the groups the grant names; a failed lookup refuses.
+    The deprecated env policy (`env_admits`) applies first.
     """
+    if not env_admits(runtime.settings.direct_message_policies, auth.tenant_id, recipient_id):
+        raise ToolError("direct messages to this recipient are not allowed here")
     executing = auth.chat_agent_id or auth.agent_id
     name: str | None = None
     if executing is not None:

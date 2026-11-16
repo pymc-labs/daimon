@@ -77,7 +77,7 @@ from daimon.adapters.teams.output_delivery import Spawn
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.team_owners import team_group_lookup, team_owner_lookup
 from daimon.core.authz import Action, Place, Subject, authorize
-from daimon.core.config import DirectMessagePolicy, Settings
+from daimon.core.config import Settings, env_dm_policy
 from daimon.core.dm_access import sender_admits
 from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -538,7 +538,7 @@ class SupportCommand:
             server_admins=live_admin_ids(self._runtime),
         )
         policies = self._runtime.settings.direct_message_policies
-        policy = policies.get(tenant_id, DirectMessagePolicy())
+        policy = env_dm_policy(policies, tenant_id)
         groups = team_group_lookup(self._runtime)
         for tier in tiers:
             landed = 0

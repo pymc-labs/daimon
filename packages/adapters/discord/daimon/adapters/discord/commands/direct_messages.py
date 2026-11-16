@@ -39,7 +39,7 @@ from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.adapters.discord.views import CancelView
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, Subject, authorize
-from daimon.core.config import DirectMessagePolicy, Settings
+from daimon.core.config import Settings, env_admits, env_dm_policy
 from daimon.core.direct_messages import (
     ColdDmNotices,
     DirectMessageAccessRevoked,
@@ -287,9 +287,7 @@ class DirectMessageCog(commands.Cog):
             except AccessPolicyUnreadable:
                 self._suppress(message, "policy_unreadable")
                 return _Eligibility()
-        recipient_policy = runtime.settings.direct_message_policies.get(
-            tenant.id, DirectMessagePolicy()
-        )
+        recipient_policy = env_dm_policy(runtime.settings.direct_message_policies, tenant.id)
         if not enabled or not recipient_policy.allows(str(message.author.id)):
             self._suppress(message, "dm_policy")
             return _Eligibility()
@@ -1086,8 +1084,8 @@ class DirectMessageCog(commands.Cog):
 
             async def still_allowed() -> None:
                 nonlocal verified
-                policy = runtime.settings.direct_message_policies.get(
-                    conversation.tenant_id, DirectMessagePolicy()
+                policy = env_dm_policy(
+                    runtime.settings.direct_message_policies, conversation.tenant_id
                 )
                 if grant is None or not policy.allows(person):
                     self._suppress(message, "delivery_recipient_revoked")
@@ -1155,8 +1153,8 @@ class DirectMessageCog(commands.Cog):
         person = str(message.author.id)
 
         async def may_post() -> bool:
-            policy = runtime.settings.direct_message_policies.get(
-                reply.conversation.tenant_id, DirectMessagePolicy()
+            policy = env_dm_policy(
+                runtime.settings.direct_message_policies, reply.conversation.tenant_id
             )
             if not policy.allows(person):
                 self._suppress(message, "delivery_recipient_revoked")
@@ -1207,8 +1205,8 @@ class DirectMessageCog(commands.Cog):
                 tenant = await get_tenant(session, conversation.tenant_id)
                 policy = await load_dm_access_policy(session, tenant_id=conversation.tenant_id)
                 enabled = await dm_enabled(session, tenant_id=conversation.tenant_id)
-            recipient_policy = runtime.settings.direct_message_policies.get(
-                conversation.tenant_id, DirectMessagePolicy()
+            recipient_policy = env_dm_policy(
+                runtime.settings.direct_message_policies, conversation.tenant_id
             )
             if (
                 not enabled
@@ -1326,9 +1324,11 @@ class DirectMessageCog(commands.Cog):
                 for start in range(0, len(answer), 1900):
                     # Each transport await is another opportunity for revocation.
                     await require_dm_delivery(runtime.turn_deps, reply)
-                    if not runtime.settings.direct_message_policies.get(
-                        conversation.tenant_id, DirectMessagePolicy()
-                    ).allows(str(message.author.id)):
+                    if not env_admits(
+                        runtime.settings.direct_message_policies,
+                        conversation.tenant_id,
+                        str(message.author.id),
+                    ):
                         self._suppress(message, "delivery_recipient_revoked")
                         return
                     await message.channel.send(

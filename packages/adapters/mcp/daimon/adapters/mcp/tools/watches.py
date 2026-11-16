@@ -39,7 +39,7 @@ from daimon.adapters.mcp.watch_polling import (
 )
 from daimon.core import channel_backend
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
-from daimon.core.config import DirectMessagePolicy
+from daimon.core.config import env_dm_policy
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.poll_tools import (
     SourceChanged,
@@ -196,7 +196,7 @@ async def private_key_delivery(
     key: str,
 ) -> None:
     """Never return plaintext keys to an MCP result or post into a conversation."""
-    policy = runtime.settings.direct_message_policies.get(watch.tenant_id, DirectMessagePolicy())
+    policy = env_dm_policy(runtime.settings.direct_message_policies, watch.tenant_id)
     if not policy.allows(watch.owner_external_id):
         raise ToolError("Private owner delivery is disabled")
     await require_dm_recipient_allowed(runtime, auth, recipient_id=watch.owner_external_id)
@@ -322,7 +322,7 @@ async def require_delivery_allowed(
     if origin.thread_id.startswith(DM_SCOPE_PREFIX):
         raise ToolError("A watch made in a DM reports in that DM. Leave delivery as thread.")
     if delivery == "dm":
-        policy = runtime.settings.direct_message_policies.get(auth.tenant_id, DirectMessagePolicy())
+        policy = env_dm_policy(runtime.settings.direct_message_policies, auth.tenant_id)
         async with runtime.session_factory() as db:
             enabled = await dm_enabled(db, tenant_id=auth.tenant_id)
         if not enabled or not policy.allows(auth.platform_user_id):

@@ -121,6 +121,31 @@ async def test_access_and_rules_round_trip_and_explain_names_the_route(
     assert found["groups"] == [], "no rule names a group, so none is looked up"
 
 
+async def test_explain_when_the_env_policy_leaves_them_out_then_refused(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Explain applies the deprecated env allowlist, as delivery does."""
+    tenant, selector = await _tenant(db_session_factory)
+    settings = Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
+        database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
+        direct_message_policies={
+            tenant.id: DirectMessagePolicy(mode="allowlist", recipient_ids=["7"])
+        },
+    )
+    rt = _runtime(
+        db_session_factory,
+        [_agent_json(agent_id="ag_a", name="ada", tenant_id=tenant.id)],
+        settings,
+    )
+    console, out = _console()
+    for user, route in (("7", "starts with ada (only)"), ("8", "refused (no_agent)")):
+        await dm_explain(rt=rt, console=console, selector=selector, user=user, as_json=True)
+        assert json.loads(out.getvalue())["route"] == route, user
+        out.truncate(0)
+        out.seek(0)
+
+
 async def test_writes_when_the_agent_is_unknown_then_refused_and_nothing_changes(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

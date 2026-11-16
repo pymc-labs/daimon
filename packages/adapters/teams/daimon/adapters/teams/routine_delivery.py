@@ -38,7 +38,7 @@ from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
 from daimon.core.channel_tidy import record_turn_post
-from daimon.core.config import DirectMessagePolicy
+from daimon.core.config import DirectMessagePolicy, env_dm_policy
 from daimon.core.dm_access import groups_by_members, sender_admits
 from daimon.core.message_split import split_fenced
 from daimon.core.native_admins import GroupMembers
@@ -104,7 +104,7 @@ def make_teams_routine_poster(
 
     async def dm_fallback(row: RoutineRow, reason: str) -> DeliveryOutcome:
         creator = row.created_by_user_id
-        policy = dm_policies.get(row.tenant_id, DirectMessagePolicy())
+        policy = env_dm_policy(dm_policies, row.tenant_id)
         async with sessionmaker() as session:
             enabled = await dm_enabled(session, tenant_id=row.tenant_id)
         if (

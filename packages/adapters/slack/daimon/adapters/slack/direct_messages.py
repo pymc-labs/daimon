@@ -27,7 +27,7 @@ from daimon.core.agent_identity import (
     resolve_agent_identity,
 )
 from daimon.core.authz import Subject, build_subject
-from daimon.core.config import DirectMessagePolicy, Settings
+from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.direct_messages import (
     DM_AGENT_REFUSED,
@@ -576,9 +576,6 @@ async def _decide_cold(
         user_id=user_id,
         groups=user_group_lookup(runtime, client, team_id=team_id, fresh=True),
     )
-    recipients = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
-    if not recipients.allows(user_id):
-        return DmDecision(DmRefused("no_agent")), groups
     async with runtime.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=tenant_id)
         agents = await list_dm_agents(

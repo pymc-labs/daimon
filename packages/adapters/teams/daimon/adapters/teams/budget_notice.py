@@ -15,7 +15,7 @@ from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.team_owners import team_group_lookup
 from daimon.core.channel_budget_notice import BudgetNotice, BudgetNotifier
-from daimon.core.config import DirectMessagePolicy
+from daimon.core.config import env_dm_policy
 from daimon.core.dm_access import sender_admits
 from daimon.core.turn.deps import TurnDeps
 
@@ -43,7 +43,7 @@ def teams_budget_notifier(runtime: TeamsRuntime, direct: DirectChats) -> BudgetN
         text = notice.text(notice.channel_label)
         delivered = 0
         for user_id in await notice.allowed_recipients(
-            policies.get(notice.tenant_id, DirectMessagePolicy()),
+            env_dm_policy(policies, notice.tenant_id),
             functools.partial(admits, notice.tenant_id),
         ):
             try:

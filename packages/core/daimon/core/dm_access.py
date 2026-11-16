@@ -20,7 +20,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
-from daimon.core.config import Settings
+from daimon.core.config import Settings, env_admits
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_READER_OF
 from daimon.core.dm_routing import (
@@ -253,11 +253,17 @@ async def decide_dm(
 ) -> DmDecision:
     """Which of `agents` a person's DM reaches, from grants, rules, their pick and the default.
 
-    A workspace with DMs off admits nobody. Pass every agent to choose among them, or one
-    to ask whether the person may use it: the decision is then `DmStart` for that agent.
-    `groups` are the ones `lookup_dm_groups` found; None takes them from `subject`.
+    A workspace with DMs off admits nobody, nor does one whose deprecated env policy
+    (`env_admits`, which delivery applies too) leaves the person out. Pass every agent to
+    choose among them, or one to ask whether the person may use it: the decision is then
+    `DmStart` for that agent. `groups` are the ones `lookup_dm_groups` found; None takes
+    them from `subject`.
     """
     if not await dm_enabled(session, tenant_id=tenant_id):
+        return DmDecision(DmRefused("no_agent"))
+    if settings is not None and not env_admits(
+        settings.direct_message_policies, tenant_id, subject.platform_user_id or ""
+    ):
         return DmDecision(DmRefused("no_agent"))
     routing = await load_routing(session, tenant_id=tenant_id)
     picked = (
