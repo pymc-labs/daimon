@@ -4,7 +4,8 @@ Grants say who may DM an agent (everyone, only those listed, or all but those li
 Rules are ordered; the first that matches a person picks their agent, and a locked one
 decides alone. The default agent answers everyone else. Every change goes through
 `dm_settings`, as from the web app and chat: agent names are checked, and each change
-leaves an audit row.
+leaves an audit row naming the CLI's local user. DMs are turned on or off as a
+feature: `daimon features set direct_messages on|off`.
 """
 
 from __future__ import annotations
@@ -29,8 +30,9 @@ from daimon.core.dm_routing import DmChoose, DmRefused, DmStart, DmUnchecked
 from daimon.core.dm_settings import DmActor, DmRuleSpec
 from daimon.core.errors import StoreError
 from daimon.core.stores import dm_access as store
-from daimon.core.stores.direct_messages import dm_enabled, get_dm_agent_name, set_dm_enabled
+from daimon.core.stores.direct_messages import dm_enabled, get_dm_agent_name
 from daimon.core.stores.domain import DmGrantMode
+from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.tenants import get_tenant
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,14 +60,21 @@ async def _tenant(rt: CliRuntime, selector: TenantSelector | None) -> uuid.UUID:
         return await discover_tenant(session, override=override)
 
 
+async def _actor(rt: CliRuntime, selector: TenantSelector | None) -> DmActor:
+    """The workspace and the CLI's local user, who each change is audited to."""
+    async with rt.sessionmaker() as session, session.begin():
+        override = await resolve_tenant_override(session, selector)
+        tenant_id = await discover_tenant(session, override=override)
+        principal = await get_or_create_cli_principal(
+            session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
+        )
+    return DmActor(tenant_id, principal.account_id, datetime.now(UTC))
+
+
 async def _agents(rt: CliRuntime, session: AsyncSession, tenant_id: uuid.UUID) -> list[DmAgent]:
     return await list_dm_agents(
         session, tenant_id=tenant_id, anthropic=rt.anthropic, records=rt.sessionmaker
     )
-
-
-def _actor(tenant_id: uuid.UUID) -> DmActor:
-    return DmActor(tenant_id, None, datetime.now(UTC))
 
 
 def _emit(console: Console, data: object, lines: list[str], as_json: bool) -> None:
@@ -83,19 +92,17 @@ async def dm_default(
     selector: TenantSelector | None,
     agent: str | None,
     clear: bool,
-    enabled: bool | None = None,
     as_json: bool = False,
 ) -> None:
     """Show or set the agent that answers people no rule or pick sends elsewhere."""
     if agent is not None and clear:
         raise typer.BadParameter("give an agent or --clear, not both")
-    tenant_id = await _tenant(rt, selector)
+    actor = await _actor(rt, selector)
+    tenant_id = actor.tenant_id
     async with rt.sessionmaker.begin() as session:
         if agent is not None or clear:
             agents = await _agents(rt, session, tenant_id)
-            await dm_settings.set_default(session, _actor(tenant_id), agents, agent)
-        if enabled is not None:
-            await set_dm_enabled(session, tenant_id=tenant_id, enabled=enabled)
+            await dm_settings.set_default(session, actor, agents, agent)
         current = await get_dm_agent_name(session, tenant_id=tenant_id)
         on = await dm_enabled(session, tenant_id=tenant_id)
     _emit(
@@ -118,9 +125,10 @@ async def dm_access(
     as_json: bool = False,
 ) -> None:
     """Show or replace who may DM one agent."""
-    tenant_id = await _tenant(rt, selector)
     if mode is None and (users or groups):
         raise typer.BadParameter("--user and --group need a mode: --mode listed|excluded")
+    actor = await _actor(rt, selector)
+    tenant_id = actor.tenant_id
     async with rt.sessionmaker.begin() as session:
         if mode is not None:
             agents = await _agents(rt, session, tenant_id)
@@ -128,7 +136,7 @@ async def dm_access(
             chosen = next(a for a in agents if a.name == agent)
             await dm_settings.set_grant(
                 session,
-                _actor(tenant_id),
+                actor,
                 chosen,
                 agent,
                 who=mode,
@@ -169,8 +177,8 @@ async def dm_rules(
     as_json: bool = False,
 ) -> None:
     """List the rules, or add, remove or move one."""
-    tenant_id = await _tenant(rt, selector)
-    actor = _actor(tenant_id)
+    actor = await _actor(rt, selector)
+    tenant_id = actor.tenant_id
     async with rt.sessionmaker.begin() as session:
         if action == "add":
             chosen = [user is not None, group is not None, everyone]
@@ -281,7 +289,12 @@ async def dm_import_policies(
 
     async with rt.sessionmaker.begin() as session:
         steps = await import_dm_policies(
-            session, rt.settings, agents_of=agents_of, now=datetime.now(UTC), dry_run=dry_run
+            session,
+            rt.settings,
+            agents_of=agents_of,
+            os_user=rt.settings.cli.local_user,
+            now=datetime.now(UTC),
+            dry_run=dry_run,
         )
     _emit(
         console,
@@ -296,17 +309,16 @@ def default_command(
     ctx: typer.Context,
     agent: Annotated[str | None, typer.Argument(help="Agent that answers by default.")] = None,
     clear: Annotated[bool, typer.Option("--clear", help="Remove the default agent.")] = False,
-    enabled: Annotated[bool | None, typer.Option("--enabled/--disabled")] = None,
     as_json: Annotated[bool, JSON_OPTION] = False,
 ) -> None:
-    """Show or set the default agent for private messages."""
+    """Show or set the default agent for private messages, and whether they are on."""
     console = Console(highlight=False)
 
     async def run() -> None:
         async with build_runtime(load_settings()) as rt:
             await dm_default(
                 rt=rt, console=console, selector=ctx.obj, agent=agent, clear=clear,
-                enabled=enabled, as_json=as_json,
+                as_json=as_json,
             )  # fmt: skip
 
     run_cli(run(), console=console)

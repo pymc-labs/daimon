@@ -24,6 +24,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import dm_access as dm_store
 from daimon.core.stores import web_audit
 from daimon.core.stores.direct_messages import dm_enabled, get_dm_agent_name, set_dm_enabled
+from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from rich.console import Console
@@ -150,7 +151,7 @@ async def test_writes_when_the_agent_is_unknown_then_refused_and_nothing_changes
 async def test_writes_leave_one_audit_row_each(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The same rows as a change from the web app, with no person as the actor."""
+    """The same rows as a change from the web app, by the CLI's local user."""
     tenant, selector = await _tenant(db_session_factory)
     rt = _runtime(
         db_session_factory, [_agent_json(agent_id="ag_a", name="ada", tenant_id=tenant.id)]
@@ -167,8 +168,11 @@ async def test_writes_leave_one_audit_row_each(
         )
     await dm_rules(rt=rt, console=console, selector=selector, action="move", position=1, to=0)
     await dm_rules(rt=rt, console=console, selector=selector, action="remove", position=1)
-    async with db_session_factory() as session:
+    async with db_session_factory.begin() as session:
         rows = await web_audit.list_recent(session, tenant_id=tenant.id)
+        cli = await get_or_create_cli_principal(
+            session, tenant_id=tenant.id, os_user=rt.settings.cli.local_user
+        )
     assert sorted((r.action, r.detail) for r in rows) == [
         ("Added DM rule", "Group g1 to ada"),
         ("Added DM rule", "Group g2 to ada"),
@@ -177,7 +181,7 @@ async def test_writes_leave_one_audit_row_each(
         ("Moved DM rule", "Group g2: 2 to 1"),
         ("Removed DM rule", "Group g1 to ada"),
     ]
-    assert all(r.actor_account_id is None for r in rows), "an operator, not a person"
+    assert {r.actor_account_id for r in rows} == {cli.account_id}, "the CLI's local user"
 
 
 async def test_rule_remove_for_a_missing_position_fails(
@@ -227,6 +231,11 @@ async def test_import_policies_lists_allowlisted_users_and_is_idempotent(
     out.seek(0)
     await dm_import_policies(rt=rt, console=console, dry_run=False, as_json=True)
     assert json.loads(out.getvalue()) == [], "a second run changes nothing"
+    async with db_session_factory() as session:
+        rows = await web_audit.list_recent(session, tenant_id=tenant.id)
+    assert [(r.action, r.actor_account_id is not None) for r in rows] == [
+        ("Changed DM access", True)
+    ], "the import is audited once, to the CLI's local user"
 
 
 async def test_import_policies_turns_a_disabled_workspace_off(
