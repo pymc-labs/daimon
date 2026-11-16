@@ -42,8 +42,14 @@ from daimon.core.turn.agent_notices import missing_skills_notice
 from mux.contracts.ids import ResourceRef, Scope, SkillRef
 from mux.contracts.ports import Skills
 from mux.contracts.profile import Profile
-from mux.contracts.resources import Agent, AgentSpec, EnvironmentSpec, SkillUpload, SkillUploadFile
-from mux.drivers.gemini import SESSION_CREATED
+from mux.contracts.resources import (
+    SESSION_CREATED,
+    Agent,
+    AgentSpec,
+    EnvironmentSpec,
+    SkillUpload,
+    SkillUploadFile,
+)
 from mux.errors import MuxError, ProviderError
 from pydantic import JsonValue
 from sqlalchemy.exc import SQLAlchemyError

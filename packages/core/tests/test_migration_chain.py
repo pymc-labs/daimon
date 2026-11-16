@@ -167,6 +167,7 @@ TAIL = (
     "0203_pending_carry_overs",
     "0204_shared_agent_copies",
     "0205_web_search_usage",
+    "0206_skill_manifest_bytes",
 )
 HEAD = TAIL[-1]
 
