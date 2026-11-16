@@ -267,7 +267,7 @@ def routine_place(row: RoutineRow, platform: str) -> FeaturePlace:
         platform,
         routine_destination_channel(row),
         agent_id=row.agent_id,
-        routine_id=str(row.id),
+        routine_id=row.id,
     )
 
 
@@ -287,8 +287,8 @@ async def own_opt_in(
     sessions: async_sessionmaker[AsyncSession], place: FeaturePlace, tier: PinnedTier
 ) -> tuple[str | None, AnySandboxPin | None]:
     """The tier's own `routine_sandbox_tools` value (None when unset) and its pin."""
-    key = place.agent_id if tier == "agent" else place.routine_id
-    assert key is not None, "the place names the agent or routine"
+    key = place.agent_id if tier == "agent" else str(place.routine_id)
+    assert key, "the place names the agent or routine"
     target = FeatureTarget(tier, agent_id=place.agent_id, routine_id=place.routine_id)
     async with sessions() as session:
         found = await get_feature_value(

@@ -1,10 +1,11 @@
 """sandbox_tools_feature: built-in sandbox tools become the `routine_sandbox_tools` feature.
 
-`feature_values` gains the `routine` tier (`routine_id`), the most specific for a
-routine's runs; it takes no lock. `sandbox_pins` records what an On covers: the agent
-id and environment name at the agent tier, the agent version and environment revision
-at the routine tier. Each routine opt-in moves to a routine-tier On with its pin, and its
-history to `channel_changes`; DM routines never ran built-ins, so theirs are dropped.
+`feature_values` gains the `routine` tier (`routine_id`, deleted with its routine), the
+most specific for a routine's runs; it takes no lock. `sandbox_pins` records what an On
+covers: the agent id and environment name at the agent tier, the agent version and
+environment revision at the routine tier. Each routine opt-in moves to a routine-tier On
+with its pin, and its history to `channel_changes`; DM routines never ran built-ins, so
+theirs are dropped.
 The routine columns and `routine_sandbox_history` go. `system` joins both surface
 checks for changes Daimon makes itself. Downgrading restores routine opt-ins and their
 history and drops agent opt-ins, routine Offs and the pins.
@@ -41,14 +42,14 @@ def _feature_checks(tiers: str, surfaces: str, unlockable: str) -> None:
     )
 
 
-def _place_index(columns: list[str]) -> None:
+def _place_index(where: str) -> None:
     op.drop_index("uq_feature_values_place", table_name="feature_values")
     op.create_index(
         "uq_feature_values_place",
         "feature_values",
-        ["tenant_id", "tier", *columns, "key"],
+        ["tenant_id", "tier", "agent_id", "channel_id", "key"],
         unique=True,
-        postgresql_where=sa.text("tier <> 'thread'"),
+        postgresql_where=sa.text(where),
     )
 
 
@@ -63,14 +64,27 @@ def upgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
     op.add_column(
         "feature_values",
-        sa.Column("routine_id", sa.Text(), nullable=False, server_default=sa.text("''")),
+        sa.Column(
+            "routine_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("routines.id", ondelete="CASCADE"),
+            nullable=True,
+        ),
+    )
+    op.create_check_constraint(
+        "ck_feature_values_routine",
+        "feature_values",
+        "(tier = 'routine') = (routine_id IS NOT NULL)",
+    )
+    op.create_index(
+        "uq_feature_values_routine", "feature_values", ["routine_id", "key"], unique=True
     )
     _feature_checks(
         "'workspace', 'agent', 'channel', 'thread', 'routine'",
         "'web', 'chat', 'panel', 'cli', 'system', 'spec', 'migration'",
         "'thread', 'routine'",
     )
-    _place_index(["agent_id", "channel_id", "routine_id"])
+    _place_index("tier NOT IN ('thread', 'routine')")
     _change_surfaces("'web', 'chat', 'panel', 'cli', 'system'")
     op.create_table(
         "sandbox_pins",
@@ -115,7 +129,7 @@ def upgrade() -> None:
     )
     op.execute(
         "INSERT INTO feature_values (tenant_id, tier, routine_id, key, value, surface, set_at)"
-        f" SELECT tenant_id, 'routine', id::text, '{_KEY}', 'on', 'migration',"
+        f" SELECT tenant_id, 'routine', id, '{_KEY}', 'on', 'migration',"
         f" coalesce(sandbox_tools_set_at, now()) FROM routines WHERE {opted_in}"
     )
     op.execute(
@@ -196,9 +210,9 @@ def downgrade() -> None:
         " sandbox_agent_version = p.agent_version, sandbox_environment_id = p.environment_id,"
         " sandbox_environment_updated_at = p.environment_updated_at"
         " FROM feature_values f JOIN sandbox_pins p ON p.tenant_id = f.tenant_id"
-        " AND p.tier = 'routine' AND p.routine_id::text = f.routine_id"
+        " AND p.tier = 'routine' AND p.routine_id = f.routine_id"
         f" WHERE f.tier = 'routine' AND f.key = '{_KEY}' AND f.value = 'on'"
-        " AND r.tenant_id = f.tenant_id AND r.id::text = f.routine_id"
+        " AND r.tenant_id = f.tenant_id AND r.id = f.routine_id"
     )
     op.execute(
         "INSERT INTO routine_sandbox_history (tenant_id, routine_id, before_enabled,"
@@ -220,7 +234,7 @@ def downgrade() -> None:
     op.execute("DELETE FROM feature_values WHERE surface = 'system'")
     op.drop_table("sandbox_pins")
     _change_surfaces("'web', 'chat', 'panel', 'cli'")
-    _place_index(["agent_id", "channel_id"])
+    _place_index("tier <> 'thread'")
     _feature_checks(
         "'workspace', 'agent', 'channel', 'thread'",
         "'web', 'chat', 'panel', 'cli', 'spec', 'migration'",

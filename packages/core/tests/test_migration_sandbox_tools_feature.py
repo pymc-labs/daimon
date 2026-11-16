@@ -88,7 +88,7 @@ async def test_opt_ins_and_history_move_to_the_routine_tier_and_back(
             ), {"t": tenant.id, "r": pinned})  # fmt: skip
             module.upgrade()
             assert _rows(
-                sync, "SELECT tier, routine_id, value, surface FROM feature_values"
+                sync, "SELECT tier, routine_id::text, value, surface FROM feature_values"
                 " WHERE key = 'routine_sandbox_tools'",
             ) == [("routine", pinned, "on", "migration")], "only the pinned opt-in moves"  # fmt: skip
             assert _rows(

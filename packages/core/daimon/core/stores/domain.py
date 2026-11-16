@@ -1307,7 +1307,7 @@ class FeatureTarget:
     agent_id: str | None = None
     channel_id: str | None = None
     thread_key: str | None = None
-    routine_id: str | None = None
+    routine_id: uuid.UUID | None = None
 
 
 class FeatureValueRow(BaseModel):
@@ -1320,7 +1320,7 @@ class FeatureValueRow(BaseModel):
     agent_id: str
     channel_id: str
     thread_key: str
-    routine_id: str = ""
+    routine_id: uuid.UUID | None = None
     key: str
     value: str
     locked: bool

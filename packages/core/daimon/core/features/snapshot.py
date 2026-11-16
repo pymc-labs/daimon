@@ -51,7 +51,7 @@ class FeaturePlace:
     thread_id: str | None = None
     agent_id: str | None = None
     backend: str | None = None
-    routine_id: str | None = None
+    routine_id: uuid.UUID | None = None
 
     @classmethod
     def of(
@@ -63,7 +63,7 @@ class FeaturePlace:
         *,
         agent_id: str | None = None,
         backend: str | None = None,
-        routine_id: str | None = None,
+        routine_id: uuid.UUID | None = None,
     ) -> FeaturePlace:
         """From a turn's ids; a thread equal to its channel is none."""
         if thread_id and platform == "slack" and ":" in thread_id:

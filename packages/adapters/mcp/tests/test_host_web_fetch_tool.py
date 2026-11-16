@@ -79,7 +79,7 @@ async def test_web_fetch_when_routine_then_follows_the_runs_own_match(
         key = str(routine.id)
         await set_feature_value(
             db_session, tenant_id=tenant.id, key=SANDBOX_KEY, value="on", set_by=None,
-            target=FeatureTarget("routine", routine_id=key), surface="chat",
+            target=FeatureTarget("routine", routine_id=routine.id), surface="chat",
         )  # fmt: skip
         await put_sandbox_pin(db_session, tenant_id=tenant.id, tier="routine", key=key, pin=pin)
     await db_session.commit()

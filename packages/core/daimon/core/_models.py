@@ -2733,10 +2733,10 @@ class FeatureValue(Base):
     """A feature set at one tier of one place; no row means the tier inherits.
 
     Rows exist for the workspace, agent, channel, thread and routine tiers (the deployment
-    tier is the `features` setting). Unused place columns hold ''. A thread row is keyed by
-    its thread key alone; its `channel_id` is the channel the thread sits in, '' when
-    unknown. `daimon.core.features.resolver` combines the rows; `locked` is final for
-    every tier below.
+    tier is the `features` setting). Unused place columns hold '' (`routine_id` NULL). A
+    thread row is keyed by its thread key alone; its `channel_id` is the channel the thread
+    sits in, '' when unknown. A routine row goes with its routine.
+    `daimon.core.features.resolver` combines the rows; `locked` is final for every tier below.
     """
 
     __tablename__ = "feature_values"
@@ -2752,16 +2752,18 @@ class FeatureValue(Base):
         CheckConstraint(
             "NOT (locked AND tier IN ('thread', 'routine'))", name="ck_feature_values_lock"
         ),
+        CheckConstraint(
+            "(tier = 'routine') = (routine_id IS NOT NULL)", name="ck_feature_values_routine"
+        ),
         Index(
             "uq_feature_values_place",
             "tenant_id",
             "tier",
             "agent_id",
             "channel_id",
-            "routine_id",
             "key",
             unique=True,
-            postgresql_where=text("tier <> 'thread'"),
+            postgresql_where=text("tier NOT IN ('thread', 'routine')"),
         ),
         Index(
             "uq_feature_values_thread",
@@ -2772,6 +2774,7 @@ class FeatureValue(Base):
             unique=True,
             postgresql_where=text("tier = 'thread'"),
         ),
+        Index("uq_feature_values_routine", "routine_id", "key", unique=True),
         Index("ix_feature_values_channel", "tenant_id", "channel_id"),
     )
 
@@ -2783,7 +2786,9 @@ class FeatureValue(Base):
     agent_id: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
     channel_id: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
     thread_key: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
-    routine_id: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    routine_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("routines.id", ondelete="CASCADE"), nullable=True
+    )
     key: Mapped[str] = mapped_column(Text, nullable=False)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     locked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))

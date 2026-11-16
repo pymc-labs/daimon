@@ -469,7 +469,7 @@ def _history(
     if setting.tier == "agent":
         found: dict[str, JsonValue] = {"agent": place.agent_id, "value": value}
     elif setting.tier == "routine":
-        found = {"routine": place.routine_id, "value": value}
+        found = {"routine": str(place.routine_id), "value": value}
     else:
         return value
     if pin is not None and setting.value == "on":
@@ -482,7 +482,7 @@ def _pin_key(tier: Tier, place: FeaturePlace) -> tuple[PinnedTier, str] | None:
     if tier == "agent" and place.agent_id:
         return "agent", place.agent_id
     if tier == "routine" and place.routine_id:
-        return "routine", place.routine_id
+        return "routine", str(place.routine_id)
     return None
 
 
@@ -796,7 +796,7 @@ async def clear_pinned_on(
         tenant_id,
         "" if tenant is None else tenant.platform,
         agent_id=holder if tier == "agent" else None,
-        routine_id=holder if tier == "routine" else None,
+        routine_id=uuid.UUID(holder) if tier == "routine" else None,
     )
     found = await get_feature_value(
         session, tenant_id=tenant_id, target=_target(tier, place), key=key

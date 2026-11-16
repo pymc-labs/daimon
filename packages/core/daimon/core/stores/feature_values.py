@@ -1,8 +1,8 @@
 """Async store for `feature_values`: the features set at each tier of each place.
 
-Unused place columns hold ''; rows come back with them as stored. Every write bumps
-the tenant's `feature_revision`, which keys the resolver's cache. Callers own the
-transaction; every write ends with `await session.flush()`.
+Unused place columns hold '' (`routine_id` NULL); rows come back with them as stored.
+Every write bumps the tenant's `feature_revision`, which keys the resolver's cache.
+Callers own the transaction; every write ends with `await session.flush()`.
 """
 
 from __future__ import annotations
@@ -19,21 +19,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 
-def _ids(target: FeatureTarget) -> tuple[str, str, str, str]:
+def _ids(target: FeatureTarget) -> tuple[str, str, str, uuid.UUID | None]:
     channel = target.channel_id or ""
     thread = target.thread_key or ""
-    routine = target.routine_id or ""
+    routine = target.routine_id
     if target.tier == "agent" and not target.agent_id:
         raise ValueError("the agent tier needs an agent_id")
     if target.tier == "channel" and not channel:
         raise ValueError("the channel tier needs a channel_id")
     if target.tier == "thread" and not thread:
         raise ValueError("the thread tier needs a thread_key")
-    if target.tier == "routine" and not routine:
-        raise ValueError("the routine tier needs a routine_id")
     if target.tier == "routine":
+        if routine is None:
+            raise ValueError("the routine tier needs a routine_id")
         return "", "", "", routine
-    return target.agent_id or "", channel if target.tier != "workspace" else "", thread, ""
+    return target.agent_id or "", channel if target.tier != "workspace" else "", thread, None
 
 
 def _match(target: FeatureTarget) -> ColumnElement[bool]:
@@ -44,11 +44,12 @@ def _match(target: FeatureTarget) -> ColumnElement[bool]:
             FeatureValue.agent_id == agent,
             FeatureValue.thread_key == thread,
         )
+    if target.tier == "routine":
+        return and_(FeatureValue.tier == "routine", FeatureValue.routine_id == routine)
     return and_(
         FeatureValue.tier == target.tier,
         FeatureValue.agent_id == agent,
         FeatureValue.channel_id == channel,
-        FeatureValue.routine_id == routine,
     )
 
 
@@ -79,7 +80,7 @@ async def place_values(
     agent_id: str | None,
     channel_id: str | None,
     thread_key: str | None,
-    routine_id: str | None = None,
+    routine_id: uuid.UUID | None = None,
     keys: Collection[str] | None = None,
 ) -> list[FeatureValueRow]:
     """One read for a place: its workspace, agent, channel, thread and routine rows."""
@@ -90,7 +91,7 @@ async def place_values(
         targets.append(FeatureTarget("channel", channel_id=channel_id))
     if thread_key:
         targets.append(FeatureTarget("thread", thread_key=thread_key))
-    if routine_id:
+    if routine_id is not None:
         targets.append(FeatureTarget("routine", routine_id=routine_id))
     stmt = select(FeatureValue).where(
         FeatureValue.tenant_id == tenant_id, or_(*(_match(t) for t in targets))
@@ -157,10 +158,12 @@ async def set_feature_value(
             index_where=text("tier = 'thread'"),
             set_=changes,
         )
+    elif target.tier == "routine":
+        stmt = stmt.on_conflict_do_update(index_elements=["routine_id", "key"], set_=changes)
     else:
         stmt = stmt.on_conflict_do_update(
-            index_elements=["tenant_id", "tier", "agent_id", "channel_id", "routine_id", "key"],
-            index_where=text("tier <> 'thread'"),
+            index_elements=["tenant_id", "tier", "agent_id", "channel_id", "key"],
+            index_where=text("tier NOT IN ('thread', 'routine')"),
             set_=changes,
         )
     row = (await session.scalars(stmt.returning(FeatureValue))).one()

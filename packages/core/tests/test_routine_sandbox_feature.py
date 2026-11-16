@@ -26,8 +26,8 @@ from daimon.core.routine_sandbox import (
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
 from daimon.core.stores.domain import AgentSandboxPin, FeatureTarget, RoutineRow, SandboxPin
-from daimon.core.stores.feature_values import set_feature_value
-from daimon.core.stores.routines import create_routine, update_routine
+from daimon.core.stores.feature_values import list_feature_values, set_feature_value
+from daimon.core.stores.routines import create_routine, delete_routine, update_routine
 from daimon.core.stores.sandbox_pins import list_sandbox_pins, pin_json
 from daimon.testing.factories import make_tenant
 from pydantic import PostgresDsn, SecretStr
@@ -106,6 +106,20 @@ async def test_a_routine_own_value_overrides_its_agent(
     assert await _pin(db_session_factory, row) is None, "cleared, the agent's Off applies"
 
 
+async def test_deleting_a_routine_deletes_its_own_value(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    """A routine's own tier goes with the routine; its agent's value stays."""
+    row = await _routine(db_session)
+    await _set(db_session_factory, row, "routine", "off")
+    await _set(db_session_factory, row, "agent", "off")
+    async with db_session_factory.begin() as session:
+        assert await delete_routine(session, row.id, tenant_id=row.tenant_id), "deleted"
+    async with db_session_factory() as session:
+        left = await list_feature_values(session, tenant_id=row.tenant_id, keys=[SANDBOX_KEY])
+    assert [value.tier for value in left] == ["agent"], "only the agent's value is left"
+
+
 async def test_a_workspace_lock_wins_over_a_routine_on(
     db_session: AsyncSession, db_session_factory: Sessions
 ) -> None:
@@ -158,7 +172,7 @@ async def test_an_on_without_its_pin_covers_nothing(
     async with db_session_factory.begin() as session:
         await set_feature_value(
             session, tenant_id=row.tenant_id, key=SANDBOX_KEY, value="on", set_by=None,
-            target=FeatureTarget("routine", routine_id=str(row.id)), surface="cli",
+            target=FeatureTarget("routine", routine_id=row.id), surface="cli",
         )  # fmt: skip
     assert await _pin(db_session_factory, row) is None, "no pin, no built-ins"
 
@@ -257,7 +271,7 @@ async def test_a_provider_move_clears_the_opt_ins_naming_the_old_agent(
     await agent_convert._move_rows(  # pyright: ignore[reportPrivateUsage]
         db_session_factory, tenant_id=row.tenant_id, name="daimon", old_id="agent_a", new_id="dm_x"
     )
-    moved = FeaturePlace(row.tenant_id, "discord", agent_id="dm_x", routine_id=str(row.id))
+    moved = FeaturePlace(row.tenant_id, "discord", agent_id="dm_x", routine_id=row.id)
     assert await own_opt_in(db_session_factory, moved, "agent") == (None, None), "not moved"
     assert await own_opt_in(db_session_factory, moved, "routine") == (None, None), "cleared"
     assert await own_opt_in(db_session_factory, other, "agent") == ("on", other_pin), "kept"
