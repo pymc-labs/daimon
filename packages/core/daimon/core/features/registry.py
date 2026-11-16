@@ -441,6 +441,7 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
 )
 
 _DM_PLATFORMS: Final = frozenset({"discord", "slack"})
+_DM_MEMORY_PLATFORMS: Final = frozenset({"discord", "slack", "web"})
 _DISCORD: Final = frozenset({"discord"})
 _CALL_GATE_PLATFORMS: Final = frozenset({"discord", "slack", "teams", "web"})
 _SETTINGS: Final = Authority(DelegatedAction.AGENT_SETTINGS)
@@ -1113,7 +1114,7 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
             "setting costs more. "
             "The smallest setting wins."
         ),
-        platforms=_DM_PLATFORMS,
+        platforms=_DM_MEMORY_PLATFORMS,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
     *_MODEL_INPUT,
