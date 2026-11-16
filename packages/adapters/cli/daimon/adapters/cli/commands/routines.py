@@ -725,7 +725,7 @@ async def run_check_roles(
         rows = await list_routines_for_tenant(session, tenant_id=tenant_id)
     # Every name the agent answers to, as a fire checks them: an alias can add a gate.
     names: dict[uuid.UUID, tuple[str | None, ...]] = {}
-    gated = []
+    gated: list[RoutineRow] = []
     for r in rows:
         if not r.enabled or r.created_by_user_id is None:
             continue
