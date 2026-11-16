@@ -4411,26 +4411,23 @@ async def test_the_dm_is_sent_only_after_the_pause_commits(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daimon.core._models import Routine
-    from sqlalchemy import func, select
+    from sqlalchemy import text
 
     class _Rest(_FakeDiscordRest):
         committed_when_sent = 0
 
-        async def send_dm(self, user_id: str, text: str) -> bool:
+        async def send_dm(self, user_id: str, text_: str) -> bool:
             async with db_session_factory() as other:  # a separate connection sees commits only
                 self.committed_when_sent = (
                     await other.scalar(
-                        select(func.count())
-                        .select_from(Routine)
-                        .where(
-                            Routine.last_error == "owner_lacks_agent_role",
-                            Routine.enabled.is_(False),
+                        text(
+                            "select count(*) from routines"
+                            " where last_error = 'owner_lacks_agent_role' and not enabled"
                         )
                     )
                     or 0
                 )
-            return await super().send_dm(user_id, text)
+            return await super().send_dm(user_id, text_)
 
     rest = _Rest()
     await _role_gated_fire(
