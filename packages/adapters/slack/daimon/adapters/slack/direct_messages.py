@@ -6,7 +6,7 @@ import contextlib
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from functools import partial
-from time import monotonic
+from time import time
 from typing import Any, cast
 
 import aiohttp
@@ -18,7 +18,7 @@ from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.errors import bound_request_id, render_error
 from daimon.adapters.slack.gating import is_slack_connect_external
 from daimon.adapters.slack.interactions import resolve_web_client
-from daimon.adapters.slack.runtime import DmPick, SlackRuntime, admission_refusal_message
+from daimon.adapters.slack.runtime import SlackRuntime, admission_refusal_message
 from daimon.adapters.slack.user_groups import user_group_lookup
 from daimon.core.agent_identity import (
     AgentIdentity,
@@ -43,7 +43,7 @@ from daimon.core.direct_messages import (
     start_dm,
 )
 from daimon.core.dm_access import decide_dm, list_dm_agents, lookup_dm_groups
-from daimon.core.dm_debounce import DmBurst, debounce_seconds, split_approvals
+from daimon.core.dm_debounce import PICK_EXPIRED, PICK_SECONDS, DmBurst, debounce_seconds
 from daimon.core.dm_routing import DmChoose, DmDecision, DmRefused, DmStart, DmUnchecked, Route
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.handoff_context import TranscriptTurn
@@ -389,7 +389,7 @@ async def _answer_burst(
     """Answer every message of the burst, one turn per group, or tell it why not.
 
     A DM with no conversation is routed first: one agent starts at once; when several
-    may answer, the burst waits for the person's pick.
+    may answer, the burst is held for the person's pick (`_pick`).
     """
     team_id, channel_id, user_id = key
     route_key = f"{team_id}:{channel_id}"
@@ -416,28 +416,26 @@ async def _answer_burst(
         )
         route = decision.route
         if isinstance(route, DmChoose):
-            await burst.answer(
-                seconds, react, partial(_offer_agents, runtime, client, key, route.agents)
+            conversation = await _pick(runtime, client, burst, key, route.agents, react)
+        elif isinstance(route, DmStart):
+            conversation = await _start_cold(
+                runtime,
+                client,
+                team_id=team_id,
+                user_id=user_id,
+                channel_id=channel_id,
+                role=role,
+                agent=route.agent,
+                groups=groups,
             )
-            return
-        if not isinstance(route, DmStart):
+        else:
             await runtime.dm_bursts.end(key, burst)  # one refusal speaks for the whole burst
             await _refuse_cold(
                 client, route, team_id=team_id, user_id=user_id, channel_id=channel_id
             )
             return
-        conversation = await _start_cold(
-            runtime,
-            client,
-            team_id=team_id,
-            user_id=user_id,
-            channel_id=channel_id,
-            role=role,
-            agent=route.agent,
-            groups=groups,
-        )
         if conversation is None:
-            return  # it ended meanwhile: the burst is asked to send again
+            return  # no pick, or it ended meanwhile: what is left is asked to send again
     else:
         groups = await lookup_dm_groups(
             runtime.sessionmaker,
@@ -564,9 +562,7 @@ async def _tell_failure(
 
 #: The select a person picks their DM agent with when several may answer.
 DM_PICK_ACTION_ID = "dm_pick_agent"
-_PICK_SECONDS = 300.0
 _UNCHECKED = "I couldn't check your access just now.\n\nTry again in a minute."
-_PICK_EXPIRED = "This choice expired.\n\nSend a new message to choose again."
 
 
 async def _decide_cold(
@@ -675,26 +671,29 @@ async def _refuse_cold(
     await client.chat_postMessage(channel=channel_id, **notice_fields(text))  # pyright: ignore[reportUnknownMemberType]
 
 
-async def _offer_agents(
+async def _find_conversation(
+    runtime: SlackRuntime, key: tuple[str, str, str]
+) -> DirectMessageRow | None:
+    team_id, channel_id, user_id = key
+    async with runtime.sessionmaker() as session:
+        return await get_conversation(
+            session, platform="slack", route_key=f"{team_id}:{channel_id}", external_user_id=user_id
+        )
+
+
+async def _pick(
     runtime: SlackRuntime,
     client: AsyncWebClient,
+    burst: DmBurst[dict[str, Any]],
     key: tuple[str, str, str],
     agents: tuple[str, ...],
-    events: list[dict[str, Any]],
-) -> None:
-    """Ask which agent answers; `events` wait for the pick with those held before them.
+    react: Callable[[dict[str, Any], bool], Awaitable[None]],
+) -> DirectMessageRow | None:
+    """Ask which agent answers, holding the burst until the conversation a pick starts.
 
-    While a choice of the same agents is open, it answers these too and no second one is
-    posted.
+    The pick may be handled by any process; the select carries its deadline in its block
+    id, so a late one is refused there. Unpicked, the select says the choice expired.
     """
-    picks, now = runtime.dm_picks, monotonic()
-    for stale in [k for k, pick in picks.items() if pick.expires_at <= now]:
-        del picks[stale]
-    if (open_pick := picks.get(key)) is not None and open_pick.agents == agents:
-        open_pick.events.extend(events)
-        return
-    held = [] if open_pick is None else open_pick.events
-    picks[key] = DmPick(agents, [*held, *events], now + _PICK_SECONDS)
     text = "Choose who to talk to for this private conversation."
     options = [
         {"text": {"type": "plain_text", "text": name[:75]}, "value": name} for name in agents[:100]
@@ -702,6 +701,7 @@ async def _offer_agents(
     blocks = [
         {
             "type": "section",
+            "block_id": str(int(time() + PICK_SECONDS)),
             "text": {"type": "mrkdwn", "text": text},
             "accessory": {
                 "type": "static_select",
@@ -711,11 +711,19 @@ async def _offer_agents(
             },
         }
     ]
-    await client.chat_postMessage(channel=key[1], text=text, blocks=blocks)  # pyright: ignore[reportUnknownMemberType]
+    posted = await client.chat_postMessage(channel=key[1], text=text, blocks=blocks)  # pyright: ignore[reportUnknownMemberType]
+    conversation = await burst.hold(partial(_find_conversation, runtime, key), react, PICK_SECONDS)
+    if conversation is None and not burst.stopped:
+        await runtime.dm_bursts.end(key, burst)  # the expired choice speaks for the burst
+        with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
+            await client.chat_update(  # pyright: ignore[reportUnknownMemberType]
+                channel=key[1], ts=str(posted.get("ts") or ""), **notice_fields(PICK_EXPIRED)
+            )
+    return conversation
 
 
 async def handle_dm_agent_pick(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
-    """Start the conversation on the agent a person picked, then answer their waiting messages."""
+    """Start the conversation on the agent a person picked; its held burst answers."""
     team = cast(dict[str, Any], payload.get("team") or {})
     user = cast(dict[str, Any], payload.get("user") or {})
     channel = cast(dict[str, Any], payload.get("channel") or {})
@@ -724,24 +732,27 @@ async def handle_dm_agent_pick(runtime: SlackRuntime, payload: dict[str, Any]) -
     channel_id = str(channel.get("id") or "")
     actions = cast(list[dict[str, Any]], payload.get("actions") or [{}])
     agent = str(cast(dict[str, Any], actions[0].get("selected_option") or {}).get("value") or "")
+    until = str(actions[0].get("block_id") or "")
     message_ts = str(cast(dict[str, Any], payload.get("container") or {}).get("message_ts") or "")
     if not team_id or not user_id or not channel_id:
         return
-    key = (team_id, channel_id, user_id)
-    pending = runtime.dm_picks.pop(key, None)
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
         return
+    late = not until.isdigit() or int(until) < time()
     try:
         if message_ts:
             with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
                 await client.chat_update(  # pyright: ignore[reportUnknownMemberType]
                     channel=channel_id,
                     ts=message_ts,
-                    **notice_fields(f"You chose {agent}.", neutral=True),
+                    **(
+                        notice_fields(PICK_EXPIRED)
+                        if late
+                        else notice_fields(f"You chose {agent}.", neutral=True)
+                    ),
                 )
-        if pending is None or pending.expires_at <= monotonic() or agent not in pending.agents:
-            await client.chat_postMessage(channel=channel_id, **notice_fields(_PICK_EXPIRED))  # pyright: ignore[reportUnknownMemberType]
+        if late:
             return
         role = await _live_role(client, user_id=user_id, team_id=team_id)
         decision, groups = await _decide_cold(
@@ -754,7 +765,7 @@ async def handle_dm_agent_pick(runtime: SlackRuntime, payload: dict[str, Any]) -
             refusal = _UNCHECKED if isinstance(route, DmUnchecked) else DM_AGENT_REFUSED
             await client.chat_postMessage(channel=channel_id, **notice_fields(refusal))  # pyright: ignore[reportUnknownMemberType]
             return
-        conversation = await _start_cold(
+        await _start_cold(
             runtime,
             client,
             team_id=team_id,
@@ -765,11 +776,7 @@ async def handle_dm_agent_pick(runtime: SlackRuntime, payload: dict[str, Any]) -
             groups=groups,
             remember_pick=True,
         )
-        if conversation is None:
-            return
-        answer = _answerer(runtime, client, conversation, key, role=role, groups=groups, thread={})
-        for group in split_approvals(pending.events, lambda e: str(e.get("text") or "")):
-            await answer(group)
+        runtime.dm_bursts.wake((team_id, channel_id, user_id))
     except _ERRORS as exc:
         log.warning("slack.dm.pick_failed", error_type=type(exc).__name__)
         with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):

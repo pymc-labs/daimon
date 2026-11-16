@@ -13,10 +13,12 @@ import pytest
 from daimon.adapters.slack import direct_messages as dm_module
 from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.runtime import new_dm_bursts
+from daimon.core import dm_debounce
 from daimon.core.authz import AgentRef
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.direct_messages import DM_AGENT_REFUSED, ColdDmNotices
 from daimon.core.dm_access import DmAgent
+from daimon.core.dm_debounce import PICK_EXPIRED
 from daimon.core.dm_routing import DmChoose, DmDecision, DmRefused, DmStart, DmUnchecked, Route
 from daimon.core.native_admins import GroupMembersCache
 from daimon.core.stores import dm_access as dm_store
@@ -51,7 +53,6 @@ def fresh_notices(monkeypatch: pytest.MonkeyPatch) -> None:
 def _runtime(db_session_factory: async_sessionmaker[AsyncSession]) -> MagicMock:
     runtime = MagicMock()
     runtime.dm_bursts = new_dm_bursts()
-    runtime.dm_picks = {}
     runtime.sessionmaker = db_session_factory
     runtime.settings.direct_message_policies = {}
     runtime.settings.features = {}
@@ -267,75 +268,151 @@ async def test_cold_dm_when_another_message_started_it_then_that_conversation_an
     assert posted == ["hi there"], "nothing is dropped as not sent"
 
 
-async def test_cold_dm_when_several_agents_fit_then_a_pick_starts_and_answers_the_wait(
+def _picking(
+    monkeypatch: pytest.MonkeyPatch, factory: async_sessionmaker[AsyncSession], tenant_id: Any
+) -> tuple[AsyncMock, AsyncMock]:
+    """A pick starts a real conversation row, as any process's click would."""
+    start, reply = _starts(monkeypatch, tenant_id)
+    _decided(monkeypatch, DmChoose(("ada", "bob")), allowed=("ada", "bob"))
+
+    async def started(*_: Any, **__: Any) -> DirectMessageRow:
+        await _start_row(factory, tenant_id)
+        return _row(tenant_id)
+
+    start.side_effect = started
+    return start, reply
+
+
+async def _start_row(factory: async_sessionmaker[AsyncSession], tenant_id: Any) -> None:
+    async with factory.begin() as session:
+        account = await make_account(session, tenant=await get_tenant(session, tenant_id))
+        row = _row(tenant_id).model_copy(update={"account_id": account.id})
+        await start_conversation(session, conversation=row, now=datetime.now(UTC))
+
+
+async def _offered(client: MagicMock) -> dict[str, Any]:
+    """The picker block, once the held burst has posted it."""
+    for _ in range(100):
+        offers = [c for c in client.chat_postMessage.await_args_list if "blocks" in c.kwargs]
+        if offers:
+            assert len(offers) == 1, "one choice for the whole burst"
+            return offers[0].kwargs["blocks"][0]
+        await asyncio.sleep(0.01)
+    raise AssertionError("no choice was posted")
+
+
+async def test_cold_dm_when_several_agents_fit_then_a_pick_answers_everything_held(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tenant = await _dms_on(db_session_factory)
     client = _client(monkeypatch)
     runtime = _runtime(db_session_factory)
-    _decided(monkeypatch, DmChoose(("ada", "bob")), allowed=("ada", "bob"))
-    start, reply = _starts(monkeypatch, tenant.tenant_id)
-
-    await dm_module.handle_direct_message(runtime, _event(), team_id="T_ROUTE")
-    select = client.chat_postMessage.await_args.kwargs["blocks"][0]["accessory"]
-    assert [o["value"] for o in select["options"]] == ["ada", "bob"], "both agents are offered"
-    assert start.await_count == 0, "nothing starts before the pick"
-
-    await dm_module.handle_dm_agent_pick(runtime, _pick("bob"))
-
-    assert start.await_args.kwargs["remember_pick"] is True, "a chosen agent is remembered"
-    assert reply.await_args.kwargs["text"] == "hello?", "the waiting message is answered"
-    await dm_module.handle_dm_agent_pick(runtime, _pick("bob"))
-    assert client.chat_postMessage.await_args.kwargs == {
-        "channel": "D_COLD",
-        **notice_fields(dm_module._PICK_EXPIRED),  # pyright: ignore[reportPrivateUsage]
-    }, "a second click finds the choice used"
-
-
-async def test_cold_dm_when_more_arrive_before_the_pick_then_one_offer_answers_them_all(
-    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    tenant = await _dms_on(db_session_factory)
-    client = _client(monkeypatch)
-    runtime = _runtime(db_session_factory)
-    monkeypatch.setattr(dm_module, "debounce_seconds", AsyncMock(return_value=0.2))
-    _decided(monkeypatch, DmChoose(("ada", "bob")), allowed=("ada", "bob"))
-    _, reply = _starts(monkeypatch, tenant.tenant_id)
-    first = asyncio.create_task(
+    start, reply = _picking(monkeypatch, db_session_factory, tenant.tenant_id)
+    held = asyncio.create_task(
         dm_module.handle_direct_message(runtime, _event(), team_id="T_ROUTE")
     )
-    await asyncio.sleep(0.05)
-    await dm_module.handle_direct_message(
-        runtime, {**_event(ts="1.2"), "text": "yes"}, team_id="T_ROUTE"
-    )
-    await first
-
-    offers = [c for c in client.chat_postMessage.await_args_list if "blocks" in c.kwargs]
-    assert len(offers) == 1, "one choice for the whole burst"
-    await dm_module.handle_dm_agent_pick(runtime, _pick("ada"))
-    texts = [c.kwargs["text"] for c in reply.await_args_list]
-    assert texts == ["hello?", "yes"], "the pick answers both, the approval on its own"
-
-
-async def test_cold_dm_when_a_later_burst_comes_before_the_pick_then_the_open_offer_answers_it(
-    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A burst after the choice was posted joins it: one card, and the pick answers both."""
-    tenant = await _dms_on(db_session_factory)
-    client = _client(monkeypatch)
-    runtime = _runtime(db_session_factory)
-    _decided(monkeypatch, DmChoose(("ada", "bob")), allowed=("ada", "bob"))
-    _, reply = _starts(monkeypatch, tenant.tenant_id)
-    await dm_module.handle_direct_message(runtime, _event(), team_id="T_ROUTE")
+    block = await _offered(client)
+    assert [o["value"] for o in block["accessory"]["options"]] == ["ada", "bob"]
     await dm_module.handle_direct_message(
         runtime, {**_event(ts="1.2"), "text": "still there?"}, team_id="T_ROUTE"
     )
+    assert start.await_count == 0 and not held.done(), "nothing starts before the pick"
 
-    offers = [c for c in client.chat_postMessage.await_args_list if "blocks" in c.kwargs]
-    assert len(offers) == 1, "the open choice is not posted again"
-    await dm_module.handle_dm_agent_pick(runtime, _pick("ada"))
+    await dm_module.handle_dm_agent_pick(runtime, _pick("bob", block["block_id"]))
+    await asyncio.wait_for(held, 2)
+
+    assert start.await_args.kwargs["remember_pick"] is True, "a chosen agent is remembered"
     texts = [c.kwargs["text"] for c in reply.await_args_list]
-    assert texts == ["hello?\n\nstill there?"], "one turn answers both bursts"
+    assert texts == ["hello?\n\nstill there?"], "one turn answers what was sent before it"
+    marks = [c.kwargs["timestamp"] for c in client.reactions_add.await_args_list]
+    assert marks == ["1.1", "1.2", "1.1", "1.2"], "each held message is marked, then unmarked"
+
+
+async def test_cold_dm_when_an_approval_was_held_then_it_is_answered_on_its_own(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant = await _dms_on(db_session_factory)
+    client = _client(monkeypatch)
+    runtime = _runtime(db_session_factory)
+    _, reply = _picking(monkeypatch, db_session_factory, tenant.tenant_id)
+    held = asyncio.create_task(
+        dm_module.handle_direct_message(runtime, _event(), team_id="T_ROUTE")
+    )
+    block = await _offered(client)
+    await dm_module.handle_direct_message(
+        runtime, {**_event(ts="1.2"), "text": "yes"}, team_id="T_ROUTE"
+    )
+
+    await dm_module.handle_dm_agent_pick(runtime, _pick("ada", block["block_id"]))
+    await asyncio.wait_for(held, 2)
+
+    texts = [c.kwargs["text"] for c in reply.await_args_list]
+    assert texts == ["hello?", "yes"], "the approval gets its own turn"
+
+
+async def test_cold_dm_when_another_process_takes_the_pick_then_the_holder_answers(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The click reaches another process: nothing wakes this one, so it looks again itself."""
+    monkeypatch.setattr(dm_debounce, "RECHECK_S", 0.05)
+    tenant = await _dms_on(db_session_factory)
+    client = _client(monkeypatch)
+    runtime = _runtime(db_session_factory)
+    _, reply = _picking(monkeypatch, db_session_factory, tenant.tenant_id)
+    held = asyncio.create_task(
+        dm_module.handle_direct_message(runtime, _event(), team_id="T_ROUTE")
+    )
+    await _offered(client)
+
+    await _start_row(db_session_factory, tenant.tenant_id)
+    await asyncio.wait_for(held, 2)
+
+    assert [c.kwargs["text"] for c in reply.await_args_list] == ["hello?"]
+
+
+async def test_cold_dm_when_nobody_picks_then_the_choice_expires_and_a_late_click_is_refused(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dm_module, "PICK_SECONDS", 0.1)
+    tenant = await _dms_on(db_session_factory)
+    client = _client(monkeypatch)
+    runtime = _runtime(db_session_factory)
+    start, reply = _picking(monkeypatch, db_session_factory, tenant.tenant_id)
+    client.chat_postMessage.return_value = {"ts": "5.5"}
+
+    await dm_module.handle_direct_message(runtime, _event(), team_id="T_ROUTE")
+    block = await _offered(client)
+
+    assert client.chat_update.await_args.kwargs == {
+        "channel": "D_COLD", "ts": "5.5", **notice_fields(PICK_EXPIRED),
+    }, "the choice says it expired, and nothing says not sent"  # fmt: skip
+    assert [c for c in client.chat_postMessage.await_args_list if "blocks" not in c.kwargs] == []
+    await dm_module.handle_dm_agent_pick(runtime, _pick("ada", str(int(block["block_id"]) - 1)))
+    assert start.await_count == 0 and reply.await_count == 0, "a late click starts nothing"
+    assert client.chat_update.await_args.kwargs == {
+        "channel": "D_COLD", "ts": "9.9", **notice_fields(PICK_EXPIRED),
+    }, "the late click is told it expired"  # fmt: skip
+
+
+async def test_cold_dm_when_the_process_stops_during_the_pick_then_the_held_are_not_sent(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant = await _dms_on(db_session_factory)
+    client = _client(monkeypatch)
+    runtime = _runtime(db_session_factory)
+    _picking(monkeypatch, db_session_factory, tenant.tenant_id)
+    held = asyncio.create_task(
+        dm_module.handle_direct_message(runtime, _event(), team_id="T_ROUTE")
+    )
+    await _offered(client)
+
+    runtime.dm_bursts.stop()
+    await asyncio.wait_for(held, 2)
+
+    assert client.chat_postMessage.await_args.kwargs == {
+        "channel": "D_COLD",
+        **notice_fields(dm_module._NOT_SENT),  # pyright: ignore[reportPrivateUsage]
+    }
 
 
 async def test_agent_pick_when_access_changed_meanwhile_then_refused(
@@ -344,9 +421,7 @@ async def test_agent_pick_when_access_changed_meanwhile_then_refused(
     tenant = await _dms_on(db_session_factory)
     client = _client(monkeypatch)
     runtime = _runtime(db_session_factory)
-    _decided(monkeypatch, DmChoose(("ada", "bob")), allowed=("ada", "bob"))
-    start, _ = _starts(monkeypatch, tenant.tenant_id)
-    await dm_module.handle_direct_message(runtime, _event(), team_id="T_ROUTE")
+    start, _ = _picking(monkeypatch, db_session_factory, tenant.tenant_id)
     _decided(monkeypatch, DmStart("ada", "locked"))
 
     await dm_module.handle_dm_agent_pick(runtime, _pick("bob"))
@@ -358,11 +433,13 @@ async def test_agent_pick_when_access_changed_meanwhile_then_refused(
     }, "the person is told to ask an admin"
 
 
-def _pick(agent: str) -> dict[str, Any]:
+def _pick(agent: str, until: str = "9999999999") -> dict[str, Any]:
     return {
         "type": "block_actions", "team": {"id": "T_ROUTE"}, "user": {"id": "U1"},
         "channel": {"id": "D_COLD"}, "container": {"message_ts": "9.9"},
-        "actions": [{"action_id": "dm_pick_agent", "selected_option": {"value": agent}}],
+        "actions": [{
+            "action_id": "dm_pick_agent", "block_id": until, "selected_option": {"value": agent},
+        }],
     }  # fmt: skip
 
 
