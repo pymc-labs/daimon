@@ -72,6 +72,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- With no Anthropic key, the Teams host readies its tenant from the selfhosted agent and environment that
+  `register` writes, so granted chats get answers; before, its startup called Anthropic and every message was refused.
+
 - A turn stuck reconnecting always ends at its time limit; before, it could keep reconnecting past it.
 
 - Verify the Helm harness CA mounts through production startup and post-drop MCP HTTPS calls; migrate saved installer state to the dedicated host harness-token Secret key.

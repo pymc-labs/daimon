@@ -834,7 +834,7 @@ class TeamsApp:
         settings = self.runtime.settings
         public_url = str(settings.mcp.public_url) if settings.mcp.public_url else None
         await provision_configured_tenant(
-            anthropic=self.runtime.anthropic,
+            anthropic=None if settings.anthropic.api_key is None else self.runtime.anthropic,
             sessionmaker=self.runtime.sessionmaker,
             defaults_root=settings.defaults_root,
             deployment_default=self.runtime.deployment_default,
