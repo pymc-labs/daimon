@@ -741,7 +741,16 @@ async def run_check_roles(
         if subject.verified_membership is not True or not authorize(
             policy, subject=subject, action=Action.ACT_FOR_CREATOR, surface=Surface.ROUTINE
         ):
-            verdict = "owner not a verified, allowed member: refused each run"
+            # The scheduler retries an unreadable membership only when the saved
+            # name itself is gated; any other unverified owner is refused.
+            unreadable = subject.verified_membership is None and bool(
+                agent_invoker_roles(policy, (row.agent_name,))
+            )
+            verdict = (
+                "owner's membership could not be read: retried each run"
+                if unreadable
+                else "owner not a verified, allowed member: refused each run"
+            )
         elif lapsed_role(policy, (row.agent_name,), subject):
             verdict = "owner lacks a role: pauses at its next run"
         else:

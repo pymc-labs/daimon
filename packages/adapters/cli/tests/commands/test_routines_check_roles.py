@@ -19,6 +19,7 @@ _MEMBERS = {
     "1": Membership(is_member=True, role_ids=("123",)),  # holds the role
     "2": Membership(is_member=True, role_ids=(), is_admin=True),  # admin, no role
     "3": Membership(is_member=False),  # left the server
+    "4": Membership(),  # the platform could not say
 }
 
 
@@ -48,6 +49,7 @@ async def test_check_roles_lists_lapsed_and_unverified_owners_without_writing(
                 ("1", "gated", True),
                 ("2", "gated", True),
                 ("3", "gated", True),
+                ("4", "gated", True),
                 ("2", "open", True),
                 ("2", "gated", False),
             ]
@@ -67,12 +69,18 @@ async def test_check_roles_lists_lapsed_and_unverified_owners_without_writing(
         resolver=CachedMembershipResolver(fetch),
     )
     lines = output.getvalue().splitlines()
-    assert sorted(set(asked)) == ["1", "2", "3"], "only owners of enabled gated routines"
+    assert sorted(set(asked)) == ["1", "2", "3", "4"], "only owners of enabled gated routines"
     lapsed, left = rows["2", "gated", True].id, rows["3", "gated", True].id
+    unreadable = rows["4", "gated", True].id
     assert any(ln.startswith(f"{lapsed} owner=2 agent=gated: owner lacks a role") for ln in lines)
     assert any(ln.startswith(f"{left} owner=3") and "refused" in ln for ln in lines)
+    assert any(
+        ln.startswith(f"{unreadable} owner=4") and "could not be read: retried each run" in ln
+        for ln in lines
+    ), "an unreadable membership is retried, not refused"
+    assert not any("owner=4" in ln and "refused" in ln for ln in lines)
     assert not any("owner=1" in ln or "agent=open" in ln for ln in lines)
-    assert lines[-1] == "2 of 3 role-gated routines need attention."
+    assert lines[-1] == "3 of 4 role-gated routines need attention."
     async with db_session_factory() as session:
         again = await get_routine(session, lapsed, tenant_id=tenant.id)
     assert again is not None and again.enabled and again.last_error is None, "read only"
