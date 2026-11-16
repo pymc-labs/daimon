@@ -167,6 +167,7 @@ TAIL = (
     "0203_pending_carry_overs",
     "0204_shared_agent_copies",
     "0205_web_search_usage",
+    "0206_thread_model_effort",
 )
 HEAD = TAIL[-1]
 
@@ -218,6 +219,8 @@ AFTER_MERGE_COLUMNS = {
     ("turn_origins", "serves_helpers"),
     ("mcp_tokens", "client"),
     ("thread_model_settings", "provider"),
+    ("thread_model_settings", "effort"),
+    ("thread_model_settings", "model"),
 }
 
 

@@ -139,6 +139,7 @@ async def real_dm(db_engine, db_clean):
     bot.draining = False
     bot.runtime.sessionmaker = factory
     bot.runtime.settings = SimpleNamespace(
+        discord=None,
         direct_message_policies={},
         ops=SimpleNamespace(alert_webhook_url=None),
         turn=TurnSettings(),
