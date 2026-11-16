@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own value, and `sandbox-tools-list` shows every agent and routine opted in.
   Each change shows in the settings history. Existing routine opt-ins carry
   over. The unattended capabilities setting still wins, and a change of agent
-  provider needs a new opt-in.
+  provider clears the opt-ins under the old agent. `get_routine` and
+  `list_routines` show `sandbox_tools` in place of the old opt-in fields.
 - **A server admin can let agents make watches without a card.** The new
   `watch_approval` setting, for the team or for one agent, defaults to Ask,
   which keeps today's card. Skip makes and resumes a watch straight away, and

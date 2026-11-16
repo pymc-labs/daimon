@@ -116,8 +116,8 @@ daimon routines sandbox-tools --tenant TENANT_UUID --agent AGENT_NAME --off
 This records the agent and the environment's name (the workspace default
 unless `--environment` is given), not a version, so editing the agent keeps
 the built-ins. Another agent or environment still runs without them. A change
-of agent provider needs a new opt-in. A routine's own setting wins over it,
-and a workspace lock wins over both. It never clears itself.
+of agent provider clears it, and the routine opt-ins under the old agent.
+A routine's own setting wins over it, and a workspace lock wins over both.
 The `unattended_capabilities` setting still wins: with it off, built-ins stay
 off. Turn it on only for agents whose runs you trust.
 
@@ -130,8 +130,9 @@ and routine opted in. The `/routines` panel says when the agent holds the opt-in
 The record does not cover what Daimon attaches to a run, such as the agent's
 keys, repository or channel skills. Review an opted-in routine after changing
 those. The setting is `routine_sandbox_tools` in the [features](features.md)
-table, and each change shows in the settings history with what it covers. `get_routine`, `list_routines` and the Discord `/routines` panel show
-the setting.
+table, and each change shows in the settings history with what it covers.
+`get_routine`, `list_routines`, the web Routines page and the Discord
+`/routines` panel show whether a routine is opted in.
 
 The `set_routine_sandbox_tools` MCP tool accepts only a live Discord server
 admin's own token, which no Daimon surface issues yet.
