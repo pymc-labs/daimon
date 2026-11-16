@@ -573,11 +573,14 @@ def render_responder_changed_without_handoff(
     return "\n".join([first, f"New thread → {new_responder}"]) if new_thread_hint else first
 
 
-def render_timer_seed(note: str, *, set_at: datetime) -> str:
-    """The user message a fired timer's turn runs with. Model-facing, not person-facing."""
+def render_timer_seed(note: str, *, set_at: datetime | None = None) -> str:
+    """The user message a fired timer's turn runs with. Model-facing, not person-facing.
+
+    `set_at` is when the timer was set; leave it out when that time is not known.
+    """
+    when = "" if set_at is None else f" at {set_at.astimezone(UTC):%Y-%m-%d %H:%M} UTC"
     return (
-        f"[timer] You set this timer in this conversation at "
-        f"{set_at.astimezone(UTC):%Y-%m-%d %H:%M} UTC and it has fired. This was "
+        f"[timer] You set this timer in this conversation{when} and it has fired. This was "
         f"started by the timer, not by a new message; act on your note and reply "
         f"here.\n\n{note}"
     )

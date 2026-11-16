@@ -87,9 +87,14 @@ def test_watch_cli_reports_mapping_errors_and_thread_only_confirmation(
             AsyncMock(
                 return_value=SimpleNamespace(
                     source_state={"tool": "read_thread"},
+                    tenant_id=tenant,
+                    agent_id="agent",
+                    agent_name="helper",
                 )
             ),
         )
+        check = AsyncMock()
+        monkeypatch.setattr(watch_commands, "check_agent", check)
         confirm = AsyncMock(return_value=SimpleNamespace(id=identifier, status="active"))
         monkeypatch.setattr(watch_commands, "confirm_import", confirm)
         result = CliRunner().invoke(
@@ -97,7 +102,7 @@ def test_watch_cli_reports_mapping_errors_and_thread_only_confirmation(
             [
                 "confirm",
                 identifier,
-                str(uuid.uuid4()),
+                str(tenant),
                 str(uuid.uuid4()),
                 "agent",
                 "4241",
@@ -108,6 +113,8 @@ def test_watch_cli_reports_mapping_errors_and_thread_only_confirmation(
         assert "require a thread ID" in result.output
         assert "Channel and DM IDs are unsupported" in result.output
         confirm.assert_awaited_once()
+        check.assert_awaited_once()
+        assert check.await_args.kwargs["agent_name"] == "helper"
 
 
 @pytest.mark.parametrize("as_json", [False, True])

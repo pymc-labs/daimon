@@ -79,7 +79,8 @@ its owner to resume it, and a timer is never scheduled.
 
 Imported watches start paused and report to the owner's private conversation.
 Confirm each after checking its owner, channel and thread, which the import
-prints.
+prints. `confirm` and `confirm-timers` check that the agent is an unarchived agent
+of the tenant, which must be a live Discord server.
 
 Timers are held, not scheduled. `confirm-timers` schedules each one that is
 still more than a minute away, once. Reminders set in a private conversation
@@ -90,7 +91,8 @@ and counted; an empty note is fine. It prints a count per outcome. A settled
 timer keeps no text.
 
 Rerun the import after fixing the file: held timers that nothing has scheduled
-are updated. With `--full` it also cancels held timers the file no longer lists.
+are updated. A rerun never pauses again what `unpause` released. With `--full` it also
+cancels held timers the file no longer lists.
 
 ```bash
 daimon watches unpause --tenant TENANT_UUID --all-timers   # or --timer-id, --watch-id

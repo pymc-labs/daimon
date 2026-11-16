@@ -22,7 +22,7 @@ from daimon.core.continuity.wakes import enqueue_wake, poll_wakes_once
 from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.core.stores.domain import ContinuationReason, TaskContinuationRow
 from daimon.core.stores.task_continuations import get_continuation
-from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -199,6 +199,8 @@ class _Delivery:
     channel: MagicMock
     policy: DirectMessagePolicy
     present: bool
+    member_error: Exception | None = None
+    open_error: Exception | None = None
 
     async def run(self, sessionmaker: async_sessionmaker[AsyncSession]) -> int:
         policy = self.policy
@@ -206,8 +208,8 @@ class _Delivery:
             sessionmaker,
             self.row,
             run_turn=self.run_turn,
-            open_dm=AsyncMock(return_value=self.channel),
-            member_present=AsyncMock(return_value=self.present),
+            open_dm=AsyncMock(return_value=self.channel, side_effect=self.open_error),
+            member_present=AsyncMock(return_value=self.present, side_effect=self.member_error),
             dm_policy=lambda _tenant: policy,
         )
 
@@ -220,6 +222,8 @@ async def _delivery(
     present: bool = True,
     text: str = "hello",
     forbidden: bool = False,
+    member_error: Exception | None = None,
+    open_error: Exception | None = None,
 ) -> _Delivery:
     _, key = await _seed(
         sessionmaker, thread_id=f"dm:{uuid.uuid4()}", workspace_id="720000099", dm=dm
@@ -236,6 +240,8 @@ async def _delivery(
         channel=channel,
         policy=policy or DirectMessagePolicy(),
         present=present,
+        member_error=member_error,
+        open_error=open_error,
     )
 
 
@@ -285,3 +291,86 @@ async def test_a_closed_dm_settles_as_not_allowed(
         await delivery.run(db_session_factory)
 
     assert caught.value.reason == "invoker_not_allowed"
+
+
+def _http_error(status: int = 503) -> discord.HTTPException:
+    return discord.HTTPException(MagicMock(status=status, reason="x"), "boom")
+
+
+async def test_a_transient_membership_error_puts_the_timer_back_not_skipped(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    delivery = await _delivery(db_session_factory, member_error=_http_error())
+
+    with pytest.raises(SessionBusyError):
+        await delivery.run(db_session_factory)
+
+    delivery.run_turn.assert_not_awaited()
+    delivery.channel.send.assert_not_awaited()
+
+
+async def test_a_definite_not_a_member_answer_still_skips(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    gone = discord.NotFound(MagicMock(status=404, reason="x"), "unknown member")
+    delivery = await _delivery(db_session_factory, member_error=gone)
+
+    with pytest.raises(AdmissionDenied):
+        await delivery.run(db_session_factory)
+
+    delivery.run_turn.assert_not_awaited()
+
+
+async def test_a_bot_or_missing_owner_settles_instead_of_raising_lookup_error(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    delivery = await _delivery(
+        db_session_factory, open_error=LookupError("the routine's creator is not a human member")
+    )
+
+    with pytest.raises(AdmissionDenied) as caught:
+        await delivery.run(db_session_factory)
+
+    assert caught.value.reason == "invoker_not_allowed"
+    delivery.channel.send.assert_not_awaited()
+
+
+async def test_a_transient_error_opening_the_dm_puts_the_timer_back(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    delivery = await _delivery(db_session_factory, open_error=_http_error(500))
+
+    with pytest.raises(SessionBusyError):
+        await delivery.run(db_session_factory)
+
+    delivery.channel.send.assert_not_awaited()
+
+
+async def test_a_transient_error_after_part_of_the_reply_is_sent_settles_without_repeating(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    delivery = await _delivery(db_session_factory, text="word " * 900)
+    delivery.channel.send = AsyncMock(side_effect=[None, _http_error()])
+
+    with pytest.raises(AdmissionDenied):
+        await delivery.run(db_session_factory)
+
+    assert delivery.channel.send.await_count == 2
+
+
+async def test_a_transient_delivery_error_leaves_the_row_pending_for_a_retry(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    _, key = await _seed(db_session_factory, thread_id=f"dm:{uuid.uuid4()}")
+    bot = _bot(db_session_factory)
+    bot._run_dm_timer = AsyncMock(  # pyright: ignore[reportPrivateUsage]
+        side_effect=SessionBusyError(
+            pending_reasons=("timer",), retry_after=datetime.now(UTC) + timedelta(minutes=1)
+        )
+    )
+
+    await _poll(db_session_factory, bot)
+
+    row = await _row(db_session_factory, key)
+    assert row.status == "pending" and row.available_at is not None
+    assert row.available_at > datetime.now(UTC)

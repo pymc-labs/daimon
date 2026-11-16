@@ -69,7 +69,8 @@ async def import_held_timer(
     """Hold one timer. A rerun updates one nobody has settled yet and adds nothing else.
 
     A timer already due is recorded as settled. A timer for a channel or a place that
-    cannot wake is refused: it is counted, never stored.
+    cannot wake is refused: it is counted, never stored. A rerun never changes `paused`:
+    what the file says counts only the first time, so an operator's unpause stays.
     """
     if not supported(definition):
         return TimerImport("unsupported")
@@ -84,7 +85,6 @@ async def import_held_timer(
     values = {
         "fire_at": definition.fire_at,
         "note": "" if past else note,
-        "paused": definition.paused,
         "settled_at": now if past else None,
         "outcome": "past" if past else None,
     }
@@ -97,6 +97,7 @@ async def import_held_timer(
         channel_id=definition.channel_id,
         thread_id=definition.thread_id,
         place_type=definition.place_type,
+        paused=definition.paused,
         **values,
     )
     result = (
@@ -110,7 +111,6 @@ async def import_held_timer(
                     or_(
                         HeldTimer.fire_at != definition.fire_at,
                         HeldTimer.note != values["note"],
-                        HeldTimer.paused != definition.paused,
                     ),
                 ),
             )

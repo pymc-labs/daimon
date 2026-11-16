@@ -59,7 +59,8 @@ async def dispatch_dm_timer(
             return
         skip_reason: str | None = None
         try:
-            await run_timer(row, render_timer_seed(row.requested_work or "", set_at=row.created_at))
+            # An imported timer carries no set time; the seed leaves it out.
+            await run_timer(row, render_timer_seed(row.requested_work or ""))
         except AnthropicDisabled:
             log.warning("dm_timer.provider_guard_denied", row_id=str(row.id))
             await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))

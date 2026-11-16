@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 
 import structlog
 from daimon.core.config import DirectMessagePolicy
@@ -18,7 +19,7 @@ from daimon.core.message_split import split_fenced
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.tenants import get_tenant
-from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
@@ -28,6 +29,8 @@ log = structlog.get_logger(__name__)
 __all__ = ["deliver_dm_timer"]
 
 _DISCORD_MAX_CHARS = 2000
+#: A transient Discord error puts the timer back this long.
+_RETRY_DELAY = timedelta(seconds=60)
 
 RunTimerTurn = Callable[[], Awaitable[str]]
 DmOpener = Callable[[int, int], Awaitable[discord.abc.Messageable]]
@@ -46,9 +49,21 @@ async def deliver_dm_timer(
 ) -> int:
     """Run the DM turn and send its text to the owner in chunks; how many were sent.
 
-    Raises `AdmissionDenied` when the timer may not start or stops partway.
+    Raises `AdmissionDenied` when the timer may not start or stops partway. A transient
+    Discord error before anything was sent raises `SessionBusyError`, so the timer is
+    offered again; only a definite answer (not a member, DMs closed) settles it.
     """
     owner = row.requester_external_user_id
+    sent = 0
+
+    def transient(error: discord.HTTPException) -> Exception:
+        log.warning("dm_timer.transient_error", row_id=str(row.id), status=error.status)
+        if sent:
+            # Part of the reply is out already; sending it again would repeat it.
+            return AdmissionDenied(reason="invoker_not_allowed", detail="delivery interrupted")
+        return SessionBusyError(
+            pending_reasons=("timer",), retry_after=datetime.now(UTC) + _RETRY_DELAY
+        )
 
     async def still_open() -> int:
         async with sessionmaker() as db:
@@ -59,14 +74,19 @@ async def deliver_dm_timer(
         if not dm_policy(row.tenant_id).allows(owner):
             raise AdmissionDenied(reason="invoker_not_allowed")
         guild = int(tenant.external_id)
-        if not await member_present(guild, int(owner)):
+        try:
+            present = await member_present(guild, int(owner))
+        except (discord.NotFound, discord.Forbidden):
+            present = False
+        except discord.HTTPException as error:
+            raise transient(error) from None
+        if not present:
             raise AdmissionDenied(reason="invoker_not_allowed")
         return guild
 
     await still_open()
     text = await run_turn()
     guild = await still_open()
-    sent = 0
     try:
         dm = await open_dm(guild, int(owner))
         for chunk in split_fenced(text, _DISCORD_MAX_CHARS, word_boundary=True):
@@ -74,7 +94,15 @@ async def deliver_dm_timer(
                 await still_open()
             await dm.send(content=chunk, allowed_mentions=discord.AllowedMentions.none())
             sent += 1
-    except discord.Forbidden:
+    except (discord.Forbidden, discord.NotFound):
         log.info("dm_timer.dm_closed", row_id=str(row.id))
         raise AdmissionDenied(reason="invoker_not_allowed") from None
+    except LookupError:
+        # The opener's definite answer: the owner is not a human member.
+        log.info("dm_timer.owner_not_a_member", row_id=str(row.id))
+        raise AdmissionDenied(
+            reason="invoker_not_allowed", detail="owner is not a human member"
+        ) from None
+    except discord.HTTPException as error:
+        raise transient(error) from None
     return sent

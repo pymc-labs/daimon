@@ -190,3 +190,99 @@ async def test_renew_and_rotate_link_for_an_imported_callback(operator, tmp_path
     assert str(watch_id) in next(iter(json.loads(written.read_text()).values()))
     live = await rows(operator, "SELECT count(*) FROM watch_capabilities WHERE revoked_at IS NULL")
     assert live == [(1,)], "each rotation leaves exactly one live link"
+
+
+async def test_unpaused_timer_stays_unpaused_when_the_file_is_imported_again(operator, tmp_path):
+    tenant = str(operator.tenant.id)
+    path = manifest(tmp_path, timers=[{**timer("p"), "paused": True}])
+    await run("import", str(path), "--tenant", tenant)
+    await run("unpause", "--tenant", tenant, "--all-timers")
+
+    again = await run("import", str(path), "--tenant", tenant)
+
+    assert again.exit_code == 0 and "existing=1" in again.output, again.output
+    assert await rows(operator, "SELECT paused FROM held_timers") == [(False,)]
+    moved = manifest(tmp_path, timers=[{**timer("p", minutes=300), "paused": True}])
+    await run("import", str(moved), "--tenant", tenant)
+    assert await rows(operator, "SELECT paused FROM held_timers") == [(False,)]
+
+
+async def test_unpaused_watch_stays_active_when_the_file_is_imported_again(
+    operator, tmp_path, monkeypatch
+):
+    async def found(*_args, **_kwargs):
+        return SimpleNamespace(id="agent-1")
+
+    monkeypatch.setattr(watch_commands, "find_agent_by_daimon_tag", found)
+    tenant = str(operator.tenant.id)
+    entry = {**callback_entry(), "paused": True}
+    path = manifest(tmp_path, watches=[entry])
+    args = ("import", str(path), "--tenant", tenant, "--agent-id", "agent-1")
+    args += ("--agent-name", "analyst", "--urls-out", str(tmp_path / "urls.json"))
+    assert (await run(*args)).exit_code == 0
+    watch_id, owner = (await rows(operator, "SELECT id, owner_account_id FROM watches"))[0]
+    confirmed = await run("confirm", str(watch_id), tenant, str(owner), "agent-1", "900", "900")
+    assert confirmed.exit_code == 0, confirmed.output
+    assert (await run("unpause", "--tenant", tenant, "--watch-id", str(watch_id))).exit_code == 0
+    assert await rows(operator, "SELECT status FROM watches") == [("active",)]
+
+    assert (await run(*args)).exit_code == 0
+
+    assert await rows(operator, "SELECT status FROM watches") == [("active",)]
+
+
+@pytest.mark.parametrize("command", ["confirm-timers", "confirm"])
+async def test_confirming_checks_the_agent_belongs_to_the_tenant(
+    operator, tmp_path, monkeypatch, command
+):
+    async def found(*_args, **_kwargs):
+        return SimpleNamespace(id="agent-1")
+
+    async def other(*_args, **_kwargs):
+        return SimpleNamespace(id="agent-other")
+
+    tenant = str(operator.tenant.id)
+    monkeypatch.setattr(watch_commands, "find_agent_by_daimon_tag", found)
+    urls = tmp_path / "urls.json"
+    path = manifest(tmp_path, watches=[callback_entry()], timers=[timer("t")])
+    imported = await run(
+        *("import", str(path), "--tenant", tenant, "--agent-id", "agent-1"),
+        *("--agent-name", "analyst", "--urls-out", str(urls)),
+    )
+    assert imported.exit_code == 0, imported.output
+    watch_id, owner = (await rows(operator, "SELECT id, owner_account_id FROM watches"))[0]
+    monkeypatch.setattr(watch_commands, "find_agent_by_daimon_tag", other)
+    if command == "confirm-timers":
+        args = ("confirm-timers", "--tenant", tenant, "--agent-id", "agent-1")
+        args += ("--agent-name", "analyst")
+    else:
+        args = ("confirm", str(watch_id), tenant, str(owner), "agent-1", "900", "900")
+
+    result = await run(*args)
+
+    assert result.exit_code == 2 and "must name one agent" in result.output, result.output
+    assert await rows(operator, "SELECT 1 FROM held_timers WHERE settled_at IS NOT NULL") == []
+    assert await rows(operator, "SELECT status FROM watches") == [("paused",)]
+
+
+@pytest.mark.parametrize("state", ["archived", "slack"])
+async def test_confirm_timers_refuses_an_archived_or_other_platform_tenant(
+    operator, tmp_path, monkeypatch, state
+):
+    async def found(*_args, **_kwargs):
+        return SimpleNamespace(id="agent-1")
+
+    monkeypatch.setattr(watch_commands, "find_agent_by_daimon_tag", found)
+    tenant = str(operator.tenant.id)
+    await run("import", str(manifest(tmp_path, timers=[timer("t")])), "--tenant", tenant)
+    change = "archived_at = now()" if state == "archived" else "platform = 'slack'"
+    async with operator.factory.begin() as db:
+        await db.execute(text(f"UPDATE tenants SET {change} WHERE id = :id"), {"id": tenant})
+
+    result = await run(
+        *("confirm-timers", "--tenant", tenant, "--agent-id", "agent-1"),
+        *("--agent-name", "analyst"),
+    )
+
+    assert result.exit_code == 2 and "is archived" in result.output, result.output
+    assert await rows(operator, "SELECT 1 FROM held_timers WHERE settled_at IS NOT NULL") == []

@@ -52,6 +52,23 @@ limits_app = typer.Typer(help="Daily firing limits for every watch, or one tenan
 watches_app.add_typer(limits_app, name="limits")
 
 
+async def check_agent(
+    runtime: CliRuntime, *, tenant_id: uuid.UUID, agent_id: str, agent_name: str
+) -> None:
+    """The tenant must be a live Discord one and the agent one of its unarchived agents."""
+    async with runtime.sessionmaker() as db:
+        tenant = await get_tenant(db, tenant_id)
+    if tenant is None:
+        raise typer.BadParameter(f"No such tenant {tenant_id}")
+    if tenant.platform != "discord" or tenant.archived_at is not None:
+        raise typer.BadParameter(f"Tenant {tenant_id} is archived or not a Discord server")
+    agent = await find_agent_by_daimon_tag(
+        runtime.anthropic, tenant_id=tenant_id, name=agent_name, records=runtime.sessionmaker
+    )
+    if agent is None or agent.id != agent_id:
+        raise typer.BadParameter("--agent-id and --agent-name must name one agent of the tenant")
+
+
 def _listed(item: WatchActivity, names: dict[tuple[str, str], str | None]) -> dict[str, object]:
     """The operator view of one watch. Never its instructions, keys, baseline or evidence."""
     row = item.watch
@@ -251,16 +268,7 @@ def import_command(
                     )
         if callbacks:
             assert tenant is not None and agent_id and agent_name
-            agent = await find_agent_by_daimon_tag(
-                runtime.anthropic,
-                tenant_id=tenant,
-                name=agent_name,
-                records=runtime.sessionmaker,
-            )
-            if agent is None or agent.id != agent_id:
-                raise typer.BadParameter(
-                    "--agent-id and --agent-name must name one agent of the tenant"
-                )
+            await check_agent(runtime, tenant_id=tenant, agent_id=agent_id, agent_name=agent_name)
 
     async def run() -> None:
         base = load_watches_settings().callback_base_url
@@ -355,6 +363,7 @@ def confirm_timers_command(
 
     async def run() -> None:
         async with build_runtime(load_settings()) as runtime:
+            await check_agent(runtime, tenant_id=tenant, agent_id=agent_id, agent_name=agent_name)
             counts = await settle_held_timers(
                 runtime.sessionmaker,
                 tenant_id=tenant,
@@ -469,6 +478,13 @@ def confirm_command(
 
     async def run() -> None:
         async with build_runtime(load_settings()) as runtime:
+            async with runtime.sessionmaker() as db:
+                named = await get_watch(db, watch_id)
+            if named is not None and named.tenant_id == tenant_id and named.agent_id == agent_id:
+                # Only a watch of this tenant and agent is checked; confirm_import refuses the rest.
+                await check_agent(
+                    runtime, tenant_id=tenant_id, agent_id=agent_id, agent_name=named.agent_name
+                )
             async with runtime.sessionmaker.begin() as db:
                 current = await get_watch(db, watch_id)
                 if current is not None and current.source_state.get("tool") == "read_thread":

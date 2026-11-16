@@ -73,6 +73,7 @@ async def test_a_dm_timer_runs_with_its_note_and_is_delivered(
 
     assert len(seeds) == 1
     assert "stretch your legs" in seeds[0]
+    assert " UTC" not in seeds[0], "an imported timer has no set time to show"
     settled = await _read(db_session_factory, row.idempotency_key)
     assert settled.status == "delivered"
 
