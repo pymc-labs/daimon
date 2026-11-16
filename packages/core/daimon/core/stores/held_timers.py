@@ -9,10 +9,9 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from daimon.core._models import HeldTimer
-from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX
+from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX, DM_SCOPE_PREFIX
 from daimon.core.continuity.timers import MAX_PENDING_TIMERS
 from daimon.core.continuity.watch_imports import NOTE_LIMIT, clip
-from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.task_continuations import (
     count_pending_timer_rows,
