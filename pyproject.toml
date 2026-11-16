@@ -377,6 +377,7 @@ source_modules = [
     "daimon.core.smoke",
     "daimon.core.specs",
     "daimon.core.support_escalation",
+    "daimon.core.support_offer",
     "daimon.core.support_routing",
     "daimon.core.switch_card",
     "daimon.core.switch_cards",
