@@ -91,6 +91,7 @@ _NARROWED: dict[str, str] = {
     "mcp_connector_relay": "operator-only rollback switch",
     "unattended_capabilities": "read for unattended runs, which have no channel or thread",
     "require_routine_destination": "read when a routine is created, at the workspace",
+    "watch_approval": "an operator's choice for the team or one agent; a channel or thread cannot loosen it",
     "long_jobs_max_usd": "checked when a job starts, from its workspace and agent",
     "long_jobs_max_deadline": "checked when a job starts, from its workspace and agent",
     "daily_model_cap": "counts the team's spend, so a workspace or agent limit",

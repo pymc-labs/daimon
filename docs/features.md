@@ -86,6 +86,7 @@ Where each feature can be set, and its default.
 | Connectors on OpenAI and Gemini | `mcp_connector_relay` | Guardrail | On | ✓ |  |  |  |  | Only Discord, Slack, Teams, Web |
 | Reach check | `reach_budget` | Guardrail | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Built-in tools in routines | `unattended_capabilities` | Guardrail | Allowed | ✓ | ✓ | ✓ |  |  |  |
+| Approval for watches | `watch_approval` | Guardrail | Ask |  | ✓ | ✓ |  |  |  |
 | Routines must say where they post | `require_routine_destination` | Guardrail | Optional | ✓ | ✓ |  |  |  |  |
 
 ## Approvals
@@ -932,6 +933,18 @@ Allowed lets an admin turn on built-in tools for one routine. Off keeps them off
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent |
 | Combines | Stricter wins |
+
+## Approval for watches
+
+Ask shows a card with the destination and duration before the agent makes, edits or resumes a watch. Skip makes it without the card, with the default destination and duration. Long jobs, watch key rotation and Fly sessions keep asking. Only a server admin can change it.
+
+| | |
+| --- | --- |
+| Key | `watch_approval` |
+| Values | `skip` (Skip the card), `ask` (Ask) |
+| Default | `ask` |
+| Levels | Workspace, Agent |
+| Combines | Most specific wins |
 
 ## Routines must say where they post
 

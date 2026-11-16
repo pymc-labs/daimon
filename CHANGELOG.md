@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A server admin can let agents make watches without a card.** The new
+  `watch_approval` setting, for the team or for one agent, defaults to Ask,
+  which keeps today's card. Skip makes, edits and resumes a watch straight
+  away with the default destination and duration. Rotating a key, starting a
+  long job and Fly sessions still ask, and a turn nobody is watching still
+  cannot enroll a watch. Only a server admin can change it, and agent owners
+  cannot. It applies to Claude agents; OpenAI and Gemini agents keep their
+  own approval card.
 - **Members can open `/routines` in Discord.** The command no longer needs
   Manage Server. It follows the same permission as chat and the web app: every
   member sees the routines they created, and an admin sees all of them. Pause,

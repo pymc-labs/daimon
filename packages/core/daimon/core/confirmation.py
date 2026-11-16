@@ -47,6 +47,7 @@ from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     PUBLISH_TOOLS,
     REACH_APPROVAL_TOOLS,
+    WATCH_APPROVAL_TOOLS,
     WATCH_CONFIRMED_TOOLS,
     ToolCall,
     microsoft_send_tools,
@@ -927,10 +928,32 @@ def confirmed_tools_for_turn(deps: TurnDeps) -> frozenset[str]:
     )
 
 
-async def confirmed_tools_for_tenant(deps: TurnDeps, tenant_id: uuid.UUID) -> frozenset[str]:
+async def watch_card_skipped(
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    agent_id: str | None,
+    platform: str = "*",
+) -> bool:
+    """Whether `watch_approval` is skip for this agent. A failed read keeps the card."""
+    if agent_id is None:
+        return False
+    from daimon.core.features.snapshot import FeaturePlace, place_guardrail
+
+    place = FeaturePlace.of(tenant_id, platform, None, agent_id=agent_id)
+    found = await place_guardrail(sessions, None, place, "watch_approval")
+    return found.value == "skip"
+
+
+async def confirmed_tools_for_tenant(
+    deps: TurnDeps, tenant_id: uuid.UUID, agent_id: str | None = None
+) -> frozenset[str]:
+    """`confirmed_tools_for_turn` plus the tenant's own gates, less the watch tools the
+    agent's `watch_approval` setting skips (long jobs, key rotation and Fly still ask)."""
     from daimon.core.stores.lead_intake import confirmation_tools
 
     base = confirmed_tools_for_turn(deps)
+    if await watch_card_skipped(deps.sessionmaker, tenant_id, agent_id):
+        base -= WATCH_APPROVAL_TOOLS
     if not deps.public_url:
         return base
     return base | await confirmation_tools(deps.sessionmaker, tenant_id)

@@ -21,7 +21,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.channel_backend import backend_selection_enabled
 from daimon.core.config import get_repo_memory_settings
-from daimon.core.confirmation import backend_switch_tools
+from daimon.core.confirmation import backend_switch_tools, watch_card_skipped
 from daimon.core.features.model_input import DEFAULT_TOOLSET, SessionToolset
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.features.toolset import place_toolset
@@ -38,6 +38,7 @@ from daimon.core.tool_safety import (
     CARDED_TOOLS,
     DAIMON_SERVER_NAME,
     REACH_APPROVAL_TOOLS,
+    WATCH_APPROVAL_TOOLS,
     WATCH_CONFIRMED_TOOLS,
     has_confirmation_gate,
     microsoft_send_tools,
@@ -89,6 +90,11 @@ async def session_card_gap(
         not auth.chat_session_id or origin.chat_session_id != auth.chat_session_id
     ):
         return "no_origin"
+    if tool_name in WATCH_APPROVAL_TOOLS and await watch_card_skipped(
+        runtime.session_factory, auth.tenant_id, origin.responder_ma_agent_id, origin.platform
+    ):
+        # The deployment's admin set this agent to make watches without the card.
+        return None
     async with runtime.session_factory() as session:
         live = await get_live_thread_session(
             session,
@@ -308,6 +314,8 @@ async def _recorded_as_gated(
         for watch_tools in (
             WATCH_CONFIRMED_TOOLS,
             WATCH_CONFIRMED_TOOLS - {"update_watch"},
+            # A session bound while `watch_approval` was skip: the rest still asked.
+            WATCH_CONFIRMED_TOOLS - WATCH_APPROVAL_TOOLS,
             frozenset[str](),
         )
         for reach_tools in (REACH_APPROVAL_TOOLS, frozenset[str]())

@@ -689,6 +689,27 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         authority=_ADMIN,
     ),
     FeatureSpec(
+        key="watch_approval",
+        name="Approval for watches",
+        category="guardrails",
+        effect="guardrail",
+        values={"skip": "Skip the card", "ask": "Ask"},
+        default="ask",
+        tiers=("workspace", "agent"),
+        binds="turn",
+        doc=(
+            "Ask shows a card with the destination and duration before the agent makes, "
+            "edits or resumes a watch. Skip makes it without the card, with the default "
+            "destination and duration. Long jobs, watch key rotation and Fly sessions "
+            "keep asking. Only a server admin can change it."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_SERVER_ADMIN,
+        # Ask is the default and the strict value, so a stricter-wins rule could never
+        # be loosened. Only a server admin sets either tier; the nearer one decides.
+        combine_override="most_specific",
+    ),
+    FeatureSpec(
         key="require_routine_destination",
         name="Routines must say where they post",
         category="guardrails",

@@ -984,7 +984,7 @@ async def _prepare_session_for_turn_locked(
             ),
             memory_read_only=admission.memory_read_only,
             asks_before_publishing=admission.asks_before_publishing,
-            confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id),
+            confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id, admission.agent.id),
             daimon_rule_tools=admission.daimon_rule_tools,
             toolset=admission.toolset,
             channel_skills=built_with.extra_skills(
@@ -1226,7 +1226,9 @@ async def _prepare_session_for_turn_locked(
                 agent_github_app=deps.agent_github_app,
                 now=moment,
                 asks_before_publishing=admission.asks_before_publishing,
-                confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id),
+                confirmed_tools=await confirmed_tools_for_tenant(
+                    deps, tenant_id, admission.agent.id
+                ),
                 daimon_rule_tools=admission.daimon_rule_tools,
                 toolset=admission.toolset,
                 mcp_vault_ids=deps.resolver_cache.mcp_vault_ids,

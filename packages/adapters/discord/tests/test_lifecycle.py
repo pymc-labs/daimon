@@ -466,7 +466,9 @@ async def test_ceiling_render_supersedes_retained_terminal_replacement(
         backend=None,
     )
 
-    async def no_confirmed_tools(_deps: object, _tenant: uuid.UUID) -> frozenset[str]:
+    async def no_confirmed_tools(
+        _deps: object, _tenant: uuid.UUID, _agent: str | None = None
+    ) -> frozenset[str]:
         if held_stage == "confirmation_lookup":
             await release.wait()
         return frozenset()

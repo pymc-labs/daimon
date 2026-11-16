@@ -64,6 +64,7 @@ __all__ = [
     "CARDED_TOOLS",
     "CONFIRMED_DAIMON_TOOLS",
     "REACH_APPROVAL_TOOLS",
+    "WATCH_APPROVAL_TOOLS",
     "WATCH_CONFIRMED_TOOLS",
     "DAIMON_SERVER_NAME",
     "OPEN_TOOL_SAFETY",
@@ -230,6 +231,13 @@ WATCH_CONFIRMED_TOOLS: Final[frozenset[str]] = frozenset(
         "fly_launch_session",
         "fly_extend_session",
     }
+)
+
+
+#: The watch tools whose card the `watch_approval` setting can skip. Key rotation, long
+#: jobs and Fly sessions in `WATCH_CONFIRMED_TOOLS` always ask.
+WATCH_APPROVAL_TOOLS: Final[frozenset[str]] = frozenset(
+    {"create_watch", "update_watch", "resume_watch"}
 )
 
 

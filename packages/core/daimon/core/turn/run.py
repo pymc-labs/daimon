@@ -2073,7 +2073,9 @@ async def run_prepared_turn_impl(
             await before_send()
 
     async def _run() -> RunOutcome:
-        confirmed_tools: frozenset[str] = await confirmed_tools_for_tenant(deps, tenant_id)
+        confirmed_tools: frozenset[str] = await confirmed_tools_for_tenant(
+            deps, tenant_id, prepared.admission.agent.id
+        )
         if confirmed_tools:
             revision = prepared.admission.backend_revision
             if (
