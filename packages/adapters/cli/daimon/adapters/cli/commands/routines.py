@@ -9,7 +9,8 @@ into the row.
 Owner-DM creation is available to operators; interactive edits use chat tools
 and the adapters' `/routines` command. `sandbox-tools` is the operator's
 switch for a routine's built-in sandbox tools, one routine or a confirmed list
-of them (the cutover), with a dry run.
+of them (the cutover), with a dry run. `check-roles` lists routines whose owner
+would be refused or paused at the next run for the agent's roles.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ import structlog
 import typer
 from anthropic import APIStatusError
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
+from daimon.core.access_policy import agent_invoker_roles
 from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.config import DirectMessagePolicy, load_settings
 from daimon.core.cron import validated_next_slot
@@ -37,6 +39,7 @@ from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
+from daimon.core.routine_delivery import lapsed_role
 from daimon.core.routine_move import (
     RoutineFreshnessSettings,
     RoutineSeedEntry,
@@ -60,6 +63,7 @@ from daimon.core.stores.routines import (
     create_routine,
     get_routine,
     link_source_routine,
+    list_routines_for_tenant,
     list_routines_missing_agent_name,
     set_sandbox_tools,
     update_routine,
@@ -689,3 +693,59 @@ async def run_pause_for_handback(
             markup=False,
         )
     console.print("Applied atomically." if apply else "Dry run: nothing written.")
+
+
+@routines_app.command("check-roles")
+def check_roles_command(tenant: Annotated[uuid.UUID, typer.Option("--tenant")]) -> None:
+    """Read only: list enabled routines whose owner fails the agent's role check."""
+    settings = load_settings()
+    if settings.discord is None:
+        raise UserFacingError("Discord bot credentials are required to read roles.")
+    resolver = DiscordRestMembershipResolver(settings.discord.bot_token.get_secret_value())
+
+    async def run() -> None:
+        async with build_runtime(settings) as rt:
+            await run_check_roles(
+                rt=rt, console=Console(highlight=False), tenant_id=tenant, resolver=resolver
+            )
+
+    asyncio.run(run())
+
+
+async def run_check_roles(
+    *, rt: CliRuntime, console: Console, tenant_id: uuid.UUID, resolver: MembershipResolver
+) -> None:
+    """The run-time rule per owner: lacking a role pauses; unverified is refused."""
+    async with rt.sessionmaker() as session:
+        tenant = await get_tenant(session, tenant_id)
+        if tenant is None or tenant.archived_at is not None or tenant.platform != "discord":
+            raise UserFacingError("Select an active Discord tenant.")
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+        rows = await list_routines_for_tenant(session, tenant_id=tenant_id)
+    gated = [
+        r
+        for r in rows
+        if r.enabled
+        and r.created_by_user_id is not None
+        and agent_invoker_roles(policy, (r.agent_name,))
+    ]
+    subjects: dict[str, Subject] = {}
+    flagged = 0
+    for row in sorted(gated, key=lambda r: str(r.id)):
+        owner = cast("str", row.created_by_user_id)
+        if owner not in subjects:
+            subjects[owner] = await resolve_subject(
+                rt.sessionmaker, resolver, tenant_id=tenant_id, user_id=owner, require_fresh=True
+            )
+        subject = subjects[owner]
+        if subject.verified_membership is not True or not authorize(
+            policy, subject=subject, action=Action.ACT_FOR_CREATOR, surface=Surface.ROUTINE
+        ):
+            verdict = "owner not a verified, allowed member: refused each run"
+        elif lapsed_role(policy, (row.agent_name,), subject):
+            verdict = "owner lacks a role: pauses at its next run"
+        else:
+            continue
+        flagged += 1
+        console.print(f"{row.id} owner={owner} agent={row.agent_name}: {verdict}", markup=False)
+    console.print(f"{flagged} of {len(gated)} role-gated routines need attention.")
