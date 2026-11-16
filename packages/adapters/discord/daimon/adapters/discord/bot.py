@@ -1690,6 +1690,18 @@ class DaimonBot(commands.Bot):
         log.info("turn.orphans_found", count=len(orphans))
 
         async def retire(row: ThreadSessionRow) -> None:
+            # Read before the row lock is held, so the read never waits on a pooled connection.
+            scrub = await place_scrub_platform(
+                self.runtime.sessionmaker,
+                self.runtime.settings,
+                FeaturePlace.of(
+                    row.tenant_id,
+                    "discord",
+                    row.channel_id,
+                    row.thread_id,
+                    agent_id=row.ma_agent_id,
+                ),
+            )
             async with self.runtime.sessionmaker() as session:
                 locked = await lock_orphaned_turn(session, row=row)
                 if locked is None:
@@ -1733,19 +1745,7 @@ class DaimonBot(commands.Bot):
                                 await session.commit()
                                 return
                             result = await completed_orphan_text(
-                                self.runtime.anthropic,
-                                locked,
-                                scrub=await place_scrub_platform(
-                                    self.runtime.sessionmaker,
-                                    self.runtime.settings,
-                                    FeaturePlace.of(
-                                        locked.tenant_id,
-                                        "discord",
-                                        locked.channel_id,
-                                        locked.thread_id,
-                                        agent_id=locked.ma_agent_id,
-                                    ),
-                                ),
+                                self.runtime.anthropic, locked, scrub=scrub
                             )
                             transport = DiscordPostTransport(
                                 self, channel, name="Daimon", avatar_url=None, builtin=False
