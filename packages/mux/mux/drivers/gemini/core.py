@@ -162,7 +162,7 @@ def page_values[T](values: Sequence[T], page: PageRequest) -> Page[T]:
 
 
 #: `Session.native` key set on a session as it is created; a replayed create omits it.
-CREATED = "created"
+SESSION_CREATED = "created"
 
 #: Waits between tries of one skill's upload; past them the skill is left out.
 UPLOAD_RETRY_DELAYS_S = (1.0, 4.0)
@@ -837,7 +837,7 @@ class GeminiSessions(Base):
                     # once: a replay of the create is not new.
                     native = prior.session.native
                     kept = (
-                        {k: v for k, v in native.items() if k != CREATED}
+                        {k: v for k, v in native.items() if k != SESSION_CREATED}
                         if isinstance(native, dict)
                         else native
                     )
@@ -886,7 +886,7 @@ class GeminiSessions(Base):
             requested_revision=spec.agent_revision,
             effective_revision=spec.agent_revision,
             state="idle",
-            native={CREATED: True},
+            native={SESSION_CREATED: True},
         )
         pins = (*(agent.spec.skills or ()), *spec.skills)
         records.sessions[id_] = SessionRecord(
@@ -1003,7 +1003,12 @@ class GeminiSessions(Base):
                 if failed == []:
                     record.uploading = ()
                     record.session = record.session.model_copy(
-                        update={"native": {"skills_left_out": list(record.left_out), CREATED: True}}
+                        update={
+                            "native": {
+                                "skills_left_out": list(record.left_out),
+                                SESSION_CREATED: True,
+                            }
+                        }
                     )
                     return record.session
                 if failed:
@@ -1063,7 +1068,7 @@ class GeminiSessions(Base):
         record.request = self._mcp_request(records, scope, record.spec, omit=record.left_out)
         if not record.uploading:
             record.session = record.session.model_copy(
-                update={"native": {"skills_left_out": list(record.left_out), CREATED: True}}
+                update={"native": {"skills_left_out": list(record.left_out), SESSION_CREATED: True}}
             )
         return stale
 

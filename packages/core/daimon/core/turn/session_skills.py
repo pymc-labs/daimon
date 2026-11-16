@@ -43,6 +43,7 @@ from mux.contracts.ids import ResourceRef, Scope, SkillRef
 from mux.contracts.ports import Skills
 from mux.contracts.profile import Profile
 from mux.contracts.resources import Agent, AgentSpec, EnvironmentSpec, SkillUpload, SkillUploadFile
+from mux.drivers.gemini import SESSION_CREATED
 from mux.errors import MuxError, ProviderError
 from pydantic import JsonValue
 from sqlalchemy.exc import SQLAlchemyError
@@ -157,6 +158,7 @@ def skill_spend(profile: Profile, row: SkillSizeRow) -> int | None:
         inline is None
         or upload is None
         or row.manifest_bytes is None
+        or row.manifest_bytes < 0
         or row.manifest_bytes > inline.file_bytes
         or not upload.fits(
             total_bytes=row.total_bytes,
@@ -167,6 +169,10 @@ def skill_spend(profile: Profile, row: SkillSizeRow) -> int | None:
     ):
         return None
     return row.manifest_bytes
+
+
+#: `manifest_bytes` of a skill whose SKILL.md was read and is not text.
+NOT_TEXT = -1
 
 
 def measure_archive(tenant_id: uuid.UUID, skill_id: str, version: str, data: bytes) -> SkillSizeRow:
@@ -211,8 +217,9 @@ def measure_archive(tenant_id: uuid.UUID, skill_id: str, version: str, data: byt
         largest_file_bytes=max(len(body) for body in files.values()),
         file_count=len(files),
         text_only=all(_is_text(body) for body in files.values()),
-        # mux mounts an uploaded skill's SKILL.md inline, so it must be text.
-        manifest_bytes=len(files["SKILL.md"]) if _is_text(files["SKILL.md"]) else None,
+        # mux mounts an uploaded skill's SKILL.md inline, so it must be text; a marker
+        # records that it was checked, so the row is never read again for it.
+        manifest_bytes=len(files["SKILL.md"]) if _is_text(files["SKILL.md"]) else NOT_TEXT,
     )
 
 
@@ -578,6 +585,7 @@ async def measure_carried_skills(
     tenant_id: uuid.UUID,
     carried: Sequence[SkillRef],
     record: Agent | None,
+    manifests: bool = True,
 ) -> tuple[tuple[SkillRef, ...], dict[tuple[str, str], SkillSizeRow]]:
     """A capture's carried skills pinned to concrete versions, and each one's size.
 
@@ -607,6 +615,7 @@ async def measure_carried_skills(
         tenant_id=tenant_id,
         pins=((p.id, str(p.version)) for p in pins if p.version not in (None, "latest")),
         record=record,
+        manifests=manifests,
     )
     return pins, sizes
 
@@ -719,8 +728,12 @@ async def tell_left_out(
     """Tell the agent the skills its new session goes without: copy losses, failed uploads.
 
     mux names a failed upload by its copy id (`Session.native["skills_left_out"]`).
+    A replayed create returns the session without mux's created mark: the agent was
+    told when it was made, so it is not told again.
     """
-    left = native.get("skills_left_out") if isinstance(native, dict) else None
+    if not (isinstance(native, dict) and native.get(SESSION_CREATED)):
+        return
+    left = native.get("skills_left_out")
     by_copy = {copy_id: pin.id for (copy_id, _), pin in files.sources.items()}
     failed = (
         [f"skill:{by_copy.get(i, i)}" for i in left if isinstance(i, str)]

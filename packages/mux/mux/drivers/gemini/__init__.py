@@ -13,6 +13,7 @@ from mux.drivers.gemini.catalog import GeminiCatalogAdapter
 from mux.drivers.gemini.catalog_transport import AgentCatalogTransport
 from mux.drivers.gemini.completions import GeminiCompletions
 from mux.drivers.gemini.core import (
+    SESSION_CREATED,
     Base,
     GeminiAgents,
     GeminiEnvironments,
@@ -180,6 +181,7 @@ class GeminiManagedAgents:
 
 
 __all__ = [
+    "SESSION_CREATED",
     "EnvironmentTransport",
     "GeminiCompletions",
     "NO_TOOLS_FUNCTION",
