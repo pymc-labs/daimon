@@ -248,6 +248,7 @@ async def _require_dm_grant(
             platform=conversation.platform,
             agent=DmAgent(names[0], binding.responder_ma_agent_id, reply.grant.agent),
             subject=subject,
+            groups=frozenset(subject.role_ids),  # a Discord member's roles are their groups
         )
     if not permitted:
         raise DirectMessageAccessRevoked(
