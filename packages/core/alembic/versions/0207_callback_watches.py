@@ -54,6 +54,22 @@ BEGIN
        OR p_token IS NULL OR p_token !~ '^[A-Za-z0-9_-]{{16,128}}$' THEN
         RAISE EXCEPTION 'callback refused' USING ERRCODE='42501';
     END IF;
+    -- A wrong token is refused before the global lock, so guessing cannot queue on it.
+    -- Every live digest is compared in full; a match never ends the scan early.
+    supplied := public.digest(convert_to(p_token,'UTF8'),'sha256');
+    FOR c IN SELECT digest FROM {schema}.watch_capabilities
+      WHERE watch_id=p_watch AND operation='callback' AND revoked_at IS NULL
+        AND expires_at > clock_timestamp() AND digest ~ '^[0-9a-f]{{64}}$'
+    LOOP
+        stored := decode(c.digest,'hex');
+        difference := 0;
+        FOR i IN 0..31 LOOP
+            difference := difference | (get_byte(stored,i) # get_byte(supplied,i));
+        END LOOP;
+        IF difference = 0 THEN matched := true; END IF;
+    END LOOP;
+    IF NOT matched THEN RAISE EXCEPTION 'callback refused' USING ERRCODE='42501'; END IF;
+    matched := false;
     -- One global source lock makes rate/byte/row quotas exact across replicas.
     PERFORM pg_advisory_xact_lock(813749201);
     IF NOT coalesce((SELECT enabled FROM {schema}.watch_controls WHERE scope='global'),false)
@@ -98,6 +114,10 @@ BEGIN
           AND s.ma_session_id=w.session_id AND s.status='live')) THEN
         RAISE EXCEPTION 'callback refused' USING ERRCODE='42501';
     END IF;
+    -- A retry of an event already held is accepted again without adding anything.
+    SELECT i.wake_key INTO k FROM {schema}.watch_inbox i
+      WHERE i.producer=w.producer AND i.event_id=p_event::text;
+    IF FOUND THEN RETURN k; END IF;
     -- Rows and payloads expire after seven days.
     DELETE FROM {schema}.watch_inbox WHERE accepted_at < t-interval '7 days';
     UPDATE {schema}.watch_firings SET events='[]'::jsonb

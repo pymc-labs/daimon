@@ -180,7 +180,9 @@ async def test_failed_private_notice_is_retried_without_changing_status(
 
 def test_import_manifest_rejects_unknown_fields():
     with pytest.raises(ValidationError):
-        WatchExport.model_validate({"version": 1, "watches": [], "callback_token": "forbidden"})
+        WatchExport.model_validate(
+            {"version": 1, "guild_id": "1", "watches": [], "callback_token": "forbidden"}
+        )
 
 
 @pytest.mark.parametrize(
@@ -253,7 +255,9 @@ async def test_database_projection_refuses_unreviewed_expression(
 def test_import_validation_never_echoes_rejected_signing_secrets():
     key = "private-key-material-that-must-not-appear"
     with pytest.raises(ValidationError) as refused:
-        WatchExport.model_validate({"version": 1, "watches": [], "signing_key": key})
+        WatchExport.model_validate(
+            {"version": 1, "guild_id": "1", "watches": [], "signing_key": key}
+        )
     assert key not in str(refused.value)
 
 
@@ -364,6 +368,7 @@ async def test_discord_manifest_import(
 ):
     manifest = {
         "version": 1,
+        "guild_id": "1",
         "watches": [
             {
                 "legacy_id": "watch-4",

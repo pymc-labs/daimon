@@ -1,13 +1,37 @@
 """Versioned, offline watch import manifest. Never exports or accepts secrets."""
 
-from datetime import datetime
 from typing import Annotated, Literal
 
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.poll_tools import require_poll_tool
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    JsonValue,
+    StringConstraints,
+)
 
 UNMAPPED_NOTICE = "this watch is paused: its source can't be polled here"
+
+#: What a stored instruction or timer note may hold. A longer one is cut and counted.
+INSTRUCTIONS_LIMIT = 2000
+NOTE_LIMIT = 2000
+#: The file as a whole is capped at 1 MiB; this only keeps one field from taking all of it.
+_FILE_TEXT_CAP = 200_000
+
+#: Whitespace is dropped before any length check.
+Instructions = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=_FILE_TEXT_CAP)
+]
+Note = Annotated[str, StringConstraints(strip_whitespace=True, max_length=_FILE_TEXT_CAP)]
+
+
+def clip(text: str, limit: int) -> tuple[str, bool]:
+    """The text cut to `limit` characters, and whether it was cut."""
+    return (text[:limit].rstrip(), True) if len(text) > limit else (text, False)
 
 
 class ImportedWatch(BaseModel):
@@ -15,7 +39,7 @@ class ImportedWatch(BaseModel):
     legacy_id: str = Field(min_length=1, max_length=128)
     os_binding: ContinuationRequest
     source: Literal["page_event", "poll"]
-    instructions: str = Field(min_length=1, max_length=2000)
+    instructions: Instructions
     page_id: str | None = None
     tool: str | None = None
     arguments: dict[str, JsonValue] = Field(default_factory=dict)
@@ -23,12 +47,20 @@ class ImportedWatch(BaseModel):
     rule: Literal["change", "added", "updated"] = "change"
     interval: int = Field(default=600, ge=60, le=86400)
     baseline: dict[str, JsonValue] = Field(default_factory=dict)
-    expires_at: datetime
+    expires_at: AwareDatetime
     max_turns_per_day: int = Field(default=24, ge=1, le=120)
     paused: bool = False
 
 
-PlaceType = Literal["direct-message", "thread", "channel", "mcp", "voice", "routine"]
+def _observer_is_channel(value: object) -> object:
+    """An observer's place is a channel."""
+    return "channel" if value == "observer" else value
+
+
+PlaceType = Annotated[
+    Literal["direct-message", "thread", "channel", "mcp", "voice", "routine"],
+    BeforeValidator(_observer_is_channel),
+]
 
 
 class ImportedCallbackWatch(BaseModel):
@@ -37,9 +69,9 @@ class ImportedCallbackWatch(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     legacy_id: str = Field(min_length=1, max_length=128)
     source: Literal["callback"]
-    instructions: str = Field(min_length=1, max_length=2000)
+    instructions: Instructions
     token_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    expires_at: datetime | None = None
+    expires_at: AwareDatetime | None = None
     owner_discord_id: str = Field(min_length=1, max_length=64)
     channel_id: str = Field(min_length=1, max_length=64)
     thread_id: str | None = Field(default=None, max_length=64)
@@ -56,14 +88,16 @@ class ImportedTimer(BaseModel):
     channel_id: str = Field(min_length=1, max_length=64)
     thread_id: str | None = Field(default=None, max_length=64)
     place_type: PlaceType
-    fire_at: datetime
-    note: str = Field(min_length=1, max_length=2000)
+    fire_at: AwareDatetime
+    note: Note = ""
     paused: bool = False
 
 
 class WatchExport(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     version: Literal[1]
+    #: The server the file was made for; checked against the tenant before anything is written.
+    guild_id: Annotated[str, StringConstraints(pattern=r"^[0-9]{1,20}$")]
     watches: list[
         Annotated[ImportedWatch | ImportedCallbackWatch, Field(discriminator="source")]
     ] = Field(max_length=25)

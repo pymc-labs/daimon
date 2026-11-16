@@ -12,23 +12,35 @@ from typing import Annotated
 
 import typer
 from daimon.adapters.cli.flags import JSON_OPTION
-from daimon.adapters.cli.runtime import build_runtime
+from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.config import load_settings, load_watches_settings
 from daimon.core.continuity.watch_imports import ImportedCallbackWatch, WatchExport
-from daimon.core.stores.held_timers import import_held_timer, settle_held_timers
+from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.stores.held_timers import (
+    TimerImport,
+    cancel_missing_timers,
+    import_held_timer,
+    settle_held_timers,
+    unpause_timers,
+)
 from daimon.core.stores.platform_names import get_user_names
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.watches import (
     CallbackImport,
     NoticeReceipt,
+    OwnerCapExceeded,
     WatchActivity,
+    WatchRow,
     confirm_import,
     get_watch,
     import_callback_watch,
     import_watch,
     list_notice_receipts,
     list_tenant_watches,
+    renew_callback_watch,
+    rotate_callback_link,
     set_watch_limits,
+    unpause_imported_watch,
     watch_ceilings,
 )
 
@@ -196,18 +208,24 @@ def import_command(
         Path | None,
         typer.Option("--urls-out", help="Write new callback links here (JSON, mode 0600)"),
     ] = None,
+    full: Annotated[
+        bool,
+        typer.Option("--full", help="Cancel held timers this file no longer lists"),
+    ] = False,
 ) -> None:
     """Import a v1 JSON manifest, offline. Every watch starts paused; no key is copied.
 
-    Callback watches keep their token hash and get a new link, written only to
-    --urls-out as {source id: url}. Timers are held until `confirm-timers`.
+    The file's server must be the tenant's. Callback watches keep their token hash and
+    get a new link, written only to --urls-out as {source id: url}. Timers are held
+    until `confirm-timers`. A rerun updates what nobody has confirmed yet; with --full
+    it also cancels held timers missing from the file.
     """
     if export_file.stat().st_size > 1048576:
         raise typer.BadParameter("Watch export exceeds 1 MiB")
     manifest = WatchExport.model_validate_json(export_file.read_bytes())
     callbacks = [w for w in manifest.watches if isinstance(w, ImportedCallbackWatch)]
     others = [w for w in manifest.watches if not isinstance(w, ImportedCallbackWatch)]
-    if (callbacks or manifest.timers) and tenant is None:
+    if (callbacks or manifest.timers or full) and tenant is None:
         raise typer.BadParameter("--tenant is required for callback watches and timers")
     if callbacks:
         if agent_id is None or agent_name is None:
@@ -217,14 +235,48 @@ def import_command(
         if load_watches_settings().callback_base_url is None:
             raise typer.BadParameter("Set DAIMON_WATCHES__CALLBACK_BASE_URL first")
 
+    async def check_targets(runtime: CliRuntime) -> None:
+        """The file, tenant and agent must agree before anything is written."""
+        tenants: set[uuid.UUID] = {w.os_binding.tenant_id for w in others}
+        if tenant is not None:
+            tenants.add(tenant)
+        async with runtime.sessionmaker() as db:
+            for tenant_id in tenants:
+                row = await get_tenant(db, tenant_id)
+                if row is None:
+                    raise typer.BadParameter(f"No such tenant {tenant_id}")
+                if row.external_id != manifest.guild_id:
+                    raise typer.BadParameter(
+                        f"The file is for server {manifest.guild_id}, not tenant {tenant_id}"
+                    )
+        if callbacks:
+            assert tenant is not None and agent_id and agent_name
+            agent = await find_agent_by_daimon_tag(
+                runtime.anthropic,
+                tenant_id=tenant,
+                name=agent_name,
+                records=runtime.sessionmaker,
+            )
+            if agent is None or agent.id != agent_id:
+                raise typer.BadParameter(
+                    "--agent-id and --agent-name must name one agent of the tenant"
+                )
+
     async def run() -> None:
         base = load_watches_settings().callback_base_url
         urls: dict[str, str] = {}
         async with build_runtime(load_settings()) as runtime:
+            await check_targets(runtime)
             now = datetime.now(UTC)
             # Whole-file transaction: no half-import or lost owner notice on crash.
             async with runtime.sessionmaker.begin() as db:
-                rows = [await import_watch(db, entry, now=now) for entry in others]
+                rows: list[WatchRow] = []
+                over_cap = 0
+                for entry in others:
+                    try:
+                        rows.append(await import_watch(db, entry, now=now))
+                    except OwnerCapExceeded:
+                        over_cap += 1
                 moved: list[CallbackImport] = []
                 for entry in callbacks:
                     assert tenant is not None and agent_id and agent_name
@@ -238,10 +290,19 @@ def import_command(
                             now=now,
                         )
                     )
-                held: list[str] = []
+                held: list[TimerImport] = []
                 for timer in manifest.timers:
                     assert tenant is not None
                     held.append(await import_held_timer(db, timer, tenant_id=tenant, now=now))
+                cancelled = 0
+                if full:
+                    assert tenant is not None
+                    cancelled = await cancel_missing_timers(
+                        db,
+                        tenant_id=tenant,
+                        keep={t.source_id for t in manifest.timers},
+                        now=now,
+                    )
                 for item in moved:
                     if item.token is not None and item.watch is not None:
                         urls[item.legacy_id] = (
@@ -265,8 +326,20 @@ def import_command(
                     f"thread={item.watch.thread_id}{note}"
                     f"{' link written' if item.token else ''}"
                 )
-            if manifest.timers:
-                counts = {k: held.count(k) for k in ("held", "existing", "past")}
+            cut = sum(1 for row in rows if row.source_state.get("truncated")) + sum(
+                1 for item in moved if item.truncated
+            )
+            capped = over_cap + sum(1 for item in moved if item.outcome == "owner_cap")
+            if capped or cut:
+                typer.echo(f"watches owner_cap={capped} truncated={cut}")
+            if manifest.timers or full:
+                counts = {
+                    k: sum(1 for t in held if t.outcome == k)
+                    for k in ("held", "updated", "existing", "past", "unsupported")
+                }
+                counts["truncated"] = sum(1 for t in held if t.truncated)
+                if full:
+                    counts["cancelled"] = cancelled
                 typer.echo("timers " + " ".join(f"{k}={n}" for k, n in counts.items()))
 
     asyncio.run(run())
@@ -278,7 +351,7 @@ def confirm_timers_command(
     agent_id: Annotated[str, typer.Option("--agent-id")],
     agent_name: Annotated[str, typer.Option("--agent-name")],
 ) -> None:
-    """Schedule every held timer for this agent. Due, over-cap and DM-less ones are skipped."""
+    """Schedule every unpaused held timer for this agent. Due and over-cap ones are skipped."""
 
     async def run() -> None:
         async with build_runtime(load_settings()) as runtime:
@@ -290,6 +363,95 @@ def confirm_timers_command(
                 now=datetime.now(UTC),
             )
         typer.echo(" ".join(f"{k}={n}" for k, n in sorted(counts.items())) or "no held timers")
+
+    asyncio.run(run())
+
+
+@watches_app.command("unpause")
+def unpause_command(
+    tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
+    watch_id: Annotated[
+        uuid.UUID | None, typer.Option("--watch-id", help="A confirmed imported watch")
+    ] = None,
+    timer_id: Annotated[
+        str | None, typer.Option("--timer-id", help="One held timer, by its source id")
+    ] = None,
+    all_timers: Annotated[
+        bool, typer.Option("--all-timers", help="Every paused held timer of the tenant")
+    ] = False,
+) -> None:
+    """Let a watch or held timers that were paused where they came from run here."""
+    if sum(x is not None and x is not False for x in (watch_id, timer_id, all_timers)) != 1:
+        raise typer.BadParameter("Give exactly one of --watch-id, --timer-id, --all-timers")
+
+    async def run() -> None:
+        async with build_runtime(load_settings()) as runtime:
+            async with runtime.sessionmaker.begin() as db:
+                if watch_id is not None:
+                    try:
+                        row = await unpause_imported_watch(
+                            db, watch_id, tenant_id=tenant, now=datetime.now(UTC)
+                        )
+                    except ValueError as exc:
+                        raise typer.BadParameter(str(exc)) from None
+                    typer.echo(f"{row.id} {row.status}")
+                    return
+                changed = await unpause_timers(db, tenant_id=tenant, source_id=timer_id)
+            typer.echo(f"timers unpaused={changed}")
+
+    asyncio.run(run())
+
+
+@watches_app.command("renew")
+def renew_command(
+    watch_id: uuid.UUID, tenant: Annotated[uuid.UUID, typer.Option("--tenant")]
+) -> None:
+    """Give a callback watch and its links another 30 days from now."""
+
+    async def run() -> None:
+        async with build_runtime(load_settings()) as runtime:
+            async with runtime.sessionmaker.begin() as db:
+                try:
+                    row = await renew_callback_watch(
+                        db, watch_id, tenant_id=tenant, now=datetime.now(UTC)
+                    )
+                except ValueError as exc:
+                    raise typer.BadParameter(str(exc)) from None
+            typer.echo(f"{row.id} expires {row.expires_at.isoformat() if row.expires_at else ''}")
+
+    asyncio.run(run())
+
+
+@watches_app.command("rotate-link")
+def rotate_link_command(
+    watch_id: uuid.UUID,
+    tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
+    urls_out: Annotated[
+        Path | None,
+        typer.Option("--urls-out", help="Write the new link here (JSON, mode 0600), not to screen"),
+    ] = None,
+) -> None:
+    """Replace every link of a callback watch with a new one, shown once."""
+    base = load_watches_settings().callback_base_url
+    if base is None:
+        raise typer.BadParameter("Set DAIMON_WATCHES__CALLBACK_BASE_URL first")
+
+    async def run() -> None:
+        async with build_runtime(load_settings()) as runtime:
+            async with runtime.sessionmaker.begin() as db:
+                try:
+                    token = await rotate_callback_link(
+                        db, watch_id, tenant_id=tenant, now=datetime.now(UTC)
+                    )
+                except ValueError as exc:
+                    raise typer.BadParameter(str(exc)) from None
+                url = f"{base}/callbacks/watches/{watch_id}/{token}"
+                if urls_out is not None:
+                    _write_urls(urls_out, {str(watch_id): url})
+            if urls_out is None:
+                typer.echo(url)
+            else:
+                typer.echo(f"{watch_id} link written")
 
     asyncio.run(run())
 

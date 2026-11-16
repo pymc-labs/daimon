@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import uuid
@@ -18,7 +19,13 @@ from daimon.core.continuity.watch_imports import (
     WatchExport,
 )
 from daimon.core.stores import tenant_ledger, watches
-from daimon.core.stores.held_timers import import_held_timer, settle_held_timers
+from daimon.core.stores.held_timers import (
+    EMPTY_NOTE_PROMPT,
+    cancel_missing_timers,
+    import_held_timer,
+    settle_held_timers,
+    unpause_timers,
+)
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.thread_sessions import create_thread_session
@@ -229,10 +236,18 @@ def _manifest_watch(**kw):
     return {**base, **kw}
 
 
+GUILD = "777000111"
+
+
+def _export(**kw):
+    return WatchExport.model_validate({"version": 1, "guild_id": GUILD, "watches": [], **kw})
+
+
 def test_manifest_accepts_callbacks_and_timers_and_rejects_unknown_fields():
     manifest = WatchExport.model_validate(
         {
             "version": 1,
+            "guild_id": GUILD,
             "watches": [_manifest_watch(expires_at=None)],
             "timers": [
                 {
@@ -249,13 +264,13 @@ def test_manifest_accepts_callbacks_and_timers_and_rejects_unknown_fields():
     )
     assert isinstance(manifest.watches[0], ImportedCallbackWatch)
     assert manifest.watches[0].expires_at is None and len(manifest.timers) == 1
-    assert WatchExport.model_validate({"version": 1, "watches": []}).timers == []
+    assert _export().timers == []
     with pytest.raises(ValidationError):
-        WatchExport.model_validate({"version": 1, "watches": [_manifest_watch(extra=1)]})
+        _export(watches=[_manifest_watch(extra=1)])
     with pytest.raises(ValidationError):
-        WatchExport.model_validate(
-            {"version": 1, "watches": [_manifest_watch(token_sha256="AB" * 32)]}
-        )
+        _export(watches=[_manifest_watch(token_sha256="AB" * 32)])
+    with pytest.raises(ValidationError, match="guild_id"):
+        WatchExport.model_validate({"version": 1, "watches": []})
 
 
 @pytest.fixture
@@ -353,15 +368,16 @@ async def test_import_caps_permanent_and_skips_expired(db_session_factory, moved
     assert gone.outcome == "expired" and gone.watch is None and gone.token is None
 
 
-def _timer(source_id, *, minutes=60, place="channel", owner="555", note="ping"):
+def _timer(source_id, *, minutes=60, place="thread", owner="555", note="ping", **kw):
     return ImportedTimer(
         source_id=source_id,
         owner_discord_id=owner,
         channel_id="900",
-        thread_id=None,
+        thread_id="901" if place == "thread" else None,
         place_type=place,
         fire_at=datetime.now(UTC) + timedelta(minutes=minutes),
         note=note,
+        **kw,
     )
 
 
@@ -379,30 +395,37 @@ async def _pending_timers(factory):
 
 async def test_held_timers_do_not_fire_until_confirmed_and_settle_once(db_session_factory, moved):
     now = datetime.now(UTC)
+    first = _timer("a", note="later")
     async with db_session_factory.begin() as db:
         results = [
-            await import_held_timer(db, t, tenant_id=moved.id, now=now)
+            (await import_held_timer(db, t, tenant_id=moved.id, now=now)).outcome
             for t in (
-                _timer("a", note="later"),
+                first,
                 _timer("b", minutes=0, note="due"),
                 _timer("c", place="direct-message", note="private"),
-                _timer("a", note="later"),
+                _timer("d", place="channel", note="shared"),
+                first,
             )
         ]
-    assert results == ["held", "past", "held", "existing"]
+    assert results == ["held", "past", "held", "unsupported", "existing"], results
     assert await _pending_timers(db_session_factory) == []
     counts = await settle_held_timers(
         db_session_factory, tenant_id=moved.id, agent_id="agent-new", agent_name="analyst", now=now
     )
-    assert dict(counts) == {"scheduled": 1, "no_dm": 1}
-    assert await _pending_timers(db_session_factory) == [("900", "900", "later")]
+    assert dict(counts) == {"scheduled": 2}, "a DM timer is scheduled like any other"
+    pending = await _pending_timers(db_session_factory)
+    assert [p[2] for p in pending] == ["later", "private"], pending
+    assert pending[0][:2] == ("900", "901"), "a thread timer wakes the thread it names"
+    assert pending[1][0].startswith("dm:") and pending[1][0] == pending[1][1], (
+        "a DM timer carries a private scope, never a channel id"
+    )
     again = await settle_held_timers(
         db_session_factory, tenant_id=moved.id, agent_id="agent-new", agent_name="analyst", now=now
     )
     assert dict(again) == {}
     async with db_session_factory() as db:
         notes = list(await db.scalars(text("SELECT note FROM held_timers")))
-    assert notes == ["", "", ""]
+    assert notes == ["", "", ""], "settled rows keep no note"
 
 
 async def test_held_timers_stop_at_the_pending_cap(db_session_factory, moved):
@@ -442,11 +465,11 @@ async def test_paused_import_stays_paused_when_confirmed(db_session_factory, mov
 
 
 async def test_paused_timers_are_never_scheduled(db_session_factory, moved):
-    flat = _timer("paused-1")
-    flat = flat.model_copy(update={"paused": True})
+    flat = _timer("paused-1", paused=True)
     now = datetime.now(UTC)
     async with db_session_factory.begin() as db:
-        assert await import_held_timer(db, flat, tenant_id=moved.id, now=now) == "held"
+        held = await import_held_timer(db, flat, tenant_id=moved.id, now=now)
+        assert held.outcome == "held"
     counts = await settle_held_timers(
         db_session_factory, tenant_id=moved.id, agent_id="agent-new", agent_name="analyst", now=now
     )
@@ -454,3 +477,265 @@ async def test_paused_timers_are_never_scheduled(db_session_factory, moved):
     assert len(await _pending_timers(db_session_factory)) == 0
     async with db_session_factory() as db:
         assert await db.scalar(text("SELECT settled_at IS NULL AND paused FROM held_timers"))
+
+
+async def test_retried_post_is_accepted_again_without_a_second_wake(db_session_factory, link):
+    watch, token = link
+    async with TestClient(TestServer(create_app(db_session_factory))) as client:
+        first = await post(client, watch.id, token, b"same event")
+        retry = await post(client, watch.id, token, b"same event")
+        other = await post(client, watch.id, token, b"another event")
+    assert [first.status, retry.status, other.status] == [202, 202, 202]
+    assert await count(db_session_factory, "watch_inbox") == 2, "a retry must not add a row"
+    assert await count(db_session_factory, "task_continuations") == 1, "events share one wake"
+
+
+def test_event_id_is_stable_inside_a_bucket_and_new_outside_it():
+    watch = uuid.uuid4()
+    t0 = datetime(2030, 1, 1, 0, 0, 10, tzinfo=UTC)
+    same = watches.callback_event_id(watch, b"x", now=t0 + timedelta(seconds=60))
+    assert same == watches.callback_event_id(watch, b"x", now=t0)
+    later = t0 + timedelta(seconds=watches.CALLBACK_DEDUPE_BUCKET_S)
+    assert watches.callback_event_id(watch, b"x", now=later) != same
+    assert watches.callback_event_id(watch, b"y", now=t0) != same
+    assert watches.callback_event_id(uuid.uuid4(), b"x", now=t0) != same
+
+
+async def test_nul_byte_body_is_400_and_stores_nothing(db_session_factory, link):
+    watch, token = link
+    async with TestClient(TestServer(create_app(db_session_factory))) as client:
+        assert (await post(client, watch.id, token, b"a\x00b")).status == 400
+    assert await count(db_session_factory, "watch_inbox") == 0
+
+
+async def test_one_watch_cannot_use_the_shared_rate_budget(db_session_factory, link):
+    watch, token = link
+    other = uuid.uuid4()
+    async with TestClient(
+        TestServer(create_app(db_session_factory, max_watch_requests_per_minute=2))
+    ) as client:
+        assert (await post(client, watch.id, token, b"1")).status == 202
+        assert (await post(client, watch.id, token, b"2")).status == 202
+        assert (await post(client, watch.id, token, b"3")).status == 429
+        assert (await post(client, other, token)).status == 403, "other watches keep their own"
+
+
+async def test_a_wrong_token_is_refused_while_the_global_lock_is_held(db_session_factory, link):
+    """Guesses must not queue behind the port's global lock: the digest is checked first."""
+    watch, token = link
+    async with db_session_factory() as holder:
+        await holder.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
+        async with TestClient(TestServer(create_app(db_session_factory))) as client:
+            refused = await asyncio.wait_for(post(client, watch.id, "A" * len(token)), timeout=5)
+            assert refused.status == 403
+        await holder.rollback()
+
+
+async def test_callback_payloads_are_labelled_as_callbacks(db_session_factory, link):
+    watch, token = link
+    async with TestClient(TestServer(create_app(db_session_factory))) as client:
+        assert (await post(client, watch.id, token, b"hello")).status == 202
+    async with db_session_factory() as db:
+        evidence = await watches.list_evidence(db, watch.id)
+        wake = await get_continuation(db, idempotency_key=evidence[0].wake_key)
+        seed = await watches.watch_seed(db, wake, now=datetime.now(UTC))
+    assert seed is not None and 'source="callback"' in seed, seed
+
+
+async def test_expiry_counts_from_confirmation_not_import(db_session_factory, moved):
+    start = datetime.now(UTC)
+    item = await _import(
+        db_session_factory, moved, expires_at=(start + timedelta(days=3)).isoformat()
+    )
+    assert item.watch is not None
+    confirm_at = start + timedelta(days=2)
+    async with db_session_factory.begin() as db:
+        confirmed = await watches.confirm_import(
+            db,
+            item.watch.id,
+            tenant_id=moved.id,
+            owner_account_id=item.watch.owner_account_id,
+            agent_id="agent-new",
+            parent_channel_id="900",
+            thread_id="900",
+            now=confirm_at,
+        )
+        links = list(await db.scalars(text("SELECT expires_at FROM watch_capabilities")))
+    expected = confirm_at + timedelta(days=3)
+    assert confirmed.expires_at is not None
+    assert abs(confirmed.expires_at - expected) < timedelta(minutes=1), confirmed.expires_at
+    assert all(abs(e - expected) < timedelta(minutes=1) for e in links), links
+
+
+async def test_renew_gives_thirty_days_from_now(db_session_factory, moved):
+    item = await _import(db_session_factory, moved)
+    assert item.watch is not None
+    now = datetime.now(UTC) + timedelta(days=10)
+    async with db_session_factory.begin() as db:
+        renewed = await watches.renew_callback_watch(db, item.watch.id, tenant_id=moved.id, now=now)
+        links = list(await db.scalars(text("SELECT expires_at FROM watch_capabilities")))
+        with pytest.raises(ValueError, match="not found"):
+            await watches.renew_callback_watch(db, item.watch.id, tenant_id=uuid.uuid4(), now=now)
+    assert renewed.expires_at == now + timedelta(days=30), renewed.expires_at
+    assert set(links) == {renewed.expires_at}, links
+
+
+async def test_rotate_revokes_every_link_and_returns_one_new_token(db_session_factory, moved):
+    item = await _import(db_session_factory, moved)
+    assert item.watch is not None and item.token is not None
+    async with db_session_factory.begin() as db:
+        await watches.confirm_import(
+            db,
+            item.watch.id,
+            tenant_id=moved.id,
+            owner_account_id=item.watch.owner_account_id,
+            agent_id="agent-new",
+            parent_channel_id="900",
+            thread_id="900",
+            now=datetime.now(UTC),
+        )
+        fresh = await watches.rotate_callback_link(
+            db, item.watch.id, tenant_id=moved.id, now=datetime.now(UTC)
+        )
+    async with TestClient(TestServer(create_app(db_session_factory))) as client:
+        assert (await post(client, item.watch.id, item.token)).status == 403
+        assert (await post(client, item.watch.id, OLD_TOKEN)).status == 403
+        assert (await post(client, item.watch.id, fresh)).status == 202
+    async with db_session_factory() as db:
+        live = await db.scalar(
+            text("SELECT count(*) FROM watch_capabilities WHERE revoked_at IS NULL")
+        )
+    assert live == 1, "exactly one live link remains"
+
+
+async def test_owner_over_the_live_cap_is_skipped_not_fatal(db_session_factory, moved):
+    for _ in range(25):
+        assert (await _import(db_session_factory, moved, legacy_id=str(uuid.uuid4()))).watch
+    over = await _import(db_session_factory, moved, legacy_id=str(uuid.uuid4()))
+    assert over.outcome == "owner_cap" and over.watch is None and over.token is None
+    assert await count(db_session_factory, "watches") == 25
+
+
+async def test_oversize_instructions_are_clipped_and_counted(db_session_factory, moved):
+    item = await _import(db_session_factory, moved, instructions="  " + "x" * 5000)
+    assert item.truncated and item.watch is not None
+    assert len(item.watch.instructions) == 2000, len(item.watch.instructions)
+
+
+async def test_rerun_updates_an_unconfirmed_watch_and_leaves_a_confirmed_one(
+    db_session_factory, moved
+):
+    first = await _import(db_session_factory, moved)
+    assert first.watch is not None
+    changed = await _import(db_session_factory, moved, instructions="New wording.", paused=True)
+    assert changed.outcome == "updated" and changed.token is None
+    assert changed.watch is not None and changed.watch.instructions == "New wording."
+    assert changed.watch.source_state["keep_paused"] is True
+    async with db_session_factory.begin() as db:
+        await watches.confirm_import(
+            db,
+            first.watch.id,
+            tenant_id=moved.id,
+            owner_account_id=first.watch.owner_account_id,
+            agent_id="agent-new",
+            parent_channel_id="900",
+            thread_id="900",
+            now=datetime.now(UTC),
+        )
+    final = await _import(db_session_factory, moved, instructions="Third wording.")
+    assert final.outcome == "existing" and final.watch is not None
+    assert final.watch.instructions == "New wording."
+
+
+async def test_operator_unpause_resumes_a_confirmed_paused_import(db_session_factory, moved):
+    item = await _import(db_session_factory, moved, paused=True)
+    assert item.watch is not None and item.token is not None
+    async with db_session_factory.begin() as db:
+        with pytest.raises(ValueError, match="not found"):
+            await watches.unpause_imported_watch(
+                db, item.watch.id, tenant_id=moved.id, now=datetime.now(UTC)
+            )
+        await watches.confirm_import(
+            db,
+            item.watch.id,
+            tenant_id=moved.id,
+            owner_account_id=item.watch.owner_account_id,
+            agent_id="agent-new",
+            parent_channel_id="900",
+            thread_id="900",
+            now=datetime.now(UTC),
+        )
+        row = await watches.unpause_imported_watch(
+            db, item.watch.id, tenant_id=moved.id, now=datetime.now(UTC)
+        )
+    assert row.status == "active", row.status
+    async with TestClient(TestServer(create_app(db_session_factory))) as client:
+        assert (await post(client, item.watch.id, item.token)).status == 202
+
+
+async def test_timer_rerun_updates_unsettled_rows_and_full_cancels_the_missing(
+    db_session_factory, moved
+):
+    now = datetime.now(UTC)
+    async with db_session_factory.begin() as db:
+        for sid in ("keep", "drop", "paused"):
+            await import_held_timer(db, _timer(sid, note=sid), tenant_id=moved.id, now=now)
+        moved_fire = _timer("keep", minutes=120, note="changed", paused=True)
+        again = await import_held_timer(db, moved_fire, tenant_id=moved.id, now=now)
+        assert again.outcome == "updated", again
+        cancelled = await cancel_missing_timers(
+            db, tenant_id=moved.id, keep={"keep", "paused"}, now=now
+        )
+        assert cancelled == 1
+        assert await unpause_timers(db, tenant_id=moved.id, source_id="keep") == 1
+    counts = await settle_held_timers(
+        db_session_factory, tenant_id=moved.id, agent_id="agent-new", agent_name="analyst", now=now
+    )
+    assert dict(counts) == {"scheduled": 2}, counts
+    async with db_session_factory() as db:
+        outcomes = {
+            r[0]: r[1] for r in await db.execute(text("SELECT source_id, outcome FROM held_timers"))
+        }
+    assert outcomes == {"keep": "scheduled", "drop": "cancelled", "paused": "scheduled"}
+
+
+async def test_timer_text_is_stripped_clipped_and_may_be_empty(db_session_factory, moved):
+    now = datetime.now(UTC)
+    async with db_session_factory.begin() as db:
+        long = await import_held_timer(
+            db, _timer("long", note="n" * 5000), tenant_id=moved.id, now=now
+        )
+        empty = await import_held_timer(
+            db, _timer("empty", note="   "), tenant_id=moved.id, now=now
+        )
+    assert long.truncated and long.outcome == "held"
+    assert empty.outcome == "held" and not empty.truncated
+    await settle_held_timers(
+        db_session_factory, tenant_id=moved.id, agent_id="agent-new", agent_name="analyst", now=now
+    )
+    texts = {row[2] for row in await _pending_timers(db_session_factory)}
+    assert "n" * 2000 in texts and EMPTY_NOTE_PROMPT in texts, texts
+
+
+def test_exporter_shapes_are_accepted():
+    observer = _manifest_watch(place_type="observer")
+    padded = _manifest_watch(instructions="  x  ")
+    export = _export(watches=[observer, padded])
+    assert export.watches[0].place_type == "channel", "an observer place maps to the channel place"
+    assert export.watches[1].instructions == "x"
+    with pytest.raises(ValidationError):
+        _export(watches=[_manifest_watch(instructions="   ")])
+    with pytest.raises(ValidationError):
+        _export(
+            timers=[
+                {
+                    "source_id": "t",
+                    "owner_discord_id": "5",
+                    "channel_id": "9",
+                    "thread_id": None,
+                    "place_type": "direct-message",
+                    "fire_at": "2030-01-01T00:00:00",
+                    "note": "",
+                }
+            ]
+        )

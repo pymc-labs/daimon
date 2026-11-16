@@ -38,11 +38,27 @@ def create_app(
     max_concurrent: int = 8,
     request_timeout_s: float = 10,
     max_requests_per_minute: int = 1200,
+    max_watch_requests_per_minute: int = 120,
 ) -> web.Application:
     """Only callback POST paths accept input; health is private at the proxy."""
     app = web.Application(client_max_size=MAX_EVENT_BYTES)
     active = 0
     recent: deque[float] = deque()
+    per_watch: dict[uuid.UUID, deque[float]] = {}
+
+    def watch_limited(watch_id: uuid.UUID) -> bool:
+        """One watch cannot use the whole shared budget; guesses count like posts."""
+        now = time.monotonic()
+        if len(per_watch) > 4096:
+            for key in [k for k, v in per_watch.items() if not v or v[-1] <= now - 60]:
+                del per_watch[key]
+        window = per_watch.setdefault(watch_id, deque())
+        while window and window[0] <= now - 60:
+            window.popleft()
+        if len(window) >= max_watch_requests_per_minute:
+            return True
+        window.append(now)
+        return False
 
     async def health(_: web.Request) -> web.Response:
         try:
@@ -158,6 +174,8 @@ def create_app(
         token = request.match_info["token"]
         if TOKEN_SHAPE.fullmatch(token) is None:
             return web.Response(status=403)
+        if watch_limited(watch_id):
+            return web.Response(status=429)
         if request.headers.get("Content-Encoding", "identity") != "identity":
             return web.Response(status=400)
         body = await read_body(request)
@@ -169,8 +187,16 @@ def create_app(
             body.decode("utf-8")
         except UnicodeDecodeError:
             return web.Response(status=400)
-        async with sessions.begin() as session:
-            await accept_callback_event(session, watch_id=watch_id, token=token, body=body)
+        # The database cannot hold a NUL in text.
+        if b"\x00" in body:
+            return web.Response(status=400)
+        try:
+            async with sessions.begin() as session:
+                await accept_callback_event(session, watch_id=watch_id, token=token, body=body)
+        except DBAPIError as exc:
+            # A retry that raced its twin is the same event, already held.
+            if getattr(exc.orig, "sqlstate", None) != "23505":
+                raise
         return web.json_response({"accepted": True}, status=202)
 
     app.router.add_get("/healthz", health)

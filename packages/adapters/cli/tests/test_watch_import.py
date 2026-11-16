@@ -33,9 +33,18 @@ def test_watch_cli_reports_mapping_errors_and_thread_only_confirmation(
     async def begin():
         yield object()
 
+    class Sessions:
+        def begin(self):
+            return begin()
+
+        def __call__(self):
+            return begin()
+
     @asynccontextmanager
     async def runtime(_settings):
-        yield SimpleNamespace(sessionmaker=SimpleNamespace(begin=begin))
+        yield SimpleNamespace(sessionmaker=Sessions())
+
+    tenant = uuid.uuid4()
 
     monkeypatch.setattr(watch_commands, "build_runtime", runtime)
     monkeypatch.setattr(watch_commands, "load_settings", lambda: None)
@@ -46,7 +55,14 @@ def test_watch_cli_reports_mapping_errors_and_thread_only_confirmation(
         monkeypatch.setattr(
             watch_commands.WatchExport,
             "model_validate_json",
-            lambda _: SimpleNamespace(watches=[object()], timers=[]),
+            lambda _: SimpleNamespace(
+                guild_id="777",
+                watches=[SimpleNamespace(os_binding=SimpleNamespace(tenant_id=tenant))],
+                timers=[],
+            ),
+        )
+        monkeypatch.setattr(
+            watch_commands, "get_tenant", AsyncMock(return_value=SimpleNamespace(external_id="777"))
         )
         monkeypatch.setattr(
             watch_commands,
