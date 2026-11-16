@@ -9771,12 +9771,13 @@
         surface issues such a token yet, and the tool is kept for a future admin surface.
         Owning the routine is not enough, and agent keys, agents in a conversation, operator
         tokens, legacy tokens and other platforms are refused. DM routines cannot be opted
-        in. An opt-in covers exactly the routine's current agent version and environment:
-        once either changes, runs go without built-ins and the opt-in is cleared. Each
-        change records who made it and when, and ``get_routine``/``list_routines`` show it
-        as ``sandbox_tools_enabled``. It takes effect from the routine's next run. Setting
-        the value a routine already has changes nothing. Timers, watches, agent chat,
-        ``daimon run`` and checkpoints cannot be opted in.
+        in. Off is the routine's own Off, which also overrides an opt-in for its agent. An
+        opt-in covers exactly the routine's current agent version and environment: once
+        either changes, runs go without built-ins and the opt-in is cleared. This is the
+        routine's own value of the ``routine_sandbox_tools`` setting, so a lock above it
+        still wins, and the settings history records each change. It takes effect from
+        the routine's next run. Setting the value a routine already has changes nothing.
+        Timers, watches, agent chat, ``daimon run`` and checkpoints cannot be opted in.
       ''',
       'parameters': dict({
         'additionalProperties': False,

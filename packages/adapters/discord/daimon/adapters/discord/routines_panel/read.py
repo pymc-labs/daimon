@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 
 from anthropic import AsyncAnthropic
@@ -11,9 +12,12 @@ from daimon.adapters.discord.routines_panel.state import (
     picker_label,
 )
 from daimon.core.defaults.ma_index import list_agents_by_tenant
+from daimon.core.features.snapshot import feature_in
+from daimon.core.routine_sandbox import SANDBOX_KEY, routine_place
 from daimon.core.routines import routine_for_reader
-from daimon.core.stores.agent_sandbox import agent_sandbox_pins
+from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import list_routines_for_tenant
+from daimon.core.stores.sandbox_pins import PinnedTier
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _PICKER_CAP = 25
@@ -51,7 +55,6 @@ async def load_guild_routines(
             name = agent.id
         agent_name_map[agent.id] = name
 
-    opted_in = {pin.agent_id for pin in await agent_sandbox_pins(session, tenant_id=tenant_id)}
     entries: list[RoutineEntry] = []
     for row in rows:
         row = routine_for_reader(row, user_id=viewer_user_id)
@@ -65,9 +68,20 @@ async def load_guild_routines(
                 glyph=glyph,
                 color=color,
                 label=label,
-                agent_sandbox=row.agent_id in opted_in,
             )
         )
     entries.sort(key=lambda e: e.label.lower())
     over_cap_count = max(0, len(entries) - _PICKER_CAP)
-    return entries[:_PICKER_CAP], over_cap_count, agent_name_map
+    shown = [
+        dataclasses.replace(entry, sandbox_by=await _sandbox_by(session, entry.routine))
+        for entry in entries[:_PICKER_CAP]
+    ]
+    return shown, over_cap_count, agent_name_map
+
+
+async def _sandbox_by(session: AsyncSession, row: RoutineRow) -> PinnedTier | None:
+    """Which opt-in turns sandbox tools on for the routine's runs: its own or its agent's."""
+    found = await feature_in(session, None, routine_place(row, "discord"), SANDBOX_KEY)
+    if not found.on:
+        return None
+    return "agent" if found.tier == "agent" else "routine" if found.tier == "routine" else None

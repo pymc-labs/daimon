@@ -112,7 +112,7 @@ from daimon.core.routine_delivery import (
 )
 from daimon.core.routine_files import collect_routine_files
 from daimon.core.routine_hold import routine_hold
-from daimon.core.routine_sandbox import RoutineSandbox, pin_of
+from daimon.core.routine_sandbox import routine_sandbox
 from daimon.core.routines import mounts_personal_memory
 from daimon.core.rule_views import (
     is_routine_parent_unknown,
@@ -138,7 +138,6 @@ from daimon.core.spend_gate import (
 )
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
-from daimon.core.stores.agent_sandbox import agent_sandbox_pin
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import Role, RoutineRow, ThreadSessionRow
 from daimon.core.stores.github_connect import delete_expired_flows
@@ -164,7 +163,6 @@ from daimon.core.stores.github_issued_tokens import (
 from daimon.core.stores.github_router_sessions import close_for_ma_session
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.routines import (
-    clear_sandbox_drift,
     record_result,
     update_routine_agent_id,
 )
@@ -290,52 +288,6 @@ async def _acquire_advisory_lock(engine: AsyncEngine, key: int) -> AsyncConnecti
         await conn.close()
         return None
     return conn
-
-
-async def _agent_sandbox(
-    sm: async_sessionmaker[AsyncSession], row: RoutineRow
-) -> RoutineSandbox | None:
-    """An operator's opt-in for the routine's agent, or None when it has none."""
-    try:
-        async with sm() as session:
-            pin = await agent_sandbox_pin(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
-    except Exception:  # unreadable: no opt-in
-        log.exception("routine.agent_sandbox_unreadable", routine_id=str(row.id))
-        return None
-    if pin is None:
-        return None
-
-    async def on_drift() -> None:
-        log.info("routine.agent_sandbox_mismatch", routine_id=str(row.id))
-
-    return RoutineSandbox(pin=pin, on_drift=on_drift)
-
-
-async def _routine_sandbox(
-    sm: async_sessionmaker[AsyncSession], row: RoutineRow
-) -> RoutineSandbox | None:
-    """The opt-in for this fire, or None when there is none recorded.
-
-    An operator's opt-in for the routine's agent comes first: it covers an agent
-    edit. Otherwise the routine's own: when the run's agent or environment no
-    longer matches what the admin approved, the run goes ahead without built-ins
-    and the opt-in is cleared, so the admin has to approve the new agent or
-    environment.
-    """
-    if (agent_level := await _agent_sandbox(sm, row)) is not None:
-        return agent_level
-    pin = pin_of(row)
-    if pin is None:
-        return None
-
-    async def on_drift() -> None:
-        try:
-            async with sm() as session, session.begin():
-                await clear_sandbox_drift(session, row.id, tenant_id=row.tenant_id, pin=pin)
-        except Exception:  # the run already went ahead without built-ins
-            log.exception("routine.sandbox_drift_clear_failed", routine_id=str(row.id))
-
-    return RoutineSandbox(pin=pin, on_drift=on_drift)
 
 
 async def _spend_block(
@@ -513,8 +465,9 @@ async def _build_fire(
                 prompt=prompt,
                 source=source,
                 budget_channel_id=row.channel_id,
-                # Built-ins only under an operator's agent-level opt-in.
-                sandbox=await _agent_sandbox(sm, row),
+                # Built-ins only under an operator's opt-in for the agent: a DM
+                # routine takes no On of its own.
+                sandbox=await routine_sandbox(sm, settings, row, platform="discord"),
             )
         except (AdmissionDenied, DirectMessageAccessRevoked) as error:
             log.info(
@@ -969,9 +922,9 @@ async def _build_fire(
                 if fire_policy is not None
                 else None
             ),
-            # Built-in sandbox tools only for a routine an admin opted in, and
-            # only while its agent version and environment are the ones approved.
-            sandbox=await _routine_sandbox(sm, row),
+            # Built-in sandbox tools only under an admin's opt-in for the routine or
+            # its agent, and only while the run matches what that opt-in pinned.
+            sandbox=await routine_sandbox(sm, settings, row, platform=platform),
             # The owner's personal memory, read-only, only for a routine whose
             # result goes to nobody else; decided again from the row each fire.
             personal_memory=mounts_personal_memory(row),

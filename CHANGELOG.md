@@ -7,18 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Operators can turn on sandbox tools for an agent's routine runs.**
-  `daimon routines sandbox-tools --agent NAME` records an opt-in for the agent
-  and its environment's name instead of one routine and one version, so
-  editing the agent no longer takes the built-in tools away. It covers every
-  routine run of that agent, DM routines included, which cannot be opted in
-  one by one. Only an operator can set it, each change is recorded, and
-  another agent or environment still runs without them. The command prints the
-  agent id, `--agent-id` turns it off for an agent that was renamed, and
-  `sandbox-tools-list` shows every agent opted in, as the `/routines` panel
-  does for the selected routine. The unattended
-  capabilities setting still wins: with it off, built-ins stay off. A change
-  of agent provider needs a new opt-in.
+- **Sandbox tools in routines is a setting with levels.** The
+  `routine_sandbox_tools` setting is off by default and set for the workspace,
+  an agent or one routine; a routine's own value wins over its agent's, and a
+  workspace lock wins over both. `daimon routines sandbox-tools --agent NAME`
+  opts in an agent and its environment's name, so editing the agent keeps the
+  built-in tools; it covers DM routines too, which cannot be opted in one by
+  one. A routine's opt-in still covers one agent version and environment.
+  `--off` keeps a routine off under an opted-in agent, `--inherit` clears its
+  own value, and `sandbox-tools-list` shows every agent and routine opted in.
+  Each change shows in the settings history. Existing routine opt-ins carry
+  over. The unattended capabilities setting still wins, and a change of agent
+  provider needs a new opt-in.
 - **A server admin can let agents make watches without a card.** The new
   `watch_approval` setting, for the team or for one agent, defaults to Ask,
   which keeps today's card. Skip makes and resumes a watch straight away, and

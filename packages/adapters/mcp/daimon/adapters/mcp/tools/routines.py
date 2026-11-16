@@ -59,14 +59,16 @@ from daimon.core import routine_service
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, Subject, authorize, build_subject
+from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.discord_membership import verify_discord_source
 from daimon.core.errors import StoreError
+from daimon.core.features.service import FeatureActor
 from daimon.core.features.snapshot import FeaturePlace, place_guardrail
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.permissions import dm_source_limited
 from daimon.core.routine_delivery import discord_creator_may_post
 from daimon.core.routine_destinations import slack_may_deliver
-from daimon.core.routine_sandbox import SandboxPinUnavailable, current_pin
+from daimon.core.routine_sandbox import change_routine_sandbox, routine_opt_in_pin
 from daimon.core.routine_service import (
     CallView,
     ChannelAgentName,
@@ -655,39 +657,38 @@ async def _set_routine_sandbox_tools_impl(
     routine_id: UUID,
     enabled: bool,
 ) -> RoutineRow:
-    actor = await _sandbox_admin(runtime, auth)
+    await _sandbox_admin(runtime, auth)
     viewer = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session:
         row = await routines_store.get_routine(session, routine_id, tenant_id=auth.tenant_id)
     if row is None or not routine_service.sees_routine(viewer, row):
         raise ToolError(routine_service.NOT_FOUND)
-    # The opt-in covers the agent version and environment the routine would
-    # run with now; the scheduler keeps built-ins off once either changes.
-    pin = None
-    if enabled:
-        try:
-            pin = await current_pin(
-                runtime.client, runtime.session_factory, row, default=runtime.deployment_default
-            )
-        except SandboxPinUnavailable as exc:
-            raise ToolError(routines_store.PIN_UNAVAILABLE_REFUSAL) from exc
-    async with runtime.session_factory.begin() as session:
-        try:
-            result = await routines_store.set_sandbox_tools(
-                session,
-                routine_id,
-                tenant_id=auth.tenant_id,
-                enabled=enabled,
-                set_by=str(auth.account_id),
-                actor=actor,
-                via="mcp",
-                pin=pin,
-            )
-        except StoreError as exc:
-            raise ToolError(str(exc)) from exc
-    if result is None:
-        raise ToolError(routine_service.NOT_FOUND)
-    return routine_for_reader(result[0], user_id=auth.platform_user_id)
+
+    async def admin_for(_action: DelegatedAction | None) -> bool:
+        return True  # `_sandbox_admin` re-checked the live admin above
+
+    actor = FeatureActor(auth.tenant_id, auth.account_id, "chat", auth.platform_user_id, admin_for)
+    value = "on" if enabled else "off"
+    try:
+        pin = await routine_opt_in_pin(
+            runtime.client,
+            runtime.session_factory,
+            row,
+            value=value,
+            default=runtime.deployment_default,
+        )
+        await change_routine_sandbox(
+            runtime.session_factory,
+            runtime.settings,
+            actor,
+            row,
+            platform=auth.platform or "",
+            value=value,
+            pin=pin,
+        )
+    except ChannelChangeRefused as exc:
+        raise ToolError(str(exc)) from exc
+    return routine_for_reader(row, user_id=auth.platform_user_id)
 
 
 class RoutineView(RoutineRow):
@@ -874,12 +875,13 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         surface issues such a token yet, and the tool is kept for a future admin surface.
         Owning the routine is not enough, and agent keys, agents in a conversation, operator
         tokens, legacy tokens and other platforms are refused. DM routines cannot be opted
-        in. An opt-in covers exactly the routine's current agent version and environment:
-        once either changes, runs go without built-ins and the opt-in is cleared. Each
-        change records who made it and when, and ``get_routine``/``list_routines`` show it
-        as ``sandbox_tools_enabled``. It takes effect from the routine's next run. Setting
-        the value a routine already has changes nothing. Timers, watches, agent chat,
-        ``daimon run`` and checkpoints cannot be opted in.
+        in. Off is the routine's own Off, which also overrides an opt-in for its agent. An
+        opt-in covers exactly the routine's current agent version and environment: once
+        either changes, runs go without built-ins and the opt-in is cleared. This is the
+        routine's own value of the ``routine_sandbox_tools`` setting, so a lock above it
+        still wins, and the settings history records each change. It takes effect from
+        the routine's next run. Setting the value a routine already has changes nothing.
+        Timers, watches, agent chat, ``daimon run`` and checkpoints cannot be opted in.
         """
         return await _set_routine_sandbox_tools_impl(
             runtime, await _auth(ctx), routine_id=routine_id, enabled=enabled
