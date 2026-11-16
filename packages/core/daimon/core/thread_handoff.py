@@ -74,6 +74,7 @@ from daimon.core.continuity.handoff import (
     decide_handoff,
 )
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
+from daimon.core.dm_access import DmAgent, permits_dm
 from daimon.core.errors import DaimonError
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
@@ -90,6 +91,8 @@ from daimon.core.stores.access_policy import (
 )
 from daimon.core.stores.accounts import key_share_lock_account
 from daimon.core.stores.agent_notices import record_agent_notices
+from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX
+from daimon.core.stores.dm_access import set_pick
 from daimon.core.stores.domain import ThreadAgentBindingRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant, resolve
@@ -377,6 +380,23 @@ async def hand_over_thread(
                 authz_reason="invoker_not_allowed",
             )
         )
+    in_dm = thread_id.startswith(DM_SCOPE_PREFIX)
+    dm_subject = subject
+    if in_dm and subject.platform_user_id is not None:
+        # Group evidence for the DM check only: the admin decision keeps its own subject.
+        dm_subject = replace(
+            await resolve_subject(
+                async_sessionmaker(bind=session.bind),
+                membership_resolver,
+                tenant_id=tenant_id,
+                user_id=subject.platform_user_id,
+                require_fresh=True,
+                session=session,
+                action=DelegatedAction.ROUTING,
+            ),
+            via_agent_key=caller.via_agent_key,
+            client=caller.client,
+        )
     if target_roles and subject.platform_user_id is not None:
         subject = await resolve_subject(
             async_sessionmaker(bind=session.bind),
@@ -461,7 +481,19 @@ async def hand_over_thread(
         decision, kind = decide(True), "owner"
     if isinstance(decision, HandoffRefused):
         raise ThreadHandoffRefused(decision)
-    return await upsert_responder_binding(
+    if in_dm and not await permits_dm(
+        session,
+        None,
+        policy,
+        tenant_id=tenant_id,
+        platform=platform,
+        agent=DmAgent(destination.name, destination.ma_agent_id, destination.agent),
+        subject=dm_subject,
+    ):
+        raise ThreadHandoffRefused(
+            HandoffRefused(reason="dm_not_allowed", destination_name=destination.name)
+        )
+    moved = await upsert_responder_binding(
         session,
         tenant_id=tenant_id,
         platform=platform,
@@ -473,6 +505,12 @@ async def hand_over_thread(
         now=now,
         kind=kind,
     )
+    if in_dm and caller.account_id is not None:
+        await set_pick(
+            session, tenant_id=tenant_id, account_id=caller.account_id,
+            agent_name=destination.name, now=now,
+        )  # fmt: skip
+    return moved
 
 
 def destination_may_read(
@@ -518,6 +556,7 @@ def render_handoff_refused(refusal: HandoffRefused, *, channel: str) -> str:
         "own_agents_only": f"{channel} only runs its own agents, and {name} isn't one of them.",
         "unreachable": f"{name} doesn't answer anywhere here any more.",
         "same_agent": f"{name} already answers in this conversation.",
+        "dm_not_allowed": f"You can't have a private conversation with {name}.",
         "shared_thread": (
             "Other people are in this thread, so I can't move it to your private copy. "
             "Start a new thread with me and ask again."

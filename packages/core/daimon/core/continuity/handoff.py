@@ -60,6 +60,8 @@ HandoffRefusalReason = Literal[
     "not_a_reader",
     # An owner's private copy may take only a thread nobody else is in.
     "shared_thread",
+    # A private conversation may only move to an agent that admits this person.
+    "dm_not_allowed",
 ]
 
 # `authorize(HAND_OFF)` denials that refuse before reachability is looked at.

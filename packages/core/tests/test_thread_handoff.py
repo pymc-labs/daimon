@@ -28,7 +28,9 @@ from daimon.core.authz import (
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.native_admins import AdminCaller
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
+from daimon.core.stores import dm_access as dm_store
 from daimon.core.stores.access_policy import lock_access_policy, set_access_policy
+from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.core.stores.domain import TenantRow, ThreadAgentBindingRow
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import append_event, list_events
@@ -1074,3 +1076,65 @@ async def test_an_owner_thread_never_routes_a_caller_with_no_account(
         config = await resolve(session, context=anonymous, default=_DEFAULT)
     # Fail closed: the channel's own agent, never the private copy.
     assert config.responder_ma_agent_id != "agt_copy" and config.thread_binding_id is None
+
+
+async def _dm_switch(
+    factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, account_id: uuid.UUID
+) -> ThreadAgentBindingRow:
+    async with factory.begin() as session:
+        return await hand_over_thread(
+            session,
+            tenant_id=tenant_id,
+            platform="slack",
+            parent_channel_id="D1",
+            thread_id="dm:abc",
+            caller=_caller(account_id, admin=True),
+            destination=_RESEARCH,
+            current_responder_ma_agent_id="agt_daimon",
+            default=_DEFAULT,
+            now=_NOW,
+        )
+
+
+async def _dm_seed(db_session: AsyncSession) -> tuple[TenantRow, uuid.UUID]:
+    tenant = await _seed(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
+    await db_session.commit()
+    return tenant, account.id
+
+
+async def test_a_dm_switch_to_an_agent_that_admits_the_person_is_remembered(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Moving a private chat to an allowed agent binds it and saves the pick."""
+    tenant, account_id = await _dm_seed(db_session)
+    moved = await _dm_switch(db_session_factory, tenant.id, account_id)
+    assert moved.responder_ma_agent_id == "agt_research", "the DM scope is bound to the agent"
+    async with db_session_factory() as session:
+        saved = await dm_store.get_pick(session, tenant_id=tenant.id, account_id=account_id)
+    assert saved is not None and saved.agent_name == "research-bot", "the pick is saved"
+
+
+@pytest.mark.parametrize("kind", ["grant", "lock"])
+async def test_a_dm_switch_to_an_agent_that_does_not_admit_the_person_is_refused(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], kind: str
+) -> None:
+    """A list that leaves the person out, or a lock on another agent, refuses the move."""
+    tenant, account_id = await _dm_seed(db_session)
+    async with db_session_factory.begin() as session:
+        if kind == "grant":
+            await dm_store.set_grant(
+                session, tenant_id=tenant.id, agent_name="research-bot", who="listed",
+                user_ids=["U9"], group_ids=[], set_by=None, now=_NOW,
+            )  # fmt: skip
+        else:
+            await dm_store.add_rule(
+                session, tenant_id=tenant.id, subject="everyone", subject_id=None,
+                agent_name="daimon", locked=True, set_by=None, now=_NOW,
+            )  # fmt: skip
+    with pytest.raises(ThreadHandoffRefused) as refused:
+        await _dm_switch(db_session_factory, tenant.id, account_id)
+    assert refused.value.refusal.reason == "dm_not_allowed", "the move names no access"
+    async with db_session_factory() as session:
+        assert await dm_store.get_pick(session, tenant_id=tenant.id, account_id=account_id) is None
