@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import contextlib
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from time import monotonic
 from typing import Any, cast
 
 import aiohttp
@@ -16,25 +18,30 @@ from daimon.adapters.slack.errors import bound_request_id, render_error
 from daimon.adapters.slack.gating import is_slack_connect_external
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime, admission_refusal_message
+from daimon.adapters.slack.user_groups import user_group_members
 from daimon.core.agent_identity import (
     AgentIdentity,
     identity_enabled_for,
     is_builtin_agent,
     resolve_agent_identity,
 )
-from daimon.core.authz import Subject
-from daimon.core.config import Settings
+from daimon.core.authz import Subject, build_subject
+from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.direct_messages import (
+    DM_AGENT_REFUSED,
     ColdDmNotices,
+    admit_cold_dm,
     cold_dm_text,
     is_sealed_slack_message,
     reply_to_dm,
     require_dm_enabled,
     require_unsealed_source,
     sealed_channel_ids,
+    start_cold_dm,
     start_dm,
 )
+from daimon.core.dm_access import decide_dm, list_dm_agents, lookup_dm_groups
 from daimon.core.dm_debounce import (
     DmDebouncer,
     DmWindow,
@@ -42,12 +49,15 @@ from daimon.core.dm_debounce import (
     debounce_seconds,
     split_approvals,
 )
+from daimon.core.dm_routing import DmChoose, DmDecision, DmRefused, DmStart, DmUnchecked, Route
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
-from daimon.core.stores.direct_messages import dm_enabled, get_conversation
+from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.direct_messages import DirectMessageRow, dm_enabled, get_conversation
 from daimon.core.stores.domain import Role
+from daimon.core.stores.identity import find_platform_principal
 from daimon.core.turn.admission import admit
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn_hold import RequesterOrg
@@ -237,6 +247,12 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
             opened = await client.conversations_open(users=user_id)  # pyright: ignore[reportUnknownMemberType]
             dm_channel = str(cast(dict[str, Any], opened["channel"])["id"])
             source_url = f"slack://channel?team={team_id}&id={channel_id}"
+            groups = await lookup_dm_groups(
+                runtime.sessionmaker,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                members=user_group_members(runtime, client, team_id=team_id, fresh=True),
+            )
             await start_dm(
                 runtime.turn_deps,
                 admission,
@@ -255,6 +271,7 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
                 source_thread_keys=[
                     f"{channel_id}:{item.get('thread_ts') or item.get('ts')}" for item in messages
                 ],
+                groups=groups,
             )
             await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=dm_channel,
@@ -364,32 +381,63 @@ async def _answer_burst(
     client: AsyncWebClient | None = None
     seen: list[dict[str, Any]] = []
     try:
+        tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
         async with runtime.sessionmaker() as session:
             conversation = await get_conversation(
                 session, platform="slack", route_key=route_key, external_user_id=user_id
             )
             dms_on = await dm_enabled(
                 session,
-                tenant_id=conversation.tenant_id
-                if conversation is not None
-                else derive_tenant_uuid(platform="slack", workspace_id=team_id),
+                tenant_id=conversation.tenant_id if conversation is not None else tenant_id,
             )
         client = await resolve_web_client(runtime, team_id=team_id)
         if client is None:
             return
-        if conversation is None or not dms_on:
+        if not dms_on:
             await _explain_no_private_chat(
                 client, team_id=team_id, user_id=user_id, channel_id=channel_id, dms_on=dms_on
             )
             return
         role = await _live_role(client, user_id=user_id, team_id=team_id)
+        choices: tuple[str, ...] = ()
+        if conversation is None:
+            decision, groups = await _decide_cold(
+                runtime, client, team_id=team_id, user_id=user_id, role=role
+            )
+            route = decision.route
+            if isinstance(route, DmStart):
+                conversation = await _start_cold(
+                    runtime,
+                    client,
+                    team_id=team_id,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    role=role,
+                    agent=route.agent,
+                    groups=groups,
+                )
+                if conversation is None:
+                    return
+            elif isinstance(route, DmChoose):
+                choices = route.agents
+            else:
+                await _refuse_cold(
+                    client, route, team_id=team_id, user_id=user_id, channel_id=channel_id
+                )
+                return
+        else:
+            tenant_id = conversation.tenant_id
+            groups = await lookup_dm_groups(
+                runtime.sessionmaker,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                members=user_group_members(runtime, client, team_id=team_id),
+            )
         first_text = str(event.get("text") or "")
         seconds = (
             0.0
             if not first_text.strip() or bypasses_wait(first_text)
-            else await debounce_seconds(
-                runtime.sessionmaker, runtime.settings, conversation.tenant_id, "slack"
-            )
+            else await debounce_seconds(runtime.sessionmaker, runtime.settings, tenant_id, "slack")
         )
         reacting = client
 
@@ -399,66 +447,20 @@ async def _answer_burst(
 
         events = await burst.settle(seconds, on_arrival=mark)
         _BURSTS.close(key, burst)
-        identity: AgentIdentity | None = None
-
-        async def on_agent(name: str) -> None:
-            nonlocal identity
-            if not identity_enabled_for(runtime.settings, "slack", team_id):
-                return
-            try:
-                agent = await find_agent_by_daimon_tag(
-                    runtime.anthropic,
-                    tenant_id=conversation.tenant_id,
-                    name=name,
-                    records=runtime.sessionmaker,
-                )
-                async with runtime.sessionmaker.begin() as session:
-                    identity = await resolve_agent_identity(
-                        session,
-                        tenant_id=conversation.tenant_id,
-                        agent_name=name,
-                        is_builtin=is_builtin_agent(
-                            name=name,
-                            metadata=agent.metadata if agent is not None else None,
-                            default_agent_name=runtime.deployment_default.agent_name,
-                        ),
-                        public_base_url=runtime.settings.mcp.app_root_url,
-                        enabled=identity_enabled_for(runtime.settings, "slack", team_id),
-                        background_sessionmaker=runtime.sessionmaker,
-                        wait_for_face=True,
-                    )
-            except (anthropic.APIError, SQLAlchemyError) as exc:
-                log.warning("slack.dm.identity_lookup_failed", error_type=type(exc).__name__)
-
-        for group in split_approvals(events, lambda e: str(e.get("text") or "")):
-            texts = [str(e.get("text") or "") for e in group]
-            content = "\n\n".join(t for t in texts if t.strip())
-            if not content.strip():
-                continue
-            answer = await reply_to_dm(
-                runtime.turn_deps,
-                platform="slack",
-                route_key=route_key,
-                external_user_id=user_id,
-                message_id=str(group[0].get("ts") or ""),
-                merged_message_ids=tuple(str(e.get("ts") or "") for e in group[1:]),
-                platform_channel_id=channel_id,
-                expected_scope_id=conversation.scope_id,
-                text=content,
-                role=role,
-                on_agent=on_agent,
-            )
-            if answer is not None:
-                for offset in range(0, len(answer), 3500):
-                    await post_as_agent(
-                        client,
-                        identity,
-                        channel=channel_id,
-                        text=answer[offset : offset + 3500],
-                        parse="none",
-                        unfurl_links=False,
-                        **thread_kwargs,
-                    )
+        if conversation is None:
+            await _offer_agents(client, key, choices, events)
+            return
+        await _reply(
+            runtime,
+            client,
+            conversation,
+            events,
+            team_id=team_id,
+            user_id=user_id,
+            role=role,
+            groups=groups,
+            thread_kwargs=thread_kwargs,
+        )
     except _ERRORS as exc:
         log.warning("slack.dm.turn_failed", error_type=type(exc).__name__)
         if client is not None:
@@ -474,3 +476,297 @@ async def _answer_burst(
         if client is not None:
             for arrived in seen:
                 await _react(client, channel_id=channel_id, event=arrived, add=False)
+
+
+async def _reply(
+    runtime: SlackRuntime,
+    client: AsyncWebClient,
+    conversation: DirectMessageRow,
+    events: list[dict[str, Any]],
+    *,
+    team_id: str,
+    user_id: str,
+    role: Role,
+    groups: frozenset[str] | None,
+    thread_kwargs: dict[str, Any],
+) -> None:
+    """Answer a settled burst in `conversation`, one turn per approval group."""
+    channel_id = str(events[0].get("channel") or "")
+    identity: AgentIdentity | None = None
+
+    async def on_agent(name: str) -> None:
+        nonlocal identity
+        if not identity_enabled_for(runtime.settings, "slack", team_id):
+            return
+        try:
+            agent = await find_agent_by_daimon_tag(
+                runtime.anthropic,
+                tenant_id=conversation.tenant_id,
+                name=name,
+                records=runtime.sessionmaker,
+            )
+            async with runtime.sessionmaker.begin() as session:
+                identity = await resolve_agent_identity(
+                    session,
+                    tenant_id=conversation.tenant_id,
+                    agent_name=name,
+                    is_builtin=is_builtin_agent(
+                        name=name,
+                        metadata=agent.metadata if agent is not None else None,
+                        default_agent_name=runtime.deployment_default.agent_name,
+                    ),
+                    public_base_url=runtime.settings.mcp.app_root_url,
+                    enabled=identity_enabled_for(runtime.settings, "slack", team_id),
+                    background_sessionmaker=runtime.sessionmaker,
+                    wait_for_face=True,
+                )
+        except (anthropic.APIError, SQLAlchemyError) as exc:
+            log.warning("slack.dm.identity_lookup_failed", error_type=type(exc).__name__)
+
+    for group in split_approvals(events, lambda e: str(e.get("text") or "")):
+        texts = [str(e.get("text") or "") for e in group]
+        content = "\n\n".join(t for t in texts if t.strip())
+        if not content.strip():
+            continue
+        answer = await reply_to_dm(
+            runtime.turn_deps,
+            platform="slack",
+            route_key=f"{team_id}:{channel_id}",
+            external_user_id=user_id,
+            message_id=str(group[0].get("ts") or ""),
+            merged_message_ids=tuple(str(e.get("ts") or "") for e in group[1:]),
+            platform_channel_id=channel_id,
+            expected_scope_id=conversation.scope_id,
+            text=content,
+            role=role,
+            on_agent=on_agent,
+            groups=groups,
+        )
+        if answer is not None:
+            for offset in range(0, len(answer), 3500):
+                await post_as_agent(
+                    client,
+                    identity,
+                    channel=channel_id,
+                    text=answer[offset : offset + 3500],
+                    parse="none",
+                    unfurl_links=False,
+                    **thread_kwargs,
+                )
+
+
+#: The select a person picks their DM agent with when several may answer.
+DM_PICK_ACTION_ID = "dm_pick_agent"
+_PICK_SECONDS = 300.0
+_UNCHECKED = "I couldn't check your access just now.\n\nTry again in a minute."
+_PICK_EXPIRED = "This choice expired.\n\nSend a new message to choose again."
+
+
+@dataclass(frozen=True)
+class _PendingPick:
+    agents: tuple[str, ...]
+    events: list[dict[str, Any]]
+    expires_at: float
+
+
+#: Each person's open agent choice and the messages it answers, by (team, channel, user).
+_PENDING_PICKS: dict[tuple[str, str, str], _PendingPick] = {}
+
+
+async def _decide_cold(
+    runtime: SlackRuntime, client: AsyncWebClient, *, team_id: str, user_id: str, role: Role
+) -> tuple[DmDecision, frozenset[str] | None]:
+    """Which agent a DM with no conversation reaches, with the person's groups looked up afresh."""
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    groups = await lookup_dm_groups(
+        runtime.sessionmaker,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        members=user_group_members(runtime, client, team_id=team_id, fresh=True),
+    )
+    recipients = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
+    if not recipients.allows(user_id):
+        return DmDecision(DmRefused("no_agent")), groups
+    async with runtime.sessionmaker() as session:
+        policy = await load_access_policy(session, tenant_id=tenant_id)
+        agents = await list_dm_agents(
+            session,
+            tenant_id=tenant_id,
+            anthropic=runtime.turn_deps.anthropic,
+            records=runtime.turn_deps.sessionmaker,
+        )
+        principal = await find_platform_principal(
+            session, tenant_id=tenant_id, platform="slack", external_id=user_id
+        )
+        decision = await decide_dm(
+            session,
+            runtime.settings,
+            policy,
+            tenant_id=tenant_id,
+            platform="slack",
+            agents=agents,
+            subject=build_subject(is_admin=role is Role.ADMIN, platform_user_id=user_id),
+            account_id=None if principal is None else principal.account_id,
+            groups=groups,
+        )
+    return decision, groups
+
+
+async def _start_cold(
+    runtime: SlackRuntime,
+    client: AsyncWebClient,
+    *,
+    team_id: str,
+    user_id: str,
+    channel_id: str,
+    role: Role,
+    agent: str,
+    groups: frozenset[str] | None,
+    remember_pick: bool = False,
+) -> DirectMessageRow | None:
+    """Start a private conversation on `agent` in this DM; None if another message won."""
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    admission = await admit_cold_dm(
+        runtime.turn_deps,
+        tenant_id=tenant_id,
+        external_user_id=user_id,
+        channel_id=channel_id,
+        role=role,
+        role_ids=(),
+        verified_membership=None,
+        agent_name=agent,
+        platform="slack",
+    )
+    return await start_cold_dm(
+        runtime.turn_deps,
+        admission,
+        tenant_id=tenant_id,
+        workspace_id=team_id,
+        route_key=f"{team_id}:{channel_id}",
+        external_user_id=user_id,
+        remember_pick=remember_pick,
+        platform="slack",
+        groups=groups,
+        channel_id=channel_id,
+    )
+
+
+async def _refuse_cold(
+    client: AsyncWebClient,
+    route: Route,
+    *,
+    team_id: str,
+    user_id: str,
+    channel_id: str,
+) -> None:
+    """Say why a DM with no conversation gets no agent: unknown access, a lock, or nothing."""
+    if isinstance(route, DmRefused) and route.reason == "no_agent":
+        await _explain_no_private_chat(
+            client, team_id=team_id, user_id=user_id, channel_id=channel_id, dms_on=True
+        )
+        return
+    text = _UNCHECKED if isinstance(route, DmUnchecked) else DM_AGENT_REFUSED
+    await client.chat_postMessage(channel=channel_id, **notice_fields(text))  # pyright: ignore[reportUnknownMemberType]
+
+
+async def _offer_agents(
+    client: AsyncWebClient,
+    key: tuple[str, str, str],
+    agents: tuple[str, ...],
+    events: list[dict[str, Any]],
+) -> None:
+    """Ask which agent answers; the messages wait for the pick."""
+    now = monotonic()
+    for stale in [k for k, pick in _PENDING_PICKS.items() if pick.expires_at <= now]:
+        del _PENDING_PICKS[stale]
+    _PENDING_PICKS[key] = _PendingPick(agents, events, now + _PICK_SECONDS)
+    text = "Choose who to talk to for this private conversation."
+    options = [
+        {"text": {"type": "plain_text", "text": name[:75]}, "value": name} for name in agents[:100]
+    ]
+    blocks = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": text},
+            "accessory": {
+                "type": "static_select",
+                "action_id": DM_PICK_ACTION_ID,
+                "placeholder": {"type": "plain_text", "text": "Choose an agent"},
+                "options": options,
+            },
+        }
+    ]
+    await client.chat_postMessage(channel=key[1], text=text, blocks=blocks)  # pyright: ignore[reportUnknownMemberType]
+
+
+async def handle_dm_agent_pick(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
+    """Start the conversation on the agent a person picked, then answer their waiting messages."""
+    team = cast(dict[str, Any], payload.get("team") or {})
+    user = cast(dict[str, Any], payload.get("user") or {})
+    channel = cast(dict[str, Any], payload.get("channel") or {})
+    team_id = str(team.get("id") or user.get("team_id") or "")
+    user_id = str(user.get("id") or "")
+    channel_id = str(channel.get("id") or "")
+    actions = cast(list[dict[str, Any]], payload.get("actions") or [{}])
+    agent = str(cast(dict[str, Any], actions[0].get("selected_option") or {}).get("value") or "")
+    message_ts = str(cast(dict[str, Any], payload.get("container") or {}).get("message_ts") or "")
+    if not team_id or not user_id or not channel_id:
+        return
+    key = (team_id, channel_id, user_id)
+    pending = _PENDING_PICKS.pop(key, None)
+    client = await resolve_web_client(runtime, team_id=team_id)
+    if client is None:
+        return
+    try:
+        if message_ts:
+            with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
+                await client.chat_update(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel_id,
+                    ts=message_ts,
+                    **notice_fields(f"You chose {agent}.", neutral=True),
+                )
+        if pending is None or pending.expires_at <= monotonic() or agent not in pending.agents:
+            await client.chat_postMessage(channel=channel_id, **notice_fields(_PICK_EXPIRED))  # pyright: ignore[reportUnknownMemberType]
+            return
+        role = await _live_role(client, user_id=user_id, team_id=team_id)
+        decision, groups = await _decide_cold(
+            runtime, client, team_id=team_id, user_id=user_id, role=role
+        )
+        route = decision.route
+        if not (isinstance(route, DmStart) and route.agent == agent) and not (
+            decision.may_switch_to(agent)
+        ):
+            refusal = _UNCHECKED if isinstance(route, DmUnchecked) else DM_AGENT_REFUSED
+            await client.chat_postMessage(channel=channel_id, **notice_fields(refusal))  # pyright: ignore[reportUnknownMemberType]
+            return
+        conversation = await _start_cold(
+            runtime,
+            client,
+            team_id=team_id,
+            user_id=user_id,
+            channel_id=channel_id,
+            role=role,
+            agent=agent,
+            groups=groups,
+            remember_pick=True,
+        )
+        if conversation is None:
+            return
+        await _reply(
+            runtime,
+            client,
+            conversation,
+            pending.events,
+            team_id=team_id,
+            user_id=user_id,
+            role=role,
+            groups=groups,
+            thread_kwargs={},
+        )
+    except _ERRORS as exc:
+        log.warning("slack.dm.pick_failed", error_type=type(exc).__name__)
+        with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
+            await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                channel=channel_id,
+                **notice_fields(_error_message(exc, settings=runtime.settings, team_id=team_id)),
+            )

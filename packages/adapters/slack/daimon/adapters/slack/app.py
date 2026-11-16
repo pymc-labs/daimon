@@ -106,7 +106,9 @@ from daimon.adapters.slack.credential_requests import (
     run_skill_repo_credential_submission,
 )
 from daimon.adapters.slack.direct_messages import (
+    DM_PICK_ACTION_ID,
     handle_direct_message,
+    handle_dm_agent_pick,
     handle_dm_command,
     is_direct_message_event,
 )
@@ -1567,6 +1569,8 @@ class SlackApp:
                 "thread_model_confirm": handle_thread_model_confirm,
             }.get(action_id, handle_thread_model_cancel)
             self._spawn(handler(self.runtime, payload))
+        elif action_id == DM_PICK_ACTION_ID:
+            self._spawn(handle_dm_agent_pick(self.runtime, payload))
         elif action_id == "billing_topup":
             self._spawn(handle_topup_select(self.runtime, payload))
         elif action_id == REDEEM_OPEN_ACTION_ID:
