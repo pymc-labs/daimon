@@ -423,7 +423,6 @@ def create_teams_http_service(
             tenant_id=installs.tenant_id,
             dm_policies=runtime.settings.direct_message_policies,
             feed=feed,
-            settings=runtime.settings,
         ),
     )
 

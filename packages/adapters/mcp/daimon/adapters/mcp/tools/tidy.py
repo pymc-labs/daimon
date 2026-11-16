@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._other_apps import scrub_platform
 from daimon.adapters.mcp.tools._outbound import render_edit
 from daimon.adapters.mcp.tools._tidy import TidyResult
 from daimon.adapters.mcp.tools.discord._tidy import (
@@ -63,15 +62,7 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """
         auth = await _auth(ctx)
         content = await render_edit(
-            runtime,
-            auth,
-            scrub_other_platforms(
-                content,
-                await scrub_platform(
-                    runtime, auth, channel_id, origin_context_id=origin_context_id
-                ),
-            ),
-            place=channel_id,
+            runtime, auth, scrub_other_platforms(content, auth.platform), place=channel_id
         )
         if auth.platform == "teams":
             return await _teams_edit_message_impl(

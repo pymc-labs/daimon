@@ -101,9 +101,6 @@ class TurnObservation:
     and logged as `unknown` where none was selected."""
     progress_plans: bool = field(default=False, kw_only=True)
     """Progress plans resolved on for this turn: its card draws the agent's plan."""
-    other_app_names: bool = field(default=False, kw_only=True)
-    """The `other_app_names` feature resolved on for this turn: its text and cards keep
-    other chat apps' names and links."""
     alertable: bool = field(default=True, kw_only=True)
     """False for a turn nobody asked for (an unprompted reply): its failure is
     recorded in the outcome row but never logged as `turn.user_failure`."""

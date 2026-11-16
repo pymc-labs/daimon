@@ -109,7 +109,6 @@ from daimon.core.routine_delivery import (
     placement_unknown_is_unsafe,
     record_routine_failure,
     render_routine_controls,
-    routine_keeps_names,
 )
 from daimon.core.routine_files import collect_routine_files
 from daimon.core.routine_hold import routine_hold
@@ -471,7 +470,6 @@ async def _build_fire(
                 platform="discord",
                 direct_post=direct_post,
                 web=WebLinks.from_settings(settings.web),
-                keep_names=await routine_keeps_names(sm, settings, row, "discord"),
             )
             + "\n"
             + row.trigger_message
@@ -907,7 +905,6 @@ async def _build_fire(
                     direct_post=direct_post,
                     web=WebLinks.from_settings(settings.web),
                     held=fire_hold is not None,
-                    keep_names=await routine_keeps_names(sm, settings, row, platform),
                 )
                 + "\n"
                 + row.trigger_message

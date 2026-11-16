@@ -8,7 +8,6 @@ from enum import Enum
 from typing import Literal
 
 from daimon.core.platform_words import scrub_other_platforms
-from daimon.core.turn.other_apps import scrub_platform
 from daimon.core.turn.progress_plans import progress_plans_shown
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.status_lines import (
@@ -100,7 +99,7 @@ def update(state: CardState, event: CardEvent) -> CardState:
     if event.kind in ("message", "draft"):
         if not event.label:
             return state
-        draft = format_draft(scrub_other_platforms(event.label, scrub_platform(state.platform)))
+        draft = format_draft(scrub_other_platforms(event.label, state.platform))
         if event.kind == "draft":
             return dataclasses.replace(state, text_preview=draft)
         earlier, latest = roll_draft(state.earlier_drafts, state.text_preview, draft)
@@ -125,10 +124,9 @@ def update_activity(state: CardState, turn: TurnState) -> CardState:
         turn.content, finished_ids=turn.finished_tool_ids, plan_shown=plan_shown
     )
     plan = format_plan_lines(turn.content) if plan_shown else ()
-    scrubbing = scrub_platform(state.platform)
     return dataclasses.replace(
         state,
         phase=phase,
-        tool_lines=tuple(scrub_other_platforms(line, scrubbing) for line in lines),
-        plan_lines=tuple(scrub_other_platforms(line, scrubbing) for line in plan),
+        tool_lines=tuple(scrub_other_platforms(line, state.platform) for line in lines),
+        plan_lines=tuple(scrub_other_platforms(line, state.platform) for line in plan),
     )

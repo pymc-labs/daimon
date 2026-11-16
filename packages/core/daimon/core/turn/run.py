@@ -131,7 +131,6 @@ from daimon.core.turn.lifecycle import (
     acknowledge,
 )
 from daimon.core.turn.mcp_context import mcp_context_prefix, tool_permission
-from daimon.core.turn.other_apps import mark_turn
 from daimon.core.turn.outbound import scrubbed_for
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.output import OutputAuthorization, output_authorization
@@ -1593,8 +1592,7 @@ async def run_prepared_turn_impl(
     signal (`_is_dead_session` gates on `kind == "upstream"`), so a ceiling
     breach can never loop into a second wall-clock-priced attempt.
     """
-    keep_names = mark_turn(prepared.admission, platform)
-    if origin in _CHAT_RENDERED_ORIGINS and not keep_names:
+    if origin in _CHAT_RENDERED_ORIGINS:
         # `confirm_write` is deliberately not wrapped: an approval card shows exactly what
         # will be sent or run, so a scrubbed card over the original call would misstate it.
         lifecycle, recovery_lifecycle = scrubbed_for(platform, lifecycle, recovery_lifecycle)

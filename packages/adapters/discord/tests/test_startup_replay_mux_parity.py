@@ -253,20 +253,3 @@ async def test_a_recovered_answer_never_names_another_chat_app(
             await startup_replay.completed_orphan_text(client, row())
             == "Moved to another app, still on Discord."
         )
-
-
-async def test_a_recovered_answer_keeps_another_chat_apps_name_when_the_place_does(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        startup_replay,
-        "extract_final_response",
-        lambda _content: "Moved to Slack or Microsoft Teams, still on Discord.",  # pyright: ignore[reportUnknownLambdaType]
-    )
-    transport = ScriptedTransport()
-    transport.queue(*replies({"status": "idle"}, scenario="current"))
-    async with transport.client() as client:
-        assert (
-            await startup_replay.completed_orphan_text(client, row(), scrub=None)
-            == "Moved to Slack or Microsoft Teams, still on Discord."
-        )

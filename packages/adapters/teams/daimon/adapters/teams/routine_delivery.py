@@ -37,7 +37,7 @@ from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
 from daimon.core.channel_tidy import record_turn_post
-from daimon.core.config import DirectMessagePolicy, Settings
+from daimon.core.config import DirectMessagePolicy
 from daimon.core.message_split import split_fenced
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
@@ -45,7 +45,6 @@ from daimon.core.routine_delivery import (
     delivery_target,
     render_fallback_dm,
     render_fallback_post,
-    routine_keeps_names,
     routine_requester_name,
     teams_thread_id,
 )
@@ -67,7 +66,6 @@ def make_teams_routine_poster(
     tenant_id: uuid.UUID,
     dm_policies: Mapping[uuid.UUID, DirectMessagePolicy],
     feed: ActivityFeed | None = None,
-    settings: Settings | None = None,
 ) -> Callable[[RoutineRow], Awaitable[DeliveryOutcome]]:
     """The poster for `tenant_id`'s routines; another organisation's rows are skipped.
 
@@ -112,7 +110,6 @@ def make_teams_routine_poster(
             chat = await teams.open_chat(member)
             delivery = uuid.uuid4()
             for chunk in split_fenced(
-                # The DM is another place than the routine's: the scrub stays.
                 render_fallback_dm(row, reason, platform="teams")
                 + unsupported_files_note(payload_for(row)),
                 TEAMS_LIMIT,
@@ -166,10 +163,7 @@ def make_teams_routine_poster(
             return await fallback("creator_cannot_post")
         name = await routine_requester_name(sessionmaker, row, "teams")
         text = render_fallback_post(
-            row,
-            platform="teams",
-            requester_name=name,
-            keep_names=await routine_keeps_names(sessionmaker, settings, row, "teams"),
+            row, platform="teams", requester_name=name
         ) + unsupported_files_note(payload_for(row))
         conversation = teams_thread_id(target)
         ids: list[str] = []

@@ -48,7 +48,6 @@ from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authori
 from daimon.core.config import Settings
 from daimon.core.cron_words import routine_phrase, schedule_words
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
-from daimon.core.features.snapshot import FeaturePlace, Sessions
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.outbound.mentions import attribution_line, render_post
@@ -71,7 +70,6 @@ from daimon.core.stores.routines import (
 )
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.turn.notices import RefusalNouns, render_termination_notice
-from daimon.core.turn.other_apps import place_scrub_platform
 from daimon.core.turn.state import ToolUseBlock, TurnState, daimon_tool_arguments
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn_origin import ROUTINE_WEB_SENTENCE, words_sentence
@@ -103,7 +101,6 @@ __all__ = [
     "delivery_target",
     "poll_deliveries_once",
     "render_fallback_post",
-    "routine_keeps_names",
     "render_routine_controls",
     "run_delivery_poller",
 ]
@@ -198,7 +195,6 @@ def render_routine_controls(
     direct_post: DirectPost = "allowed",
     web: WebLinks | None = None,
     held: bool = False,
-    keep_names: bool = False,
 ) -> str:
     """Host-supplied facts that open a routine fire with a destination.
 
@@ -271,7 +267,7 @@ def render_routine_controls(
         + "\nThis is a scheduled routine run; nobody is watching it. Write your final reply "
         "for someone reading it later without context. "
         + delivery
-        + (words_sentence(platform, keep_names=keep_names) if platform in CHAT_PLATFORMS else "")
+        + (words_sentence(platform) if platform in CHAT_PLATFORMS else "")
         + (ROUTINE_WEB_SENTENCE if links is not None else "")
         + " These controls grant no other posting or mutation permissions."
         "\n</turn_controls>"
@@ -429,43 +425,23 @@ async def record_routine_failure(
         await record_failure(session, row.id, error=error, reason=reason, expected_row=row)
 
 
-async def routine_keeps_names(
-    sessions: Sessions, settings: Settings | None, row: RoutineRow, platform: str
-) -> bool:
-    """Whether `other_app_names` is on where `row` posts (its agent and destination). A
-    failed read keeps the scrub."""
-    target = delivery_target(row, platform=platform)
-    place = FeaturePlace.of(
-        row.tenant_id,
-        platform,
-        target.channel_id if target else None,
-        target.thread_ts if target else None,
-        agent_id=row.agent_id,
-    )
-    return await place_scrub_platform(sessions, settings, place) is None
-
-
 def render_fallback_post(
     row: RoutineRow,
     *,
     as_agent: bool = False,
     platform: str | None = None,
     requester_name: str | None = None,
-    keep_names: bool = False,
 ) -> str:
     """The message posted for a routine whose agent did not post itself.
 
-    On a chat `platform` the result never names another chat app, unless `keep_names`
-    (`routine_keeps_names`) says the place wants them.
+    On a chat `platform` the result never names another chat app.
 
     `as_agent` is for a post that carries the agent's own name and face, which
     already say who it is from; the schedule is kept either way, in words
     only where `routine_phrase` can say it exactly. A queued failure notice
     says the run failed instead of introducing a result.
     """
-    payload = scrub_other_platforms(
-        decode_payload(payload_for(row)).text.strip(), None if keep_names else platform
-    )
+    payload = scrub_other_platforms(decode_payload(payload_for(row)).text.strip(), platform)
     phrase = routine_phrase(row.cron_expr, row.timezone)
     if row.delivery_note == FAILURE_NOTICE:
         owner = "The" if as_agent else f"{row.agent_name}'s"
@@ -571,8 +547,7 @@ def render_fallback_dm(row: RoutineRow, reason: str, *, platform: str | None = N
     """The direct message sent to the creator when the destination is unusable.
 
     The agent and schedule first, then why the result is here, then the result,
-    which on a chat `platform` never names another chat app: a DM is not the place
-    the routine's setting was read for.
+    which on a chat `platform` never names another chat app.
     """
     schedule = schedule_words(row.cron_expr, row.timezone)
     payload = scrub_other_platforms(decode_payload(payload_for(row)).text.strip(), platform)

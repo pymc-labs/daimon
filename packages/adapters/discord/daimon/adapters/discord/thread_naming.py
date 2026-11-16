@@ -46,7 +46,6 @@ async def generate_thread_name(
     channel_id: str | None = None,
     provider: Provider | None = None,
     agent_id: str | None = None,
-    keep_names: bool = False,
 ) -> str:
     """Title from ``message_text``; ``fallback`` on failure, timeout, or a blank or generic answer.
 
@@ -102,4 +101,4 @@ async def generate_thread_name(
         log.info("thread.naming_skipped", message_id=message_id, reason="generic_answer")
         return fallback
     log.info("thread.named", message_id=message_id)
-    return scrub_other_platforms(suggestion.name, None if keep_names else "discord")
+    return scrub_other_platforms(suggestion.name, "discord")

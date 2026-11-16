@@ -320,27 +320,6 @@ async def get_latest_thread_session(
     return ThreadSessionRow.model_validate(orm)
 
 
-async def get_thread_parent_channel(
-    session: AsyncSession,
-    *,
-    tenant_id: _uuid.UUID,
-    platform: str,
-    thread_id: str,
-) -> str | None:
-    """The channel a thread's newest session row was recorded for, or None when unknown."""
-    return await session.scalar(
-        select(ThreadSession.channel_id)
-        .where(
-            ThreadSession.tenant_id == tenant_id,
-            ThreadSession.platform == platform,
-            ThreadSession.thread_id == thread_id,
-            ThreadSession.channel_id.is_not(None),
-        )
-        .order_by(ThreadSession.created_at.desc())
-        .limit(1)
-    )
-
-
 async def list_thread_agents(
     session: AsyncSession,
     *,

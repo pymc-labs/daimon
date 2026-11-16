@@ -151,13 +151,10 @@ SHIPPED_PASSAGES: tuple[str, ...] = (
 )
 
 
-def _swaps(platform: ChatPlatform, keep_names: bool) -> tuple[tuple[str, str], ...]:
+def _swaps(platform: ChatPlatform) -> tuple[tuple[str, str], ...]:
     return (
         _EVERY_PLATFORM,
-        (
-            _SHIPPED_FORMAT,
-            f"{_FORMATTING[platform]}\n\n{one_platform_rule(platform, keep_names=keep_names)}",
-        ),
+        (_SHIPPED_FORMAT, f"{_FORMATTING[platform]}\n\n{one_platform_rule(platform)}"),
         _NEVER_ASSUME,
         (_FILES_SHIPPED, _FILES[platform]),
         (
@@ -172,28 +169,22 @@ def _names_another_platform(platform: str) -> re.Pattern[str]:
     return re.compile(rf"\b({others})\b", re.IGNORECASE)
 
 
-def system_for_platform(
-    system: str | None, platform: str | None, *, keep_other_names: bool = False
-) -> str | None:
+def system_for_platform(system: str | None, platform: str | None) -> str | None:
     """The prompt to send for this platform's session instead of the agent's own.
 
     None when the agent's own prompt is right: no prompt, no chat platform, or a
-    prompt the variant would leave exactly as it is. `keep_other_names` keeps the lines
-    that name another chat app and the rule against naming one (the swaps still apply)."""
+    prompt the variant would leave exactly as it is."""
     if system is None or platform not in _PLATFORMS:
         return None
     # Tenant context fragments follow the marker as one JSON line `context_prompt` decodes:
     # they are configuration, not prompt, so neither the swaps nor the line drop touch them.
     prompt, marker, fragments = system.partition(FRAGMENT_MARKER)
     variant = prompt
-    for shipped, own in _swaps(platform, keep_other_names):
+    for shipped, own in _swaps(platform):
         variant = variant.replace(shipped, own)
+    foreign = _names_another_platform(platform)
     lines = variant.split("\n")
-    kept = (
-        lines
-        if keep_other_names
-        else [line for line in lines if not _names_another_platform(platform).search(line)]
-    )
+    kept = [line for line in lines if not foreign.search(line)]
     if len(kept) != len(lines):
         log.warning("system_prompt.lines_dropped", platform=platform, count=len(lines) - len(kept))
         variant = "\n".join(kept)

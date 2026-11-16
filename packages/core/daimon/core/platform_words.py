@@ -270,22 +270,17 @@ def space_for(platform: str | None) -> str:
     return words_for(platform).space if platform in CHAT_PLATFORMS else NEUTRAL_SPACE
 
 
-def one_platform_rule(platform: ChatPlatform | None = None, *, keep_names: bool = False) -> str:
+def one_platform_rule(platform: ChatPlatform | None = None) -> str:
     """The rule that keeps a person from learning Daimon runs on other chat apps.
 
     Scoped to apps: Daimon still works in every place it has been added on this
     platform, so the model must not deny those. Without a platform (the CLI, a
-    headless run) there is no place list. `keep_names` drops the rule and keeps the places."""
-    rule = (
-        ""
-        if keep_names
-        else "Never name or hint at another chat app, and never say Daimon works in one."
-    )
+    headless run) there is no place list."""
+    rule = "Never name or hint at another chat app, and never say Daimon works in one."
     if platform is None:
         return rule
     words = WORDS[platform]
-    places = f"In {words.label}, Daimon works {words.works_in}."
-    return f"{rule} {places}" if rule else places
+    return f"{rule} In {words.label}, Daimon works {words.works_in}."
 
 
 def turn_words(platform: ChatPlatform, *, place: Place, foreign: bool = False) -> dict[str, str]:

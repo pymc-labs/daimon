@@ -42,7 +42,7 @@ from daimon.core.agent_identity import AgentIdentity
 from daimon.core.agent_post_identity import fallback_name_prefix
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.channel_tidy import record_turn_post
-from daimon.core.config import DirectMessagePolicy, Settings
+from daimon.core.config import DirectMessagePolicy
 from daimon.core.membership import MembershipResolver
 from daimon.core.message_split import split_fenced
 from daimon.core.outbound.opt_out import untag_opted_out
@@ -56,7 +56,6 @@ from daimon.core.routine_delivery import (
     discord_creator_may_post,
     render_fallback_dm,
     render_fallback_post,
-    routine_keeps_names,
     tenant_dm_still_open,
 )
 from daimon.core.routine_files import decode_payload, deliver_routine_files, payload_for
@@ -184,7 +183,6 @@ def make_discord_routine_poster(
     resolve_identity: IdentityResolver | None = None,
     membership_resolver: MembershipResolver | None = None,
     resolve_agent_names: AgentNamesResolver | None = None,
-    settings: Settings | None = None,
 ) -> Callable[[RoutineRow], Awaitable[DeliveryOutcome]]:
     """A poster bound to the bot's channel lookup (cache first, then REST).
 
@@ -194,9 +192,6 @@ def make_discord_routine_poster(
     membership_resolver = membership_resolver or (
         GatewayMembershipResolver(client) if client is not None else None
     )
-
-    async def keeps_names(row: RoutineRow) -> bool:
-        return await routine_keeps_names(sessionmaker, settings, row, "discord")
 
     def refusal(row: RoutineRow, reason: str) -> DeliveryOutcome:
         private_reasons = {
@@ -352,10 +347,7 @@ def make_discord_routine_poster(
             dm = await open_dm(int(guild_id), int(creator))
             for chunk in split_fenced(
                 await _untagged(
-                    sessionmaker,
-                    row,
-                    # The DM is another place than the routine's: the scrub stays.
-                    render_fallback_dm(row, reason, platform="discord"),
+                    sessionmaker, row, render_fallback_dm(row, reason, platform="discord")
                 ),
                 _DISCORD_MAX_CHARS,
                 word_boundary=True,
@@ -517,13 +509,7 @@ def make_discord_routine_poster(
         )
         if client is None or identity is None or identity.builtin:
             for chunk in split_fenced(
-                await _untagged(
-                    sessionmaker,
-                    row,
-                    render_fallback_post(
-                        row, platform="discord", keep_names=await keeps_names(row)
-                    ),
-                ),
+                await _untagged(sessionmaker, row, render_fallback_post(row, platform="discord")),
                 _DISCORD_MAX_CHARS,
                 word_boundary=True,
             ):
@@ -548,14 +534,7 @@ def make_discord_routine_poster(
         for index, chunk in enumerate(
             split_fenced(
                 await _untagged(
-                    sessionmaker,
-                    row,
-                    render_fallback_post(
-                        row,
-                        as_agent=True,
-                        platform="discord",
-                        keep_names=await keeps_names(row),
-                    ),
+                    sessionmaker, row, render_fallback_post(row, as_agent=True, platform="discord")
                 ),
                 limit,
                 word_boundary=True,

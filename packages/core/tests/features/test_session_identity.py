@@ -27,11 +27,9 @@ def _snapshot(**values: str) -> FeatureSnapshot:
 
 
 def test_a_session_recorded_before_the_features_reads_as_everything_on() -> None:
-    """No stored values means every identity feature at its default, as those sessions ran."""
+    """No stored values means every identity feature on, as those sessions ran."""
     old = SessionIdentity.frozen(())
-    assert all(old.on(key) == (FEATURES[key].default != "off") for key in IDENTITY_KEYS), (
-        "every key reads its default"
-    )
+    assert all(old.on(key) for key in IDENTITY_KEYS), "every key reads on"
     assert SessionIdentity.of(None) == DEFAULT_IDENTITY, "a hand-built admission is the default"
 
 

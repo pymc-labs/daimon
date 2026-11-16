@@ -18,7 +18,6 @@ if TYPE_CHECKING:
 
 IDENTITY_KEYS: Final[tuple[str, ...]] = (
     "platform_prompt",
-    "other_app_names",
     "platform_skills",
     "agent_skills",
     "channel_skills",
@@ -61,11 +60,7 @@ class SessionIdentity:
         """The prompt sent in place of the agent's own (`system_for_platform`), if any."""
         from daimon.core.platform_system import system_for_platform
 
-        if not self.on("platform_prompt"):
-            return None
-        return system_for_platform(
-            agent_system, platform, keep_other_names=self.on("other_app_names")
-        )
+        return system_for_platform(agent_system, platform) if self.on("platform_prompt") else None
 
     def extra_skills(
         self, channel_skills: Sequence[MaSkill], platform_skill_ids: Collection[str]
