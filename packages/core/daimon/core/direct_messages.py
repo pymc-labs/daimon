@@ -1026,6 +1026,37 @@ async def run_dm_watch(
         ) from error
 
 
+async def run_dm_timer(
+    deps: TurnDeps,
+    row: TaskContinuationRow,
+    *,
+    prompt: str,
+) -> DmRoutineReply:
+    """Run a due DM timer as a fresh private DM turn of its owner.
+
+    The same admission and Managed-Agents-only rules as a DM routine, in a new
+    scope with no history. Nothing is posted here. While the owner has a DM turn
+    running it raises `SessionBusyError` so the timer is offered again later.
+    """
+    if row.reason != "timer":
+        raise DirectMessageAccessRevoked("invoker_not_allowed", message="Not a timer.")
+    try:
+        return await _run_dm_fire(
+            deps,
+            tenant_id=row.tenant_id,
+            owner_user_id=row.requester_external_user_id,
+            agent_name=row.target_name,
+            prompt=prompt,
+            source=None,
+            budget_channel_id=None,
+            timer_row=row,
+        )
+    except DirectMessageAccessRevoked as error:
+        if error.reason != "owner_busy":
+            raise
+        raise SessionBusyError(pending_reasons=("timer",), retry_after=datetime.now(UTC)) from error
+
+
 async def _run_dm_fire(
     deps: TurnDeps,
     *,
@@ -1036,6 +1067,7 @@ async def _run_dm_fire(
     source: DmSource | None,
     budget_channel_id: str | None,
     watch_row: TaskContinuationRow | None = None,
+    timer_row: TaskContinuationRow | None = None,
 ) -> DmRoutineReply:
     async with owner_dm_turn(deps, platform="discord", owner=owner_user_id, wait=False):
         now = datetime.now(UTC)
@@ -1117,6 +1149,10 @@ async def _run_dm_fire(
         grant = prepared.admission.grant
         if prepared.backend is not None or grant is None:
             raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
+        if timer_row is not None and prepared.admission.agent.id != timer_row.target_ma_agent_id:
+            raise DirectMessageAccessRevoked(
+                "invoker_not_allowed", message="The timer's agent changed."
+            )
         if watch_row is not None:
             from daimon.core.stores.watches import record_delivery_session
 
