@@ -65,7 +65,12 @@ def register_tidy_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         content = await render_edit(
             runtime,
             auth,
-            scrub_other_platforms(content, await scrub_platform(runtime, auth, channel_id)),
+            scrub_other_platforms(
+                content,
+                await scrub_platform(
+                    runtime, auth, channel_id, origin_context_id=origin_context_id
+                ),
+            ),
             place=channel_id,
         )
         if auth.platform == "teams":

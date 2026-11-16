@@ -34,5 +34,16 @@ async def place_scrub_platform(
 ) -> str | None:
     """`place.platform` for `scrub_other_platforms`, or None when `other_app_names` is on at
     `place`. For a post or tool call outside a turn; a failed read keeps the scrub."""
-    kept = (await place_feature(sessions, settings, place, "other_app_names")).on
-    return None if kept else place.platform
+    return await places_scrub_platform(sessions, settings, place)
+
+
+async def places_scrub_platform(
+    sessions: Sessions, settings: Settings | None, first: FeaturePlace, *more: FeaturePlace
+) -> str | None:
+    """`first.platform` for `scrub_other_platforms`, or None only when `other_app_names` is
+    on at every place given (a sender's place and where it posts). A failed read keeps the
+    scrub."""
+    for place in (first, *more):
+        if not (await place_feature(sessions, settings, place, "other_app_names")).on:
+            return first.platform
+    return None

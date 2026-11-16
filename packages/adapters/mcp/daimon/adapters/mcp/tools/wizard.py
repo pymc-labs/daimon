@@ -90,6 +90,7 @@ async def _post_wizard_impl(
     steps: list[Step],
     channel_id: str,
     plan: ReachPlan | None = None,
+    origin_context_id: str | None = None,
 ) -> str:
     if auth.platform == "slack":
         raise ToolError("post_wizard isn't available here")
@@ -98,7 +99,7 @@ async def _post_wizard_impl(
 
     # `image_url` is server-populated: a caller-supplied value must never
     # reach the renderer, so it is stripped before validation even runs.
-    scrub = await scrub_platform(runtime, auth, channel_id)
+    scrub = await scrub_platform(runtime, auth, channel_id, origin_context_id=origin_context_id)
     stripped_steps = [
         _scrubbed_step(step.model_copy(update={"image_url": None}), scrub) for step in steps
     ]
@@ -179,8 +180,12 @@ def register_wizard_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         steps: list[Step],
         channel_id: str,
         plan: ReachPlan | None = None,
+        origin_context_id: str | None = None,
     ) -> str:
         """Post a multi-step form in the channel instead of asking in prose.
+
+        Pass this turn's origin_context_id to keep other apps' names where the setting
+        allows.
 
         ``plan`` counts everything this turn posts outside this conversation: threads,
         places and people tagged; posts here need none. Past the limit the call is
@@ -207,4 +212,5 @@ def register_wizard_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             steps=steps,
             channel_id=channel_id,
             plan=plan,
+            origin_context_id=origin_context_id,
         )

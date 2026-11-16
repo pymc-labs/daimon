@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.tools._other_apps import scrub_platform
 from daimon.adapters.mcp.tools.wizard import (
     _scrubbed_step,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
+from daimon.core.features.registry import Tier
 from daimon.core.features.service import FeatureActor, change_feature
 from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.stores.domain import Role
+from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.wizard.spec import Option, Step
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from fastmcp.exceptions import ToolError
@@ -358,3 +364,138 @@ async def test_a_wizard_form_keeps_or_scrubs_the_prompt_by_the_setting(
         if keep
         else ("Do you use another app?", "Where is another app?")
     )
+
+
+class _Case:
+    """A discord tenant with a verified turn in thread T1 of channel C1, answered by agent_1."""
+
+    def __init__(
+        self,
+        runtime: Any,
+        auth: AuthIdentity,
+        sessionmaker: async_sessionmaker[AsyncSession],
+    ) -> None:
+        self.runtime = runtime
+        self.auth = auth
+        self._sessionmaker = sessionmaker
+
+    async def set(
+        self,
+        tier: Tier,
+        value: str,
+        *,
+        channel: str | None = None,
+        thread: str | None = None,
+        agent: str | None = None,
+    ) -> None:
+        async def admin_for(_: DelegatedAction | None) -> bool:
+            return True
+
+        tenant_id = self.auth.tenant_id
+        await change_feature(
+            self._sessionmaker,
+            _make_settings(),
+            FeatureActor(tenant_id, None, "web", None, admin_for),
+            key="other_app_names",
+            tier=tier,
+            value=value,
+            place=FeaturePlace(tenant_id, "discord", channel, thread, agent),
+        )
+
+    async def scrub(self, destination: str) -> str | None:
+        return await scrub_platform(
+            self.runtime, self.auth, destination, origin_context_id=str(uuid.uuid4())
+        )
+
+
+async def _case(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    verified: bool = True,
+) -> _Case:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="scrub-places")
+    account = await make_account(db_session, tenant=tenant)
+    await create_thread_session(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id="T1",
+        account_id=account.id,
+        ma_session_id="sess_1",
+        ma_agent_id="agent_1",
+        channel_id="C1",
+    )
+    await db_session.commit()
+    origin = SimpleNamespace(
+        parent_channel_id="C1", thread_id="T1", responder_ma_agent_id="agent_1"
+    )
+
+    async def get_origin(*_a: object, **_k: object) -> SimpleNamespace | None:
+        return origin if verified else None
+
+    monkeypatch.setattr("daimon.adapters.mcp.tools._other_apps.get_verified_origin", get_origin)
+    runtime = SimpleNamespace(session_factory=sessionmaker, settings=_make_settings())
+    auth = AuthIdentity(
+        account_id=account.id, tenant_id=tenant.id, role=Role.USER, platform="discord"
+    )
+    return _Case(runtime, auth, sessionmaker)
+
+
+async def test_names_are_scrubbed_when_the_senders_agent_is_off(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = await _case(db_session, sessionmaker, monkeypatch)
+    await case.set("workspace", "on")
+    assert await case.scrub("C2") is None
+    await case.set("agent", "off", agent="agent_1")
+    assert await case.scrub("C2") == "discord"
+
+
+async def test_an_agent_on_alone_does_not_keep_names_where_the_destination_is_off(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = await _case(db_session, sessionmaker, monkeypatch)
+    await case.set("agent", "on", agent="agent_1")
+    assert await case.scrub("C2") == "discord"
+    await case.set("workspace", "on")
+    assert await case.scrub("C2") is None
+
+
+async def test_a_thread_destination_follows_its_own_and_its_channels_setting(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = await _case(db_session, sessionmaker, monkeypatch, verified=False)
+    await case.set("workspace", "on")
+    assert await case.scrub("T2") is None
+    await case.set("thread", "off", channel="C1", thread="T2")
+    assert await case.scrub("T2") == "discord", "a thread set Off"
+    assert await case.scrub("C1") is None, "its channel is untouched"
+    assert await case.scrub("T1") is None
+    await case.set("channel", "off", channel="C1")
+    assert await case.scrub("T1") == "discord", "a thread inherits its Off channel"
+
+
+async def test_a_chat_agent_that_names_no_verified_turn_keeps_the_scrub(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = await _case(db_session, sessionmaker, monkeypatch, verified=False)
+    await case.set("workspace", "on")
+    assert await case.scrub("C2") is None
+    agent_auth = AuthIdentity(
+        account_id=case.auth.account_id,
+        tenant_id=case.auth.tenant_id,
+        role=Role.USER,
+        platform="discord",
+        chat_agent_id=uuid.uuid4(),
+    )
+    assert await scrub_platform(case.runtime, agent_auth, "C2") == "discord"

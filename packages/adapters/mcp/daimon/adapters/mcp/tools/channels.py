@@ -194,9 +194,16 @@ async def _send_one(
 def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool(tags={"discord", "slack", "teams"})  # pyright: ignore[reportArgumentType]
     async def send_direct_message(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, recipient_id: str, content: str, plan: ReachPlan | None = None
+        ctx: Context,
+        recipient_id: str,
+        content: str,
+        plan: ReachPlan | None = None,
+        origin_context_id: str | None = None,
     ) -> DirectMessageResult:
         """Privately message one human member of the current workspace.
+
+        Pass this turn's origin_context_id to keep other apps' names where the setting
+        allows.
 
         ``plan`` counts everything this turn posts outside this conversation: threads,
         places and people; a DM to anyone but the requester needs it.
@@ -213,7 +220,9 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         cross-tenant messages.
         """
         auth = await _auth(ctx)
-        content = scrub_other_platforms(content, await scrub_platform(runtime, auth))
+        content = scrub_other_platforms(
+            content, await scrub_platform(runtime, auth, origin_context_id=origin_context_id)
+        )
         await refuse_dm_to_opted_out(runtime, auth, recipient_id)
         [post] = await prepare_posts(
             runtime, auth, [OutgoingPost(text=content, place=recipient_id)], plan=plan
@@ -430,6 +439,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         content: str,
         plan: ReachPlan | None = None,
         batch: list[ThreadDraft] | None = None,
+        origin_context_id: str | None = None,
     ) -> (
         ThreadRow
         | SlackMessageRow
@@ -457,11 +467,12 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ``C0123456789`` is ``C0123456789:1717171717.123456``).
 
         Only create a thread when the user asked for one. Refused in channels the
-        workspace marked protected.
+        workspace marked protected. Pass this turn's origin_context_id to keep other
+        apps' names where the setting allows.
         """
         auth = await _auth(ctx)
         drafts = [ThreadDraft(name=name, content=content), *(batch or [])]
-        scrub = await scrub_platform(runtime, auth, channel_id)
+        scrub = await scrub_platform(runtime, auth, channel_id, origin_context_id=origin_context_id)
         drafts = [
             ThreadDraft(
                 name=scrub_other_platforms(d.name, scrub),
@@ -497,18 +508,20 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         thread_id: str,
         name: str,
+        origin_context_id: str | None = None,
     ) -> ThreadRow:
         """Rename a Discord thread; ``name`` is the new title (1-100 characters).
 
         Use when the user asks to rename or retitle a thread, including the
         one you are chatting in — ``thread_id`` is the thread's channel id.
         Anyone who can post in a thread daimon opened may rename it; other
-        threads need Manage Threads.
+        threads need Manage Threads. Pass this turn's origin_context_id to keep other
+        apps' names where the setting allows.
         """
         auth = await _auth(ctx)
         if auth.platform == "slack":
             raise _slack_unsupported("rename_thread")
-        scrub = await scrub_platform(runtime, auth, thread_id)
+        scrub = await scrub_platform(runtime, auth, thread_id, origin_context_id=origin_context_id)
         return await _rename_thread_impl(
             runtime, auth, thread_id=thread_id, name=scrub_other_platforms(name, scrub)
         )
@@ -537,7 +550,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         auth = await _auth(ctx)
         if auth.platform == "slack":
             raise _slack_unsupported("set_display_identity")
-        scrub = await scrub_platform(runtime, auth)
+        scrub = await scrub_platform(runtime, auth, origin_context_id=origin_context_id)
         # MCP clients often send "" for an optional param they mean to omit.
         return await _set_display_identity_impl(
             runtime,
@@ -579,6 +592,7 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         attachments: list[dict[str, str]] | None = None,
         file_handles: list[str] | None = None,
         batch: list[MessageDraft] | None = None,
+        origin_context_id: str | None = None,
     ) -> (
         MessageRow
         | SlackMessageRow
@@ -625,11 +639,12 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         of the channel or conversation. A group chat takes no files. Channels the
         workspace marked protected, and threads under them,
         refuse every post — tell the caller rather than retrying elsewhere
-        unasked.
+        unasked. Pass this turn's origin_context_id to keep other apps' names where
+        the setting allows.
         """
         auth = await _auth(ctx)
         scrubs = {
-            cid: await scrub_platform(runtime, auth, cid)
+            cid: await scrub_platform(runtime, auth, cid, origin_context_id=origin_context_id)
             for cid in {channel_id, *(d.channel_id for d in batch or [])}
         }
         drafts = [

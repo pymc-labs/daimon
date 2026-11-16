@@ -88,6 +88,7 @@ def register_github_app_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context,
         channel_id: str,
         purpose: str,
+        origin_context_id: str | None = None,
     ) -> PostAppInstallLinkResult:
         """Install the GitHub App: post a link inviting the user to grant repository access.
 
@@ -98,11 +99,17 @@ def register_github_app_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Posts a link button in this channel opening GitHub's install page. It cannot
         tell whether installation happened. Installing alone neither verifies this
         tenant's access nor binds a working repo; use ``github_connect`` and
-        verify access through the requested operation afterwards."""
+        verify access through the requested operation afterwards. Pass this turn's
+        origin_context_id to keep other apps' names where the setting allows."""
         auth = await _auth(ctx)
         return await _post_app_install_link_impl(
             runtime,
             auth,
             channel_id=channel_id,
-            purpose=scrub_other_platforms(purpose, await scrub_platform(runtime, auth, channel_id)),
+            purpose=scrub_other_platforms(
+                purpose,
+                await scrub_platform(
+                    runtime, auth, channel_id, origin_context_id=origin_context_id
+                ),
+            ),
         )
