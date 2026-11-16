@@ -82,16 +82,21 @@ def test_the_teams_prompt_defers_to_the_files_hint_for_a_person_with_no_one_to_o
     assert "again, unless the files hint says this person can't open one." in teams
 
 
-#: What Discord's and Slack's prompts hash to. A new hash replaces their sessions, so
+#: What each chat platform's prompt hashes to. A new hash replaces its sessions, so
 #: it moves only with a deliberate change to the shipped prompt.
 _PINNED = {
     "discord": "661bccea5fcd0879935e89e7a599ce71974901c0e24d36c22f39c6b5884240a7",
     "slack": "130b352874a731beaf49c29f9d847615c529cd5d40bbde465b1a255e53443d49",
+    "teams": "68a8fc272e513898962d7e843ef5bf5cd067fcdd59dc108f6f776d37b2a32a73",
 }
 
 
+def test_every_chat_platform_has_a_pinned_prompt() -> None:
+    assert sorted(_PINNED) == sorted(_PLATFORMS), "a platform's prompt can move unnoticed"
+
+
 @pytest.mark.parametrize("platform", sorted(_PINNED))
-def test_the_discord_and_slack_prompts_are_pinned(platform: str) -> None:
+def test_each_chat_prompt_is_pinned(platform: str) -> None:
     variant = system_for_platform(_shipped_system(), platform)
 
     assert hash_system(variant) == _PINNED[platform]
