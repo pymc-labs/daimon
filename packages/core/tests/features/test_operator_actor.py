@@ -193,4 +193,4 @@ async def test_a_settings_panel_actor_is_refused_unless_the_live_check_says_admi
         e
         for e in await list_events(db_session, tenant_id=tenant.id)
         if e.tool_name == "approval_gate"
-    ]
+    ], "a refused panel change writes no audit row"

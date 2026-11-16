@@ -126,7 +126,7 @@ async def test_an_agent_set_to_off_is_not_offered_while_another_agent_still_is(
     )
     await db_session.commit()
     await _set(db_session_factory, tenant.id, tier="agent", value="off", agent="agent_off")
-    assert not await _offered(db_session_factory, tenant.id, THREAD)
+    assert not await _offered(db_session_factory, tenant.id, THREAD), "its own agent is off"
     assert await _offered(db_session_factory, tenant.id, "t2"), "a client agent keeps it"
 
 
@@ -135,9 +135,9 @@ async def test_a_thread_without_a_session_uses_the_workspace_value(
 ) -> None:
     tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
     await db_session.commit()
-    assert await _offered(db_session_factory, tenant.id, "none")
+    assert await _offered(db_session_factory, tenant.id, "none"), "on by default"
     await _set(db_session_factory, tenant.id, tier="workspace", value="off")
-    assert not await _offered(db_session_factory, tenant.id, "none")
+    assert not await _offered(db_session_factory, tenant.id, "none"), "the workspace decides"
 
 
 async def test_an_agent_cannot_turn_it_on_above_an_off_workspace(
@@ -149,7 +149,7 @@ async def test_an_agent_cannot_turn_it_on_above_an_off_workspace(
     await _set(db_session_factory, tenant.id, tier="workspace", value="off")
     with pytest.raises(ChannelChangeRefused):
         await _set(db_session_factory, tenant.id, tier="agent", value="on", agent="agent_1")
-    assert not await _offered(db_session_factory, tenant.id, THREAD)
+    assert not await _offered(db_session_factory, tenant.id, THREAD), "off above is a ceiling"
 
 
 async def test_a_failed_lookup_or_read_refuses(

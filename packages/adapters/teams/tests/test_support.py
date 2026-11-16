@@ -364,7 +364,9 @@ async def test_ask_a_human_is_unavailable_when_the_conversations_agent_turned_it
 
     assert support.UNAVAILABLE in json.dumps(opened), "the form is not shown"
     assert sent["task"]["value"] == support.UNAVAILABLE, "a late send is refused again"
-    assert await _rows(db_session_factory) == [] and _posts_to(teams_api_fake, OPS) == []
+    assert await _rows(db_session_factory) == [] and _posts_to(teams_api_fake, OPS) == [], (
+        "nothing is recorded or posted for an agent set to off"
+    )
 
 
 async def test_ask_a_human_twice_on_one_answer_spends_one_credit(

@@ -437,8 +437,8 @@ async def test_a_submission_for_an_agent_set_to_off_records_nothing(
 
     await run_support_submission(runtime, evaluate_support_submission(_submit_payload("help")))
 
-    assert await _rows(db_session_factory) == []
-    assert _posts(permalink) == []
+    assert await _rows(db_session_factory) == [], "an agent set to off records no request"
+    assert _posts(permalink) == [], "and posts none"
 
 
 async def test_a_submission_for_another_agent_in_the_workspace_is_recorded(
@@ -454,8 +454,8 @@ async def test_a_submission_for_another_agent_in_the_workspace_is_recorded(
 
     await run_support_submission(runtime, evaluate_support_submission(_submit_payload("help")))
 
-    assert len(await _rows(db_session_factory)) == 1
-    assert len(_posts(permalink)) == 1
+    assert len(await _rows(db_session_factory)) == 1, "another agent's request is recorded"
+    assert len(_posts(permalink)) == 1, "and posted once"
 
 
 async def test_double_submit_spends_one_credit_and_posts_once(
@@ -490,8 +490,8 @@ async def test_out_of_credits_submission_records_nothing(
         runtime, evaluate_support_submission(_submit_payload("b", message_ts="1.2"))
     )
 
-    assert len(await _rows(db_session_factory)) == 1
-    assert len(_posts(permalink)) == 1
+    assert len(await _rows(db_session_factory)) == 1, "another agent's request is recorded"
+    assert len(_posts(permalink)) == 1, "and posted once"
     assert _ephemeral_texts(permalink) == [received_text(remaining=0), OUT_OF_CREDITS]
 
 
@@ -509,8 +509,8 @@ async def test_submission_is_refused_when_access_was_revoked_after_the_click(
 
     await run_support_submission(runtime, evaluate_support_submission(_submit_payload("help")))
 
-    assert await _rows(db_session_factory) == []
-    assert _posts(permalink) == []
+    assert await _rows(db_session_factory) == [], "an agent set to off records no request"
+    assert _posts(permalink) == [], "and posts none"
     assert _ephemeral_texts(permalink) == [NOT_ALLOWED]
 
 

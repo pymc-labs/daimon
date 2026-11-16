@@ -99,7 +99,7 @@ def test_every_chat_platform_has_a_pinned_prompt() -> None:
 def test_each_chat_prompt_is_pinned(platform: str) -> None:
     variant = system_for_platform(_shipped_system(), platform)
 
-    assert hash_system(variant) == _PINNED[platform]
+    assert hash_system(variant) == _PINNED[platform], "a new hash replaces every session"
 
 
 @pytest.mark.parametrize("platform", [None, "cli", ""])
@@ -112,11 +112,13 @@ def test_a_custom_line_naming_another_platform_is_kept(platform: str) -> None:
     other = next(p for p in _PLATFORMS if p != platform).capitalize()
     line = f"Post the summary in {other}."
 
-    assert system_for_platform(f"You are a research agent.\n{line}\n", platform) is None
+    assert system_for_platform(f"You are a research agent.\n{line}\n", platform) is None, (
+        "a prompt with no shipped passage needs no variant"
+    )
     swapped = system_for_platform(f"{line}\nReply {SHIPPED_PASSAGES[0]}\n", platform)
-    assert swapped is not None
+    assert swapped is not None, "the shipped passage is swapped"
     assert swapped.startswith(f"{line}\n"), "the swap leaves the tenant's line alone"
-    assert SHIPPED_PASSAGES[0] not in swapped
+    assert SHIPPED_PASSAGES[0] not in swapped, "for this platform's wording"
 
 
 @pytest.mark.parametrize("platform", _PLATFORMS)

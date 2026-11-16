@@ -164,7 +164,7 @@ async def test_support_note_uses_the_escalation_channel(
     bot, escalation, _dm = await _submit(db_session_factory)
     bot.open_member_dm.assert_not_awaited()
     escalation.send.assert_awaited_once()
-    assert await _delivered(db_session_factory) == [True]
+    assert await _delivered(db_session_factory) == [True], "another agent's form is delivered"
 
 
 async def _switch_off(
@@ -195,7 +195,7 @@ async def test_the_form_is_refused_for_an_agent_set_to_off(
     _bot, escalation, dm = await _submit(db_session_factory)
     escalation.send.assert_not_awaited()
     dm.send.assert_not_awaited()
-    assert await _delivered(db_session_factory) == []
+    assert await _delivered(db_session_factory) == [], "a refused form records nothing"
 
 
 async def test_the_form_still_works_for_another_agent_in_the_workspace(
@@ -206,7 +206,7 @@ async def test_the_form_still_works_for_another_agent_in_the_workspace(
     await _switch_off(db_session_factory, tenant_id, "agent_off")
     _bot, escalation, _dm = await _submit(db_session_factory)
     escalation.send.assert_awaited_once()
-    assert await _delivered(db_session_factory) == [True]
+    assert await _delivered(db_session_factory) == [True], "another agent's form is delivered"
 
 
 async def test_a_teams_escalation_channel_spends_nothing_and_posts_nothing(
@@ -219,7 +219,7 @@ async def test_a_teams_escalation_channel_spends_nothing_and_posts_nothing(
     )
     escalation.send.assert_not_awaited()
     dm.send.assert_not_awaited()
-    assert await _delivered(db_session_factory) == []
+    assert await _delivered(db_session_factory) == [], "a refused form records nothing"
 
 
 async def test_a_sealed_channel_marks_the_post_and_an_open_one_does_not(
