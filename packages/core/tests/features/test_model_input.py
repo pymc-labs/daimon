@@ -87,6 +87,22 @@ def test_chat_history_takes_the_smallest_setting_and_caps_the_channel() -> None:
     assert all(int(value) >= 0 for value in spec.values), "limit values are counts"
 
 
+def test_channel_background_follows_its_setting_and_chat_history_still_caps_it() -> None:
+    """`channel_history` raises the channel read past 25; `history_depth` stays a ceiling."""
+    spec = FEATURES["channel_history"]
+    assert spec.default == "25", "the channel read stays 25 messages until someone raises it"
+    found = resolve_feature(spec, [TierValue("workspace", "25"), TierValue("agent", "50")])
+    assert (found.value, found.tier) == ("50", "agent"), "the most specific tier decides"
+    fifty = HistoryDepth.of(_snapshot(found))
+    assert (fifty.replay, fifty.backfill) == (100, 50), "50 reads 50 channel messages"
+    capped = HistoryDepth.of(
+        _snapshot(found, ResolvedFeature("history_depth", "25", "workspace"))
+    )
+    assert capped.backfill == 25, "chat history at 25 caps the channel read at 25"
+    assert HistoryDepth.of(_snapshot()).backfill == 25, "the default reads 25"
+    assert HistoryDepth.of(None).backfill == 25, "a hand-built admission reads 25"
+
+
 def test_a_limit_is_a_finite_number_read_the_same_way_everywhere() -> None:
     spec = FEATURES["outbound_people"]
     assert spec.accepts("12.0", "deployment") and spec.accepts("0", "deployment")

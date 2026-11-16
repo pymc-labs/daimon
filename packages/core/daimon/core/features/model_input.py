@@ -28,7 +28,7 @@ PER_TURN_KEYS: Final[tuple[str, ...]] = (
 """Turn-bound switches each turn checks with `Admission.feature_on`."""
 MODEL_INPUT_KEYS: Final[tuple[str, ...]] = ("guidance", *SESSION_KEYS, *TURN_KEYS)
 
-HISTORY_KEYS: Final[tuple[str, ...]] = ("history_depth",)
+HISTORY_KEYS: Final[tuple[str, ...]] = ("history_depth", "channel_history")
 CHAT_KEYS: Final[tuple[str, ...]] = (
     "completion_pings",
     "table_rendering",
@@ -41,7 +41,7 @@ CHAT_KEYS: Final[tuple[str, ...]] = (
 )
 """Chat display settings the adapters read from the turn's admission."""
 CHANNEL_BACKFILL: Final[int] = 25
-"""The most channel messages around a new thread any chat adapter reads."""
+"""The channel messages around a new thread a chat adapter reads by default."""
 
 TOOLSET_TYPE: Final[str] = "agent_toolset_20260401"
 
@@ -56,16 +56,24 @@ class HistoryDepth:
     """How many earlier messages a chat adapter reads: the thread's, and the channel's."""
 
     replay: int = 100
+    channel: int = CHANNEL_BACKFILL
 
     @property
     def backfill(self) -> int:
-        return min(CHANNEL_BACKFILL, self.replay)
+        """The channel messages read: the channel setting, never past the thread's depth."""
+        return min(self.channel, self.replay)
 
     @classmethod
     def of(cls, features: FeatureSnapshot | None) -> HistoryDepth:
-        """From a snapshot; none, or one without the key (a hand-built admission), reads 100."""
-        found = features.features.get("history_depth") if features is not None else None
-        return cls() if found is None else cls(limit_int(found.value))
+        """From a snapshot; none, or one without a key (a hand-built admission), reads the defaults."""
+        if features is None:
+            return cls()
+        replay = features.features.get("history_depth")
+        channel = features.features.get("channel_history")
+        return cls(
+            replay=cls.replay if replay is None else limit_int(replay.value),
+            channel=cls.channel if channel is None else limit_int(channel.value),
+        )
 
 
 FULL_HISTORY: Final[HistoryDepth] = HistoryDepth()

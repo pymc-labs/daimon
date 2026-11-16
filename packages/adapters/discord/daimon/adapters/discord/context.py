@@ -15,6 +15,7 @@ from xml.sax.saxutils import escape, quoteattr
 import structlog
 from daimon.adapters.discord.button_message import ButtonMessage
 from daimon.adapters.discord.vision import is_oversized_image, is_vision_image_attachment
+from daimon.core.features.model_input import CHANNEL_BACKFILL
 from daimon.core.media.vision import MAX_VISION_IMAGE_DIMENSION
 from daimon.core.turn_keys import render_keys_element
 from daimon.core.untrusted import untrusted_block
@@ -23,9 +24,6 @@ import discord
 
 log = structlog.get_logger()
 
-# Number of parent-channel messages fetched when a channel mention creates a new thread.
-# Bot replies are included so the agent sees the full conversational context.
-CHANNEL_BACKFILL_LIMIT = 25
 # A bounded second scan keeps recent uploads visible after channel chatter
 # pushes them outside the conversational window. Discord history is newest first.
 CHANNEL_FILE_SCAN_LIMIT = 200
@@ -695,7 +693,7 @@ async def build_channel_context_xml(
     trigger: discord.Message,
     *,
     thread: discord.Thread,
-    limit: int = CHANNEL_BACKFILL_LIMIT,
+    limit: int = CHANNEL_BACKFILL,
     bot_user_id: int | None = None,
     bot_display_name: str = "daimon",
     omit_oversized_image_urls: bool = False,

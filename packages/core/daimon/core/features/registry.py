@@ -1088,7 +1088,29 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         binds="turn",
         doc=(
             "How many earlier chat messages a new conversation reads, up to 100 from the "
-            "thread and 25 from the channel around it. The smallest setting wins."
+            "thread and from the channel around it. The smallest setting wins."
+        ),
+        platforms=frozenset({"discord", "slack", "teams"}),
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
+    FeatureSpec(
+        key="channel_history",
+        name="Channel background",
+        category="model_input",
+        effect="display",
+        values={
+            "100": "100 messages",
+            "50": "50 messages",
+            "25": "25 messages",
+            "10": "10 messages",
+            "0": "None",
+        },
+        default="25",
+        tiers=TIERS,
+        binds="turn",
+        doc=(
+            "How many recent channel messages a new thread reads for background when a message "
+            "in the channel starts it. Chat history still caps it."
         ),
         platforms=frozenset({"discord", "slack", "teams"}),
         authority=Authority(DelegatedAction.AGENT_SETTINGS),

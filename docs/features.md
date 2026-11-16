@@ -20,6 +20,7 @@ Where each feature can be set, and its default.
 | Feature | Key | Kind | Default | Deployment | Workspace | Agent | Channel | Thread | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Chat history | `history_depth` | Model input | 100 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  |
+| Channel background | `channel_history` | Model input | 25 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Setup guidance | `guidance` | Model input | On | ✓ | ✓ | ✓ |  |  |  |
 | Run commands | `tool.bash` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
 | Read files | `tool.read` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Up to Agent on Gemini, OpenAI |
@@ -166,7 +167,7 @@ A context provider set up for this channel or agent adds what it knows to each m
 
 ## Chat history
 
-How many earlier chat messages a new conversation reads, up to 100 from the thread and 25 from the channel around it. The smallest setting wins.
+How many earlier chat messages a new conversation reads, up to 100 from the thread and from the channel around it. The smallest setting wins.
 
 | | |
 | --- | --- |
@@ -175,6 +176,18 @@ How many earlier chat messages a new conversation reads, up to 100 from the thre
 | Default | `100` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Lowest wins |
+
+## Channel background
+
+How many recent channel messages a new thread reads for background when a message in the channel starts it. Chat history still caps it.
+
+| | |
+| --- | --- |
+| Key | `channel_history` |
+| Values | `100` (100 messages), `50` (50 messages), `25` (25 messages), `10` (10 messages), `0` (None) |
+| Default | `25` |
+| Levels | Deployment, Workspace, Agent, Channel, Thread |
+| Combines | Most specific wins |
 
 ## Setup guidance
 
