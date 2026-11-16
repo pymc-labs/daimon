@@ -46,6 +46,8 @@ from daimon.core.thread_models import (
     ThreadModelChange,
     ThreadModelRefused,
     choose_thread_model,
+    model_efforts,
+    model_label,
     resolve_effort,
 )
 from fastmcp import Context, FastMCP
@@ -108,6 +110,16 @@ async def _set_thread_model_impl(
         if await _off_claude(runtime, auth, origin):
             raise ToolError(_EFFORT_OFF_CLAUDE + " Nothing changed.")
         return await _choose_claude(runtime, auth, origin, None, effort)
+    chosen, _reset = resolve_effort(effort)
+    model_id = THREAD_MODEL_CHOICES.get(model.strip().lower())
+    if (
+        chosen is not None
+        and model_id is not None
+        and chosen not in model_efforts(model_id)
+        and not await _off_claude(runtime, auth, origin)
+    ):
+        # Refuse before the model is saved: a refusal changes nothing.
+        raise ToolError(f"{model_label(model_id)} doesn't take an effort. Nothing changed.")
     result = await _set_model(runtime, auth, origin, model, digest, revision)
     if not wants_effort:
         return result

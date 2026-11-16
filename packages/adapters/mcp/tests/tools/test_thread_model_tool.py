@@ -20,6 +20,7 @@ from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings, Tu
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.thread_models import get_thread_model
+from daimon.core.thread_models import _MODEL_EFFORTS  # pyright: ignore[reportPrivateUsage]
 from daimon.core.turn_origin import turn_origin
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
@@ -459,6 +460,7 @@ async def test_with_the_host_call_gate_off_only_a_same_provider_pick_runs(
 async def test_an_effort_alone_or_beside_a_model_is_kept_for_a_direct_message_conversation(
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from daimon.core.stores.thread_models import get_thread_effort
     from daimon.core.stores.turn_origins import bind_origin_session
@@ -512,6 +514,12 @@ async def test_an_effort_alone_or_beside_a_model_is_kept_for_a_direct_message_co
             )
         with pytest.raises(ToolError, match="Name a model, an effort"):
             await _set_thread_model_impl(runtime, auth, origin_context_id=origin_id)
+        # A model that takes no effort refuses the pair before saving the model.
+        monkeypatch.delitem(_MODEL_EFFORTS, "claude-haiku-5-5")
+        with pytest.raises(ToolError, match="Haiku 5.5 doesn't take an effort. Nothing changed."):
+            await _set_thread_model_impl(
+                runtime, auth, origin_context_id=origin_id, model="haiku", effort="low"
+            )
 
     assert await _stored(committing_sessionmaker, tenant.id, "dm:scope-1") == "claude-fable-5-2"
     async with committing_sessionmaker() as session:
