@@ -149,3 +149,50 @@ async def test_person_scoped_rows_when_purged_then_picks_user_rules_and_grant_id
     grant = (await dm_access.list_grants(db_session, tenant_id=tenant.id))["a"]
     assert grant.user_ids == ("kept",), "the person's id leaves the list"
     assert grant.group_ids == ("gone",), "group ids are not personal"
+
+
+async def test_update_rule_when_changed_then_keeps_its_place_and_a_lock_needs_an_agent(
+    db_session: AsyncSession,
+) -> None:
+    """The agent and lock change in place; a lock with no agent is refused everywhere."""
+    import pytest
+    from daimon.core.errors import UserFacingError
+
+    tenant = await make_tenant(db_session)
+    for agent in ("a", "b"):
+        await dm_access.add_rule(
+            db_session, tenant_id=tenant.id, subject="everyone", subject_id=None,
+            agent_name=agent, locked=False, set_by=None, now=NOW,
+        )  # fmt: skip
+
+    changed = await dm_access.update_rule(
+        db_session, tenant_id=tenant.id, position=1, agent_name="c", locked=True,
+        set_by="admin", now=NOW,
+    )  # fmt: skip
+    rules = await dm_access.list_rules(db_session, tenant_id=tenant.id)
+    assert changed is not None and changed.agent_name == "c", "the changed rule is returned"
+    assert [(r.agent_name, r.locked) for r in rules] == [("a", False), ("c", True)], (
+        "only that rule changes, in its place"
+    )
+    assert (
+        await dm_access.update_rule(
+            db_session,
+            tenant_id=tenant.id,
+            position=5,
+            agent_name=None,
+            locked=False,
+            set_by=None,
+            now=NOW,
+        )  # fmt: skip
+        is None
+    ), "an unknown position reports None"
+    with pytest.raises(UserFacingError):
+        await dm_access.update_rule(
+            db_session, tenant_id=tenant.id, position=0, agent_name=None, locked=True,
+            set_by=None, now=NOW,
+        )  # fmt: skip
+    with pytest.raises(UserFacingError):
+        await dm_access.add_rule(
+            db_session, tenant_id=tenant.id, subject="everyone", subject_id=None,
+            agent_name=None, locked=True, set_by=None, now=NOW,
+        )  # fmt: skip

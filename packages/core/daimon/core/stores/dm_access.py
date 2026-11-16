@@ -95,6 +95,16 @@ async def _rewrite_rules(
     return out
 
 
+def _check_subject(subject: DmRuleSubject, subject_id: str | None) -> None:
+    if (subject == "everyone") != (subject_id is None):
+        raise UserFacingError("A user or group rule needs an id; an everyone rule takes none.")
+
+
+def _check_lock(agent_name: str | None, locked: bool) -> None:
+    if locked and agent_name is None:
+        raise UserFacingError("A locked rule needs an agent.")
+
+
 async def add_rule(
     session: AsyncSession,
     *,
@@ -108,8 +118,8 @@ async def add_rule(
     position: int | None = None,
 ) -> DmRuleRow:
     """Insert a rule at `position`, or at the end."""
-    if (subject == "everyone") != (subject_id is None):
-        raise UserFacingError("A user or group rule needs an id; an everyone rule takes none.")
+    _check_subject(subject, subject_id)
+    _check_lock(agent_name, locked)
     rules = await list_rules(session, tenant_id=tenant_id)
     at = len(rules) if position is None else max(0, min(position, len(rules)))
     rule = DmRuleRow(
@@ -123,6 +133,33 @@ async def add_rule(
     )
     rules.insert(at, rule)
     return (await _rewrite_rules(session, tenant_id, rules, now))[at]
+
+
+async def replace_rules(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    rules: Sequence[tuple[DmRuleSubject, str | None, str | None, bool]],
+    set_by: str | None,
+    now: datetime,
+) -> list[DmRuleRow]:
+    """Replace every rule with `rules` (subject, subject id, agent, locked), in order."""
+    rows: list[DmRuleRow] = []
+    for at, (subject, subject_id, agent_name, locked) in enumerate(rules):
+        _check_subject(subject, subject_id)
+        _check_lock(agent_name, locked)
+        rows.append(
+            DmRuleRow(
+                tenant_id=tenant_id,
+                position=at,
+                subject=subject,
+                subject_id=subject_id,
+                agent_name=agent_name,
+                locked=locked,
+                set_by=set_by,
+            )
+        )
+    return await _rewrite_rules(session, tenant_id, rows, now)
 
 
 async def remove_rule(
@@ -148,6 +185,27 @@ async def move_rule(
     rules.insert(max(0, min(to, len(rules))), rule)
     await _rewrite_rules(session, tenant_id, rules, now)
     return True
+
+
+async def update_rule(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    position: int,
+    agent_name: str | None,
+    locked: bool,
+    set_by: str | None,
+    now: datetime,
+) -> DmRuleRow | None:
+    """Change the agent and lock of the rule at `position`; None when there is none."""
+    _check_lock(agent_name, locked)
+    rules = await list_rules(session, tenant_id=tenant_id)
+    if not 0 <= position < len(rules):
+        return None
+    rules[position] = rules[position].model_copy(
+        update={"agent_name": agent_name, "locked": locked, "set_by": set_by}
+    )
+    return (await _rewrite_rules(session, tenant_id, rules, now))[position]
 
 
 async def get_pick(

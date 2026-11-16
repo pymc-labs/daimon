@@ -135,6 +135,28 @@ async def get_user_names(
     return {user_id: KnownName(display, handle) for user_id, display, handle in rows.all()}
 
 
+async def search_user_names(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, text: str, limit: int
+) -> dict[str, KnownName]:
+    """People whose stored name or handle contains `text`, by platform user id."""
+    rows = await session.execute(
+        select(
+            PlatformUserName.platform_user_id,
+            PlatformUserName.display_name,
+            PlatformUserName.handle,
+        )
+        .where(
+            PlatformUserName.tenant_id == tenant_id,
+            PlatformUserName.platform == platform,
+            PlatformUserName.display_name.icontains(text, autoescape=True)
+            | PlatformUserName.handle.icontains(text, autoescape=True),
+        )
+        .order_by(func.coalesce(PlatformUserName.display_name, PlatformUserName.handle))
+        .limit(limit)
+    )
+    return {user_id: KnownName(display, handle) for user_id, display, handle in rows.all()}
+
+
 async def delete_user_names_for_platform_user(
     session: AsyncSession,
     *,

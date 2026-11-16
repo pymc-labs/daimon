@@ -86,6 +86,11 @@ async def list_dm_agents(
         if anthropic_disabled()
         else await list_agents_by_tenant(anthropic, tenant_id=tenant_id, records=records)
     )
+    return dm_agents_of(agents)
+
+
+def dm_agents_of(agents: Iterable[BetaManagedAgentsAgent]) -> list[DmAgent]:
+    """The DM view of a workspace's agents; published report readers are never DM agents."""
     return [dm_agent_of(a) for a in agents if MA_METADATA_KEY_READER_OF not in a.metadata]
 
 
