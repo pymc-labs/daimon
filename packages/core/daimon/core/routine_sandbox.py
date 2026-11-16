@@ -307,7 +307,7 @@ def _decision(
             or (value.tier == "routine" and not dm and value.routine_id == row.id)
         )
     ]
-    found = resolve_one(FEATURES[SANDBOX_KEY], settings, place, own)
+    found = resolve_one(FEATURES["routine_sandbox_tools"], settings, place, own)
     if not found.on or found.tier not in ("agent", "routine"):
         return None
     return next((value for value in own if value.tier == found.tier), None)
