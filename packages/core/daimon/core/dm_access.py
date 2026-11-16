@@ -27,6 +27,7 @@ from daimon.core.dm_routing import (
     DmRuleFact,
     DmStart,
     Person,
+    grant_admits,
     resolve,
 )
 from daimon.core.features.snapshot import FeaturePlace, feature_in
@@ -200,3 +201,24 @@ async def permits_dm(
         account_id=None,
     )
     return isinstance(decision.route, DmStart) and decision.route.agent == agent.name
+
+
+async def agent_dm_admits(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_name: str | None,
+    user_id: str,
+    groups: frozenset[str] | None = None,
+) -> bool:
+    """Whether the sending agent's grant admits `user_id` to an agent-sent DM.
+
+    Locks only decide who answers, so they do not apply. A message with no sending
+    agent (a budget notice) uses the workspace default agent's grant, and none when
+    no default is set. Groups not known where the grant needs them: not admitted.
+    """
+    name = agent_name or await get_dm_agent_name(session, tenant_id=tenant_id)
+    if name is None:
+        return True
+    grants = (await load_routing(session, tenant_id=tenant_id)).grants
+    return grant_admits(grants.get(name, DmGrant()), Person(user_id, groups)) is True

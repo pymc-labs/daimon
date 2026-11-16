@@ -133,6 +133,10 @@ def dm_store(monkeypatch):
         watch_delivery, "watch_seed", AsyncMock(side_effect=lambda *_a, **_k: state.seed)
     )
     monkeypatch.setattr(watch_delivery, "pause_watch", pause)
+    state.granted = True
+    monkeypatch.setattr(
+        watch_delivery, "agent_dm_admits", AsyncMock(side_effect=lambda *_a, **_k: state.granted)
+    )
     return state
 
 
@@ -156,6 +160,17 @@ async def test_dm_report_goes_only_to_the_owner_with_mentions_off(dm_store):
     kwargs = dm.send.await_args.kwargs
     assert kwargs["content"] == "Two new rows. <@999>"
     assert kwargs["allowed_mentions"].to_dict() == discord.AllowedMentions.none().to_dict()
+
+
+async def test_agent_grant_leaving_the_owner_out_runs_no_turn_and_pauses_the_watch(dm_store):
+    """The watch's agent no longer admits the owner: nothing is sent and the watch pauses."""
+    dm_store.granted = False
+    ports, dm = _ports()
+    with pytest.raises(AdmissionDenied):
+        await deliver_dm_report(_Sessions(), _row(dm_store.watch), **ports)
+    ports["run_turn"].assert_not_awaited()
+    dm.send.assert_not_awaited()
+    assert dm_store.paused, "the watch is paused"
 
 
 async def test_dm_disabled_runs_no_turn_and_pauses_the_watch(dm_store):

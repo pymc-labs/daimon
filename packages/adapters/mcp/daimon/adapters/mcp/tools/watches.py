@@ -21,7 +21,7 @@ from daimon.adapters.mcp import watch_polling as polling
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _session_gate
-from daimon.adapters.mcp.tools._channel_policy import require_dm_recipient_allowed
+from daimon.adapters.mcp.tools._channel_policy import require_dm_grant, require_dm_recipient_allowed
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
@@ -207,6 +207,12 @@ async def private_key_delivery(
         member = await guild.fetch_member(int(watch.owner_external_id))
         if member.bot:
             raise ToolError("Watch keys require a human owner")
+        await require_dm_grant(
+            runtime,
+            auth,
+            recipient_id=watch.owner_external_id,
+            groups=frozenset(str(role.id) for role in member.roles),
+        )
         dm = await member.create_dm()
         await dm.send(
             f"Page signing key for watch {watch.id}, page {watch.page_id}:\n"
@@ -321,6 +327,7 @@ async def require_delivery_allowed(
         if not enabled or not policy.allows(auth.platform_user_id):
             raise ToolError("Daimon cannot DM you here. Ask an admin or an owner.")
         await require_dm_recipient_allowed(runtime, auth, recipient_id=auth.platform_user_id)
+        await require_dm_grant(runtime, auth, recipient_id=auth.platform_user_id)
         return
     async with rest_client(_require_bot_token(runtime)) as client:
         try:

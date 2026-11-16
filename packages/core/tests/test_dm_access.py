@@ -18,7 +18,7 @@ from daimon.core.direct_messages import (
     start_cold_dm,
     start_dm,
 )
-from daimon.core.dm_access import DmAgent, decide_dm, permits_dm
+from daimon.core.dm_access import DmAgent, agent_dm_admits, decide_dm, permits_dm
 from daimon.core.dm_routing import DmChoose, DmRefused, DmStart
 from daimon.core.errors import UserFacingError
 from daimon.core.features.service import FeatureActor, change_feature
@@ -26,7 +26,7 @@ from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import ResolvedConfig
 from daimon.core.stores import dm_access as store
-from daimon.core.stores.direct_messages import set_dm_enabled
+from daimon.core.stores.direct_messages import set_dm_agent_name, set_dm_enabled
 from daimon.core.turn.admission import Admission, AdmissionGrant
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.testing.factories import make_account, make_tenant
@@ -319,3 +319,69 @@ async def test_start_dm_refuses_an_agent_the_person_may_not_use(db_session_facto
             external_user_id="999", source_url="https://x/y", source_channel_id="1",
             source_thread_id=None, context=[],
         )  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("who", "user_ids", "group_ids", "groups", "expected"),
+    [
+        ("members", [], [], None, True),
+        ("listed", ["999"], [], None, True),
+        ("listed", ["1"], [], None, False),
+        ("listed", [], ["g1"], frozenset({"g1"}), True),
+        ("listed", [], ["g1"], None, False),
+        ("excluded", ["999"], [], None, False),
+        ("excluded", [], ["g1"], frozenset({"g2"}), True),
+    ],
+)
+async def test_agent_dm_admits_by_the_sending_agents_grant(
+    db_session_factory, who, user_ids, group_ids, groups, expected
+):
+    """An agent-sent DM follows the sender's grant, and unknown groups fail closed."""
+    tenant, _, _ = await seed(db_session_factory, "ada")
+    async with db_session_factory.begin() as session:
+        await store.set_grant(
+            session, tenant_id=tenant.id, agent_name="ada", who=who,
+            user_ids=user_ids, group_ids=group_ids, set_by=None, now=NOW,
+        )  # fmt: skip
+    async with db_session_factory() as session:
+        admitted = await agent_dm_admits(
+            session, tenant_id=tenant.id, agent_name="ada", user_id="999", groups=groups
+        )
+    assert admitted is expected, f"{who} {user_ids} {group_ids} {groups}"
+
+
+async def test_agent_dm_admits_ignores_a_lock_for_another_agent(db_session_factory):
+    """A lock decides who answers; it does not stop an agent from messaging the person."""
+    tenant, _, _ = await seed(db_session_factory, "ada", "bob")
+    async with db_session_factory.begin() as session:
+        await store.add_rule(
+            session, tenant_id=tenant.id, subject="everyone", subject_id=None,
+            agent_name="bob", locked=True, set_by=None, now=NOW,
+        )  # fmt: skip
+    async with db_session_factory() as session:
+        admitted = await agent_dm_admits(
+            session, tenant_id=tenant.id, agent_name="ada", user_id="999"
+        )
+    assert admitted, "the grant alone admits an agent-sent DM"
+
+
+async def test_agent_dm_admits_without_a_sender_uses_the_default_agents_grant(
+    db_session_factory,
+):
+    """A budget notice has no sending agent: the workspace default's grant decides."""
+    tenant, _, _ = await seed(db_session_factory, "ada")
+    async with db_session_factory.begin() as session:
+        assert await agent_dm_admits(session, tenant_id=tenant.id, agent_name=None, user_id="1"), (
+            "no default agent: nothing to hold the notice to"
+        )
+        await set_dm_agent_name(session, tenant_id=tenant.id, agent_name="ada")
+        await store.set_grant(
+            session, tenant_id=tenant.id, agent_name="ada", who="listed",
+            user_ids=["999"], group_ids=[], set_by=None, now=NOW,
+        )  # fmt: skip
+    async with db_session_factory() as session:
+        admitted = [
+            await agent_dm_admits(session, tenant_id=tenant.id, agent_name=None, user_id=u)
+            for u in ("999", "1")
+        ]
+    assert admitted == [True, False], "the default agent's list decides"

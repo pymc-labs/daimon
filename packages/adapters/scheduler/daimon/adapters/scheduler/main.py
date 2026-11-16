@@ -66,6 +66,7 @@ from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_routine
 from daimon.core.discord_membership import DiscordRestMembershipResolver
+from daimon.core.dm_access import agent_dm_admits
 from daimon.core.github_app_session import (
     GitHubTokenMintUnavailable,
     archive_app_vault,
@@ -543,6 +544,12 @@ async def _build_fire(
                 or not settings.direct_message_policies.get(
                     row.tenant_id, DirectMessagePolicy()
                 ).allows(row.created_by_user_id)
+                or not await agent_dm_admits(
+                    s,
+                    tenant_id=row.tenant_id,
+                    agent_name=row.agent_name,
+                    user_id=row.created_by_user_id,
+                )
             ):
                 await _refuse(s, row, "routine DMs are disabled or the owner is not allowed")
                 return

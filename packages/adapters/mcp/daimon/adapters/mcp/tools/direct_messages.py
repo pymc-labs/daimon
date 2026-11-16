@@ -8,7 +8,7 @@ from typing import cast
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._channel_policy import require_dm_recipient_allowed
+from daimon.adapters.mcp.tools._channel_policy import require_dm_grant, require_dm_recipient_allowed
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     _require_discord_identity,  # pyright: ignore[reportPrivateUsage]
@@ -83,6 +83,12 @@ async def send_direct_message_impl(
                 recipient = await guild.fetch_member(int(recipient_id))
                 if recipient.bot:
                     raise ToolError("recipient must be a person in this server")
+                await require_dm_grant(
+                    runtime,
+                    auth,
+                    recipient_id=recipient_id,
+                    groups=frozenset(str(role.id) for role in recipient.roles),
+                )
                 dm = await recipient.create_dm()
                 for chunk in chunks:
                     message = await dm.send(chunk, allowed_mentions=discord.AllowedMentions.none())

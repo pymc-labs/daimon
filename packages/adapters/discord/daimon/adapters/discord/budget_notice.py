@@ -14,6 +14,7 @@ from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.channel_budget_notice import BudgetNotice, BudgetNotifier
 from daimon.core.config import DirectMessagePolicy
+from daimon.core.dm_access import agent_dm_admits
 from daimon.core.stores.watches import (
     REFUSED,
     UNCLEAR,
@@ -97,6 +98,16 @@ def with_budget_notifier(
     )
 
 
+async def _default_agent_admits(
+    runtime: DiscordRuntime, tenant_id: uuid.UUID, recipient_id: str
+) -> bool:
+    """A notice has no sending agent: the workspace default agent's grant decides."""
+    async with runtime.turn_deps.sessionmaker() as session:
+        return await agent_dm_admits(
+            session, tenant_id=tenant_id, agent_name=None, user_id=recipient_id
+        )
+
+
 async def send_member_notice(
     runtime: DiscordRuntime,
     open_dm: OpenDm,
@@ -110,6 +121,8 @@ async def send_member_notice(
     """Existing private member-notice transport, also used for watch migration DMs."""
     policy = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
     if is_closed() or not policy.allows(recipient_id):
+        return False
+    if not await _default_agent_admits(runtime, tenant_id, recipient_id):
         return False
     try:
         dm = await open_dm(int(workspace_id), int(recipient_id))
@@ -151,6 +164,8 @@ async def send_watch_notice(
     """
     policy = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
     if is_closed() or not policy.allows(recipient_id):
+        return None
+    if not await _default_agent_admits(runtime, tenant_id, recipient_id):
         return None
     try:
         dm = await open_dm(int(workspace_id), int(recipient_id))

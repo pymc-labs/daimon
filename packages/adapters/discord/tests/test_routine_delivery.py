@@ -748,13 +748,15 @@ async def test_routine_dm_does_not_replace_an_active_private_conversation(
 
 
 @pytest.mark.parametrize(
-    "mode", ["members", "disabled", "tenant_disabled", "blocked", "sealed", "revoked"]
+    "mode", ["members", "disabled", "tenant_disabled", "blocked", "sealed", "revoked", "unlisted"]
 )
 async def test_explicit_owner_dm_never_looks_up_channel_or_changes_conversation(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     mode: str,
 ) -> None:
+    from datetime import UTC, datetime
+
     from daimon.core.config import DirectMessagePolicy
     from daimon.core.stores.direct_messages import set_dm_enabled
     from daimon.core.stores.routines import update_routine
@@ -769,6 +771,14 @@ async def test_explicit_owner_dm_never_looks_up_channel_or_changes_conversation(
             destination_kind="dm",
         )
         await set_dm_enabled(session, tenant_id=row.tenant_id, enabled=mode != "tenant_disabled")
+        if mode == "unlisted":
+            from daimon.core.stores.dm_access import set_grant
+
+            # The routine's agent lists someone else: the owner gets no DM from it.
+            await set_grant(
+                session, tenant_id=row.tenant_id, agent_name=row.agent_name, who="listed",
+                user_ids=["424242"], group_ids=[], set_by=None, now=datetime.now(UTC),
+            )  # fmt: skip
     assert updated is not None
     if mode == "sealed":
         from daimon.core.access_policy import ChannelRule

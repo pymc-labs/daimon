@@ -8,6 +8,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from daimon.adapters.discord import budget_notice
 from daimon.adapters.discord.budget_notice import discord_budget_notifier, with_budget_notifier
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.theme import COLOR_RED
@@ -17,6 +18,14 @@ from daimon.core.turn.deps import TurnDeps
 from daimon.testing.turn_fakes import deps_for
 
 _TENANT = uuid.uuid4()
+
+
+@pytest.fixture(autouse=True)
+def default_agent_grant(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """The default agent's grant admits everyone unless a test says otherwise."""
+    admits = AsyncMock(return_value=True)
+    monkeypatch.setattr(budget_notice, "agent_dm_admits", admits)
+    return admits
 
 
 def _required(cls: Any, **given: object) -> dict[str, object]:
@@ -67,6 +76,21 @@ async def test_each_allowed_recipient_gets_a_dm_and_one_failure_skips_only_them(
     assert dms["1"].send.await_args.kwargs["embed"].color.value == COLOR_RED
     assert text.startswith("<#222> has used its $5.00 monthly budget.\n\n"), text
     dms["3"].send.assert_not_awaited()  # the DM policy leaves 3 out
+
+
+async def test_a_recipient_the_default_agent_does_not_admit_gets_no_dm(
+    default_agent_grant: AsyncMock,
+) -> None:
+    """The workspace default agent's grant holds a budget notice like any agent-sent DM."""
+    default_agent_grant.side_effect = lambda *_a, user_id, **_k: user_id == "1"
+    sent = AsyncMock()
+
+    async def open_dm(_guild_id: int, _user_id: int) -> Any:
+        return sent
+
+    notifier = discord_budget_notifier(_runtime({}), open_dm, lambda: False)
+    assert await notifier(_notice()) == 1, "only the admitted recipient is messaged"
+    sent.send.assert_awaited_once()
 
 
 async def test_a_closed_client_counts_as_undelivered_instead_of_raising() -> None:

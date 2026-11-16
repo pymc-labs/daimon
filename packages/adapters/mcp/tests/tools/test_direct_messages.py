@@ -4,6 +4,7 @@ import json
 import re
 import uuid
 from dataclasses import replace
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
@@ -321,3 +322,29 @@ async def test_noncanonical_policy_denies_before_client_creation(
         )
     discord_client.assert_not_called()
     slack_client.assert_not_called()
+
+
+async def test_require_dm_grant_when_the_senders_list_leaves_the_person_out_refuses(sessionmaker):
+    """An agent-sent DM follows the sending agent's grant; the operator uses the default's."""
+    from daimon.adapters.mcp.tools._channel_policy import require_dm_grant
+    from daimon.core.stores import dm_access
+    from daimon.core.stores.direct_messages import set_dm_agent_name
+    from daimon.testing.factories import make_tenant
+
+    async with sessionmaker.begin() as session:
+        tenant = await make_tenant(session, workspace_id="111")
+        await set_dm_agent_name(session, tenant_id=tenant.id, agent_name="ada")
+        await dm_access.set_grant(
+            session, tenant_id=tenant.id, agent_name="ada", who="listed",
+            user_ids=["123"], group_ids=["role1"], set_by=None,
+            now=datetime(2026, 1, 1, tzinfo=UTC),
+        )  # fmt: skip
+    runtime, auth = runtime_and_auth()
+    runtime = replace(runtime, session_factory=sessionmaker)
+    auth = replace(auth, tenant_id=tenant.id)
+    await require_dm_grant(runtime, auth, recipient_id="123")
+    await require_dm_grant(runtime, auth, recipient_id="9", groups=frozenset({"role1"}))
+    with pytest.raises(ToolError, match="may not send"):
+        await require_dm_grant(runtime, auth, recipient_id="9")
+    with pytest.raises(ToolError, match="may not send"):
+        await require_dm_grant(runtime, auth, recipient_id="9", groups=frozenset({"other"}))

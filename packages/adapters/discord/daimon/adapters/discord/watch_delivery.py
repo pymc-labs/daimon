@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 import structlog
 from daimon.adapters.discord.watch_access import require_watch_parent_access
 from daimon.core.config import DirectMessagePolicy
+from daimon.core.dm_access import agent_dm_admits
 from daimon.core.message_split import split_fenced
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import TaskContinuationRow, WatchRow
@@ -104,7 +105,11 @@ async def deliver_dm_report(
             raise AdmissionDenied(reason="invoker_not_allowed")
         if not enabled:
             raise await _pause(sessionmaker, watch, "Watch paused: Daimon DMs are off here.")
-        if not dm_policy(watch.tenant_id).allows(owner):
+        async with sessionmaker() as db:
+            granted = await agent_dm_admits(
+                db, tenant_id=watch.tenant_id, agent_name=watch.agent_name, user_id=owner
+            )
+        if not (dm_policy(watch.tenant_id).allows(owner) and granted):
             raise await _pause(
                 sessionmaker, watch, "Watch paused: you can no longer get DMs from Daimon here."
             )
