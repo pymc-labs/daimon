@@ -34,6 +34,7 @@ Where each feature can be set, and its default.
 | Notes on non-chat messages | `origin_fragments` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Keys file | `agent_env_file` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
 | Platform prompt | `platform_prompt` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always Off on OpenAI |
+| Name other apps | `other_app_names` | Model input | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Platform skills | `platform_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Not on Gemini, OpenAI |
 | Agent skills | `agent_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ | Always On on Gemini, OpenAI |
 | Channel skills | `channel_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
@@ -362,6 +363,18 @@ The agent's prompt is adjusted to the chat platform's words and formatting. Off 
 | Key | `platform_prompt` |
 | Values | `on` (On), `off` (Off) |
 | Default | `on` |
+| Levels | Deployment, Workspace, Agent, Channel, Thread |
+| Combines | Most specific wins |
+
+## Name other apps
+
+Replies, posts and the agent's prompt keep the names and links of other chat apps. Off replaces them with "another app". A conversation keeps the prompt it started with. A conversation keeps what it started with until /new.
+
+| | |
+| --- | --- |
+| Key | `other_app_names` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
 

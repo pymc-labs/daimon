@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A place can keep other chat apps' names.** The new Name other apps setting
+  (Off by default) lets replies, status lines, routine posts, tool sends, thread
+  names and the agent's instructions name other chat apps and keep their links
+  in the place it is set. Off, they are replaced as before.
 - **An agent can turn off Ask a person for itself.** The setting now has an Agent
   level. A button, reaction or form checks it at the agent of the conversation, so
   other agents in the workspace keep the offer. An agent cannot turn it on above an
