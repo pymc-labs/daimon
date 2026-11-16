@@ -234,6 +234,7 @@ source_modules = [
     "daimon.core.direct_messages",
     "daimon.core.dm_access",
     "daimon.core.dm_debounce",
+    "daimon.core.dm_explain",
     "daimon.core.dm_import",
     "daimon.core.dm_routing",
     "daimon.core.dm_settings",
