@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **An edit that adds a mention gets an answer.** Editing a message to mention
+  the bot in Discord answers it like a new mention, once.
 - **A turn time limit setting.** Server admins can let one answer run for 90 or 180
   minutes instead of 45, for a workspace or an agent; the smallest setting wins.
   Routines, watches and agent-to-agent chats keep the standard limit.

@@ -2914,6 +2914,35 @@ class DaimonBot(commands.Bot):
             self.runtime.sessionmaker, guild_id=interaction.guild_id, channels=[interaction.channel]
         )
 
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
+        """An edit that adds a mention of the bot answers like a fresh mention.
+
+        A message that already mentioned the bot was claimed when it arrived, so
+        a later edit of it changes nothing: ``claim_message`` stops a second turn.
+        """
+        if self.user is None or payload.guild_id is None:
+            return
+        data = payload.data
+        # "author" is absent on partial updates such as link previews.
+        author: dict[str, Any] | None = data.get("author")  # type: ignore[assignment]
+        if author is None or author.get("bot"):
+            return
+        if not any(user["id"] == str(self.user.id) for user in data.get("mentions", [])):
+            return
+        before = payload.cached_message
+        if before is not None and any(user.id == self.user.id for user in before.mentions):
+            return
+        try:
+            channel = await self._channel_by_id(payload.channel_id)
+            if not isinstance(channel, discord.abc.Messageable):
+                return
+            message = await channel.fetch_message(payload.message_id)
+        except discord.HTTPException:
+            return
+        if message.author.bot:
+            return
+        await self.on_message(message)
+
     async def on_message(
         self,
         message: discord.Message,
