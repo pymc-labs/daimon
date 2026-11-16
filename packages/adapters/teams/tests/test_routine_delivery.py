@@ -430,3 +430,21 @@ async def test_a_part_posted_before_a_failure_stays_recorded(
             message_id="m-1",
         )
     assert post is not None, "the part already in the thread can still be tidied"
+
+
+async def test_dm_fallback_when_dms_are_off_then_nothing_is_sent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A workspace with direct messages off gets no fallback 1:1, like every other DM path."""
+    from daimon.core.stores.direct_messages import set_dm_enabled
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="teams")
+        await set_dm_enabled(session, tenant_id=tenant.id, enabled=False)
+    teams = _Teams(post_status=404)
+    poster = make_teams_routine_poster(
+        db_session_factory, teams, tenant_id=tenant.id, dm_policies={}
+    )
+    outcome = await poster(_row(tenant_id=tenant.id))
+    assert outcome == DeliveryOutcome(status="skipped", note="destination_unavailable")
+    assert teams.posts == [], "no 1:1 while DMs are off"

@@ -54,6 +54,7 @@ from daimon.core.routine_delivery import (
 from daimon.core.routine_files import payload_for, unsupported_files_note
 from daimon.core.routine_hold import result_is_held
 from daimon.core.rule_views import keeps_routine_inside
+from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import RoutineRow
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -104,8 +105,11 @@ def make_teams_routine_poster(
     async def dm_fallback(row: RoutineRow, reason: str) -> DeliveryOutcome:
         creator = row.created_by_user_id
         policy = dm_policies.get(row.tenant_id, DirectMessagePolicy())
+        async with sessionmaker() as session:
+            enabled = await dm_enabled(session, tenant_id=row.tenant_id, platform="teams")
         if (
-            creator is None
+            not enabled
+            or creator is None
             or not policy.allows(creator)
             or not await sender_admits(
                 sessionmaker,
