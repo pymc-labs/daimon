@@ -3891,10 +3891,11 @@ async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
     from dataclasses import replace
     from datetime import timedelta
 
-    from daimon.core.authz import Subject
+    from daimon.core.features.service import FeatureActor
     from daimon.core.routine_files import decode_payload
+    from daimon.core.routine_sandbox import change_routine_sandbox, own_opt_in, routine_place
+    from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
     from daimon.core.stores.domain import SandboxPin
-    from daimon.core.stores.routines import set_sandbox_tools
     from daimon.testing.ma import MARouter
     from daimon.testing.ma_models import ma_agent, ma_environment
     from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response, sse_response
@@ -3929,20 +3930,17 @@ async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
         destination_kind="channel",
         destination_id="C123",
     )
-    if sandbox != "default":
-        result = await set_sandbox_tools(
-            db_session,
-            row.id,
-            tenant_id=tenant.id,
-            enabled=True,
-            pin=pin,
-            set_by="admin",
-            actor=Subject(is_admin=True),
-            via="cli",
-        )
-        assert result is not None
-        row = result[0]
     await db_session.commit()
+    if sandbox != "default":
+
+        async def _admin(_action: object) -> bool:
+            return True
+
+        actor = FeatureActor(tenant.id, None, "cli", None, _admin)
+        settings = _make_test_settings(monkeypatch)
+        await change_routine_sandbox(
+            db_session_factory, settings, actor, row, platform="slack", value="on", pin=pin
+        )
     router = MARouter()
     snapshot = ma_session(id="ses_output", agent_id="ag", environment_id="env").model_dump(
         mode="json"
@@ -4101,9 +4099,13 @@ async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
     assert payload.files == []
     assert after.last_result_tail == "Here is the report."
     # A drifted opt-in is cleared, by the fire, without touching the run's result.
-    assert after.sandbox_tools_enabled is (sandbox == "opted_in")
+    kept = ("on", pin) if sandbox == "opted_in" else (None, None)
+    place = routine_place(after, "slack")
+    assert await own_opt_in(db_session_factory, place, "routine") == kept, "drift clears"
     if sandbox in ("agent_changed", "environment_changed"):
-        assert after.sandbox_tools_set_by == "agent_changed"
+        async with db_session_factory() as session:
+            [last, *_] = await list_changes(session, tenant_id=tenant.id, channel_id=WORKSPACE_ID)
+        assert (last.after, last.surface) == (None, "system"), "Daimon's own clear"
 
 
 @pytest.mark.parametrize("at_destination", [False, True], ids=["origin", "destination"])
