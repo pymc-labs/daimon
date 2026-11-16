@@ -36,6 +36,7 @@ from daimon.core.stores import dm_carry_overs as dm_carry_overs_store
 from daimon.core.stores import gemini_runtime_state as gemini_state_store
 from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_links as github_links_store
+from daimon.core.stores import held_timers as held_timers_store
 from daimon.core.stores import host_call_cards as host_call_cards_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import lead_intake as lead_intake_store
@@ -101,6 +102,7 @@ class PurgePreview(BaseModel):
     slack_turn_contexts: PurgePreviewRow
     direct_message_conversations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     dm_carry_overs: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    held_timers: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     tag_opt_outs: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     credential_requests: PurgePreviewRow
     wizard_sessions: PurgePreviewRow
@@ -152,6 +154,7 @@ def held_lines(preview: PurgePreview) -> list[str]:
         (preview.slack_turn_contexts, "temporary request record"),
         (preview.direct_message_conversations, "private conversation"),
         (preview.dm_carry_overs, "imported earlier conversation"),
+        (preview.held_timers, "imported timer"),
         (preview.tag_opt_outs, "never-tag setting"),
         (preview.daimon_admins, "Daimon admin grants"),
         (preview.agent_post_requesters, "post an agent made for you"),
@@ -529,6 +532,9 @@ async def collect_purge_preview(
         dm_carry_overs_count = await dm_carry_overs_store.count_for_users(
             session, users=[(pp.tenant_id, pp.platform, pp.external_id) for pp in pp_list]
         )
+        held_timers_count = await held_timers_store.count_for_users(
+            session, users=[(pp.tenant_id, pp.platform, pp.external_id) for pp in pp_list]
+        )
         github_connect_requests_count = await github_connect_store.count_requests_for_account(
             session, account_id=account_id
         )
@@ -569,6 +575,7 @@ async def collect_purge_preview(
         agent_post_requesters=PurgePreviewRow(count=agent_post_requesters_total, example=None),
         direct_message_conversations=PurgePreviewRow(count=direct_message_count, example=None),
         dm_carry_overs=PurgePreviewRow(count=dm_carry_overs_count, example=None),
+        held_timers=PurgePreviewRow(count=held_timers_count, example=None),
         tag_opt_outs=PurgePreviewRow(count=tag_opt_outs_count, example=None),
         platform_user_names=PurgePreviewRow(count=platform_user_names_total, example=None),
         teams_messages=PurgePreviewRow(count=teams_messages_total, example=None),

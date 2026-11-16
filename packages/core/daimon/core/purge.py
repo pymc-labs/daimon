@@ -159,6 +159,7 @@ from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import github_router_sessions as github_router_sessions_store
+from daimon.core.stores import held_timers as held_timers_store
 from daimon.core.stores import host_call_cards as host_call_cards_store
 from daimon.core.stores import identity as identity_store
 from daimon.core.stores import lead_intake as lead_intake_store
@@ -217,6 +218,7 @@ class PurgeReport(BaseModel):
     slack_turn_contexts: int = 0
     direct_message_conversations: int = 0
     dm_carry_overs: int = 0
+    held_timers: int = 0
     tag_opt_outs: int = 0
     credential_requests: int = 0
     wizard_sessions: int = 0
@@ -266,6 +268,7 @@ class PurgeReport(BaseModel):
                 self.direct_message_conversations + other.direct_message_conversations
             ),
             dm_carry_overs=self.dm_carry_overs + other.dm_carry_overs,
+            held_timers=self.held_timers + other.held_timers,
             tag_opt_outs=self.tag_opt_outs + other.tag_opt_outs,
             credential_requests=self.credential_requests + other.credential_requests,
             wizard_sessions=self.wizard_sessions + other.wizard_sessions,
@@ -365,6 +368,10 @@ async def _purge_principal_in_session(
         dm_carry_overs_count = await dm_carry_overs_store.delete_for_users(
             session, users=[(principal.tenant_id, principal.platform, principal.external_id)]
         )
+        # An imported timer is keyed by the same platform user, and keeps who it was for.
+        held_timers_count = await held_timers_store.delete_for_users(
+            session, users=[(principal.tenant_id, principal.platform, principal.external_id)]
+        )
         # support_escalations carries the SAME (tenant, platform-user) key and
         # the same account_id = NULL hazard: somebody can ask for help without
         # ever having taken a turn, so an account-keyed pass alone would leave
@@ -438,6 +445,7 @@ async def _purge_principal_in_session(
         # running one would risk deleting an unrelated platform user's rows
         # that happen to share the string.
         dm_carry_overs_count = 0
+        held_timers_count = 0
         message_feedback_count = 0
         # Escalation is a reaction-then-modal path in a guild, so a CLI
         # principal owns no support_escalations rows — same reasoning, and the
@@ -505,6 +513,7 @@ async def _purge_principal_in_session(
         wizard_sessions=wizard_sessions_count,
         message_feedback=message_feedback_count,
         dm_carry_overs=dm_carry_overs_count,
+        held_timers=held_timers_count,
         support_escalations=support_escalations_count,
         daimon_admins=daimon_admins_count,
         agent_post_requesters=agent_post_requesters_count,
@@ -707,6 +716,9 @@ async def _purge_account_transaction(
     dm_carry_overs_count = await dm_carry_overs_store.delete_for_users(
         session, users=[(pp.tenant_id, pp.platform, pp.external_id) for pp in pp_list]
     )
+    held_timers_count = await held_timers_store.delete_for_users(
+        session, users=[(pp.tenant_id, pp.platform, pp.external_id) for pp in pp_list]
+    )
     tag_opt_outs_count = await tag_opt_outs_store.delete_for_account(session, account_id=account_id)
     # The web app's people (identities, tokens and browser sessions go with them) and
     # admin grants cascade from accounts.id; deleted here so the report counts them.
@@ -753,6 +765,7 @@ async def _purge_account_transaction(
             slack_turn_contexts=slack_turn_contexts_count,
             direct_message_conversations=direct_message_count,
             dm_carry_overs=dm_carry_overs_count,
+            held_timers=held_timers_count,
             tag_opt_outs=tag_opt_outs_count,
             web_people=web_people_count,
             web_admin_grants=web_admin_grants_count,

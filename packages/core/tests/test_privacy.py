@@ -988,6 +988,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "slack_turn_contexts": "slack_turn_contexts",
         "direct_message_conversations": "direct_message_conversations",
         "dm_carry_overs": "dm_carry_overs",
+        "held_timers": "held_timers",
         "credential_requests": "credential_requests",
         "wizard_sessions": "wizard_sessions",
         "message_feedback": "message_feedback",
