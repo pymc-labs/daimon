@@ -88,9 +88,9 @@ from daimon.core.stores import access_policy as policy_store
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn.approvals import daimon_rule_tools_for
 from daimon.core.turn.ceiling import (
-    LONGEST_TURN_CEILING_S,
     TURN_CEILING_S,
     ceiling_error,
+    limit_ceiling_s,
     remaining_s,
     turn_deadline,
 )
@@ -191,8 +191,7 @@ async def unattended_ceiling_s(
     snapshot = await resolve_features(
         session_factory, feature_settings, place, keys=("unattended_time_limit",)
     )
-    minutes = turn_limit_minutes(snapshot, unattended=True)
-    return TURN_CEILING_S if minutes is None else min(minutes * 60.0, LONGEST_TURN_CEILING_S)
+    return limit_ceiling_s(turn_limit_minutes(snapshot, unattended=True))
 
 
 async def run_turn(

@@ -122,6 +122,7 @@ from daimon.core.turn.driver import (
     unattended_sends,
 )
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
+from daimon.core.turn.invocation import unattended_turn
 from daimon.core.turn.io import LegacyTurnIO, TurnIO, turn_io
 from daimon.core.turn.lifecycle import (
     Acknowledgment,
@@ -1612,7 +1613,7 @@ async def run_prepared_turn_impl(
     ):
         raise ValueError("Watch turns must be explicitly unattended")
     effective_deadline = deadline if deadline is not None else turn_deadline(now=now())
-    unattended = not (attended if attended is not None else origin != "routine")
+    unattended = unattended_turn(origin, attended)
     # Tracks the session/mapping id (and whether recovery has taken over) the
     # FINAL attempt is running against, updated by `_run` the instant recovery
     # recreates -- so a ceiling breach mid-recovery marks the NEW mapping dead,

@@ -132,7 +132,7 @@ from daimon.core.stores.thread_sessions import get_thread_session_at
 from daimon.core.thread_models import apply_thread_model, conversation_key, thread_backend
 from daimon.core.thread_release import apply_thread_release, release_due, release_now
 from daimon.core.turn.approvals import daimon_rule_set_for
-from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S, TURN_CEILING_S
+from daimon.core.turn.ceiling import limit_ceiling_s
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
@@ -142,6 +142,7 @@ from daimon.core.turn.errors import (
     MissingTurnConfigError,
     SessionBusyError,
 )
+from daimon.core.turn.invocation import unattended_turn
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.slots import register_spend_recheck
 from daimon.core.turn_hold import RequesterOrg, TurnHold
@@ -493,12 +494,13 @@ class Admission:
     def turn_ceiling_s(self) -> float:
         """How long a turn here may run before it is stopped, never past
         `LONGEST_TURN_CEILING_S`: a person's message reads the turn time limit set at this
-        place, a wake or routine the unattended run limit, and a hand-built admission or a
-        missing setting the built-in 45 minutes. A turn allowed past 45 minutes stores its
-        deadline for the stale-turn, DM claim and lock-wait checks."""
-        unattended = self.grant is not None and not self.grant.human_invocation
-        minutes = turn_limit_minutes(self.features, unattended=unattended)
-        return TURN_CEILING_S if minutes is None else min(minutes * 60.0, LONGEST_TURN_CEILING_S)
+        place, a turn nobody waits on (`unattended_turn`) the unattended run limit, and a
+        hand-built admission or a missing setting the built-in 45 minutes. A turn allowed
+        past 45 minutes stores its deadline for the stale-turn, DM claim and lock-wait checks."""
+        unattended = self.request is not None and unattended_turn(
+            self.request.origin, self.request.attended
+        )
+        return limit_ceiling_s(turn_limit_minutes(self.features, unattended=unattended))
 
     def feature_on(self, key: str) -> bool:
         """`key` at this place; a hand-built admission, or a key not resolved, keeps it on."""

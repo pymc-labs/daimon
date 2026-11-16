@@ -43,9 +43,14 @@ __all__ = [
 # budgets, so a flat deadline is still the right shape.
 TURN_CEILING_S: float = 45.0 * 60.0
 
-#: The longest an answer time limit may extend one chat turn. Unattended runs stay at
-#: `TURN_CEILING_S`.
+#: The longest a time limit setting (chat or unattended) may extend one turn.
 LONGEST_TURN_CEILING_S: float = 180.0 * 60.0
+
+
+def limit_ceiling_s(minutes: int | None) -> float:
+    """A time limit setting in seconds, never past the longest; None keeps the standard 45."""
+    return TURN_CEILING_S if minutes is None else min(minutes * 60.0, LONGEST_TURN_CEILING_S)
+
 
 #: The running turn's deadline, for anything inside it that must not promise a
 #: time past it (an approval card's expiry). None outside a turn.
