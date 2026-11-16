@@ -399,6 +399,8 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
 
             scope.update(
                 checks=SimpleNamespace(is_guild_admin=discord_admin),
+                # The current chat permission is new; the archived handler had none.
+                _chat_permitted=AsyncMock(return_value=True),
                 pause_routine_via_panel=scope["pause_routine"],
                 resume_routine_via_panel=scope["resume_routine"],
                 _rerender=AsyncMock(side_effect=lambda *a: trace.append("render")),
