@@ -492,9 +492,10 @@ class Admission:
     @property
     def turn_ceiling_s(self) -> float:
         """How long a turn here may run before it is stopped: the turn time limit set at this
-        place, else the built-in 45 minutes."""
+        place, else the built-in 45 minutes. Never longer: the stale-turn windows, DM claim and
+        lock waits all assume a turn ends within `TURN_CEILING_S`."""
         minutes = turn_limit_minutes(self.features)
-        return TURN_CEILING_S if minutes is None else minutes * 60.0
+        return TURN_CEILING_S if minutes is None else min(minutes * 60.0, TURN_CEILING_S)
 
     def feature_on(self, key: str) -> bool:
         """`key` at this place; a hand-built admission, or a key not resolved, keeps it on."""

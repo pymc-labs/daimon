@@ -664,7 +664,7 @@ async def test_admission_limits_follow_their_settings(
         tenant_id=tenant.id,
         platform="discord",
         key="turn_time_limit",
-        value="90",
+        value="30",
         account_id=None,
         surface="cli",
     )
@@ -682,10 +682,10 @@ async def test_admission_limits_follow_their_settings(
     await db_session.commit()
     later = await admitted()
     assert later.answer_message_cap == 10, "a workspace setting raises the answer message cap"
-    extended = later.turn_ceiling_s
-    assert extended == 90 * 60.0, "a workspace setting of 90 minutes extends the turn"
+    shortened = later.turn_ceiling_s
+    assert shortened == 30 * 60.0, "a workspace setting of 30 minutes shortens the turn"
     capped = turn_deadline(
-        now=_NOW, ceiling_s=extended, authority_deadline=_NOW + timedelta(minutes=10)
+        now=_NOW, ceiling_s=shortened, authority_deadline=_NOW + timedelta(minutes=10)
     )
     assert capped == _NOW + timedelta(minutes=10), "retained authority still caps the limit"
 

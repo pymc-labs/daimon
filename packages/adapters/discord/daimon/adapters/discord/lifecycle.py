@@ -387,6 +387,7 @@ class DiscordTurnLifecycle(OutputGate):
         render_tables: bool = False,
         answer_message_cap: int = ANSWER_MESSAGES,
         model_marks: tuple[str, ...] = (),
+        on_model_marked: Callable[[], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
         adopt_message_ref: discord.Message | None = None,
         adopt_pending_progress: DiscordTurnLifecycle | None = None,
@@ -419,6 +420,7 @@ class DiscordTurnLifecycle(OutputGate):
         # The terminal answer/card takes one of these messages.
         self._answer_message_cap = answer_message_cap
         self._model_marks = model_marks
+        self._on_model_marked = on_model_marked
         self._send = self.guarded_output(send)
         self._request_id = request_id
         self._sessionmaker = sessionmaker
@@ -599,6 +601,8 @@ class DiscordTurnLifecycle(OutputGate):
             except discord.HTTPException:
                 log.warning("turn.model_reaction_failed", exc_info=True)
                 return
+        if self._on_model_marked is not None:
+            self._on_model_marked()
 
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
         # Cheap local tap per the hardened TurnLifecycle contract:

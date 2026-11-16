@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,6 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .harness import make_bot
 
 _BOT_ID = 999
+
+
+def _snowflake(age: timedelta = timedelta(minutes=5)) -> int:
+    """A message id minted `age` ago."""
+    return discord.utils.time_snowflake(datetime.now(UTC) - age)
 
 
 def _bot(sessionmaker: async_sessionmaker[AsyncSession]) -> DaimonBot:
@@ -54,29 +60,46 @@ def _edit(
     mentions: list[int],
     bot_author: bool = False,
     before: list[int] | None = None,
+    age: timedelta = timedelta(minutes=5),
+    edited: bool = True,
+    before_content: str | None = None,
+    content: str = "hey <@999>",
 ) -> discord.RawMessageUpdateEvent:
+    message_id = _snowflake(age)
     data: dict[str, Any] = {
-        "id": "5",
+        "id": str(message_id),
+        "content": content,
+        "edited_timestamp": datetime.now(UTC).isoformat() if edited else None,
         "channel_id": "6",
         "guild_id": "7",
         "author": {"id": "42", "bot": bot_author},
         "mentions": [{"id": str(user)} for user in mentions],
     }
     payload = MagicMock(spec=discord.RawMessageUpdateEvent)
-    payload.message_id, payload.channel_id, payload.guild_id = 5, 6, 7
+    payload.message_id, payload.channel_id, payload.guild_id = message_id, 6, 7
     payload.data = data
     payload.cached_message = (
-        None if before is None else MagicMock(mentions=[MagicMock(id=user) for user in before])
+        None
+        if before is None
+        else MagicMock(
+            mentions=[MagicMock(id=user) for user in before],
+            content=before_content if before_content is not None else "hey",
+        )
     )
     return payload
 
 
 async def _run_edit(
-    bot: DaimonBot, payload: discord.RawMessageUpdateEvent, *, fetched_bot: bool = False
+    bot: DaimonBot,
+    payload: discord.RawMessageUpdateEvent,
+    *,
+    fetched_bot: bool = False,
+    thread: object | None = None,
 ) -> AsyncMock:
     """Deliver the edit; return the `on_message` mock that stands in for a turn."""
     message = MagicMock(spec=discord.Message)
     message.author = MagicMock(bot=fetched_bot)
+    message.thread = thread
     channel = MagicMock(spec=discord.TextChannel)
     channel.fetch_message = AsyncMock(return_value=message)
     on_message = AsyncMock()
@@ -124,3 +147,33 @@ async def test_an_edit_by_a_bot_author_is_ignored(
         _bot(db_session_factory), _edit(mentions=[_BOT_ID], bot_author=True)
     )
     assert on_message.await_count == 0, "no turn for a bot's edit"
+
+
+async def test_an_old_message_is_not_answered_after_an_edit(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Past the ledger's memory, an uncached message may have been answered: it stays quiet."""
+    old = _edit(mentions=[_BOT_ID], age=timedelta(hours=3))
+    on_message = await _run_edit(_bot(db_session_factory), old)
+    assert on_message.await_count == 0, "no turn for an edited message older than the ledger"
+
+
+async def test_an_update_that_is_not_a_content_edit_is_ignored(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A pin or flag update has no edit time; unchanged text is not a new request."""
+    bot = _bot(db_session_factory)
+    pinned = await _run_edit(bot, _edit(mentions=[_BOT_ID], edited=False))
+    assert pinned.await_count == 0, "no turn for an update with no edit time"
+    same = await _run_edit(bot, _edit(mentions=[_BOT_ID], before=[], before_content="hey <@999>"))
+    assert same.await_count == 0, "no turn when the text did not change"
+
+
+async def test_a_message_that_already_has_a_thread_is_ignored(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A thread on the message means it was answered, or another bot took it."""
+    on_message = await _run_edit(
+        _bot(db_session_factory), _edit(mentions=[_BOT_ID]), thread=MagicMock(spec=discord.Thread)
+    )
+    assert on_message.await_count == 0, "no second answer where a thread exists"

@@ -312,6 +312,8 @@ _DRAIN_NOTICES_S: float = 10.0
 # only 5 of 16 tenants' skills before 429ing; the agent reconcile then failed
 # attaching skills the sweep had never created.
 _SWEEP_CONCURRENCY = 2
+MESSAGE_LEDGER_HORIZON = timedelta(minutes=60)
+"""How long the message admission ledger remembers a message before it is pruned."""
 _MODEL_MARKED_LIMIT = 2000
 # What a tenant reconcile returns: True on success, False on failure, or the
 # task already reconciling that tenant when the in-flight guard skipped this
@@ -1956,7 +1958,7 @@ class DaimonBot(commands.Bot):
         async with self.runtime.sessionmaker() as session:
             for tenant in tenants:
                 await prune_old_messages(
-                    session, tenant_id=tenant.id, cutoff=datetime.now(UTC) - timedelta(minutes=60)
+                    session, tenant_id=tenant.id, cutoff=datetime.now(UTC) - MESSAGE_LEDGER_HORIZON
                 )
             await session.commit()
 
@@ -2928,12 +2930,16 @@ class DaimonBot(commands.Bot):
     async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
         """An edit that adds a mention of the bot answers like a fresh mention.
 
-        A message that already mentioned the bot was claimed when it arrived, so
-        a later edit of it changes nothing: ``claim_message`` stops a second turn.
+        Only a real content edit counts (pins, flags and embed updates carry no
+        edit time). A message older than the admission ledger's horizon is left
+        alone, since the ledger can no longer tell whether it was answered, as
+        is one that already has a thread.
         """
         if self.user is None or payload.guild_id is None:
             return
         data = payload.data
+        if not data.get("edited_timestamp"):
+            return
         # "author" is absent on partial updates such as link previews.
         author: dict[str, Any] | None = data.get("author")  # type: ignore[assignment]
         if author is None or author.get("bot"):
@@ -2941,7 +2947,13 @@ class DaimonBot(commands.Bot):
         if not any(user["id"] == str(self.user.id) for user in data.get("mentions", [])):
             return
         before = payload.cached_message
-        if before is not None and any(user.id == self.user.id for user in before.mentions):
+        if before is not None and (
+            before.content == data.get("content")
+            or any(user.id == self.user.id for user in before.mentions)
+        ):
+            return
+        sent_at = discord.utils.snowflake_time(payload.message_id)
+        if datetime.now(UTC) - sent_at > MESSAGE_LEDGER_HORIZON:
             return
         try:
             channel = await self._channel_by_id(payload.channel_id)
@@ -2950,7 +2962,7 @@ class DaimonBot(commands.Bot):
             message = await channel.fetch_message(payload.message_id)
         except discord.HTTPException:
             return
-        if message.author.bot:
+        if message.author.bot or message.thread is not None:
             return
         await self.on_message(message)
 
@@ -3819,8 +3831,8 @@ class DaimonBot(commands.Bot):
             await self._release_and_clear(thread.id, tenant_id, clear_reactions=False)
 
     def _model_marks(self, admission: Admission, thread_id: int) -> tuple[str, ...]:
-        """The model and effort emoji for this turn's trigger message, when the setting is on
-        and they differ from the pair last shown in this thread."""
+        """The model and effort emoji for a prompted turn's trigger message, when the setting
+        is on and they differ from the pair last shown in this thread."""
         if not admission.shown("model_reactions", "discord"):
             return ()
         backend = admission.backend_revision
@@ -3830,12 +3842,13 @@ class DaimonBot(commands.Bot):
             model_id = admission.agent.model.id
             effort = (admission.agent.model.model_extra or {}).get("effort")
         marks = model_marks(model_id, effort if isinstance(effort, str) else None)
-        if self._model_marked.get(thread_id) == marks:
-            return ()
+        return () if self._model_marked.get(thread_id) == marks else marks
+
+    def _record_model_marks(self, thread_id: int, marks: tuple[str, ...]) -> None:
+        """Remember the pair a thread now shows. Held in memory: a restart marks it again."""
         self._model_marked[thread_id] = marks
         while len(self._model_marked) > _MODEL_MARKED_LIMIT:
             del self._model_marked[next(iter(self._model_marked))]
-        return marks
 
     async def _thread_started_from(self, message: discord.Message) -> discord.Thread | None:
         """The thread already opened on `message` (it shares the message's id), if any."""
@@ -4349,7 +4362,6 @@ class DaimonBot(commands.Bot):
                 notify_on_completion=admission.shown("completion_pings"),
                 render_tables=admission.shown("table_rendering"),
                 answer_message_cap=admission.answer_message_cap,
-                model_marks=self._model_marks(admission, thread.id),
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
@@ -5390,6 +5402,8 @@ class DaimonBot(commands.Bot):
         self._thread_stops.watch(thread.id, cancel)
         self._typed_stops.watch(thread.id, requester_id=message.author.id, cancel=cancel)
 
+        marks_to_show = self._model_marks(admission, thread.id)
+
         def _make_lifecycle(
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
         ) -> DiscordTurnLifecycle:
@@ -5405,7 +5419,8 @@ class DaimonBot(commands.Bot):
                 acknowledgment_managed=True,
                 render_tables=admission.shown("table_rendering"),
                 answer_message_cap=admission.answer_message_cap,
-                model_marks=self._model_marks(admission, thread.id),
+                model_marks=marks_to_show,
+                on_model_marked=lambda: self._record_model_marks(thread.id, marks_to_show),
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,

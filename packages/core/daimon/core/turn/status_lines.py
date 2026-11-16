@@ -256,7 +256,7 @@ def _tool_line(call: ToolUseBlock) -> str:
             label = f"{label}: {detail}"
     else:
         icon, label = _humanize(call.name)
-        label = _clip(call.title or label)
+        label = _clip(label)
         if call.mcp_server_name and tool_server_names_shown():
             label = f"{label} ({call.mcp_server_name})"
     if is_finished:
@@ -271,7 +271,7 @@ def tool_label(call: ToolUseBlock) -> tuple[str, str | None]:
         label = narration.finished if call.status != "pending" else narration.running
         return label, _built_in_detail(call)
     server = call.mcp_server_name if tool_server_names_shown() else None
-    return _clip(call.title or _humanize(call.name)[1]), server
+    return _clip(_humanize(call.name)[1]), server
 
 
 def _humanize(name: str) -> tuple[str, str]:

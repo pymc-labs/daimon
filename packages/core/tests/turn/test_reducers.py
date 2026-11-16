@@ -796,15 +796,3 @@ def test_apply_ignores_retrying_model_error_until_it_settles() -> None:
     assert "e_1" in state.seen_event_ids, "the event is still folded for dedup"
     settled = apply(state, make_session_error(event_id="e_2", error=make_overloaded_error()))
     assert settled.error is not None, "the settled copy fails the turn"
-
-
-def test_apply_keeps_a_title_the_event_carries() -> None:
-    """A tool event that carries a title keeps it on the block; a blank one is dropped."""
-    titled = make_mcp_tool_use(event_id="tu_t", name="search", mcp_server_name="gh")
-    titled.__dict__["title"] = " Find tickets "
-    blank = make_mcp_tool_use(event_id="tu_b", name="search", mcp_server_name="gh")
-    blank.__dict__["title"] = "  "
-    block = apply(TurnState(), titled).content[0]
-    assert isinstance(block, ToolUseBlock) and block.title == "Find tickets", "title kept, trimmed"
-    block = apply(TurnState(), blank).content[0]
-    assert isinstance(block, ToolUseBlock) and block.title is None, "blank title dropped"

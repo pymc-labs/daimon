@@ -7,9 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Tool labels.** A tool line on the working card now uses the tool's own title
-  when its server gives one, and a new workspace or agent setting, `tool_server_names`,
-  hides the server name that follows it.
+- **Hide the server name on tool lines.** A new workspace or agent setting,
+  `tool_server_names`, drops the connected server's name from the working card's tool lines.
 - **Model and effort reactions in Discord.** A new setting, off by default, reacts
   to the first message in a thread, and to the first after the model or effort
   changes, with an emoji for the model and one for the effort.
@@ -21,8 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reporting that it could not open one.
 - **An edit that adds a mention gets an answer.** Editing a message to mention
   the bot in Discord answers it like a new mention, once.
-- **A turn time limit setting.** Server admins can let one answer run for 90 or 180
-  minutes instead of 45, for a workspace or an agent; the smallest setting wins.
+- **A turn time limit setting.** Server admins can shorten the time one answer may
+  run to 30 or 15 minutes instead of 45, for a workspace or an agent; the smallest setting wins.
   Routines, watches and agent-to-agent chats keep the standard limit.
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and

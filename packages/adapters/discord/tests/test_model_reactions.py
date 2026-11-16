@@ -23,7 +23,11 @@ def _admission(*, on: bool, model: str, effort: str) -> MagicMock:
 
 
 def _marks(bot: DaimonBot, admission: MagicMock, thread_id: int = 7) -> tuple[str, ...]:
-    return bot._model_marks(admission, thread_id)  # pyright: ignore[reportPrivateUsage]
+    """The marks a turn would ask for; as the lifecycle does once they are shown, record them."""
+    marks = bot._model_marks(admission, thread_id)  # pyright: ignore[reportPrivateUsage]
+    if marks:
+        bot._record_model_marks(thread_id, marks)  # pyright: ignore[reportPrivateUsage]
+    return marks
 
 
 async def test_setting_off_adds_nothing(
@@ -74,3 +78,31 @@ async def test_lifecycle_reacts_with_the_marks_on_the_trigger_message() -> None:
         await lifecycle.post_initial()
         reacted = tuple(call.args[0] for call in trigger.add_reaction.await_args_list)
         assert reacted == marks, f"the trigger message gets exactly {marks}"
+
+
+async def test_marks_are_recorded_only_after_the_reactions_land() -> None:
+    """A failed reaction leaves the thread unmarked, so the next prompt tries again."""
+    trigger = MagicMock(spec=discord.Message)
+    recorded: list[bool] = []
+
+    async def send(**kwargs: object) -> object:
+        return types.SimpleNamespace(id=1)
+
+    async def edit(ref: object, **kwargs: object) -> None:
+        return None
+
+    for fails in (True, False):
+        trigger.add_reaction = AsyncMock(
+            side_effect=discord.HTTPException(MagicMock(status=403), "no") if fails else None
+        )
+        lifecycle = DiscordTurnLifecycle(
+            send=send,
+            edit=edit,
+            agent_name="agent",
+            model_id="m",
+            trigger_message=trigger,
+            model_marks=("🎼", "🌓"),
+            on_model_marked=lambda: recorded.append(True),
+        )
+        await lifecycle.post_initial()
+    assert recorded == [True], "only the turn whose reactions landed records the pair"

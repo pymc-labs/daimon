@@ -346,6 +346,7 @@ class TestNewThreadCreation:
             ("own_parent", True),
             ("other_parent", False),
             ("not_found", False),
+            ("lookup_error", False),
         ],
     )
     @patch("daimon.adapters.discord.bot.TurnPostRecorder.opened_thread", new_callable=AsyncMock)
@@ -392,11 +393,11 @@ class TestNewThreadCreation:
         thread.id = 9999
         thread.parent_id = 789 if lookup == "own_parent" else 555
         thread.send = AsyncMock()
-        fetch = (
-            AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "unknown channel"))
-            if lookup == "not_found"
-            else AsyncMock(return_value=thread)
-        )
+        fetch = AsyncMock(return_value=thread)
+        if lookup == "not_found":
+            fetch = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "unknown"))
+        elif lookup == "lookup_error":
+            fetch = AsyncMock(side_effect=RuntimeError("lookup failed"))
 
         with (
             patch.object(bot, "get_channel", MagicMock(return_value=None)),
