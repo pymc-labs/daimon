@@ -25,7 +25,7 @@ async def import_dm_policies(
     session: AsyncSession,
     settings: Settings,
     *,
-    list_agents: AgentLister,
+    agents_of: AgentLister,
     now: datetime,
     dry_run: bool = False,
 ) -> list[str]:
@@ -44,7 +44,7 @@ async def import_dm_policies(
                     await set_dm_enabled(session, tenant_id=tenant_id, enabled=False)
             continue
         grants = await store.list_grants(session, tenant_id=tenant_id)
-        for agent in await list_agents(tenant_id):
+        for agent in await agents_of(tenant_id):
             place = FeaturePlace(tenant_id, tenant.platform, agent_id=agent.ma_agent_id)
             if not (await feature_in(session, settings, place, "direct_messages")).on:
                 continue

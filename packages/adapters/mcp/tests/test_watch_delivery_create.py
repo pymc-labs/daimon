@@ -47,6 +47,7 @@ def discord_rest(monkeypatch):
     monkeypatch.setattr(tools, "_require_bot_token", lambda _runtime: "token")
     monkeypatch.setattr(tools, "dm_enabled", AsyncMock(return_value=True))
     monkeypatch.setattr(tools, "require_dm_recipient_allowed", AsyncMock())
+    monkeypatch.setattr(tools, "require_dm_grant", AsyncMock())
     return channels
 
 
@@ -77,6 +78,7 @@ async def test_dm_delivery_needs_dms_on_and_the_owner_allowed(discord_rest, monk
     await require_delivery_allowed(_runtime(), AUTH, _origin(), "dm")  # type: ignore[arg-type]
     tools.require_dm_recipient_allowed.assert_awaited_once()  # type: ignore[attr-defined]
     assert tools.require_dm_recipient_allowed.await_args.kwargs == {"recipient_id": "555"}  # type: ignore[attr-defined]
+    tools.require_dm_grant.assert_awaited_once()  # type: ignore[attr-defined]
     blocked = _runtime(DirectMessagePolicy(mode="allowlist", recipient_ids=["777"]))
     with pytest.raises(ToolError, match="Ask an admin or an owner"):
         await require_delivery_allowed(blocked, AUTH, _origin(), "dm")  # type: ignore[arg-type]

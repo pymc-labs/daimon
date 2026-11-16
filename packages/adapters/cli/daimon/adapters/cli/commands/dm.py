@@ -288,7 +288,7 @@ async def dm_import_policies(
 
     async with rt.sessionmaker.begin() as session:
         steps = await import_dm_policies(
-            session, rt.settings, list_agents=agents_of, now=datetime.now(UTC), dry_run=dry_run
+            session, rt.settings, agents_of=agents_of, now=datetime.now(UTC), dry_run=dry_run
         )
     _emit(
         console,
