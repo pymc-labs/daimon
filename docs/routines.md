@@ -69,8 +69,8 @@ tool checks, before saving, that:
 For the owner's DM, set `destination_kind="dm"` and leave out the id. Daimon
 uses the caller's own Discord id; nobody can send another person's routine to
 their DM. Slack and Teams refuse it. A DM routine runs as a live DM turn, with
-the owner's personal memory, and needs the server's DMs on. See
-[direct messages](direct-messages.md).
+the owner's personal memory, and needs the server's DMs on and the agent's
+[DM grant](direct-messages.md#choose-who-may-dm-which-agent) for the owner.
 
 To make a destination mandatory, set
 `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION=true`
@@ -145,9 +145,8 @@ get unattended-run framing, which an agent can override with
 
 Routine sessions mount the agent's shared memory read-only. A routine with no
 destination or channel also mounts its owner's personal memory read-only. An
-owner-DM routine runs as a live DM turn, with the owner's memory under the DM
-policy. It is skipped as
-`owner_busy` if the owner already has a DM turn running. A routine in a
+owner-DM routine is skipped as `owner_busy` if the owner already has a DM turn
+running. A routine in a
 channel shared with another organisation runs held to that channel, with only
 that channel's memory and no DM fallback.
 

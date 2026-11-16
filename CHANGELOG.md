@@ -8,15 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - **Choose who may DM which agent.** Each agent has a DM grant (every member, only
-  those listed, or all but those listed, by person or role), and a server has a
-  default agent and ordered rules that send a person, a role or everyone to an
-  agent. A locked rule decides alone. When several agents admit a person, a
-  dropdown lets them choose and remembers the choice. `/dm-me`, cold DMs, agent
-  hand-overs and agents that send DMs follow the same grants, and a failed role
-  lookup refuses. Manage it with `daimon dm default|access|rule|explain`;
-  `daimon dm import-policies` moves `DAIMON_DIRECT_MESSAGE_POLICIES` into stored
-  access. Discord only for now. Erasing a person removes their pick, rules and
-  grant entries.
+  those listed, or all but those listed, by person or group: a Discord role, Slack
+  user group or Teams team), and a server has a default agent and ordered rules
+  that send a person, a group or everyone to an agent. A locked rule decides alone.
+  When several agents admit a person, a picker lets them choose and remembers the
+  choice. `/dm-me`, cold DMs (Slack too), Teams personal chats (DMs on by default
+  there), hand-overs and agents that send DMs follow the same grants, and a failed
+  group lookup refuses. Slack user groups need the `usergroups:read` scope and a
+  reinstall. Manage it with `daimon dm default|access|rule|explain`; `daimon dm
+  import-policies` moves `DAIMON_DIRECT_MESSAGE_POLICIES` into stored access.
+  Erasing a person removes their pick, rules and grant entries.
 - **Direct messages take files, forwards and replies.** A picture or a file sent in a
   direct message reaches the agent as it does in a channel, and a message with only a
   picture is answered. A forwarded message is passed as untrusted content, and a

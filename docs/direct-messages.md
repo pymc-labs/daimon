@@ -9,7 +9,7 @@ There are three ways into a DM:
 | Way in | Platforms | Starts with |
 | --- | --- | --- |
 | `/dm-me` in a channel | Discord, Slack | that channel's recent text and a link back |
-| A cold DM to the bot | Discord | an empty conversation with the server's DM agent |
+| A cold DM to the bot | Discord, Slack, Teams | an empty conversation with the agent chosen below |
 | A routine or watch that reports by DM | Discord | a fresh private turn per run |
 
 All three need the server's DMs turned on (`/dm-me enable`) and a recipient
@@ -31,6 +31,10 @@ An admin can do the same in Discord with `/dm-me action:enable`, then
 `/dm-me action:agent agent_name:AGENT_NAME`. Clearing the agent stops cold DMs
 without closing existing conversations or `/dm-me` moves.
 
+A Slack or Teams DM belongs to one workspace, so a cold DM there starts at
+once with the agent chosen below. Teams personal chats have DMs on unless an
+admin turns them off.
+
 Upgrade every Discord process before naming an agent, since older ones do not
 recognise a conversation with no source channel. The bot token must be set on
 the scheduler and MCP processes too, for the membership checks below.
@@ -42,15 +46,16 @@ and, per person, an optional pick. A person's private conversation starts
 with the first agent that has DMs on and admits them, chosen like this:
 
 1. **Grants.** An agent admits `members` (the default: every member), only
-   those `listed` (people or roles), or everyone `excluded` (all but those
-   listed). A role id in a grant needs a live role lookup; if it fails, the
-   agent is treated as closed for that person.
-2. **Rules.** The first rule that matches the person (by user, role or
+   those `listed`, or everyone `excluded` (all but those listed). A grant
+   lists people and groups: Discord roles, Slack user groups, or Teams teams
+   the app is installed in. If a group lookup fails, the agent is treated as
+   closed for that person.
+2. **Rules.** The first rule that matches the person (by user, group or
    everyone) names an agent. A **locked** rule decides alone: the person's pick
    is ignored, and if its agent is unavailable to them they are refused.
 3. **Pick, rule agent, default.** Otherwise the first available of the person's
    pick, the rule's agent and the server default. When several agents remain, a
-   dropdown (server and agent) lets the person choose, and the choice is
+   picker (a dropdown, or buttons on Teams) lets the person choose, and the choice is
    remembered for the next conversation.
 
 `/dm-me` in a channel follows the same rules and refuses a locked-out person
@@ -124,6 +129,10 @@ read members, roles and server details.
 A positive answer is cached for at most 30 seconds and a negative one for
 five. Private delivery always does a live lookup. A failed or slow lookup
 never grants access; discovery asks the person to try again instead.
+
+Slack user groups need the `usergroups:read` scope, so reinstall the app
+after adding it. Teams teams are read from the team's roster. A group lookup
+is fresh when a conversation starts and cached for 60 seconds after.
 
 The stock Discord service does not request the privileged Server Members
 intent, so it relies on that short cache. A gateway that turns the intent on
