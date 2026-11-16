@@ -15,13 +15,15 @@ from daimon.adapters.web import routines as routines_module
 from daimon.adapters.web.channel_visibility import forget_visibility
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.config import DiscordSettings, Settings
+from daimon.core.features.service import FeatureActor
+from daimon.core.routine_sandbox import change_agent_sandbox
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import platform_names
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores import web_roles as roles_store_alias
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.domain import WebPersonRow
+from daimon.core.stores.domain import AgentSandboxPin, WebPersonRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.routines import create_routine, list_routines_for_tenant
 from daimon.testing.factories import make_platform_principal
@@ -38,7 +40,7 @@ from .chat_support import (
     signed_in,
     visitor_of,
 )
-from .conftest import PUBLIC_URL, FakeUpstream, WebClientFactory, web_settings
+from .conftest import PUBLIC_URL, FakeUpstream, WebClientFactory, discord_settings, web_settings
 
 _OWN = {"X-Daimon-Web": "1", "Origin": PUBLIC_URL}
 _CHANNEL = "123456789012345678"
@@ -370,6 +372,27 @@ async def test_a_member_may_deliver_only_to_a_channel_their_platform_shows_them(
     assert (refused.status_code, locked.status_code) == (422, 422)
     assert made.json()["destination"] == {"id": _CHANNEL, "name": "general", "kind": "channel"}
     assert cleared.json()["destination"] is None
+
+
+async def test_a_routine_shows_its_agent_opt_in_to_sandbox_tools(rig: Rig) -> None:
+    """The list shows the opt-in a run would use, here the agent's over a DM routine."""
+
+    async def yes(_action: object) -> bool:
+        return True
+
+    async with rig.open(discord_id="222222222222222222") as (client, ws, _):
+        made = (await client.post("/api/routines", json=_NEW | {"dm": True})).json()
+        await change_agent_sandbox(
+            rig.factory,
+            discord_settings(),
+            FeatureActor(ws.tenant_id, None, "cli", None, yes),
+            agent_id=AGENT_ID,
+            platform="discord",
+            value="on",
+            pin=AgentSandboxPin(AGENT_ID, "default"),
+        )
+        [listed] = (await client.get("/api/routines")).json()
+    assert (made["sandbox_tools"], listed["sandbox_tools"]) == (False, True)
 
 
 async def test_a_member_delivers_by_direct_message_to_themselves_only(rig: Rig) -> None:

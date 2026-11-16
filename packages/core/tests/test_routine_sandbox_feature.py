@@ -17,6 +17,7 @@ from daimon.core.routine_sandbox import (
     builtins_allowed,
     change_agent_sandbox,
     change_routine_sandbox,
+    opted_in_by,
     own_opt_in,
     routine_opt_in_pin,
     routine_place,
@@ -77,7 +78,14 @@ async def _set(sessions: Sessions, row: RoutineRow, tier: Any, value: str, **kw:
 
 
 async def _pin(sessions: Sessions, row: RoutineRow) -> object:
+    """The run's pin; every surface shows the tier the run takes it from."""
     found = await routine_sandbox(sessions, SETTINGS, row, platform="discord")
+    async with sessions() as session:
+        shown = await opted_in_by(session, row, "discord")
+    tier = (
+        None if found is None else "agent" if isinstance(found.pin, AgentSandboxPin) else "routine"
+    )
+    assert shown == tier, "surfaces show what runs get"
     return None if found is None else found.pin
 
 

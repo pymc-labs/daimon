@@ -32,7 +32,7 @@ from daimon.core.features.service import (
     change_feature,
     clear_pinned_on,
 )
-from daimon.core.features.snapshot import FeaturePlace, place_guardrail
+from daimon.core.features.snapshot import FeaturePlace, feature_in, place_guardrail
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent, retrieve_environment
 from daimon.core.rule_views import routine_destination_channel
@@ -63,6 +63,7 @@ __all__ = [
     "clear_agent_opt_ins",
     "current_agent_pin",
     "current_pin",
+    "opted_in_by",
     "own_opt_in",
     "routine_opt_in_pin",
     "routine_place",
@@ -268,6 +269,18 @@ def routine_place(row: RoutineRow, platform: str) -> FeaturePlace:
         agent_id=row.agent_id,
         routine_id=str(row.id),
     )
+
+
+async def opted_in_by(session: AsyncSession, row: RoutineRow, platform: str) -> PinnedTier | None:
+    """Whose pinned On the routine runs under, its own or its agent's; None when off.
+    What every surface shows; each run also checks the pin still matches (`routine_sandbox`)."""
+    found = await feature_in(session, None, routine_place(row, platform), SANDBOX_KEY)
+    if not found.on or found.tier not in ("agent", "routine"):
+        return None
+    tier: PinnedTier = "agent" if found.tier == "agent" else "routine"
+    key = row.agent_id if tier == "agent" else str(row.id)
+    pinned = await sandbox_pin(session, tenant_id=row.tenant_id, tier=tier, key=key)
+    return None if pinned is None else tier
 
 
 async def own_opt_in(
