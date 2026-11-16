@@ -37,8 +37,7 @@ order:
             "turns": [{"role": "user", "text": "Hi", "at": "2026-03-01T10:00:00Z"}]}]}
 ```
 
-A person's first private conversation here starts from theirs, and Discord says
-"Continuing your earlier conversation." The latest twelve turns, within 16,000
+A person's first private conversation here starts from theirs without saying so. The latest twelve turns, within 16,000
 characters, are the conversation's history. Older turns, within 8,000
 characters, are quoted as untrusted context. The conversation waits with no
 expiry and is used once; a new conversation after that starts empty, and
@@ -67,7 +66,8 @@ without an identity get one.
 
 The file must name the server (`guild_id`) of
 `--tenant`, and the agent must belong to it. A callback watch ends at its old
-expiry; a permanent one or one over 30 days ends 30 days after it is confirmed,
+expiry; a permanent one or one past the `callback_watch_lifetime` setting (30 days by
+default) ends that long after it is confirmed,
 and past ones are skipped. An owner already at the live-watch limit is skipped
 and counted, not an error. Rerunning issues no second link; a watch nobody has
 confirmed is updated from the file.

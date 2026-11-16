@@ -15,11 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reminders in the thread and one-off channel reminders in their channel, only
   while the agent may post there and the owner can still see it. A rerun
   updates what is not yet confirmed, `--full` cancels what the file dropped, and
-  `unpause`, `renew` and `rotate-link` manage what came in.
+  `unpause`, `renew` and `rotate-link` manage what came in. How long a callback
+  watch lasts is the server-admin feature `callback_watch_lifetime` (30 days
+  by default, or unlimited), and the largest post it accepts is
+  `DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES` (4 KiB by default, up to 512 KiB).
+  Moving people in never messages them: an imported conversation just continues
+  and an imported watch that cannot run here is reported only by the command.
 - **Operators can move people in from another bot.** `daimon tags import` opts
   listed Discord members out of being tagged. `daimon dms import` holds each
   person's earlier private conversation for their first DM here, which starts
-  from it once and says it is continuing.
+  from it once, without saying so.
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and
   the MCP tools. A run nobody started, such as a routine, never applies one at once.

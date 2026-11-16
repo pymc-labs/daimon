@@ -186,11 +186,15 @@ days.
 ## Callback watches
 
 `create_watch(source="callback")` polls nothing. Daimon DMs the owner a private
-link, and each `POST` of up to 4 KiB of UTF-8 text to it wakes the agent once,
+link, and each `POST` of UTF-8 text to it, up to 4 KiB unless the deployment allows more
+(`DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES`, up to 512 KiB), wakes the agent once,
 with that text as untrusted evidence. The link is never returned in the tool
 result or shown in a channel, and a lost one cannot be shown again: delete the
 watch and make a new one. If the DM fails the watch is deleted. A callback
 watch always has an end date and reports to the owner's private conversation.
+It lasts 30 days by default; the `callback_watch_lifetime` feature (server admins,
+`DAIMON_FEATURES__CALLBACK_WATCH_LIFETIME`) sets 7, 30 or 90 days, or unlimited with
+`0`. It applies to new and imported watches, and `renew` restarts the clock.
 
 Set the public address of the sidecar first:
 
@@ -223,8 +227,8 @@ signing keys, saved credentials, leases or unfinished wakes.
 
 `discord_read_messages` maps to `read_thread`, for thread ids only.
 `discord_read_channel_since` maps to `read_channel` and drops `since`. Other
-tools import as `source_unmapped`, cannot be resumed, and their owner gets a
-private notice. Confirm a watch only after checking every binding field.
+tools import as `source_unmapped`, and cannot be resumed. The owner is
+not messaged; the command output lists them. Confirm a watch only after checking every binding field.
 
 Callback entries (`source: "callback"`) carry `token_sha256`, the owner, channel
 and an optional `expires_at`; see
