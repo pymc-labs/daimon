@@ -519,12 +519,14 @@ async def accept_page_event(
 
 
 async def accept_callback_event(
-    session: AsyncSession, *, watch_id: uuid.UUID, token: str, body: bytes
+    session: AsyncSession, *, watch_id: uuid.UUID, token: str, body: bytes, max_body_bytes: int
 ) -> uuid.UUID | None:
     """Hand a bearer-token post to the constrained database port, which checks everything.
 
-    The body is the event as sent. Nothing here reads, logs or keeps the token. The same
-    body within five minutes of an earlier one returns that post's wake and adds nothing.
+    `max_body_bytes` is the cap the caller already applied to the HTTP read, so both
+    limits come from one value. The body is the event as sent. Nothing here reads, logs or
+    keeps the token. The same body within five minutes of an earlier one returns that
+    post's wake and adds nothing.
     """
     settings = load_watches_settings()
     if not settings.enabled:
@@ -535,7 +537,7 @@ async def accept_callback_event(
             "watch": watch_id,
             "token": token,
             "body": body.decode("utf-8"),
-            "max_body": settings.callback_max_body_bytes,
+            "max_body": max_body_bytes,
         },
     )
     return None if result is None else uuid.UUID(str(result))

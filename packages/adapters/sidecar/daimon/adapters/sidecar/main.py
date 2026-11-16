@@ -39,14 +39,14 @@ def create_app(
     request_timeout_s: float = 10,
     max_requests_per_minute: int = 1200,
     max_watch_requests_per_minute: int = 120,
-    callback_max_body_bytes: int | None = None,
 ) -> web.Application:
     """Only callback POST paths accept input; health is private at the proxy.
 
-    A token post may carry up to the deployment's `callback_max_body_bytes`; a signed
-    page event keeps its own smaller limit.
+    A token post may carry up to the deployment's `callback_max_body_bytes`, the one value
+    the HTTP read and the database port both use; a signed page event keeps its own
+    smaller limit.
     """
-    callback_cap = callback_max_body_bytes or load_watches_settings().callback_max_body_bytes
+    callback_cap = load_watches_settings().callback_max_body_bytes
     app = web.Application(client_max_size=max(MAX_EVENT_BYTES, callback_cap))
     active = 0
     recent: deque[float] = deque()
@@ -197,7 +197,9 @@ def create_app(
         if b"\x00" in body:
             return web.Response(status=400)
         async with sessions.begin() as session:
-            await accept_callback_event(session, watch_id=watch_id, token=token, body=body)
+            await accept_callback_event(
+                session, watch_id=watch_id, token=token, body=body, max_body_bytes=callback_cap
+            )
         return web.json_response({"accepted": True}, status=202)
 
     app.router.add_get("/healthz", health)
