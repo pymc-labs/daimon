@@ -119,7 +119,7 @@ async def change_rule(
 ) -> bool:
     """Set a rule's agent and lock, then move it to `to`; False when there is no such rule."""
     require_agent(agents, agent)
-    rules = await store.list_rules(db, tenant_id=actor.tenant_id)
+    rules = await store.list_rules_for_update(db, tenant_id=actor.tenant_id)
     if not 0 <= position < len(rules):
         return False
     before = rules[position]
@@ -146,7 +146,7 @@ async def change_rule(
 
 async def remove_rule(db: AsyncSession, actor: DmActor, position: int) -> bool:
     """Delete a rule; False when there is no such rule."""
-    rules = await store.list_rules(db, tenant_id=actor.tenant_id)
+    rules = await store.list_rules_for_update(db, tenant_id=actor.tenant_id)
     if not 0 <= position < len(rules):
         return False
     gone = rules[position]
@@ -164,7 +164,7 @@ async def replace_rules(
         require_agent(agents, rule.agent)
     current = [
         DmRuleSpec(r.subject, r.subject_id, r.agent_name, r.locked)
-        for r in await store.list_rules(db, tenant_id=actor.tenant_id)
+        for r in await store.list_rules_for_update(db, tenant_id=actor.tenant_id)
     ]
     if current == list(rules):
         return False
