@@ -6,6 +6,7 @@ import contextlib
 import uuid
 
 import pytest
+from daimon.core._models import ThreadSession
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.config import (
@@ -18,10 +19,13 @@ from daimon.core.config import (
 from daimon.core.features.registry import Tier
 from daimon.core.features.service import FeatureActor, change_feature
 from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.stores.agent_posts import record_post
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.support_offer import support_offered
 from daimon.testing.factories import make_account, make_tenant
 from pydantic import PostgresDsn, SecretStr
+from sqlalchemy import delete, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 KEY = "support_escalation"
@@ -127,7 +131,7 @@ async def test_an_agent_cannot_turn_it_on_above_an_off_workspace(
     assert not await _offered(db_session_factory, tenant.id, THREAD)
 
 
-async def test_a_failed_session_lookup_falls_back_to_the_workspace(
+async def test_a_failed_session_lookup_refuses(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -138,5 +142,63 @@ async def test_a_failed_session_lookup_falls_back_to_the_workspace(
     async def boom(*_a: object, **_k: object) -> None:
         raise RuntimeError("down")
 
-    monkeypatch.setattr("daimon.core.support_offer.get_latest_thread_session", boom)
-    assert await _offered(db_session_factory, tenant.id, THREAD)
+    monkeypatch.setattr("daimon.core.support_offer.list_thread_agents", boom)
+    assert not await _offered(db_session_factory, tenant.id, THREAD)
+
+
+async def test_the_agent_that_wrote_the_answer_decides_in_a_two_agent_thread(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
+    account = await make_account(db_session, tenant=tenant)
+    for n, agent in enumerate(("agent_off", "agent_on")):
+        await create_thread_session(
+            db_session,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id=THREAD,
+            account_id=account.id,
+            ma_session_id=f"sess_{n}",
+            ma_agent_id=agent,
+        )
+        await db_session.commit()  # one transaction would stamp both rows alike
+    await record_post(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        channel_id=THREAD,
+        message_id="m_off",
+        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_off"),
+    )
+    await db_session.commit()
+    await _set(db_session_factory, tenant.id, tier="agent", value="off", agent="agent_off")
+
+    async def at(message_id: str | None) -> bool:
+        return await support_offered(
+            db_session_factory,
+            _settings(),
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id=THREAD,
+            post=(THREAD, message_id) if message_id else None,
+        )
+
+    assert not await at("m_off"), "the answer's own agent is off, though another is newer"
+    assert await at(None), "without the answer, the newest agent decides"
+
+
+async def test_a_thread_with_only_ended_sessions_still_names_its_agent(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
+    account = await make_account(db_session, tenant=tenant)
+    for status in ("dead", "retired"):
+        await _thread(db_session, tenant.id, account.id, agent="agent_off")
+        await db_session.execute(
+            update(ThreadSession).where(ThreadSession.thread_id == THREAD).values(status=status)
+        )
+        await db_session.commit()
+        await _set(db_session_factory, tenant.id, tier="agent", value="off", agent="agent_off")
+        assert not await _offered(db_session_factory, tenant.id, THREAD), status
+        await db_session.execute(delete(ThreadSession).where(ThreadSession.thread_id == THREAD))
+        await db_session.commit()

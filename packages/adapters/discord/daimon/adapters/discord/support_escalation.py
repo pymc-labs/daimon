@@ -233,6 +233,7 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
             tenant_id=tenant_id,
             platform="discord",
             thread_id=self._channel_id,
+            post=(self._channel_id, self._message_id),
         )
         if channel_id is None or not offered:
             # Disabled between the reaction and the submit. Nothing is spent.

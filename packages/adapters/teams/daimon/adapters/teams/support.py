@@ -287,19 +287,27 @@ class SupportCommand:
         self._spawn = spawn
         self._asked: OrderedDict[str, _Asked] = OrderedDict()
 
-    async def _offered(self, tenant_id: uuid.UUID, thread_id: str | None) -> bool:
-        """Whether `support_escalation` is on for the agent of the thread, else the tenant."""
+    async def _offered(
+        self,
+        tenant_id: uuid.UUID,
+        thread_id: str | None,
+        post: tuple[str, str] | None = None,
+    ) -> bool:
+        """Whether `support_escalation` is on for the answer's agent, else the tenant."""
         return await support_offered(
             self._runtime.sessionmaker,
             self._runtime.settings,
             tenant_id=tenant_id,
             platform="teams",
             thread_id=thread_id,
+            post=post,
         )
 
     async def command(self, context: CommandContext) -> None:
         asked = _Asked.of(context.asked_in or context.inbound)
-        if not await self._offered(context.tenant_id, asked.thread_id):
+        if not await self._offered(
+            context.tenant_id, asked.thread_id, (asked.conversation_id, asked.message_id)
+        ):
             await context.send(notice_card(UNAVAILABLE))
             return
         if asked.place is not None:
@@ -364,7 +372,11 @@ class SupportCommand:
         if actor is None or not activity.reply_to_id:
             return dialog_notice(TITLE, DENIED)
         place = AnswerPlace.of(activity, activity.reply_to_id)
-        if not await self._offered(actor.tenant_id, place.conversation_id):
+        if not await self._offered(
+            actor.tenant_id,
+            place.conversation_id,
+            (place.conversation_id, activity.reply_to_id),
+        ):
             return dialog_notice(TITLE, UNAVAILABLE)
         if (access := await check_answer_access(self._runtime, actor, place)).access != "allowed":
             return dialog_notice(TITLE, refusal_text(access.access))
@@ -425,7 +437,9 @@ class SupportCommand:
         """
         runtime = self._runtime
         tenant_id = actor.tenant_id
-        if not await self._offered(tenant_id, asked.thread_id):
+        if not await self._offered(
+            tenant_id, asked.thread_id, (asked.conversation_id, asked.message_id)
+        ):
             return UNAVAILABLE
         refusal, sealed = not_allowed, False
         source_allowed = None

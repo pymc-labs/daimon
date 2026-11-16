@@ -21,9 +21,15 @@ from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.support import SupportCommand
 from daimon.core._models import SupportEscalation
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
+from daimon.core.admin_actions import DelegatedAction
 from daimon.core.config import SupportSettings
+from daimon.core.features.service import FeatureActor, change_feature
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.thread_sessions import create_thread_session
+from daimon.testing.factories import make_account, make_tenant
 from microsoft_teams.common.http.client import MiddlewareContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -312,6 +318,53 @@ async def test_ask_a_human_on_an_answer_spends_a_credit_and_links_the_answer(
     assert "wrong totals" in posted and IN_DIRECT_CHAT in posted, "the note, and where it was"
     [row] = await _rows(db_session_factory)
     assert (row.message_id, row.channel_id) == ("m-7", CONVERSATION_ID)
+
+
+async def _agent_off(db_factory: async_sessionmaker[AsyncSession], conversation: str) -> None:
+    """The conversation's agent has "ask a person" switched off for itself."""
+    async with db_factory.begin() as session:
+        tenant = await get_tenant(session, TENANT) or await make_tenant(
+            session, platform="teams", workspace_id=ENTRA_TENANT_ID, id=TENANT
+        )
+        account = await make_account(session, tenant=tenant)
+        await create_thread_session(
+            session,
+            tenant_id=TENANT,
+            platform="teams",
+            thread_id=conversation,
+            account_id=account.id,
+            ma_session_id="sess_1",
+            ma_agent_id="agent_off",
+        )
+
+    async def admin_for(_: DelegatedAction | None) -> bool:
+        return True
+
+    settings = build_teams_runtime(db_factory).settings
+    settings.support = SupportSettings(teams_escalation_channel_id=OPS)
+    await change_feature(
+        db_factory,
+        settings,
+        FeatureActor(TENANT, None, "web", None, admin_for),
+        key="support_escalation",
+        tier="agent",
+        value="off",
+        place=FeaturePlace.of(TENANT, "teams", None, agent_id="agent_off"),
+    )
+
+
+async def test_ask_a_human_is_unavailable_when_the_conversations_agent_turned_it_off(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    await _agent_off(db_session_factory, CONVERSATION_ID)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        opened = await post_activity(service, _ask("open"))
+        sent = await post_activity(service, _ask("send", message="m-7", note="wrong totals"))
+        await _delivered(service)
+
+    assert support.UNAVAILABLE in json.dumps(opened), "the form is not shown"
+    assert sent["task"]["value"] == support.UNAVAILABLE, "a late send is refused again"
+    assert await _rows(db_session_factory) == [] and _posts_to(teams_api_fake, OPS) == []
 
 
 async def test_ask_a_human_twice_on_one_answer_spends_one_credit(

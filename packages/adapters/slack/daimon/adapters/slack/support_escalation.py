@@ -340,14 +340,17 @@ async def _decide_click(
     )
 
 
-async def _escalation_offered(runtime: SlackRuntime, team_id: str, thread_ts: str) -> bool:
-    """Whether `support_escalation` is on for the agent of the thread, else the workspace."""
+async def _escalation_offered(
+    runtime: SlackRuntime, team_id: str, thread_ts: str, post: tuple[str, str]
+) -> bool:
+    """Whether `support_escalation` is on for the answer's agent, else the workspace."""
     return await support_offered(
         runtime.sessionmaker,
         runtime.settings,
         tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
         platform="slack",
         thread_id=thread_ts,
+        post=post,
     )
 
 
@@ -386,7 +389,7 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
 
     support = runtime.settings.support
     if not slack_support_enabled(support) or not await _escalation_offered(
-        runtime, team_id, thread_ts
+        runtime, team_id, thread_ts, (channel_id, message_ts)
     ):
         log.info("support.disabled", platform="slack")
         await post_ephemeral(
@@ -482,7 +485,9 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
     if (
         dest_channel is None
         or not slack_support_enabled(support)
-        or not await _escalation_offered(runtime, s.team_id, s.thread_ts)
+        or not await _escalation_offered(
+            runtime, s.team_id, s.thread_ts, (s.channel_id, s.message_ts)
+        )
     ):
         # Disabled between the click and the submit. Nothing is spent.
         await reply(UNAVAILABLE)

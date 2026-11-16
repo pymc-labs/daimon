@@ -404,6 +404,7 @@ class FeedbackReactionCog(commands.Cog):
             tenant_id=tenant_id,
             platform="discord",
             thread_id=str(payload.channel_id),
+            post=(str(payload.channel_id), str(payload.message_id)),
         )
         if not offered or not is_enabled(
             channel_id=discord_channel(settings.support), allowance=allowance
