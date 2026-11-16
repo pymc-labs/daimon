@@ -9,21 +9,15 @@ hashed the same way (`desired_snapshot`). A platform with no chat (the CLI, a
 headless run without one) runs the agent's own prompt.
 
 A variant swaps known passages of the shipped prompt (`defaults/agents/daimon.yaml`
-and `agent_guidance`) for wording that names only its platform. It then fails
-closed: any line that still names one of the other two platforms, because the
-prompt drifted or a tenant edited it, is dropped.
+and `agent_guidance`) for wording that names only its platform. Every other line,
+including one a tenant wrote that names another chat app, is kept as it is.
 """
 
 from __future__ import annotations
 
-import re
-
-import structlog
 from daimon.core.context_prompt import FRAGMENT_MARKER
 from daimon.core.platform_words import works_in_sentence
 from daimon.core.stores.domain import CHAT_PLATFORMS, ChatPlatform
-
-log = structlog.get_logger(__name__)
 
 _PLATFORMS = CHAT_PLATFORMS
 
@@ -164,11 +158,6 @@ def _swaps(platform: ChatPlatform) -> tuple[tuple[str, str], ...]:
     )
 
 
-def _names_another_platform(platform: str) -> re.Pattern[str]:
-    others = "|".join(p for p in _PLATFORMS if p != platform)
-    return re.compile(rf"\b({others})\b", re.IGNORECASE)
-
-
 def system_for_platform(system: str | None, platform: str | None) -> str | None:
     """The prompt to send for this platform's session instead of the agent's own.
 
@@ -177,16 +166,10 @@ def system_for_platform(system: str | None, platform: str | None) -> str | None:
     if system is None or platform not in _PLATFORMS:
         return None
     # Tenant context fragments follow the marker as one JSON line `context_prompt` decodes:
-    # they are configuration, not prompt, so neither the swaps nor the line drop touch them.
+    # they are configuration, not prompt, so the swaps do not touch them.
     prompt, marker, fragments = system.partition(FRAGMENT_MARKER)
     variant = prompt
     for shipped, own in _swaps(platform):
         variant = variant.replace(shipped, own)
-    foreign = _names_another_platform(platform)
-    lines = variant.split("\n")
-    kept = [line for line in lines if not foreign.search(line)]
-    if len(kept) != len(lines):
-        log.warning("system_prompt.lines_dropped", platform=platform, count=len(lines) - len(kept))
-        variant = "\n".join(kept)
     variant += marker + fragments
     return None if variant == system else variant

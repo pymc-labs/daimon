@@ -1,8 +1,8 @@
 """Each chat platform's session runs a system prompt that names no other platform.
 
 The shipped prompt covers all three, so every session runs its platform's variant,
-sent as the session's own override. A prompt that drifted or was edited still never
-shows another platform's name: the variant drops the lines that do.
+sent as the session's own override. Lines a tenant wrote are kept, even when they
+name another chat app.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ import re
 from pathlib import Path
 
 import pytest
-import structlog
 import yaml
 from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.context_prompt import (
@@ -104,32 +103,15 @@ def test_a_prompt_without_a_chat_platform_stays_the_agents_own(platform: str | N
 
 
 @pytest.mark.parametrize("platform", _PLATFORMS)
-def test_a_drifted_formatting_passage_still_names_no_other_platform(platform: str) -> None:
-    system = _shipped_system()
-    drifted = system.replace("a CommonMark subset", "a CommonMark subsets", 1)
-    assert drifted != system
+def test_a_custom_line_naming_another_platform_is_kept(platform: str) -> None:
+    other = next(p for p in _PLATFORMS if p != platform).capitalize()
+    line = f"Post the summary in {other}."
 
-    with structlog.testing.capture_logs() as logs:
-        variant = system_for_platform(drifted, platform)
-
-    assert variant is not None
-    assert _others(platform).search(variant) is None
-    assert [log["platform"] for log in logs if log["event"] == "system_prompt.lines_dropped"], (
-        "the lines it dropped are logged"
-    )
-    for entry in logs:
-        assert set(entry) <= {"event", "log_level", "platform", "count"}, "a count, never text"
-
-
-@pytest.mark.parametrize("platform", _PLATFORMS)
-def test_a_custom_line_naming_another_platform_is_dropped_and_nothing_else(platform: str) -> None:
-    other = next(p for p in _PLATFORMS if p != platform)
-    own = platform.capitalize()
-    custom = f"You are a research agent.\nAnswer {other.capitalize()} questions first.\nBe brief on {own}.\n"
-
-    variant = system_for_platform(custom, platform)
-
-    assert variant == f"You are a research agent.\nBe brief on {own}.\n"
+    assert system_for_platform(f"You are a research agent.\n{line}\n", platform) is None
+    swapped = system_for_platform(f"{line}\nReply {SHIPPED_PASSAGES[0]}\n", platform)
+    assert swapped is not None
+    assert swapped.startswith(f"{line}\n"), "the swap leaves the tenant's line alone"
+    assert SHIPPED_PASSAGES[0] not in swapped
 
 
 @pytest.mark.parametrize("platform", _PLATFORMS)
@@ -177,7 +159,6 @@ def test_tenant_context_fragments_survive_whatever_they_name(platform: str) -> N
     assert variant.endswith(
         system.partition(FRAGMENT_MARKER)[1] + system.partition(FRAGMENT_MARKER)[2]
     )
-    assert _others(platform).search(variant.partition(FRAGMENT_MARKER)[0]) is None
     routine = context_prompt("routine", system=variant)
     assert f"Post the summary to {other} first." in routine
     assert DEFAULT_FRAGMENTS["routine"] in routine, "an extend fragment keeps the default"
