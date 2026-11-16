@@ -567,18 +567,15 @@ _DM_REASONS: Final[dict[str, tuple[str, ...]]] = {
 }
 
 
-def render_fallback_dm(
-    row: RoutineRow, reason: str, *, platform: str | None = None, keep_names: bool = False
-) -> str:
+def render_fallback_dm(row: RoutineRow, reason: str, *, platform: str | None = None) -> str:
     """The direct message sent to the creator when the destination is unusable.
 
     The agent and schedule first, then why the result is here, then the result,
-    which on a chat `platform` never names another chat app unless `keep_names`.
+    which on a chat `platform` never names another chat app: a DM is not the place
+    the routine's setting was read for.
     """
     schedule = schedule_words(row.cron_expr, row.timezone)
-    payload = scrub_other_platforms(
-        decode_payload(payload_for(row)).text.strip(), None if keep_names else platform
-    )
+    payload = scrub_other_platforms(decode_payload(payload_for(row)).text.strip(), platform)
     if row.delivery_note == FAILURE_NOTICE:
         why: tuple[str, ...] = ("Your routine failed, so there's no result this time.",)
     else:

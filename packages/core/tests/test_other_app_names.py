@@ -168,8 +168,7 @@ def test_a_routine_post_keeps_the_names_and_the_link_when_told_to() -> None:
     kept = render_fallback_post(row, platform="discord", keep_names=True)
     assert SAID in kept
     assert SCRUBBED in render_fallback_post(row, platform="discord")
-    assert SAID in render_fallback_dm(row, "gone", platform="discord", keep_names=True)
-    assert SCRUBBED in render_fallback_dm(row, "gone", platform="discord")
+    assert SCRUBBED in render_fallback_dm(row, "gone", platform="discord"), "a DM always scrubs"
 
 
 def test_a_routine_run_is_not_told_to_hide_other_apps_when_it_keeps_them() -> None:

@@ -102,13 +102,8 @@ async def _dm_fallback(
                 sessionmaker,
                 tenant_id=row.tenant_id,
                 platform="slack",
-                text=render_fallback_dm(
-                    row,
-                    reason,
-                    platform="slack",
-                    keep_names=sessionmaker is not None
-                    and await routine_keeps_names(sessionmaker, settings, row, "slack"),
-                ),
+                # The DM is another place than the routine's: the scrub stays.
+                text=render_fallback_dm(row, reason, platform="slack"),
             )
         )
         for chunk in split_fenced(text, 11800, word_boundary=True):

@@ -354,9 +354,8 @@ def make_discord_routine_poster(
                 await _untagged(
                     sessionmaker,
                     row,
-                    render_fallback_dm(
-                        row, reason, platform="discord", keep_names=await keeps_names(row)
-                    ),
+                    # The DM is another place than the routine's: the scrub stays.
+                    render_fallback_dm(row, reason, platform="discord"),
                 ),
                 _DISCORD_MAX_CHARS,
                 word_boundary=True,
