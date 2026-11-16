@@ -4307,15 +4307,23 @@ async def test_routine_fires_role_gated_agent_for_owner_holding_the_role(
 
 
 class _FakeDiscordRest:
-    def __init__(self, *, accepts: bool = True) -> None:
+    def __init__(self, *, accepts: bool = True, reads_roles: bool = True) -> None:
         self.accepts = accepts
+        self.reads_roles = reads_roles
         self.sent: list[tuple[str, str]] = []
 
-    async def send_dm(self, user_id: str, text: str) -> bool:
+    async def send_dm(self, user_id: str, text: str) -> None:
+        from daimon.core.discord_dm import DiscordRestError
+
         self.sent.append((user_id, text))
-        return self.accepts
+        if not self.accepts:
+            raise DiscordRestError("POST users/@me/channels: HTTP 403")
 
     async def role_names(self, guild_id: str) -> dict[str, str]:
+        from daimon.core.discord_dm import DiscordRestError
+
+        if not self.reads_roles:
+            raise DiscordRestError("GET guilds/roles: HTTP 500")
         return {"123": "Staff"}
 
 
@@ -4355,12 +4363,32 @@ async def test_lapsed_role_still_pauses_when_the_dm_cannot_be_sent(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A refused DM is logged with the routine; the pause stands."""
+    from structlog.testing import capture_logs
+
     rest = _FakeDiscordRest(accepts=False)
+    with capture_logs() as logs:
+        after, _ = await _role_gated_fire(
+            db_session, db_session_factory, monkeypatch, _lapsed(()), discord_rest=rest
+        )
+    assert after.enabled is False, "the routine is paused even though the DM failed"
+    assert len(rest.sent) == 1, "the DM was tried once"
+    failed = [e for e in logs if e["event"] == "routine.lapsed_role_dm_failed"]
+    assert [e["routine_id"] for e in failed] == [str(after.id)], "the failure names the routine"
+
+
+async def test_lapsed_role_dm_names_roles_by_id_when_names_are_unreadable(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rest = _FakeDiscordRest(reads_roles=False)
     after, _ = await _role_gated_fire(
         db_session, db_session_factory, monkeypatch, _lapsed(()), discord_rest=rest
     )
     assert after.enabled is False
-    assert len(rest.sent) == 1
+    ((_, text),) = rest.sent
+    assert "123" in text and "Staff" not in text, "the role id stands in for its name"
 
 
 async def test_lapsed_role_pauses_without_a_dm_when_dms_are_disabled_or_unavailable(
@@ -4416,7 +4444,7 @@ async def test_the_dm_is_sent_only_after_the_pause_commits(
     class _Rest(_FakeDiscordRest):
         committed_when_sent = 0
 
-        async def send_dm(self, user_id: str, text_: str) -> bool:
+        async def send_dm(self, user_id: str, text_: str) -> None:
             async with db_session_factory() as other:  # a separate connection sees commits only
                 self.committed_when_sent = (
                     await other.scalar(

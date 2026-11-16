@@ -65,7 +65,7 @@ from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_routine
-from daimon.core.discord_dm import DiscordRest
+from daimon.core.discord_dm import DiscordRest, DiscordRestError
 from daimon.core.discord_membership import DiscordRestMembershipResolver
 from daimon.core.github_app_session import (
     GitHubTokenMintUnavailable,
@@ -442,8 +442,8 @@ async def _build_fire(
         """Pause a routine whose owner lost a role its agent needs, and tell the owner once.
 
         The pause is fenced on the claimed row, so only one fire wins it and later
-        fires never run. The DM is best effort: when it cannot be sent, the routine
-        is still paused. It is queued on `notices` and sent by `_fire` only after
+        fires never run. When the DM cannot be sent the routine is still paused and
+        the failure is logged. It is queued on `notices` and sent by `_fire` only after
         the pause commits, outside the transaction.
         """
         if not await pause_for_lapsed_role(s, row, error=OWNER_LACKS_ROLE_ERROR):
@@ -470,16 +470,26 @@ async def _build_fire(
         rest = discord_rest
 
         async def notify() -> None:
-            role_names = await rest.role_names(guild_id) if guild_id else {}
-            await rest.send_dm(
-                owner,
-                lapsed_role_text(
-                    row,
-                    tuple(
-                        tuple(role_names.get(rid, rid) for rid in required) for required in unmet
+            role_names: dict[str, str] = {}
+            try:
+                role_names = await rest.role_names(guild_id) if guild_id else {}
+            except DiscordRestError as exc:
+                # The notice still goes out, naming the roles by id.
+                log.info("routine.role_names_unread", routine_id=str(row.id), error=str(exc))
+            try:
+                await rest.send_dm(
+                    owner,
+                    lapsed_role_text(
+                        row,
+                        tuple(
+                            tuple(role_names.get(rid, rid) for rid in required)
+                            for required in unmet
+                        ),
                     ),
-                ),
-            )
+                )
+            except DiscordRestError as exc:
+                # The routine stays paused; the panel shows why.
+                log.warning("routine.lapsed_role_dm_failed", routine_id=str(row.id), error=str(exc))
 
         notices.append(notify)
 
