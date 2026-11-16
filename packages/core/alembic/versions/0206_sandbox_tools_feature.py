@@ -1,14 +1,13 @@
 """sandbox_tools_feature: built-in sandbox tools become the `routine_sandbox_tools` feature.
 
 `feature_values` gains the `routine` tier (`routine_id`, deleted with its routine), the
-most specific for a routine's runs; it takes no lock. `sandbox_pins` records what an On
+most specific for a routine's runs; it takes no lock. Its `pin` keeps what a pinned On
 covers: the agent id and environment name at the agent tier, the agent version and
 environment revision at the routine tier. Each routine opt-in moves to a routine-tier On
 with its pin, and its history to `channel_changes`; DM routines never ran built-ins, so
-theirs are dropped.
-The routine columns and `routine_sandbox_history` go. `system` joins both surface
-checks for changes Daimon makes itself. Downgrading restores routine opt-ins and their
-history and drops agent opt-ins, routine Offs and the pins.
+theirs are dropped. The routine columns and `routine_sandbox_history` go. `system` joins
+both surface checks for changes Daimon makes itself. Downgrading restores routine opt-ins
+and their history and drops agent opt-ins and routine Offs.
 
 downgrade: destructive
 """
@@ -86,40 +85,7 @@ def upgrade() -> None:
     )
     _place_index("tier NOT IN ('thread', 'routine')")
     _change_surfaces("'web', 'chat', 'panel', 'cli', 'system'")
-    op.create_table(
-        "sandbox_pins",
-        sa.Column("id", sa.BigInteger(), sa.Identity(), primary_key=True),
-        sa.Column("tenant_id", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("tier", sa.Text(), nullable=False),
-        sa.Column("agent_id", sa.Text(), nullable=False),
-        sa.Column("routine_id", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("environment_name", sa.Text(), nullable=True),
-        sa.Column("agent_version", sa.Integer(), nullable=True),
-        sa.Column("environment_id", sa.Text(), nullable=True),
-        sa.Column("environment_updated_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column(
-            "set_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
-        ),
-        sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["routine_id"], ["routines.id"], ondelete="CASCADE"),
-        sa.CheckConstraint(
-            "(tier = 'agent' AND routine_id IS NULL AND environment_name IS NOT NULL"
-            " AND agent_version IS NULL AND environment_id IS NULL"
-            " AND environment_updated_at IS NULL)"
-            " OR (tier = 'routine' AND routine_id IS NOT NULL AND environment_name IS NULL"
-            " AND agent_version IS NOT NULL AND environment_id IS NOT NULL"
-            " AND environment_updated_at IS NOT NULL)",
-            name="ck_sandbox_pins_shape",
-        ),
-    )
-    for tier, column in (("agent", "agent_id"), ("routine", "routine_id")):
-        op.create_index(
-            f"uq_sandbox_pins_{tier}",
-            "sandbox_pins",
-            ["tenant_id", column],
-            unique=True,
-            postgresql_where=sa.text(f"tier = '{tier}'"),
-        )
+    op.add_column("feature_values", sa.Column("pin", postgresql.JSONB(), nullable=True))
     # An opt-in without a full pin never ran built-ins, so it is not carried over.
     opted_in = (
         "sandbox_tools_enabled AND sandbox_agent_id IS NOT NULL"
@@ -128,16 +94,10 @@ def upgrade() -> None:
         " AND destination_kind IS DISTINCT FROM 'dm'"
     )
     op.execute(
-        "INSERT INTO feature_values (tenant_id, tier, routine_id, key, value, surface, set_at)"
-        f" SELECT tenant_id, 'routine', id, '{_KEY}', 'on', 'migration',"
-        f" coalesce(sandbox_tools_set_at, now()) FROM routines WHERE {opted_in}"
-    )
-    op.execute(
-        "INSERT INTO sandbox_pins (tenant_id, tier, agent_id, routine_id, agent_version,"
-        " environment_id, environment_updated_at, set_at)"
-        " SELECT tenant_id, 'routine', sandbox_agent_id, id, sandbox_agent_version,"
-        " sandbox_environment_id, sandbox_environment_updated_at,"
-        f" coalesce(sandbox_tools_set_at, now()) FROM routines WHERE {opted_in}"
+        "INSERT INTO feature_values (tenant_id, tier, routine_id, key, value, pin, surface,"
+        f" set_at) SELECT tenant_id, 'routine', id, '{_KEY}', 'on',"
+        f" {_PIN_JSON.format(p='sandbox_')}, 'migration', coalesce(sandbox_tools_set_at, now())"
+        f" FROM routines WHERE {opted_in}"
     )
     # The old Off meant no opt-in, which is the new inherited value: a null side.
     op.execute(
@@ -206,13 +166,12 @@ def downgrade() -> None:
     op.execute(
         "UPDATE routines r SET sandbox_tools_enabled = true,"
         " sandbox_tools_set_by = coalesce(f.set_by::text, f.surface),"
-        " sandbox_tools_set_at = f.set_at, sandbox_agent_id = p.agent_id,"
-        " sandbox_agent_version = p.agent_version, sandbox_environment_id = p.environment_id,"
-        " sandbox_environment_updated_at = p.environment_updated_at"
-        " FROM feature_values f JOIN sandbox_pins p ON p.tenant_id = f.tenant_id"
-        " AND p.tier = 'routine' AND p.routine_id = f.routine_id"
-        f" WHERE f.tier = 'routine' AND f.key = '{_KEY}' AND f.value = 'on'"
-        " AND r.tenant_id = f.tenant_id AND r.id = f.routine_id"
+        " sandbox_tools_set_at = f.set_at, sandbox_agent_id = f.pin->>'agent_id',"
+        " sandbox_agent_version = (f.pin->>'agent_version')::int,"
+        " sandbox_environment_id = f.pin->>'environment_id',"
+        " sandbox_environment_updated_at = (f.pin->>'environment_updated_at')::timestamptz"
+        f" FROM feature_values f WHERE f.tier = 'routine' AND f.key = '{_KEY}'"
+        " AND f.value = 'on' AND f.pin IS NOT NULL AND r.id = f.routine_id"
     )
     op.execute(
         "INSERT INTO routine_sandbox_history (tenant_id, routine_id, before_enabled,"
@@ -232,7 +191,6 @@ def downgrade() -> None:
     op.execute(f"DELETE FROM channel_changes WHERE setting = '{_KEY}' OR surface = 'system'")
     op.execute(f"DELETE FROM feature_values WHERE tier = 'routine' OR key = '{_KEY}'")
     op.execute("DELETE FROM feature_values WHERE surface = 'system'")
-    op.drop_table("sandbox_pins")
     _change_surfaces("'web', 'chat', 'panel', 'cli'")
     _place_index("tier <> 'thread'")
     _feature_checks(
@@ -240,4 +198,5 @@ def downgrade() -> None:
         "'web', 'chat', 'panel', 'cli', 'spec', 'migration'",
         "'thread'",
     )
+    op.drop_column("feature_values", "pin")
     op.drop_column("feature_values", "routine_id")

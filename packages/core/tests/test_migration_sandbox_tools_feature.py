@@ -1,6 +1,7 @@
 """Migration 0206: routine sandbox opt-ins move into the feature system and back."""
 
 import importlib.util
+from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
 
@@ -14,7 +15,7 @@ from daimon.testing.factories import make_tenant
 from sqlalchemy import Connection, inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-_TABLES = ("feature_values", "sandbox_pins", "channel_changes", "routines")
+_TABLES = ("feature_values", "channel_changes", "routines")
 # public is on the test search_path and may hold stale tables, so look in ours only.
 _HISTORY_TABLE = (
     "SELECT count(*) FROM information_schema.tables"
@@ -92,9 +93,10 @@ async def test_opt_ins_and_history_move_to_the_routine_tier_and_back(
                 " WHERE key = 'routine_sandbox_tools'",
             ) == [("routine", pinned, "on", "migration")], "only the pinned opt-in moves"  # fmt: skip
             assert _rows(
-                sync, "SELECT tier, agent_id, routine_id::text, agent_version, environment_id"
-                " FROM sandbox_pins",
-            ) == [("routine", "agent_a", pinned, 3, "env_1")], "with its pin"  # fmt: skip
+                sync, "SELECT pin ->> 'agent_id', (pin ->> 'agent_version')::int,"
+                " pin ->> 'environment_id', (pin ->> 'environment_updated_at')::timestamptz"
+                " FROM feature_values WHERE key = 'routine_sandbox_tools'",
+            ) == [("agent_a", 3, "env_1", datetime(2026, 10, 1, tzinfo=UTC))], "with its pin"  # fmt: skip
             history = _rows(
                 sync, "SELECT surface, before ->> 'value', after -> 'pin' ->> 'agent_version'"
                 " FROM channel_changes WHERE setting = 'routine_sandbox_tools' ORDER BY at",

@@ -3893,7 +3893,7 @@ async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
 
     from daimon.core.features.service import FeatureActor
     from daimon.core.routine_files import decode_payload
-    from daimon.core.routine_sandbox import change_routine_sandbox, own_opt_in, routine_place
+    from daimon.core.routine_sandbox import change_sandbox, own_opt_in, routine_place
     from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
     from daimon.core.stores.domain import SandboxPin
     from daimon.testing.ma import MARouter
@@ -3938,9 +3938,8 @@ async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
 
         actor = FeatureActor(tenant.id, None, "cli", None, _admin)
         settings = _make_test_settings(monkeypatch)
-        await change_routine_sandbox(
-            db_session_factory, settings, actor, row, platform="slack", value="on", pin=pin
-        )
+        place = routine_place(row, "slack")
+        await change_sandbox(db_session_factory, settings, actor, place, value="on", pin=pin)
     router = MARouter()
     snapshot = ma_session(id="ses_output", agent_id="ag", environment_id="env").model_dump(
         mode="json"
@@ -4101,7 +4100,7 @@ async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
     # A drifted opt-in is cleared, by the fire, without touching the run's result.
     kept = ("on", pin) if sandbox == "opted_in" else (None, None)
     place = routine_place(after, "slack")
-    assert await own_opt_in(db_session_factory, place, "routine") == kept, "drift clears"
+    assert await own_opt_in(db_session_factory, place) == kept, "drift clears"
     if sandbox in ("agent_changed", "environment_changed"):
         async with db_session_factory() as session:
             [last, *_] = await list_changes(session, tenant_id=tenant.id, channel_id=WORKSPACE_ID)

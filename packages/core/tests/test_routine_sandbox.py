@@ -7,12 +7,12 @@ from typing import Any
 
 import httpx
 import pytest
+from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import create_owned_environment
 from daimon.core.routine_sandbox import (
     AgentSandboxPin,
     SandboxPin,
-    SandboxPinUnavailable,
     current_agent_pin,
     current_pin,
     run_matches_pin,
@@ -94,7 +94,7 @@ async def test_current_pin_refuses_an_archived_agent(db_session, db_session_fact
     )
     await db_session.commit()
 
-    with pytest.raises(SandboxPinUnavailable):
+    with pytest.raises(ChannelChangeRefused):
         await current_pin(
             _client(tenant.id, archived=datetime(2026, 10, 3, tzinfo=UTC)),
             db_session_factory,
@@ -253,7 +253,7 @@ async def test_current_agent_pin_names_the_agent_and_the_default_environment(
         default=DeploymentDefault(),
     )
     assert pin == AgentSandboxPin("ag", "default")
-    with pytest.raises(SandboxPinUnavailable):
+    with pytest.raises(ChannelChangeRefused):
         await current_agent_pin(
             client,
             db_session_factory,

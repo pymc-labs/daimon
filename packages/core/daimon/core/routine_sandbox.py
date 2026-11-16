@@ -1,15 +1,16 @@
 """Built-in sandbox tools for a routine's runs: the `routine_sandbox_tools` feature.
 
 It resolves for the routine like any feature, so a routine's own value beats its
-agent's unless a tier above locks it. An On holds only with the pin of the tier
-that decided it (`sandbox_pins`): a routine's pins the agent version and the
-environment revision, an agent's pins the agent id and the environment's name.
+agent's unless a tier above locks it. An On holds only with the pin kept on the row
+that decided it: a routine's pins the agent version and the environment revision, an
+agent's pins the agent id and the environment's name.
 Any mismatch, or a missing pin, keeps built-ins off, so a provider or environment
 change needs a new opt-in. `unattended_capabilities` off still wins.
 
 `current_pin` and `current_agent_pin` read what an opt-in would pin now (an
-unreadable one refuses it); `routine_sandbox` hands the deciding pin to the
-headless runner, which checks it against the run's own session (`run_matches_pin`).
+unreadable one refuses it) for `change_sandbox`; `routine_sandbox` hands the deciding
+pin to the headless runner, which checks it against the run's own session
+(`run_matches_pin`).
 """
 
 from __future__ import annotations
@@ -38,14 +39,17 @@ from daimon.core.mux_compat import retrieve_agent, retrieve_environment
 from daimon.core.rule_views import routine_destination_channel
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.domain import (
+    SANDBOX_KEY,
     AgentSandboxPin,
     AnySandboxPin,
     FeatureTarget,
+    FeatureValueRow,
+    PinnedTier,
     RoutineRow,
     SandboxPin,
+    stored_pin,
 )
-from daimon.core.stores.feature_values import get_feature_value
-from daimon.core.stores.sandbox_pins import SANDBOX_KEY, PinnedTier, list_sandbox_pins, sandbox_pin
+from daimon.core.stores.feature_values import get_feature_value, list_feature_values
 from daimon.core.stores.scoped_config_read import resolve
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -56,16 +60,13 @@ __all__ = [
     "AgentSandboxPin",
     "RoutineSandbox",
     "SandboxPin",
-    "SandboxPinUnavailable",
     "builtins_allowed",
-    "change_agent_sandbox",
-    "change_routine_sandbox",
+    "change_sandbox",
     "clear_agent_opt_ins",
     "current_agent_pin",
     "current_pin",
     "opted_in_by",
     "own_opt_in",
-    "routine_opt_in_pin",
     "routine_place",
     "routine_sandbox",
     "run_matches_pin",
@@ -78,13 +79,16 @@ DM_SANDBOX_REFUSAL = (
     "conversation. An operator can turn them on for the agent. Nothing was changed."
 )
 PIN_UNAVAILABLE_REFUSAL = (
-    "Can't read the routine's agent version or environment, so sandbox tools can't be "
-    "turned on for it. Nothing was changed."
+    "Can't read the {what} or its environment, so sandbox tools can't be turned on for "
+    "it. Nothing was changed."
 )
 
 
-class SandboxPinUnavailable(Exception):
-    """The routine's agent or environment cannot be read, so nothing can be pinned."""
+def _unavailable(what: str, reason: str) -> ChannelChangeRefused:
+    log.warning("routine.sandbox_pin_unavailable", what=what, reason=reason)
+    return ChannelChangeRefused(
+        PIN_UNAVAILABLE_REFUSAL.format(what=what), kind="invalid", reason="pin_unavailable"
+    )
 
 
 @dataclass(frozen=True)
@@ -108,12 +112,15 @@ async def current_pin(
     *,
     default: DeploymentDefault,
 ) -> SandboxPin:
-    """The agent version and environment the routine would run with now.
+    """What a routine's own On would pin now: its agent's version and the environment its
+    channel resolves to, as the scheduler resolves it at fire time.
 
-    The agent is the routine's own; the environment is the one its channel
-    resolves to, as the scheduler resolves it at fire time. Raises
-    `SandboxPinUnavailable` when either is archived, missing or unreadable.
+    Raises `ChannelChangeRefused` for a DM routine, which runs as its owner's private
+    conversation and takes no On of its own, or when either is archived, missing or
+    unreadable.
     """
+    if row.destination_kind == "dm":
+        raise ChannelChangeRefused(DM_SANDBOX_REFUSAL, kind="invalid", reason="dm_routine")
     scope = resource_scope(tenant_id=str(row.tenant_id))
     try:
         agent = await retrieve_agent(client, row.agent_id, scope=scope, records=session_factory)
@@ -133,9 +140,9 @@ async def current_pin(
             records=session_factory,
         )
     except Exception as exc:  # any read failure refuses the opt-in
-        raise SandboxPinUnavailable(str(exc)) from exc
+        raise _unavailable("routine's agent", str(exc)) from exc
     if agent.archived_at is not None or environment is None:
-        raise SandboxPinUnavailable("the routine's agent or environment is not live")
+        raise _unavailable("routine's agent", "not live")
     return SandboxPin(
         agent_id=agent.id,
         agent_version=agent.version,
@@ -156,8 +163,8 @@ async def current_agent_pin(
     """The agent and environment an operator's opt-in would name now.
 
     Without `environment_name` it is the workspace's default environment, as a
-    routine without a channel setting resolves it. Raises `SandboxPinUnavailable`
-    when either is archived, missing or unreadable.
+    routine without a channel setting resolves it. Raises `ChannelChangeRefused` when
+    either is archived, missing or unreadable.
     """
     try:
         agent = await find_agent_by_daimon_tag(
@@ -175,9 +182,9 @@ async def current_agent_pin(
             client, tenant_id=tenant_id, name=environment_name, records=session_factory
         )
     except Exception as exc:  # any read failure refuses the opt-in
-        raise SandboxPinUnavailable(str(exc)) from exc
+        raise _unavailable(f"agent {agent_name}", str(exc)) from exc
     if agent is None or agent.archived_at is not None or environment is None:
-        raise SandboxPinUnavailable("the agent or environment is not live")
+        raise _unavailable(f"agent {agent_name}", "not live")
     return AgentSandboxPin(agent_id=agent.id, environment_name=environment_name)
 
 
@@ -271,100 +278,68 @@ def routine_place(row: RoutineRow, platform: str) -> FeaturePlace:
     )
 
 
-async def opted_in_by(session: AsyncSession, row: RoutineRow, platform: str) -> PinnedTier | None:
-    """Whose pinned On the routine runs under, its own or its agent's; None when off.
-    What every surface shows; each run also checks the pin still matches (`routine_sandbox`)."""
-    found = await feature_in(session, None, routine_place(row, platform), SANDBOX_KEY)
+async def _deciding(
+    session: AsyncSession, settings: Settings | None, row: RoutineRow, platform: str
+) -> FeatureValueRow | None:
+    """The agent's or the routine's own row when it decides an On for the routine."""
+    place = routine_place(row, platform)
+    found = await feature_in(session, settings, place, "routine_sandbox_tools")
     if not found.on or found.tier not in ("agent", "routine"):
         return None
     tier: PinnedTier = "agent" if found.tier == "agent" else "routine"
-    key = row.agent_id if tier == "agent" else str(row.id)
-    pinned = await sandbox_pin(session, tenant_id=row.tenant_id, tier=tier, key=key)
-    return None if pinned is None else tier
+    target = FeatureTarget(tier, agent_id=row.agent_id, routine_id=row.id)
+    return await get_feature_value(session, tenant_id=row.tenant_id, target=target, key=SANDBOX_KEY)
+
+
+async def opted_in_by(session: AsyncSession, row: RoutineRow, platform: str) -> PinnedTier | None:
+    """Whose pinned On the routine runs under, its own or its agent's; None when off.
+    What every surface shows; each run also checks the pin still matches (`routine_sandbox`)."""
+    found = await _deciding(session, None, row, platform)
+    if found is None or found.pin is None:
+        return None
+    return "agent" if found.tier == "agent" else "routine"
 
 
 async def own_opt_in(
-    sessions: async_sessionmaker[AsyncSession], place: FeaturePlace, tier: PinnedTier
+    sessions: async_sessionmaker[AsyncSession], place: FeaturePlace
 ) -> tuple[str | None, AnySandboxPin | None]:
-    """The tier's own `routine_sandbox_tools` value (None when unset) and its pin."""
-    key = place.agent_id if tier == "agent" else str(place.routine_id)
-    assert key, "the place names the agent or routine"
-    target = FeatureTarget(tier, agent_id=place.agent_id, routine_id=place.routine_id)
+    """The own `routine_sandbox_tools` value (None when unset) and pin of the place's routine,
+    or of its agent when it names none."""
+    target = FeatureTarget(
+        "routine" if place.routine_id else "agent",
+        agent_id=place.agent_id,
+        routine_id=place.routine_id,
+    )
     async with sessions() as session:
         found = await get_feature_value(
             session, tenant_id=place.tenant_id, target=target, key=SANDBOX_KEY
         )
-        pin = await sandbox_pin(session, tenant_id=place.tenant_id, tier=tier, key=key)
-    return (found.value if found is not None else None), pin
+    return (None, None) if found is None else (found.value, stored_pin(found))
 
 
-async def routine_opt_in_pin(
-    client: AsyncAnthropic,
-    sessions: async_sessionmaker[AsyncSession],
-    row: RoutineRow,
-    *,
-    value: str,
-    default: DeploymentDefault,
-) -> SandboxPin | None:
-    """The pin a routine's own `value` carries: for On, the agent version and environment
-    it would run with now; nothing otherwise. A DM routine takes no On of its own: it
-    runs as its owner's private conversation."""
-    if value != "on":
-        return None
-    if row.destination_kind == "dm":
-        raise ChannelChangeRefused(DM_SANDBOX_REFUSAL, kind="invalid", reason="dm_routine")
-    try:
-        return await current_pin(client, sessions, row, default=default)
-    except SandboxPinUnavailable as exc:
-        raise ChannelChangeRefused(
-            PIN_UNAVAILABLE_REFUSAL, kind="invalid", reason="pin_unavailable"
-        ) from exc
-
-
-async def change_routine_sandbox(
+async def change_sandbox(
     sessions: async_sessionmaker[AsyncSession],
     settings: Settings,
     actor: FeatureActor,
-    row: RoutineRow,
+    place: FeaturePlace,
     *,
-    platform: str,
     value: str,
-    pin: SandboxPin | None,
+    pin: AnySandboxPin | None,
 ) -> FeatureChange | None:
-    """Set a routine's own `routine_sandbox_tools` (`DEFAULT` clears it) with the pin from
-    `routine_opt_in_pin`; None when it already holds that value and pin."""
-    place = routine_place(row, platform)
-    if await own_opt_in(sessions, place, "routine") == (None if value == DEFAULT else value, pin):
+    """Set the place's routine's own `routine_sandbox_tools`, or its agent's when it names no
+    routine (`DEFAULT` clears it); an On carries the pin from `current_pin` or
+    `current_agent_pin`. None when it already holds that value and pin."""
+    if await own_opt_in(sessions, place) == (None if value == DEFAULT else value, pin):
         return None
     return await change_feature(
         sessions,
         settings,
         actor,
         key=SANDBOX_KEY,
-        tier="routine",
+        tier="routine" if place.routine_id else "agent",
         value=value,
         place=place,
         pin=pin,
-    )
-
-
-async def change_agent_sandbox(
-    sessions: async_sessionmaker[AsyncSession],
-    settings: Settings,
-    actor: FeatureActor,
-    *,
-    agent_id: str,
-    platform: str,
-    value: str,
-    pin: AgentSandboxPin | None,
-) -> FeatureChange | None:
-    """Set an agent's own `routine_sandbox_tools` (`DEFAULT` clears it), an On with the pin
-    from `current_agent_pin`; None when it already holds that value and pin."""
-    place = FeaturePlace.of(actor.tenant_id, platform, None, agent_id=agent_id)
-    if await own_opt_in(sessions, place, "agent") == (None if value == DEFAULT else value, pin):
-        return None
-    return await change_feature(
-        sessions, settings, actor, key=SANDBOX_KEY, tier="agent", value=value, place=place, pin=pin
     )
 
 
@@ -372,19 +347,20 @@ async def clear_agent_opt_ins(session: AsyncSession, *, tenant_id: uuid.UUID, ag
     """Clear the agent's own On and every routine On pinned to it, in the caller's
     transaction, before its rows move to another agent id: an opt-in covers that id only.
     Returns how many it cleared."""
-    cleared = await clear_pinned_on(
-        session, None, tenant_id=tenant_id, key=SANDBOX_KEY, tier="agent", holder=agent_id
-    )
-    for entry in await list_sandbox_pins(session, tenant_id=tenant_id):
-        if entry.tier == "routine" and entry.pin.agent_id == agent_id:
+    cleared = 0
+    for found in await list_feature_values(session, tenant_id=tenant_id, keys=[SANDBOX_KEY]):
+        pinned_to = found.agent_id if found.tier == "agent" else (found.pin or {}).get("agent_id")
+        if found.value == "on" and found.tier in ("agent", "routine") and pinned_to == agent_id:
+            target = FeatureTarget(
+                found.tier, agent_id=found.agent_id or None, routine_id=found.routine_id
+            )
             cleared += await clear_pinned_on(
                 session,
                 None,
                 tenant_id=tenant_id,
                 key=SANDBOX_KEY,
-                tier="routine",
-                holder=entry.key,
-                only_pin=entry.pin,
+                target=target,
+                revision=found.revision,
             )
     return cleared
 
@@ -402,25 +378,23 @@ async def routine_sandbox(
     routine's own On is then cleared, so an admin approves the new agent or environment;
     an agent's is kept, as its other routines may still match.
     """
-    place = routine_place(row, platform)
-    found = await place_guardrail(sessions, settings, place, "routine_sandbox_tools")
-    if not found.on or found.tier not in ("agent", "routine"):
-        return None
-    tier: PinnedTier = "agent" if found.tier == "agent" else "routine"
-    key = row.agent_id if tier == "agent" else str(row.id)
     try:
         async with sessions() as session:
-            pin = await sandbox_pin(session, tenant_id=row.tenant_id, tier=tier, key=key)
+            found = await _deciding(session, settings, row, platform)
+        pin = None if found is None else stored_pin(found)
     except Exception:  # unreadable: no opt-in
-        log.exception("routine.sandbox_pin_unreadable", routine_id=str(row.id), tier=tier)
+        log.exception("routine.sandbox_pin_unreadable", routine_id=str(row.id))
+        return None
+    if found is None:
         return None
     if pin is None:
-        log.warning("routine.sandbox_pin_missing", routine_id=str(row.id), tier=tier)
+        log.warning("routine.sandbox_pin_missing", routine_id=str(row.id), tier=found.tier)
         return None
+    decided = found
 
     async def on_drift() -> None:
-        log.info("routine.sandbox_pin_mismatched", routine_id=str(row.id), tier=tier)
-        if not isinstance(pin, SandboxPin):
+        log.info("routine.sandbox_pin_mismatched", routine_id=str(row.id), tier=decided.tier)
+        if decided.tier != "routine":
             return
         try:
             async with sessions.begin() as session:
@@ -429,9 +403,8 @@ async def routine_sandbox(
                     settings,
                     tenant_id=row.tenant_id,
                     key=SANDBOX_KEY,
-                    tier="routine",
-                    holder=str(row.id),
-                    only_pin=pin,
+                    target=FeatureTarget("routine", routine_id=row.id),
+                    revision=decided.revision,
                 )
         except Exception:  # the run already went ahead without built-ins
             log.exception("routine.sandbox_drift_clear_failed", routine_id=str(row.id))

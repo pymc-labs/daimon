@@ -63,6 +63,7 @@ from daimon.core.stores.domain import (
     ChannelSetting,
     FeatureTarget,
     SandboxPin,
+    pin_json,
 )
 from daimon.core.stores.feature_values import (
     clear_feature_value,
@@ -73,7 +74,6 @@ from daimon.core.stores.feature_values import (
     replace_agent_values,
     set_feature_value,
 )
-from daimon.core.stores.sandbox_pins import PinnedTier, pin_json, put_sandbox_pin, sandbox_pin
 from daimon.core.stores.tenants import get_tenant
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -456,9 +456,7 @@ def _target(tier: Tier, place: FeaturePlace) -> FeatureTarget:
     )
 
 
-def _history(
-    setting: TierSetting, place: FeaturePlace, pin: AnySandboxPin | None = None
-) -> JsonValue:
+def _history(setting: TierSetting, place: FeaturePlace, pin: JsonValue = None) -> JsonValue:
     """A tier's value as `channel_changes` records it; the legacy `disabled` is Off+Lock.
     A pinned On also records what it covers."""
     if setting.value == DEFAULT:
@@ -472,18 +470,9 @@ def _history(
         found = {"routine": str(place.routine_id), "value": value}
     else:
         return value
-    if pin is not None and setting.value == "on":
-        found["pin"] = pin_json(pin)
+    if pin is not None:
+        found["pin"] = pin
     return found
-
-
-def _pin_key(tier: Tier, place: FeaturePlace) -> tuple[PinnedTier, str] | None:
-    """The `sandbox_pins` row a pinned feature's tier keeps: the agent's or the routine's."""
-    if tier == "agent" and place.agent_id:
-        return "agent", place.agent_id
-    if tier == "routine" and place.routine_id:
-        return "routine", str(place.routine_id)
-    return None
 
 
 def _pin_refusal(
@@ -698,6 +687,13 @@ async def _write_in(
     if _loosens(spec, after, above):
         raise _looser_than_above(spec, above, place, tier)
     target = _target(tier, place)
+    pin_before = None
+    if spec.pinned:
+        row = await get_feature_value(
+            session, tenant_id=place.tenant_id, target=target, key=spec.key
+        )
+        pin_before = None if row is None else row.pin
+    pin_after = pin_json(pin) if pin is not None and after.value == "on" else None
     if after.value == DEFAULT:
         await clear_feature_value(session, tenant_id=place.tenant_id, target=target, key=spec.key)
     else:
@@ -710,14 +706,8 @@ async def _write_in(
             locked=after.locked,
             set_by=actor.account_id,
             surface=actor.surface,
+            pin=pin_after,
         )
-    pinned = _pin_key(tier, place) if spec.pinned else None
-    pin_before = None
-    if pinned is not None:
-        tenant_id, (pin_tier, pin_key) = place.tenant_id, pinned
-        pin_before = await sandbox_pin(session, tenant_id=tenant_id, tier=pin_tier, key=pin_key)
-        kept = pin if after.value == "on" else None
-        await put_sandbox_pin(session, tenant_id=tenant_id, tier=pin_tier, key=pin_key, pin=kept)
     await record_change(
         session,
         tenant_id=place.tenant_id,
@@ -727,7 +717,7 @@ async def _write_in(
         else WORKSPACE_ID,
         setting=_THREAD_SETTING.get(spec.key, spec.key) if tier == "thread" else spec.key,
         before=_history(before, place, pin_before),
-        after=_history(after, place, pin),
+        after=_history(after, place, pin_after),
         actor_account_id=actor.account_id,
         surface=actor.surface,
     )
@@ -779,39 +769,32 @@ async def clear_pinned_on(
     *,
     tenant_id: uuid.UUID,
     key: str,
-    tier: PinnedTier,
-    holder: str,
-    only_pin: AnySandboxPin | None = None,
+    target: FeatureTarget,
+    revision: int | None = None,
 ) -> bool:
-    """Clear a pinned feature's On at the agent (`holder` is its id) or a routine (its id)
-    in the caller's transaction, once what it covered changed: an edit, a drift, a move to
-    another agent id. An Off stays. With `only_pin`, only while that is still the tier's
-    pin, so a fresh opt-in is kept. Recorded as a `system` change; returns whether it
-    cleared one."""
+    """Clear a pinned feature's On at an agent or routine `target` in the caller's
+    transaction, once what it covered changed: an edit, a drift, a move to another agent id.
+    An Off stays. With `revision`, only while the value is still that one, so a fresh opt-in
+    is kept. Recorded as a `system` change; returns whether it cleared one."""
     spec = FEATURES[key]
     assert spec.pinned, f"{key} has no pin"
     await lock_tenant(session, tenant_id)
+    found = await get_feature_value(session, tenant_id=tenant_id, target=target, key=key)
+    if found is None or found.value != "on" or revision not in (None, found.revision):
+        return False
     tenant = await get_tenant(session, tenant_id)
     place = FeaturePlace(
         tenant_id,
         "" if tenant is None else tenant.platform,
-        agent_id=holder if tier == "agent" else None,
-        routine_id=uuid.UUID(holder) if tier == "routine" else None,
+        agent_id=target.agent_id,
+        routine_id=target.routine_id,
     )
-    found = await get_feature_value(
-        session, tenant_id=tenant_id, target=_target(tier, place), key=key
-    )
-    if found is None or found.value != "on":
-        return False
-    pin = await sandbox_pin(session, tenant_id=tenant_id, tier=tier, key=holder)
-    if only_pin is not None and pin != only_pin:
-        return False
 
     async def _nobody(_: DelegatedAction | None) -> bool:
         return False
 
     actor = FeatureActor(tenant_id, None, "system", None, _nobody)
-    after = TierSetting(tier, DEFAULT)
+    after = TierSetting(target.tier, DEFAULT)
     await _write_in(session, settings, actor, spec, after, place, None, check_own_lock=False)
     return True
 

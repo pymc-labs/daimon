@@ -68,7 +68,7 @@ from daimon.core.membership_subject import resolve_subject
 from daimon.core.permissions import dm_source_limited
 from daimon.core.routine_delivery import discord_creator_may_post
 from daimon.core.routine_destinations import slack_may_deliver
-from daimon.core.routine_sandbox import change_routine_sandbox, opted_in_by, routine_opt_in_pin
+from daimon.core.routine_sandbox import change_sandbox, current_pin, opted_in_by, routine_place
 from daimon.core.routine_service import (
     CallView,
     ChannelAgentName,
@@ -669,19 +669,18 @@ async def _set_routine_sandbox_tools_impl(
     actor = FeatureActor(auth.tenant_id, auth.account_id, "chat", auth.platform_user_id, admin_for)
     value = "on" if enabled else "off"
     try:
-        pin = await routine_opt_in_pin(
-            runtime.client,
-            runtime.session_factory,
-            row,
-            value=value,
-            default=runtime.deployment_default,
+        pin = (
+            await current_pin(
+                runtime.client, runtime.session_factory, row, default=runtime.deployment_default
+            )
+            if enabled
+            else None
         )
-        await change_routine_sandbox(
+        await change_sandbox(
             runtime.session_factory,
             runtime.settings,
             actor,
-            row,
-            platform=auth.platform or "",
+            routine_place(row, auth.platform or ""),
             value=value,
             pin=pin,
         )

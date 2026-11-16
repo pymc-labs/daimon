@@ -16,7 +16,8 @@ from daimon.adapters.web.channel_visibility import forget_visibility
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.config import DiscordSettings, Settings
 from daimon.core.features.service import FeatureActor
-from daimon.core.routine_sandbox import change_agent_sandbox
+from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.routine_sandbox import change_sandbox
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import platform_names
 from daimon.core.stores import tenants as tenants_store
@@ -382,12 +383,11 @@ async def test_a_routine_shows_its_agent_opt_in_to_sandbox_tools(rig: Rig) -> No
 
     async with rig.open(discord_id="222222222222222222") as (client, ws, _):
         made = (await client.post("/api/routines", json=_NEW | {"dm": True})).json()
-        await change_agent_sandbox(
+        await change_sandbox(
             rig.factory,
             discord_settings(),
             FeatureActor(ws.tenant_id, None, "cli", None, yes),
-            agent_id=AGENT_ID,
-            platform="discord",
+            FeaturePlace(ws.tenant_id, "discord", agent_id=AGENT_ID),
             value="on",
             pin=AgentSandboxPin(AGENT_ID, "default"),
         )

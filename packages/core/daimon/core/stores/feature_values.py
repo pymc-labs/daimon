@@ -1,7 +1,8 @@
 """Async store for `feature_values`: the features set at each tier of each place.
 
-Unused place columns hold '' (`routine_id` NULL); rows come back with them as stored.
-Every write bumps the tenant's `feature_revision`, which keys the resolver's cache.
+Unused place columns hold '' (`routine_id` NULL); rows come back with them as stored. A
+pinned feature's On carries its `pin`, written with the value. Every write bumps the
+tenant's `feature_revision`, which keys the resolver's cache.
 Callers own the transaction; every write ends with `await session.flush()`.
 """
 
@@ -13,6 +14,7 @@ from typing import Any, cast
 
 from daimon.core._models import FeatureValue, Tenant
 from daimon.core.stores.domain import FeatureSurface, FeatureTarget, FeatureValueRow
+from pydantic import JsonValue
 from sqlalchemy import CursorResult, and_, case, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -123,8 +125,10 @@ async def set_feature_value(
     locked: bool = False,
     set_by: uuid.UUID | None,
     surface: FeatureSurface,
+    pin: dict[str, JsonValue] | None = None,
 ) -> FeatureValueRow:
-    """Upsert one tier's value; a thread row keeps its known channel when given none."""
+    """Upsert one tier's value and its pin; a thread row keeps its known channel when given
+    none."""
     agent, channel, thread, routine = _ids(target)
     stmt = pg_insert(FeatureValue).values(
         tenant_id=tenant_id,
@@ -136,6 +140,7 @@ async def set_feature_value(
         key=key,
         value=value,
         locked=locked,
+        pin=pin,
         set_by=set_by,
         surface=surface,
         set_at=func.now(),
@@ -144,6 +149,7 @@ async def set_feature_value(
     changes: dict[str, Any] = {
         "value": excluded.value,
         "locked": excluded.locked,
+        "pin": excluded.pin,
         "set_by": excluded.set_by,
         "surface": excluded.surface,
         "set_at": func.now(),

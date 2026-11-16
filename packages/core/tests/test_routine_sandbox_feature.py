@@ -15,20 +15,25 @@ from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.routine_sandbox import (
     SANDBOX_KEY,
     builtins_allowed,
-    change_agent_sandbox,
-    change_routine_sandbox,
+    change_sandbox,
+    current_pin,
     opted_in_by,
     own_opt_in,
-    routine_opt_in_pin,
     routine_place,
     routine_sandbox,
 )
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
-from daimon.core.stores.domain import AgentSandboxPin, FeatureTarget, RoutineRow, SandboxPin
+from daimon.core.stores.domain import (
+    AgentSandboxPin,
+    FeatureTarget,
+    RoutineRow,
+    SandboxPin,
+    pin_json,
+    stored_pin,
+)
 from daimon.core.stores.feature_values import list_feature_values, set_feature_value
 from daimon.core.stores.routines import create_routine, delete_routine, update_routine
-from daimon.core.stores.sandbox_pins import list_sandbox_pins, pin_json
 from daimon.testing.factories import make_tenant
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -161,7 +166,8 @@ async def test_an_on_needs_a_pin_at_the_agent_or_routine_tier(
     with pytest.raises(ChannelChangeRefused, match="from here"):
         await _set(db_session_factory, row, "workspace", "on", pin=PIN)
     async with db_session_factory() as session:
-        assert await list_sandbox_pins(session, tenant_id=row.tenant_id) == [], "nothing written"
+        written = await list_feature_values(session, tenant_id=row.tenant_id, keys=[SANDBOX_KEY])
+    assert written == [], "nothing written"
 
 
 async def test_an_on_without_its_pin_covers_nothing(
@@ -186,16 +192,13 @@ async def test_each_change_is_recorded_with_its_pin(
     await _set(db_session_factory, row, "routine", "off")
     async with db_session_factory() as session:
         changes = await list_changes(session, tenant_id=row.tenant_id, channel_id=WORKSPACE_ID)
-        pins = await list_sandbox_pins(session, tenant_id=row.tenant_id)
-    on = {"routine": str(row.id), "value": "on", "pin": {
-        "agent_id": "agent_a", "agent_version": 3, "environment_id": "env_1",
-        "environment_updated_at": PIN.environment_updated_at.isoformat(),
-    }}  # fmt: skip
+    on = {"routine": str(row.id), "value": "on", "pin": pin_json(PIN)}
     assert [(c.setting, c.before, c.after, c.surface) for c in reversed(changes)] == [
         (SANDBOX_KEY, None, on, "cli"),
         (SANDBOX_KEY, on, {"routine": str(row.id), "value": "off"}, "cli"),
     ], "each change and its pin"
-    assert pins == [], "an Off drops the pin"
+    place = routine_place(row, "discord")
+    assert await own_opt_in(db_session_factory, place) == ("off", None), "an Off drops the pin"
 
 
 async def test_a_routine_drift_clears_only_the_opt_in_it_ran_under(
@@ -244,12 +247,12 @@ async def test_a_material_edit_clears_the_routine_on_and_a_schedule_edit_keeps_i
         await update_routine(
             session, row.id, tenant_id=row.tenant_id, cron_expr="0 10 * * *", edited_by="owner-1"
         )
-    assert await own_opt_in(db_session_factory, place, "routine") == ("on", PIN), "kept"
+    assert await own_opt_in(db_session_factory, place) == ("on", PIN), "kept"
     async with db_session_factory.begin() as session:
         await update_routine(
             session, row.id, tenant_id=row.tenant_id, trigger_message="new", edited_by="owner-1"
         )
-    assert await own_opt_in(db_session_factory, place, "routine") == (None, None), "cleared"
+    assert await own_opt_in(db_session_factory, place) == (None, None), "cleared"
     async with db_session_factory() as session:
         [last, *_] = await list_changes(session, tenant_id=row.tenant_id, channel_id=WORKSPACE_ID)
     assert (last.after, last.surface) == (None, "system"), "recorded as Daimon's own change"
@@ -271,14 +274,15 @@ async def test_a_provider_move_clears_the_opt_ins_naming_the_old_agent(
     await agent_convert._move_rows(  # pyright: ignore[reportPrivateUsage]
         db_session_factory, tenant_id=row.tenant_id, name="daimon", old_id="agent_a", new_id="dm_x"
     )
-    moved = FeaturePlace(row.tenant_id, "discord", agent_id="dm_x", routine_id=row.id)
-    assert await own_opt_in(db_session_factory, moved, "agent") == (None, None), "not moved"
-    assert await own_opt_in(db_session_factory, moved, "routine") == (None, None), "cleared"
-    assert await own_opt_in(db_session_factory, other, "agent") == ("on", other_pin), "kept"
+    moved = FeaturePlace(row.tenant_id, "discord", agent_id="dm_x")
+    assert await own_opt_in(db_session_factory, moved) == (None, None), "not moved"
+    routine = FeaturePlace(row.tenant_id, "discord", agent_id="dm_x", routine_id=row.id)
+    assert await own_opt_in(db_session_factory, routine) == (None, None), "cleared"
+    assert await own_opt_in(db_session_factory, other) == ("on", other_pin), "kept"
     async with db_session_factory() as session:
-        pins = await list_sandbox_pins(session, tenant_id=row.tenant_id)
+        rows = await list_feature_values(session, tenant_id=row.tenant_id, keys=[SANDBOX_KEY])
         changes = await list_changes(session, tenant_id=row.tenant_id, channel_id=WORKSPACE_ID)
-    assert [entry.pin for entry in pins] == [other_pin], "no pin is left on the old id"
+    assert [stored_pin(found) for found in rows] == [other_pin], "nothing is left on the old id"
     assert [c.surface for c in changes[:2]] == ["system", "system"], "both clears recorded"
 
 
@@ -287,15 +291,7 @@ async def test_a_dm_routine_takes_no_on_of_its_own(db_session: AsyncSession) -> 
     row = (await _routine(db_session)).model_copy(update={"destination_kind": "dm"})
     no_client: Any = None
     with pytest.raises(ChannelChangeRefused, match="DM routines"):
-        await routine_opt_in_pin(
-            no_client, async_sessionmaker(), row, value="on", default=DeploymentDefault()
-        )
-    assert (
-        await routine_opt_in_pin(
-            no_client, async_sessionmaker(), row, value="off", default=DeploymentDefault()
-        )
-        is None
-    ), "an Off needs no pin"
+        await current_pin(no_client, async_sessionmaker(), row, default=DeploymentDefault())
 
 
 async def test_setting_the_same_value_and_pin_again_writes_nothing(
@@ -303,15 +299,11 @@ async def test_setting_the_same_value_and_pin_again_writes_nothing(
 ) -> None:
     """The routine's and the agent's writers are idempotent on their own value and pin."""
     row = await _routine(db_session)
-    write: dict[str, Any] = {"platform": "discord", "value": "on", "pin": PIN}
-    first = await change_routine_sandbox(db_session_factory, SETTINGS, _actor(row), row, **write)
-    again = await change_routine_sandbox(db_session_factory, SETTINGS, _actor(row), row, **write)
-    assert first is not None and again is None, "the second write is a no-op"
-    agent: dict[str, Any] = {"agent_id": "agent_a", "platform": "discord", "value": "on"}
-    first = await change_agent_sandbox(
-        db_session_factory, SETTINGS, _actor(row), **agent, pin=AGENT_PIN
-    )
-    again = await change_agent_sandbox(
-        db_session_factory, SETTINGS, _actor(row), **agent, pin=AGENT_PIN
-    )
-    assert first is not None and again is None, "the same for the agent's own value"
+    for place, pin in (
+        (routine_place(row, "discord"), PIN),
+        (FeaturePlace(row.tenant_id, "discord", agent_id="agent_a"), AGENT_PIN),
+    ):
+        write = (db_session_factory, SETTINGS, _actor(row), place)
+        first = await change_sandbox(*write, value="on", pin=pin)
+        again = await change_sandbox(*write, value="on", pin=pin)
+        assert first is not None and again is None, "the second write is a no-op"

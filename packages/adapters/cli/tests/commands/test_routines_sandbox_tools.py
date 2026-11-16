@@ -9,16 +9,20 @@ from unittest.mock import AsyncMock
 import daimon.adapters.cli.commands.routines as routines_cli
 import daimon.core.routine_sandbox as routine_sandbox
 import pytest
-from daimon.adapters.cli.commands.routines import run_agent_sandbox_tools, run_sandbox_tools
+from daimon.adapters.cli.commands.routines import (
+    run_agent_sandbox_tools,
+    run_sandbox_tools,
+    sandbox_pin_lines,
+)
+from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.errors import UserFacingError
 from daimon.core.features.registry import DEFAULT
 from daimon.core.features.snapshot import FeaturePlace
-from daimon.core.routine_sandbox import SandboxPinUnavailable, own_opt_in, routine_place
+from daimon.core.routine_sandbox import PIN_UNAVAILABLE_REFUSAL, own_opt_in, routine_place
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
 from daimon.core.stores.domain import AgentSandboxPin, RoutineRow, SandboxPin
 from daimon.core.stores.routines import create_routine
-from daimon.core.stores.sandbox_pins import list_sandbox_pins
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
 from pydantic import PostgresDsn, SecretStr
@@ -39,7 +43,7 @@ SETTINGS = Settings.model_validate(
 @pytest.fixture(autouse=True)
 def current_pin_reported(monkeypatch: pytest.MonkeyPatch) -> None:
     """The routine's agent and environment, as Managed Agents would report them."""
-    monkeypatch.setattr(routine_sandbox, "current_pin", AsyncMock(return_value=PIN))
+    monkeypatch.setattr(routines_cli, "current_pin", AsyncMock(return_value=PIN))
 
 
 def _rt(db_session_factory: Any) -> Any:
@@ -66,10 +70,7 @@ async def _routines(db_session_factory: Any, count: int, **kw: Any) -> list[Rout
 
 
 async def _values(db_session_factory: Any, rows: list[RoutineRow]) -> list[object]:
-    return [
-        await own_opt_in(db_session_factory, routine_place(row, "discord"), "routine")
-        for row in rows
-    ]
+    return [await own_opt_in(db_session_factory, routine_place(row, "discord")) for row in rows]
 
 
 async def _routine_run(db_session_factory: Any, rows: list[RoutineRow], **kw: Any) -> str:
@@ -140,8 +141,11 @@ async def test_off_and_inherit_are_the_routine_own_values(db_session_factory: An
     assert await _values(db_session_factory, rows) == [(None, None)], "cleared"
 
 
-async def test_a_listed_dm_routine_refuses_the_whole_batch(db_session_factory: Any) -> None:
+async def test_a_listed_dm_routine_refuses_the_whole_batch(
+    db_session_factory: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A DM routine takes no On of its own, so a batch naming one changes nothing."""
+    monkeypatch.setattr(routines_cli, "current_pin", routine_sandbox.current_pin)
     [row] = await _routines(db_session_factory, 1)
     [dm] = await _routines(
         db_session_factory, 1, source_provenance_known=True, destination_kind="dm",
@@ -160,9 +164,10 @@ async def test_an_unreadable_agent_or_environment_refuses_the_whole_batch(
 ) -> None:
     """Every pin is read before any write."""
     rows = await _routines(db_session_factory, 2)
-    unavailable = AsyncMock(side_effect=[PIN, SandboxPinUnavailable("archived")])
-    monkeypatch.setattr(routine_sandbox, "current_pin", unavailable)
-    with pytest.raises(UserFacingError, match="Can't read the routine's agent version"):
+    message = PIN_UNAVAILABLE_REFUSAL.format(what="routine's agent")
+    unavailable = AsyncMock(side_effect=[PIN, ChannelChangeRefused(message, kind="invalid")])
+    monkeypatch.setattr(routines_cli, "current_pin", unavailable)
+    with pytest.raises(UserFacingError, match="Can't read the routine's agent"):
         await _routine_run(db_session_factory, rows)
     assert await _values(db_session_factory, rows) == [(None, None)] * 2, "nothing written"
 
@@ -174,7 +179,7 @@ async def test_re_running_after_an_agent_edit_re_approves_it(
     rows = await _routines(db_session_factory, 1)
     newer = SandboxPin("ag", 4, "env_1", PIN.environment_updated_at)
     await _routine_run(db_session_factory, rows)
-    monkeypatch.setattr(routine_sandbox, "current_pin", AsyncMock(return_value=newer))
+    monkeypatch.setattr(routines_cli, "current_pin", AsyncMock(return_value=newer))
     text = await _routine_run(db_session_factory, rows)
     assert "re-approve current agent and environment" in text, "the operator is told"
     assert await _values(db_session_factory, rows) == [("on", newer)], "the pin moved"
@@ -194,12 +199,12 @@ async def test_agent_opt_in_pins_the_agent_and_environment_then_off_drops_it(
     assert "Dry run: nothing written." in await _agent_run(
         db_session_factory, row.tenant_id, dry_run=True
     ), "a dry run writes nothing"
-    assert await own_opt_in(db_session_factory, place, "agent") == (None, None), "unchanged"
+    assert await own_opt_in(db_session_factory, place) == (None, None), "unchanged"
     await _agent_run(db_session_factory, row.tenant_id)
-    assert await own_opt_in(db_session_factory, place, "agent") == ("on", pin), "pinned"
+    assert await own_opt_in(db_session_factory, place) == ("on", pin), "pinned"
     assert "already on" in await _agent_run(db_session_factory, row.tenant_id), "a repeat"
     await _agent_run(db_session_factory, row.tenant_id, value="off")
-    assert await own_opt_in(db_session_factory, place, "agent") == ("off", None), "Off, no pin"
+    assert await own_opt_in(db_session_factory, place) == ("off", None), "Off, no pin"
 
 
 async def test_agent_opt_in_refuses_an_unreadable_agent(
@@ -207,7 +212,8 @@ async def test_agent_opt_in_refuses_an_unreadable_agent(
 ) -> None:
     """No live agent or environment, no On."""
     [row] = await _routines(db_session_factory, 1)
-    unavailable = AsyncMock(side_effect=SandboxPinUnavailable("archived"))
+    message = PIN_UNAVAILABLE_REFUSAL.format(what="agent daimon")
+    unavailable = AsyncMock(side_effect=ChannelChangeRefused(message, kind="invalid"))
     monkeypatch.setattr(routines_cli, "current_agent_pin", unavailable)
     with pytest.raises(UserFacingError, match="Nothing was changed"):
         await _agent_run(db_session_factory, row.tenant_id)
@@ -227,7 +233,7 @@ async def test_off_by_agent_id_reaches_a_renamed_agent(
     await _agent_run(db_session_factory, row.tenant_id, agent_name=None, agent_id="ag-77",
                      value=DEFAULT)  # fmt: skip
     place = FeaturePlace.of(row.tenant_id, "discord", None, agent_id="ag-77")
-    assert await own_opt_in(db_session_factory, place, "agent") == (None, None), "cleared"
+    assert await own_opt_in(db_session_factory, place) == (None, None), "cleared"
     lookup.assert_not_awaited()
 
 
@@ -267,8 +273,11 @@ async def test_the_list_shows_agents_then_routines(
     monkeypatch.setattr(routines_cli, "current_agent_pin", AsyncMock(return_value=agent_pin))
     await _agent_run(db_session_factory, row.tenant_id)
     async with db_session_factory() as session:
-        entries = await list_sandbox_pins(session, tenant_id=row.tenant_id)
-    assert [(e.tier, e.key, e.pin) for e in entries] == [
-        ("agent", "ag", agent_pin),
-        ("routine", str(row.id), PIN),
+        lines = await sandbox_pin_lines(session, tenant_id=row.tenant_id)
+    assert [line.split("  ")[:2] for line in lines] == [
+        ["agent ag", "environment default, any agent version"],
+        [
+            f"routine {row.id}",
+            "agent ag version 3, environment env_1 as of 2026-10-01T00:00:00+00:00",
+        ],
     ], "agents first"

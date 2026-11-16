@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, Final, Literal, cast
 
 from anthropic.types.beta import BetaManagedAgentsSystemContentBlockParam
 from daimon.core.session_snapshot import SessionSnapshot
@@ -283,6 +283,27 @@ class AgentSandboxPin:
 
 AnySandboxPin = SandboxPin | AgentSandboxPin
 """What a `routine_sandbox_tools` On covers at the routine or the agent tier."""
+
+SANDBOX_KEY: Final = "routine_sandbox_tools"
+PinnedTier = Literal["agent", "routine"]
+_AGENT_PIN: Final = TypeAdapter(AgentSandboxPin)
+_ROUTINE_PIN: Final = TypeAdapter(SandboxPin)
+
+
+def pin_json(pin: AnySandboxPin) -> dict[str, JsonValue]:
+    """A pin as its feature value and the change record keep it."""
+    if isinstance(pin, AgentSandboxPin):
+        return _AGENT_PIN.dump_python(pin, mode="json")
+    return _ROUTINE_PIN.dump_python(pin, mode="json")
+
+
+def stored_pin(row: FeatureValueRow) -> AnySandboxPin | None:
+    """The pin an agent's or a routine's `routine_sandbox_tools` row keeps; None without one."""
+    if row.pin is None:
+        return None
+    if row.tier == "agent":
+        return _AGENT_PIN.validate_python(row.pin)
+    return _ROUTINE_PIN.validate_python(row.pin)
 
 
 class RoutineRow(BaseModel):
@@ -1324,6 +1345,8 @@ class FeatureValueRow(BaseModel):
     key: str
     value: str
     locked: bool
+    #: What a pinned feature's On covers (`pin_json`); None for every other value.
+    pin: dict[str, JsonValue] | None = None
     set_by: uuid.UUID | None
     surface: FeatureSurface
     set_at: datetime

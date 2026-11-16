@@ -91,7 +91,6 @@ KEPT: Final[dict[tuple[str, str], str]] = {
     ("agent_tool_rule_history", "agent_id"): "history",
     ("long_job_policy_history", "agent_id"): "history",
     ("long_job", "agent_id"): "history; running jobs block the move",
-    ("sandbox_pins", "agent_id"): "an opt-in covers the old id only; cleared at the move",
     ("turn_outcomes", "agent_id"): "history",
     ("security_audit_events", "agent_id"): "audit trail",
     ("neutral_agent_revisions", "agent"): "per-account native catalog, keyed by name",

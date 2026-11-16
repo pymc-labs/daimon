@@ -133,8 +133,8 @@ class FeatureSpec:
     """The smallest number a limit's deployment tier takes. 0 where no limit is a real setting;
     above 0 where 0 would be an unusable limit, not an off switch."""
     pinned: bool = False
-    """An On at the agent or routine tier holds only for the agent and environment recorded
-    with it (`sandbox_pins`); a write without one is refused, and no other tier takes On."""
+    """An On at the agent or routine tier holds only for the agent and environment in the
+    `pin` kept with it; a write without one is refused, and no other tier takes On."""
     zero_unlimited: bool = False
     """A limit whose deployment 0 means no limit, as its legacy variable did: when settings
     combine, 0 is the loosest value, never the smallest."""

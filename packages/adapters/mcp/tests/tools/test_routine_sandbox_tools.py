@@ -14,13 +14,9 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.config import McpSettings
 from daimon.core.features.service import FeatureActor
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.membership import Membership
-from daimon.core.routine_sandbox import (
-    SandboxPinUnavailable,
-    change_agent_sandbox,
-    own_opt_in,
-    routine_place,
-)
+from daimon.core.routine_sandbox import change_sandbox, own_opt_in, routine_place
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
 from daimon.core.stores.domain import (
@@ -51,7 +47,7 @@ PIN = SandboxPin(
 @pytest.fixture(autouse=True)
 def current_pin_reported(monkeypatch: pytest.MonkeyPatch) -> None:
     """The routine's agent and environment, as Managed Agents would report them."""
-    monkeypatch.setattr(_sandbox_mod, "current_pin", AsyncMock(return_value=PIN))
+    monkeypatch.setattr(_routines_mod, "current_pin", AsyncMock(return_value=PIN))
 
 
 OWNER = "owner-1"
@@ -102,7 +98,7 @@ Sessions = async_sessionmaker[AsyncSession]
 
 
 async def _opt_in(sessions: Sessions, row: RoutineRow) -> tuple[str | None, object]:
-    return await own_opt_in(sessions, routine_place(row, "discord"), "routine")
+    return await own_opt_in(sessions, routine_place(row, "discord"))
 
 
 async def _changes(sessions: Sessions, tenant_id: uuid.UUID) -> list[ChannelChangeRow]:
@@ -171,12 +167,11 @@ async def test_routines_show_their_agent_opt_in_unless_their_own_off_beats_it(
     async def yes(_action: object) -> bool:
         return True
 
-    await change_agent_sandbox(
+    await change_sandbox(
         committing_sessionmaker,
         runtime.settings,
         FeatureActor(tenant_id, account_id, "cli", None, yes),
-        agent_id="ag",
-        platform="discord",
+        FeaturePlace(tenant_id, "discord", agent_id="ag"),
         value="on",
         pin=AgentSandboxPin("ag", "default"),
     )
@@ -262,11 +257,10 @@ async def test_an_unreadable_agent_or_environment_refuses_the_opt_in(
     """Without the agent version and environment there is nothing to pin, so no On."""
     tenant_id, chosen, _, _ = await _setup(db_session)
     runtime = _runtime(committing_sessionmaker, _resolver())
-    monkeypatch.setattr(
-        _sandbox_mod, "current_pin", AsyncMock(side_effect=SandboxPinUnavailable("gone"))
-    )
+    monkeypatch.setattr(_routines_mod, "current_pin", _sandbox_mod.current_pin)
+    monkeypatch.setattr(_sandbox_mod, "retrieve_agent", AsyncMock(side_effect=OSError("gone")))
 
-    with pytest.raises(ToolError, match="Can't read the routine's agent version"):
+    with pytest.raises(ToolError, match="Can't read the routine's agent or its environment"):
         await _set_impl(
             runtime, _auth(tenant_id, ADMIN, is_admin=True), routine_id=chosen.id, enabled=True
         )

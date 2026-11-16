@@ -32,13 +32,14 @@ from daimon.core.routine_files import OUTBOX_FILES, PREFIX, plain_payload
 from daimon.core.routine_move import routine_never_fired
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import (
+    SANDBOX_KEY,
     CatchUpPolicy,
+    FeatureTarget,
     Role,
     RoutineDestinationKind,
     RoutineRow,
     UnattendedRequester,
 )
-from daimon.core.stores.sandbox_pins import SANDBOX_KEY
 from daimon.core.stores.security_audit import append_event
 from sqlalchemy import and_, delete, false, func, or_, select, true, update
 from sqlalchemy.engine import CursorResult
@@ -571,8 +572,7 @@ async def _save_routine_edit(
             None,
             tenant_id=current.tenant_id,
             key=SANDBOX_KEY,
-            tier="routine",
-            holder=str(current.id),
+            target=FeatureTarget("routine", routine_id=current.id),
         ):
             log.info(
                 "routine.sandbox_tools_cleared_by_edit",

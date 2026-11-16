@@ -546,61 +546,6 @@ class Routine(Base):
     )
 
 
-class SandboxPinRecord(Base):
-    """What a `routine_sandbox_tools` On at the agent or routine tier covers.
-
-    An agent's pin names its environment, never a version, so an agent edit keeps it; a
-    routine's names the agent version and environment revision. Written only with the
-    feature row it pins, by `features.service.change_feature`.
-    """
-
-    __tablename__ = "sandbox_pins"
-    __table_args__ = (
-        CheckConstraint(
-            "(tier = 'agent' AND routine_id IS NULL AND environment_name IS NOT NULL"
-            " AND agent_version IS NULL AND environment_id IS NULL"
-            " AND environment_updated_at IS NULL)"
-            " OR (tier = 'routine' AND routine_id IS NOT NULL AND environment_name IS NULL"
-            " AND agent_version IS NOT NULL AND environment_id IS NOT NULL"
-            " AND environment_updated_at IS NOT NULL)",
-            name="ck_sandbox_pins_shape",
-        ),
-        Index(
-            "uq_sandbox_pins_agent",
-            "tenant_id",
-            "agent_id",
-            unique=True,
-            postgresql_where=text("tier = 'agent'"),
-        ),
-        Index(
-            "uq_sandbox_pins_routine",
-            "tenant_id",
-            "routine_id",
-            unique=True,
-            postgresql_where=text("tier = 'routine'"),
-        ),
-    )
-
-    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    tier: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
-    routine_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("routines.id", ondelete="CASCADE"), nullable=True
-    )
-    environment_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    agent_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    environment_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    environment_updated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    set_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-
-
 class ThreadSession(Base):
     __tablename__ = "thread_sessions"
     __table_args__ = (
@@ -2735,8 +2680,9 @@ class FeatureValue(Base):
     Rows exist for the workspace, agent, channel, thread and routine tiers (the deployment
     tier is the `features` setting). Unused place columns hold '' (`routine_id` NULL). A
     thread row is keyed by its thread key alone; its `channel_id` is the channel the thread
-    sits in, '' when unknown. A routine row goes with its routine.
-    `daimon.core.features.resolver` combines the rows; `locked` is final for every tier below.
+    sits in, '' when unknown. A routine row goes with its routine. A pinned feature's On
+    keeps in `pin` what it covers. `daimon.core.features.resolver` combines the rows;
+    `locked` is final for every tier below.
     """
 
     __tablename__ = "feature_values"
@@ -2792,6 +2738,7 @@ class FeatureValue(Base):
     key: Mapped[str] = mapped_column(Text, nullable=False)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     locked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    pin: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     set_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
     )

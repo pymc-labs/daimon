@@ -370,7 +370,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
         compared_tables = compared_tables - {"web_logins", "web_login_accounts"}
     else:
         # 0187 folds progress_plan_scopes (no longer modelled) into feature_values.
-        compared_tables = compared_tables | {"feature_values", "sandbox_pins"}
+        compared_tables = compared_tables | {"feature_values"}
     if expected not in (LONG_JOBS_HEAD, ADMINS_HEAD, *TOP):
         compared_tables = {name for name in compared_tables if not name.startswith("long_job")}
     if expected not in TOP:

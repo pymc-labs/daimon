@@ -54,12 +54,18 @@ from daimon.core.stores.direct_messages import (
     set_dm_agent_name,
     set_dm_enabled,
 )
-from daimon.core.stores.domain import AgentSandboxPin, FeatureTarget, Role, RoutineRow
+from daimon.core.stores.domain import (
+    SANDBOX_KEY,
+    AgentSandboxPin,
+    FeatureTarget,
+    Role,
+    RoutineRow,
+    pin_json,
+)
 from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_oauth_flows import create_flow, mark_flow_completed
 from daimon.core.stores.routines import create_routine, get_routine
-from daimon.core.stores.sandbox_pins import SANDBOX_KEY, put_sandbox_pin
 from daimon.core.stores.tenant_ledger import get_channel_spend
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import ToolSafetyPolicy
@@ -1869,11 +1875,8 @@ async def test_dm_routine_keeps_builtins_only_under_the_agent_opt_in(
             await set_feature_value(
                 db, tenant_id=harness.tenant.id, key=SANDBOX_KEY, value="on", set_by=None,
                 target=FeatureTarget("agent", agent_id="ag_daimon"), surface="cli",
+                pin=pin_json(AgentSandboxPin("ag_daimon", environment)),
             )  # fmt: skip
-            pin = AgentSandboxPin("ag_daimon", environment)
-            await put_sandbox_pin(
-                db, tenant_id=harness.tenant.id, tier="agent", key="ag_daimon", pin=pin
-            )
         if guardrail == "off":
             await set_workspace_feature(
                 db,

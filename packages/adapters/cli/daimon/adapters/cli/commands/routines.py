@@ -54,12 +54,10 @@ from daimon.core.routine_move import (
 from daimon.core.routine_sandbox import (
     AgentSandboxPin,
     SandboxPin,
-    SandboxPinUnavailable,
-    change_agent_sandbox,
-    change_routine_sandbox,
+    change_sandbox,
     current_agent_pin,
+    current_pin,
     own_opt_in,
-    routine_opt_in_pin,
     routine_place,
 )
 from daimon.core.routine_service import (
@@ -74,7 +72,8 @@ from daimon.core.routine_service import create_routine as create_routine_checked
 from daimon.core.routines import routine_for_reader
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import dm_enabled
-from daimon.core.stores.domain import AnySandboxPin, RoutineRow
+from daimon.core.stores.domain import SANDBOX_KEY, AnySandboxPin, RoutineRow, stored_pin
+from daimon.core.stores.feature_values import list_feature_values
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.routine_move import pause_for_handback, rollback_rows, seed_routines
 from daimon.core.stores.routines import (
@@ -85,7 +84,6 @@ from daimon.core.stores.routines import (
     update_routine,
     validate_dm_source,
 )
-from daimon.core.stores.sandbox_pins import list_sandbox_pins
 from daimon.core.stores.tenants import get_tenant
 from pydantic import JsonValue, ValidationError
 from rich.console import Console
@@ -546,17 +544,23 @@ def sandbox_tools_list_command(*, tenant: Annotated[uuid.UUID, typer.Option("--t
     async def run() -> None:
         async with build_runtime(settings) as rt:
             async with rt.sessionmaker() as session:
-                entries = await list_sandbox_pins(session, tenant_id=tenant)
+                lines = await sandbox_pin_lines(session, tenant_id=tenant)
             console = Console(highlight=False)
-            if not entries:
-                console.print("No agent or routine is opted in.")
-            for entry in entries:
-                console.print(
-                    f"{entry.tier} {entry.key}  {_pin_words(entry.pin)}  "
-                    f"since {entry.set_at:%Y-%m-%d %H:%M} UTC"
-                )
+            for line in lines or ["No agent or routine is opted in."]:
+                console.print(line)
 
     asyncio.run(run())
+
+
+async def sandbox_pin_lines(session: AsyncSession, *, tenant_id: uuid.UUID) -> list[str]:
+    """One line per pinned On, agents first."""
+    rows = await list_feature_values(session, tenant_id=tenant_id, keys=[SANDBOX_KEY])
+    pinned = [(row, pin) for row in rows if (pin := stored_pin(row)) is not None]
+    return [
+        f"{row.tier} {row.agent_id or row.routine_id}  {_pin_words(pin)}  "
+        f"since {row.set_at:%Y-%m-%d %H:%M} UTC"
+        for row, pin in sorted(pinned, key=lambda e: (e[0].tier, e[0].set_at))
+    ]
 
 
 def _pin_words(pin: AnySandboxPin) -> str:
@@ -624,11 +628,8 @@ async def run_agent_sandbox_tools(
                 environment_name=environment_name,
                 default=rt.deployment_default,
             )
-        except SandboxPinUnavailable as exc:
-            raise UserFacingError(
-                f"Can't read agent {agent_name} or its environment, so sandbox tools "
-                f"can't be turned on for it. Nothing was changed. ({exc})"
-            ) from exc
+        except ChannelChangeRefused as exc:
+            raise UserFacingError(str(exc)) from exc
         agent_id = pin.agent_id
     elif agent_id is None:
         assert agent_name is not None
@@ -644,7 +645,7 @@ async def run_agent_sandbox_tools(
         agent_id = found.id
     label = f"{agent_name or agent_id} ({agent_id})"
     place = FeaturePlace.of(tenant_id, target.platform, None, agent_id=agent_id)
-    if await own_opt_in(rt.sessionmaker, place, "agent") == (
+    if await own_opt_in(rt.sessionmaker, place) == (
         None if value == DEFAULT else value,
         pin,
     ):
@@ -661,14 +662,8 @@ async def run_agent_sandbox_tools(
         console.print("Dry run: nothing written.")
         return
     try:
-        await change_agent_sandbox(
-            rt.sessionmaker,
-            rt.settings,
-            target.actor,
-            agent_id=agent_id,
-            platform=target.platform,
-            value=value,
-            pin=pin,
+        await change_sandbox(
+            rt.sessionmaker, rt.settings, target.actor, place, value=value, pin=pin
         )
     except ChannelChangeRefused as exc:
         raise UserFacingError(str(exc)) from exc
@@ -704,8 +699,10 @@ async def run_sandbox_tools(
     refused: list[str] = []
     for rid, row in found.items():
         try:
-            pins[rid] = await routine_opt_in_pin(
-                rt.anthropic, rt.sessionmaker, row, value=value, default=rt.deployment_default
+            pins[rid] = (
+                await current_pin(rt.anthropic, rt.sessionmaker, row, default=rt.deployment_default)
+                if value == "on"
+                else None
             )
         except ChannelChangeRefused as exc:
             refused.append(f"{rid}: {exc}")
@@ -715,7 +712,7 @@ async def run_sandbox_tools(
     want = None if value == DEFAULT else value
     for rid, row in found.items():
         place = routine_place(row, target.platform)
-        own, own_pin = await own_opt_in(rt.sessionmaker, place, "routine")
+        own, own_pin = await own_opt_in(rt.sessionmaker, place)
         pin = pins[rid]
         if (own, own_pin) == (want, pin):
             label = f"already {_value_words(value)}"
@@ -732,12 +729,11 @@ async def run_sandbox_tools(
         return
     for rid in pending:
         try:
-            await change_routine_sandbox(
+            await change_sandbox(
                 rt.sessionmaker,
                 rt.settings,
                 target.actor,
-                found[rid],
-                platform=target.platform,
+                routine_place(found[rid], target.platform),
                 value=value,
                 pin=pins[rid],
             )
