@@ -47,6 +47,18 @@ _TIDY = "daimon.adapters.mcp.tools.tidy"
 _WIZARD = "daimon.adapters.mcp.tools.wizard"
 
 _PLAN = {"threads": 1, "places": 1, "people": 0}
+
+
+@pytest.fixture(autouse=True)
+def _plain_channels(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every Discord destination the bot looks up is a plain channel."""
+
+    async def plain(_runtime: object, _ref: str) -> str | None:
+        return None
+
+    monkeypatch.setattr("daimon.adapters.mcp.tools._other_apps._discord_parent", plain)
+
+
 _SAID = "Never upload customer data to Discord or Slack, or Microsoft Teams."
 # What each platform's person may read of `_SAID`: its own name stays.
 _READ = {
@@ -436,6 +448,15 @@ async def _case(
         return origin if verified else None
 
     monkeypatch.setattr("daimon.adapters.mcp.tools._other_apps.get_verified_origin", get_origin)
+
+    async def discord_parent(_runtime: object, ref: str) -> str | None:
+        if ref == "T9":
+            return "C3"  # a human-made thread: no session row
+        if ref == "X1":
+            raise LookupError(ref)
+        return None  # a plain channel
+
+    monkeypatch.setattr("daimon.adapters.mcp.tools._other_apps._discord_parent", discord_parent)
     runtime = SimpleNamespace(session_factory=sessionmaker, settings=_make_settings())
     auth = AuthIdentity(
         account_id=account.id, tenant_id=tenant.id, role=Role.USER, platform="discord"
@@ -481,6 +502,19 @@ async def test_a_thread_destination_follows_its_own_and_its_channels_setting(
     assert await case.scrub("T1") is None
     await case.set("channel", "off", channel="C1")
     assert await case.scrub("T1") == "discord", "a thread inherits its Off channel"
+
+
+async def test_a_thread_with_no_session_row_follows_its_parent_channel(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = await _case(db_session, sessionmaker, monkeypatch)
+    await case.set("workspace", "on")
+    await case.set("channel", "off", channel="C3")
+    assert await case.scrub("T9") == "discord", "an unknown thread under an Off channel"
+    assert await case.scrub("C2") is None, "a plain channel is not scrubbed"
+    assert await case.scrub("X1") == "discord", "a destination that can't be read"
 
 
 async def test_a_chat_agent_that_names_no_verified_turn_keeps_the_scrub(
