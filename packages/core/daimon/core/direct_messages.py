@@ -1129,37 +1129,16 @@ async def run_channel_timer(
         raise _revoked(error) from error
     if prepared.backend is not None:
         raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
-
-    async def sealed() -> None:
-        raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE)
-
-    try:
-        text, session_id, _outputs = await _run_admitted_dm_turn(
-            deps,
-            prepared,
-            tenant_id=row.tenant_id,
-            platform="discord",
-            parent_channel_id=channel_id,
-            scope_id=scope_id,
-            external_user_id=owner,
-            role=Role.ADMIN if prepared.admission.is_platform_admin else Role.USER,
-            prompt=prompt,
-            deadline=deadline,
-            on_sealed=sealed,
-            origin="routine",
-        )
-    except asyncio.CancelledError:
-        if deps.running_turns.is_drain_cancel():
-            await _settle_shutdown_dm_scope(
-                deps,
-                tenant_id=row.tenant_id,
-                platform="discord",
-                scope_id=scope_id,
-                account_id=admission.account_id,
-            )
-        raise
-    return DmRoutineReply(
-        text=text, session_id=session_id, producing_agent_id=prepared.admission.agent.id
+    return await _run_unattended_turn(
+        deps,
+        prepared,
+        tenant_id=row.tenant_id,
+        parent_channel_id=channel_id,
+        scope_id=scope_id,
+        owner=owner,
+        prompt=prompt,
+        deadline=deadline,
+        account_id=admission.account_id,
     )
 
 
@@ -1275,40 +1254,67 @@ async def _run_dm_fire(
                     "invoker_not_allowed", message="This report already ran."
                 )
 
-        async def sealed() -> None:
-            raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE)
+        return await _run_unattended_turn(
+            deps,
+            prepared,
+            tenant_id=tenant_id,
+            parent_channel_id=scope_id,
+            scope_id=scope_id,
+            owner=owner_user_id,
+            prompt=prompt,
+            deadline=deadline,
+            account_id=admission.account_id,
+            watch_row=watch_row,
+        )
 
-        try:
-            text, session_id, _outputs = await _run_admitted_dm_turn(
+
+async def _run_unattended_turn(
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    *,
+    tenant_id: uuid.UUID,
+    parent_channel_id: str,
+    scope_id: str,
+    owner: str,
+    prompt: str,
+    deadline: datetime,
+    account_id: uuid.UUID,
+    watch_row: TaskContinuationRow | None = None,
+) -> DmRoutineReply:
+    """Run an admitted unattended fire in its fresh scope; a drain settles that scope."""
+
+    async def sealed() -> None:
+        raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE)
+
+    try:
+        text, session_id, _outputs = await _run_admitted_dm_turn(
+            deps,
+            prepared,
+            tenant_id=tenant_id,
+            platform="discord",
+            parent_channel_id=parent_channel_id,
+            scope_id=scope_id,
+            external_user_id=owner,
+            role=Role.ADMIN if prepared.admission.is_platform_admin else Role.USER,
+            prompt=prompt,
+            deadline=deadline,
+            on_sealed=sealed,
+            origin="routine",
+            watch_row=watch_row,
+        )
+    except asyncio.CancelledError:
+        if deps.running_turns.is_drain_cancel():
+            await _settle_shutdown_dm_scope(
                 deps,
-                prepared,
                 tenant_id=tenant_id,
                 platform="discord",
-                parent_channel_id=scope_id,
                 scope_id=scope_id,
-                external_user_id=owner_user_id,
-                role=Role.ADMIN if prepared.admission.is_platform_admin else Role.USER,
-                prompt=prompt,
-                deadline=deadline,
-                on_sealed=sealed,
-                origin="routine",
-                watch_row=watch_row,
+                account_id=account_id,
             )
-        except asyncio.CancelledError:
-            if deps.running_turns.is_drain_cancel():
-                await _settle_shutdown_dm_scope(
-                    deps,
-                    tenant_id=tenant_id,
-                    platform="discord",
-                    scope_id=scope_id,
-                    account_id=admission.account_id,
-                )
-            raise
-        return DmRoutineReply(
-            text=text,
-            session_id=session_id,
-            producing_agent_id=prepared.admission.agent.id,
-        )
+        raise
+    return DmRoutineReply(
+        text=text, session_id=session_id, producing_agent_id=prepared.admission.agent.id
+    )
 
 
 def _revoked(
