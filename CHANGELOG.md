@@ -72,8 +72,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- With no Anthropic key, the Teams host readies its tenant from the selfhosted agent and environment that
-  `register` writes, so granted chats get answers; before, its startup called Anthropic and every message was refused.
+- With no Anthropic key, the Teams host readies its tenant once selfhosted admission is on and `register` has written
+  the selfhosted agent and environment, so granted chats get answers; before, its startup called Anthropic and every
+  message was refused.
 
 - A turn stuck reconnecting always ends at its time limit; before, it could keep reconnecting past it.
 

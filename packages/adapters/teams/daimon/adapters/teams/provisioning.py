@@ -6,10 +6,11 @@ boot instead. Same status rules as the Slack boot sweep: success (clean
 reconcile and the default agent on the roster) flips to `ready`; a failure
 keeps an already-ready tenant ready and records the reason; otherwise the
 tenant flips to `failed`. A deployment holding no Anthropic key has nothing
-to reconcile there: success is a selfhosted turn finding the default agent
-and environment, which `daimon selfhosted init` writes. An archived tenant is
-left alone. Anyone no longer an owner of `DAIMON_TEAMS__ADMIN_TEAM_ID`'s team
-loses the stored admin role here; a failed owner read demotes no one.
+to reconcile there: success is selfhosted admission being on and a selfhosted
+turn finding the default agent and environment, which `daimon selfhosted init`
+writes. An archived tenant is left alone. Anyone no longer an owner of
+`DAIMON_TEAMS__ADMIN_TEAM_ID`'s team loses the stored admin role here; a
+failed owner read demotes no one.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from pathlib import Path
 import anthropic as _anthropic
 import structlog
 from anthropic import AsyncAnthropic
+from daimon.core.config import load_selfhosted_settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.provisioning import provision_tenant, reconcile_tenant_defaults
 from daimon.core.defaults.report import compose_failure_reason
@@ -58,12 +60,14 @@ async def demote_former_admins(
             log.info("teams.admins_demoted", tenant_id=str(tenant_id), count=demoted)
 
 
-async def _missing_selfhosted_defaults(
+async def _selfhosted_failure_reason(
     sessionmaker: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
     deployment_default: DeploymentDefault,
 ) -> str | None:
-    """Why a selfhosted turn could not find the default agent and environment, or None."""
+    """Why selfhosted turns could not answer with the default agent and environment, or None."""
+    if not load_selfhosted_settings().admission_enabled:
+        return "selfhosted admission is off (DAIMON_SELFHOSTED__ADMISSION_ENABLED)"
     if deployment_default.agent_name is None or deployment_default.environment_name is None:
         return "no default agent and environment configured"
     try:
@@ -114,7 +118,7 @@ async def provision_configured_tenant(
     reason: str | None = None
     try:
         if anthropic is None:
-            reason = await _missing_selfhosted_defaults(sessionmaker, tenant_id, deployment_default)
+            reason = await _selfhosted_failure_reason(sessionmaker, tenant_id, deployment_default)
         else:
             report = await reconcile_tenant_defaults(
                 anthropic, sessionmaker, defaults_root, tenant_id=tenant_id, public_url=public_url

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -68,10 +69,16 @@ async def _provision(
 
 
 async def _provision_without_anthropic(
-    db_factory: async_sessionmaker[AsyncSession], default: DeploymentDefault = DEFAULTS
+    db_factory: async_sessionmaker[AsyncSession],
+    default: DeploymentDefault = DEFAULTS,
+    *,
+    admission: bool = True,
 ) -> Any:
     reconcile = AsyncMock()
-    with patch("daimon.adapters.teams.provisioning.reconcile_tenant_defaults", reconcile):
+    with (
+        patch.dict(os.environ, {"DAIMON_SELFHOSTED__ADMISSION_ENABLED": str(admission).lower()}),
+        patch("daimon.adapters.teams.provisioning.reconcile_tenant_defaults", reconcile),
+    ):
         await provision_configured_tenant(
             anthropic=None,
             sessionmaker=db_factory,
@@ -163,6 +170,23 @@ async def test_without_an_anthropic_key_or_default_names_the_tenant_stays_failed
     tenant = await _provision_without_anthropic(db_session_factory, DeploymentDefault())
     assert tenant is not None and tenant.provision_status == "failed"
     assert tenant.last_reconcile_error == "no default agent and environment configured"
+
+
+@pytest.mark.parametrize("was_ready", [False, True], ids=["failed", "ready"])
+async def test_without_an_anthropic_key_or_selfhosted_admission_records_promote_no_tenant(
+    db_session_factory: async_sessionmaker[AsyncSession], was_ready: bool
+) -> None:
+    """Leftover records open no tenant whose turns admission refuses; a ready one stays ready."""
+    await _provision_without_anthropic(db_session_factory)
+    await _register_selfhosted(db_session_factory)
+    if was_ready:
+        await _provision_without_anthropic(db_session_factory)
+    tenant = await _provision_without_anthropic(db_session_factory, admission=False)
+    assert tenant is not None
+    assert tenant.provision_status == ("ready" if was_ready else "failed")
+    assert tenant.last_reconcile_error == (
+        "selfhosted admission is off (DAIMON_SELFHOSTED__ADMISSION_ENABLED)"
+    )
 
 
 @pytest.mark.parametrize("keyed", [True, False], ids=["anthropic-key", "no-anthropic-key"])
