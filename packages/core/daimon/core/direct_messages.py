@@ -1096,7 +1096,7 @@ async def _run_dm_fire(
                         MANAGED_AGENTS_ONLY,
                         message="DM routines require a gateable Managed Agents runtime.",
                     ) from error
-            deadline = turn_deadline(now=now)
+            deadline = turn_deadline(now=now, ceiling_s=admission.turn_ceiling_s)
             prepared = await bind_session(
                 deps,
                 admission,
