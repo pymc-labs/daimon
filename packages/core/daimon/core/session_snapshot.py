@@ -150,6 +150,7 @@ class SessionSnapshot(BaseModel):
             "mcp_hold",
             "memory_scope",
             "model_effort",
+            "model_effort_recorded",
             "identity_features",
         ):
             if not data.get(name):
@@ -169,6 +170,9 @@ class SessionSnapshot(BaseModel):
     # The effort a conversation chose for the session (`daimon.core.thread_models`);
     # None when the agent's own runs, and for every session from before it existed.
     model_effort: str | None = None
+    # Set on every session created since efforts were recorded, so `None` above
+    # then means "no effort sent" and not "made before the field existed".
+    model_effort_recorded: bool = False
 
     @property
     def pricing_id(self) -> str:
@@ -428,6 +432,7 @@ def snapshot_from_created_session(
             "memory_scope": memory_scope,
             "identity_features": identity_features,
             "model_effort": model_effort,
+            "model_effort_recorded": True,
         }
     )
     if sent_system is None:

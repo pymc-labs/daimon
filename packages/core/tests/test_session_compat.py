@@ -464,7 +464,6 @@ def test_decision_ignores_handles_and_diagnostics_when_only_those_differ() -> No
     [
         ("ma_agent_id", "agent_other", "agent_identity"),
         ("model_id", "claude-haiku-4-5", "model"),
-        ("model_effort", "low", "model"),
         ("system_sha256", "other-system-hash", "system_prompt"),
         ("skills_sha256", "other-skills-hash", "skills"),
         ("environment_id", "env_other", "environment"),
@@ -862,3 +861,31 @@ async def test_a_managed_agents_session_is_reused_across_the_records_seam() -> N
         recorded=recorded, desired=desired, capabilities=DEFAULT_MA_CAPABILITIES, now=NOW
     )
     assert decision == ReuseAsIs(), "the stored session is reused untouched after the seam"
+
+
+def test_a_recorded_effort_change_replaces_the_session_but_an_older_session_is_unchanged() -> None:
+    """A session from before efforts were recorded says None, so a deploy resets none."""
+    recorded = make_snapshot(model_effort_recorded=True)
+    changed = decide_session_compatibility(
+        recorded=recorded,
+        desired=make_snapshot(model_effort="low"),
+        capabilities=DEFAULT_MA_CAPABILITIES,
+        now=NOW,
+    )
+    assert changed == ReplaceSession(reasons=("model",)), "a new effort on a recorded session"
+
+    older = decide_session_compatibility(
+        recorded=make_snapshot(),
+        desired=make_snapshot(model_effort="high"),
+        capabilities=DEFAULT_MA_CAPABILITIES,
+        now=NOW,
+    )
+    assert older == ReuseAsIs(), "an older session's effort is unknown, not different"
+
+    pinned = decide_session_compatibility(
+        recorded=make_snapshot(model_effort="low", model_effort_recorded=True),
+        desired=make_snapshot(model_effort="high"),
+        capabilities=DEFAULT_MA_CAPABILITIES,
+        now=NOW,
+    )
+    assert pinned == ReplaceSession(reasons=("model",))
