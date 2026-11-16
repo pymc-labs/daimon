@@ -914,6 +914,18 @@ async def reply_to_dm_result(
             )
             answer, _session_id, outputs = await _run_admitted_dm_turn(
                 deps,
+            whole = f"{context}\n\n{prefix}\n{text}" if prefix else f"{context}\n\n{text}"
+            # A session that continues already holds the earlier turns; a new or replaced
+            # one has seen none, and a recovery rebuilds `whole` for the same reason.
+            holds_history = prepared.reused and prepared.continuity.state in (
+                "continued",
+                "updated",
+            )
+            sent = (f"{prefix}\n{text}" if prefix else text) if holds_history else whole
+
+            async def reseed_whole() -> str:
+                return whole
+
                 prepared,
                 tenant_id=conversation.tenant_id,
                 platform=platform,
@@ -921,7 +933,7 @@ async def reply_to_dm_result(
                 scope_id=conversation.scope_id,
                 external_user_id=external_user_id,
                 role=role,
-                prompt=f"{context}\n\n{prefix}\n{text}" if prefix else f"{context}\n\n{text}",
+                prompt=sent,
                 deadline=deadline,
                 destination=_dm_destination(deps, conversation, admission.slack_turn_context_id),
                 on_sealed=lambda: _quarantine(deps, conversation),
@@ -934,7 +946,7 @@ async def reply_to_dm_result(
                 platform_message_id=message_id if platform_channel_id is not None else None,
                 image_blocks=image_blocks,
                 reseed_prompt=(
-                    None
+                    reseed_whole
                     if reseed_prefix is None
                     else lambda: _reseed_prompt(context, reseed_prefix, text)
                 ),

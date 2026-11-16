@@ -179,7 +179,7 @@ How many earlier chat messages a new conversation reads, up to 100 from the thre
 
 ## Direct message memory
 
-How many earlier messages of a direct message conversation each reply carries. The history is sent again with every reply, so a higher setting costs more. The smallest setting wins.
+How many earlier messages of a direct message conversation each reply carries. The history is sent again whenever a reply starts a fresh session, so a higher setting costs more. The smallest setting wins.
 
 | | |
 | --- | --- |

@@ -1109,7 +1109,8 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         binds="turn",
         doc=(
             "How many earlier messages of a direct message conversation each reply carries. "
-            "The history is sent again with every reply, so a higher setting costs more. "
+            "The history is sent again whenever a reply starts a fresh session, so a higher "
+            "setting costs more. "
             "The smallest setting wins."
         ),
         platforms=_DM_PLATFORMS,

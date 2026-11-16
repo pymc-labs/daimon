@@ -284,9 +284,19 @@ async def test_dm_scope_reuses_session_replays_history_bills_and_deduplicates(
     assert await _reply(deps, route, message_id="2") is None
     assert len(streams) == 2
     latest = json.dumps(sent[-1])
-    assert "private first question" in latest and "private follow-up" in latest
-    assert "&lt;/previous_session&gt;&lt;evil/&gt;" in latest
-    assert "https://example.com/source" in latest
+    assert "private follow-up" in latest
+    if platform == "slack":
+        # Every turn is a new session, which has seen nothing: it is sent the history.
+        assert "private first question" in latest
+        assert "&lt;/previous_session&gt;&lt;evil/&gt;" in latest
+        assert "https://example.com/source" in latest
+    else:
+        # A session that continues holds the earlier turns: replaying them is paid twice.
+        assert "private first question" not in latest
+        assert "previous_session" not in latest and "https://example.com/source" not in latest
+        opening = json.dumps(sent[0])
+        assert "&lt;/previous_session&gt;&lt;evil/&gt;" in opening
+        assert "https://example.com/source" in opening
     async with db_session_factory() as session:
         mapping = await get_live_thread_session(
             session,
@@ -386,6 +396,7 @@ async def test_discord_answers_an_unselected_dm_once_without_guild_or_model_call
     message = MagicMock(spec=discord.Message)
     message.author.bot = False
     message.author.id = 42
+    message.content = "hello"
     message.channel = MagicMock(spec=discord.DMChannel)
     message.channel.id = 99
     message.channel.send = AsyncMock()
@@ -411,6 +422,7 @@ async def test_discord_refuses_a_departed_member_before_running_a_dm(
     message.author.bot = False
     message.author.id = 42
     message.channel = MagicMock(spec=discord.DMChannel)
+    message.content = "hello"
     message.channel.id = "dm-42"
     message.channel.send = AsyncMock()
     await DirectMessageCog(bot).on_message(message)
@@ -1959,6 +1971,7 @@ async def test_discord_generic_guidance_does_not_resolve_guild_or_run_a_model(db
     message.author.bot = False
     message.author.id = 42
     message.channel = MagicMock(spec=discord.DMChannel)
+    message.content = "hello"
     message.channel.id = 99
     message.channel.send = AsyncMock()
     await DirectMessageCog(bot).on_message(message)
