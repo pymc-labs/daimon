@@ -34,7 +34,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.discord_membership import DiscordRestMembershipResolver, verify_discord_source
 from daimon.core.errors import StoreError, UserFacingError
 from daimon.core.membership import MembershipResolver
-from daimon.core.membership_subject import resolve_subject
+from daimon.core.membership_subject import dm_policy_allows, resolve_subject
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.routine_move import (
@@ -233,10 +233,12 @@ async def run_create_dm_routine(
         if tenant is None or tenant.archived_at is not None or tenant.platform != "discord":
             raise UserFacingError("Select an active Discord tenant.")
         policy = await load_access_policy(session, tenant_id=tenant_id)
-        if not await dm_enabled(
-            session, tenant_id=tenant_id
-        ) or not rt.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy()).allows(
-            owner
+        if not await dm_enabled(session, tenant_id=tenant_id) or not await dm_policy_allows(
+            rt.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy()),
+            rt.sessionmaker,
+            None,
+            tenant_id=tenant_id,
+            user_id=owner,
         ):
             raise UserFacingError("Routine DMs are disabled or the owner is not allowed.")
         source_thread_id = None

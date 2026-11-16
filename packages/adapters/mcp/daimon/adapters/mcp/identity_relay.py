@@ -18,6 +18,7 @@ import httpx
 import structlog
 from daimon.adapters.mcp.auth.verifier import FOREIGN_HOME_CLAIM, TOKEN_KIND_CLAIM
 from daimon.core.config import SignedIdentityServer
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_identity import (
     RELAY_CLAIM,
     RELAY_PATH,
@@ -139,17 +140,24 @@ async def _routine_run(
     binding: RelayBinding,
     *,
     tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
 ) -> RoutineRow | None:
     """The routine a scheduled run's credential names, or None.
 
-    Only a routine of this tenant that runs this agent and has an owner counts; a
-    routine since deleted, or one whose id does not match, names nobody.
+    Only a routine of this tenant that runs this agent (by id) and is still owned by
+    the user the run started for counts; a routine since deleted, handed to someone
+    else or aimed at another agent names nobody.
     """
     if binding.routine_id is None:
         return None
     async with sessionmaker() as session:
         row = await get_routine(session, binding.routine_id, tenant_id=tenant_id)
-    if row is None or row.agent_name != binding.agent_name or not row.created_by_user_id:
+    if (
+        row is None
+        or not row.created_by_user_id
+        or row.created_by_user_id != binding.owner
+        or derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=row.agent_id) != agent_id
+    ):
         return None
     return row
 
@@ -243,10 +251,15 @@ def build_identity_relay_route(
                 place=origin_turn_place(origin) if origin is not None else None,
             )
             headers["authorization"] = f"Bearer {tokens.token(identity, now=now)}"
+        if request.method in ("GET", "DELETE"):
+            # Neither carries a message; a body on one is dropped, not forwarded.
+            body = b""
         if server.requester_meta and request.method == "POST":
-            # A live person's turn names that person; a routine run names its owner
-            # and delivery place. A foreign sender, a replaced session and two turns
-            # at once match neither and carry no requester fields.
+            # A turn a person started names that person. An unattended run names who
+            # it acts for, as kind "routine": a routine's owner and delivery place, or
+            # the person and place of a wake (watch, timer, continuation). A foreign
+            # sender, a replaced session and two turns at once match neither and
+            # carry no requester fields.
             named: str | None = None
             conversation: dict[str, str | None] | None = None
             kind: RequesterKind | None = None
@@ -256,13 +269,17 @@ def build_identity_relay_route(
                 and isinstance(person, str)
                 and person
             ):
-                named, conversation, kind = person, requester_conversation(origin), "person"
+                kind = "person" if origin.human_invocation is True else "routine"
+                named = person
+                conversation = requester_conversation(origin, unattended=kind == "routine")
             elif (
                 binding.routine_id is not None
                 and platform in REQUESTER_PLATFORMS
                 and FOREIGN_HOME_CLAIM not in claims
             ):
-                routine = await _routine_run(sessionmaker, binding, tenant_id=tenant_id)
+                routine = await _routine_run(
+                    sessionmaker, binding, tenant_id=tenant_id, agent_id=agent_id
+                )
                 if routine is not None:
                     named, conversation, kind = (
                         routine.created_by_user_id,

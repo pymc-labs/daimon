@@ -168,6 +168,49 @@ def test_relay_claim_round_trips_and_refuses_other_shapes() -> None:
             parse_relay_claim(bad)
 
 
+def test_relay_claim_carries_the_routine_owner_and_refuses_a_stray_one() -> None:
+    routine_id = uuid.uuid4()
+    owned = RelayBinding("Helper", routine_id=routine_id, owner="42")
+    assert parse_relay_claim(owned.claim()) == owned, "the owner reads back"
+    assert parse_relay_claim(RelayBinding("Helper", routine_id=routine_id).claim()).owner is None
+    for bad in (
+        {"agent_name": "Helper", "owner": "42"},
+        {"agent_name": "Helper", "routine": str(routine_id), "owner": ""},
+        {"agent_name": "Helper", "routine": str(routine_id), "owner": 42},
+    ):
+        with pytest.raises(ValueError):
+            parse_relay_claim(bad)
+
+
+def test_requester_conversation_of_an_unopened_dm_is_named_only_for_unattended_runs() -> None:
+    origin = _origin_at(thread_id="dm:7", parent="dm:7")
+    assert requester_conversation(origin) is None, "a person's turn needs a real channel"
+    assert requester_conversation(origin, unattended=True) == {
+        "place_type": "dm",
+        "channel_id": None,
+        "parent_channel_id": None,
+    }
+
+
+def test_requester_keys_are_stripped_from_every_method_and_unencodable_bodies_refused() -> None:
+    forged = {"requester_platform_user_id": "666", "requester_kind": "person", "keep": 1}
+    message = {"jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": {"_meta": forged}}
+    out = json.loads(
+        stamp_requester(json.dumps(message).encode(), person="42", conversation=_CONVERSATION)
+    )
+    assert out["params"]["_meta"] == {"keep": 1}, "only a tool call is stamped; forged keys go"
+    plain = {"jsonrpc": "2.0", "method": "ping", "params": {"x": 1}}
+    assert (
+        json.loads(
+            stamp_requester(json.dumps(plain).encode(), person="42", conversation=_CONVERSATION)
+        )
+        == plain
+    ), "a method without _meta gains none"
+    for body in (b'{"params":{"a":"\\ud800"}}', b"[" * 50_000 + b"]" * 50_000):
+        with pytest.raises(RequesterBodyError):
+            stamp_requester(body, person="42", conversation=_CONVERSATION)
+
+
 def _origin(tenant_id: uuid.UUID, ma_agent_id: str, thread_id: str = "2") -> TurnOriginRow:
     return TurnOriginRow(
         id=uuid.uuid4(),
@@ -446,7 +489,10 @@ def _routine_row(**changes: Any) -> Any:
             {"place_type": "thread", "channel_id": "9", "parent_channel_id": "5"},
         ),
         ({"destination_kind": "thread", "destination_id": "9"}, None),
-        ({"destination_kind": "dm", "destination_id": "42"}, None),
+        (
+            {"destination_kind": "dm", "destination_id": "42"},
+            {"place_type": "dm", "channel_id": None, "parent_channel_id": None},
+        ),
         ({}, None),
     ],
 )

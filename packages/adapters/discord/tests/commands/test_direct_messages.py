@@ -285,3 +285,80 @@ async def test_role_loss_while_dm_runs_prevents_private_result_delivery(
     sent = [call.args[0] for call in message.channel.send.await_args_list]
     assert not sent, "revoked access suppresses the private result without replying"
     dm_module.reply_to_dm_result.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("roles_at_start", "roles_at_send", "delivered"),
+    [
+        (("555",), ("555",), True),
+        ((), (), False),
+        (("555",), (), False),
+    ],
+    ids=["holds the role", "never held it", "role lapsed mid-turn"],
+)
+async def test_role_mode_delivers_a_dm_reply_only_while_the_member_holds_the_role(
+    db_session_factory, monkeypatch, roles_at_start, roles_at_send, delivered
+):  # type: ignore[no-untyped-def]
+    from daimon.core.config import DirectMessagePolicy
+    from daimon.core.membership import CachedMembershipResolver, Membership
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, workspace_id=str(_GUILD))
+        account = await make_account(session, tenant=tenant)
+        await make_dm_conversation(
+            session,
+            tenant=tenant,
+            account_id=account.id,
+            route_key="5",
+            external_user_id="999",
+            workspace_id=str(_GUILD),
+            source_channel_id=str(_PARENT),
+        )
+    from .test_cold_direct_messages import private_reply
+
+    async def answer(deps, **kwargs):
+        from daimon.core.stores.direct_messages import get_conversation
+
+        async with db_session_factory() as session:
+            row = await get_conversation(
+                session, platform="discord", route_key="5", external_user_id="999"
+            )
+        return private_reply(row, "role reply")
+
+    monkeypatch.setattr(dm_module, "reply_to_dm_result", AsyncMock(side_effect=answer))
+    lookups = [Membership(is_member=True, role_ids=roles_at_start)]
+    lookups.append(Membership(is_member=True, role_ids=roles_at_send))
+
+    async def lookup(*args, **kwargs):
+        return lookups.pop(0) if len(lookups) > 1 else lookups[0]
+
+    member = MagicMock()
+    member.guild_permissions.administrator = False
+    member.guild_permissions.manage_guild = False
+    guild = MagicMock()
+    guild.owner_id = 1
+    guild.fetch_member = AsyncMock(return_value=member)
+    bot = MagicMock()
+    bot.draining = False
+    bot.runtime.sessionmaker = db_session_factory
+    bot.runtime.turn_deps.sessionmaker = db_session_factory
+    bot.runtime.turn_deps.membership_resolver = CachedMembershipResolver(
+        AsyncMock(side_effect=lookup)
+    )
+    bot.runtime.settings.direct_message_policies = {
+        tenant.id: DirectMessagePolicy(mode="role", role_ids=["555"])
+    }
+    bot.get_guild.return_value = guild
+    bot.turn_queue = TurnQueue(
+        platform="discord", global_cap=1, max_queued_per_tenant=1, max_queued=1, max_wait_s=60
+    )
+    message = MagicMock()
+    message.author.bot = False
+    message.author.id = 999
+    message.channel = MagicMock(spec=discord.DMChannel)
+    message.channel.id = 5
+    message.channel.send = AsyncMock()
+    message.content = "hello"
+    await DirectMessageCog(bot).on_message(message)
+    sent = [call.args[0] for call in message.channel.send.await_args_list if call.args]
+    assert ("role reply" in "".join(map(str, sent))) is delivered, sent

@@ -604,6 +604,7 @@ async def run_turn_impl(
             model_override=model_override,
             system_override=identity.system(agent.system, platform),
             relay_routine_id=routine_id if origin == "routine" else None,
+            relay_owner=runs_as_user if origin == "routine" and routine_id else None,
             identity=identity,
         )
 

@@ -721,6 +721,7 @@ async def create_session(
     system_override: str | None = None,
     relay_session_key: uuid.UUID | None = None,
     relay_routine_id: uuid.UUID | None = None,
+    relay_owner: str | None = None,
     github_mcp_router: bool = False,
     identity: SessionIdentity = DEFAULT_IDENTITY,
 ) -> BetaManagedAgentsSession:
@@ -777,8 +778,8 @@ async def create_session(
     vault of this session's own for it (`create_relay_vault`), whatever caller.
     ``relay_session_key`` is the `thread_sessions` row a person's chat session will
     be recorded under, which the relay reads to find the turn the session runs;
-    without it the relay names no person. ``relay_routine_id`` marks a routine's run,
-    which the relay names as its owner's, not as a live turn.
+    without it the relay names no person. ``relay_routine_id`` marks a routine's run and
+    ``relay_owner`` the owner it started for; the relay names that owner, not a live turn.
 
     ``budget_channel_id`` is the channel whose budget the session's spend counts
     toward (for a DM, the channel it was moved from). It is stamped apart from
@@ -1056,6 +1057,7 @@ async def create_session(
                     agent_name=agent.name,
                     session_key=relay_session_key,
                     routine_id=relay_routine_id,
+                    owner=relay_owner,
                 ),
                 now=dt.datetime.now(dt.UTC),
                 scope=scope,

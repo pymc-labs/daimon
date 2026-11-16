@@ -26,6 +26,7 @@ from daimon.adapters.discord.checks import (
 from daimon.adapters.discord.commands.cold_dm_views import ServerSelector, ServerSwitch
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.notice_card import build_notice_embed
+from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.adapters.discord.views import CancelView
 from daimon.core.admin_actions import DelegatedAction
@@ -130,6 +131,17 @@ def _error_text(exc: Exception, fallback: str, *, settings: Settings) -> str:
             exc.reason, settings, in_dm=True, cause=exc.cause, provider=exc.provider
         )
     return str(exc) if isinstance(exc, DaimonError) else fallback
+
+
+async def _dm_allowed(runtime: DiscordRuntime, tenant_id: uuid.UUID, user_id: str) -> bool:
+    """The tenant's DM policy for `user_id` right now; role mode reads their roles."""
+    return await dm_policy_allows(
+        runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy()),
+        runtime.sessionmaker,
+        runtime.turn_deps.membership_resolver,
+        tenant_id=tenant_id,
+        user_id=user_id,
+    )
 
 
 class DirectMessageCog(commands.Cog):
@@ -848,10 +860,7 @@ class DirectMessageCog(commands.Cog):
 
             async def still_allowed() -> None:
                 nonlocal verified
-                policy = runtime.settings.direct_message_policies.get(
-                    conversation.tenant_id, DirectMessagePolicy()
-                )
-                if grant is None or not policy.allows(person):
+                if grant is None or not await _dm_allowed(runtime, conversation.tenant_id, person):
                     self._suppress(message, "delivery_recipient_revoked")
                     raise AdmissionDenied(reason="invoker_not_allowed")
                 try:
@@ -917,10 +926,7 @@ class DirectMessageCog(commands.Cog):
         person = str(message.author.id)
 
         async def may_post() -> bool:
-            policy = runtime.settings.direct_message_policies.get(
-                reply.conversation.tenant_id, DirectMessagePolicy()
-            )
-            if not policy.allows(person):
+            if not await _dm_allowed(runtime, reply.conversation.tenant_id, person):
                 self._suppress(message, "delivery_recipient_revoked")
                 return False
             try:
@@ -962,14 +968,11 @@ class DirectMessageCog(commands.Cog):
                 tenant = await get_tenant(session, conversation.tenant_id)
                 policy = await load_dm_access_policy(session, tenant_id=conversation.tenant_id)
                 enabled = await dm_enabled(session, tenant_id=conversation.tenant_id)
-            recipient_policy = runtime.settings.direct_message_policies.get(
-                conversation.tenant_id, DirectMessagePolicy()
-            )
             if (
                 not enabled
                 or not tenant_ready(tenant)
                 or not self.bot.allows_tenant(tenant)
-                or not recipient_policy.allows(str(message.author.id))
+                or not await _dm_allowed(runtime, conversation.tenant_id, str(message.author.id))
                 or subject.verified_membership is not True
                 or not authorize(policy, subject=subject, action=Action.START_TURN)
             ):
@@ -1041,9 +1044,9 @@ class DirectMessageCog(commands.Cog):
                 for start in range(0, len(answer), 1900):
                     # Each transport await is another opportunity for revocation.
                     await require_dm_delivery(runtime.turn_deps, reply)
-                    if not runtime.settings.direct_message_policies.get(
-                        conversation.tenant_id, DirectMessagePolicy()
-                    ).allows(str(message.author.id)):
+                    if not await _dm_allowed(
+                        runtime, conversation.tenant_id, str(message.author.id)
+                    ):
                         self._suppress(message, "delivery_recipient_revoked")
                         return
                     await message.channel.send(

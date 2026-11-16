@@ -145,6 +145,9 @@ class RelayBinding:
     session_key: uuid.UUID | None = None
     #: The routine a scheduled run belongs to; never set together with `session_key`.
     routine_id: uuid.UUID | None = None
+    #: The routine's owner when the run started; the relay stamps the routine only
+    #: while the row still names this user, so a later ownership change credits nobody.
+    owner: str | None = None
 
     def claim(self) -> dict[str, str]:
         value = {"agent_name": self.agent_name}
@@ -152,6 +155,8 @@ class RelayBinding:
             value["session"] = str(self.session_key)
         if self.routine_id is not None:
             value["routine"] = str(self.routine_id)
+        if self.owner is not None:
+            value["owner"] = self.owner
         return value
 
 
@@ -161,8 +166,10 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         raise ValueError("relay claim is not an object")
     claim = cast("Mapping[str, object]", raw)
     name, key, routine = claim.get("agent_name"), claim.get("session"), claim.get("routine")
+    owner = claim.get("owner")
     if (
-        not set(claim) <= {"agent_name", "session", "routine"}
+        not set(claim) <= {"agent_name", "session", "routine", "owner"}
+        or not (owner is None or (isinstance(owner, str) and owner and routine is not None))
         or not isinstance(name, str)
         or not name
         or not (key is None or isinstance(key, str))
@@ -174,6 +181,7 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         agent_name=name,
         session_key=None if key is None else uuid.UUID(key),
         routine_id=None if routine is None else uuid.UUID(routine),
+        owner=owner,
     )
 
 
@@ -341,16 +349,27 @@ class RequesterBodyError(ValueError):
     """A relayed request body that cannot be stamped safely; the relay answers 400."""
 
 
-def requester_conversation(origin: TurnOriginRow) -> dict[str, str | None] | None:
+#: A DM whose channel is not opened yet: an unattended run can DM only its owner.
+UNOPENED_DM_PLACE: Final[Mapping[str, str | None]] = {
+    "place_type": "dm",
+    "channel_id": None,
+    "parent_channel_id": None,
+}
+
+
+def requester_conversation(
+    origin: TurnOriginRow, *, unattended: bool = False
+) -> dict[str, str | None] | None:
     """Where the person's live turn runs, as `requester_conversation`; None when unknown.
 
     `channel_id` names the channel, thread or DM the conversation lives in;
     `parent_channel_id` names a thread's channel and is None otherwise. Read from
-    the origin the platform adapter recorded, never from the caller's request.
+    the origin the platform adapter recorded, never from the caller's request. An
+    `unattended` run in a DM with no recorded channel is still a DM (its owner's).
     """
     if origin_place(origin) == "dm":
         if not origin.platform_channel_id:
-            return None
+            return dict(UNOPENED_DM_PLACE) if unattended else None
         return {
             "place_type": "dm",
             "channel_id": origin.platform_channel_id,
@@ -371,10 +390,13 @@ def routine_conversation(row: RoutineRow) -> dict[str, str | None] | None:
     """Where a routine delivers, as `requester_conversation`; None when it has no
     destination or the destination's place is not recorded.
 
-    A DM destination has no channel id until the DM is opened at delivery, and a
-    thread saved before its parent channel was recorded has no parent: neither
-    can be named, so both give None.
+    A DM destination has no channel id until the DM is opened at delivery, so it is
+    a DM with a null channel. A thread saved before its parent channel was recorded
+    has no parent and cannot be named: None.
     """
+    if row.destination_kind == "dm":
+        # A routine can DM only its owner; the DM channel is opened at delivery.
+        return dict(UNOPENED_DM_PLACE)
     if row.destination_id is None:
         return None
     if row.destination_kind == "channel":
@@ -417,10 +439,11 @@ def _stamp_message(
         raise RequesterBodyError("a request body must be an object or an array of objects")
     fields = cast("dict[str, object]", message)
     method = fields.get("method")
-    if not isinstance(method, str) or method.strip().casefold() != "tools/call":
-        return fields
     params = fields.get("params")
-    if not isinstance(params, dict):
+    is_call = isinstance(method, str) and method.strip().casefold() == "tools/call"
+    if not is_call and not isinstance(params, dict):
+        return fields
+    if is_call and not isinstance(params, dict):
         raise RequesterBodyError("a tool call needs params")
     call = cast("dict[str, object]", params)
     # `meta` is the field's name without its alias: drop it so no parser reads it.
@@ -434,13 +457,19 @@ def _stamp_message(
     meta.pop(REQUESTER_META_KEY, None)
     meta.pop(CONVERSATION_META_KEY, None)
     meta.pop(KIND_META_KEY, None)
+    # Only a tool call is stamped; any other method just loses what a caller put there.
     # A live turn is named only with its place; a routine's place may be unrecorded.
-    if person is not None and (kind == "routine" or (kind == "person" and conversation)):
+    if (
+        is_call
+        and person is not None
+        and (kind == "routine" or (kind == "person" and conversation))
+    ):
         meta[REQUESTER_META_KEY] = person
         meta[KIND_META_KEY] = kind
         if conversation:
             meta[CONVERSATION_META_KEY] = dict(conversation)
-    call["_meta"] = meta
+    if is_call or existing is not None:
+        call["_meta"] = meta
     return fields
 
 
@@ -458,6 +487,7 @@ def stamp_requester(
     turn and `routine` for a routine run, whose `person` is the routine's owner and
     whose `conversation` is its delivery place (left out when it has none). With no
     `person` or `kind` (a foreign sender, two live turns) the keys are only removed.
+    Requester keys are removed under `params._meta` of every method, not only tool calls.
     Strict: a body that is not UTF-8 JSON, repeats a key, or holds a tool call without
     object params raises `RequesterBodyError`. Other methods and responses pass through, but
     the whole body is re-serialized so what was checked is what is sent.
@@ -480,4 +510,7 @@ def stamp_requester(
         ]
     else:
         out = _stamp_message(parsed, person=person, conversation=conversation, kind=kind)
-    return json.dumps(out, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    try:
+        return json.dumps(out, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    except (UnicodeEncodeError, RecursionError, ValueError) as err:
+        raise RequesterBodyError("request body cannot be re-encoded") from err

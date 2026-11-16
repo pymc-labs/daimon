@@ -25,9 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workspaces and agents that may use it. With `"requester_meta": true` Daimon
   removes any `requester_platform_user_id`, `requester_conversation` or
   `requester_kind` a tool call carries in `params._meta`, then sets them from
-  the person's live turn (their user id, where it runs, kind `"person"`) or a
-  routine's own run (its owner, delivery place, kind `"routine"`). Senders from
-  another organisation, replaced sessions and two turns at once carry none. A body that is not strict JSON is refused with a 400.
+  the person's own turn (their user id, where it runs, kind `"person"`) or any
+  unattended run such as a routine, watch, timer, wake or DM routine (the person
+  it runs for, its place, kind `"routine"`). A routine's owner is signed into
+  its credential and must still match at call time. Keys are removed under every
+  method's `_meta`. Senders from another organisation, replaced sessions and two
+  turns at once carry none. A body that is not strict JSON, or cannot be
+  re-encoded, is refused with a 400.
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and
   the MCP tools. A run nobody started, such as a routine, never applies one at once.

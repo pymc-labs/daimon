@@ -18,6 +18,7 @@ from daimon.core.config import (
     McpOAuthSettings,
     McpSettings,
     Settings,
+    SignedIdentityServer,
     SlackSettings,
     TeamsSettings,
     load_settings,
@@ -1349,3 +1350,18 @@ def test_selfhosted_admission_setting_defaults_false_and_reads_nested_env(monkey
     assert load_selfhosted_settings(_env_file=None).admission_enabled is True
     monkeypatch.setenv("DAIMON_DATABASE__URL", "postgresql+asyncpg://u:p@h:5432/d")
     assert load_settings(_env_file=None).selfhosted.admission_enabled is True
+
+
+@pytest.mark.parametrize(
+    "url", ["http://tools.example.com/mcp", "https://user:pw@tools.example.com/mcp", "tools"]
+)
+def test_a_bearer_identity_server_must_be_plain_https(url: str) -> None:
+    with pytest.raises(ValidationError, match="https URL"):
+        SignedIdentityServer(
+            name="tools",
+            url=url,
+            auth="bearer",
+            requester_meta=True,
+            workspaces=frozenset({"discord:1"}),
+            agents=("Agent A",),
+        )
