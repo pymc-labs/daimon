@@ -992,14 +992,79 @@
     'change_workspace_settings': dict({
       'description': '''
         Change the web modules, web chat agent, who may start turns (everyone or exactly
-        ``invoker_people``) and the direct-message rules.
+        ``invoker_people``) and the direct-message settings. ``dm_default_agent`` is the agent
+        a DM starts with ("" clears it); ``dm_rules`` replaces the ordered rule list, first
+        match wins.
       ''',
       'parameters': dict({
+        '$defs': dict({
+          'DmRule': dict({
+            'additionalProperties': False,
+            'description': '''
+              One direct-message rule: whom it matches (``subject_id`` for a user or group),
+              the agent they get (none: the default agent) and whether they may switch.
+            ''',
+            'properties': dict({
+              'agent': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'locked': dict({
+                'default': False,
+                'type': 'boolean',
+              }),
+              'subject': dict({
+                'enum': list([
+                  'user',
+                  'group',
+                  'everyone',
+                ]),
+                'type': 'string',
+              }),
+              'subject_id': dict({
+                'anyOf': list([
+                  dict({
+                    'maxLength': 100,
+                    'minLength': 1,
+                    'pattern': '^[\\w:.@-]+$',
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+            }),
+            'required': list([
+              'subject',
+            ]),
+            'type': 'object',
+          }),
+        }),
         'additionalProperties': False,
         'properties': dict({
           'default_agent': dict({
             'default': '',
             'type': 'string',
+          }),
+          'dm_default_agent': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'dm_enabled': dict({
             'anyOf': list([
@@ -1016,6 +1081,21 @@
             'anyOf': list([
               dict({
                 'type': 'boolean',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'dm_rules': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  '$ref': '#/$defs/DmRule',
+                }),
+                'maxItems': 100,
+                'type': 'array',
               }),
               dict({
                 'type': 'null',
@@ -9406,13 +9486,66 @@
     'set_agent_web_access': dict({
       'description': '''
         Turn an agent's web chat on or off and set who may use it: everyone or up to 100
-        groups or invitees.
+        groups or invitees. ``dm_who`` sets who may DM it: ``members`` (everyone), ``listed``
+        or ``excluded``, with platform user and group ids.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
           'agent_id': dict({
             'type': 'string',
+          }),
+          'dm_group_ids': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  'maxLength': 100,
+                  'minLength': 1,
+                  'pattern': '^[\\w:.@-]+$',
+                  'type': 'string',
+                }),
+                'maxItems': 100,
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'dm_user_ids': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  'maxLength': 100,
+                  'minLength': 1,
+                  'pattern': '^[\\w:.@-]+$',
+                  'type': 'string',
+                }),
+                'maxItems': 100,
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'dm_who': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'members',
+                  'listed',
+                  'excluded',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'groups': dict({
             'anyOf': list([

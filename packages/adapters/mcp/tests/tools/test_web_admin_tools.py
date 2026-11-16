@@ -705,8 +705,12 @@ async def test_list_agent_web_access_when_over_25_then_a_cursor_reaches_the_rest
     async def fake_rows(*_a: Any, **_k: Any):
         return rows
 
+    async def no_dms(*_a: Any, **_k: Any):
+        return None
+
     monkeypatch.setattr(people_tool, "list_agents_by_tenant", fake_agents)
     monkeypatch.setattr(people_tool.web_admin, "agent_access_rows", fake_rows)
+    monkeypatch.setattr(people_tool.dm_settings, "dm_platform", no_dms)
     first = await people_tool._access_list_impl(runtime, make_auth())
     assert (len(first.agents), first.total) == (25, 30), "cut at 25 of 30"
     assert first.next_page is not None, "more exist, so there is a cursor"
