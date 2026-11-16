@@ -289,20 +289,29 @@ async def dm_enabled(session: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
     return (await feature_in(session, None, place, "direct_messages")).on
 
 
-async def set_dm_enabled(session: AsyncSession, *, tenant_id: uuid.UUID, enabled: bool) -> None:
-    """Turn `direct_messages` on or off for a workspace, as a feature value. For the CLI and
-    fixtures; the settings surfaces go through `workspace_settings`."""
+async def set_dm_enabled(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    enabled: bool,
+    account_id: uuid.UUID | None = None,
+) -> None:
+    """Turn `direct_messages` on or off for a workspace, as a recorded feature value. For the
+    CLI and fixtures; the settings surfaces go through `workspace_settings`."""
     # Imported here: the feature service reads these stores.
     from daimon.core.features.service import set_workspace_feature
 
+    platform = await session.scalar(select(Tenant.platform).where(Tenant.id == tenant_id))
+    if platform is None:
+        raise LookupError(f"no workspace {tenant_id}")
     await set_workspace_feature(
         session,
         None,
         tenant_id=tenant_id,
-        platform="discord",
+        platform=platform,
         key="direct_messages",
         value="on" if enabled else "off",
-        account_id=None,
+        account_id=account_id,
         surface="cli",
     )
 

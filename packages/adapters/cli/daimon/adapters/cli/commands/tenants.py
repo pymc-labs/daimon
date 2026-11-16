@@ -44,6 +44,7 @@ from daimon.core.stores.access_policy import (
     set_access_policy,
 )
 from daimon.core.stores.domain import Platform, TenantBackendPolicy
+from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.tenants import (
     delete_tenant,
     get_tenant,
@@ -1001,7 +1002,12 @@ async def tenants_dm_policy(
         if agent is not None or clear_agent:
             await set_dm_agent_name(session, tenant_id=tenant_id, agent_name=agent)
         if enabled is not None:
-            await set_dm_enabled(session, tenant_id=tenant_id, enabled=enabled)
+            principal = await get_or_create_cli_principal(
+                session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
+            )
+            await set_dm_enabled(
+                session, tenant_id=tenant_id, enabled=enabled, account_id=principal.account_id
+            )
         return {
             "enabled": await dm_enabled(session, tenant_id=tenant_id),
             "dm_agent_name": await get_dm_agent_name(session, tenant_id=tenant_id),
