@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Let the AKS scripts run from a copy of the source outside a daimon checkout: set
+  `SOURCE_ROOT` to the copy and `CHART_DIR` to the chart's path inside it.
+
 - Let AKS registration grant selfhosted model replies in Teams: set `TEAMS_GRANTS`
   to map Teams channel or chat IDs to the Entra object IDs of the people allowed there.
 

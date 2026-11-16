@@ -138,11 +138,20 @@ elif name == 'kubectl' and 'exec' in args and '-i' in args:
     print(json.dumps({'tenant_id': 'tenant-id', 'account_id': 'account-id', 'config_digest': 'digest'}))
 elif name == 'helm' and args[:1] == ['list']:
     print(os.environ.get('HELM_RELEASES', ''))
+elif name == 'az' and args[:2] == ['acr', 'run']:
+    # ACR reads the task file from the uploaded build context.
+    if not Path(args[-1], args[args.index('-f') + 1]).is_file():
+        sys.exit(1)
+    print('Queued a run with ID: offline-run', file=sys.stderr)
+elif name == 'az' and args[:3] == ['acr', 'task', 'show-run']:
+    print('Succeeded')
 """
 
 
 class TeamsReleaseScriptTests(unittest.TestCase):
-    def run_script(self, script, command, state, overrides=None, stub_source=STUB):
+    def run_script(
+        self, script, command, state, overrides=None, stub_source=STUB, cwd=CHART.parents[2]
+    ):
         stub = state / "stub"
         if not stub.exists():
             stub.write_text(stub_source)
@@ -173,7 +182,7 @@ class TeamsReleaseScriptTests(unittest.TestCase):
             env=env,
             capture_output=True,
             text=True,
-            cwd=CHART.parents[2],
+            cwd=cwd,
         )
         calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
         return result, calls
@@ -246,6 +255,28 @@ class TeamsReleaseScriptTests(unittest.TestCase):
             helm = next(c for c in calls if c[:2] == ["helm", "upgrade"])
             files = [helm[i + 1] for i, arg in enumerate(helm) if arg == "-f"]
             self.assertEqual(files, [str(state / "values.yaml"), str(state / "aks-values.json")])
+
+    def test_chart_and_source_directories_reach_helm_and_the_build(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            (state / "source").mkdir()
+            (state / "source/chart").symlink_to(CHART)
+            # Run outside any checkout with relative paths, as a wrapper script may pass
+            # them: SOURCE_ROOT from the caller's directory, CHART_DIR from SOURCE_ROOT.
+            overrides = {"SOURCE_ROOT": "source", "CHART_DIR": "chart"}
+            for script, command in (
+                ("aks.sh", ["install"]),
+                ("aks.sh", ["register"]),
+                ("register.sh", []),
+            ):
+                result, calls = self.run_script(script, command, state, overrides, cwd=state)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("chart", next(c for c in calls if c[:2] == ["helm", "upgrade"]))
+            result, calls = self.run_script("build-images.sh", [], state, overrides, cwd=state)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            build = next(c for c in calls if c[:3] == ["az", "acr", "run"])
+            self.assertEqual(build[build.index("-f") + 1], "chart/scripts/acr-build.yaml")
+            self.assertEqual(build[-1], ".")
 
     def test_install_adds_operator_held_host_keys(self):
         with tempfile.TemporaryDirectory() as directory:

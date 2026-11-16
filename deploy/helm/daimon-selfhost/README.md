@@ -301,6 +301,11 @@ export AKS_STATE=$(mktemp -d)
 bash deploy/helm/daimon-selfhost/scripts/aks.sh bootstrap
 ```
 
+The scripts build from this checkout and install the chart in
+`deploy/helm/daimon-selfhost`. To run them from a copy of the source outside a
+daimon checkout, set `SOURCE_ROOT` to the copy and `CHART_DIR` to the chart's
+path inside it.
+
 When `TAG` is unset, each bootstrap generates a unique git-SHA/timestamp tag.
 After a successful build it saves the tag in `AKS_STATE/image-tag`; later helper
 commands reuse that saved tag. An explicit operator `TAG` takes precedence.

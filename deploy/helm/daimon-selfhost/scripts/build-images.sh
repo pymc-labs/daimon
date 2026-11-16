@@ -2,12 +2,14 @@
 # Queue once, then trust the run status API rather than the log stream exit code.
 set -euo pipefail
 umask 077
-cd "$(git rev-parse --show-toplevel)"
+cd "${SOURCE_ROOT:-$(git rev-parse --show-toplevel)}"
+# ACR finds the task file inside the uploaded context, so CHART_DIR is relative to it.
+chart=${CHART_DIR:-deploy/helm/daimon-selfhost}
 : "${ACR:?export ACR}" "${TAG:?export TAG}" "${AKS_STATE:?export AKS_STATE}"
 # Azure CLI's --no-wait path can suppress returned JSON. Its queue receipt
 # includes the exact run ID on stderr; do not select the registry's latest run.
 queue_output=$(AZURE_CORE_ONLY_SHOW_ERRORS=false az acr run -r "$ACR" \
-  -f deploy/helm/daimon-selfhost/scripts/acr-build.yaml --set "tag=$TAG" \
+  -f "$chart/scripts/acr-build.yaml" --set "tag=$TAG" \
   --timeout 7200 --no-wait -o none . 2>&1) || {
   printf '%s\n' "$queue_output" >&2
   echo 'ACR Tasks BuildKit build/push failed to queue; stopping before provisioning' >&2
@@ -22,4 +24,4 @@ else
 fi
 printf '%s\n' "$run" > "$AKS_STATE/acr-run-id"
 echo "ACR run $run queued for tag $TAG"
-bash deploy/helm/daimon-selfhost/scripts/wait-build.sh "$run"
+bash "$chart/scripts/wait-build.sh" "$run"

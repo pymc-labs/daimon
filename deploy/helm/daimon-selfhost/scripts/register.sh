@@ -3,7 +3,8 @@
 set -euo pipefail
 umask 077
 : "${ALLOW_TEST_TARIFFS:?set true for TEST rates, false for verified production rates}" "${AKS_STATE:?}" "${SELFHOSTED_MODEL:?}" "${SELFHOSTED_MODELS:?JSON tariff catalogue required}"
-chart=deploy/helm/daimon-selfhost
+cd "${SOURCE_ROOT:-$(git rev-parse --show-toplevel)}"
+chart=${CHART_DIR:-deploy/helm/daimon-selfhost}
 source "$chart/scripts/release.sh"
 require_release_names register
 refuse_other_releases register

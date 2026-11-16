@@ -2,8 +2,11 @@
 # Operator-run only. This script creates/deletes Azure resources when invoked.
 set -euo pipefail
 umask 077
-cd "$(git rev-parse --show-toplevel)"
-chart=deploy/helm/daimon-selfhost
+# Build and run from SOURCE_ROOT (default: this checkout), with the chart at
+# CHART_DIR inside it. Nested scripts get the resolved root.
+cd "${SOURCE_ROOT:-$(git rev-parse --show-toplevel)}"
+export SOURCE_ROOT=$PWD
+chart=${CHART_DIR:-deploy/helm/daimon-selfhost}
 : "${RG:?export RG}" "${LOCATION:?export LOCATION}" "${ACR:?export ACR}"
 : "${AKS:?export AKS}" "${AOAI:?export AOAI}"
 : "${AKS_STATE:?export AKS_STATE to a private mktemp -d directory}"
