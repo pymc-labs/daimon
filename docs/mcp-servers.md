@@ -137,7 +137,10 @@ keys are removed under `_meta` of every method, not only tool calls.
   the watch, timer or wake.
 - `requester_conversation`: `{"place_type": "channel" | "thread" | "dm",
   "channel_id": ..., "parent_channel_id": ...}`. `parent_channel_id` is a
-  thread's channel and null otherwise. For a routine, its delivery place.
+  thread's channel and null otherwise. For a routine, its delivery place. A routine
+  with no place (no destination, or a thread with no parent) is stamped with the
+  asker and kind but no place, so a server that requires a place refuses every read
+  from it (fails closed); writes are unaffected.
 - `requester_kind`: `"person"` only while a person's own message or click is
   being answered. `"routine"` means any unattended run: a routine, watch,
   timer, continuation wake or DM routine.
