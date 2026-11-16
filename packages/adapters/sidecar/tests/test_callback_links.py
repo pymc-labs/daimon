@@ -1036,14 +1036,14 @@ async def test_the_database_enforces_its_own_cap_whatever_the_caller_passes(
             return str(getattr(exc.__cause__, "sqlstate", None) or getattr(exc, "orig", exc))
         return "accepted"
 
-    assert await call(5000, 4096) != "accepted"
-    assert await call(5000, None) != "accepted"
+    assert await call(5000, 4096) == "42501"
+    assert await call(5000, None) == "42501"
     assert await call(4096, 1) == "accepted"  # Below the floor, the default 4 KiB applies.
-    assert await call(524289, 10_000_000) != "accepted"  # Above the ceiling, 512 KiB applies.
+    assert await call(524289, 10_000_000) == "42501"  # Above the ceiling, 512 KiB applies.
     assert await call(524288, 10_000_000) == "accepted"
 
 
-@pytest.mark.parametrize("value", ["1023", "524289", "0", "-1"])
+@pytest.mark.parametrize("value", ["4095", "524289", "0", "-1"])
 def test_the_body_cap_setting_has_bounds(monkeypatch, value):
     monkeypatch.setenv("DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES", value)
     with pytest.raises(ValidationError):
