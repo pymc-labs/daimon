@@ -748,7 +748,7 @@ Anyone who can change a conversation's model may pick an OpenAI or Gemini model 
 
 ## Ask a person
 
-Answers offer a way to ask the Daimon team for help, which posts the request in the support channel. Off removes the button and the form. An agent can turn it off for itself, never on above an Off workspace. Whoever runs Daimon sets the channel and each person's credits.
+Answers offer a way to ask the Daimon team for help, which posts the request in the support channel. Off removes the button and the form. An agent can turn it off for itself, never on where it is off for everyone. Whoever runs Daimon sets the channel and each person's credits.
 
 | | |
 | --- | --- |

@@ -883,7 +883,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         doc=(
             "Answers offer a way to ask the Daimon team for help, which posts the request in the "
             "support channel. Off removes the button and the form. An agent can turn it off for "
-            "itself, never on above an Off workspace. Whoever runs Daimon sets the channel "
+            "itself, never on where it is off for everyone. Whoever runs Daimon sets the channel "
             "and each person's credits."
         ),
         requires=("support_channel",),
