@@ -787,6 +787,14 @@ async def test_callback_lifetime_is_thirty_days_unless_a_server_admin_changes_it
     assert await _lifetime(db_session_factory, moved) == timedelta(days=7)
 
 
+async def test_a_workspace_may_set_ninety_days_over_the_thirty_day_default(
+    db_session_factory, moved
+):
+    await _choose(db_session_factory, moved, "90")
+    assert await _lifetime(db_session_factory, moved) == timedelta(days=90)
+    assert await _lifetime(db_session_factory, moved, _settings(features={})) == timedelta(days=90)
+
+
 async def test_the_deployment_sets_the_lifetime_and_a_workspace_cannot_loosen_it(
     db_session_factory, moved
 ):
@@ -940,3 +948,59 @@ def test_the_body_cap_setting_has_bounds(monkeypatch, value):
     monkeypatch.setenv("DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES", value)
     with pytest.raises(ValidationError):
         watches.load_watches_settings()
+
+
+async def test_reimporting_an_unconfirmed_watch_refreshes_its_lifetime(db_session_factory, moved):
+    async def run(cap):
+        definition = ImportedCallbackWatch.model_validate(_manifest_watch(expires_at=None))
+        async with db_session_factory.begin() as db:
+            return await watches.import_callback_watch(
+                db,
+                definition,
+                tenant_id=moved.id,
+                agent_id="agent-new",
+                agent_name="analyst",
+                now=datetime.now(UTC),
+                lifetime_cap=cap,
+            )
+
+    first = await run(timedelta(days=7))
+    assert first.watch is not None and first.watch.source_state["lifetime_s"] == 7 * 86400
+    again = await run(timedelta(days=90))
+    assert again.outcome == "updated" and again.watch is not None
+    assert again.watch.source_state["lifetime_s"] == 90 * 86400
+    assert (await run(timedelta(days=90))).outcome == "existing"
+    async with db_session_factory.begin() as db:
+        await watches.confirm_import(
+            db,
+            first.watch.id,
+            tenant_id=moved.id,
+            owner_account_id=first.watch.owner_account_id,
+            agent_id="agent-new",
+            parent_channel_id="900",
+            thread_id="900",
+            now=datetime.now(UTC),
+        )
+    assert (await run(None)).outcome == "existing"
+
+
+async def test_an_unlimited_watch_shows_no_expiry_in_lists(db_session_factory, moved):
+    from daimon.adapters.mcp.tools.watches import lasts, summary
+
+    item = await _import(db_session_factory, moved, expires_at=None)
+    assert item.watch is not None
+    now = datetime.now(UTC)
+    async with db_session_factory.begin() as db:
+        forever = await watches.renew_callback_watch(
+            db, item.watch.id, tenant_id=moved.id, now=now, lifetime=None
+        )
+    assert lasts(forever.expires_at) == "no expiry"
+    listed = summary(forever)
+    assert listed.unlimited and listed.expires_at is None and not listed.permanent
+    async with db_session_factory.begin() as db:
+        week = await watches.renew_callback_watch(
+            db, item.watch.id, tenant_id=moved.id, now=now, lifetime=timedelta(days=7)
+        )
+    assert lasts(week.expires_at).startswith("until ")
+    shown = summary(week)
+    assert not shown.unlimited and shown.expires_at == week.expires_at

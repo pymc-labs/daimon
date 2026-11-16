@@ -593,6 +593,13 @@ async def callback_lifetime(
     return None if days == 0 else timedelta(days=days)
 
 
+def is_unlimited(expires_at: datetime | None, *, now: datetime | None = None) -> bool:
+    """Whether a callback watch's expiry is the far-off date an unlimited lifetime stores."""
+    if expires_at is None:
+        return False
+    return expires_at - (now or datetime.now(UTC)) > UNLIMITED_LIFETIME / 2
+
+
 def callback_end(now: datetime, lifetime: timedelta | None) -> datetime:
     """When a callback watch made `now` ends under `lifetime` (None is unlimited)."""
     return now + (UNLIMITED_LIFETIME if lifetime is None else lifetime)
@@ -1771,6 +1778,16 @@ async def import_callback_watch(
 
     await session.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
     instructions, truncated = clip(definition.instructions, INSTRUCTIONS_LIMIT)
+    expired = definition.expires_at is not None and definition.expires_at <= now
+    if definition.expires_at is None:
+        lifetime = UNLIMITED_LIFETIME if lifetime_cap is None else lifetime_cap
+    else:
+        lifetime = definition.expires_at - now
+        if lifetime_cap is not None:
+            lifetime = min(lifetime, lifetime_cap)
+    capped = lifetime_cap is not None and (
+        definition.expires_at is None or definition.expires_at > now + lifetime_cap
+    )
     previous = await session.scalar(
         select(Watch).where(
             Watch.tenant_id == tenant_id,
@@ -1784,8 +1801,11 @@ async def import_callback_watch(
                 definition.legacy_id, WatchRow.model_validate(previous), None, "existing"
             )
         state = previous.source_state
+        # The lifetime follows the current setting until the watch is confirmed.
+        lifetime_s = int(lifetime.total_seconds()) if not expired else state.get("lifetime_s")
         if (
-            previous.instructions == instructions
+            lifetime_s == state.get("lifetime_s")
+            and previous.instructions == instructions
             and state.get("keep_paused") == definition.paused
             and state.get("place_type") == definition.place_type
         ):
@@ -1798,6 +1818,7 @@ async def import_callback_watch(
             "keep_paused": definition.paused,
             "truncated": truncated,
             "place_type": definition.place_type,
+            "lifetime_s": lifetime_s,
         }
         await session.flush()
         previous_id = previous.id
@@ -1805,17 +1826,8 @@ async def import_callback_watch(
         refreshed = await get_watch(session, previous_id)
         assert refreshed is not None
         return CallbackImport(definition.legacy_id, refreshed, None, "updated", truncated=truncated)
-    if definition.expires_at is not None and definition.expires_at <= now:
+    if expired:
         return CallbackImport(definition.legacy_id, None, None, "expired")
-    if definition.expires_at is None:
-        lifetime = UNLIMITED_LIFETIME if lifetime_cap is None else lifetime_cap
-    else:
-        lifetime = definition.expires_at - now
-        if lifetime_cap is not None:
-            lifetime = min(lifetime, lifetime_cap)
-    capped = lifetime_cap is not None and (
-        definition.expires_at is None or definition.expires_at > now + lifetime_cap
-    )
     expires_at = now + MAX_LIFETIME
     principal = await get_or_create_platform_principal(
         session,

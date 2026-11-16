@@ -36,6 +36,7 @@ from daimon.core.stores.watches import (
     get_watch,
     import_callback_watch,
     import_watch,
+    is_unlimited,
     list_notice_receipts,
     list_tenant_watches,
     renew_callback_watch,
@@ -70,6 +71,12 @@ async def check_agent(
         raise typer.BadParameter("--agent-id and --agent-name must name one agent of the tenant")
 
 
+def _expiry_text(expires_at: datetime | None, *, empty: str) -> str:
+    if expires_at is None:
+        return empty
+    return "no expiry" if is_unlimited(expires_at) else expires_at.isoformat()
+
+
 def _listed(item: WatchActivity, names: dict[tuple[str, str], str | None]) -> dict[str, object]:
     """The operator view of one watch. Never its instructions, keys, baseline or evidence."""
     row = item.watch
@@ -86,7 +93,7 @@ def _listed(item: WatchActivity, names: dict[tuple[str, str], str | None]) -> di
         "parent_channel_id": row.parent_channel_id,
         "thread_id": row.thread_id,
         "agent_id": row.agent_id,
-        "expires_at": row.expires_at.isoformat() if row.expires_at else "permanent",
+        "expires_at": _expiry_text(row.expires_at, empty="permanent"),
         "fires_today": item.fires_today,
         "last_fired_at": item.last_fired_at.isoformat() if item.last_fired_at else None,
         "errors": row.consecutive_errors,
@@ -440,7 +447,7 @@ def renew_command(
                     )
                 except ValueError as exc:
                     raise typer.BadParameter(str(exc)) from None
-            typer.echo(f"{row.id} expires {row.expires_at.isoformat() if row.expires_at else ''}")
+            typer.echo(f"{row.id} expires {_expiry_text(row.expires_at, empty='')}")
 
     asyncio.run(run())
 

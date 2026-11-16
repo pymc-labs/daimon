@@ -82,6 +82,8 @@ class WatchSummary(BaseModel):
     source_host: str | None = None
     delivery: WatchDelivery = "thread"
     permanent: bool = False
+    # A callback watch whose workspace sets no lifetime limit: expires_at is then None.
+    unlimited: bool = False
     max_turns_per_day: int = watches.DEFAULT_WATCH_CAP
     revision: int = 0
 
@@ -89,6 +91,7 @@ class WatchSummary(BaseModel):
 def summary(row: WatchRow, *, key_id: str | None = None) -> WatchSummary:
     reason = row.source_state.get("reason")
     server_url = row.source_state.get("server_url") if row.source == "mcp_poll" else None
+    unlimited = row.source == "callback" and watches.is_unlimited(row.expires_at)
     return WatchSummary(
         watch_id=row.id,
         source=row.source,
@@ -97,11 +100,12 @@ def summary(row: WatchRow, *, key_id: str | None = None) -> WatchSummary:
         thread_id=row.thread_id,
         parent_channel_id=row.parent_channel_id,
         agent_id=row.agent_id,
-        expires_at=row.expires_at,
+        expires_at=None if unlimited else row.expires_at,
         key_id=key_id,
         source_host=urlsplit(str(server_url)).hostname if server_url else None,
         delivery=row.delivery,
         permanent=row.expires_at is None,
+        unlimited=unlimited,
         max_turns_per_day=row.max_turns_per_day,
         revision=row.revision,
     )
@@ -812,7 +816,11 @@ EDITABLE = (
 
 def lasts(expires_at: datetime | None) -> str:
     """How long a watch runs, as its edit card shows it."""
-    return "permanent" if expires_at is None else f"until {expires_at:%Y-%m-%d %H:%M} UTC"
+    if expires_at is None:
+        return "permanent"
+    if watches.is_unlimited(expires_at):
+        return "no expiry"
+    return f"until {expires_at:%Y-%m-%d %H:%M} UTC"
 
 
 def editable(row: WatchRow) -> dict[str, JsonValue]:
