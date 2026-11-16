@@ -2963,13 +2963,14 @@ async def test_save_caller_reads_no_roles_for_anyone_but_a_discord_member(
     read = AsyncMock(side_effect=AssertionError("must not read roles"))
     monkeypatch.setattr(_routines_mod, "resolve_subject", read)
     caller = _routines_mod._saving_caller(_runtime(MagicMock()), auth)
-    assert caller.fresh_subject is None
-    assert not caller.subject.membership_fresh
+    assert caller.fresh_subject is None, "only a Discord member has live roles to read"
+    assert not caller.subject.membership_fresh, "the stored subject never claims a fresh read"
 
 
 async def test_save_caller_reads_a_discord_members_roles_fresh_and_only_when_asked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Roles are read lazily, so a save for an agent without roles costs no lookup."""
     from daimon.core.authz import Subject
 
     read = AsyncMock(
@@ -2983,8 +2984,9 @@ async def test_save_caller_reads_a_discord_members_roles_fresh_and_only_when_ask
     monkeypatch.setattr(_routines_mod, "resolve_subject", read)
     caller = _routines_mod._saving_caller(_runtime(MagicMock()), _auth_identity())
     read.assert_not_awaited()
-    assert caller.fresh_subject is not None
+    assert caller.fresh_subject is not None, "a Discord member's roles can be read"
     subject = await caller.fresh_subject()
-    assert read.await_args.kwargs["require_fresh"] is True
-    assert subject.membership_fresh
-    assert subject.role_ids == ("123",)
+    assert read.await_args is not None
+    assert read.await_args.kwargs["require_fresh"] is True, "the read skips the cache"
+    assert subject.membership_fresh, "the subject marks the read as live"
+    assert subject.role_ids == ("123",), "the live roles are the ones checked"
