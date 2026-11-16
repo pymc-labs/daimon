@@ -166,7 +166,7 @@ async def test_duplicate_message_claims_and_routine_delivery_do_not_change_mappi
             route_key="555",
             message_id="101",
             expected_scope_id=row.scope_id,
-            active_until=now,
+            claimed_at=now,
         )
         await finish_message(session, conversation=first, history=[{"role": "user", "text": "hi"}])
     async with db_session_factory.begin() as session:
@@ -177,7 +177,7 @@ async def test_duplicate_message_claims_and_routine_delivery_do_not_change_mappi
                 route_key="555",
                 message_id="101",
                 expected_scope_id=row.scope_id,
-                active_until=now,
+                claimed_at=now,
             )
             is None
         )

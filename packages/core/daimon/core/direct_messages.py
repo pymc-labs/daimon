@@ -14,7 +14,7 @@ from contextlib import (
     suppress,
 )
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import anthropic
 import structlog
@@ -430,7 +430,7 @@ async def start_dm(
         memory_read_only=admission.memory_read_only,
         history=[],
         recent_message_ids=[],
-        active_until=None,
+        claimed_at=None,
     )
     async with deps.sessionmaker.begin() as session:
         await start_conversation(session, conversation=conversation)
@@ -519,7 +519,7 @@ async def start_cold_dm(
         memory_read_only=admission.memory_read_only,
         history=[],
         recent_message_ids=[],
-        active_until=None,
+        claimed_at=None,
     )
     async with deps.sessionmaker.begin() as session:
         await lock_route(
@@ -781,7 +781,7 @@ async def reply_to_dm_result(
                 route_key=route_key,
                 message_id=message_id,
                 expected_scope_id=expected_scope_id,
-                active_until=now + timedelta(seconds=TURN_CEILING_S + 60),
+                claimed_at=now,
             )
         if conversation is None:
             return None

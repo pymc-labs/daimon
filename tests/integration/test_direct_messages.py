@@ -301,7 +301,7 @@ async def test_dm_scope_reuses_session_replays_history_bills_and_deduplicates(
         stored = await get_conversation(
             session, platform=platform, route_key="dm-42", external_user_id="42"
         )
-        assert stored is not None and len(stored.history) == 4 and stored.active_until is None
+        assert stored is not None and len(stored.history) == 4 and stored.claimed_at is None
 
 
 async def test_policy_revocation_and_disable_refuse_existing_dm(db_session, db_session_factory):
@@ -364,7 +364,7 @@ async def test_concurrent_dm_claims_serialize_and_wrong_owner_has_no_route(
                 route_key="dm-42",
                 message_id="one",
                 expected_scope_id=route.scope_id,
-                active_until=now + timedelta(minutes=1),
+                claimed_at=now + timedelta(minutes=1),
             )
     assert winner is not None, "the fence holder claims the conversation"
     async with db_session_factory.begin() as session:
@@ -662,7 +662,7 @@ async def test_discord_drain_stops_a_running_dm_and_never_starts_a_queued_one(
         "an unconfirmed interrupt retires the mapping so the next DM gets a fresh session"
     )
     await engine.dispose()
-    assert stored is not None and stored.active_until is None, "the claim is released"
+    assert stored is not None and stored.claimed_at is None, "the claim is released"
     assert stored.recent_message_ids == ["1"], "the queued DM was never claimed"
 
 
@@ -1857,7 +1857,7 @@ async def _claimed_dm(db_session, db_session_factory, *, ma_session_id):
             route_key="dm-42",
             message_id="claim-1",
             expected_scope_id=route.scope_id,
-            active_until=now + timedelta(minutes=2),
+            claimed_at=now + timedelta(minutes=2),
         )
         await create_thread_session(
             session,
@@ -1944,7 +1944,7 @@ async def test_a_stalled_shutdown_interrupt_is_bounded_and_retires_the_dm_mappin
         stored = await get_conversation(
             session, platform="discord", route_key="dm-42", external_user_id="42"
         )
-    assert stored is not None and stored.active_until == row.active_until, (
+    assert stored is not None and stored.claimed_at == row.claimed_at, (
         "settling leaves releasing the claim to finish_message"
     )
 

@@ -96,7 +96,7 @@ async def _claim(
         route_key=row.route_key,
         message_id=message_id,
         expected_scope_id=row.scope_id,
-        active_until=at + timedelta(minutes=minutes),
+        claimed_at=at + timedelta(minutes=minutes),
     )
 
 
@@ -125,7 +125,7 @@ async def test_a_dm_claim_left_by_a_dead_worker_does_not_block_for_hours(
     async with turn(), db_session_factory.begin() as session:
         taken = await _claim(session, original, "m2", at=later, minutes=46)
         assert taken is not None, "the next message is admitted, not refused as busy"
-        assert taken.active_until == later + timedelta(minutes=46), "it holds its own claim"
+        assert taken.claimed_at == later + timedelta(minutes=46), "it holds its own claim"
         assert not await holds_claim(session, conversation=left), "the dead claim lost the scope"
 
 

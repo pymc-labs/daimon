@@ -44,7 +44,7 @@ async def _dm_from(
             memory_read_only=False,
             history=[],
             recent_message_ids=[],
-            active_until=None,
+            claimed_at=None,
         ),
     )
     await set_fields(

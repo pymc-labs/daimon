@@ -62,7 +62,7 @@ class DirectMessageRow(BaseModel):
     source_thread_keys: list[str] | None = None
     history: list[dict[str, str]]
     recent_message_ids: list[str]
-    active_until: datetime | None
+    claimed_at: datetime | None
 
     @property
     def is_cold(self) -> bool:
@@ -138,7 +138,7 @@ async def start_conversation(session: AsyncSession, *, conversation: DirectMessa
         (conversation.platform, conversation.route_key, conversation.external_user_id),
         with_for_update=True,
     )
-    if row is not None and row.active_until is not None:
+    if row is not None and row.claimed_at is not None:
         try:
             await try_fence(
                 session, owner_dm_fence(row.platform, row.external_user_id), schema_scoped=True
@@ -163,7 +163,7 @@ async def claim_message(
     route_key: str,
     message_id: str,
     expected_scope_id: str,
-    active_until: datetime,
+    claimed_at: datetime,
 ) -> DirectMessageRow | None:
     """Claim the conversation of `fence`'s owner for `message_id`; None for a duplicate delivery.
 
@@ -185,11 +185,11 @@ async def claim_message(
         raise UserFacingError("That private conversation changed. Please send your message again.")
     if message_id in row.recent_message_ids:
         return None
-    if row.active_until is not None:
+    if row.claimed_at is not None:
         structlog.get_logger(__name__).warning(
-            "dm.claim_taken_over", platform=fence.platform, left_until=row.active_until.isoformat()
+            "dm.claim_taken_over", platform=fence.platform, left_until=row.claimed_at.isoformat()
         )
-    row.active_until = active_until
+    row.claimed_at = claimed_at
     row.recent_message_ids = [*row.recent_message_ids[-49:], message_id]
     await session.flush()
     return DirectMessageRow.model_validate(row)
@@ -209,8 +209,8 @@ async def holds_claim(session: AsyncSession, *, conversation: DirectMessageRow) 
     return (
         row is not None
         and row.scope_id == conversation.scope_id
-        and row.active_until is not None
-        and row.active_until == conversation.active_until
+        and row.claimed_at is not None
+        and row.claimed_at == conversation.claimed_at
     )
 
 
@@ -232,9 +232,9 @@ async def finish_message(
             .with_for_update()
         )
     ).scalar_one_or_none()
-    if row is None or row.active_until != conversation.active_until:
+    if row is None or row.claimed_at != conversation.claimed_at:
         return
-    row.active_until = None
+    row.claimed_at = None
     if history is not None:
         row.history = history
     await session.flush()

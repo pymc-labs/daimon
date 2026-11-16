@@ -178,7 +178,7 @@ async def test_tenant_summary_leaves_out_dm_channels(
                 memory_read_only=False,
                 history=[],
                 recent_message_ids=[],
-                active_until=None,
+                claimed_at=None,
             ),
         )
 

@@ -2411,7 +2411,7 @@ async def test_authenticated_routine_creation_preserves_private_or_guild_origin(
                 source_thread_keys=None,
                 history=[],
                 recent_message_ids=[],
-                active_until=None,
+                claimed_at=None,
             ),
         )
     origin = await create_origin(

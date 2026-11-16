@@ -58,7 +58,7 @@ async def test_a_dm_turn_is_admitted_against_its_source_channel(
             session, platform="discord", route_key="dm-chan", external_user_id="u1"
         )
     assert stored is not None and stored.source_channel_id == source_channel_id, "it round-trips"
-    assert stored.active_until is None, "a refused turn releases the conversation"
+    assert stored.claimed_at is None, "a refused turn releases the conversation"
 
 
 @pytest.mark.parametrize("owns_claim", [True, False])
@@ -94,7 +94,7 @@ async def test_shutdown_settle_uses_owned_scope_and_cannot_interrupt_a_released_
             route_key=original.route_key,
             message_id="shutdown-test",
             expected_scope_id=original.scope_id,
-            active_until=now + timedelta(minutes=10),
+            claimed_at=now + timedelta(minutes=10),
         )
         assert claimed is not None
         if not owns_claim:

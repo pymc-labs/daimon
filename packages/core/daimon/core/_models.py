@@ -4083,7 +4083,11 @@ class DirectMessageConversation(Base):
     memory_read_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
     history: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
     recent_message_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
-    active_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set while a delivery's turn holds the conversation: its claim time, only an
+    # identity compared on finish and delivery (the column keeps its first name).
+    claimed_at: Mapped[datetime | None] = mapped_column(
+        "active_until", DateTime(timezone=True), nullable=True
+    )
 
 
 class PlatformUserName(Base):
