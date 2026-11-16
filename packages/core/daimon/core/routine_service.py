@@ -18,7 +18,11 @@ from datetime import UTC, datetime
 from typing import Literal, Protocol
 
 from anthropic import AsyncAnthropic
-from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
+from daimon.core.access_policy import (
+    OPEN_ACCESS_POLICY,
+    TenantAccessPolicy,
+    agent_invoker_roles,
+)
 from daimon.core.agent_pins import agent_aliases
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.cron import InvalidScheduleError, validated_next_slot
@@ -64,6 +68,12 @@ class RoutineNotFound(RoutineRefused):
 class RoutineNotOwned(RoutineNotFound):
     """Someone else's routine. Reads as `RoutineNotFound` to anyone probing; a panel that
     already lists the routine to the caller may word it differently."""
+
+
+ROLES_REQUIRED_REFUSAL = (
+    "This agent is limited to certain roles, so only someone who holds all of them "
+    "right now can schedule it. Nothing was saved."
+)
 
 
 @dataclass(frozen=True)
@@ -135,8 +145,8 @@ class RoutineCaller:
     member may schedule these."""
     admin_noun: str = "an admin"
     fresh_subject: Callable[[], Awaitable[Subject]] | None = None
-    """Reads the caller's roles from the platform right now; called only once a save is
-    about to be checked against a role-gated agent, so earlier refusals touch nothing."""
+    """Reads the caller's roles from the platform right now; called only when the agent
+    being saved is limited to roles, once the earlier checks have passed."""
 
     @property
     def user_id(self) -> str | None:
@@ -446,9 +456,7 @@ def _check_agent_pin(
     if not decision:
         record_authz_denial(Action.SAVE_ROUTINE, decision.reason)
     if decision.reason == "invoker_not_allowed":
-        raise RoutineRefused(
-            "This agent requires a human invocation, so it cannot run routines. Nothing was saved."
-        )
+        raise RoutineRefused(ROLES_REQUIRED_REFUSAL)
     if decision.reason == "own_agents_only":
         if origin is not None and home_of(policy, origin.channel_id, origin.parent_channel_id):
             raise RoutineRefused(
@@ -503,8 +511,11 @@ async def _require_agent_in_scope(
     )
 
 
-async def _with_fresh_subject(caller: RoutineCaller) -> RoutineCaller:
-    if caller.fresh_subject is None:
+async def _with_fresh_subject(
+    caller: RoutineCaller, policy: TenantAccessPolicy, agent: AgentRef
+) -> RoutineCaller:
+    """The caller with live roles, read only when `agent` is limited to roles."""
+    if caller.fresh_subject is None or not agent_invoker_roles(policy, agent.names):
         return caller
     return replace(caller, subject=await caller.fresh_subject())
 
@@ -538,7 +549,6 @@ async def create_routine(env: RoutineEnv, caller: RoutineCaller, new: NewRoutine
         )
     async with env.sessionmaker() as session:
         policy = await _load_policy(session, caller.tenant_id)
-    caller = await _with_fresh_subject(caller)
     budget_channel_id = destination_channel_id
     if new.destination_kind in (None, "dm") and env.origin_budget_channel is not None:
         budget_channel_id = await env.origin_budget_channel()
@@ -553,11 +563,13 @@ async def create_routine(env: RoutineEnv, caller: RoutineCaller, new: NewRoutine
     )
     if match is None or not view.viewer.sees_agent(match):
         raise UnknownAgent(f"no agent named {new.agent_name!r} found here")
+    agent = build_agent_ref(match.name, match.metadata, new.agent_name)
+    caller = await _with_fresh_subject(caller, policy, agent)
     _check_agent_pin(
         policy,
         caller,
         agent_name=new.agent_name,
-        agent=build_agent_ref(match.name, match.metadata, new.agent_name),
+        agent=agent,
         kind=new.destination_kind,
         destination_id=destination_id,
         destination_channel_id=destination_channel_id,
@@ -711,7 +723,6 @@ async def update_routine(
                 raise UnknownAgent(f"no agent named {change.agent_name!r} found here")
             new_agent_id = match.id
         if any_agent_rules(policy) or any_own_readers(policy):
-            caller = await _with_fresh_subject(caller)
             # Check the agent the routine will run, by all its names.
             effective_ma_id = new_agent_id or row.agent_id
             effective_agent = next(
@@ -727,13 +738,15 @@ async def update_routine(
             if effective_agent is None:
                 raise RoutineRefused("the routine's agent no longer exists. Nothing was saved.")
             effective_name = change.agent_name if new_agent_id is not None else row.agent_name
+            effective_ref = build_agent_ref(
+                effective_agent.name, effective_agent.metadata, effective_name
+            )
+            caller = await _with_fresh_subject(caller, policy, effective_ref)
             _check_agent_pin(
                 policy,
                 caller,
                 agent_name=effective_name or effective_agent.name,
-                agent=build_agent_ref(
-                    effective_agent.name, effective_agent.metadata, effective_name
-                ),
+                agent=effective_ref,
                 kind=effective_kind,
                 destination_id=effective_id,
                 destination_channel_id=destination_channel_id,

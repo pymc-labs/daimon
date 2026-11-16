@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
 from anthropic import AsyncAnthropic
-from daimon.core.access_policy import OPEN_ACCESS_POLICY
-from daimon.core.authz import Place, build_subject
+from daimon.core.access_policy import OPEN_ACCESS_POLICY, AgentRule, TenantAccessPolicy
+from daimon.core.authz import Place, Subject, build_subject
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.routine_service import (
@@ -31,6 +32,7 @@ from daimon.core.routine_service import (
     update_routine,
 )
 from daimon.core.rule_views import RuleViewer
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import RoutineDestinationKind
 from daimon.core.stores.routines import claim_due_fireable
 from daimon.core.turn_hold import TurnHold
@@ -412,3 +414,46 @@ def test_placement_budget_channel() -> None:
     assert Placement(channel_id="T1", parent_channel_id="C0123ABC").budget_channel_id == "C0123ABC"
     assert Placement(channel_id="C0123ABC").budget_channel_id == "C0123ABC"
     assert Place(channel_id="C0123ABC").channel_id == "C0123ABC"
+
+
+async def test_save_reads_live_roles_only_for_a_role_gated_agent(
+    db_committing_engine: AsyncEngine, db_clean: None
+) -> None:
+    """Saving a routine for an agent with no roles reads nothing from the platform."""
+    # A role rule makes an edit list agents while it holds its transaction.
+    sessionmaker = async_sessionmaker(bind=db_committing_engine, expire_on_commit=False)
+    async with sessionmaker.begin() as session:
+        tenant = await make_tenant(session, platform="discord")
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(agent_rules={"other": AgentRule(invoker_role_ids=("123",))}),
+        )
+    env = _env(sessionmaker, tenant.id)
+    reads: list[str] = []
+    live_roles: tuple[str, ...] = ("123",)
+
+    async def fresh() -> Subject:
+        reads.append("read")
+        return Subject(
+            is_admin=True,
+            platform_user_id="u_admin",
+            role_ids=live_roles,
+            verified_membership=True,
+            membership_fresh=True,
+        )
+
+    caller = replace(_caller(tenant.id, "u_admin", admin=True), fresh_subject=fresh)
+    plain = await create_routine(env, caller, _new())
+    await update_routine(env, caller, plain.id, RoutineChange(trigger_message="x"))
+    assert reads == [], "an agent with no roles needs no live read"
+
+    gated = await create_routine(env, caller, _new(agent_name="other"))
+    await update_routine(env, caller, gated.id, RoutineChange(trigger_message="x"))
+    assert reads == ["read", "read"], "each save of a role-gated agent reads roles live"
+
+    live_roles = ()
+    with pytest.raises(RoutineRefused, match="limited to certain roles"):
+        await create_routine(env, caller, _new(agent_name="other"))
+    with pytest.raises(RoutineRefused, match="limited to certain roles"):
+        await update_routine(env, caller, gated.id, RoutineChange(trigger_message="y"))
