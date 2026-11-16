@@ -18,7 +18,9 @@ from daimon.adapters.discord.routines_panel.state import (
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+from daimon.core.authz import Subject
 from daimon.core.channel_budget import is_over_channel_budget
+from daimon.core.routine_service import ROLES_REQUIRED_REFUSAL
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_budgets import set_channel_budget
 from daimon.core.stores.routines import (
@@ -171,6 +173,40 @@ async def test_agent_validation_and_save_policy(setup_panel, db_session_factory,
     async with db_session_factory() as session:
         assert await list_routines_for_tenant(session, tenant_id=tenant.id) == []
     refresh.assert_not_awaited()
+
+
+@pytest.mark.parametrize("held", [True, False])
+async def test_role_gated_agent_is_saved_only_by_a_live_role_holder(
+    setup_panel, db_session_factory, monkeypatch, held
+):
+    """The saver's roles are read live, and only for an agent limited to roles."""
+    view, tenant, _, _ = setup_panel
+    live = AsyncMock(
+        return_value=Subject(
+            platform_user_id="42",
+            role_ids=("123",) if held else (),
+            verified_membership=True,
+            membership_fresh=True,
+        )
+    )
+    monkeypatch.setattr(forms, "resolve_subject", live)
+    modal = await open_modal(view, interaction())
+    await modal.on_submit(interaction())
+    live.assert_not_awaited()
+    async with db_session_factory.begin() as session:
+        await set_access_policy(
+            session,
+            tenant_id=tenant.id,
+            policy=TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("123",))}),
+        )
+    submit = interaction()
+    await modal.on_submit(submit)
+    assert live.await_args.kwargs["require_fresh"] is True, "roles must be read live"
+    async with db_session_factory() as session:
+        rows = await list_routines_for_tenant(session, tenant_id=tenant.id)
+    assert len(rows) == (2 if held else 1), "only a role holder saves a role-gated routine"
+    if not held:
+        submit.followup.send.assert_awaited_once_with(ROLES_REQUIRED_REFUSAL, ephemeral=True)
 
 
 async def seed_selected(view, tenant, factory, *, creator="42"):

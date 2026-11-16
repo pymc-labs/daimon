@@ -15,7 +15,7 @@ import structlog
 from daimon.adapters.discord import checks, layout
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.routines_panel.embeds import build_panel_container
-from daimon.adapters.discord.routines_panel.forms import DeleteButton, NewButton
+from daimon.adapters.discord.routines_panel.forms import DeleteButton, NewButton, saver_subject
 from daimon.adapters.discord.routines_panel.read import load_guild_routines
 from daimon.adapters.discord.routines_panel.state import RoutinesPanelState, state_label
 from daimon.adapters.discord.routines_panel.write import (
@@ -28,9 +28,9 @@ from daimon.core.authz import Action, AgentRef, Place, Surface, authorize, build
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.membership_subject import resolve_subject
 from daimon.core.permissions import any_agent_rules
 from daimon.core.posted_controls.routines import apply_routine_action
+from daimon.core.routine_service import ROLES_REQUIRED_REFUSAL
 from daimon.core.routines import can_read_routine_output
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import RoutineRow
@@ -155,24 +155,30 @@ class _DestinationPicker(discord.ui.Select["RoutinesPanelView"]):
                         )
                         return
                     agent_ref = build_agent_ref(agent.name, agent.metadata, row.agent_name)
-                # The person saving, read fresh: a role-gated agent's routine needs a role holder.
-                owner = await resolve_subject(
-                    self.view.runtime.sessionmaker,
-                    self.view.runtime.turn_deps.membership_resolver,
-                    tenant_id=row.tenant_id,
-                    user_id=str(interaction.user.id),
-                    require_fresh=True,
+                decision = (
+                    authorize(
+                        policy,
+                        subject=await saver_subject(
+                            self.view.runtime,
+                            policy,
+                            agent_ref,
+                            tenant_id=row.tenant_id,
+                            user_id=str(interaction.user.id),
+                        ),
+                        action=Action.SAVE_ROUTINE,
+                        surface=Surface.ROUTINE,
+                        agent=agent_ref,
+                        place=Place(),
+                    )
+                    if self.values[0] == "dm"
+                    else None
                 )
-                if self.values[0] == "dm" and not authorize(
-                    policy,
-                    subject=owner,
-                    action=Action.SAVE_ROUTINE,
-                    surface=Surface.ROUTINE,
-                    agent=agent_ref,
-                    place=Place(),
-                ):
+                if decision is not None and not decision:
                     await interaction.response.send_message(
-                        "This agent cannot run a private routine.", ephemeral=True
+                        ROLES_REQUIRED_REFUSAL
+                        if decision.reason == "invoker_not_allowed"
+                        else "This agent cannot run a private routine.",
+                        ephemeral=True,
                     )
                     return
                 await update_routine(

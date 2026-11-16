@@ -10,13 +10,15 @@ from typing import TYPE_CHECKING
 from daimon.adapters.discord import checks
 from daimon.adapters.discord.routines_panel import embeds
 from daimon.adapters.discord.routines_panel.state import RoutinesPanelState
+from daimon.core.access_policy import TenantAccessPolicy, agent_invoker_roles
 from daimon.core.admin_actions import DelegatedAction
-from daimon.core.authz import Action, Place, Surface, authorize, build_agent_ref
+from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.cron import InvalidScheduleError, validated_next_slot
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.membership_subject import resolve_subject
+from daimon.core.routine_service import ROLES_REQUIRED_REFUSAL
 from daimon.core.routines import can_manage_routine
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.routines import create_routine, delete_routine, get_routine
@@ -25,6 +27,27 @@ import discord
 
 if TYPE_CHECKING:
     from daimon.adapters.discord.routines_panel.panel import RoutinesPanelView
+    from daimon.adapters.discord.runtime import DiscordRuntime
+
+
+async def saver_subject(
+    runtime: DiscordRuntime,
+    policy: TenantAccessPolicy,
+    agent: AgentRef,
+    *,
+    tenant_id: uuid.UUID,
+    user_id: str,
+) -> Subject:
+    """The person saving, with roles read live only when `agent` is limited to roles."""
+    if not agent_invoker_roles(policy, agent.names):
+        return Subject()
+    return await resolve_subject(
+        runtime.sessionmaker,
+        runtime.turn_deps.membership_resolver,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        require_fresh=True,
+    )
 
 
 class NewButton(discord.ui.Button["RoutinesPanelView"]):
@@ -110,28 +133,33 @@ class CreateRoutineModal(discord.ui.Modal, title="New routine"):
                 return
             async with runtime.sessionmaker.begin() as session:
                 policy = await load_access_policy(session, tenant_id=tenant_id)
+                agent_ref = build_agent_ref(agent.name, agent.metadata, name)
                 # These routines have no automatic destination, matching the other panels.
-                # The person saving, read fresh: a role-gated agent's routine needs a role holder.
-                owner = await resolve_subject(
-                    runtime.sessionmaker,
-                    runtime.turn_deps.membership_resolver,
-                    tenant_id=tenant_id,
-                    user_id=str(self.origin.user.id),
-                    require_fresh=True,
-                )
-                if not authorize(
+                decision = authorize(
                     policy,
-                    subject=owner,
+                    subject=await saver_subject(
+                        runtime,
+                        policy,
+                        agent_ref,
+                        tenant_id=tenant_id,
+                        user_id=str(self.origin.user.id),
+                    ),
                     action=Action.SAVE_ROUTINE,
                     surface=Surface.ROUTINE,
-                    agent=build_agent_ref(agent.name, agent.metadata, name),
+                    agent=agent_ref,
                     place=Place(),
                     origin=Place(
                         channel_id=str(channel.id),
                         parent_channel_id=source_channel_id if source_thread_id else None,
                     ),
-                ):
-                    await interaction.followup.send(embeds.SAVE_REFUSED, ephemeral=True)
+                )
+                if not decision:
+                    await interaction.followup.send(
+                        ROLES_REQUIRED_REFUSAL
+                        if decision.reason == "invoker_not_allowed"
+                        else embeds.SAVE_REFUSED,
+                        ephemeral=True,
+                    )
                     return
                 await create_routine(
                     session,
