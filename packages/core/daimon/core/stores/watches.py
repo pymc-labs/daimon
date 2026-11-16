@@ -502,38 +502,22 @@ async def accept_page_event(
     return None if result is None else uuid.UUID(str(result))
 
 
-#: Posts of one body within this long are one event, so a sender's retry adds nothing.
-CALLBACK_DEDUPE_BUCKET_S = 300
-
-
-def callback_event_id(watch_id: uuid.UUID, body: bytes, *, now: datetime) -> uuid.UUID:
-    """The same body to the same watch in the same few minutes is the same event."""
-    bucket = int(now.timestamp()) // CALLBACK_DEDUPE_BUCKET_S
-    return uuid.uuid5(watch_id, f"{hashlib.sha256(body).hexdigest()}:{bucket}")
-
-
 async def accept_callback_event(
-    session: AsyncSession,
-    *,
-    watch_id: uuid.UUID,
-    token: str,
-    body: bytes,
-    now: datetime | None = None,
+    session: AsyncSession, *, watch_id: uuid.UUID, token: str, body: bytes
 ) -> uuid.UUID | None:
     """Hand a bearer-token post to the constrained database port, which checks everything.
 
-    The body is the event as sent. Nothing here reads, logs or keeps the token. A repeat
-    of an event the port already holds returns that event's wake and adds nothing.
+    The body is the event as sent. Nothing here reads, logs or keeps the token. The same
+    body within five minutes of an earlier one returns that post's wake and adds nothing.
     """
     settings = load_watches_settings()
     if not settings.enabled:
         raise ValueError("Watch producers disabled")
     result = await session.scalar(
-        text("SELECT accept_watch_callback(:watch,:token,:event,:body,:max_body)"),
+        text("SELECT accept_watch_callback(:watch,:token,:body,:max_body)"),
         {
             "watch": watch_id,
             "token": token,
-            "event": callback_event_id(watch_id, body, now=now or datetime.now(UTC)),
             "body": body.decode("utf-8"),
             "max_body": settings.callback_max_body_bytes,
         },
@@ -850,7 +834,7 @@ async def audit_sidecar_identity(session: AsyncSession) -> None:
                 AND oidvectortypes(p.proargtypes)='uuid, uuid, text, bigint, uuid, text, text, text'
                 AND p.prorettype='uuid'::regtype)
             OR (p.proname='accept_watch_callback'
-                AND oidvectortypes(p.proargtypes)='uuid, text, uuid, text, integer'
+                AND oidvectortypes(p.proargtypes)='uuid, text, text, integer'
                 AND p.prorettype='uuid'::regtype)
             OR (p.proname='claim_watch_polls' AND p.pronargs=0
                 AND p.prorettype='jsonb'::regtype)

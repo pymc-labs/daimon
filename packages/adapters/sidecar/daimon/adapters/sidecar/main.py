@@ -196,13 +196,8 @@ def create_app(
         # The database cannot hold a NUL in text.
         if b"\x00" in body:
             return web.Response(status=400)
-        try:
-            async with sessions.begin() as session:
-                await accept_callback_event(session, watch_id=watch_id, token=token, body=body)
-        except DBAPIError as exc:
-            # A retry that raced its twin is the same event, already held.
-            if getattr(exc.orig, "sqlstate", None) != "23505":
-                raise
+        async with sessions.begin() as session:
+            await accept_callback_event(session, watch_id=watch_id, token=token, body=body)
         return web.json_response({"accepted": True}, status=202)
 
     app.router.add_get("/healthz", health)

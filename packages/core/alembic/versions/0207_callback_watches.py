@@ -1,11 +1,13 @@
 """Callback watches: a secret-URL ingress for senders that cannot sign, and held timers.
 
-`accept_watch_callback(watch, token, event, payload, max_body)` is the one function the sidecar
+`accept_watch_callback(watch, token, payload, max_body)` is the one function the sidecar
 may call for a bearer-token post. It compares sha256(token) with every live
 `watch_capabilities` row of operation `callback` in constant time (no early exit),
 refuses every failure the same way (42501), and then applies the same switches,
 rate limits, byte quotas and daily caps as the page and poll paths, under the same
-global lock. The body is the event as is; it is evidence, never an instruction.
+global lock. The body is the event as is; it is evidence, never an instruction. The
+same body to the same watch within five minutes is one event: a sender's retry gets
+the first post's wake and adds nothing.
 Only the hash is stored. `max_body` is the deployment's body cap in bytes, kept between
 4 KiB and 512 KiB here whatever the caller says; the byte quotas grow with it.
 
@@ -28,17 +30,18 @@ down_revision: str | None = "0206_dm_carry_overs"
 branch_labels = None
 depends_on = None
 
-SIGNATURE = "accept_watch_callback(uuid,text,uuid,text,integer)"
+SIGNATURE = "accept_watch_callback(uuid,text,text,integer)"
 
 CALLBACK_SQL = """
 CREATE OR REPLACE FUNCTION {schema}.accept_watch_callback(
-    p_watch uuid, p_token text, p_event uuid, p_payload text, p_max_body integer
+    p_watch uuid, p_token text, p_payload text, p_max_body integer
 ) RETURNS uuid LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp AS $body$
 DECLARE
     w {schema}.watches%ROWTYPE;
     c record;
     k uuid;
+    fresh uuid := gen_random_uuid();
     t timestamptz := clock_timestamp();
     n bigint;
     watch_cap integer;
@@ -53,7 +56,7 @@ DECLARE
 BEGIN
     IF NOT coalesce((SELECT enabled FROM {schema}.watch_controls WHERE scope='global'),false)
        THEN RAISE EXCEPTION 'callback refused' USING ERRCODE='42501'; END IF;
-    IF p_watch IS NULL OR p_event IS NULL OR p_payload IS NULL
+    IF p_watch IS NULL OR p_payload IS NULL
        OR octet_length(p_payload) NOT BETWEEN 1 AND m
        OR p_token IS NULL OR p_token !~ '^[A-Za-z0-9_-]{{16,128}}$' THEN
         RAISE EXCEPTION 'callback refused' USING ERRCODE='42501';
@@ -118,9 +121,10 @@ BEGIN
           AND s.ma_session_id=w.session_id AND s.status='live')) THEN
         RAISE EXCEPTION 'callback refused' USING ERRCODE='42501';
     END IF;
-    -- A retry of an event already held is accepted again without adding anything.
+    -- A retry of a body held in the last five minutes is accepted again, adding nothing.
     SELECT i.wake_key INTO k FROM {schema}.watch_inbox i
-      WHERE i.producer=w.producer AND i.event_id=p_event::text;
+      WHERE i.watch_id=w.id AND i.accepted_at > t-interval '5 minutes' AND i.payload=p_payload
+      ORDER BY i.accepted_at DESC LIMIT 1;
     IF FOUND THEN RETURN k; END IF;
     -- Rows and payloads expire after seven days.
     DELETE FROM {schema}.watch_inbox WHERE accepted_at < t-interval '7 days';
@@ -187,10 +191,10 @@ BEGIN
           VALUES(k,w.id,w.revision,0,t);
     END IF;
     INSERT INTO {schema}.watch_inbox(watch_id,producer,event_id,payload,wake_key,accepted_at)
-      VALUES(w.id,w.producer,p_event::text,p_payload,k,t);
+      VALUES(w.id,w.producer,fresh::text,p_payload,k,t);
     UPDATE {schema}.watch_firings SET
       events=(CASE WHEN jsonb_array_length(events)>=20 THEN events-0 ELSE events END)
-        ||jsonb_build_array(jsonb_build_object('event_id',p_event::text,'text',p_payload)),
+        ||jsonb_build_array(jsonb_build_object('event_id',fresh::text,'text',p_payload)),
       omitted=omitted+CASE WHEN jsonb_array_length(events)>=20 THEN 1 ELSE 0 END
       WHERE wake_key=k;
     UPDATE {schema}.watches SET fire_count=fire_count+1 WHERE id=w.id;

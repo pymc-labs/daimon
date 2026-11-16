@@ -496,15 +496,32 @@ async def test_retried_post_is_accepted_again_without_a_second_wake(db_session_f
     assert await count(db_session_factory, "task_continuations") == 1, "events share one wake"
 
 
-def test_event_id_is_stable_inside_a_bucket_and_new_outside_it():
-    watch = uuid.uuid4()
-    t0 = datetime(2030, 1, 1, 0, 0, 10, tzinfo=UTC)
-    same = watches.callback_event_id(watch, b"x", now=t0 + timedelta(seconds=60))
-    assert same == watches.callback_event_id(watch, b"x", now=t0)
-    later = t0 + timedelta(seconds=watches.CALLBACK_DEDUPE_BUCKET_S)
-    assert watches.callback_event_id(watch, b"x", now=later) != same
-    assert watches.callback_event_id(watch, b"y", now=t0) != same
-    assert watches.callback_event_id(uuid.uuid4(), b"x", now=t0) != same
+async def test_a_body_is_one_event_for_exactly_five_minutes(db_session_factory, link):
+    watch, token = link
+
+    async def age(minutes: int) -> None:
+        async with db_session_factory.begin() as db:
+            await db.execute(
+                text("UPDATE watch_inbox SET accepted_at = now() - make_interval(mins => :m)"),
+                {"m": minutes},
+            )
+
+    async with TestClient(TestServer(create_app(db_session_factory))) as client:
+        assert (await post(client, watch.id, token, b"x")).status == 202
+        await age(4)
+        assert (await post(client, watch.id, token, b"x")).status == 202
+        assert await count(db_session_factory, "watch_inbox") == 1, "a retry inside five minutes"
+        await age(6)
+        assert (await post(client, watch.id, token, b"x")).status == 202
+        assert await count(db_session_factory, "watch_inbox") == 2, "a new event after five"
+
+
+async def test_racing_retries_of_one_body_add_one_event(db_session_factory, link):
+    watch, token = link
+    async with TestClient(TestServer(create_app(db_session_factory))) as client:
+        sent = await asyncio.gather(*(post(client, watch.id, token, b"twin") for _ in range(4)))
+    assert [r.status for r in sent] == [202] * 4
+    assert await count(db_session_factory, "watch_inbox") == 1
 
 
 async def test_nul_byte_body_is_400_and_stores_nothing(db_session_factory, link):
@@ -1012,8 +1029,8 @@ async def test_the_database_enforces_its_own_cap_whatever_the_caller_passes(
         try:
             async with db_session_factory.begin() as db:
                 await db.scalar(
-                    text("SELECT accept_watch_callback(:w,:t,:e,:b,:m)"),
-                    {"w": watch.id, "t": token, "e": uuid.uuid4(), "b": "x" * size, "m": cap},
+                    text("SELECT accept_watch_callback(:w,:t,:b,:m)"),
+                    {"w": watch.id, "t": token, "b": "x" * size, "m": cap},
                 )
         except Exception as exc:
             return str(getattr(exc.__cause__, "sqlstate", None) or getattr(exc, "orig", exc))
