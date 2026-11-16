@@ -2598,7 +2598,7 @@ class WatchesSettings(BaseModel):
 
     callback_max_body_bytes: int = Field(
         default=4096,
-        ge=1024,
+        ge=4096,
         le=524288,
         description=(
             "Largest body, in bytes, that one post to a callback watch link may carry; "
