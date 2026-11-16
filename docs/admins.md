@@ -134,7 +134,8 @@ unattended turn stay refused.
 If the owner loses a role, the next run is skipped and the routine is paused
 with the error `owner_lacks_agent_role`. On Discord the owner gets one direct
 message naming the routine and the missing role (when the direct-message
-policy allows it; the routine is paused either way). It stays paused until
+policy allows it; the routine is paused either way, and a message Discord
+refuses is logged). It stays paused until
 someone resumes it from the `/routines` panel; if the role is still missing it
 pauses again at its next run.
 

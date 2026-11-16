@@ -193,7 +193,7 @@ Delivery is at most once and checks first:
 - **Never tag me.** Someone who opted out shows as a plain name and gets no
   Teams notice.
 
-An expired claim is not posted again, as the poster may have posted already. A raising poster is not retried. An empty result is skipped. With [agent identity](agent-identity.md) on, Slack and Discord post as
+An expired claim or a raising poster is not retried, as it may have posted. An empty result is skipped. With [agent identity](agent-identity.md) on, Slack and Discord post as
 the agent. On Discord a reply to any delivered message starts a turn.
 
 ### Generated files
@@ -236,7 +236,8 @@ below the ceiling. Settings are in [configuration.md](configuration.md#scheduler
 Ownerless routines are admin-only, and a refusal reads as "not found".
 Non-admins see only their own routines, since output often holds business
 data. A routine runs with its agent's repo, keys and connectors, so a member
-may schedule only the agent they are talking to.
+may schedule only the agent they are talking to. Admins too need a role-gated
+agent's roles.
 
 In a `readers: own` channel, a routine of that channel's own agent is visible
 and editable only from inside it. Each run re-checks the agent's rule at the
@@ -244,8 +245,10 @@ destination and skips a run that would cross the line (`own_agents_only`).
 
 ## When a run fails
 
-The scheduler does not retry a failed run, count failures or disable a routine.
-A failing routine waits for its next slot and tries again, enabled. A failed run
+The scheduler does not retry a failed run or count failures; a failing routine
+tries again at its next slot. It pauses one whose owner lost a
+[role its agent needs](admins.md#limit-an-agent-to-roles)
+(`owner_lacks_agent_role`). A failed run
 writes `last_error` and clears `last_result_tail`, and a success does the
 reverse. The panels show a failure whenever `last_error` is set.
 
@@ -257,7 +260,7 @@ routine that keeps failing posts once and stays quiet until a run succeeds.
 
 The `last_error` values are a closed set: `invoker_not_allowed` (the creator was
 removed from the allowlist), `access_policy_unreadable`, `balance_depleted`,
-`cap_exceeded`, `channel_budget_exceeded`, `scheduler_shutdown`,
+`cap_exceeded`, `channel_budget_exceeded`, `owner_lacks_agent_role`, `scheduler_shutdown`,
 `timeout: exceeded <n>s`, and otherwise `<ExceptionType>: <message>` cut to 500
 characters. A ceiling breach reads `TurnError: ceiling: ...`.
 
@@ -277,9 +280,6 @@ that channel's budget, checked last after the agent's rule
 fires again at its next slot. On Discord each fire, and each delivery,
 checks the creator's live membership, roles and admin permissions. Elsewhere
 only the creator's stored admin role exempts them from the allowlist.
-
-An agent limited to [invoker roles](admins.md#limit-an-agent-to-roles) cannot
-run routines at all.
 
 A Discord thread destination saved before channel budgets existed has no
 channel until its destination is set again.
