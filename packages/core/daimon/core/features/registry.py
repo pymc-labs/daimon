@@ -923,11 +923,17 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "turn_time_limit",
         "Answer time limit",
         (
-            "The longest one answer may take before it is stopped; it can shorten the standard "
-            "45 minutes, not lengthen it. The smallest setting wins. Routines, watches and "
+            "The longest one answer may take before it is stopped: the standard 45 minutes, "
+            "shorter, or up to 3 hours. The smallest setting wins. Routines, watches and "
             "agent-to-agent chats keep the standard limit."
         ),
-        {"45": "45 minutes", "30": "30 minutes", "15": "15 minutes"},
+        {
+            "180": "180 minutes",
+            "90": "90 minutes",
+            "45": "45 minutes",
+            "30": "30 minutes",
+            "15": "15 minutes",
+        },
         default="45",
         tiers=("workspace", "agent"),
         authority=_SERVER_ADMIN,

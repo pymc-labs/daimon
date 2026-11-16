@@ -163,6 +163,32 @@ async def claim_message(
     return DirectMessageRow.model_validate(row)
 
 
+async def extend_claim(
+    session: AsyncSession, *, conversation: DirectMessageRow, active_until: datetime
+) -> DirectMessageRow:
+    """Move this delivery's claim to a later `active_until`, once its turn's deadline is known.
+
+    Only this delivery's own claim moves, and never earlier: a lapsed or superseded claim,
+    or a later `active_until` already held, returns `conversation` unchanged.
+    """
+    row = await session.get(
+        DirectMessageConversation,
+        (conversation.platform, conversation.route_key, conversation.external_user_id),
+        with_for_update=True,
+    )
+    if (
+        row is None
+        or row.scope_id != conversation.scope_id
+        or row.active_until is None
+        or row.active_until != conversation.active_until
+        or active_until <= row.active_until
+    ):
+        return conversation
+    row.active_until = active_until
+    await session.flush()
+    return DirectMessageRow.model_validate(row)
+
+
 async def holds_claim(session: AsyncSession, *, conversation: DirectMessageRow) -> bool:
     """Lock the conversation and report whether `conversation`'s claim still holds it.
 

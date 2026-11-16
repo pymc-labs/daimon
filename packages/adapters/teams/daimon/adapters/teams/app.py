@@ -1810,6 +1810,7 @@ class TeamsApp:
                     active_turn_message_id=lifecycle.message_id,
                     active_turn_channel_id=inbound.conversation_id,
                     now=datetime.now(UTC),
+                    deadline=deadline,
                 )
             markers.add(prepared.mapping_id)
 

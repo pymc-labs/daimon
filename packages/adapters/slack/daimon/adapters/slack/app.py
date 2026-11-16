@@ -2952,6 +2952,7 @@ class SlackApp:
                         active_turn_message_id=lifecycle.status_ts,
                         active_turn_channel_id=channel,
                         now=datetime.now(UTC),
+                        deadline=turn_deadline_at,
                     )
                     await _at_session.commit()
                 _marker_mapping_ids.add(prepared.mapping_id)
@@ -3652,6 +3653,7 @@ class SlackApp:
                     active_turn_message_id=follow_lifecycle.status_ts,
                     active_turn_channel_id=channel,
                     now=datetime.now(UTC),
+                    deadline=follow_deadline,
                 )
                 await _at_session.commit()
 

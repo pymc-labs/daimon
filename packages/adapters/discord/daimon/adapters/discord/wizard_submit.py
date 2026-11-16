@@ -792,6 +792,7 @@ async def run_wizard_submit_turn_observed(
                         now=datetime.now(UTC),
                         # A successor's orphan sweep leaves a live owner's marker alone.
                         owner_key=bot.runtime.owner_key,
+                        deadline=turn_deadline_at,
                     )
                     await marker_session.commit()
 

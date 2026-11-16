@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Longer answer time limits.** The answer time limit setting now also allows 90 and
+  180 minutes, besides the standard 45 and the shorter 30 and 15. A longer turn stays live
+  past 45 minutes: its deadline is stored with the turn's marker, and the stale-turn check,
+  a direct message's claim and lock waits follow it. Routines, watches and agent-to-agent
+  chats keep 45 minutes.
 - **Hide the server name on tool lines.** A new workspace or agent setting,
   `tool_server_names`, drops the connected server's name from the working card's tool lines.
 - **Model and effort reactions in Discord.** A new setting, off by default, reacts

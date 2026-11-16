@@ -350,6 +350,7 @@ class ThreadSessionRow(BaseModel):
     active_turn_message_id: str | None = None
     active_turn_started_at: datetime | None = None
     active_turn_channel_id: str | None = None
+    active_turn_deadline: datetime | None = None
     # The configuration the MA session froze at create time. NULL on rows
     # written before continuity existed — callers read that as "unknown".
     effective_config: SessionSnapshot | None = None

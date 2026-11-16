@@ -14,6 +14,8 @@ from daimon.core.errors import TurnError
 
 __all__ = [
     "TURN_CEILING_S",
+    "LONGEST_TURN_CEILING_S",
+    "marker_window_s",
     "current_turn_deadline",
     "turn_deadline",
     "remaining_s",
@@ -41,6 +43,10 @@ __all__ = [
 # budgets, so a flat deadline is still the right shape.
 TURN_CEILING_S: float = 45.0 * 60.0
 
+#: The longest an answer time limit may extend one chat turn. Unattended runs stay at
+#: `TURN_CEILING_S`.
+LONGEST_TURN_CEILING_S: float = 180.0 * 60.0
+
 #: The running turn's deadline, for anything inside it that must not promise a
 #: time past it (an approval card's expiry). None outside a turn.
 current_turn_deadline: ContextVar[datetime | None] = ContextVar(
@@ -61,6 +67,17 @@ def turn_deadline(
     """Use the caller's bound or the default, capped by retained authority."""
     bound = deadline if deadline is not None else now + timedelta(seconds=ceiling_s)
     return min(bound, authority_deadline) if authority_deadline is not None else bound
+
+
+def marker_window_s(*, started_at: datetime, deadline: datetime | None) -> float:
+    """How long a turn marker written at `started_at` may stand before it is read as abandoned.
+
+    The standard ceiling, or the turn's own stored deadline when that is later; a marker
+    without one (written before turns could outlive the standard ceiling) keeps the standard.
+    """
+    if deadline is None:
+        return TURN_CEILING_S
+    return min(max((deadline - started_at).total_seconds(), TURN_CEILING_S), LONGEST_TURN_CEILING_S)
 
 
 def remaining_s(deadline: datetime, *, now: datetime, refuse_expired: bool = False) -> float:

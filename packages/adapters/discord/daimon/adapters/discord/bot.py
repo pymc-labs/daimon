@@ -4464,6 +4464,7 @@ class DaimonBot(commands.Bot):
                     active_turn_message_id=lifecycle.final_message_id,
                     now=datetime.now(UTC),
                     owner_key=self.runtime.owner_key,
+                    deadline=turn_deadline_at,
                 )
                 await session.commit()
 
@@ -5732,6 +5733,7 @@ class DaimonBot(commands.Bot):
                     active_turn_message_id=lifecycle.final_message_id,
                     now=datetime.now(UTC),
                     owner_key=self.runtime.owner_key,
+                    deadline=turn_deadline_at,
                 )
                 await _at_session.commit()
 

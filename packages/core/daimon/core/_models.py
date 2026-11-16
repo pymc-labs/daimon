@@ -702,6 +702,11 @@ class ThreadSession(Base):
         DateTime(timezone=True), nullable=True
     )
     active_turn_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The running turn's own deadline, so a turn allowed longer than the standard window
+    # is not read as abandoned. NULL keeps the standard window.
+    active_turn_deadline: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

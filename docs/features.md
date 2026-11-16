@@ -850,12 +850,12 @@ The longest one long job may run. The smallest setting wins.
 
 ## Answer time limit
 
-The longest one answer may take before it is stopped; it can shorten the standard 45 minutes, not lengthen it. The smallest setting wins. Routines, watches and agent-to-agent chats keep the standard limit.
+The longest one answer may take before it is stopped: the standard 45 minutes, shorter, or up to 3 hours. The smallest setting wins. Routines, watches and agent-to-agent chats keep the standard limit.
 
 | | |
 | --- | --- |
 | Key | `turn_time_limit` |
-| Values | `45` (45 minutes), `30` (30 minutes), `15` (15 minutes) |
+| Values | `180` (180 minutes), `90` (90 minutes), `45` (45 minutes), `30` (30 minutes), `15` (15 minutes) |
 | Default | `45` |
 | Levels | Workspace, Agent |
 | Combines | Lowest wins |

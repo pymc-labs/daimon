@@ -132,7 +132,7 @@ from daimon.core.stores.thread_sessions import get_thread_session_at
 from daimon.core.thread_models import apply_thread_model, conversation_key, thread_backend
 from daimon.core.thread_release import apply_thread_release, release_due, release_now
 from daimon.core.turn.approvals import daimon_rule_set_for
-from daimon.core.turn.ceiling import TURN_CEILING_S
+from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S, TURN_CEILING_S
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
@@ -492,10 +492,11 @@ class Admission:
     @property
     def turn_ceiling_s(self) -> float:
         """How long a turn here may run before it is stopped: the turn time limit set at this
-        place, else the built-in 45 minutes. Never longer: the stale-turn windows, DM claim and
-        lock waits all assume a turn ends within `TURN_CEILING_S`."""
+        place, else the built-in 45 minutes, and never past `LONGEST_TURN_CEILING_S`. A turn
+        allowed past 45 minutes stores its deadline for the stale-turn, DM claim and lock-wait
+        checks. Only chat turns read this; unattended runs keep `TURN_CEILING_S`."""
         minutes = turn_limit_minutes(self.features)
-        return TURN_CEILING_S if minutes is None else min(minutes * 60.0, TURN_CEILING_S)
+        return TURN_CEILING_S if minutes is None else min(minutes * 60.0, LONGEST_TURN_CEILING_S)
 
     def feature_on(self, key: str) -> bool:
         """`key` at this place; a hand-built admission, or a key not resolved, keeps it on."""

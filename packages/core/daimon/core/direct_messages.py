@@ -44,6 +44,7 @@ from daimon.core.stores.direct_messages import (
     DirectMessageRow,
     claim_message,
     dm_enabled,
+    extend_claim,
     finish_message,
     get_conversation,
     get_dm_agent_name,
@@ -66,7 +67,7 @@ from daimon.core.stores.thread_sessions import (
     retire_dm_scope,
 )
 from daimon.core.turn.admission import Admission, AdmissionGrant, DmSource, admit
-from daimon.core.turn.ceiling import TURN_CEILING_S, turn_deadline
+from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S, TURN_CEILING_S, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied, DmSourceSealedError, SessionBusyError
 from daimon.core.turn.io import turn_io
@@ -850,6 +851,14 @@ async def reply_to_dm_result(
                 else None,
             )
             deadline = turn_deadline(now=now, ceiling_s=admission.turn_ceiling_s)
+            # The claim was taken before admission, at the standard window; a time limit
+            # past it must keep the claim until its own deadline.
+            async with deps.sessionmaker.begin() as session:
+                conversation = await extend_claim(
+                    session,
+                    conversation=conversation,
+                    active_until=deadline + timedelta(seconds=60),
+                )
             try:
                 prepared = await bind_session(
                     deps,
@@ -1263,7 +1272,13 @@ async def owner_dm_turn(
             connection = await stack.enter_async_context(engine.connect())
             db = await stack.enter_async_context(AsyncSession(bind=connection))
             await stack.enter_async_context(db.begin())
-            await try_fence(db, f"owner_dm:{platform}:{owner}", schema_scoped=True)
+            # The holder is a DM turn, which may run to the longest answer time limit.
+            await try_fence(
+                db,
+                f"owner_dm:{platform}:{owner}",
+                schema_scoped=True,
+                timeout_s=LONGEST_TURN_CEILING_S,
+            )
             # Detach so the lock does not hold a work-pool slot; closing the
             # detached connection releases the lock on every local exit.
             await connection.run_sync(lambda sync: sync.detach())

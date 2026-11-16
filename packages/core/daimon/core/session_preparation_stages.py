@@ -179,16 +179,20 @@ async def lock_preparation(
 def turn_is_active(row: ThreadSessionRow, *, now: dt.datetime) -> bool:
     """Is a turn still plausibly running on this mapping?
 
-    A marker older than the per-turn ceiling cannot belong to a live turn — the
+    A marker older than the turn's ceiling cannot belong to a live turn — the
     turn that wrote it either cleared it or died with its process — so an
-    abandoned marker must not defer every later change forever.
+    abandoned marker must not defer every later change forever. The ceiling is
+    the standard one, or the marker's stored deadline when a time limit allowed longer.
     """
     if row.active_turn_message_id is None or row.active_turn_started_at is None:
         return False
     # Import lazily: turn.__init__ re-exports run, which imports these stages.
-    from daimon.core.turn.ceiling import TURN_CEILING_S
+    from daimon.core.turn.ceiling import marker_window_s
 
-    return (now - row.active_turn_started_at).total_seconds() < TURN_CEILING_S
+    window = marker_window_s(
+        started_at=row.active_turn_started_at, deadline=row.active_turn_deadline
+    )
+    return (now - row.active_turn_started_at).total_seconds() < window
 
 
 def retry_after(preparation: SessionPreparationRow) -> dt.datetime:

@@ -413,6 +413,7 @@ class WebTurns:
                     active_turn_message_id=str(lifecycle.reply_id),
                     active_turn_channel_id=key,
                     now=datetime.now(UTC),
+                    deadline=deadline,
                 )
             markers.add(prepared.mapping_id)
         prefix, images = await attachment_prompt(
