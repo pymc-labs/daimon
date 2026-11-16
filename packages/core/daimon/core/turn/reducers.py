@@ -231,6 +231,7 @@ def _apply_tool_use(
     (or mcp_tool_use_id / custom_tool_use_id)."""
     evaluated_permission = getattr(event, "evaluated_permission", None)
     mcp_server_name = getattr(event, "mcp_server_name", None)
+    title = getattr(event, "title", None)
     block = ToolUseBlock(
         kind="tool_use",
         id=event.id,
@@ -239,6 +240,7 @@ def _apply_tool_use(
         input=event.input,
         evaluated_permission=evaluated_permission,
         mcp_server_name=mcp_server_name,
+        title=title.strip() or None if isinstance(title, str) else None,
     )
     return dataclasses.replace(state, content=[*state.content, block], seen_event_ids=seen)
 

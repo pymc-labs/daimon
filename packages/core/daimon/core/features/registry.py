@@ -520,6 +520,13 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         platforms=frozenset({"discord"}),
     ),
     _shown(
+        "tool_server_names",
+        "Tool server names",
+        "Tool lines on the working card name the connected server each tool belongs to.",
+        tiers=("workspace", "agent"),
+        default="on",
+    ),
+    _shown(
         "table_rendering",
         "Table images",
         "Tables in an answer are drawn as an image or a native table instead of text.",

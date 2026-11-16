@@ -46,6 +46,7 @@ Where each feature can be set, and its default.
 | Typed mentions | `plain_text_mentions` | Chat | Off | ✓ | ✓ |  | ✓ |  |  |
 | Completion pings | `completion_pings` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Model reactions | `model_reactions` | Chat | Off |  | ✓ | ✓ |  |  | Only Discord |
+| Tool server names | `tool_server_names` | Chat | On |  | ✓ | ✓ |  |  |  |
 | Table images | `table_rendering` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ | Only Discord, Slack; Off by default on Slack |
 | Budget notices | `budget_notices` | Chat | On | ✓ | ✓ |  | ✓ |  |  |
 | Vote buttons | `message_feedback` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
@@ -514,6 +515,18 @@ The first message in a thread, and the first after the model or effort changes, 
 | Key | `model_reactions` |
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
+| Levels | Workspace, Agent |
+| Combines | Most specific wins |
+
+## Tool server names
+
+Tool lines on the working card name the connected server each tool belongs to.
+
+| | |
+| --- | --- |
+| Key | `tool_server_names` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
 | Levels | Workspace, Agent |
 | Combines | Most specific wins |
 

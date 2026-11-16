@@ -1644,6 +1644,8 @@ async def run_prepared_turn_impl(
         platform=platform,
         chat_rendered=origin in _CHAT_RENDERED_ORIGINS,
     )
+    if (observation := current_outcome.get()) is not None:
+        observation.tool_server_names = prepared.admission.shown("tool_server_names", platform)
     sources = _web_search_sources(prepared)
     memory_state = await _repo_memory_state(
         deps,

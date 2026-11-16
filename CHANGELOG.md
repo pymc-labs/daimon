@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Tool labels.** A tool line on the working card now uses the tool's own title
+  when its server gives one, and a new workspace or agent setting, `tool_server_names`,
+  hides the server name that follows it.
 - **Model and effort reactions in Discord.** A new setting, off by default, reacts
   to the first message in a thread, and to the first after the model or effort
   changes, with an emoji for the model and one for the effort.

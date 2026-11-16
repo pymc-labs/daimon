@@ -21,7 +21,7 @@ from pathlib import PurePosixPath
 from typing import Literal, cast
 from urllib.parse import urlsplit
 
-from daimon.core.turn.outcomes import current_outcome
+from daimon.core.turn.outcomes import current_outcome, tool_server_names_shown
 from daimon.core.turn.state import ContentBlock, ToolUseBlock, daimon_tool_input
 from mux.profiles import get_profile
 
@@ -256,8 +256,8 @@ def _tool_line(call: ToolUseBlock) -> str:
             label = f"{label}: {detail}"
     else:
         icon, label = _humanize(call.name)
-        label = _clip(label)
-        if call.mcp_server_name:
+        label = _clip(call.title or label)
+        if call.mcp_server_name and tool_server_names_shown():
             label = f"{label} ({call.mcp_server_name})"
     if is_finished:
         icon = _FAILED_ICON if call.status == "failed" else _DONE_ICON
@@ -270,7 +270,8 @@ def tool_label(call: ToolUseBlock) -> tuple[str, str | None]:
     if narration is not None:
         label = narration.finished if call.status != "pending" else narration.running
         return label, _built_in_detail(call)
-    return _clip(_humanize(call.name)[1]), call.mcp_server_name
+    server = call.mcp_server_name if tool_server_names_shown() else None
+    return _clip(call.title or _humanize(call.name)[1]), server
 
 
 def _humanize(name: str) -> tuple[str, str]:

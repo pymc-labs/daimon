@@ -37,6 +37,7 @@ CHAT_KEYS: Final[tuple[str, ...]] = (
     "completion_pings",
     "table_rendering",
     "model_reactions",
+    "tool_server_names",
     "message_feedback",
     "support_escalation",
     "outbound_people",

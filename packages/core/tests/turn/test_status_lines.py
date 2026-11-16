@@ -6,6 +6,7 @@ from typing import Literal
 
 import pytest
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
+from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.state import ContentBlock, TextBlock, ToolUseBlock
 from daimon.core.turn.status_lines import (
     CARD_SECTIONS,
@@ -21,6 +22,7 @@ from daimon.core.turn.status_lines import (
     has_running_tool,
     in_card_order,
     roll_draft,
+    tool_label,
 )
 
 ToolType = Literal["agent.tool_use", "agent.custom_tool_use", "agent.mcp_tool_use"]
@@ -35,6 +37,7 @@ def _call(
     type: ToolType = "agent.tool_use",
     server: str | None = None,
     input: dict[str, object] | None = None,
+    title: str | None = None,
 ) -> ToolUseBlock:
     return ToolUseBlock(
         kind="tool_use",
@@ -43,6 +46,7 @@ def _call(
         name=name,
         input=input or {},
         mcp_server_name=server,
+        title=title,
         status=status,
     )
 
@@ -480,3 +484,27 @@ def test_the_card_reads_updates_then_plan_then_tool_lines() -> None:
     assert CARD_SECTIONS == ("updates", "plan", "tools"), "the latest updates lead the card"
     drawn = in_card_order({"tools": "T", "plan": None, "updates": "U"})
     assert drawn == ["U", "T"], "sections follow CARD_SECTIONS and an empty one drops out"
+
+
+def test_tool_title_replaces_the_humanized_name() -> None:
+    """A server's own title is the label; without one the name is humanized."""
+    titled = _call("search_issues", "complete", type="agent.mcp_tool_use", server="tracker",
+                   title="Find tickets")  # fmt: skip
+    plain = _call("search_issues", "complete", type="agent.mcp_tool_use", server="tracker")
+    assert format_tool_lines([titled])[0].endswith("Find tickets (tracker)"), "title is the label"
+    assert format_tool_lines([plain])[0].endswith("Search issues (tracker)"), "name is the fallback"
+    assert tool_label(titled) == ("Find tickets", "tracker"), "surfaces drawing their own agree"
+
+
+def test_server_suffix_hidden_when_the_setting_hides_it() -> None:
+    """The `tool_server_names` setting drops the server from both label forms."""
+    call = _call("search_issues", "complete", type="agent.mcp_tool_use", server="tracker")
+    observation = TurnObservation(sessionmaker=None, tenant_id=None, platform="discord")  # type: ignore[arg-type]
+    observation.tool_server_names = False
+    token = current_outcome.set(observation)
+    try:
+        assert format_tool_lines([call])[0].endswith("Search issues"), "no server suffix"
+        assert tool_label(call) == ("Search issues", None), "no server detail"
+    finally:
+        current_outcome.reset(token)
+    assert format_tool_lines([call])[0].endswith("(tracker)"), "shown again by default"

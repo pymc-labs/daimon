@@ -58,6 +58,8 @@ class ToolUseBlock:
     input: dict[str, object]
     evaluated_permission: Literal["allow", "ask", "deny"] | None = None
     mcp_server_name: str | None = None
+    title: str | None = None
+    """The tool's own display title, when its server gave one."""
     status: Literal["pending", "complete", "failed"] = "pending"
     result_content: list[ToolResultContent] | None = None
     is_error: bool = False
