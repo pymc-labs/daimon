@@ -4090,6 +4090,7 @@ class DmRule(Base):
         CheckConstraint(
             "(subject = 'everyone') = (subject_id IS NULL)", name="ck_dm_rules_subject_id"
         ),
+        CheckConstraint("NOT locked OR agent_name IS NOT NULL", name="ck_dm_rules_locked_agent"),
     )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(

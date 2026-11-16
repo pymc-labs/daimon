@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 
+from daimon.core._models import DmRule
 from daimon.core.stores import dm_access
 from daimon.testing.factories import make_account, make_tenant
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
@@ -228,3 +230,11 @@ async def test_update_rule_when_changed_then_keeps_its_place_and_a_lock_needs_an
             db_session, tenant_id=tenant.id, subject="everyone", subject_id=None,
             agent_name=None, locked=True, set_by=None, now=NOW,
         )  # fmt: skip
+    with pytest.raises(IntegrityError):
+        async with db_session.begin_nested():
+            db_session.add(
+                DmRule(
+                    tenant_id=tenant.id, position=9, subject="everyone", subject_id=None,
+                    agent_name=None, locked=True, set_by=None, updated_at=NOW,
+                )
+            )  # fmt: skip

@@ -141,19 +141,12 @@ def test_resolve_when_rule_is_locked_then_pick_is_ignored() -> None:
     assert d.may_switch_to("a") is False, "a lock blocks switching"
 
 
-def test_resolve_when_locked_rule_has_no_agent_then_uses_the_default() -> None:
-    """A lock without an agent pins the default."""
-    d = decide(rules=[DmRuleFact("everyone", locked=True)], default="b", pick="a")
-
-    assert d.route == DmStart("b", "locked"), "default is the locked target"
-
-
-@pytest.mark.parametrize("default", [None, "z"], ids=["no-default", "default-not-in-A"])
+@pytest.mark.parametrize("agent", ["z", None], ids=["agent-not-in-A", "no-agent"])
 def test_resolve_when_locked_target_is_unavailable_then_refuses_for_an_admin(
-    default: str | None,
+    agent: str | None,
 ) -> None:
-    """A lock never falls back to another agent."""
-    d = decide(rules=[DmRuleFact("everyone", locked=True)], default=default, pick="a")
+    """A lock never falls back to another agent, not even the default."""
+    d = decide(rules=[DmRuleFact("everyone", agent=agent, locked=True)], default="b", pick="a")
 
     assert d.route == DmRefused("locked_unavailable"), "refused, not rerouted"
 

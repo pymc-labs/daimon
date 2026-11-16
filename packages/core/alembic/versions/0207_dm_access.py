@@ -57,6 +57,7 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "(subject = 'everyone') = (subject_id IS NULL)", name="ck_dm_rules_subject_id"
         ),
+        sa.CheckConstraint("NOT locked OR agent_name IS NOT NULL", name="ck_dm_rules_locked_agent"),
         sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("tenant_id", "position"),
     )
