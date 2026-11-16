@@ -153,7 +153,7 @@ class PrivacyPanel:
                 sm=runtime.sessionmaker,
                 account_id=account_id,
                 # With no Anthropic key, what it holds is queued for a later sweep to delete.
-                anthropic=runtime.anthropic if runtime.anthropic_configured else None,
+                anthropic=runtime.configured_anthropic,
             )
             log.info(
                 "teams.privacy.deleted",

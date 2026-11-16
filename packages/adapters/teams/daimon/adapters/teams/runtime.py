@@ -63,6 +63,11 @@ class TeamsRuntime:
         """Whether this release holds an Anthropic key: without one, nothing may call Anthropic."""
         return self.settings.anthropic.api_key is not None
 
+    @property
+    def configured_anthropic(self) -> AsyncAnthropic | None:
+        """The Anthropic client for work that can skip it, or None without a key."""
+        return self.anthropic if self.anthropic_configured else None
+
 
 # How often the owner connection is checked; a relock retries from 1 s up to the cap.
 OWNER_WATCH_INTERVAL_S = 15.0

@@ -598,7 +598,7 @@ class TeamsApp:
         while True:
             try:
                 await retire_orphaned_turns(
-                    anthropic=self.runtime.anthropic,
+                    anthropic=self.runtime.configured_anthropic,
                     sessionmaker=self.runtime.sessionmaker,
                     sender=self._sender,
                     now=datetime.now(UTC),
@@ -833,7 +833,7 @@ class TeamsApp:
         settings = self.runtime.settings
         public_url = str(settings.mcp.public_url) if settings.mcp.public_url else None
         await provision_configured_tenant(
-            anthropic=self.runtime.anthropic if self.runtime.anthropic_configured else None,
+            anthropic=self.runtime.configured_anthropic,
             sessionmaker=self.runtime.sessionmaker,
             defaults_root=settings.defaults_root,
             deployment_default=self.runtime.deployment_default,

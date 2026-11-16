@@ -2,7 +2,8 @@
 
 Such a release answers only where registration granted the selfhosted model. A
 message anywhere else gets one refusal, and the operator one
-`selfhosted.grant_missing` line with the IDs to grant. `setup` and `memory`,
+`selfhosted.grant_missing` line with the IDs to grant, beside the reason line
+every refused turn logs, which names only the tenant. `setup` and `memory`,
 which read their agents from Anthropic, say they are unavailable; every other
 command answers as it does with a key. Each case runs the real HTTP service
 with an Anthropic client that records any use.
@@ -43,7 +44,10 @@ from daimon.core.stores.identity import find_platform_principal, get_or_create_p
 from daimon.core.stores.routines import create_routine, get_routine
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents, SelfHostedEnvironments
 from daimon.core.stores.tenants import set_funding_mode
+from daimon.core.stores.thread_sessions import get_thread_session_by_id, mark_turn_active
 from daimon.core.turn.admission import AdmissionDenied, admit
+from daimon.testing.factories import make_thread_session
+from daimon.testing.ma_models import ma_agent
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.resources import AgentSpec, EnvironmentSpec
@@ -178,9 +182,14 @@ async def test_an_unlisted_conversation_gets_one_refusal_and_one_grant_missing_l
     assert [(httpx.URL(r.url).path, notice(r)) for r in teams_api_fake.activity_requests] == [
         (f"/test/v3/conversations/{conversation}/activities", REFUSAL)
     ]
-    missing = [log for log in logs if log["event"] == "selfhosted.grant_missing"]
-    assert [(log["platform"], log["channel_id"], log["account_id"]) for log in missing] == [
-        ("teams", granted, str(principal.account_id))
+    refused = [
+        (log["event"], log.get("channel_id"), log.get("account_id"))
+        for log in logs
+        if log["log_level"] in ("warning", "error") or log["event"].startswith("turn.skipped.")
+    ]
+    assert refused == [
+        ("selfhosted.grant_missing", granted, str(principal.account_id)),
+        ("turn.skipped.backend_unsupported", None, None),
     ]
     assert client.used == []
 
@@ -333,15 +342,20 @@ async def test_the_key_changes_only_what_an_unlisted_conversation_gets(
     async with release(db_session_factory, teams_api_fake, tmp_path, monkeypatch, grants) as host:
         if key == "absent":
             host.runtime.settings.anthropic.api_key = None
-        outcomes = {
-            "listed": await outcome(
-                host, make_group_activity(conversation_id=listed, activity_id="listed-1")
-            ),
-            "unlisted": await outcome(
-                host,
-                make_group_activity(conversation_id="19:other@thread.v2", activity_id="other-1"),
-            ),
-        }
+        # The Anthropic path admits the tenant's own agent, as a real deployment's is.
+        own = AsyncMock(return_value=ma_agent(tenant_id=TENANT, name="daimon"))
+        with patch("daimon.core.turn.admission.retrieve_agent_cached", own):
+            outcomes = {
+                "listed": await outcome(
+                    host, make_group_activity(conversation_id=listed, activity_id="listed-1")
+                ),
+                "unlisted": await outcome(
+                    host,
+                    make_group_activity(
+                        conversation_id="19:other@thread.v2", activity_id="other-1"
+                    ),
+                ),
+            }
 
     assert outcomes == {"listed": "served", "unlisted": unlisted}
 
@@ -605,4 +619,34 @@ async def test_deleting_a_routine_reaches_no_anthropic_without_its_key(
 
     assert "Routine deleted" in done
     assert gone is None
+    assert client.used == []
+
+
+async def test_startup_retires_a_turn_left_running_without_calling_anthropic(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+) -> None:
+    """Its card says it was interrupted and its session is dropped; nothing is interrupted
+    upstream, and the next message is answered."""
+    left = await make_thread_session(db_session, platform="teams", thread_id=CONVERSATION_ID)
+    await mark_turn_active(
+        db_session,
+        id=left.id,
+        active_turn_message_id="m-left",
+        active_turn_channel_id=CONVERSATION_ID,
+        now=datetime.now(UTC),
+    )
+    await db_session.commit()
+    client = NoAnthropic()
+    async with running_service(keyless(db_session_factory, client), teams_api_fake) as service:
+        await post_activity(service, make_message_activity(text="help", activity_id="help-1"))
+        await settle(service.turns)
+    async with db_session_factory() as session:
+        retired = await get_thread_session_by_id(session, id=left.id)
+
+    [interrupted, answer] = teams_api_fake.activity_requests
+    assert interrupted.method == "PUT" and interrupted.url.endswith("/activities/m-left")
+    assert "command reference" in json.dumps(answer.body)
+    assert retired is not None and retired.active_turn_message_id is None
     assert client.used == []

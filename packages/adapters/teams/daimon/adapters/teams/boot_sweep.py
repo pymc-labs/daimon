@@ -3,7 +3,9 @@
 Managed Agents keeps running (and billing) a turn whose render loop died with
 its process. Before admitting a turn, this edits every known card to the
 interrupted notice, clears the turn markers, interrupts the orphaned MA
-sessions and retires the card intents. No late answer is delivered. An intent
+sessions and retires the card intents. With no Anthropic client (a release
+that holds no key) nothing is interrupted upstream: each orphaned session is
+marked dead, as one whose interrupt failed is. No late answer is delivered. An intent
 whose post never returned an id is looked up by its Cancel key with `find_card`
 (Graph, so channel threads only); one not found is retired with a log line, its
 card (if any) left frozen. Sends use the SDK's
@@ -52,7 +54,7 @@ async def _interrupt_card(sender: TeamsSender, *, conversation_id: str, message_
 
 async def retire_orphaned_turns(
     *,
-    anthropic: AsyncAnthropic,
+    anthropic: AsyncAnthropic | None,
     sessionmaker: async_sessionmaker[AsyncSession],
     sender: TeamsSender,
     now: datetime,
@@ -77,17 +79,20 @@ async def retire_orphaned_turns(
             cleared = await clear_active_turn_if_message_id(
                 session, id=row.id, expected_message_id=message_id
             )
-            if cleared and not await interrupt_orphaned_session(
-                anthropic,
-                session_id=row.ma_session_id,
-                scope=Scope(
-                    tenant_id=str(row.tenant_id),
-                    account_id=str(row.account_id),
-                    principal_id="daimon",
-                    authorization_id="teams-orphan-sweep",
+            if cleared and (
+                anthropic is None
+                or not await interrupt_orphaned_session(
+                    anthropic,
+                    session_id=row.ma_session_id,
+                    scope=Scope(
+                        tenant_id=str(row.tenant_id),
+                        account_id=str(row.account_id),
+                        principal_id="daimon",
+                        authorization_id="teams-orphan-sweep",
+                    )
+                    if row.account_id is not None
+                    else None,
                 )
-                if row.account_id is not None
-                else None,
             ):
                 await mark_dead(session, id=row.id)
         started = row.active_turn_started_at
