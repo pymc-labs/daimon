@@ -34,6 +34,7 @@ from mux.contracts.receipts import (
     UpdateReceipt,
 )
 from mux.contracts.resources import (
+    SESSION_CREATED,
     Agent,
     AgentFilter,
     AgentPatch,
@@ -160,9 +161,6 @@ def page_values[T](values: Sequence[T], page: PageRequest) -> Page[T]:
         next_cursor=str(end) if end < len(ordered) else None,
     )
 
-
-#: `Session.native` key set on a session as it is created; a replayed create omits it.
-SESSION_CREATED = "created"
 
 #: Waits between tries of one skill's upload; past them the skill is left out.
 UPLOAD_RETRY_DELAYS_S = (1.0, 4.0)
