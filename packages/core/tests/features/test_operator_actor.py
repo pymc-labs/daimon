@@ -1,11 +1,10 @@
 """Approvals need a live native admin; the CLI operator is the one other actor allowed, by type.
 
-A chat user who is not an admin, an agent key and an `admin_for`-true actor with no chat identity
-(how the CLI acted before the operator type) are all still refused."""
+A chat user who is not an admin, an agent key and an `admin_for`-true actor with no chat
+identity are all refused."""
 
 from __future__ import annotations
 
-import ast
 import uuid
 from pathlib import Path
 
@@ -24,7 +23,7 @@ from daimon.core.features.service import FeatureActor, OperatorActor, change_fea
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.settings_panel import chat_actor
 from daimon.core.stores.domain import ChangeSurface
-from daimon.core.stores.security_audit import list_events
+from daimon.core.stores.security_audit import SecurityAuditRow, list_events
 from daimon.testing.factories import make_tenant
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -50,6 +49,10 @@ def _operator(tenant_id: uuid.UUID, reason: str = "unattended bridge") -> Operat
     return OperatorActor(tenant_id, None, "cli", None, _yes, operator="ops", reason=reason)
 
 
+async def _audit_rows(session: AsyncSession, tenant_id: uuid.UUID) -> list[SecurityAuditRow]:
+    return await list_events(session, tenant_id=tenant_id, tool_name="approval_gate")
+
+
 async def _set(
     factory: async_sessionmaker[AsyncSession], actor: FeatureActor, tier: str = "workspace"
 ) -> None:
@@ -71,12 +74,7 @@ async def test_the_operator_sets_approvals_and_the_audit_row_names_who_and_why(
     await db_session.commit()
     await _set(db_session_factory, _operator(tenant.id))
     await _set(db_session_factory, _operator(tenant.id, "client channel"), tier="channel")
-    events = [
-        e
-        for e in await list_events(db_session, tenant_id=tenant.id)
-        if e.tool_name == "approval_gate"
-    ]
-    assert [(e.platform_user_id, e.reason) for e in events] == [
+    assert [(e.platform_user_id, e.reason) for e in await _audit_rows(db_session, tenant.id)] == [
         ("operator:ops", "server:inherit->off (unattended bridge)"),
         ("operator:ops", "c1:inherit->off (client channel)"),
     ], "each operator change is audited with operator, old and new value and the reason"
@@ -91,7 +89,7 @@ async def test_the_operator_sets_approvals_and_the_audit_row_names_who_and_why(
     ],
     ids=["no chat identity", "agent key", "agent key with a chat id"],
 )
-async def test_other_actors_are_still_refused_even_when_admin_for_says_yes(
+async def test_other_actors_are_refused_even_when_admin_for_says_yes(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     actor_kwargs: dict[str, object],
@@ -101,11 +99,7 @@ async def test_other_actors_are_still_refused_even_when_admin_for_says_yes(
     actor = FeatureActor(tenant.id, None, "web", admin_for=_yes, **actor_kwargs)  # pyright: ignore[reportArgumentType]
     with pytest.raises(ChannelChangeRefused):
         await _set(db_session_factory, actor)
-    assert not [
-        e
-        for e in await list_events(db_session, tenant_id=tenant.id)
-        if e.tool_name == "approval_gate"
-    ], "a refused change writes no audit row"
+    assert not await _audit_rows(db_session, tenant.id), "a refused change writes no audit row"
 
 
 @pytest.mark.parametrize(
@@ -133,39 +127,16 @@ def test_an_operator_actor_needs_a_name_a_reason_and_the_cli(
         )
 
 
-def _mentions_the_operator_type(tree: ast.AST) -> bool:
-    """Any use of the type: a call, an attribute (`service.OperatorActor`), a class
-    argument (`dataclasses.replace`, `cast`, a subclass base) or a string annotation."""
-    return any(
-        (isinstance(node, ast.Name) and node.id == "OperatorActor")
-        or (isinstance(node, ast.Attribute) and node.attr == "OperatorActor")
-        or (isinstance(node, ast.Constant) and node.value == "OperatorActor")
-        for node in ast.walk(tree)
-    )
-
-
 def test_only_the_cli_entrypoint_builds_an_operator_actor() -> None:
-    """The operator path is reachable from the CLI alone; a second constructor would make a
-    chat or MCP path able to approve its own writes. The check reads every use of the type
-    (not only a bare call), so an attribute call or `dataclasses.replace` is caught too."""
+    """The operator path is reachable from the CLI alone; any other module naming the type
+    could let a chat or MCP path approve its own writes."""
     service = REPO / "packages/core/daimon/core/features/service.py"
-    builders = {
+    users = {
         path.relative_to(REPO).as_posix()
         for path in (REPO / "packages").rglob("*.py")
-        if "tests" not in path.parts
-        and path != service
-        and _mentions_the_operator_type(ast.parse(path.read_text()))
+        if "tests" not in path.parts and path != service and "OperatorActor" in path.read_text()
     }
-    assert builders == {"packages/adapters/cli/daimon/adapters/cli/commands/features.py"}, builders
-
-
-def test_the_check_sees_attribute_calls_and_replace_on_the_type() -> None:
-    for source in (
-        "service.OperatorActor(t, None, 'cli', None, f, operator='x', reason='y')",
-        "dataclasses.replace(op, via_agent_key=True); cast('OperatorActor', op)",
-        "class Other(OperatorActor): ...",
-    ):
-        assert _mentions_the_operator_type(ast.parse(source)), source
+    assert users == {"packages/adapters/cli/daimon/adapters/cli/commands/features.py"}, users
 
 
 async def test_a_settings_panel_actor_is_refused_unless_the_live_check_says_admin(
@@ -189,8 +160,6 @@ async def test_a_settings_panel_actor_is_refused_unless_the_live_check_says_admi
     with pytest.raises(ChannelChangeRefused):
         await _set(db_session_factory, actor)
     assert asked == ["u1"], "the live native check ran for the panel user"
-    assert not [
-        e
-        for e in await list_events(db_session, tenant_id=tenant.id)
-        if e.tool_name == "approval_gate"
-    ], "a refused panel change writes no audit row"
+    assert not await _audit_rows(db_session, tenant.id), (
+        "a refused panel change writes no audit row"
+    )

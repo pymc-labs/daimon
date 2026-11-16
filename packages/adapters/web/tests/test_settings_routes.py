@@ -73,7 +73,7 @@ async def test_the_web_actor_is_refused_an_approvals_change(
     monkeypatch: pytest.MonkeyPatch,
     linked: bool,
 ) -> None:
-    """A workspace owner is not a native admin: approvals change from chat, never here."""
+    """A workspace owner is not a native admin, so approvals never change from the web."""
     if linked:
         _linked(monkeypatch, admin=False)
     async with _channels(web_client, db_session_factory, tmp_path) as admin:
