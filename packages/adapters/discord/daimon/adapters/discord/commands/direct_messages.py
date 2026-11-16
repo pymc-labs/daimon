@@ -57,7 +57,9 @@ from daimon.core.direct_messages import (
     start_dm,
     tenant_ready,
 )
+from daimon.core.dm_access import decide_dm, list_dm_agents
 from daimon.core.dm_debounce import DmDebouncer, DmWindow, bypasses_wait, debounce_seconds
+from daimon.core.dm_routing import DmChoose, DmRefused, DmStart, DmUnchecked
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -74,6 +76,7 @@ from daimon.core.stores.direct_messages import (
     set_dm_agent_name,
 )
 from daimon.core.stores.domain import Role, TenantRow
+from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.pending_skill_adds import is_affirmative
 from daimon.core.stores.tenants import get_tenant, list_tenants_by_platform
 from daimon.core.turn.admission import Admission, admit
@@ -167,6 +170,34 @@ def _error_text(exc: Exception, fallback: str, *, settings: Settings) -> str:
     return str(exc) if isinstance(exc, DaimonError) else fallback
 
 
+@dataclass(frozen=True)
+class _Eligibility:
+    """What admitting a DM through one server found.
+
+    `agents` is set when several agents fit and the person must pick; `admission`
+    when exactly one route was settled; `unknown` when membership could not be
+    checked; `failed` when discovery broke and the person was told.
+    """
+
+    admission: Admission | None = None
+    unknown: bool = False
+    failed: bool = False
+    agents: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _Choice:
+    """One row of the discovery dropdown: a server, and an agent when it offers several."""
+
+    tenant: TenantRow
+    admission: Admission | None
+    agent: str | None
+
+    @property
+    def value(self) -> str:
+        return str(self.tenant.id) if self.agent is None else f"{self.tenant.id}/{self.agent}"
+
+
 class DirectMessageCog(commands.Cog):
     def __init__(self, bot: DaimonBot) -> None:
         self.bot = bot
@@ -255,46 +286,84 @@ class DirectMessageCog(commands.Cog):
         message: discord.Message | _DmRequest,
         *,
         denied: set[uuid.UUID] | None = None,
-    ) -> tuple[Admission | None, bool, bool]:
+        agent: str | None = None,
+    ) -> _Eligibility:
         """Admit `message` through `tenant`, or say why not.
 
-        Returns (admission, membership unknown, discovery failed). A verified
-        member refused for lack of access is added to `denied`, so discovery can
-        tell them they lack permission rather than give the generic guidance.
+        A verified member refused for lack of access is added to `denied`, so
+        discovery can tell them they lack permission rather than give the generic
+        guidance. `agent` is the one the person picked; it must still be offered.
         """
         runtime = self.bot.runtime
         if not tenant_ready(tenant):
             self._suppress(message, "tenant_unavailable")
-            return None, False, False
+            return _Eligibility()
         if not self.bot.allows_tenant(tenant):
             self._suppress(message, "guild_not_allowed")
-            return None, False, False
+            return _Eligibility()
         async with runtime.sessionmaker() as session:
             enabled = await dm_enabled(session, tenant_id=tenant.id)
-            agent = await get_dm_agent_name(session, tenant_id=tenant.id)
             try:
                 policy = await load_access_policy(session, tenant_id=tenant.id)
             except AccessPolicyUnreadable:
                 self._suppress(message, "policy_unreadable")
-                return None, False, False
+                return _Eligibility()
         recipient_policy = runtime.settings.direct_message_policies.get(
             tenant.id, DirectMessagePolicy()
         )
-        if not enabled or agent is None or not recipient_policy.allows(str(message.author.id)):
+        if not enabled or not recipient_policy.allows(str(message.author.id)):
             self._suppress(message, "dm_policy")
-            return None, False, False
+            return _Eligibility()
         subject = await self._subject(tenant.id, message.author.id)
         if subject.verified_membership is None:
-            return None, True, False
+            return _Eligibility(unknown=True)
         if subject.verified_membership is not True:
             self._suppress(message, "invoker_not_allowed")
-            return None, False, False
+            return _Eligibility()
         if not authorize(policy, subject=subject, action=Action.START_TURN):
             self._suppress(message, "invoker_not_allowed")
             if denied is not None:
                 denied.add(tenant.id)
-            return None, False, False
+            return _Eligibility()
         try:
+            async with runtime.sessionmaker() as session:
+                agents = await list_dm_agents(runtime.turn_deps, session, tenant_id=tenant.id)
+                principal = await find_platform_principal(
+                    session,
+                    tenant_id=tenant.id,
+                    platform="discord",
+                    external_id=str(message.author.id),
+                )
+                decision = await decide_dm(
+                    session,
+                    runtime.settings,
+                    policy,
+                    tenant_id=tenant.id,
+                    platform="discord",
+                    agents=agents,
+                    subject=subject,
+                    account_id=None if principal is None else principal.account_id,
+                )
+            route = decision.route
+            if isinstance(route, DmUnchecked):
+                return _Eligibility(unknown=True)
+            if isinstance(route, DmRefused):
+                self._suppress(message, route.reason)
+                if route.reason == "locked_unavailable" and denied is not None:
+                    denied.add(tenant.id)
+                return _Eligibility()
+            if agent is not None:
+                if not (
+                    (isinstance(route, DmStart) and route.agent == agent)
+                    or decision.may_switch_to(agent)
+                ):
+                    self._suppress(message, "agent_unavailable")
+                    return _Eligibility()
+                name = agent
+            elif isinstance(route, DmChoose):
+                return _Eligibility(agents=route.agents)
+            else:
+                name = route.agent
             admission = await admit_cold_dm(
                 runtime.turn_deps,
                 tenant_id=tenant.id,
@@ -303,8 +372,9 @@ class DirectMessageCog(commands.Cog):
                 role=Role.ADMIN if subject.is_admin else Role.USER,
                 role_ids=subject.role_ids,
                 verified_membership=subject.verified_membership,
+                agent_name=name,
             )
-        except (DaimonError, MAResolverMissError) as exc:
+        except (DaimonError, MAResolverMissError, anthropic.APIError) as exc:
             if (isinstance(exc, AdmissionDenied) and exc.reason in _ACCESS_DENIALS) or isinstance(
                 exc,
                 (
@@ -323,15 +393,15 @@ class DirectMessageCog(commands.Cog):
                     and exc.reason == "invoker_not_allowed"
                 ):
                     denied.add(tenant.id)
-                return None, False, False
+                return _Eligibility()
             # Membership and invoker eligibility were established above. Do not
             # disclose which candidate failed, or include exception/resource text.
             log.warning("discord.dm.discovery_failed", error_type=type(exc).__name__)
             await message.channel.send(
                 _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
             )
-            return None, False, True
-        return admission, False, False
+            return _Eligibility(failed=True)
+        return _Eligibility(admission=admission)
 
     async def _discover(
         self,
@@ -342,16 +412,17 @@ class DirectMessageCog(commands.Cog):
         if self._unloaded or not self._claim_discovery(message.author.id):
             return None
         tenants = await list_tenants_by_platform(self.bot.runtime.sessionmaker, platform="discord")
-        candidates: list[tuple[TenantRow, Admission]] = []
+        candidates: list[_Choice] = []
         denied: set[uuid.UUID] = set()
         unknown = False
         for tenant in tenants:
-            admission, uncertain, failed = await self._eligible(tenant, message, denied=denied)
-            if failed:
+            found = await self._eligible(tenant, message, denied=denied)
+            if found.failed:
                 return None
-            unknown |= uncertain
-            if admission is not None:
-                candidates.append((tenant, admission))
+            unknown |= found.unknown
+            if found.admission is not None:
+                candidates.append(_Choice(tenant, found.admission, None))
+            candidates.extend(_Choice(tenant, None, name) for name in found.agents)
         if self._unloaded:
             return None
         if unknown:
@@ -365,8 +436,11 @@ class DirectMessageCog(commands.Cog):
             await self._explain_no_private_chat(message, dms_on=None, permission=bool(denied))
             return None
         if len(candidates) == 1 and expected_scope_id is None:
-            tenant, admission = candidates[0]
-            return await self._start(message, tenant, admission, expected_scope_id=None)
+            only = candidates[0]
+            if only.admission is not None:
+                return await self._start(
+                    message, only.tenant, only.admission, expected_scope_id=None
+                )
         key = (message.author.id, message.channel.id)
         pending = _PendingSelection(message, expected_scope_id, monotonic() + SELECTION_SECONDS)
         self._pending[key] = pending
@@ -385,7 +459,7 @@ class DirectMessageCog(commands.Cog):
                         "This selector expired. Send a new message.", ephemeral=True
                     )
                     return
-                if selected not in {str(tenant.id) for tenant, _ in candidates}:
+                if selected not in {choice.value for choice in candidates}:
                     await interaction.response.defer()
                     self._suppress(message, "invalid_selection")
                     return
@@ -394,8 +468,10 @@ class DirectMessageCog(commands.Cog):
                 del self._pending[key]
                 view.complete()
                 await interaction.edit_original_response(view=None)
+                tenant_part, _, agent_part = selected.partition("/")
+                agent = agent_part or None
                 async with self.bot.runtime.sessionmaker() as session:
-                    tenant = await get_tenant(session, uuid.UUID(selected))
+                    tenant = await get_tenant(session, uuid.UUID(tenant_part))
                     current = await get_conversation(
                         session,
                         platform="discord",
@@ -408,38 +484,56 @@ class DirectMessageCog(commands.Cog):
                 if tenant is None:
                     self._suppress(message, "tenant_unavailable")
                     return
-                admission, uncertain, failed = await self._eligible(tenant, message)
-                if failed:
+                found = await self._eligible(tenant, message, agent=agent)
+                if found.failed:
                     return
-                if uncertain:
+                if found.unknown:
                     await message.channel.send(
                         "Server membership is temporarily unavailable. Please retry."
                     )
                     return
-                if admission is None:
+                if found.admission is None:
                     return
                 conversation = await self._start(
-                    message, tenant, admission, expected_scope_id=expected_scope_id
+                    message,
+                    tenant,
+                    found.admission,
+                    expected_scope_id=expected_scope_id,
+                    remember_pick=agent is not None,
                 )
                 if conversation is not None and expected_scope_id is None:
                     await self._reply(message, expected_scope_id=conversation.scope_id)
 
+        several = len({choice.tenant.id for choice in candidates}) > 1
+        picking_agent = any(choice.agent is not None for choice in candidates)
         servers: list[tuple[str, str]] = []
-        for tenant, _ in candidates:
-            guild = self.bot.get_guild(int(tenant.external_id))
-            servers.append((str(tenant.id), guild.name if guild else tenant.external_id))
+        for choice in candidates:
+            guild = self.bot.get_guild(int(choice.tenant.external_id))
+            server_name = guild.name if guild else choice.tenant.external_id
+            if choice.agent is None:
+                label = server_name
+            else:
+                label = f"{choice.agent} in {server_name}" if several else choice.agent
+            servers.append((choice.value, label))
 
         def expire() -> None:
             if self._pending.get(key) is pending:
                 del self._pending[key]
 
         view = ServerSelector(
-            user_id=key[0], route_id=key[1], servers=servers, choose=choose, expire=expire
+            user_id=key[0],
+            route_id=key[1],
+            servers=servers,
+            choose=choose,
+            expire=expire,
+            placeholder="Choose an agent" if picking_agent else "Choose a server",
         )
         pending.view = view
         try:
             sent = await message.channel.send(
-                "Choose a server for this private conversation.",
+                "Choose who to talk to for this private conversation."
+                if picking_agent
+                else "Choose a server for this private conversation.",
                 view=view,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -458,6 +552,7 @@ class DirectMessageCog(commands.Cog):
         admission: Admission,
         *,
         expected_scope_id: str | None,
+        remember_pick: bool = False,
     ) -> DirectMessageRow | None:
         conversation = await start_cold_dm(
             self.bot.runtime.turn_deps,
@@ -467,6 +562,7 @@ class DirectMessageCog(commands.Cog):
             route_key=str(message.channel.id),
             external_user_id=str(message.author.id),
             expected_scope_id=expected_scope_id,
+            remember_pick=remember_pick,
         )
         if conversation is None:
             return None
@@ -595,10 +691,11 @@ class DirectMessageCog(commands.Cog):
                     tenant = await get_tenant(session, current.tenant_id)
                 if tenant is None:
                     self._suppress(request, "tenant_unavailable")
-                    admission, uncertain = None, False
+                    found = _Eligibility()
                 else:
-                    admission, uncertain, _ = await self._eligible(tenant, request)
-                if uncertain:
+                    found = await self._eligible(tenant, request)
+                admission = found.admission
+                if found.unknown:
                     text = "Server membership is temporarily unavailable. Please retry."
                 elif tenant is None or admission is None:
                     text = "Couldn't start a new conversation."

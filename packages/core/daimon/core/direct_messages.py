@@ -450,6 +450,23 @@ async def start_dm(
     """
     require_unsealed_source(admission)
     await require_dm_enabled(deps, tenant_id=tenant_id)
+    async with deps.sessionmaker() as session:
+        permitted = await permits_dm(
+            session,
+            deps.settings,
+            await load_dm_access_policy(session, tenant_id=tenant_id),
+            tenant_id=tenant_id,
+            platform=platform,
+            agent=dm_agent_of(admission.agent, admission.config.agent_name),
+            subject=admission.grant.subject
+            if admission.grant is not None
+            else build_subject(is_admin=False, platform_user_id=external_user_id),
+        )
+    if not permitted:
+        raise UserFacingError(
+            "You can't have a private conversation with this agent here.\n\n"
+            "Ask an admin if you think you should have access."
+        )
     scope_id = f"{DM_SCOPE_PREFIX}{uuid.uuid4()}"
     conversation = DirectMessageRow(
         platform=platform,

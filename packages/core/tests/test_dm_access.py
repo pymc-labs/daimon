@@ -16,9 +16,11 @@ from daimon.core.direct_messages import (
     DirectMessageReply,
     require_dm_delivery,
     start_cold_dm,
+    start_dm,
 )
 from daimon.core.dm_access import DmAgent, decide_dm, permits_dm
 from daimon.core.dm_routing import DmChoose, DmRefused, DmStart
+from daimon.core.errors import UserFacingError
 from daimon.core.features.service import FeatureActor, change_feature
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.membership import CachedMembershipResolver, Membership
@@ -300,3 +302,20 @@ async def test_require_dm_delivery_with_unknown_membership_keeps_proved_revocati
         )  # fmt: skip
     with pytest.raises(DirectMessageAccessRevoked):
         await require_dm_delivery(deps, reply)
+
+
+async def test_start_dm_refuses_an_agent_the_person_may_not_use(db_session_factory):
+    """/dm-me from a channel whose agent a lock or grant rules out ends in a refusal."""
+    tenant, _, admission, deps = await cold(db_session_factory)
+    async with db_session_factory.begin() as session:
+        await store.add_rule(
+            session, tenant_id=tenant.id, subject="everyone", subject_id=None,
+            agent_name="other", locked=True, set_by=None, now=NOW,
+        )  # fmt: skip
+    with pytest.raises(UserFacingError, match="private conversation with this agent"):
+        await start_dm(
+            deps, admission, tenant_id=tenant.id, platform="discord",
+            workspace_id=tenant.external_id, route_key="555", channel_id="555",
+            external_user_id="999", source_url="https://x/y", source_channel_id="1",
+            source_thread_id=None, context=[],
+        )  # fmt: skip

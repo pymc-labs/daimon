@@ -18,10 +18,12 @@ from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.authz import AgentRef, Place, Surface, build_subject
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.direct_messages import DirectMessageReply
+from daimon.core.dm_access import DmAgent
 from daimon.core.errors import DaimonError
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.output_runtime import AnthropicOutputRuntime
 from daimon.core.scope import ResolvedConfig
+from daimon.core.stores import dm_access as dm_access_store
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.direct_messages import get_conversation, set_dm_agent_name, set_dm_enabled
 from daimon.core.stores.tenants import set_provision_status
@@ -114,6 +116,7 @@ async def setup(db_session_factory, monkeypatch, count=1):
     bot.runtime.sessionmaker = db_session_factory
     bot.runtime.settings = SimpleNamespace(
         direct_message_policies={},
+        features={},
         ops=SimpleNamespace(alert_webhook_url=None),
         discord=None,
         table_rendering={},
@@ -127,9 +130,27 @@ async def setup(db_session_factory, monkeypatch, count=1):
     )
 
     async def admit(deps, **kwargs):
-        return admissions[kwargs["tenant_id"]]
+        base = admissions[kwargs["tenant_id"]]
+        name = kwargs.get("agent_name")
+        if name is None:
+            return base
+        return replace(
+            base,
+            agent=ma_agent(id=f"ag_{name}", name=name, tenant_id=kwargs["tenant_id"]),
+            config=ResolvedConfig(agent_name=name, environment_name="default"),
+        )
 
     monkeypatch.setattr(module, "admit_cold_dm", admit)
+    # Each server's own agents; a test edits `cog.agents` to offer more.
+    offered = {
+        tenant.id: [DmAgent(f"private-{i}", f"ag_{i}", AgentRef.of(f"private-{i}"))]
+        for i, tenant in enumerate(tenants)
+    }
+
+    async def list_agents(deps, session, *, tenant_id):
+        return offered[tenant_id]
+
+    monkeypatch.setattr(module, "list_dm_agents", list_agents)
 
     async def answer(deps, **kwargs):
         row = await conversation(db_session_factory)
@@ -137,7 +158,9 @@ async def setup(db_session_factory, monkeypatch, count=1):
 
     reply = AsyncMock(side_effect=answer)
     monkeypatch.setattr(module, "reply_to_dm_result", reply)
-    return DirectMessageCog(bot), tenants, fetch, reply
+    cog = DirectMessageCog(bot)
+    cog.agents = offered  # pyright: ignore[reportAttributeAccessIssue]
+    return cog, tenants, fetch, reply
 
 
 async def conversation(factory):
@@ -276,7 +299,7 @@ async def test_unknown_prevents_assuming_only_verified_candidate(db_session_fact
 
 
 @pytest.mark.parametrize(
-    "change", ["disabled", "archived", "not_ready", "unset", "recipient", "agent"]
+    "change", ["disabled", "archived", "not_ready", "no_agents", "recipient", "agent"]
 )
 async def test_ineligible_tenant_gets_only_generic_guidance(
     db_session_factory, monkeypatch, change
@@ -286,8 +309,8 @@ async def test_ineligible_tenant_gets_only_generic_guidance(
     async with db_session_factory.begin() as session:
         if change == "disabled":
             await set_dm_enabled(session, tenant_id=tenant.id, enabled=False)
-        elif change == "unset":
-            await set_dm_agent_name(session, tenant_id=tenant.id, agent_name=None)
+    if change == "no_agents":
+        cog.agents[tenant.id] = []
     if change in {"archived", "not_ready"}:
         await set_provision_status(
             db_session_factory,
@@ -435,7 +458,7 @@ async def test_new_conversation_rechecks_access(db_session_factory, monkeypatch,
             if change == "disabled":
                 await set_dm_enabled(session, tenant_id=tenants[0].id, enabled=False)
             else:
-                await set_dm_agent_name(session, tenant_id=tenants[0].id, agent_name=None)
+                cog.agents[tenants[0].id] = []
     click = interaction(channel=msg.channel)
     await switch_view(msg).children[1].callback(click)
     assert click.followup.send.await_args.args[0] == "Couldn't start a new conversation."
@@ -1293,3 +1316,78 @@ async def test_held_messages_are_dropped_with_a_notice_on_unload(db_session_fact
     gate.set()
     await asyncio.wait_for(running, 5)
     assert [t["text"] for t in turns] == ["one"], "nothing runs after the unload"
+
+
+def two_agents(cog, tenant):
+    cog.agents[tenant.id] = [
+        DmAgent(name, f"ag_{name}", AgentRef.of(name)) for name in ("private-0", "private-1")
+    ]
+
+
+async def test_several_agents_offer_a_dropdown_and_remember_the_pick(
+    db_session_factory, monkeypatch
+):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    two_agents(cog, tenants[0])
+    async with db_session_factory.begin() as session:
+        await set_dm_agent_name(session, tenant_id=tenants[0].id, agent_name=None)
+    msg = message()
+    await cog.on_message(msg)
+    assert await conversation(db_session_factory) is None, "nothing starts before a choice"
+    view = selector(msg)
+    assert [label for _, label in view.servers] == ["private-0", "private-1"]
+    assert "who to talk to" in sent_text(msg.channel.send.await_args_list[0])
+    await view.choose(interaction(), f"{tenants[0].id}/private-1")
+    row = await conversation(db_session_factory)
+    assert row is not None and row.tenant_id == tenants[0].id, "the choice starts the DM"
+    async with db_session_factory() as session:
+        saved = await dm_access_store.get_pick(
+            session, tenant_id=tenants[0].id, account_id=row.account_id
+        )
+    assert saved is not None and saved.agent_name == "private-1", "the pick is remembered"
+    await cog.cog_unload()
+
+
+async def test_a_lock_names_the_agent_and_skips_the_dropdown(db_session_factory, monkeypatch):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    two_agents(cog, tenants[0])
+    async with db_session_factory.begin() as session:
+        await dm_access_store.add_rule(
+            session, tenant_id=tenants[0].id, subject="everyone", subject_id=None,
+            agent_name="private-1", locked=True, set_by=None, now=datetime.now(UTC),
+        )  # fmt: skip
+    msg = message()
+    await cog.on_message(msg)
+    assert await conversation(db_session_factory) is not None, "the locked agent starts at once"
+    assert "private-1" in sent_text(msg.channel.send.await_args_list[0]), "the lock picks private-1"
+    await cog.cog_unload()
+
+
+async def test_a_lock_on_an_unavailable_agent_tells_the_person_they_lack_access(
+    db_session_factory, monkeypatch
+):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    async with db_session_factory.begin() as session:
+        await dm_access_store.add_rule(
+            session, tenant_id=tenants[0].id, subject="everyone", subject_id=None,
+            agent_name="ghost", locked=True, set_by=None, now=datetime.now(UTC),
+        )  # fmt: skip
+    msg = message()
+    await cog.on_message(msg)
+    assert sent_text(msg.channel.send.await_args) == module.dm_permission_text("discord")
+    assert await conversation(db_session_factory) is None, (
+        "a lock never falls back to another agent"
+    )
+
+
+async def test_a_grant_that_lists_others_hides_the_agent(db_session_factory, monkeypatch):
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    async with db_session_factory.begin() as session:
+        await dm_access_store.set_grant(
+            session, tenant_id=tenants[0].id, agent_name="private-0", who="listed",
+            user_ids=["1"], group_ids=[], set_by=None, now=datetime.now(UTC),
+        )  # fmt: skip
+    msg = message()
+    await cog.on_message(msg)
+    assert_generic_guidance(msg, tenants)
+    assert await conversation(db_session_factory) is None, "an unlisted person gets no DM"
