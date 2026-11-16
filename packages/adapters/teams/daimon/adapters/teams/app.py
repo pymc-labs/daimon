@@ -89,6 +89,7 @@ from daimon.adapters.teams.lifecycle import (
 from daimon.adapters.teams.names import remember_inbound
 from daimon.adapters.teams.output_delivery import TeamsOutputDelivery
 from daimon.adapters.teams.participation import TeamsParticipation
+from daimon.adapters.teams.personal_chat import chat_groups, route_personal_chat
 from daimon.adapters.teams.private_replies import SENDER_ONLY, PrivateReplies, reply_privately
 from daimon.adapters.teams.provider_actions import TeamsProviderActions
 from daimon.adapters.teams.provisioning import provision_configured_tenant
@@ -117,6 +118,7 @@ from daimon.core.continuity.messages import (
     render_responder_changed_without_handoff,
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller
+from daimon.core.direct_messages import DirectMessageAccessRevoked, require_dm_turn_grant
 from daimon.core.errors import DaimonError
 from daimon.core.features.model_input import FULL_HISTORY, HistoryDepth
 from daimon.core.features.snapshot import FeaturePlace, may_turn_on, place_feature
@@ -203,6 +205,7 @@ from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
     MessageActivity,
+    MessageActivityInput,
 )
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.cards import ExecuteAction
@@ -1206,6 +1209,33 @@ class TeamsApp:
             inbound.conversation_id, notice_card(text, error=error), service_url=inbound.service_url
         )
 
+    def _post_to(self, inbound: TeamsInbound) -> Callable[[MessageActivityInput], Awaitable[None]]:
+        async def post(card: MessageActivityInput) -> None:
+            await self._sender.send(inbound.conversation_id, card, service_url=inbound.service_url)
+
+        return post
+
+    async def _personal_grant(
+        self, inbound: TeamsInbound, tenant_id: uuid.UUID, admission: Admission
+    ) -> bool:
+        """Whether the admitted agent still admits this person in their personal chat."""
+        groups = await chat_groups(
+            self.runtime, tenant_id=tenant_id, user_id=inbound.user_id, fresh=False
+        )
+        try:
+            await require_dm_turn_grant(
+                self.runtime.turn_deps,
+                admission,
+                tenant_id=tenant_id,
+                platform="teams",
+                user_id=inbound.user_id.lower(),
+                groups=groups,
+            )
+        except DirectMessageAccessRevoked as err:
+            await self._post_to(inbound)(notice_card(str(err)))
+            return False
+        return True
+
     async def _may_post(self, channel_id: str, thread_id: str) -> bool:
         """True only for an unprotected target; a protected or unreadable one gets nothing."""
         return (await self._post_state(channel_id, thread_id)).may_post
@@ -1489,6 +1519,11 @@ class TeamsApp:
         """
         deps, role = self.runtime.turn_deps, await self._role(inbound)
         org, home_id = _requester_org(inbound)
+        personal = inbound.kind == "dm" and continuation is None and not inbound.setup_thread_id
+        if personal and not await route_personal_chat(
+            self.runtime, inbound, tenant_id=tenant_id, post=self._post_to(inbound)
+        ):
+            return
         try:
             admission = await admit(
                 deps,
@@ -1515,6 +1550,8 @@ class TeamsApp:
                 await self._say(inbound, refusal, sender_only=private)
             if reraise:
                 raise
+            return
+        if personal and not await self._personal_grant(inbound, tenant_id, admission):
             return
         if continuation is not None:
             # A wake runs only as the agent it was queued for: refused before any card.
