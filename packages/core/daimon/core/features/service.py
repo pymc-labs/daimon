@@ -499,8 +499,9 @@ def _pin_refusal(
     wants = {"agent": AgentSandboxPin, "routine": SandboxPin}.get(tier)
     if wants is None or not isinstance(pin, wants):
         return _refused(
-            f"{spec.name} is turned on for one agent or one routine, with the agent and "
-            f"environment it covers, so it can't be turned on {_where_set(tier, place.platform)}.",
+            f"{spec.name} can't be turned on {_where_set(tier, place.platform)} from here, as "
+            "each On covers one agent and environment. Turn it on for an agent or one routine "
+            "with `daimon routines sandbox-tools`.",
             "needs_pin",
         )
     return None

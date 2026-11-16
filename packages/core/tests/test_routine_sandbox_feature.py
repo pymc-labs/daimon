@@ -140,9 +140,11 @@ async def test_an_on_needs_a_pin_at_the_agent_or_routine_tier(
 ) -> None:
     """An On covers one agent or routine with what it pins; elsewhere it is refused."""
     row = await _routine(db_session)
-    with pytest.raises(ChannelChangeRefused, match="one agent or one routine"):
+    with pytest.raises(ChannelChangeRefused, match="routine from here.*routines sandbox-tools"):
         await _set(db_session_factory, row, "routine", "on")
-    with pytest.raises(ChannelChangeRefused, match="one agent or one routine"):
+    with pytest.raises(ChannelChangeRefused, match="agent from here.*routines sandbox-tools"):
+        await _set(db_session_factory, row, "agent", "on", pin=PIN)
+    with pytest.raises(ChannelChangeRefused, match="from here"):
         await _set(db_session_factory, row, "workspace", "on", pin=PIN)
     async with db_session_factory() as session:
         assert await list_sandbox_pins(session, tenant_id=row.tenant_id) == [], "nothing written"
