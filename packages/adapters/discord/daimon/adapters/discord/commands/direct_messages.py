@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import monotonic
@@ -173,6 +174,8 @@ class DirectMessageCog(commands.Cog):
         self._pending: dict[tuple[int, int], _PendingSelection] = {}
         self._replying: set[tuple[int, int]] = set()
         self._queued: dict[tuple[int, int], list[discord.Message]] = {}
+        # The conversation each held message was sent into, by message id.
+        self._held_scope: dict[int, str] = {}
         self._switch_views: dict[tuple[int, int], ServerSwitch] = {}
         self._buckets: TTLCache[int, tuple[float, float]] = TTLCache[int, tuple[float, float]](
             10_000, 300
@@ -843,6 +846,17 @@ class DirectMessageCog(commands.Cog):
         self._thread_queue.enqueue(key, message)
         with contextlib.suppress(discord.HTTPException):
             await message.add_reaction(_QUEUED_REACTION)
+        # After the append, so held messages keep their order. A /dm-me during
+        # the reply changes this scope; the batch then drops instead of answering there.
+        async with self.bot.runtime.sessionmaker() as session:
+            held_in = await get_conversation(
+                session,
+                platform="discord",
+                route_key=str(message.channel.id),
+                external_user_id=str(message.author.id),
+            )
+        if held_in is not None:
+            self._held_scope[message.id] = held_in.scope_id
 
     @staticmethod
     def _compose(queued: list[discord.Message]) -> list[list[discord.Message]]:
@@ -886,11 +900,34 @@ class DirectMessageCog(commands.Cog):
                 for message in messages:
                     self._suppress(message, "selection_pending")
             else:
-                await self._answer(messages[0], batch=tuple(messages))
+                messages = await self._without_moved(messages)
+                if messages:
+                    await self._answer(messages[0], batch=tuple(messages))
         finally:
             await self._clear_queued_reactions(messages)
 
+    async def _without_moved(self, messages: list[discord.Message]) -> list[discord.Message]:
+        """Drop, with a notice, messages held in a conversation /dm-me has since replaced."""
+        first = messages[0]
+        async with self.bot.runtime.sessionmaker() as session:
+            current = await get_conversation(
+                session,
+                platform="discord",
+                route_key=str(first.channel.id),
+                external_user_id=str(first.author.id),
+            )
+        if current is None:
+            return messages
+        moved = [
+            m for m in messages if self._held_scope.get(m.id, current.scope_id) != current.scope_id
+        ]
+        if moved:
+            await self._drop_queued(moved)
+        return [m for m in messages if m not in moved]
+
     async def _clear_queued_reactions(self, messages: list[discord.Message]) -> None:
+        for message in messages:
+            self._held_scope.pop(message.id, None)
         user = self.bot.user
         if user is None:
             return
@@ -1142,6 +1179,24 @@ class DirectMessageCog(commands.Cog):
                             discord_settings.bot_display_name if discord_settings else "daimon"
                         ),
                     )
+
+                    async def reseed_prefix(
+                        messages: Sequence[discord.Message] = messages,
+                        channel: discord.abc.Messageable = message.channel,
+                        prefix: str = prefix,
+                    ) -> str:
+                        # No link to an oversized image: it may be what ended the session.
+                        again = await input_context(
+                            channel,
+                            messages,
+                            bot_user_id=self.bot.user.id if self.bot.user else None,
+                            bot_display_name=(
+                                discord_settings.bot_display_name if discord_settings else "daimon"
+                            ),
+                            omit_oversized_image_urls=True,
+                        )
+                        return "\n".join(part for part in (again, prefix) if part)
+
                     reply = await reply_to_dm_result(
                         runtime.turn_deps,
                         platform="discord",
@@ -1152,6 +1207,7 @@ class DirectMessageCog(commands.Cog):
                         expected_scope_id=conversation.scope_id,
                         text=text,
                         prefix="\n".join(part for part in (context, prefix) if part),
+                        reseed_prefix=reseed_prefix,
                         image_blocks=image_blocks,
                         history_notes=[
                             *(f"[attachment: {a.filename}]" for a in files),

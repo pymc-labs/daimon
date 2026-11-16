@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Direct message bursts are answered once.** Messages sent while a reply is running
   wait with an hourglass reaction and are answered together in the next turn. An
   approval reply such as "yes" is always answered on its own. Held messages are dropped
-  with a notice if the bot restarts.
+  with a notice if the bot restarts or `/dm-me` moves the conversation.
 - **Direct message memory is a setting.** `dm_history_depth` sets how many earlier
   messages each direct message reply carries: 12 (the default), 25, 50 or 100, at the
   deployment, workspace and agent levels. The smallest setting wins. The history is

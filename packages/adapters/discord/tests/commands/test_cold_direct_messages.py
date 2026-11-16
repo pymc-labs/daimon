@@ -1108,6 +1108,31 @@ def snapshot(content="forwarded words"):
     return snap
 
 
+async def test_a_recovery_reseed_withholds_an_oversized_forwarded_image(
+    db_session_factory, monkeypatch
+):
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    snap = snapshot()
+    snap.attachments = [
+        SimpleNamespace(
+            filename="huge.jpg",
+            url="https://cdn/huge.jpg",
+            size=3,
+            content_type="image/jpeg",
+            width=12000,
+            height=4000,
+        )
+    ]
+    msg = dm_message(content="", snapshots=[snap])
+    await cog.on_message(msg)
+    kwargs = reply.await_args.kwargs
+    assert 'oversized="true"' in kwargs["prefix"] and "https://cdn/huge.jpg" in kwargs["prefix"]
+    again = await kwargs["reseed_prefix"]()
+    assert 'oversized="true"' in again, "the agent still learns the image exists"
+    assert "https://cdn/huge.jpg" not in again, "a replayed turn never carries the huge image"
+    await cog.cog_unload()
+
+
 async def test_an_image_only_dm_is_answered_with_the_picture(db_session_factory, monkeypatch):
     cog, _, _, reply = await setup(db_session_factory, monkeypatch)
     prepare = AsyncMock(return_value=("[attachment] photo.png", ["BLOCK"]))
@@ -1213,6 +1238,32 @@ async def test_messages_sent_during_a_reply_are_answered_in_one_turn(
     assert [t["text"] for t in turns] == ["one", "two\n\nthree"], "the burst is one turn"
     assert turns[1]["message_id"] == "102" and turns[1]["merged_message_ids"] == ("103",)
     second.remove_reaction.assert_awaited_once()
+    await cog.cog_unload()
+
+
+async def test_a_held_message_is_dropped_when_dm_me_moved_the_conversation(
+    db_session_factory, monkeypatch
+):
+    from daimon.core.stores.direct_messages import DirectMessageConversation
+    from sqlalchemy import update
+
+    cog, _, _, reply = await setup(db_session_factory, monkeypatch)
+    gate, started, turns = await hold_first_reply(db_session_factory, reply)
+    running = asyncio.create_task(cog.on_message(dm_message(101, "one")))
+    await asyncio.wait_for(started.wait(), 5)
+    held = dm_message(102, "two")
+    await cog.on_message(held)
+    async with db_session_factory() as session, session.begin():
+        await session.execute(
+            update(DirectMessageConversation)
+            .where(DirectMessageConversation.route_key == "555")
+            .values(scope_id="private-moved")
+        )
+    gate.set()
+    await asyncio.wait_for(running, 5)
+    assert [t["text"] for t in turns] == ["one"], "nothing is answered in the new conversation"
+    assert sent_text(held.channel.send.await_args_list[-1]) == module._DROPPED_NOTICE
+    held.remove_reaction.assert_awaited_once()
     await cog.cog_unload()
 
 
