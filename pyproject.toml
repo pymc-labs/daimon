@@ -288,6 +288,7 @@ source_modules = [
     "daimon.core.mcp_vault",
     "daimon.core.mcp_vault_janitor",
     "daimon.core.media",
+    "daimon.core.model_reactions",
     "daimon.core.member_reloads",
     "daimon.core.memory_personal_scan",
     "daimon.core.memory_resource",

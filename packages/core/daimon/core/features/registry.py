@@ -921,7 +921,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     ),
     _limit(
         "turn_time_limit",
-        "Turn time limit",
+        "Answer time limit",
         (
             "The longest one answer may take before it is stopped; it can shorten the standard "
             "45 minutes, not lengthen it. The smallest setting wins. Routines, watches and "

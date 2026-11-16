@@ -78,7 +78,7 @@ Where each feature can be set, and its default.
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Long job dollar cap | `long_jobs_max_usd` | Limit | $5 | ✓ | ✓ | ✓ |  |  |  |
 | Long job time limit | `long_jobs_max_deadline` | Limit | 70 minutes | ✓ | ✓ | ✓ |  |  |  |
-| Turn time limit | `turn_time_limit` | Limit | 45 minutes |  | ✓ | ✓ |  |  |  |
+| Answer time limit | `turn_time_limit` | Limit | 45 minutes |  | ✓ | ✓ |  |  |  |
 | New threads per reply | `outbound_threads` | Limit | 2 threads | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Places per reply | `outbound_places` | Limit | 2 places | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | People tagged per reply | `outbound_people` | Limit | 5 people | ✓ | ✓ | ✓ | ✓ | ✓ |  |
@@ -848,7 +848,7 @@ The longest one long job may run. The smallest setting wins.
 | Combines | Lowest wins |
 | Deprecated | `DAIMON_LONG_JOBS__MAX_DEADLINE_MINUTES` |
 
-## Turn time limit
+## Answer time limit
 
 The longest one answer may take before it is stopped; it can shorten the standard 45 minutes, not lengthen it. The smallest setting wins. Routines, watches and agent-to-agent chats keep the standard limit.
 

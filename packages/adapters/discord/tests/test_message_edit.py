@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -82,7 +83,7 @@ def _edit(
         None
         if before is None
         else MagicMock(
-            mentions=[MagicMock(id=user) for user in before],
+            mentions=[SimpleNamespace(id=user) for user in before],
             content=before_content if before_content is not None else "hey",
         )
     )
