@@ -4,22 +4,27 @@ The bot's wake opener hands each `dm:<uuid>` timer row here (via
 `daimon.core.continuity.dm_timers`). Before the turn and before each chunk the
 tenant's DMs must be on, the owner allowed to receive them and still a human
 member of the guild (read over REST). Anything else stops this timer only.
-Mentions are off on everything posted.
+A transient error (5xx, 429, network) before the turn puts the timer back, capped by
+the dispatcher; after the turn the delivery is retried in place and then settles, so
+a turn is never run twice. Any other Discord error settles. Mentions are off.
 """
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta
+from typing import TypeVar
 
+import aiohttp
 import structlog
 from daimon.core.config import DirectMessagePolicy
+from daimon.core.continuity.dm_timers import DeliveryFailed, DeliveryRetry
 from daimon.core.message_split import split_fenced
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.tenants import get_tenant
-from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
+from daimon.core.turn.errors import AdmissionDenied
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
@@ -29,13 +34,22 @@ log = structlog.get_logger(__name__)
 __all__ = ["deliver_dm_timer"]
 
 _DISCORD_MAX_CHARS = 2000
-#: A transient Discord error puts the timer back this long.
-_RETRY_DELAY = timedelta(seconds=60)
+#: Pauses between in-place delivery retries after the turn ran; then it settles.
+_DELIVERY_BACKOFF = (1.0, 3.0, 8.0)
+
+_T = TypeVar("_T")
 
 RunTimerTurn = Callable[[], Awaitable[str]]
 DmOpener = Callable[[int, int], Awaitable[discord.abc.Messageable]]
 MemberPresent = Callable[[int, int], Awaitable[bool]]
 DmPolicyLookup = Callable[[uuid.UUID], DirectMessagePolicy]
+
+
+def _transient(error: BaseException) -> bool:
+    """5xx, 429 and network failures; any other answer from Discord is final."""
+    if isinstance(error, discord.HTTPException):
+        return error.status >= 500 or error.status == 429
+    return isinstance(error, aiohttp.ClientError | TimeoutError | OSError)
 
 
 async def deliver_dm_timer(
@@ -50,20 +64,11 @@ async def deliver_dm_timer(
     """Run the DM turn and send its text to the owner in chunks; how many were sent.
 
     Raises `AdmissionDenied` when the timer may not start or stops partway. A transient
-    Discord error before anything was sent raises `SessionBusyError`, so the timer is
-    offered again; only a definite answer (not a member, DMs closed) settles it.
+    error before the turn raises `DeliveryRetry`; one that outlasts the in-place retries
+    after it raises `DeliveryFailed`. A permanent Discord error propagates and settles.
     """
     owner = row.requester_external_user_id
     sent = 0
-
-    def transient(error: discord.HTTPException) -> Exception:
-        log.warning("dm_timer.transient_error", row_id=str(row.id), status=error.status)
-        if sent:
-            # Part of the reply is out already; sending it again would repeat it.
-            return AdmissionDenied(reason="invoker_not_allowed", detail="delivery interrupted")
-        return SessionBusyError(
-            pending_reasons=("timer",), retry_after=datetime.now(UTC) + _RETRY_DELAY
-        )
 
     async def still_open() -> int:
         async with sessionmaker() as db:
@@ -78,31 +83,56 @@ async def deliver_dm_timer(
             present = await member_present(guild, int(owner))
         except (discord.NotFound, discord.Forbidden):
             present = False
-        except discord.HTTPException as error:
-            raise transient(error) from None
         if not present:
             raise AdmissionDenied(reason="invoker_not_allowed")
         return guild
 
-    await still_open()
-    text = await run_turn()
-    guild = await still_open()
+    async def after_turn(op: Callable[[], Awaitable[_T]]) -> _T:
+        """Retry a transient failure in place; the turn already ran and must not repeat."""
+        for pause in (*_DELIVERY_BACKOFF, None):
+            try:
+                return await op()
+            except (discord.HTTPException, aiohttp.ClientError, OSError) as error:
+                if not _transient(error):
+                    raise
+                log.warning("dm_timer.transient_error", row_id=str(row.id), sent=sent)
+                if pause is None:
+                    raise DeliveryFailed(f"delivery failed: {type(error).__name__}") from None
+                await asyncio.sleep(pause)
+        raise AssertionError("unreachable")
+
     try:
-        dm = await open_dm(guild, int(owner))
+        await still_open()
+    except (discord.HTTPException, aiohttp.ClientError, OSError) as error:
+        if not _transient(error):
+            raise
+        log.warning("dm_timer.transient_error", row_id=str(row.id), sent=0)
+        raise DeliveryRetry from None
+    text = await run_turn()
+    guild = await after_turn(still_open)
+
+    async def open_owner_dm() -> discord.abc.Messageable:
+        try:
+            return await open_dm(guild, int(owner))
+        except LookupError:
+            # The opener's definite answer: the owner is not a human member.
+            log.info("dm_timer.owner_not_a_member", row_id=str(row.id))
+            raise AdmissionDenied(
+                reason="invoker_not_allowed", detail="owner is not a human member"
+            ) from None
+
+    try:
+        dm = await after_turn(open_owner_dm)
         for chunk in split_fenced(text, _DISCORD_MAX_CHARS, word_boundary=True):
             if sent:
-                await still_open()
-            await dm.send(content=chunk, allowed_mentions=discord.AllowedMentions.none())
+                await after_turn(still_open)
+            await after_turn(
+                lambda chunk=chunk: dm.send(
+                    content=chunk, allowed_mentions=discord.AllowedMentions.none()
+                )
+            )
             sent += 1
     except (discord.Forbidden, discord.NotFound):
         log.info("dm_timer.dm_closed", row_id=str(row.id))
         raise AdmissionDenied(reason="invoker_not_allowed") from None
-    except LookupError:
-        # The opener's definite answer: the owner is not a human member.
-        log.info("dm_timer.owner_not_a_member", row_id=str(row.id))
-        raise AdmissionDenied(
-            reason="invoker_not_allowed", detail="owner is not a human member"
-        ) from None
-    except discord.HTTPException as error:
-        raise transient(error) from None
     return sent

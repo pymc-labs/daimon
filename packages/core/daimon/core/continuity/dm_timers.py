@@ -3,7 +3,8 @@
 An imported timer from a DM names a private scope (`dm:<uuid>`), not a thread, so
 the thread wake path cannot run it. It keeps the wake queue's ladder: claim, commit
 the start fence, run, settle. The adapter runs the turn and delivers its output;
-every refusal settles the row, nothing is retried blind.
+every refusal settles the row. Only a transient error before the turn runs puts it back,
+and that retry is capped.
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ import structlog
 from daimon.core.anthropic_guard import AnthropicDisabled, independent_wake_provider_context
 from daimon.core.continuity.messages import render_timer_seed
 from daimon.core.continuity.wakes import (
+    WAKE_MAX_ATTEMPTS,
+    WAKE_RETRY_DELAY,
     busy_retry_at,
     claim_wake,
     release_wake,
@@ -34,10 +37,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 
-__all__ = ["RunDmTimer", "dispatch_dm_timer"]
+__all__ = ["DeliveryFailed", "DeliveryRetry", "RunDmTimer", "dispatch_dm_timer"]
 
 #: Runs one started timer with its seed and delivers the reply; raises on refusal.
 RunDmTimer = Callable[[TaskContinuationRow, str], Awaitable[None]]
+
+
+class DeliveryFailed(DaimonError):
+    """The turn ran but its reply could not be delivered; it settles, never re-runs."""
+
+
+class DeliveryRetry(Exception):
+    """A transient error before the turn ran: offer the timer again, up to a cap."""
 
 
 async def dispatch_dm_timer(
@@ -70,6 +81,16 @@ async def dispatch_dm_timer(
             retry_at = busy_retry_at(row, now=now(), not_before=busy.retry_after)
             await release_wake(sessionmaker, claim, retry_at=retry_at)
             return
+        except DeliveryRetry:
+            # The turn never ran. Each claim stays counted, so a failure that never
+            # clears settles after WAKE_MAX_ATTEMPTS instead of re-running forever.
+            if claim.attempts < WAKE_MAX_ATTEMPTS:
+                await release_wake(
+                    sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY, refund=False
+                )
+                return
+            log.warning("dm_timer.retries_exhausted", row_id=str(row.id))
+            skip_reason = "dispatch_failed"
         except TurnNotStarted as exc:
             if exc.capacity:
                 await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))

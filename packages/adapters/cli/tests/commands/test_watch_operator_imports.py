@@ -160,6 +160,20 @@ async def test_agent_must_belong_to_the_tenant(operator, tmp_path, monkeypatch):
     assert await rows(operator, "SELECT 1 FROM watches") == []
 
 
+async def test_a_timers_only_import_checks_the_agent_it_is_given(operator, tmp_path, monkeypatch):
+    async def other(*_args, **_kwargs):
+        return SimpleNamespace(id="agent-other")
+
+    monkeypatch.setattr(watch_commands, "find_agent_by_daimon_tag", other)
+    path = manifest(tmp_path, timers=[timer("t")])
+    result = await run(
+        *("import", str(path), "--tenant", str(operator.tenant.id)),
+        *("--agent-id", "agent-1", "--agent-name", "analyst"),
+    )
+    assert result.exit_code == 2 and "must name one agent" in result.output, result.output
+    assert await rows(operator, "SELECT 1 FROM held_timers") == []
+
+
 async def test_renew_and_rotate_link_for_an_imported_callback(operator, tmp_path, monkeypatch):
     async def found(*_args, **_kwargs):
         return SimpleNamespace(id="agent-1")

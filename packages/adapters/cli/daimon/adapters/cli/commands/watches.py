@@ -266,8 +266,10 @@ def import_command(
                     raise typer.BadParameter(
                         f"The file is for server {manifest.guild_id}, not tenant {tenant_id}"
                     )
-        if callbacks:
-            assert tenant is not None and agent_id and agent_name
+        if callbacks or (manifest.timers and (agent_id or agent_name)):
+            assert tenant is not None
+            if not (agent_id and agent_name):
+                raise typer.BadParameter("--agent-id and --agent-name go together")
             await check_agent(runtime, tenant_id=tenant, agent_id=agent_id, agent_name=agent_name)
 
     async def run() -> None:

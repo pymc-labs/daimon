@@ -80,7 +80,8 @@ its owner to resume it, and a timer is never scheduled.
 Imported watches start paused and report to the owner's private conversation.
 Confirm each after checking its owner, channel and thread, which the import
 prints. `confirm` and `confirm-timers` check that the agent is an unarchived agent
-of the tenant, which must be a live Discord server.
+of the tenant, which must be a live Discord server. A timers-only `import` that is
+given `--agent-id` and `--agent-name` checks them too.
 
 Timers are held, not scheduled. `confirm-timers` schedules each one that is
 still more than a minute away, once. Reminders set in a private conversation
@@ -89,6 +90,11 @@ Channel reminders are not imported and are counted. Any past the 25 pending a
 person may hold are skipped. Notes and instructions over their limit are cut
 and counted; an empty note is fine. It prints a count per outcome. A settled
 timer keeps no text.
+
+A reminder that cannot start because Discord answers with a server error, a rate limit
+or a network failure is offered again, up to five times. Once its turn has run, sending
+is retried in place a few times and a reminder that still fails is settled: the turn
+never runs twice. Any other Discord error settles it at once.
 
 Rerun the import after fixing the file: held timers that nothing has scheduled
 are updated. A rerun never pauses again what `unpause` released. With `--full` it also

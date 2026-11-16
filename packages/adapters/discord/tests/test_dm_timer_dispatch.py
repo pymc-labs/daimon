@@ -10,20 +10,24 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
+from daimon.adapters.discord import dm_timer_delivery
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.dm_timer_delivery import deliver_dm_timer
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.continuity.continuation import ContinuationRequest
-from daimon.core.continuity.wakes import enqueue_wake, poll_wakes_once
+from daimon.core.continuity.dm_timers import DeliveryFailed, DeliveryRetry
+from daimon.core.continuity.wakes import WAKE_MAX_ATTEMPTS, enqueue_wake, poll_wakes_once
 from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.core.stores.domain import ContinuationReason, TaskContinuationRow
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
 from daimon.testing.factories import make_tenant
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import make_bot
@@ -297,12 +301,17 @@ def _http_error(status: int = 503) -> discord.HTTPException:
     return discord.HTTPException(MagicMock(status=status, reason="x"), "boom")
 
 
+@pytest.fixture(autouse=True)
+def no_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dm_timer_delivery, "_DELIVERY_BACKOFF", (0.0, 0.0))
+
+
 async def test_a_transient_membership_error_puts_the_timer_back_not_skipped(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     delivery = await _delivery(db_session_factory, member_error=_http_error())
 
-    with pytest.raises(SessionBusyError):
+    with pytest.raises(DeliveryRetry):
         await delivery.run(db_session_factory)
 
     delivery.run_turn.assert_not_awaited()
@@ -335,27 +344,161 @@ async def test_a_bot_or_missing_owner_settles_instead_of_raising_lookup_error(
     delivery.channel.send.assert_not_awaited()
 
 
-async def test_a_transient_error_opening_the_dm_puts_the_timer_back(
+async def test_a_transient_error_opening_the_dm_is_retried_without_rerunning_the_turn(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     delivery = await _delivery(db_session_factory, open_error=_http_error(500))
 
-    with pytest.raises(SessionBusyError):
+    with pytest.raises(DeliveryFailed):
         await delivery.run(db_session_factory)
 
+    delivery.run_turn.assert_awaited_once()
     delivery.channel.send.assert_not_awaited()
 
 
-async def test_a_transient_error_after_part_of_the_reply_is_sent_settles_without_repeating(
+async def test_a_transient_send_error_is_retried_in_place_and_sends_every_chunk_once(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     delivery = await _delivery(db_session_factory, text="word " * 900)
-    delivery.channel.send = AsyncMock(side_effect=[None, _http_error()])
+    delivery.channel.send = AsyncMock(side_effect=[None, _http_error(), None, None])
 
-    with pytest.raises(AdmissionDenied):
+    assert await delivery.run(db_session_factory) == 3
+
+    delivery.run_turn.assert_awaited_once()
+    assert delivery.channel.send.await_count == 4
+
+
+async def test_a_send_that_keeps_failing_settles_as_a_delivery_failure(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    delivery = await _delivery(db_session_factory, text="word " * 900)
+    delivery.channel.send = AsyncMock(side_effect=[None, *[_http_error()] * 3])
+
+    with pytest.raises(DeliveryFailed):
         await delivery.run(db_session_factory)
 
-    assert delivery.channel.send.await_count == 2
+    delivery.run_turn.assert_awaited_once()
+    assert delivery.channel.send.await_count == 4
+
+
+@pytest.mark.parametrize("status", [500, 429])
+async def test_server_errors_and_rate_limits_are_transient(
+    db_session_factory: async_sessionmaker[AsyncSession], status: int
+) -> None:
+    delivery = await _delivery(db_session_factory, member_error=_http_error(status))
+
+    with pytest.raises(DeliveryRetry):
+        await delivery.run(db_session_factory)
+
+
+async def test_any_other_4xx_is_final(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    delivery = await _delivery(db_session_factory, member_error=_http_error(400))
+
+    with pytest.raises(discord.HTTPException):
+        await delivery.run(db_session_factory)
+
+    delivery.run_turn.assert_not_awaited()
+
+
+async def test_a_lookup_error_from_anywhere_but_the_opener_is_not_a_missing_member(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    delivery = await _delivery(db_session_factory)
+    delivery.run_turn = AsyncMock(side_effect=KeyError("boom"))
+
+    with pytest.raises(KeyError):
+        await delivery.run(db_session_factory)
+
+
+# The real bot path: poll -> dispatch -> `_run_dm_timer` -> deliver ---------------------
+
+
+def _live_bot(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    send: AsyncMock,
+    member: AsyncMock | None = None,
+) -> tuple[DaimonBot, AsyncMock]:
+    """A bot whose REST and model turn are stubbed; delivery and dispatch are real."""
+    bot = _bot(sessionmaker)
+    turn = AsyncMock(return_value=SimpleNamespace(text="hello"))
+    monkeypatch.setattr("daimon.core.direct_messages.run_dm_timer", turn)
+    guild = MagicMock()
+    guild.fetch_member = member or AsyncMock(return_value=MagicMock(bot=False))
+    bot.get_guild = MagicMock(return_value=guild)  # pyright: ignore[reportAttributeAccessIssue]
+    dm = MagicMock()
+    dm.send = send
+    bot.open_member_dm = AsyncMock(return_value=dm)  # pyright: ignore[reportAttributeAccessIssue]
+    return bot, turn
+
+
+async def _due_again(sessionmaker: async_sessionmaker[AsyncSession], key: uuid.UUID) -> None:
+    async with sessionmaker.begin() as session:
+        await session.execute(
+            text(
+                "UPDATE task_continuations SET available_at = now() - interval '1 second' "
+                "WHERE idempotency_key = :key"
+            ),
+            {"key": key},
+        )
+
+
+async def test_a_permanent_400_settles_the_timer_instead_of_retrying_forever(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, key = await _seed(db_session_factory, thread_id=f"dm:{uuid.uuid4()}")
+    bot, turn = _live_bot(
+        db_session_factory, monkeypatch, send=AsyncMock(side_effect=_http_error(400))
+    )
+
+    await _poll(db_session_factory, bot)
+
+    row = await _row(db_session_factory, key)
+    assert (row.status, row.skip_reason) == ("skipped", "dispatch_failed")
+    turn.assert_awaited_once()
+
+
+async def test_a_transient_send_failure_after_the_turn_does_not_run_it_again(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, key = await _seed(db_session_factory, thread_id=f"dm:{uuid.uuid4()}")
+    bot, turn = _live_bot(
+        db_session_factory, monkeypatch, send=AsyncMock(side_effect=_http_error(503))
+    )
+
+    await _poll(db_session_factory, bot)
+
+    row = await _row(db_session_factory, key)
+    assert (row.status, row.skip_reason) == ("skipped", "dispatch_failed")
+    await _due_again(db_session_factory, key)
+    await _poll(db_session_factory, bot)
+    turn.assert_awaited_once()
+
+
+async def test_a_failure_before_the_turn_retries_a_few_times_then_settles(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, key = await _seed(db_session_factory, thread_id=f"dm:{uuid.uuid4()}")
+    send = AsyncMock()
+    bot, turn = _live_bot(
+        db_session_factory, monkeypatch, send=send, member=AsyncMock(side_effect=_http_error(503))
+    )
+
+    for _ in range(WAKE_MAX_ATTEMPTS - 1):
+        await _poll(db_session_factory, bot)
+        row = await _row(db_session_factory, key)
+        assert row.status == "pending" and row.available_at is not None
+        await _due_again(db_session_factory, key)
+    await _poll(db_session_factory, bot)
+
+    row = await _row(db_session_factory, key)
+    assert (row.status, row.skip_reason) == ("skipped", "dispatch_failed")
+    assert row.attempts == WAKE_MAX_ATTEMPTS
+    turn.assert_not_awaited()
+    send.assert_not_awaited()
 
 
 async def test_a_transient_delivery_error_leaves_the_row_pending_for_a_retry(

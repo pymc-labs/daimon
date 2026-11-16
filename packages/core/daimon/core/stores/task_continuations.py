@@ -346,6 +346,7 @@ async def release_wake_row(
     idempotency_key: _uuid.UUID,
     owner: str,
     retry_at: datetime | None,
+    refund: bool = True,
 ) -> bool:
     """Hand a claim back because its turn could not run yet; False if the claim was lost.
 
@@ -355,15 +356,17 @@ async def release_wake_row(
     so a thread that stays busy for a long time never uses up the budget that
     is kept for crashes. `retry_at=None` keeps the row's `available_at` as it
     is, so a handoff (NULL) waits for the next turn in its thread exactly as it
-    always did; a wake passes the instant to retry at.
+    always did; a wake passes the instant to retry at. `refund=False` keeps the claim
+    counted, for a retry that must run out (a delivery that keeps failing).
     """
     values: dict[str, object] = {
         "status": "pending",
         "lease_owner": None,
         "lease_expires_at": None,
         "started_at": None,
-        "attempts": TaskContinuation.attempts - 1,
     }
+    if refund:
+        values["attempts"] = TaskContinuation.attempts - 1
     if retry_at is not None:
         values["available_at"] = retry_at
     released = (
