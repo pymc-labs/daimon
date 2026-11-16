@@ -819,13 +819,13 @@ async def test_the_deployment_sets_the_lifetime_and_a_workspace_cannot_loosen_it
     assert await _lifetime(db_session_factory, moved, kept) == timedelta(days=14)
     await _choose(db_session_factory, moved, "0")
     assert await _lifetime(db_session_factory, moved, kept) == timedelta(days=14)
-    unlimited = _settings(features={"callback_watch_lifetime": "0"})
+    permanent = _settings(features={"callback_watch_lifetime": "0"})
     await _choose(db_session_factory, moved, "7")
-    assert await _lifetime(db_session_factory, moved, unlimited) == timedelta(days=7)
+    assert await _lifetime(db_session_factory, moved, permanent) == timedelta(days=7)
     assert await _lifetime(db_session_factory, moved, _settings(features={})) == timedelta(days=7)
 
 
-async def test_import_keeps_a_long_source_to_the_setting_and_unlimited_keeps_it_all(
+async def test_import_keeps_a_long_source_to_the_setting_and_permanent_keeps_it_all(
     db_session_factory, moved
 ):
     async def run(legacy_id, expires_at, cap):
@@ -879,7 +879,7 @@ async def test_import_keeps_a_long_source_to_the_setting_and_unlimited_keeps_it_
         assert (await post(client, never.watch.id, never.token)).status == 202
 
 
-async def test_an_unlimited_callback_watch_and_its_link_keep_working(db_session_factory, moved):
+async def test_a_permanent_callback_watch_and_its_link_keep_working(db_session_factory, moved):
     item = await _import(db_session_factory, moved, expires_at=None)
     assert item.watch is not None
     now = datetime.now(UTC)
@@ -908,7 +908,7 @@ async def test_an_unlimited_callback_watch_and_its_link_keep_working(db_session_
     assert links == [short.expires_at]
 
 
-async def test_an_unlimited_import_kept_paused_counts_its_paused_days_from_confirmation(
+async def test_a_permanent_import_kept_paused_counts_its_paused_days_from_confirmation(
     db_session_factory, moved
 ):
     definition = ImportedCallbackWatch.model_validate(_manifest_watch(expires_at=None, paused=True))
@@ -1100,7 +1100,7 @@ async def test_a_rerun_after_the_source_ended_keeps_its_lifetime_uncapped(
     assert again.watch.source_state["lifetime_s"] == kept
 
 
-async def test_an_unlimited_watch_lists_as_permanent(db_session_factory, moved):
+async def test_a_permanent_watch_lists_as_permanent(db_session_factory, moved):
     from daimon.adapters.mcp.tools.watches import lasts, summary
 
     item = await _import(db_session_factory, moved, expires_at=None)
