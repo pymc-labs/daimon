@@ -64,8 +64,11 @@ WATCH_TURN_TOOLS = (
 MAX_LIFETIME = timedelta(days=30)
 #: A permanent watch paused this long expires (the claim function's own rule).
 PAUSED_PERMANENT_EXPIRY = timedelta(days=30)
-#: Permanent watches one owner may have live at once.
+#: Permanent polled watches one owner may have live at once.
 MAX_PERMANENT_PER_OWNER = 5
+#: Sources that poll for good when permanent, so a permanent one needs a named admin and
+#: room under `MAX_PERMANENT_PER_OWNER` (`require_permanent_allowed`).
+POLLED_SOURCES = ("poll", "mcp_poll")
 #: Daily firing limits with no ceiling stored, and the hard limits no ceiling passes.
 #: The firing SQL (0164) holds the same numbers.
 DEFAULT_WATCH_CAP = 24
@@ -194,20 +197,13 @@ async def register_page_watch(
 ) -> WatchRow:
     """Register a human-admitted owner's exact live binding; never called by ingress.
 
-    `expires_at=None` is a permanent polled watch; the caller has checked a fresh
-    admin approved it, named in `permanent_approved_by`. A callback watch has none when
-    the `callback_watch_lifetime` feature is unlimited.
+    `expires_at=None` is a permanent watch (`require_permanent_allowed`); for a polled one
+    the caller has checked a fresh admin approved it, named in `permanent_approved_by`.
     """
     if binding.platform != "discord":
         raise ValueError("Page-event enrollment currently requires a Discord thread")
     if not 0 < len(instructions) <= 2000:
         raise ValueError("Instructions or watch lifetime out of bounds")
-    if (
-        expires_at is None
-        and source != "callback"
-        and (permanent_approved_by is None or source == "page_event")
-    ):
-        raise ValueError("Only an admin can approve a permanent watch")
     if expires_at is not None and not now < expires_at <= now + max_lifetime:
         raise ValueError("Instructions or watch lifetime out of bounds")
     if not 1 <= max_turns_per_day <= HARD_WATCH_CAP:
@@ -248,8 +244,13 @@ async def register_page_watch(
     )
     if count is not None and count >= 25:
         raise OwnerCapExceeded
-    if expires_at is None and source != "callback":
-        await require_permanent_room(session, binding.requester_account_id)
+    if expires_at is None:
+        await require_permanent_allowed(
+            session,
+            binding.requester_account_id,
+            source=source,
+            approved_by=permanent_approved_by,
+        )
     row = Watch(
         tenant_id=binding.tenant_id,
         owner_account_id=binding.requester_account_id,
@@ -275,11 +276,26 @@ async def register_page_watch(
     return WatchRow.model_validate(row)
 
 
-async def require_permanent_room(
-    session: AsyncSession, owner_account_id: uuid.UUID, *, excluding: uuid.UUID | None = None
+async def require_permanent_allowed(
+    session: AsyncSession,
+    owner_account_id: uuid.UUID,
+    *,
+    source: str,
+    approved_by: uuid.UUID | None,
+    excluding: uuid.UUID | None = None,
 ) -> None:
-    """At most `MAX_PERMANENT_PER_OWNER` live permanent polled watches per owner. A callback
-    watch polls nothing, so one with no expiry does not count."""
+    """The one rule for a permanent watch (no expiry); call it under the owner lock.
+
+    A polled one needs a fresh admin (`approved_by`) and room under
+    `MAX_PERMANENT_PER_OWNER`. A callback one polls nothing and is permanent only when the
+    deployment's `callback_watch_lifetime` is permanent (0), which is its approval. A page-event
+    watch is never permanent. Every permanent watch counts toward the live-watch limit and
+    expires after `PAUSED_PERMANENT_EXPIRY` paused.
+    """
+    if source == "callback":
+        return
+    if source not in POLLED_SOURCES or approved_by is None:
+        raise ValueError("Only an admin can approve a permanent watch")
     count = await session.scalar(
         select(func.count())
         .select_from(Watch)
@@ -287,7 +303,7 @@ async def require_permanent_room(
             Watch.owner_account_id == owner_account_id,
             Watch.status.in_(("active", "paused")),
             Watch.expires_at.is_(None),
-            Watch.source != "callback",
+            Watch.source.in_(POLLED_SOURCES),
             *([Watch.id != excluding] if excluding is not None else []),
         )
     )
@@ -576,7 +592,7 @@ async def callback_lifetime(
     session: AsyncSession, settings: Settings | None, tenant_id: uuid.UUID
 ) -> timedelta | None:
     """How long a callback watch lasts in this workspace: the `callback_watch_lifetime`
-    feature. None is unlimited. The resolver only returns values `accepts` takes: finite
+    feature. None is permanent. The resolver only returns values `accepts` takes: finite
     numbers."""
     place = FeaturePlace.of(tenant_id, "discord", None)
     resolved = await feature_in(session, settings, place, "callback_watch_lifetime")
@@ -585,7 +601,7 @@ async def callback_lifetime(
 
 
 def callback_end(now: datetime, lifetime: timedelta | None) -> datetime | None:
-    """When a callback watch made `now` ends under `lifetime`: never (None) when unlimited."""
+    """When a callback watch made `now` ends under `lifetime`: never (None) when permanent."""
     return None if lifetime is None else now + lifetime
 
 
@@ -602,7 +618,7 @@ async def register_callback_watch(
     """A watch fed by posts to a secret link; returns the link's token, shown once.
 
     Only the token's sha256 is stored. It lasts `lifetime`, the `callback_watch_lifetime`
-    feature; None (unlimited) gives the watch and its link no expiry.
+    feature; None makes the watch and its link permanent.
     """
     require_delivery(binding, delivery)
     expires_at = callback_end(now, lifetime)
@@ -615,7 +631,7 @@ async def register_callback_watch(
         now=now,
         max_turns_per_day=max_turns_per_day,
         source="callback",
-        max_lifetime=MAX_LIFETIME if lifetime is None else lifetime,
+        max_lifetime=lifetime or MAX_LIFETIME,
     )
     if delivery != "thread":
         await session.execute(
@@ -1346,7 +1362,13 @@ async def update_watch(
     if expires_at is None:
         # The same owner lock as create, so the two cannot both take the last place.
         await _lock_owner(session, current.owner_account_id)
-        await require_permanent_room(session, current.owner_account_id, excluding=current.id)
+        await require_permanent_allowed(
+            session,
+            current.owner_account_id,
+            source=current.source,
+            approved_by=admin_account_id,
+            excluding=current.id,
+        )
     delivery = edit.delivery or current.delivery
     session_id = current.session_id
     if delivery != current.delivery:
@@ -1752,7 +1774,7 @@ async def import_callback_watch(
     It keeps the old link's token hash, so the old token still opens it, and gets a fresh
     token of its own for a forwarder that cannot know the old one. A permanent or
     long-lived source is kept for `lifetime_cap` at most (the `callback_watch_lifetime`
-    feature; None is unlimited, and a source that never ended then never ends).
+    feature; None is permanent, and a source that never ended then never ends).
     The lifetime counts from confirmation: an unconfirmed import and its links lapse
     `MAX_LIFETIME` after import. A rerun refreshes a watch nobody has confirmed yet and
     leaves a confirmed one alone.
@@ -1892,9 +1914,13 @@ async def import_callback_watch(
 
 
 async def _set_callback_expiry(
-    session: AsyncSession, row: Watch, expires_at: datetime | None
+    session: AsyncSession, row: Watch, expires_at: datetime | None, now: datetime
 ) -> None:
+    """Give a callback watch and its live links a new end. An operator just acted on it,
+    so a paused permanent one starts its `PAUSED_PERMANENT_EXPIRY` again."""
     row.expires_at = expires_at
+    if expires_at is None and row.status == "paused":
+        row.paused_at = now
     await session.execute(
         update(WatchCapability)
         .where(
@@ -1914,15 +1940,13 @@ async def renew_callback_watch(
     now: datetime,
     lifetime: timedelta | None = MAX_LIFETIME,
 ) -> WatchRow:
-    """Operator: give a callback watch and its live links a fresh `lifetime` from now. With
-    None (unlimited) they have no expiry, and a paused watch's 30 paused days restart."""
+    """Operator: give a callback watch and its live links a fresh `lifetime` from now; None
+    makes them permanent."""
     await session.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
     row = await session.scalar(select(Watch).where(Watch.id == watch_id).with_for_update())
     if row is None or row.tenant_id != tenant_id or row.source != "callback":
         raise ValueError("Callback watch not found")
-    await _set_callback_expiry(session, row, callback_end(now, lifetime))
-    if row.expires_at is None and row.status == "paused":
-        row.paused_at = now
+    await _set_callback_expiry(session, row, callback_end(now, lifetime), now)
     await session.flush()
     session.expire_all()
     result = await get_watch(session, watch_id)
@@ -2020,13 +2044,10 @@ async def confirm_import(
         # The link's lifetime counts from the operator's confirmation, not from import.
         lifetime_s = cast(int | None, row.source_state.get("lifetime_s"))
         lifetime = None if lifetime_s is None else timedelta(seconds=lifetime_s)
-        await _set_callback_expiry(session, row, callback_end(now, lifetime))
+        await _set_callback_expiry(session, row, callback_end(now, lifetime), now)
     if row.source_state.get("keep_paused") is True:
-        # Paused where it came from: confirmed, but only its owner resumes it. A watch
-        # with no expiry starts its 30 paused days now (`is_paused_out`).
+        # Paused where it came from: confirmed, but only its owner resumes it.
         row.source_state = {**row.source_state, "confirmed": True, "reason": "owner_paused"}
-        if row.source == "callback" and row.expires_at is None:
-            row.paused_at = now
         await session.flush()
         session.expire_all()
         kept = await get_watch(session, watch_id)

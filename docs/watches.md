@@ -61,9 +61,10 @@ before it are dropped, and the next poll saves a new baseline. Admins may
 show, pause or delete another owner's watch, and `list_watches(scope="all")`
 lists the whole server. Only the owner can resume or edit.
 
-A watch lasts 1 to 30 days, with at most 25 live watches per owner. An owner
-who is an admin can make up to 5 watches permanent with `permanent=true`. A
-permanent watch paused for 30 days expires.
+A watch lasts 1 to 30 days, with at most 25 live watches per owner. A permanent
+watch has no end date and expires after 30 days paused. An owner who is an admin
+can make up to 5 polled watches permanent with `permanent=true`; a callback watch
+is permanent only when whoever runs Daimon sets that (below).
 
 A watch pauses and tells its owner privately when:
 
@@ -195,9 +196,9 @@ again: delete the watch and make a new one.
 If the DM fails the watch is deleted. A callback watch reports to the owner's
 private conversation and lasts 30 days by default. The `callback_watch_lifetime`
 feature (server admins, `DAIMON_FEATURES__CALLBACK_WATCH_LIFETIME`) sets 7, 30 or
-90 days, or no end date with `0`. Such a watch is permanent without counting
-toward the 5 above, and like them expires after 30 days paused. The setting
-applies to new and imported watches, and `renew` restarts the clock.
+90 days, or permanent with `0`; a permanent callback watch polls nothing, so it
+does not count toward the 5 above. The setting applies to new and imported
+watches, and `renew` restarts the clock.
 
 Set the public address of the sidecar first:
 

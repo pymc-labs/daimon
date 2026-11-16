@@ -909,7 +909,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "Callback watch lifetime",
         "How long a callback watch lasts, new or moved in, before it must be renewed. "
         "The smallest setting wins.",
-        {"0": "Unlimited", "90": "90 days", "30": "30 days", "7": "7 days"},
+        {"0": "Permanent", "90": "90 days", "30": "30 days", "7": "7 days"},
         default="30",
         tiers=("deployment", "workspace"),
         authority=_SERVER_ADMIN,

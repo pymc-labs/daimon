@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   updates what is not yet confirmed, `--full` cancels what the file dropped, and
   `unpause`, `renew` and `rotate-link` manage what came in. How long a callback
   watch lasts is the server-admin feature `callback_watch_lifetime` (30 days
-  by default, or unlimited), and the largest post it accepts is
+  by default, or permanent), and the largest post it accepts is
   `DAIMON_WATCHES__CALLBACK_MAX_BODY_BYTES` (4 KiB by default, up to 512 KiB).
   Moving people in never messages them: an imported conversation just continues
   and an imported watch that cannot run here is reported only by the command.

@@ -66,9 +66,9 @@ without an identity get one.
 
 The file must name the server (`guild_id`) of
 `--tenant`, and the agent must belong to it. A callback watch ends at its old
-expiry; a permanent one or one past the `callback_watch_lifetime` setting (30 days by
-default) ends that long after it is confirmed, or never when the setting is
-unlimited, and past ones are skipped. An owner already at the live-watch limit is skipped
+expiry, and one already past it is skipped. One with no expiry, or longer than the
+`callback_watch_lifetime` setting (30 days by default), ends that long after it is
+confirmed; with the setting at `0` it is permanent. An owner already at the live-watch limit is skipped
 and counted, not an error. Rerunning issues no second link; a watch nobody has
 confirmed is updated from the file.
 

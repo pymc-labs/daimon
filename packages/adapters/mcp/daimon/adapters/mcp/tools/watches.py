@@ -410,7 +410,7 @@ async def create_watch_impl(
     assert auth.platform_user_id is not None
     if source == "callback" and permanent:
         raise ToolError(
-            "A callback watch cannot be permanent; its lifetime is set by whoever runs Daimon"
+            "Whoever runs Daimon sets whether a callback watch is permanent; leave this out"
         )
     if source != "callback" and not permanent and not 1 <= lifetime_days <= 30:
         raise ToolError("Watch lifetime must be 1 to 30 days")
@@ -1077,7 +1077,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         with that text as evidence. The link is never shown in chat or in this result and
         cannot be shown again; delete the watch and make a new one to change it. A callback
         watch needs a deployment that has set a callback address. It lasts as long as whoever runs
-        Daimon allows (30 days unless they changed it; with no limit it is permanent), so
+        Daimon allows (30 days unless they changed it, or permanent), so
         `lifetime_days` and `permanent` do not apply to it.
         The tool, server, arguments, projection, rule, interval and key fields are for polls.
 

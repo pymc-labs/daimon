@@ -4932,7 +4932,7 @@ class Watch(Base):
             name="ck_watches_delivery_source",
         ),
         # No expiry: an admin-approved polled watch, or a callback watch where the
-        # `callback_watch_lifetime` feature is unlimited.
+        # `callback_watch_lifetime` feature is `0` (permanent).
         CheckConstraint(
             "expires_at IS NOT NULL OR source = 'callback' OR "
             "(permanent_approved_by IS NOT NULL AND source IN ('poll', 'mcp_poll'))",

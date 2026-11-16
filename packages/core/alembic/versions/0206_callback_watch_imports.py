@@ -12,7 +12,7 @@ Only the hash is stored. `max_body` is the deployment's body cap in bytes, kept 
 4 KiB and 512 KiB here whatever the caller says; the byte quotas grow with it.
 
 `watches.delivery` other than `thread` is now allowed for the `callback` source too, and
-a callback watch may be permanent (the `callback_watch_lifetime` feature's unlimited);
+a callback watch may be permanent (`callback_watch_lifetime` set to `0`);
 its links then have no expiry either.
 
 `held_timers` keeps imported one-shot timers until an operator confirms them, and

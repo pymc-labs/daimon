@@ -803,7 +803,7 @@ How long a callback watch lasts, new or moved in, before it must be renewed. The
 | | |
 | --- | --- |
 | Key | `callback_watch_lifetime` |
-| Values | `0` (Unlimited), `90` (90 days), `30` (30 days), `7` (7 days) |
+| Values | `0` (Permanent), `90` (90 days), `30` (30 days), `7` (7 days) |
 | Default | `30` |
 | Levels | Deployment, Workspace |
 | Combines | Lowest wins |
