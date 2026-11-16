@@ -4,7 +4,7 @@ The first message of a burst opens it; each later message from the same person i
 same conversation joins it, also while a turn runs. A turn starts once nothing new has
 arrived for the configured wait, or ten seconds after the first waiting message; what
 arrives during that turn is answered by the next one. A held message is marked until its
-turn ends.
+turn ends. While the person picks an agent, the burst holds every message for the pick.
 """
 
 from __future__ import annotations
@@ -22,6 +22,14 @@ from daimon.core.stores.pending_skill_adds import is_affirmative
 
 MAX_WAIT_S = 10.0
 """The longest a message waits for the rest of its burst."""
+
+PICK_SECONDS = 300.0
+"""How long an agent pick stays open, holding the messages sent before it is made."""
+
+PICK_EXPIRED = "This choice expired.\n\nSend a new message to choose again."
+
+RECHECK_S = 2.0
+"""How often a held burst looks for a pick made in another process."""
 
 type React[T] = Callable[[T, bool], Awaitable[None]]
 """Add (True) or remove (False) the mark that says a message is held."""
@@ -82,6 +90,41 @@ class DmBurst[T]:
         """Skip every wait from now on: the process is stopping."""
         self._stopped = True
         self._wake.set()
+
+    @property
+    def stopped(self) -> bool:
+        return self._stopped
+
+    def wake(self) -> None:
+        """Look again now: a pick was made."""
+        self._wake.set()
+
+    async def hold[R](
+        self,
+        picked: Callable[[], Awaitable[R | None]],
+        react: React[T],
+        seconds: float,
+    ) -> R | None:
+        """Hold every message, marked, until `picked` finds the pick; None once `seconds`
+        (`PICK_SECONDS`) pass or the process stops.
+
+        The pick is durable, so a click any process handled is found: at once after
+        `wake` or a message joining, else within `RECHECK_S`. What was held is then
+        answered without a further wait.
+        """
+        await self.mark(self.unanswered[0], react)
+        deadline = monotonic() + seconds
+        while not self._stopped:
+            self._wake.clear()
+            if (found := await picked()) is not None:
+                self._flush = True
+                return found
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                break
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._wake.wait(), min(RECHECK_S, remaining))
+        return None
 
     async def mark(self, item: T, react: React[T]) -> None:
         """Mark a held message, and unmark it at once if its turn already ended."""
@@ -171,6 +214,11 @@ class DmBursts[K: Hashable, T]:
         if self._open.get(key) is burst:
             del self._open[key]
         return await burst.close()
+
+    def wake(self, key: K) -> None:
+        """A pick was made for `key`: its held burst looks again now."""
+        if (burst := self._open.get(key)) is not None:
+            burst.wake()
 
     def stop(self) -> None:
         """Skip every wait, now and in bursts opened later: the process is stopping."""
