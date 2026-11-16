@@ -34,6 +34,11 @@ from daimon.core.turn_origin import ResponderAccount
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
+def new_dm_bursts() -> DmBursts[tuple[str, str, str], dict[str, Any]]:
+    """No open bursts, keyed by (team, channel, user) and read by each event's text."""
+    return DmBursts(lambda event: str(event.get("text") or ""))
+
+
 @dataclass(frozen=True)
 class SlackRuntime:
     settings: Settings
@@ -56,9 +61,7 @@ class SlackRuntime:
     # User group members for DM grants and rules (`user_groups`), a minute at most.
     group_members: GroupMembersCache = field(default_factory=GroupMembersCache)
     # The messages each person sent in each direct message that no turn has answered yet.
-    dm_bursts: DmBursts[tuple[str, str, str], dict[str, Any]] = field(
-        default_factory=lambda: new_dm_bursts()
-    )
+    dm_bursts: DmBursts[tuple[str, str, str], dict[str, Any]] = field(default_factory=new_dm_bursts)
 
     @cached_property
     def fernet(self) -> MultiFernet:
@@ -68,11 +71,6 @@ class SlackRuntime:
         empty key set raises `ValueError` on every access, as building did.
         """
         return build_multifernet(tuple(k.get_secret_value() for k in self.settings.crypto.keys))
-
-
-def new_dm_bursts() -> DmBursts[tuple[str, str, str], dict[str, Any]]:
-    """No open bursts, keyed by (team, channel, user) and read by each event's text."""
-    return DmBursts(lambda event: str(event.get("text") or ""))
 
 
 def resolve_bot_display_name(settings: Settings) -> str:
