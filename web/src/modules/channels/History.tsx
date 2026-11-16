@@ -9,7 +9,7 @@ import { useChannelHistory } from "./api"
 import { agentOf, describeChange, type Part } from "./lib"
 import type { AgentRefs, ChannelDetail } from "./types"
 
-const SURFACE = { web: "Web", chat: "Chat", panel: "Panel", cli: "CLI" } as const
+const SURFACE = { web: "Web", chat: "Chat", panel: "Panel", cli: "CLI", system: "Daimon" } as const
 
 function Parts({ parts, refs }: { parts: Part[]; refs: AgentRefs }) {
   return (

@@ -23,8 +23,10 @@ from daimon.core import credit_views, routine_service
 from daimon.core.authz import Action, Place, Surface, authorize
 from daimon.core.cron_words import schedule_words
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.features.snapshot import feature_in
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.platform_names import UNNAMED_CHANNEL
+from daimon.core.routine_sandbox import SANDBOX_KEY, routine_place
 from daimon.core.routine_service import (
     Happened,
     InvalidSchedule,
@@ -336,6 +338,11 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
                 else {}
             )
             agents = {a.id: _agent_name(a) for a in await usable_agents(db, caller)}
+            # On for this routine's runs, by its own opt-in or its agent's.
+            sandbox = {
+                r.id: (await feature_in(db, None, routine_place(r, platform), SANDBOX_KEY)).on
+                for r in rows
+            }
         out: list[Routine] = []
         for row in rows:
             channel = routine_service.destination_channel_of(
@@ -369,7 +376,7 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
                     catch_up=row.catch_up_policy,
                     destination=destination,
                     dm=row.destination_kind == "dm",
-                    sandbox_tools=row.sandbox_tools_enabled,
+                    sandbox_tools=sandbox[row.id],
                     next_run=_iso(row.next_fire_at),
                     last_run=_iso(row.last_fired_at),
                     failed=row.last_error is not None,

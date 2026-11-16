@@ -111,7 +111,7 @@ export type ChannelHistoryEntry = {
   before: unknown
   after: unknown
   actor: { id: string; name: string | null } | null
-  surface: "web" | "chat" | "panel" | "cli" | null
+  surface: "web" | "chat" | "panel" | "cli" | "system" | null
 }
 
 export type ChannelSetting =
@@ -136,7 +136,7 @@ export type ChannelApprovals = {
   available: boolean
   own: ApprovalMode | null
   value: ApprovalMode
-  source: "default" | "deployment" | "workspace" | "agent" | "channel" | "thread"
+  source: "default" | "deployment" | "workspace" | "agent" | "channel" | "thread" | "routine"
   editable: boolean
 }
 export type CostFooter = { shown: boolean; editable: boolean }

@@ -10,7 +10,7 @@ import { useFeatureSave, useFeatures, useFeatureSchema } from "./api"
 import type { FeaturePlace, FeatureSchema, FeatureView, Tier } from "./types"
 
 const DEFAULT = "default"
-const TIER_NAME: Record<string, string> = { deployment: "Built-in", default: "Built-in", workspace: "Workspace", agent: "Agent", channel: "Channel", thread: "Thread" }
+const TIER_NAME: Record<string, string> = { deployment: "Built-in", default: "Built-in", workspace: "Workspace", agent: "Agent", channel: "Channel", thread: "Thread", routine: "Routine" }
 
 type Group = { name: string; rows: { key: string; label: string; control: React.ReactNode }[] }
 

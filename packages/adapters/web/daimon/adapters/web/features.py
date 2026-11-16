@@ -55,6 +55,7 @@ _NEEDED: dict[Tier, str] = {
     "agent": "agents.edit",
     "channel": "channels.manage",
     "thread": "channels.manage",
+    "routine": "workspace.manage",
 }
 _NO_WEB = "Web chat has no such setting."
 
