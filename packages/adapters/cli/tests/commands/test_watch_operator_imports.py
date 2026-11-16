@@ -92,17 +92,18 @@ async def test_timer_import_counts_each_kind_and_a_rerun_updates(operator, tmp_p
             timer("t"),
             timer("dm", place="direct-message"),
             timer("room", place="observer"),
+            timer("call", place="voice"),
             timer("long", note="n" * 5000),
         ],
     )
     result = await run("import", str(first), "--tenant", tenant)
     assert result.exit_code == 0, result.output
-    assert "timers held=3 updated=0 existing=0 past=0 unsupported=1 truncated=1" in result.output
+    assert "timers held=4 updated=0 existing=0 past=0 unsupported=1 truncated=1" in result.output
     again = manifest(tmp_path, timers=[timer("t", minutes=200, note="moved")])
     result = await run("import", str(again), "--tenant", tenant)
     assert "updated=1" in result.output and "cancelled" not in result.output, result.output
     stored = await rows(operator, "SELECT source_id, note FROM held_timers ORDER BY source_id")
-    assert ("t", "moved") in stored and len(stored) == 3, stored
+    assert ("t", "moved") in stored and len(stored) == 4, stored
 
 
 async def test_full_import_cancels_timers_the_file_no_longer_lists(operator, tmp_path):

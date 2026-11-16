@@ -42,8 +42,10 @@ MIN_LEAD = timedelta(minutes=1)
 Outcome = Literal["scheduled", "past", "capped", "cancelled"]
 ImportOutcome = Literal["held", "updated", "existing", "past", "unsupported"]
 
-#: Where an imported timer can wake: an owner's private conversation, or an existing thread.
-SUPPORTED_PLACES = frozenset({"direct-message", "thread"})
+#: Where an imported timer can wake: an owner's private conversation, a thread or a channel.
+SUPPORTED_PLACES = frozenset({"direct-message", "thread", "channel"})
+#: Queue scope of a channel timer: one per timer, the channel is the row's parent.
+CHANNEL_SCOPE_PREFIX = "ch:"
 #: What a timer with no note asks of the agent.
 EMPTY_NOTE_PROMPT = "A reminder you set has come due."
 
@@ -55,9 +57,11 @@ class TimerImport(NamedTuple):
 
 
 def supported(definition: ImportedTimer) -> bool:
-    """A DM, or a thread named by a numeric id. A channel has no conversation to resume."""
+    """A DM, or a thread or channel named by a numeric id."""
     if definition.place_type not in SUPPORTED_PLACES:
         return False
+    if definition.place_type == "channel":
+        return definition.channel_id.isdigit()
     return definition.place_type == "direct-message" or (
         (definition.thread_id or definition.channel_id).isdigit()
     )
@@ -68,8 +72,8 @@ async def import_held_timer(
 ) -> TimerImport:
     """Hold one timer. A rerun updates one nobody has settled yet and adds nothing else.
 
-    A timer already due is recorded as settled. A timer for a channel or a place that
-    cannot wake is refused: it is counted, never stored. A rerun never changes `paused`:
+    A timer already due is recorded as settled. A timer for a place that cannot wake is
+    refused: it is counted, never stored. A rerun never changes `paused`:
     what the file says counts only the first time, so an operator's unpause stays.
     """
     if not supported(definition):
@@ -240,6 +244,9 @@ async def _settle_one(
         # The bot opens the owner's private conversation when it fires; this scope only
         # keeps each timer apart in the queue.
         parent = thread = f"{DM_SCOPE_PREFIX}{uuid.uuid4()}"
+    elif timer.place_type == "channel":
+        # The channel stays the parent; the scope keeps each timer apart in the queue.
+        thread = f"{CHANNEL_SCOPE_PREFIX}{uuid.uuid4()}"
     await lock_timer_quota(session, tenant_id=timer.tenant_id, account_id=timer.account_id)
     pending = await count_pending_timer_rows(
         session, tenant_id=timer.tenant_id, requester_account_id=timer.account_id
@@ -265,6 +272,7 @@ async def _settle_one(
 
 
 __all__ = [
+    "CHANNEL_SCOPE_PREFIX",
     "EMPTY_NOTE_PROMPT",
     "MIN_LEAD",
     "TimerImport",

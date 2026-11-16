@@ -303,7 +303,7 @@ def _http_error(status: int = 503) -> discord.HTTPException:
 
 @pytest.fixture(autouse=True)
 def no_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(dm_timer_delivery, "_DELIVERY_BACKOFF", (0.0, 0.0))
+    monkeypatch.setattr(dm_timer_delivery, "DELIVERY_BACKOFF", (0.0, 0.0))
 
 
 async def test_a_transient_membership_error_puts_the_timer_back_not_skipped(

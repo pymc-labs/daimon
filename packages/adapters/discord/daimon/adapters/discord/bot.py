@@ -118,6 +118,7 @@ from daimon.core.continuity.continuation import (
     continuation_attended,
     load_asking_agent_id,
 )
+from daimon.core.continuity.dm_timers import RunDmTimer
 from daimon.core.continuity.messages import (
     render_access_changed_try_again,
     render_current_work_must_finish,
@@ -168,6 +169,7 @@ from daimon.core.stores.domain import (
 )
 from daimon.core.stores.github_access_requests import AccessRequest
 from daimon.core.stores.github_connect_notices import ConnectNotice
+from daimon.core.stores.held_timers import CHANNEL_SCOPE_PREFIX
 from daimon.core.stores.pending_skill_adds import is_affirmative
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
 from daimon.core.stores.tenant_ledger import get_prepaid_balance
@@ -3891,6 +3893,8 @@ class DaimonBot(commands.Bot):
             return True
         if wake.thread_id.startswith(DM_SCOPE_PREFIX):
             return await self._open_dm_timers(wake)
+        if wake.thread_id.startswith(CHANNEL_SCOPE_PREFIX):
+            return await self._open_dm_timers(wake, run_timer=self._run_channel_timer)
         try:
             thread_id = int(wake.thread_id)
         except ValueError:
@@ -3924,8 +3928,10 @@ class DaimonBot(commands.Bot):
         )
         return True
 
-    async def _open_dm_timers(self, wake: WakeThread) -> bool:
-        """Dispatch the due timers of a private DM scope, each in its own task."""
+    async def _open_dm_timers(
+        self, wake: WakeThread, *, run_timer: RunDmTimer | None = None
+    ) -> bool:
+        """Dispatch the due timers of a private DM or channel scope, each in its own task."""
         from daimon.core.continuity.dm_timers import dispatch_dm_timer
         from daimon.core.continuity.wakes import (
             claim_wake,
@@ -3961,11 +3967,51 @@ class DaimonBot(commands.Bot):
                 dispatch_dm_timer(
                     self.runtime.sessionmaker,
                     row,
-                    run_timer=self._run_dm_timer,
+                    run_timer=run_timer or self._run_dm_timer,
                     dispatch_errors=(discord.HTTPException,),
                 )
             )
         return True
+
+    async def _run_channel_timer(self, row: TaskContinuationRow, seed: str) -> None:
+        """Run one started timer as an unattended turn of its owner and post it in the channel."""
+        from daimon.adapters.discord.channel_timer_delivery import (
+            ChannelAccess,
+            deliver_channel_timer,
+            require_channel_timer_access,
+        )
+        from daimon.core.direct_messages import DirectMessageAccessRevoked, run_channel_timer
+
+        async def check_access() -> ChannelAccess:
+            return await require_channel_timer_access(self.runtime.sessionmaker, row, self)
+
+        async def run_turn(access: ChannelAccess) -> str:
+            member = access.member
+            role = (
+                Role.ADMIN
+                if is_member_guild_admin(member, guild_owner_id=member.guild.owner_id)
+                else Role.USER
+            )
+            try:
+                reply = await run_channel_timer(
+                    self.runtime.turn_deps,
+                    row,
+                    prompt=seed,
+                    role=role,
+                    role_ids=tuple(member_role_ids(member)),
+                    category_id=access.category_id,
+                )
+            except DirectMessageAccessRevoked as error:
+                log.info("channel_timer.refused", reason=error.reason)
+                raise AdmissionDenied(reason="invoker_not_allowed") from None
+            return reply.text
+
+        await deliver_channel_timer(
+            row,
+            check_access=check_access,
+            run_turn=run_turn,
+            channel_for=self.get_partial_messageable,
+        )
 
     async def _run_dm_timer(self, row: TaskContinuationRow, seed: str) -> None:
         """Run one started timer as a private DM turn of its owner and DM the reply."""

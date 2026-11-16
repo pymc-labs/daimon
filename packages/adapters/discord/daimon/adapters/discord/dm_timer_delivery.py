@@ -31,11 +31,11 @@ import discord
 
 log = structlog.get_logger(__name__)
 
-__all__ = ["deliver_dm_timer"]
+__all__ = ["DELIVERY_BACKOFF", "deliver_dm_timer", "is_transient"]
 
 _DISCORD_MAX_CHARS = 2000
 #: Pauses between in-place delivery retries after the turn ran; then it settles.
-_DELIVERY_BACKOFF = (1.0, 3.0, 8.0)
+DELIVERY_BACKOFF = (1.0, 3.0, 8.0)
 
 _T = TypeVar("_T")
 
@@ -45,7 +45,7 @@ MemberPresent = Callable[[int, int], Awaitable[bool]]
 DmPolicyLookup = Callable[[uuid.UUID], DirectMessagePolicy]
 
 
-def _transient(error: BaseException) -> bool:
+def is_transient(error: BaseException) -> bool:
     """5xx, 429 and network failures; any other answer from Discord is final."""
     if isinstance(error, discord.HTTPException):
         return error.status >= 500 or error.status == 429
@@ -89,11 +89,11 @@ async def deliver_dm_timer(
 
     async def after_turn(op: Callable[[], Awaitable[_T]]) -> _T:
         """Retry a transient failure in place; the turn already ran and must not repeat."""
-        for pause in (*_DELIVERY_BACKOFF, None):
+        for pause in (*DELIVERY_BACKOFF, None):
             try:
                 return await op()
             except (discord.HTTPException, aiohttp.ClientError, OSError) as error:
-                if not _transient(error):
+                if not is_transient(error):
                     raise
                 log.warning("dm_timer.transient_error", row_id=str(row.id), sent=sent)
                 if pause is None:
@@ -104,7 +104,7 @@ async def deliver_dm_timer(
     try:
         await still_open()
     except (discord.HTTPException, aiohttp.ClientError, OSError) as error:
-        if not _transient(error):
+        if not is_transient(error):
             raise
         log.warning("dm_timer.transient_error", row_id=str(row.id), sent=0)
         raise DeliveryRetry from None

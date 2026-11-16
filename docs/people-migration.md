@@ -85,8 +85,11 @@ given `--agent-id` and `--agent-name` checks them too.
 
 Timers are held, not scheduled. `confirm-timers` schedules each one that is
 still more than a minute away, once. Reminders set in a private conversation
-fire in that person's private messages and ones set in a thread fire in it.
-Channel reminders are not imported and are counted. Any past the 25 pending a
+fire in that person's private messages, ones set in a thread fire in it and
+one-off reminders set in a plain channel fire in that channel. A channel reminder
+runs unattended, as its owner, and only if the agent can still post there and the
+owner can still see it; otherwise it is settled with a reason and nothing is sent.
+Channel reminders whose channel id is not numeric are counted. Any past the 25 pending a
 person may hold are skipped. Notes and instructions over their limit are cut
 and counted; an empty note is fine. It prints a count per outcome. A settled
 timer keeps no text.

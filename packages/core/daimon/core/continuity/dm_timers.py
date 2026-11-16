@@ -1,10 +1,10 @@
-"""Dispatch a due timer that fires in its owner's DM.
+"""Dispatch a due timer that fires in its owner's DM or in a plain channel.
 
-An imported timer from a DM names a private scope (`dm:<uuid>`), not a thread, so
-the thread wake path cannot run it. It keeps the wake queue's ladder: claim, commit
-the start fence, run, settle. The adapter runs the turn and delivers its output;
-every refusal settles the row. Only a transient error before the turn runs puts it back,
-and that retry is capped.
+An imported timer from a DM or a channel names a private scope (`dm:<uuid>`,
+`ch:<uuid>`), not a thread, so the thread wake path cannot run it. It keeps the wake
+queue's ladder: claim, commit the start fence, run, settle. The adapter runs the turn
+and delivers its output; every refusal settles the row. Only a transient error before
+the turn runs puts it back, and that retry is capped.
 """
 
 from __future__ import annotations
