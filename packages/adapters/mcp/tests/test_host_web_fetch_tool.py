@@ -54,10 +54,19 @@ async def test_web_fetch_when_conversation_has_no_origin_then_refused(
         await check_web_fetch_allowed(_runtime(sessionmaker), auth, None)
 
 
-@pytest.mark.parametrize("opted_in", [False, True])
-async def test_web_fetch_when_routine_then_follows_its_built_in_tools(
-    db_session: AsyncSession, sessionmaker: async_sessionmaker[AsyncSession], opted_in: bool
+@pytest.mark.parametrize(
+    ("opted_in", "matched", "allowed"),
+    [(False, False, False), (True, False, False), (True, True, True)],
+    ids=["no_opt_in", "pin_row_but_environment_mismatch", "pin_matched"],
+)
+async def test_web_fetch_when_routine_then_follows_the_runs_own_match(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    opted_in: bool,
+    matched: bool,
+    allowed: bool,
 ) -> None:
+    """A pin row alone never opens it; only the run's signed match does."""
     tenant = await make_tenant(db_session)
     routine = await make_routine(db_session, tenant=tenant)
     if opted_in:
@@ -79,9 +88,13 @@ async def test_web_fetch_when_routine_then_follows_its_built_in_tools(
         )
     await db_session.commit()
     auth = _auth(
-        tenant.id, no_confirmation_surface=True, routine_id=routine.id, execution_id=uuid.uuid4()
+        tenant.id,
+        no_confirmation_surface=True,
+        routine_id=routine.id,
+        execution_id=uuid.uuid4(),
+        host_builtins=matched,
     )
-    if opted_in:
+    if allowed:
         await check_web_fetch_allowed(_runtime(sessionmaker), auth, None)
     else:
         with pytest.raises(ToolError, match="off for this routine"):

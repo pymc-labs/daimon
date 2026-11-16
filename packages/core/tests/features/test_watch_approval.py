@@ -1,4 +1,4 @@
-"""`watch_approval`: skip drops the make, edit and resume watch cards; the rest keep asking."""
+"""`watch_approval`: skip drops the make and resume watch cards; the rest keep asking."""
 
 from __future__ import annotations
 
@@ -85,16 +85,17 @@ async def test_ask_keeps_every_watch_card(
 
 
 @pytest.mark.parametrize("tier", ["workspace", "agent"])
-async def test_skip_drops_only_make_edit_and_resume(
+async def test_skip_drops_only_make_and_resume(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tier: str
 ) -> None:
     tenant = await make_tenant(db_session)
     await db_session.commit()
     await _set(db_session_factory, tenant.id, tier, "skip")
     got = await confirmed_tools_for_tenant(_deps(db_session_factory), tenant.id, AGENT)
-    assert not got & WATCH_APPROVAL_TOOLS, "create, update and resume run without a card"
+    assert not got & WATCH_APPROVAL_TOOLS, "create and resume run without a card"
     assert got >= STILL_ASK, "key rotation, long jobs and Fly keep asking"
     assert {"start_long_job", "rotate_watch_key", "fly_launch_session"} <= got
+    assert "update_watch" in got, "editing a watch keeps its card, as it can change anything"
 
 
 async def test_skip_for_one_agent_leaves_another_asking(

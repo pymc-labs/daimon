@@ -8,9 +8,15 @@ from unittest.mock import AsyncMock
 import daimon.adapters.cli.commands.routines as routines_cli
 import pytest
 from daimon.adapters.cli.commands.routines import run_agent_sandbox_tools, run_sandbox_tools
+from daimon.core.authz import Subject
 from daimon.core.errors import UserFacingError
 from daimon.core.routine_sandbox import SandboxPinUnavailable
-from daimon.core.stores.agent_sandbox import agent_sandbox_history, agent_sandbox_pin
+from daimon.core.stores.agent_sandbox import (
+    agent_sandbox_history,
+    agent_sandbox_pin,
+    agent_sandbox_pins,
+    set_agent_sandbox_tools,
+)
 from daimon.core.stores.domain import AgentSandboxPin, SandboxPin
 from daimon.core.stores.routines import create_routine, get_routine, sandbox_tools_history
 from daimon.testing.factories import make_tenant
@@ -298,3 +304,111 @@ async def test_agent_opt_in_refuses_an_unreadable_agent(db_session_factory, monk
             enabled=True,
             dry_run=False,
         )
+
+
+async def test_agent_opt_in_prints_the_id_and_the_scope_warning(
+    db_session_factory, monkeypatch
+) -> None:
+    """Turning on names the agent id and says what the pin follows and covers."""
+    tenant_id, _ = await _routines(db_session_factory, 0)
+    monkeypatch.setattr(
+        routines_cli,
+        "current_agent_pin",
+        AsyncMock(return_value=AgentSandboxPin("ag-77", "default")),
+    )
+    output = StringIO()
+
+    await run_agent_sandbox_tools(
+        rt=build_cli_runtime(db_session_factory),
+        console=Console(file=output, width=300),
+        tenant_id=tenant_id,
+        agent_name="daimon",
+        environment_name=None,
+        enabled=True,
+        dry_run=False,
+    )
+
+    text = output.getvalue()
+    assert "ag-77" in text, "the agent id is printed so --off can name it later"
+    assert "recreated under the same name keeps built-ins" in text, "the pin follows the name"
+    assert "DM routines included" in text, "the opt-in covers every routine of the agent"
+
+
+async def test_off_by_agent_id_reaches_a_renamed_agent(db_session_factory, monkeypatch) -> None:
+    """`--agent-id` turns the opt-in off without resolving any name."""
+    tenant_id, _ = await _routines(db_session_factory, 0)
+    monkeypatch.setattr(
+        routines_cli,
+        "current_agent_pin",
+        AsyncMock(return_value=AgentSandboxPin("ag-77", "default")),
+    )
+    lookup = AsyncMock(return_value=ma_agent(id="a-different-agent"))
+    monkeypatch.setattr(routines_cli, "find_agent_by_daimon_tag", lookup)
+    rt = build_cli_runtime(db_session_factory)
+    await run_agent_sandbox_tools(
+        rt=rt,
+        console=Console(file=StringIO()),
+        tenant_id=tenant_id,
+        agent_name="daimon",
+        environment_name=None,
+        enabled=True,
+        dry_run=False,
+    )
+
+    await run_agent_sandbox_tools(
+        rt=rt,
+        console=Console(file=StringIO()),
+        tenant_id=tenant_id,
+        agent_name=None,
+        agent_id="ag-77",
+        environment_name=None,
+        enabled=False,
+        dry_run=False,
+    )
+
+    async with db_session_factory() as session:
+        assert await agent_sandbox_pin(session, tenant_id=tenant_id, agent_id="ag-77") is None
+    lookup.assert_not_awaited()
+
+
+async def test_off_by_a_reused_name_points_at_the_list(db_session_factory, monkeypatch) -> None:
+    """A name that now means another agent changes nothing and says where to look."""
+    tenant_id, _ = await _routines(db_session_factory, 0)
+    monkeypatch.setattr(
+        routines_cli, "find_agent_by_daimon_tag", AsyncMock(return_value=ma_agent(id="other"))
+    )
+    output = StringIO()
+
+    await run_agent_sandbox_tools(
+        rt=build_cli_runtime(db_session_factory),
+        console=Console(file=output, width=300),
+        tenant_id=tenant_id,
+        agent_name="daimon",
+        environment_name=None,
+        enabled=False,
+        dry_run=False,
+    )
+
+    assert "sandbox-tools-list" in output.getvalue(), "the operator is told how to find the holder"
+
+
+async def test_agent_pins_lists_every_opted_in_agent(db_session_factory) -> None:
+    """The listing returns each opted-in agent id with its environment, in id order."""
+    tenant_id, _ = await _routines(db_session_factory, 0)
+    async with db_session_factory.begin() as session:
+        for agent_id in ("ag-b", "ag-a"):
+            await set_agent_sandbox_tools(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                pin=AgentSandboxPin(agent_id, "default"),
+                set_by="op",
+                actor=Subject(is_admin=True),
+            )
+    async with db_session_factory() as session:
+        pins = await agent_sandbox_pins(session, tenant_id=tenant_id)
+
+    assert [(p.agent_id, p.environment_name) for p in pins] == [
+        ("ag-a", "default"),
+        ("ag-b", "default"),
+    ], "pins come back ordered by agent id"

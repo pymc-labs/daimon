@@ -125,9 +125,11 @@ def build_panel_container(
         timeline_body += f"\nStatus: {routine.delivery_status}"
     if routine.delivery_note is not None:
         timeline_body += "\n" + routine.delivery_note.replace("_", " ")
-    # An admin's per-routine opt-in; off for every routine unless set.
-    if routine.destination_kind == "dm":
-        timeline_body += "\n\nSandbox tools: set per agent for DM routines"
+    # An admin's opt-in, per routine or for the whole agent; off unless set.
+    if selected.agent_sandbox:
+        timeline_body += "\n\nSandbox tools: on for this agent (admin opt-in)"
+    elif routine.destination_kind == "dm":
+        timeline_body += "\n\nSandbox tools: off"
     elif routine.sandbox_tools_enabled:
         timeline_body += "\n\nSandbox tools: on (admin opt-in)"
     else:

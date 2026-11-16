@@ -2,8 +2,9 @@
 
 Hidden unless the credential is a provider turn's (`HOST_WEB_FETCH_TAG`). In a
 conversation the place's `tool.web_fetch` feature decides. An unattended run
-follows its built-in tools: only a routine an admin opted in, where
-`unattended_capabilities` is on, keeps them. A held turn never lists it (`mcp_hold`).
+follows its built-in tools: only a routine run that matched an admin's opt-in, where
+`unattended_capabilities` is on, keeps them (the signed `host_builtins` flag).
+A held turn never lists it (`mcp_hold`).
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
-from daimon.core.features.snapshot import FeaturePlace, place_guardrail, resolve_features
+from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.host_web_fetch import (
     FETCH_TIMEOUT_S,
     HOST_WEB_FETCH_TAG,
@@ -20,8 +21,6 @@ from daimon.core.host_web_fetch import (
     fetch_page,
 )
 from daimon.core.mcp_tool_call import pinned_http_client
-from daimon.core.stores.agent_sandbox import agent_sandbox_pin
-from daimon.core.stores.routines import get_routine
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -35,7 +34,7 @@ async def check_web_fetch_allowed(
     if not auth.no_confirmation_surface:
         raise ToolError("Opening web pages is not available for this agent.")
     if auth.routine_id is not None or auth.execution_id is not None:
-        if not await _routine_keeps_builtins(runtime, auth):
+        if not await _routine_keeps_builtins(auth):
             raise ToolError("Opening web pages is off for this routine. Ask an admin.")
         return
     if origin_context_id is None:
@@ -59,24 +58,14 @@ async def check_web_fetch_allowed(
         raise ToolError("Opening web pages is off here.")
 
 
-async def _routine_keeps_builtins(runtime: McpRuntime, auth: AuthIdentity) -> bool:
-    if auth.routine_id is None:
-        return False
-    async with runtime.session_factory() as session:
-        row = await get_routine(session, auth.routine_id, tenant_id=auth.tenant_id)
-        agent_level = (
-            row is not None
-            and await agent_sandbox_pin(session, tenant_id=auth.tenant_id, agent_id=row.agent_id)
-            is not None
-        )
-    # The run already matched the pin before built-ins were allowed (headless runner).
-    if row is None or not (row.sandbox_tools_enabled or agent_level):
-        return False
-    place = FeaturePlace.of(auth.tenant_id, auth.platform or "routine", None, agent_id=row.agent_id)
-    found = await place_guardrail(
-        runtime.session_factory, runtime.settings, place, "unattended_capabilities"
-    )
-    return found.on
+async def _routine_keeps_builtins(auth: AuthIdentity) -> bool:
+    """Whether the run's own decision kept built-ins on.
+
+    The runner signs `host_builtins` into the credential only after the run
+    matched the operator's pin and `unattended_capabilities` allowed it, so a
+    pin row alone, or a run that did not match, never opens them.
+    """
+    return auth.routine_id is not None and auth.host_builtins
 
 
 def register_host_web_fetch_tool(mcp: FastMCP, runtime: McpRuntime) -> None:

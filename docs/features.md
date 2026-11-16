@@ -936,7 +936,7 @@ Allowed lets an admin turn on built-in tools for one routine. Off keeps them off
 
 ## Approval for watches
 
-Ask shows a card with the destination and duration before the agent makes, edits or resumes a watch. Skip makes it without the card, with the default destination and duration. Long jobs, watch key rotation and Fly launches keep asking. Only a server admin can change it.
+Ask shows a card with the destination and duration before the agent makes or resumes a watch. Skip makes it without the card, reporting in the same thread for the default duration. Editing a watch, long jobs, watch key rotation and Fly launches keep asking. Only a server admin can change it.
 
 | | |
 | --- | --- |

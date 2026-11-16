@@ -117,6 +117,12 @@ opt-in and never clears itself. Every change is recorded with who and when.
 The `unattended_capabilities` setting still wins: with it off, built-ins stay
 off. Turn it on only for agents whose runs you trust.
 
+The record follows the agent id and the environment's name, so an
+environment recreated under the same name keeps the built-ins. `--off`
+takes the agent by name or, for one renamed or gone, `--agent-id`;
+`daimon routines sandbox-tools-list --tenant TENANT_UUID` shows every agent
+opted in. The `/routines` panel says when the agent holds the opt-in.
+
 The record does not cover what Daimon attaches to a run, such as the agent's
 keys, repository or channel skills. Review an opted-in routine after changing
 those. Every change is recorded with who, when, the routine and the version it

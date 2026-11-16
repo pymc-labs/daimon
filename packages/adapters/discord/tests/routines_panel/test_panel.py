@@ -25,9 +25,11 @@ from daimon.adapters.discord.routines_panel.state import (
     derive_state,
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import RoutineRow
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def _make_row(**overrides: Any) -> RoutineRow:
@@ -52,7 +54,7 @@ def _make_row(**overrides: Any) -> RoutineRow:
     return RoutineRow.model_validate(base)
 
 
-def _make_entry(**overrides: Any) -> RoutineEntry:
+def _make_entry(*, agent_sandbox: bool = False, **overrides: Any) -> RoutineEntry:
     row = _make_row(**overrides)
     glyph, color = derive_state(row)
     return RoutineEntry(
@@ -61,6 +63,7 @@ def _make_entry(**overrides: Any) -> RoutineEntry:
         glyph=glyph,
         color=color,
         label=row.trigger_message[:60] or row.id.hex[:8],
+        agent_sandbox=agent_sandbox,
     )
 
 
@@ -69,7 +72,35 @@ def _make_state(entries: list[RoutineEntry], *, over_cap: int = 0) -> RoutinesPa
 
 
 def _make_runtime() -> DiscordRuntime:
-    return MagicMock(spec=DiscordRuntime)
+    runtime = MagicMock(spec=DiscordRuntime)
+    runtime.turn_deps = MagicMock()
+    return runtime
+
+
+@pytest.fixture(autouse=True)
+def _current_members(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clickers are verified members unless a test says otherwise."""
+    from daimon.adapters.discord.routines_panel import panel as panel_mod
+    from daimon.core.authz import build_subject
+
+    real_policy = panel_mod.load_access_policy
+
+    async def policy(session: Any, **kwargs: Any) -> Any:
+        """The real policy for a database session, an empty one for the mock sessions."""
+        if isinstance(session, AsyncSession):
+            return await real_policy(session, **kwargs)
+        return TenantAccessPolicy()
+
+    monkeypatch.setattr(panel_mod, "load_access_policy", policy)
+    monkeypatch.setattr(
+        panel_mod,
+        "resolve_subject",
+        AsyncMock(
+            return_value=build_subject(
+                is_admin=False, platform_user_id="1", verified_membership=True
+            )
+        ),
+    )
 
 
 def _find_button(view: discord.ui.LayoutView, label: str) -> discord.ui.Button[Any]:
@@ -251,10 +282,20 @@ def test_empty_roster_disables_all_but_done_and_refresh() -> None:
         ({"sandbox_tools_enabled": True}, "Sandbox tools: on (admin opt-in)"),
         (
             {"destination_kind": "dm", "destination_id": "u1", "created_by_user_id": "u1"},
-            "Sandbox tools: set per agent for DM routines",
+            "Sandbox tools: off",
+        ),
+        ({"agent_sandbox": True}, "Sandbox tools: on for this agent (admin opt-in)"),
+        (
+            {
+                "agent_sandbox": True,
+                "destination_kind": "dm",
+                "destination_id": "u1",
+                "created_by_user_id": "u1",
+            },
+            "Sandbox tools: on for this agent (admin opt-in)",
         ),
     ],
-    ids=["default", "opted_in", "dm"],
+    ids=["default", "opted_in", "dm", "agent", "agent_dm"],
 )
 def test_panel_shows_the_routine_sandbox_opt_in(overrides: dict[str, Any], line: str) -> None:
     state = _make_state([_make_entry(**overrides)])
@@ -291,7 +332,7 @@ class _SessionCM:
 
 
 def _runtime_with_session(session: Any) -> MagicMock:
-    runtime = MagicMock(spec=DiscordRuntime)
+    runtime = _make_runtime()
     runtime.sessionmaker = MagicMock(return_value=_SessionCM(session))
     return runtime
 

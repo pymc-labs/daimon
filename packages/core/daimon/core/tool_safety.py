@@ -234,11 +234,9 @@ WATCH_CONFIRMED_TOOLS: Final[frozenset[str]] = frozenset(
 )
 
 
-#: The watch tools whose card the `watch_approval` setting can skip. Key rotation, long
-#: jobs and Fly sessions in `WATCH_CONFIRMED_TOOLS` always ask.
-WATCH_APPROVAL_TOOLS: Final[frozenset[str]] = frozenset(
-    {"create_watch", "update_watch", "resume_watch"}
-)
+#: The watch tools whose card the `watch_approval` setting can skip. Editing a watch,
+#: key rotation, long jobs and Fly sessions in `WATCH_CONFIRMED_TOOLS` always ask.
+WATCH_APPROVAL_TOOLS: Final[frozenset[str]] = frozenset({"create_watch", "resume_watch"})
 
 
 #: Asked on every turn: the requester approves a reach over the budget (`daimon.core.outbound`).

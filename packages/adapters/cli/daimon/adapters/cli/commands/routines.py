@@ -65,7 +65,11 @@ from daimon.core.routine_service import (
 from daimon.core.routine_service import create_routine as create_routine_checked
 from daimon.core.routines import routine_for_reader
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.agent_sandbox import agent_sandbox_pin, set_agent_sandbox_tools
+from daimon.core.stores.agent_sandbox import (
+    agent_sandbox_pin,
+    agent_sandbox_pins,
+    set_agent_sandbox_tools,
+)
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.identity import get_or_create_cli_principal
@@ -466,6 +470,13 @@ def sandbox_tools_command(
             help="Change every routine run of this agent instead, through agent edits.",
         ),
     ] = None,
+    agent_id: Annotated[
+        str | None,
+        typer.Option(
+            "--agent-id",
+            help="With --off: the agent id (see sandbox-tools-list), for an agent renamed or gone.",
+        ),
+    ] = None,
     environment: Annotated[
         str | None,
         typer.Option(
@@ -484,10 +495,19 @@ def sandbox_tools_command(
     safe. Each change records the CLI operator and the time. With --agent the
     opt-in is the agent's instead, naming the agent and environment but no
     version, so editing the agent keeps it; it covers its DM routines too, and
-    the `unattended_capabilities` setting still caps it.
+    the `unattended_capabilities` setting still caps it. The opt-in is tied to
+    the agent id and the environment's name: an environment recreated under
+    the same name keeps it, and every routine of the agent gets it, DM routines
+    included. `sandbox-tools-list` shows who holds one.
     """
-    if (agent is None) == (not routine_ids):
-        raise typer.BadParameter("Give routine ids, or --agent, not both or neither.")
+    if agent is not None and agent_id is not None:
+        raise typer.BadParameter("Give --agent or --agent-id, not both.")
+    if (agent is None and agent_id is None) == (not routine_ids) or (
+        (agent is not None or agent_id is not None) and bool(routine_ids)
+    ):
+        raise typer.BadParameter("Give routine ids, or --agent / --agent-id, not both or neither.")
+    if agent_id is not None and not off:
+        raise typer.BadParameter("--agent-id only turns an opt-in off; add --off.")
     if environment is not None and agent is None:
         raise typer.BadParameter("--environment needs --agent.")
     settings = load_settings()
@@ -495,12 +515,13 @@ def sandbox_tools_command(
     async def run() -> None:
         async with build_runtime(settings) as rt:
             console = Console(highlight=False)
-            if agent is not None:
+            if agent is not None or agent_id is not None:
                 await run_agent_sandbox_tools(
                     rt=rt,
                     console=console,
                     tenant_id=tenant,
                     agent_name=agent,
+                    agent_id=agent_id,
                     environment_name=environment,
                     enabled=not off,
                     dry_run=dry_run,
@@ -518,23 +539,50 @@ def sandbox_tools_command(
     asyncio.run(run())
 
 
+@routines_app.command("sandbox-tools-list")
+def sandbox_tools_list_command(*, tenant: Annotated[uuid.UUID, typer.Option("--tenant")]) -> None:
+    """List the agents opted in to built-in sandbox tools for routine runs."""
+    settings = load_settings()
+
+    async def run() -> None:
+        async with build_runtime(settings) as rt:
+            async with rt.sessionmaker() as session:
+                pins = await agent_sandbox_pins(session, tenant_id=tenant)
+            console = Console(highlight=False)
+            if not pins:
+                console.print("No agent is opted in.")
+            for pin in pins:
+                console.print(
+                    f"{pin.agent_id}  environment {pin.environment_name}  "
+                    f"since {pin.set_at:%Y-%m-%d %H:%M} UTC"
+                )
+
+    asyncio.run(run())
+
+
 async def run_agent_sandbox_tools(
     *,
     rt: CliRuntime,
     console: Console,
     tenant_id: uuid.UUID,
-    agent_name: str,
+    agent_name: str | None,
     environment_name: str | None,
     enabled: bool,
     dry_run: bool,
+    agent_id: str | None = None,
 ) -> None:
-    """Opt one agent's routine runs in or out, after checking it and its environment are live."""
+    """Opt one agent's routine runs in or out, after checking it and its environment are live.
+
+    Turning off takes the agent by name or by id, as the opt-in may sit on an agent
+    that was renamed, or whose name another agent now uses.
+    """
     async with rt.sessionmaker.begin() as session:
         tenant = await get_tenant(session, tenant_id)
         if tenant is None or tenant.archived_at is not None:
             raise UserFacingError("Select an active tenant.")
         pin: AgentSandboxPin | None
         if enabled:
+            assert agent_name is not None
             try:
                 pin = await current_agent_pin(
                     rt.anthropic,
@@ -552,23 +600,31 @@ async def run_agent_sandbox_tools(
             agent_id = pin.agent_id
         else:
             pin = None
-            found = await find_agent_by_daimon_tag(
-                rt.anthropic,
-                tenant_id=tenant_id,
-                name=agent_name,
-                include_archived=True,
-                records=rt.sessionmaker,
-            )
-            if found is None:
-                raise UserFacingError(f"No agent named {agent_name}. Nothing was changed.")
-            agent_id = found.id
+            if agent_id is None:
+                assert agent_name is not None
+                found = await find_agent_by_daimon_tag(
+                    rt.anthropic,
+                    tenant_id=tenant_id,
+                    name=agent_name,
+                    include_archived=True,
+                    records=rt.sessionmaker,
+                )
+                if found is None:
+                    raise UserFacingError(f"No agent named {agent_name}. Nothing was changed.")
+                agent_id = found.id
+        label = f"{agent_name or agent_id} ({agent_id})"
         recorded = await agent_sandbox_pin(session, tenant_id=tenant_id, agent_id=agent_id)
         state = "on" if enabled else "off"
         if recorded == pin:
-            console.print(f"Agent {agent_name}: already {state}.")
+            console.print(f"Agent {label}: already {state}.")
+            if not enabled and agent_name is not None:
+                console.print(
+                    "If the opt-in sits on another agent id, find it with "
+                    "`routines sandbox-tools-list` and use --agent-id."
+                )
             return
         detail = f" (environment {pin.environment_name}, any agent version)" if pin else ""
-        console.print(f"Agent {agent_name}: turn {state}{detail}")
+        console.print(f"Agent {label}: turn {state}{detail}")
         if dry_run:
             console.print("Dry run: nothing written.")
             return
@@ -584,7 +640,13 @@ async def run_agent_sandbox_tools(
             # Whoever holds the database credentials is the operator.
             actor=Subject(is_admin=True),
         )
-    console.print(f"Sandbox tools {state} for agent {agent_name}.")
+    console.print(f"Sandbox tools {state} for agent {label}.")
+    if enabled:
+        console.print(
+            "The opt-in names this agent id and the environment's name, so an environment "
+            "recreated under the same name keeps built-ins. It covers every routine of "
+            "the agent, DM routines included."
+        )
 
 
 async def run_sandbox_tools(

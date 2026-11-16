@@ -228,3 +228,30 @@ async def test_panel_rows_redact_legacy_diagnostics_for_non_owners(
                 result.delivery_payload is None and "private-error" not in result.model_dump_json()
             )
     await client.close()
+
+
+async def test_load_guild_routines_marks_agent_level_sandbox_opt_in(
+    db_session: AsyncSession,
+    tenant_id: uuid.UUID,
+    seed_routine: SeedRoutineFn,
+) -> None:
+    """A routine whose agent holds the opt-in is marked, and another agent's is not."""
+    from daimon.core.authz import Subject
+    from daimon.core.stores.agent_sandbox import set_agent_sandbox_tools
+    from daimon.core.stores.domain import AgentSandboxPin
+
+    await seed_routine(tenant_id=tenant_id, trigger_message="on", agent_id="agent_on")
+    await seed_routine(tenant_id=tenant_id, trigger_message="off", agent_id="agent_off")
+    await set_agent_sandbox_tools(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id="agent_on",
+        pin=AgentSandboxPin("agent_on", "env"),
+        set_by="op",
+        actor=Subject(is_admin=True),
+    )
+    entries, _, _ = await load_guild_routines(
+        db_session, build_stub_anthropic(_handler_with([])), tenant_id=tenant_id
+    )
+    marked = {e.label: e.agent_sandbox for e in entries}
+    assert marked == {"on": True, "off": False}, "only the opted-in agent's routine is marked"

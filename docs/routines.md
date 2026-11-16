@@ -47,12 +47,12 @@ The CLI creates routines for an owner (`daimon routines create`), sets
 [moves routines in from another system](routine-migration.md).
 
 `--destination dm|channel|thread` (with `--destination-id`) runs the checks
-below; `--dry-run` saves nothing.
+below; `--dry-run` saves nothing. The operator may name any agent; it counts as the
+owner's own.
 
 `create_routine` refuses a caller with no platform identity (a CLI-only
 token), an unknown IANA timezone, an unparseable cron expression and an
-`agent_name` that is not an agent in the tenant. The tenant comes from
-the caller's verified token.
+`agent_name` that is not an agent in the tenant. The tenant is the caller's.
 
 ### Set a destination
 
@@ -69,8 +69,8 @@ tool checks that:
 - the tenant's access policy does not protect it ([permissions.md](permissions.md)).
 
 For the owner's DM, set `destination_kind="dm"` and leave out the id. Daimon
-uses the caller's own Discord id; nobody can send another person's routine to
-their DM. Slack and Teams refuse it. A DM routine runs as a live DM turn, with
+uses the caller's own Discord id, so no one can send a routine to another
+person's DM. Slack and Teams refuse it. A DM routine runs as a live DM turn, with
 the owner's personal memory, and needs the server's DMs on. See
 [direct messages](direct-messages.md).
 
@@ -130,13 +130,13 @@ run survives the run's completion.
 
 A run resolves the tenant, finds or creates the creator's account, checks the
 invoker allowlist and the balance, and resolves the agent. It then creates a
-session the way chat does and drives it with the same turn driver, so
-reconnects and read timeouts behave the same. It is not a chat turn. There is
-no thread binding, continuity, handoff or dead-session recovery.
+session the way chat does and drives it with the same turn driver. It is not
+a chat turn: there is no thread binding, continuity, handoff or dead-session
+recovery.
 
 Nobody can click a confirmation, so tool calls follow the
 [unattended rules](unattended.md#how-tool-calls-are-decided). Built-in sandbox
-tools are off unless an operator opted the routine in.
+tools stay off unless an operator opts in.
 
 A routine with a destination gets a short controls block before its prompt: its
 id, schedule and destination, a line saying nobody is watching, and that Daimon
@@ -148,8 +148,7 @@ get unattended-run framing, which an agent can override with
 Routine sessions mount the agent's shared memory read-only. A routine with no
 destination or channel also mounts its owner's personal memory read-only. An
 owner-DM routine runs as a live DM turn, with the owner's memory under the DM
-policy. It is skipped as
-`owner_busy` if the owner already has a DM turn running. A routine in a
+policy, and is skipped as `owner_busy` while the owner has a DM turn running. A routine in a
 channel shared with another organisation runs held to that channel, with only
 that channel's memory and no DM fallback.
 

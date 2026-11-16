@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import uuid as _uuid
 from collections.abc import Collection
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final, cast
 
@@ -23,8 +24,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 __all__ = [
     "AGENT_SETTER_ERASED",
+    "AgentSandboxEntry",
     "agent_sandbox_history",
     "agent_sandbox_pin",
+    "agent_sandbox_pins",
     "erase_agent_sandbox_setter",
     "set_agent_sandbox_tools",
 ]
@@ -32,6 +35,27 @@ __all__ = [
 log = structlog.get_logger(__name__)
 
 AGENT_SETTER_ERASED: Final = "erased"
+
+
+@dataclass(frozen=True)
+class AgentSandboxEntry:
+    """One agent's opt-in as recorded, for listing."""
+
+    agent_id: str
+    environment_name: str
+    set_at: datetime
+
+
+async def agent_sandbox_pins(
+    session: AsyncSession, *, tenant_id: _uuid.UUID
+) -> list[AgentSandboxEntry]:
+    """Every agent opted in for the tenant, ordered by agent id."""
+    rows = await session.scalars(
+        select(AgentSandboxTools)
+        .where(AgentSandboxTools.tenant_id == tenant_id)
+        .order_by(AgentSandboxTools.agent_id)
+    )
+    return [AgentSandboxEntry(r.agent_id, r.environment_name, r.set_at) for r in rows]
 
 
 async def agent_sandbox_pin(

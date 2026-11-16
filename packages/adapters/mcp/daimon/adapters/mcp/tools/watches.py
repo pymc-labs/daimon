@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 import discord
 from daimon.adapters.mcp import watch_polling as polling
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.confirmed_call import card_satisfied
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _session_gate
 from daimon.adapters.mcp.tools._channel_policy import require_dm_recipient_allowed
@@ -40,6 +41,7 @@ from daimon.adapters.mcp.watch_polling import (
 from daimon.core import channel_backend
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.config import DirectMessagePolicy
+from daimon.core.confirmation import watch_card_skipped
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.poll_tools import (
     SourceChanged,
@@ -345,6 +347,41 @@ ADMIN_ONLY = (
 )
 
 
+DEFAULT_LIFETIME_DAYS = 7
+
+
+async def require_skip_defaults(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin: TurnOriginRow,
+    *,
+    delivery: WatchDelivery,
+    lifetime_days: int,
+    permanent: bool,
+    server: str,
+) -> None:
+    """With the card skipped, a new watch can only be the default one.
+
+    Nobody sees these choices, so the model may not widen them: it reports in
+    this thread, ends after the default lifetime and reads Daimon's own tools.
+    """
+    if card_satisfied(auth) or not await watch_card_skipped(
+        runtime.session_factory, auth.tenant_id, origin.responder_ma_agent_id, origin.platform
+    ):
+        return
+    if (
+        delivery != "thread"
+        or permanent
+        or lifetime_days != DEFAULT_LIFETIME_DAYS
+        or server != DAIMON_SERVER_NAME
+    ):
+        raise ToolError(
+            "Watches here are made without a card, so they report in this thread, last "
+            f"{DEFAULT_LIFETIME_DAYS} days and read only Daimon's own tools. Leave the "
+            "other settings out, or ask a server admin to set watch approval to Ask."
+        )
+
+
 async def admin_approval(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -385,7 +422,7 @@ async def create_watch_impl(
     projection: str = ".",
     rule: str = "change",
     interval: int = 300,
-    lifetime_days: int = 7,
+    lifetime_days: int = DEFAULT_LIFETIME_DAYS,
     key: str | None = None,
     evidence: list[str] | None = None,
     delivery: WatchDelivery = "thread",
@@ -398,6 +435,15 @@ async def create_watch_impl(
     if source == "page_event":
         raise ToolError("Page-event watches are unavailable until a page-event producer exists")
     assert auth.platform_user_id is not None
+    await require_skip_defaults(
+        runtime,
+        auth,
+        origin,
+        delivery=delivery,
+        lifetime_days=lifetime_days,
+        permanent=permanent,
+        server=server,
+    )
     if not permanent and not 1 <= lifetime_days <= 30:
         raise ToolError("Watch lifetime must be 1 to 30 days")
     # Left out, the default daily limit; the firing SQL still holds it to the ceiling.

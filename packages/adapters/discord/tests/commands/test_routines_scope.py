@@ -135,3 +135,105 @@ async def test_only_own_loads_nothing_without_a_matching_creator(db_session_fact
         )
 
     assert (entries, over_cap) == ([], 0), "no routine loads for a non-creator"
+
+
+async def _panel_view(db_session_factory, monkeypatch, *, admin: bool):
+    """Open the panel for ME, returning the view and the interaction that opened it."""
+    monkeypatch.setattr(routines_cmd, "panel_links", lambda *_a, **_k: None)
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(GUILD))
+    async with db_session_factory.begin() as session:
+        await make_tenant(session, platform="discord", workspace_id=str(GUILD))
+        for creator, text in ((str(ME), "mine"), (str(OTHER), "theirs")):
+            await create_routine(
+                session,
+                tenant_id=tenant_id,
+                created_by_user_id=creator,
+                agent_id="agent_a",
+                agent_name="daimon",
+                cron_expr="0 9 * * *",
+                timezone_="UTC",
+                trigger_message=text,
+            )
+    interaction = _interaction(_runtime(db_session_factory), admin=admin)
+    cog = RoutinesCog(MagicMock())
+    await cog.routines.callback(cog, interaction)  # pyright: ignore[reportArgumentType]
+    view = interaction.followup.send.call_args.kwargs["view"]
+    click = _interaction(view.runtime, admin=admin)
+    click.response.is_done = MagicMock(return_value=False)
+    click.response.edit_message = AsyncMock()
+    return view, click
+
+
+def _rerendered_labels(click: MagicMock) -> list[str]:
+    return [
+        entry.label for entry in click.response.edit_message.call_args.kwargs["view"].state.rows
+    ]
+
+
+@pytest.mark.parametrize(("admin", "expected"), [(False, ["mine"]), (True, ["mine", "theirs"])])
+async def test_refresh_keeps_the_panel_scoped_to_the_clicker(
+    db_session_factory, monkeypatch, admin, expected
+):
+    """Refresh re-reads the clicker's role: a member never gains other members' routines."""
+    from daimon.adapters.discord.routines_panel.panel import _rerender
+
+    view, click = await _panel_view(db_session_factory, monkeypatch, admin=admin)
+
+    await _rerender(click, view)
+
+    assert sorted(_rerendered_labels(click)) == expected, "the refreshed list matches the role"
+
+
+async def test_pause_rerenders_only_the_members_own_routines(db_session_factory, monkeypatch):
+    """After a member pauses their routine, the redrawn panel still hides everyone else's."""
+    from daimon.adapters.discord.routines_panel import panel as panel_mod
+    from daimon.core.authz import build_subject
+
+    monkeypatch.setattr(
+        panel_mod,
+        "resolve_subject",
+        AsyncMock(
+            return_value=build_subject(
+                is_admin=False, platform_user_id=str(ME), verified_membership=True
+            )
+        ),
+    )
+    view, click = await _panel_view(db_session_factory, monkeypatch, admin=False)
+    pause = next(c for c in view.walk_children() if isinstance(c, panel_mod._PauseButton))
+
+    await pause.callback(click)
+
+    assert _rerendered_labels(click) == ["mine"], "Pause must not widen the list"
+    selected = click.response.edit_message.call_args.kwargs["view"].state.selected
+    assert selected is not None
+    assert not selected.routine.enabled, "the routine was paused"
+
+
+@pytest.mark.parametrize("membership", [None, False])
+async def test_pause_refuses_a_creator_who_is_no_longer_a_member(
+    db_session_factory, monkeypatch, membership
+):
+    """Creating the routine is not enough: the clicker's current membership is read fresh."""
+    from daimon.adapters.discord.routines_panel import panel as panel_mod
+    from daimon.core.authz import build_subject
+
+    monkeypatch.setattr(
+        panel_mod,
+        "resolve_subject",
+        AsyncMock(
+            return_value=build_subject(
+                is_admin=False, platform_user_id=str(ME), verified_membership=membership
+            )
+        ),
+    )
+    view, click = await _panel_view(db_session_factory, monkeypatch, admin=False)
+    pause = next(c for c in view.walk_children() if isinstance(c, panel_mod._PauseButton))
+    click.response.send_message = AsyncMock()
+
+    await pause.callback(click)
+
+    click.response.send_message.assert_awaited_once()
+    click.response.edit_message.assert_not_awaited()
+    assert view.state.selected is not None and view.state.selected.routine.enabled, (
+        "the routine stays running"
+    )

@@ -12,6 +12,7 @@ from daimon.adapters.discord.routines_panel.state import (
 )
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.routines import routine_for_reader
+from daimon.core.stores.agent_sandbox import agent_sandbox_pins
 from daimon.core.stores.routines import list_routines_for_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -50,6 +51,7 @@ async def load_guild_routines(
             name = agent.id
         agent_name_map[agent.id] = name
 
+    opted_in = {pin.agent_id for pin in await agent_sandbox_pins(session, tenant_id=tenant_id)}
     entries: list[RoutineEntry] = []
     for row in rows:
         row = routine_for_reader(row, user_id=viewer_user_id)
@@ -63,6 +65,7 @@ async def load_guild_routines(
                 glyph=glyph,
                 color=color,
                 label=label,
+                agent_sandbox=row.agent_id in opted_in,
             )
         )
     entries.sort(key=lambda e: e.label.lower())

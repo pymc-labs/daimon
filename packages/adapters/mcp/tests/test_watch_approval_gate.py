@@ -1,4 +1,4 @@
-"""With `watch_approval` skip, the session gate lets only make, edit and resume go uncarded."""
+"""With `watch_approval` skip, the session gate lets only make and resume go uncarded."""
 
 from __future__ import annotations
 

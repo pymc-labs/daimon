@@ -13,23 +13,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   editing the agent no longer takes the built-in tools away. It covers every
   routine run of that agent, DM routines included, which cannot be opted in
   one by one. Only an operator can set it, each change is recorded, and
-  another agent or environment still runs without them. The unattended
+  another agent or environment still runs without them. The command prints the
+  agent id, `--agent-id` turns it off for an agent that was renamed, and
+  `sandbox-tools-list` shows every agent opted in, as the `/routines` panel
+  does for the selected routine. The unattended
   capabilities setting still wins: with it off, built-ins stay off. A change
   of agent provider needs a new opt-in.
 - **A server admin can let agents make watches without a card.** The new
   `watch_approval` setting, for the team or for one agent, defaults to Ask,
-  which keeps today's card. Skip makes, edits and resumes a watch straight
-  away with the default destination and duration. Rotating a key, starting a
-  long job and Fly sessions still ask, and a turn nobody is watching still
-  cannot enroll a watch. Only a server admin can change it, and agent owners
-  cannot. It applies to Claude agents; OpenAI and Gemini agents keep their
-  own approval card.
+  which keeps today's card. Skip makes and resumes a watch straight away, and
+  only the default one: it reports in the same thread, ends after 7 days and
+  reads Daimon's own tools, and the agent cannot pick anything wider without a
+  card. Editing a watch, rotating a key, starting a long job and Fly launches
+  still ask, and a turn nobody is watching still cannot enroll a watch. Only a
+  server admin can change it, and agent owners cannot. It applies to Claude
+  agents; OpenAI and Gemini agents keep their own approval card.
 - **Members can open `/routines` in Discord.** The command no longer needs
   Manage Server. It follows the same permission as chat and the web app: every
   member sees the routines they created, and an admin sees all of them. Pause,
   resume and delete still belong to the creator or an admin, New still needs an
   admin, and the panel's web links match the role. Nobody sees a routine
-  someone else made unless they are an admin.
+  someone else made unless they are an admin, also after Refresh, Pause or
+  Resume. Pause, resume and moving a routine to a DM check the person's
+  current chat permission, not only that they made it.
 - **Operators can create channel and thread routines from the command line.**
   `daimon routines create --destination channel` or `thread`, with
   `--destination-id`, makes a routine for a verified member who owns it, is

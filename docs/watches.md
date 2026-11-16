@@ -55,9 +55,10 @@ Creating, resuming, editing and rotating a key need an approval card from the
 owner, even with tool safety off.
 
 A server admin can set `watch_approval` to skip for the team or one agent.
-Creating, resuming and editing then run without the card, with the default
-destination and duration. Rotating a key, long jobs and Fly sessions keep
-asking, and a turn nobody is watching still cannot enroll a watch.
+Creating and resuming then run without the card, but only as the default
+watch: it reports in the same thread for 7 days and reads Daimon's own tools,
+and any other choice is refused. Editing, rotating a key, long jobs and Fly
+launches keep asking, and a turn nobody is watching still cannot enroll a watch.
 
 An edit shows each change as old and new on its card. Queued reports from
 before it are dropped, and the next poll saves a new baseline. Admins may

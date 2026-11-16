@@ -62,6 +62,7 @@ class RoutineEntry:
     glyph: Glyph
     color: int
     label: str
+    agent_sandbox: bool = False
 
 
 @dataclasses.dataclass
