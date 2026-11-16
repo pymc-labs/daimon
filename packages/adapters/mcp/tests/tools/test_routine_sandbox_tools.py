@@ -13,11 +13,23 @@ import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.config import McpSettings
+from daimon.core.features.service import FeatureActor
 from daimon.core.membership import Membership
-from daimon.core.routine_sandbox import SandboxPinUnavailable, own_opt_in, routine_place
+from daimon.core.routine_sandbox import (
+    SandboxPinUnavailable,
+    change_agent_sandbox,
+    own_opt_in,
+    routine_place,
+)
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
-from daimon.core.stores.domain import ChannelChangeRow, Role, RoutineRow, SandboxPin
+from daimon.core.stores.domain import (
+    AgentSandboxPin,
+    ChannelChangeRow,
+    Role,
+    RoutineRow,
+    SandboxPin,
+)
 from daimon.core.stores.routines import create_routine
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.membership import FixtureMembershipResolver
@@ -25,6 +37,7 @@ from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _set_impl = _routines_mod._set_routine_sandbox_tools_impl  # pyright: ignore[reportPrivateUsage]
+_views = _routines_mod._views  # pyright: ignore[reportPrivateUsage]
 
 ADMIN = "admin-1"
 PIN = SandboxPin(
@@ -136,8 +149,43 @@ async def test_admin_opts_one_routine_in_and_status_shows_it(
     [entry] = await _changes(committing_sessionmaker, tenant_id)
     assert (entry.actor_account_id, entry.surface) == (admin.account_id, "chat"), "recorded"
 
-    await _set_impl(runtime, admin, routine_id=chosen.id, enabled=False)
+    [view] = await _views(runtime, admin, [result])
+    assert view.sandbox_tools, "the tool's result shows the opt-in"
+    shown = [v.sandbox_tools for v in await _views(runtime, admin, [chosen, other])]
+    assert shown == [True, False], "get and list show it on that routine only"
+
+    result = await _set_impl(runtime, admin, routine_id=chosen.id, enabled=False)
     assert await _opt_in(committing_sessionmaker, chosen) == ("off", None), "its own Off"
+    [view] = await _views(runtime, admin, [result])
+    assert not view.sandbox_tools, "and shows it"
+
+
+async def test_routines_show_their_agent_opt_in_unless_their_own_off_beats_it(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    """An agent's On shows on each of its routines; a routine's own Off hides it there."""
+    tenant_id, chosen, other, account_id = await _setup(db_session)
+    runtime = _runtime(committing_sessionmaker, _resolver())
+    admin = _auth(tenant_id, ADMIN, is_admin=True, account_id=account_id)
+
+    async def yes(_action: object) -> bool:
+        return True
+
+    await change_agent_sandbox(
+        committing_sessionmaker,
+        runtime.settings,
+        FeatureActor(tenant_id, account_id, "cli", None, yes),
+        agent_id="ag",
+        platform="discord",
+        value="on",
+        pin=AgentSandboxPin("ag", "default"),
+    )
+    shown = [v.sandbox_tools for v in await _views(runtime, admin, [chosen, other])]
+    assert shown == [True, True], "the agent's On covers both"
+
+    await _set_impl(runtime, admin, routine_id=chosen.id, enabled=False)
+    shown = [v.sandbox_tools for v in await _views(runtime, admin, [chosen, other])]
+    assert shown == [False, True], "the routine's own Off beats it"
 
 
 PERSON_ONLY = "does not accept an agent"

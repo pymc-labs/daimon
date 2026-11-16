@@ -1,8 +1,10 @@
-"""`list_routines` resolves the caller's web links once, not once per routine."""
+"""`list_routines` resolves the caller's web links and opens a session once, not per routine."""
 
 from __future__ import annotations
 
+import contextlib
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
@@ -50,18 +52,31 @@ async def test_list_routines_when_many_rows_then_links_resolved_once(monkeypatch
         return links
 
     async def fake_auth(_ctx: Any) -> Any:
-        return SimpleNamespace()
+        return SimpleNamespace(platform="discord")
 
     async def fake_rows(_rt: Any, _auth: Any) -> list[RoutineRow]:
         return [_row() for _ in range(5)]
 
+    async def agent_opt_in(*_a: Any) -> str:
+        return "agent"
+
+    opened: list[int] = []
+
+    @contextlib.asynccontextmanager
+    async def session() -> AsyncIterator[object]:
+        opened.append(1)
+        yield object()
+
     monkeypatch.setattr(routines_mod, "tenant_links", fake_links)
     monkeypatch.setattr(routines_mod, "_auth", fake_auth)
     monkeypatch.setattr(routines_mod, "_list_routines_impl", fake_rows)
+    monkeypatch.setattr(routines_mod, "opted_in_by", agent_opt_in)
     mcp = FastMCP("t")
-    routines_mod.register_routines_tools(mcp, cast(McpRuntime, SimpleNamespace()))
+    runtime = SimpleNamespace(session_factory=session)
+    routines_mod.register_routines_tools(mcp, cast(McpRuntime, runtime))
     tool = await mcp.get_tool("list_routines")
     out = await tool.fn(None)  # pyright: ignore[reportAttributeAccessIssue]
     assert len(out) == 5, "one view per routine"
-    assert all(v.web_url for v in out), "each carries its link"
+    assert all(v.web_url and v.sandbox_tools for v in out), "each carries its link and opt-in"
     assert len(calls) == 1, "links are looked up once per call, not per row"
+    assert len(opened) == 1, "the opt-ins are read in one session"

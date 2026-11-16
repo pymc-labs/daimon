@@ -9777,7 +9777,9 @@
         routine's own value of the ``routine_sandbox_tools`` setting, so a lock above it
         still wins, and the settings history records each change. It takes effect from
         the routine's next run. Setting the value a routine already has changes nothing.
-        Timers, watches, agent chat, ``daimon run`` and checkpoints cannot be opted in.
+        ``get_routine`` and ``list_routines`` show whether it is opted in, by its own setting
+        or its agent's, as ``sandbox_tools``. Timers, watches, agent chat,
+        ``daimon run`` and checkpoints cannot be opted in.
       ''',
       'parameters': dict({
         'additionalProperties': False,

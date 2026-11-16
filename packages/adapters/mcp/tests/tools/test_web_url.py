@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import pytest
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools import routines as routines_tools
 from daimon.adapters.mcp.tools._web_url import admin_links, tenant_links
 from daimon.adapters.mcp.tools.agents import (  # pyright: ignore[reportPrivateUsage]
     AgentInfo,
@@ -65,6 +66,16 @@ def web_role(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(roles_store, "get_workspace_role", grant)
     monkeypatch.setattr(accounts_store, "list_roles", no_platform_roles)
     return state
+
+
+@pytest.fixture(autouse=True)
+def no_sandbox_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests read no database; a routine's sandbox status has its own tests."""
+
+    async def off(*_a: Any) -> None:
+        return None
+
+    monkeypatch.setattr(routines_tools, "opted_in_by", off)
 
 
 _WEB = WebSettings(public_url="https://app.example.com")  # type: ignore[call-arg]
