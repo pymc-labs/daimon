@@ -212,7 +212,7 @@ def _write_urls(path: Path, urls: dict[str, str]) -> None:
 
 @watches_app.command("import")
 def import_command(
-    export_file: Path,
+    export_files: Annotated[list[Path], typer.Argument(metavar="EXPORT_FILE...")],
     tenant: Annotated[
         uuid.UUID | None, typer.Option("--tenant", help="Tenant for callback watches and timers")
     ] = None,
@@ -228,22 +228,39 @@ def import_command(
     ] = None,
     full: Annotated[
         bool,
-        typer.Option("--full", help="Cancel held timers this file no longer lists"),
+        typer.Option("--full", help="Cancel held timers that no file of this run lists"),
     ] = False,
 ) -> None:
-    """Import a v1 JSON manifest, offline. Every watch starts paused; no key is copied.
+    """Import v1 JSON manifests of one export, offline, in one transaction. Every watch
+    starts paused; no key is copied.
 
-    The file's server must be the tenant's. Callback watches keep their token hash and
-    get a new link, written only to --urls-out as {source id: url}. Timers are held
-    until `confirm-timers`. A rerun updates what nobody has confirmed yet; with --full
-    it also cancels held timers missing from the file.
+    Give every file of one export in the same run. Their server must be the tenant's.
+    Callback watches keep their token hash and get a new link, written only to
+    --urls-out as {source id: url}. Timers are held until `confirm-timers`. A rerun updates
+    what nobody has confirmed yet; with --full it also cancels held timers that no
+    file lists, and refuses a run whose files list no timers.
     """
-    if export_file.stat().st_size > 1048576:
-        raise typer.BadParameter("Watch export exceeds 1 MiB")
-    manifest = WatchExport.model_validate_json(export_file.read_bytes())
-    callbacks = [w for w in manifest.watches if isinstance(w, ImportedCallbackWatch)]
-    others = [w for w in manifest.watches if not isinstance(w, ImportedCallbackWatch)]
-    if (callbacks or manifest.timers or full) and tenant is None:
+    manifests: list[WatchExport] = []
+    for export_file in export_files:
+        if export_file.stat().st_size > 1048576:
+            raise typer.BadParameter(f"Watch export {export_file.name} exceeds 1 MiB")
+        manifests.append(WatchExport.model_validate_json(export_file.read_bytes()))
+    guilds = {manifest.guild_id for manifest in manifests}
+    if len(guilds) > 1:
+        raise typer.BadParameter("The files are for different servers")
+    guild_id = guilds.pop()
+    entries = [entry for manifest in manifests for entry in manifest.watches]
+    timers = [timer for manifest in manifests for timer in manifest.timers]
+    callbacks = [w for w in entries if isinstance(w, ImportedCallbackWatch)]
+    others = [w for w in entries if not isinstance(w, ImportedCallbackWatch)]
+    if full and not timers:
+        # Later files of a split export list no timers: --full on them alone would
+        # cancel every held reminder.
+        raise typer.BadParameter(
+            "No file lists timers; give every file of the export with --full",
+            param_hint="--full",
+        )
+    if (callbacks or timers) and tenant is None:
         raise typer.BadParameter("--tenant is required for callback watches and timers")
     if callbacks:
         if agent_id is None or agent_name is None:
@@ -263,11 +280,11 @@ def import_command(
                 row = await get_tenant(db, tenant_id)
                 if row is None:
                     raise typer.BadParameter(f"No such tenant {tenant_id}")
-                if row.external_id != manifest.guild_id:
+                if row.external_id != guild_id:
                     raise typer.BadParameter(
-                        f"The file is for server {manifest.guild_id}, not tenant {tenant_id}"
+                        f"The file is for server {guild_id}, not tenant {tenant_id}"
                     )
-        if callbacks or (manifest.timers and (agent_id or agent_name)):
+        if callbacks or (timers and (agent_id or agent_name)):
             assert tenant is not None
             if not (agent_id and agent_name):
                 raise typer.BadParameter("--agent-id and --agent-name go together")
@@ -279,7 +296,7 @@ def import_command(
         async with build_runtime(load_settings()) as runtime:
             await check_targets(runtime)
             now = datetime.now(UTC)
-            # Whole-file transaction: no half-import on crash.
+            # One transaction for every file: no half-import on crash.
             async with runtime.sessionmaker.begin() as db:
                 rows: list[WatchRow] = []
                 over_cap = 0
@@ -308,7 +325,7 @@ def import_command(
                         )
                     )
                 held: list[TimerImport] = []
-                for timer in manifest.timers:
+                for timer in timers:
                     assert tenant is not None
                     held.append(await import_held_timer(db, timer, tenant_id=tenant, now=now))
                 cancelled = 0
@@ -317,7 +334,7 @@ def import_command(
                     cancelled = await cancel_missing_timers(
                         db,
                         tenant_id=tenant,
-                        keep={t.source_id for t in manifest.timers},
+                        keep={t.source_id for t in timers},
                         now=now,
                     )
                 for item in moved:
@@ -349,7 +366,7 @@ def import_command(
             capped = over_cap + sum(1 for item in moved if item.outcome == "owner_cap")
             if capped or cut:
                 typer.echo(f"watches owner_cap={capped} truncated={cut}")
-            if manifest.timers or full:
+            if timers:
                 counts = {
                     k: sum(1 for t in held if t.outcome == k)
                     for k in ("held", "updated", "existing", "past", "unsupported")

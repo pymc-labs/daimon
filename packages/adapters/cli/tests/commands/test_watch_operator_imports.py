@@ -57,11 +57,13 @@ def timer(source_id: str, *, place: str = "thread", minutes: int = 90, note: str
     }
 
 
-def manifest(tmp_path: Path, *, guild: str | None = GUILD, **parts: object) -> Path:
+def manifest(
+    tmp_path: Path, *, guild: str | None = GUILD, name: str = "export.json", **parts: object
+) -> Path:
     body: dict[str, object] = {"version": 1, "watches": [], **parts}
     if guild is not None:
         body["guild_id"] = guild
-    path = tmp_path / "export.json"
+    path = tmp_path / name
     path.write_text(json.dumps(body))
     return path
 
@@ -117,6 +119,32 @@ async def test_full_import_cancels_timers_the_file_no_longer_lists(operator, tmp
     assert result.exit_code == 0 and "cancelled=1" in result.output, result.output
     stored = await rows(operator, "SELECT source_id, outcome FROM held_timers ORDER BY source_id")
     assert stored == [("a", None), ("b", "cancelled")], stored
+
+
+async def test_full_import_over_a_split_export_keeps_what_any_file_lists(operator, tmp_path):
+    tenant = str(operator.tenant.id)
+    first = manifest(tmp_path, name="1.json", timers=[timer("a"), timer("b")])
+    later = manifest(tmp_path, name="2.json", timers=[])
+    assert (await run("import", str(first), str(later), "--tenant", tenant)).exit_code == 0
+
+    alone = await run("import", str(later), "--tenant", tenant, "--full")
+
+    assert alone.exit_code == 2 and "No file lists timers" in alone.output, alone.output
+    cancelled = "SELECT 1 FROM held_timers WHERE outcome = 'cancelled'"
+    assert await rows(operator, cancelled) == [], "a later file alone cancels nothing"
+    trimmed = manifest(tmp_path, name="1.json", timers=[timer("a")])
+    result = await run("import", str(trimmed), str(later), "--tenant", tenant, "--full")
+    assert result.exit_code == 0 and "cancelled=1" in result.output, result.output
+    stored = await rows(operator, "SELECT source_id, outcome FROM held_timers ORDER BY source_id")
+    assert stored == [("a", None), ("b", "cancelled")], stored
+
+
+async def test_files_for_different_servers_are_refused_together(operator, tmp_path):
+    first = manifest(tmp_path, name="1.json", timers=[timer("a")])
+    other = manifest(tmp_path, name="2.json", guild="888", timers=[timer("b")])
+    result = await run("import", str(first), str(other), "--tenant", str(operator.tenant.id))
+    assert result.exit_code == 2 and "different servers" in result.output, result.output
+    assert await rows(operator, "SELECT 1 FROM held_timers") == [], "nothing is written"
 
 
 async def test_unpause_lets_a_paused_timer_be_scheduled(operator, tmp_path):

@@ -105,7 +105,9 @@ never runs twice. Any other Discord error settles it at once.
 
 Rerun the import after fixing the file: held timers that nothing has scheduled
 are updated. A rerun never pauses again what `unpause` released. With `--full` it also
-cancels held timers the file no longer lists.
+cancels held timers that no file of the run lists. An export split over several
+files may list its timers in only one, so `--full` refuses a run whose files list
+no timers.
 
 ```bash
 daimon watches unpause --tenant TENANT_UUID --all-timers   # or --timer-id, --watch-id
