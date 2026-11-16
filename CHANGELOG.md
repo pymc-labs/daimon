@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **An agent can turn off Ask a person for itself.** The setting now has an Agent
+  level. A button, reaction or form checks it at the agent of the conversation, so
+  other agents in the workspace keep the offer. An agent cannot turn it on above an
+  Off workspace.
 - **The operator can set Approvals from the command line.** `daimon features set
   approvals <on|off> --reason "..."` works for a workspace, channel or thread,
   without a chat admin. The reason is required, and the audit log records the

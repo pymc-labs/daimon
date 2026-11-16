@@ -72,7 +72,6 @@ from daimon.adapters.slack.place_access import (
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.authz import Action, Place, Subject, authorize
 from daimon.core.config import SupportSettings
-from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.permissions import readers_limited_at
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -99,6 +98,7 @@ from daimon.core.support_escalation import (
     received_text,
     remaining_credits,
 )
+from daimon.core.support_offer import support_offered
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -340,16 +340,15 @@ async def _decide_click(
     )
 
 
-async def _escalation_offered(runtime: SlackRuntime, team_id: str) -> bool:
-    """Whether the workspace's `support_escalation` feature is on."""
-    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-    placed = await place_feature(
+async def _escalation_offered(runtime: SlackRuntime, team_id: str, thread_ts: str) -> bool:
+    """Whether `support_escalation` is on for the agent of the thread, else the workspace."""
+    return await support_offered(
         runtime.sessionmaker,
         runtime.settings,
-        FeaturePlace.of(tenant_id, "slack", None),
-        "support_escalation",
+        tenant_id=derive_tenant_uuid(platform="slack", workspace_id=team_id),
+        platform="slack",
+        thread_id=thread_ts,
     )
-    return placed.on
 
 
 async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
@@ -386,7 +385,9 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
         return
 
     support = runtime.settings.support
-    if not slack_support_enabled(support) or not await _escalation_offered(runtime, team_id):
+    if not slack_support_enabled(support) or not await _escalation_offered(
+        runtime, team_id, thread_ts
+    ):
         log.info("support.disabled", platform="slack")
         await post_ephemeral(
             client,
@@ -481,7 +482,7 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
     if (
         dest_channel is None
         or not slack_support_enabled(support)
-        or not await _escalation_offered(runtime, s.team_id)
+        or not await _escalation_offered(runtime, s.team_id, s.thread_ts)
     ):
         # Disabled between the click and the submit. Nothing is spent.
         await reply(UNAVAILABLE)

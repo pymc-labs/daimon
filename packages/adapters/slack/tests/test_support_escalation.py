@@ -31,10 +31,21 @@ from daimon.adapters.slack.support_escalation import (
     slack_support_enabled,
 )
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.config import SupportSettings
+from daimon.core.admin_actions import DelegatedAction
+from daimon.core.config import (
+    AnthropicSettings,
+    DatabaseSettings,
+    DiscordSettings,
+    Settings,
+    SupportSettings,
+)
+from daimon.core.features.service import FeatureActor, change_feature
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
+from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.support_escalation import (
     ALREADY_REQUESTED,
     OUT_OF_CREDITS,
@@ -43,7 +54,8 @@ from daimon.core.support_escalation import (
     offer_text,
     received_text,
 )
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_account, make_tenant
+from pydantic import PostgresDsn, SecretStr
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
@@ -367,6 +379,83 @@ async def test_submission_records_posts_and_confirms(
         "an unfurled permalink would copy the answer into the escalation channel"
     )
     assert _ephemeral_texts(permalink) == [received_text(remaining=19)]
+
+
+async def _agent_thread_set_off(
+    db_session: AsyncSession,
+    factory: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    *,
+    session_agent: str,
+) -> Settings:
+    """A live session of `session_agent` in `_THREAD`, after agent `agent_off` switched it off."""
+    account = await make_account(db_session, tenant=await get_tenant(db_session, tenant_id))
+    await create_thread_session(
+        db_session,
+        tenant_id=tenant_id,
+        platform="slack",
+        thread_id=_THREAD,
+        account_id=account.id,
+        ma_session_id="sess_1",
+        ma_agent_id=session_agent,
+    )
+    await db_session.commit()
+    settings = Settings.model_validate(
+        {
+            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
+            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
+            "discord": DiscordSettings(bot_token=SecretStr("test")),
+            "support": _support(),
+        }
+    )
+
+    async def admin_for(_: DelegatedAction | None) -> bool:
+        return True
+
+    await change_feature(
+        factory,
+        settings,
+        FeatureActor(tenant_id, None, "web", None, admin_for),
+        key="support_escalation",
+        tier="agent",
+        value="off",
+        place=FeaturePlace.of(tenant_id, "slack", None, agent_id="agent_off"),
+    )
+    return settings
+
+
+async def test_a_submission_for_an_agent_set_to_off_records_nothing(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    permalink: Any,
+) -> None:
+    tenant_id, key = await _seed(db_session)
+    settings = await _agent_thread_set_off(
+        db_session, db_session_factory, tenant_id, session_agent="agent_off"
+    )
+    runtime = build_slack_runtime(key, db_session_factory, settings=settings)
+
+    await run_support_submission(runtime, evaluate_support_submission(_submit_payload("help")))
+
+    assert await _rows(db_session_factory) == []
+    assert _posts(permalink) == []
+
+
+async def test_a_submission_for_another_agent_in_the_workspace_is_recorded(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    permalink: Any,
+) -> None:
+    tenant_id, key = await _seed(db_session)
+    settings = await _agent_thread_set_off(
+        db_session, db_session_factory, tenant_id, session_agent="agent_client"
+    )
+    runtime = build_slack_runtime(key, db_session_factory, settings=settings)
+
+    await run_support_submission(runtime, evaluate_support_submission(_submit_payload("help")))
+
+    assert len(await _rows(db_session_factory)) == 1
+    assert len(_posts(permalink)) == 1
 
 
 async def test_double_submit_spends_one_credit_and_posts_once(

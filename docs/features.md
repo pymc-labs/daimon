@@ -68,7 +68,7 @@ Where each feature can be set, and its default.
 | Report publishing | `report_publish` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Video transcripts | `media` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Microsoft 365 | `microsoft_365` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
-| Ask a person | `support_escalation` | Capability | On | ✓ | ✓ |  |  |  | Needs setup by whoever runs Daimon |
+| Ask a person | `support_escalation` | Capability | On | ✓ | ✓ | ✓ |  |  | Needs setup by whoever runs Daimon |
 | GitHub access | `github` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Lead intake | `lead_intake` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
@@ -735,14 +735,14 @@ Anyone who can change a conversation's model may pick an OpenAI or Gemini model 
 
 ## Ask a person
 
-Answers offer a way to ask the Daimon team for help, which posts the request in the support channel. Off removes the button and the form. Whoever runs Daimon sets the channel and each person's credits.
+Answers offer a way to ask the Daimon team for help, which posts the request in the support channel. Off removes the button and the form. An agent can turn it off for itself, never on above an Off workspace. Whoever runs Daimon sets the channel and each person's credits.
 
 | | |
 | --- | --- |
 | Key | `support_escalation` |
 | Values | `on` (On), `off` (Off) |
 | Default | `on` |
-| Levels | Deployment, Workspace |
+| Levels | Deployment, Workspace, Agent |
 | Combines | Off above is a ceiling |
 
 ## GitHub access

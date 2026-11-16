@@ -51,7 +51,6 @@ from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.core.config import SupportSettings
-from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.permissions import readers_limited_at
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -74,6 +73,7 @@ from daimon.core.support_escalation import (
     build_custom_id,
     received_text,
 )
+from daimon.core.support_offer import support_offered
 
 import discord
 from discord.ext import commands
@@ -227,13 +227,14 @@ class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
         # None and the originating guild comes from the custom_id instead.
         guild_id = self._guild_id
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
-        offered = await place_feature(
+        offered = await support_offered(
             self._runtime.sessionmaker,
             settings,
-            FeaturePlace.of(tenant_id, "discord", None),
-            "support_escalation",
+            tenant_id=tenant_id,
+            platform="discord",
+            thread_id=self._channel_id,
         )
-        if channel_id is None or not offered.on:
+        if channel_id is None or not offered:
             # Disabled between the reaction and the submit. Nothing is spent.
             await interaction.followup.send(embed=build_notice_embed(_MALFORMED), ephemeral=True)
             return

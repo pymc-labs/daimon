@@ -45,7 +45,6 @@ from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.post_transport import DiscordPostTransport, known_webhook_ids
 from daimon.adapters.discord.support_escalation import SupportEscalateButton, discord_channel
 from daimon.core.agent_post_identity import is_our_discord_webhook
-from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.message_feedback import (
     Vote,
@@ -66,6 +65,7 @@ from daimon.core.support_escalation import (
     is_escalation_reaction,
     remaining_credits,
 )
+from daimon.core.support_offer import support_offered
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -398,13 +398,14 @@ class FeedbackReactionCog(commands.Cog):
         # guild_id is guaranteed non-None: is_escalation_reaction already
         # returned False for any reaction lacking a guild.
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(payload.guild_id))
-        offered = await place_feature(
+        offered = await support_offered(
             self._bot.runtime.sessionmaker,
             settings,
-            FeaturePlace.of(tenant_id, "discord", None),
-            "support_escalation",
+            tenant_id=tenant_id,
+            platform="discord",
+            thread_id=str(payload.channel_id),
         )
-        if not offered.on or not is_enabled(
+        if not offered or not is_enabled(
             channel_id=discord_channel(settings.support), allowance=allowance
         ):
             log.info("support.disabled", message_id=str(payload.message_id))

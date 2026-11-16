@@ -82,7 +82,7 @@ _NARROWED: dict[str, str] = {
     "plain_text_mentions": _PRE_AGENT,
     "budget_notices": "read when a turn is refused for budget, before an agent or thread resolves",
     "cost_footer": "read by the finished-turn footer, which has no deployment settings or agent",
-    "support_escalation": "the escalation button re-checks at the workspace when pressed",
+    "support_escalation": "a button or form re-checks at the conversation's agent, with no channel",
     "private_channel_messages": "operator-only: read once at startup",
     "direct_messages": "a workspace policy for DMs, which have no agent or thread to choose",
     "dm_memory_read_only": "a workspace policy for DMs, which have no agent or thread to choose",

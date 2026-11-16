@@ -19,8 +19,19 @@ import discord
 from anthropic import AsyncAnthropic
 from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.config import McpSettings, ThreadNamingSettings
+from daimon.core.admin_actions import DelegatedAction
+from daimon.core.config import (
+    AnthropicSettings,
+    DatabaseSettings,
+    DiscordSettings,
+    McpSettings,
+    Settings,
+    SupportSettings,
+    ThreadNamingSettings,
+)
 from daimon.core.errors import TurnError
+from daimon.core.features.service import FeatureActor, change_feature
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
 from daimon.core.message_feedback import THUMBS_DOWN, THUMBS_UP
 from daimon.core.notebooks._rate_limit import RateLimiter
@@ -33,6 +44,7 @@ from daimon.testing.factories import make_tenant
 from daimon.testing.ma import resolved_agent_env_router
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from mux.testing.drivers.anthropic.ma_models import ma_session
+from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import make_bot
@@ -289,6 +301,102 @@ async def test_a_real_text_answer_seeds_all_three_emoji_on_the_final_message(
     assert mock_thread.get_partial_message.return_value.add_reaction.await_count == 3, (
         "an answered turn must seed both vote emoji on its final message"
     )
+
+
+async def _turn_for_agent_set_off(
+    off_agent: str,
+    mock_resolve: AsyncMock,
+    mock_create_session: AsyncMock,
+    mock_run_turn: AsyncMock,
+    mock_find_env: AsyncMock,
+    mock_find_agent: AsyncMock,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> MagicMock:
+    """Answer a turn of agent `ag_test` after `off_agent` switched "ask a person" off."""
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+    await _seed_balance(db_session, tenant.id)
+    await db_session.commit()
+    settings = Settings.model_validate(
+        {
+            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
+            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
+            "discord": DiscordSettings(bot_token=SecretStr("test")),
+            "support": SupportSettings(escalation_channel_id="999"),
+        }
+    )
+
+    async def admin_for(_: DelegatedAction | None) -> bool:
+        return True
+
+    await change_feature(
+        db_session_factory,
+        settings,
+        FeatureActor(tenant.id, None, "web", None, admin_for),
+        key="support_escalation",
+        tier="agent",
+        value="off",
+        place=FeaturePlace.of(tenant.id, "discord", None, agent_id=off_agent),
+    )
+    mock_resolve.return_value = _stub_resolved_config()
+    mock_create_session.return_value = ma_session(id="sess-seed-agent")
+    mock_run_turn.side_effect = _fake_run_turn(
+        TurnState(content=[TextBlock(kind="text", text="the answer")])
+    )
+    mock_find_agent.return_value = "ag_test"
+    mock_find_env.return_value = "env_test"
+    runtime = _make_runtime(db_session_factory)
+    runtime.settings.support = settings.support
+    bot = make_bot(runtime)
+    message = _make_channel_message()
+    mock_thread = _make_seeding_thread()
+    message.create_thread.return_value = mock_thread  # pyright: ignore[reportAttributeAccessIssue]
+    await bot.on_message(message)
+    return mock_thread.get_partial_message.return_value
+
+
+@patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+@patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+@patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+@patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+@patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+async def test_an_agent_set_to_off_seeds_only_the_vote_emoji(
+    mock_resolve: AsyncMock,
+    mock_create_session: AsyncMock,
+    mock_run_turn: AsyncMock,
+    mock_find_env: AsyncMock,
+    mock_find_agent: AsyncMock,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    partial = await _turn_for_agent_set_off(
+        "ag_test", mock_resolve, mock_create_session, mock_run_turn, mock_find_env,
+        mock_find_agent, db_session, db_session_factory,
+    )  # fmt: skip
+    added = [call.args[0] for call in partial.add_reaction.await_args_list]
+    assert added == [THUMBS_UP, THUMBS_DOWN], "no ask-a-person emoji for an agent set to off"
+
+
+@patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+@patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+@patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+@patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+@patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+async def test_another_agent_in_the_same_workspace_still_seeds_the_escalate_emoji(
+    mock_resolve: AsyncMock,
+    mock_create_session: AsyncMock,
+    mock_run_turn: AsyncMock,
+    mock_find_env: AsyncMock,
+    mock_find_agent: AsyncMock,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    partial = await _turn_for_agent_set_off(
+        "ag_other", mock_resolve, mock_create_session, mock_run_turn, mock_find_env,
+        mock_find_agent, db_session, db_session_factory,
+    )  # fmt: skip
+    added = [call.args[0] for call in partial.add_reaction.await_args_list]
+    assert added == [THUMBS_UP, THUMBS_DOWN, ESCALATE], "a client agent keeps the offer"
 
 
 @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)

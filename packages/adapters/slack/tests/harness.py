@@ -15,7 +15,7 @@ import httpx
 from anthropic import AsyncAnthropic
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.config import OutboundSettings, TurnQueueSettings
+from daimon.core.config import OutboundSettings, Settings, TurnQueueSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.deps import build_turn_deps
@@ -31,7 +31,7 @@ def build_slack_runtime(
     db_factory: async_sessionmaker[AsyncSession],
     *,
     anthropic: AsyncAnthropic | None = None,
-    settings: MagicMock | None = None,
+    settings: Settings | MagicMock | None = None,
 ) -> SlackRuntime:
     """A `SlackRuntime` for handlers that never enter the turn path.
 
