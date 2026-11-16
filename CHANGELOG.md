@@ -18,8 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a reinstall. Manage it with `daimon dm default|access|rule|explain`, in the web
   app (Admin > Agent access and Admin > Workspace, with a "Check a person" box that
   reads the person's groups from the platform) or from chat, each change checked and
-  audited; `daimon dm import-policies` moves `DAIMON_DIRECT_MESSAGE_POLICIES` into
-  stored access. Erasing a person removes their pick, rules and grant entries.
+  audited; `daimon features set direct_messages on|off` turns DMs on or off.
+  `daimon dm import-policies` moves `DAIMON_DIRECT_MESSAGE_POLICIES` into stored
+  access; until it is removed the env setting applies with it on every path, `dm
+  explain` included. Erasing a person removes their pick, rules and grant entries.
 - **Teams personal chats follow the DM settings.** The DM wait, DM history depth
   and read-only DM memory apply to them as they do to Discord and Slack DMs.
 - **Direct messages take files, forwards and replies.** A picture or a file sent in a

@@ -67,22 +67,28 @@ held to the same grant. Agents that send a DM by themselves (the
 the sending agent's grant only; locks do not apply.
 
 ```bash
-daimon dm default AGENT --enabled        # default agent, DMs on
-daimon dm access AGENT --mode listed --user 123 --group 456
-daimon dm rule add --group 456 --agent AGENT --locked
-daimon dm rule list | move | remove
-daimon dm explain 123                  # who would answer, and why (groups read live)
-daimon dm import-policies --dry-run      # see DAIMON_DIRECT_MESSAGE_POLICIES as stored access
+daimon features --guild GUILD_ID set direct_messages on   # or off; `default` clears it
+daimon dm --guild GUILD_ID default AGENT                  # the default agent
+daimon dm --guild GUILD_ID access AGENT --mode listed --user 123 --group 456
+daimon dm --guild GUILD_ID rule add --group 456 --agent AGENT --locked
+daimon dm --guild GUILD_ID rule list | move | remove
+daimon dm --guild GUILD_ID explain 123   # who would answer, and why (groups read live)
+daimon dm import-policies --dry-run      # DAIMON_DIRECT_MESSAGE_POLICIES as stored access
 ```
 
-Add `--guild GUILD_ID` (or `--tenant`) to pick the server. As in the web app,
-an unknown agent name is refused and each change is in the audit log. Erasing a
-person removes their pick, their personal rules and their entry in any listed
-grant.
+`--guild GUILD_ID` (or `--tenant TENANT_UUID`) picks the server and goes after
+`dm` or `features`, before the command; without it the CLI's own tenant is used. As
+in the web app, an unknown agent name is refused and each change is in the
+audit log, under the CLI's local user. Erasing a person removes their pick,
+their personal rules and their entry in any listed grant.
 
-`DAIMON_DIRECT_MESSAGE_POLICIES` still applies and is checked in addition.
-The Discord service logs a warning when it is set; `daimon dm import-policies`
-copies it into stored access so it can be removed.
+`DAIMON_DIRECT_MESSAGE_POLICIES` is deprecated. While it is set it applies with
+the stored access on every path, `dm explain` and "Check a person" included, so
+the stricter wins; the Discord service logs a warning. `daimon dm
+import-policies` stores it: an allowlist becomes a listed grant on every agent
+and `disabled` turns DMs off. The setting can then be removed. A notice no agent
+sends, such as a budget notice, is held to the default agent's grant, so set a
+default agent before removing an allowlist.
 
 ## What a person sees
 
