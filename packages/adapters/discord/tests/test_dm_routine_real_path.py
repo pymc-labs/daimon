@@ -48,17 +48,18 @@ from daimon.core.routine_delivery import poll_deliveries_once
 from daimon.core.scheduler import RoutineDispatcher, run_one_tick
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.agent_sandbox import set_agent_sandbox_tools
 from daimon.core.stores.credential_requests import create_credential_request
 from daimon.core.stores.direct_messages import (
     get_conversation,
     set_dm_agent_name,
     set_dm_enabled,
 )
-from daimon.core.stores.domain import AgentSandboxPin, Role, RoutineRow
+from daimon.core.stores.domain import AgentSandboxPin, FeatureTarget, Role, RoutineRow
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_oauth_flows import create_flow, mark_flow_completed
 from daimon.core.stores.routines import create_routine, get_routine
+from daimon.core.stores.sandbox_pins import SANDBOX_KEY, put_sandbox_pin
 from daimon.core.stores.tenant_ledger import get_channel_spend
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import ToolSafetyPolicy
@@ -964,7 +965,6 @@ async def test_protected_final_action_is_refused_through_the_driver(
 
 
 async def test_endpoint_bound_rule_allows_the_unattended_pause(harness: Harness):
-    from daimon.core.authz import Subject
     from daimon.core.stores.agent_tool_rules import set_rule
 
     harness.with_safety(ToolSafetyPolicy(enabled=True, agent_rules=True))
@@ -991,7 +991,6 @@ async def test_endpoint_bound_rule_allows_the_unattended_pause(harness: Harness)
 async def test_replacement_endpoint_cannot_reuse_predecessor_allow(
     harness: Harness, rule_endpoint: str, rule: str
 ):
-    from daimon.core.authz import Subject
     from daimon.core.stores.agent_tool_rules import set_rule
 
     harness.with_safety(ToolSafetyPolicy(enabled=True, agent_rules=True))
@@ -1362,7 +1361,6 @@ async def test_cached_agent_hints_cannot_authorize_actual_session_endpoint(
     harness: Harness, monkeypatch: pytest.MonkeyPatch, recovery: bool
 ):
     from daimon.core import ma_resolver
-    from daimon.core.authz import Subject
     from daimon.core.stores.agent_tool_rules import set_rule
 
     harness.with_safety(
@@ -1867,13 +1865,13 @@ async def test_dm_routine_keeps_builtins_only_under_the_agent_opt_in(
     _bash_agent(harness)
     async with harness.factory.begin() as db:
         if environment is not None:
-            await set_agent_sandbox_tools(
-                db,
-                tenant_id=harness.tenant.id,
-                agent_id="ag_daimon",
-                pin=AgentSandboxPin("ag_daimon", environment),
-                set_by="operator",
-                actor=Subject(is_admin=True),
+            await set_feature_value(
+                db, tenant_id=harness.tenant.id, key=SANDBOX_KEY, value="on", set_by=None,
+                target=FeatureTarget("agent", agent_id="ag_daimon"), surface="cli",
+            )  # fmt: skip
+            pin = AgentSandboxPin("ag_daimon", environment)
+            await put_sandbox_pin(
+                db, tenant_id=harness.tenant.id, tier="agent", key="ag_daimon", pin=pin
             )
         if guardrail == "off":
             await set_workspace_feature(

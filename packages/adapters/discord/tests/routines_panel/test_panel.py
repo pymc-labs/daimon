@@ -54,7 +54,7 @@ def _make_row(**overrides: Any) -> RoutineRow:
     return RoutineRow.model_validate(base)
 
 
-def _make_entry(*, agent_sandbox: bool = False, **overrides: Any) -> RoutineEntry:
+def _make_entry(*, sandbox_by: Any = None, **overrides: Any) -> RoutineEntry:
     row = _make_row(**overrides)
     glyph, color = derive_state(row)
     return RoutineEntry(
@@ -63,7 +63,7 @@ def _make_entry(*, agent_sandbox: bool = False, **overrides: Any) -> RoutineEntr
         glyph=glyph,
         color=color,
         label=row.trigger_message[:60] or row.id.hex[:8],
-        agent_sandbox=agent_sandbox,
+        sandbox_by=sandbox_by,
     )
 
 
@@ -279,15 +279,15 @@ def test_empty_roster_disables_all_but_done_and_refresh() -> None:
     ("overrides", "line"),
     [
         ({}, "Sandbox tools: off"),
-        ({"sandbox_tools_enabled": True}, "Sandbox tools: on (admin opt-in)"),
+        ({"sandbox_by": "routine"}, "Sandbox tools: on (admin opt-in)"),
         (
             {"destination_kind": "dm", "destination_id": "u1", "created_by_user_id": "u1"},
             "Sandbox tools: off",
         ),
-        ({"agent_sandbox": True}, "Sandbox tools: on for this agent (admin opt-in)"),
+        ({"sandbox_by": "agent"}, "Sandbox tools: on for this agent (admin opt-in)"),
         (
             {
-                "agent_sandbox": True,
+                "sandbox_by": "agent",
                 "destination_kind": "dm",
                 "destination_id": "u1",
                 "created_by_user_id": "u1",
@@ -298,12 +298,13 @@ def test_empty_roster_disables_all_but_done_and_refresh() -> None:
     ids=["default", "opted_in", "dm", "agent", "agent_dm"],
 )
 def test_panel_shows_the_routine_sandbox_opt_in(overrides: dict[str, Any], line: str) -> None:
+    """The panel names the opt-in that decides: the routine's own or its agent's."""
     state = _make_state([_make_entry(**overrides)])
     container = build_panel_container(state, now=datetime(2026, 5, 14, 12, 0, tzinfo=UTC))
     text = " ".join(
         child.content for child in container.children if isinstance(child, discord.ui.TextDisplay)
     )
-    assert line in text
+    assert line in text, text
 
 
 @pytest.mark.asyncio

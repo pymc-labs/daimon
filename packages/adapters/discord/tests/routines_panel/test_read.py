@@ -230,28 +230,35 @@ async def test_panel_rows_redact_legacy_diagnostics_for_non_owners(
     await client.close()
 
 
-async def test_load_guild_routines_marks_agent_level_sandbox_opt_in(
+async def test_load_guild_routines_marks_which_opt_in_decides(
     db_session: AsyncSession,
     tenant_id: uuid.UUID,
     seed_routine: SeedRoutineFn,
 ) -> None:
-    """A routine whose agent holds the opt-in is marked, and another agent's is not."""
-    from daimon.core.authz import Subject
-    from daimon.core.stores.agent_sandbox import set_agent_sandbox_tools
-    from daimon.core.stores.domain import AgentSandboxPin
+    """Each routine shows the opt-in that turns its sandbox tools on: its agent's or its own."""
+    from daimon.core.stores.domain import AgentSandboxPin, FeatureTarget, SandboxPin
+    from daimon.core.stores.feature_values import set_feature_value
+    from daimon.core.stores.sandbox_pins import SANDBOX_KEY, put_sandbox_pin
 
-    await seed_routine(tenant_id=tenant_id, trigger_message="on", agent_id="agent_on")
+    await seed_routine(tenant_id=tenant_id, trigger_message="agent", agent_id="agent_on")
     await seed_routine(tenant_id=tenant_id, trigger_message="off", agent_id="agent_off")
-    await set_agent_sandbox_tools(
-        db_session,
-        tenant_id=tenant_id,
-        agent_id="agent_on",
-        pin=AgentSandboxPin("agent_on", "env"),
-        set_by="op",
-        actor=Subject(is_admin=True),
-    )
+    own = await seed_routine(tenant_id=tenant_id, trigger_message="own", agent_id="agent_off")
+    pins = {
+        "agent": ("agent_on", AgentSandboxPin("agent_on", "env")),
+        "routine": (
+            str(own.id),
+            SandboxPin("agent_off", 1, "env_1", datetime(2026, 10, 1, tzinfo=UTC)),
+        ),
+    }
+    for tier, (key, pin) in pins.items():
+        target = FeatureTarget(tier, **{f"{tier}_id": key})
+        await set_feature_value(
+            db_session, tenant_id=tenant_id, key=SANDBOX_KEY, value="on", set_by=None,
+            target=target, surface="cli",
+        )  # fmt: skip
+        await put_sandbox_pin(db_session, tenant_id=tenant_id, tier=tier, key=key, pin=pin)
     entries, _, _ = await load_guild_routines(
         db_session, build_stub_anthropic(_handler_with([])), tenant_id=tenant_id
     )
-    marked = {e.label: e.agent_sandbox for e in entries}
-    assert marked == {"on": True, "off": False}, "only the opted-in agent's routine is marked"
+    marked = {e.label: e.sandbox_by for e in entries}
+    assert marked == {"agent": "agent", "off": None, "own": "routine"}, "the deciding opt-in"

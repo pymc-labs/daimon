@@ -11,11 +11,11 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.host_web_fetch import check_web_fetch_allowed
-from daimon.core.authz import Subject
 from daimon.core.config import DatabaseSettings, Settings
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores.domain import Role, SandboxPin
-from daimon.core.stores.routines import set_sandbox_tools
+from daimon.core.stores.domain import FeatureTarget, Role, SandboxPin
+from daimon.core.stores.feature_values import set_feature_value
+from daimon.core.stores.sandbox_pins import SANDBOX_KEY, put_sandbox_pin
 from daimon.core.stores.turn_origins import create_origin
 from daimon.testing.factories import make_account, make_routine, make_tenant
 from fastmcp.exceptions import ToolError
@@ -76,16 +76,12 @@ async def test_web_fetch_when_routine_then_follows_the_runs_own_match(
             environment_id="env_1",
             environment_updated_at=datetime(2026, 10, 1, tzinfo=UTC),
         )
-        await set_sandbox_tools(
-            db_session,
-            routine.id,
-            tenant_id=tenant.id,
-            enabled=True,
-            pin=pin,
-            set_by="admin-1",
-            actor=Subject(is_admin=True, platform_user_id="admin-1"),
-            via="mcp",
-        )
+        key = str(routine.id)
+        await set_feature_value(
+            db_session, tenant_id=tenant.id, key=SANDBOX_KEY, value="on", set_by=None,
+            target=FeatureTarget("routine", routine_id=key), surface="chat",
+        )  # fmt: skip
+        await put_sandbox_pin(db_session, tenant_id=tenant.id, tier="routine", key=key, pin=pin)
     await db_session.commit()
     auth = _auth(
         tenant.id,
