@@ -45,7 +45,7 @@ class DiscordRest:
     async def send_dm(self, user_id: str, text: str) -> None:
         """Send `text` to `user_id` as a direct message."""
         if not user_id.isascii() or not user_id.isdecimal():
-            raise DiscordRestError("a Discord user id is a decimal number")
+            raise DiscordRestError("a user id is a decimal number")
         body = await self._call("POST", "users/@me/channels", {"recipient_id": user_id})
         channel = cast("dict[str, Any]", body).get("id") if isinstance(body, dict) else None
         if not isinstance(channel, str) or not channel.isdecimal():
@@ -59,7 +59,7 @@ class DiscordRest:
     async def role_names(self, guild_id: str) -> dict[str, str]:
         """Role id to name for a guild; malformed entries are skipped."""
         if not guild_id.isascii() or not guild_id.isdecimal():
-            raise DiscordRestError("a Discord guild id is a decimal number")
+            raise DiscordRestError("a guild id is a decimal number")
         roles = await self._call("GET", f"guilds/{guild_id}/roles")
         if not isinstance(roles, list):
             raise DiscordRestError("guilds/roles: the reply is not a list")
