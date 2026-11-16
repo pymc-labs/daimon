@@ -39,9 +39,9 @@ numbers"). Each platform also has a panel:
 - **Web app** Routines page: members manage their own, admins all. Creating or
   changing one needs a linked chat account. **Run now** makes an active routine
   due at once.
-- **Discord** `/routines` needs Manage Server. **New** creates a routine for
-  an agent, schedule, timezone and message. The creator or an admin can pause,
-  resume or delete one.
+- **Discord** `/routines` lists your own routines, or all of them for an admin.
+  **New** creates a routine for an agent, schedule, timezone and message, for
+  admins. The creator or an admin can pause, resume or delete one.
 
 The CLI creates routines for an owner (`daimon routines create`), sets
 [sandbox tools](unattended.md#opt-a-routine-into-sandbox-tools) and
@@ -233,7 +233,7 @@ below the ceiling. Settings are in [configuration.md](configuration.md#scheduler
 | Action | MCP | Discord | Slack and Teams |
 | --- | --- | --- | --- |
 | create | a caller with a platform user identity, for the agent they are talking to or the one the destination answers with; any agent for an admin | by asking the agent; admins also in the panel | workspace admin only |
-| list and read last output | admin or the creator | `Manage Server`, the command's invoker only | admin or the creator |
+| list and read last output | admin or the creator | admin or the creator | admin or the creator |
 | pause and resume | admin or the creator | admin or the creator | admin or the creator |
 | delete | admin or the creator | admin or the creator, after a confirmation | admin or the creator |
 | run now | admin or the creator, web app only | not offered | not offered |

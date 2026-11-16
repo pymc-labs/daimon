@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Members can open `/routines` in Discord.** The command no longer needs
+  Manage Server. It follows the same permission as chat and the web app: every
+  member sees the routines they created, and an admin sees all of them. Pause,
+  resume and delete still belong to the creator or an admin, New still needs an
+  admin, and the panel's web links match the role. Nobody sees a routine
+  someone else made unless they are an admin.
 - **Operators can create channel and thread routines from the command line.**
   `daimon routines create --destination channel` or `thread`, with
   `--destination-id`, makes a routine for a verified member who owns it, is

@@ -24,15 +24,24 @@ async def load_guild_routines(
     *,
     tenant_id: uuid.UUID,
     viewer_user_id: str | None = None,
+    only_own: bool = False,
     records: async_sessionmaker[AsyncSession] | None = None,
 ) -> tuple[list[RoutineEntry], int, dict[str, str]]:
     """Fetch routines + tenant agents; sort, cap, and decorate per entry.
 
     Returns ``(entries, over_cap_count, agent_name_map)``. ``agent_name_map``
     covers every agent in the tenant (not just those referenced) so the caller
-    can render fallbacks without a per-row LIST.
+    can render fallbacks without a per-row LIST. With `only_own`, only routines
+    created by `viewer_user_id` are loaded, so a non-admin never reads another
+    member's routine; no viewer then loads none.
     """
     rows = await list_routines_for_tenant(session, tenant_id=tenant_id)
+    if only_own:
+        rows = [
+            row
+            for row in rows
+            if viewer_user_id is not None and row.created_by_user_id == viewer_user_id
+        ]
     agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id, records=records)
     agent_name_map: dict[str, str] = {}
     for agent in agents:
