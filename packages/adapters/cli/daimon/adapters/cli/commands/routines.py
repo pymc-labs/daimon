@@ -55,6 +55,7 @@ from daimon.core.routine_sandbox import (
 from daimon.core.routines import routine_for_reader
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import dm_enabled
+from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.routine_move import pause_for_handback, rollback_rows, seed_routines
 from daimon.core.stores.routines import (
@@ -722,13 +723,15 @@ async def run_check_roles(
             raise UserFacingError("Select an active Discord tenant.")
         policy = await load_access_policy(session, tenant_id=tenant_id)
         rows = await list_routines_for_tenant(session, tenant_id=tenant_id)
-    gated = [
-        r
-        for r in rows
-        if r.enabled
-        and r.created_by_user_id is not None
-        and agent_invoker_roles(policy, (r.agent_name,))
-    ]
+    # Every name the agent answers to, as a fire checks them: an alias can add a gate.
+    names: dict[uuid.UUID, tuple[str | None, ...]] = {}
+    gated = []
+    for r in rows:
+        if not r.enabled or r.created_by_user_id is None:
+            continue
+        names[r.id] = await _agent_names(rt, r)
+        if agent_invoker_roles(policy, names[r.id]):
+            gated.append(r)
     subjects: dict[str, Subject] = {}
     flagged = 0
     for row in sorted(gated, key=lambda r: str(r.id)):
@@ -751,10 +754,33 @@ async def run_check_roles(
                 if unreadable
                 else "owner not a verified, allowed member: refused each run"
             )
-        elif lapsed_role(policy, (row.agent_name,), subject):
+        elif lapsed_role(policy, names[row.id], subject):
             verdict = "owner lacks a role: pauses at its next run"
         else:
             continue
         flagged += 1
         console.print(f"{row.id} owner={owner} agent={row.agent_name}: {verdict}", markup=False)
     console.print(f"{flagged} of {len(gated)} role-gated routines need attention.")
+
+
+async def _agent_names(rt: CliRuntime, row: RoutineRow) -> tuple[str | None, ...]:
+    """The names a fire of `row` checks: its saved name plus the agent's own."""
+    agent = None
+    try:
+        agent = await retrieve_agent(
+            rt.anthropic,
+            row.agent_id,
+            scope=resource_scope(tenant_id=str(row.tenant_id)),
+            records=rt.sessionmaker,
+        )
+    except APIStatusError as err:
+        if err.status_code != 404:
+            raise
+    if agent is None or agent.archived_at is not None:
+        # A fire self-heals to the agent now carrying the saved name.
+        agent = await find_agent_by_daimon_tag(
+            rt.anthropic, tenant_id=row.tenant_id, name=row.agent_name, records=rt.sessionmaker
+        )
+    if agent is None:
+        return (row.agent_name,)
+    return build_agent_ref(agent.name, agent.metadata, row.agent_name).names
