@@ -13,7 +13,6 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
@@ -55,6 +54,7 @@ from .test_support_escalation import (
     _USER,
     _ephemeral_texts,
     _posts,
+    _settings,
     _submit_payload,
 )
 
@@ -109,9 +109,8 @@ async def _tenant_row(session: AsyncSession, tenant_id: uuid.UUID) -> TenantRow:
 
 
 def _runtime(key: str, factory: async_sessionmaker[AsyncSession], **support: Any) -> Any:
-    settings = MagicMock()
-    settings.support = SupportSettings(slack_escalation_channel_id=_ESC_CHANNEL, **support)
-    return build_slack_runtime(key, factory, settings=settings)
+    escalation = SupportSettings(slack_escalation_channel_id=_ESC_CHANNEL, **support)
+    return build_slack_runtime(key, factory, settings=_settings(escalation))
 
 
 async def _pid(session: AsyncSession) -> int:

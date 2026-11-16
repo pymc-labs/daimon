@@ -290,8 +290,8 @@ class SupportCommand:
     async def _offered(
         self,
         tenant_id: uuid.UUID,
-        thread_id: str | None,
-        post: tuple[str, str] | None = None,
+        thread_id: str,
+        post: tuple[str, str],
     ) -> bool:
         """Whether `support_escalation` is on for the answer's agent, else the tenant."""
         return await support_offered(

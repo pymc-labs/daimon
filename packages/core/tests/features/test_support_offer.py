@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import uuid
 
 import pytest
@@ -26,6 +25,7 @@ from daimon.core.support_offer import support_offered
 from daimon.testing.factories import make_account, make_tenant
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy import delete, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 KEY = "support_escalation"
@@ -80,11 +80,33 @@ async def _set(
 
 
 async def _offered(
-    factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, thread: str | None
+    factory: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    thread: str,
+    message_id: str = "m_unrecorded",
 ) -> bool:
     return await support_offered(
-        factory, _settings(), tenant_id=tenant_id, platform="discord", thread_id=thread
+        factory,
+        _settings(),
+        tenant_id=tenant_id,
+        platform="discord",
+        thread_id=thread,
+        post=(thread, message_id),
     )
+
+
+async def _answer(
+    db_session: AsyncSession, tenant_id: uuid.UUID, agent: str, message_id: str
+) -> None:
+    await record_post(
+        db_session,
+        tenant_id=tenant_id,
+        platform="discord",
+        channel_id=THREAD,
+        message_id=message_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent),
+    )
+    await db_session.commit()
 
 
 async def test_an_agent_set_to_off_is_not_offered_while_another_agent_still_is(
@@ -114,7 +136,6 @@ async def test_a_thread_without_a_session_uses_the_workspace_value(
     tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
     await db_session.commit()
     assert await _offered(db_session_factory, tenant.id, "none")
-    assert await _offered(db_session_factory, tenant.id, None)
     await _set(db_session_factory, tenant.id, tier="workspace", value="off")
     assert not await _offered(db_session_factory, tenant.id, "none")
 
@@ -126,24 +147,28 @@ async def test_an_agent_cannot_turn_it_on_above_an_off_workspace(
     account = await make_account(db_session, tenant=tenant)
     await _thread(db_session, tenant.id, account.id, agent="agent_1")
     await _set(db_session_factory, tenant.id, tier="workspace", value="off")
-    with contextlib.suppress(ChannelChangeRefused):  # a refused write is as good as ignored
+    with pytest.raises(ChannelChangeRefused):
         await _set(db_session_factory, tenant.id, tier="agent", value="on", agent="agent_1")
     assert not await _offered(db_session_factory, tenant.id, THREAD)
 
 
-async def test_a_failed_session_lookup_refuses(
+async def test_a_failed_lookup_or_read_refuses(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
     await db_session.commit()
+    assert await _offered(db_session_factory, tenant.id, THREAD), "on by default"
 
     async def boom(*_a: object, **_k: object) -> None:
-        raise RuntimeError("down")
+        raise OperationalError("select", {}, Exception("down"))
 
-    monkeypatch.setattr("daimon.core.support_offer.list_thread_agents", boom)
-    assert not await _offered(db_session_factory, tenant.id, THREAD)
+    with monkeypatch.context() as patch:
+        patch.setattr("daimon.core.support_offer.get_post", boom)
+        assert not await _offered(db_session_factory, tenant.id, THREAD), "lookup failed"
+    monkeypatch.setattr("daimon.core.features.snapshot.resolve_features", boom)
+    assert not await _offered(db_session_factory, tenant.id, THREAD), "the read failed"
 
 
 async def test_the_agent_that_wrote_the_answer_decides_in_a_two_agent_thread(
@@ -162,29 +187,27 @@ async def test_the_agent_that_wrote_the_answer_decides_in_a_two_agent_thread(
             ma_agent_id=agent,
         )
         await db_session.commit()  # one transaction would stamp both rows alike
-    await record_post(
-        db_session,
-        tenant_id=tenant.id,
-        platform="discord",
-        channel_id=THREAD,
-        message_id="m_off",
-        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_off"),
-    )
-    await db_session.commit()
+    await _answer(db_session, tenant.id, "agent_off", "m_off")
     await _set(db_session_factory, tenant.id, tier="agent", value="off", agent="agent_off")
+    assert not await _offered(db_session_factory, tenant.id, THREAD, "m_off"), (
+        "the answer's own agent is off, though another is newer"
+    )
+    assert await _offered(db_session_factory, tenant.id, THREAD), (
+        "an answer with no record falls back to the newest agent"
+    )
 
-    async def at(message_id: str | None) -> bool:
-        return await support_offered(
-            db_session_factory,
-            _settings(),
-            tenant_id=tenant.id,
-            platform="discord",
-            thread_id=THREAD,
-            post=(THREAD, message_id) if message_id else None,
-        )
 
-    assert not await at("m_off"), "the answer's own agent is off, though another is newer"
-    assert await at(None), "without the answer, the newest agent decides"
+async def test_an_answer_outside_the_threads_sessions_still_names_its_agent(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
+    await _answer(db_session, tenant.id, "agent_off", "m_off")
+    await _answer(db_session, tenant.id, "agent_plain", "m_plain")
+    await _set(db_session_factory, tenant.id, tier="agent", value="off", agent="agent_off")
+    assert not await _offered(db_session_factory, tenant.id, THREAD, "m_off"), "own value"
+    assert await _offered(db_session_factory, tenant.id, THREAD, "m_plain"), "workspace"
+    await _set(db_session_factory, tenant.id, tier="workspace", value="off")
+    assert not await _offered(db_session_factory, tenant.id, THREAD, "m_plain"), "workspace off"
 
 
 async def test_a_thread_with_only_ended_sessions_still_names_its_agent(

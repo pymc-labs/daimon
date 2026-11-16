@@ -11,7 +11,7 @@ import json
 import re
 import uuid
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import yarl
@@ -35,7 +35,6 @@ from daimon.core.admin_actions import DelegatedAction
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
-    DiscordSettings,
     Settings,
     SupportSettings,
 )
@@ -101,12 +100,20 @@ async def _seed(
     return tenant.id, fernet_key
 
 
+def _settings(support: SupportSettings) -> Settings:
+    return Settings.model_validate(
+        {
+            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
+            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
+            "support": support,
+        }
+    )
+
+
 def _runtime(
     fernet_key: str, factory: async_sessionmaker[AsyncSession], support: SupportSettings
 ) -> Any:
-    settings = MagicMock()
-    settings.support = support
-    return build_slack_runtime(fernet_key, factory, settings=settings)
+    return build_slack_runtime(fernet_key, factory, settings=_settings(support))
 
 
 def _click(*, user_team: str = _TEAM) -> dict[str, Any]:
@@ -400,14 +407,7 @@ async def _agent_thread_set_off(
         ma_agent_id=session_agent,
     )
     await db_session.commit()
-    settings = Settings.model_validate(
-        {
-            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
-            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
-            "discord": DiscordSettings(bot_token=SecretStr("test")),
-            "support": _support(),
-        }
-    )
+    settings = _settings(_support())
 
     async def admin_for(_: DelegatedAction | None) -> bool:
         return True

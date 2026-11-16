@@ -320,16 +320,16 @@ async def get_latest_thread_session(
     return ThreadSessionRow.model_validate(orm)
 
 
-async def list_thread_agents(
+async def newest_thread_agent(
     session: AsyncSession,
     *,
     tenant_id: _uuid.UUID,
     platform: str,
     thread_id: str,
-) -> list[str | None]:
-    """The agent ids of every session row in the thread, newest first, of any status.
+) -> str | None:
+    """The agent id of the thread's newest session row, of any status; None without one.
 
-    A thread whose sessions all ended still names the agents that answered in it. Like
+    A thread whose sessions all ended still names the agent that answered in it. Like
     `get_latest_thread_session`, an attribution hint only: never used to bind a session.
     """
     result = await session.execute(
@@ -340,8 +340,9 @@ async def list_thread_agents(
             ThreadSession.thread_id == thread_id,
         )
         .order_by(ThreadSession.created_at.desc())
+        .limit(1)
     )
-    return list(result.scalars().all())
+    return result.scalar_one_or_none()
 
 
 async def create_thread_session(
