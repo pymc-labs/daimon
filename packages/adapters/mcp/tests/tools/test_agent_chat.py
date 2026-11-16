@@ -154,6 +154,23 @@ def _claude_agents_for_mock_db(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _default_run_limit_for_mock_db(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests built on a MagicMock session factory have no place settings: their
+    worker runs to the built-in 45 minutes, as a run without a workspace does."""
+    from daimon.adapters.mcp.tools import _agent_chat_safety
+    from daimon.core.turn.ceiling import TURN_CEILING_S
+
+    real = _agent_chat_safety.unattended_ceiling_s
+
+    async def ceiling(session_factory: Any, *args: Any, **kwargs: Any) -> float:
+        if isinstance(session_factory, MagicMock):
+            return TURN_CEILING_S
+        return await real(session_factory, *args, **kwargs)
+
+    monkeypatch.setattr(_agent_chat_safety, "unattended_ceiling_s", ceiling)
+
+
+@pytest.fixture(autouse=True)
 def _open_seal_policy_for_mock_db(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tests built on a MagicMock session factory have no policy to load: they
     read as an open tenant. Tests with a real database go through the real
