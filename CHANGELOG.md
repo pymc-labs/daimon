@@ -11,10 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   180 minutes, besides the standard 45 and the shorter 30, 20 and 15. A longer turn stays live
   past 45 minutes: its deadline is stored with the turn's marker, and the stale-turn check,
   a direct message's claim and lock waits follow it. It covers chats, direct messages and the
-  web app.
+  web app. A turn whose worker stopped no longer holds its thread or direct message for the
+  rest of its limit.
 - **An unattended run time limit.** A new workspace or agent setting, with the same choices,
-  limits one routine run or watch wake-up (45 minutes by default). Agent-to-agent chats
-  and command-line runs keep 45 minutes.
+  limits one run nobody is watching (45 minutes by default): a routine, a watch wake-up,
+  an agent-to-agent chat or a `daimon run`.
 - **Hide the server name on tool lines.** A new workspace or agent setting,
   `tool_server_names`, drops the connected server's name from the working card's tool lines.
 - **Model and effort reactions in Discord.** A new setting, off by default, reacts

@@ -863,7 +863,7 @@ The longest one answer may take before it is stopped when someone is talking to 
 
 ## Unattended run time limit
 
-The longest one routine run or watch wake-up may take before it is stopped: the standard 45 minutes, shorter, or up to 3 hours. The smallest setting wins. Chats use the answer time limit; agent-to-agent chats and command-line runs keep 45 minutes.
+The longest a run nobody is watching may take before it is stopped: a routine, a watch wake-up, an agent-to-agent chat or a command-line run. The standard 45 minutes, shorter, or up to 3 hours. The smallest setting wins. Chats use the answer time limit.
 
 | | |
 | --- | --- |
