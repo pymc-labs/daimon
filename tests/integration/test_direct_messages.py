@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 from contextlib import asynccontextmanager
@@ -29,7 +30,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.direct_messages import (
-    DirectMessageBusy,
+    OwnerDmFence,
     claim_message,
     dm_enabled,
     finish_message,
@@ -348,26 +349,24 @@ async def test_concurrent_dm_claims_serialize_and_wrong_owner_has_no_route(
     tenant, deps, admission, sent, streams, created = await _setup(db_session, db_session_factory)
     route = await _start(tenant, deps, admission)
     now = datetime.now(UTC)
-
     independent = async_sessionmaker(db_engine, expire_on_commit=False)
-
-    async def claim(message_id):
+    turn = functools.partial(
+        core_direct_messages.owner_dm_turn, deps, platform="discord", owner="42", wait=False
+    )
+    async with turn() as fence:
+        with pytest.raises(core_direct_messages.DirectMessageAccessRevoked):
+            async with turn():
+                pass
         async with independent.begin() as session:
-            return await claim_message(
+            winner = await claim_message(
                 session,
-                platform="discord",
+                fence=fence,
                 route_key="dm-42",
-                external_user_id="42",
-                message_id=message_id,
+                message_id="one",
                 expected_scope_id=route.scope_id,
-                now=now,
                 active_until=now + timedelta(minutes=1),
-                held_fence=None,
             )
-
-    results = await asyncio.gather(claim("one"), claim("two"), return_exceptions=True)
-    assert sum(isinstance(result, DirectMessageBusy) for result in results) == 1
-    winner = next(result for result in results if not isinstance(result, Exception))
+    assert winner is not None, "the fence holder claims the conversation"
     async with db_session_factory.begin() as session:
         assert (
             await get_conversation(
@@ -1854,14 +1853,11 @@ async def _claimed_dm(db_session, db_session_factory, *, ma_session_id):
     async with db_session_factory.begin() as session:
         row = await claim_message(
             session,
-            platform="discord",
+            fence=OwnerDmFence("discord", "42"),
             route_key="dm-42",
-            external_user_id="42",
             message_id="claim-1",
             expected_scope_id=route.scope_id,
-            now=now,
             active_until=now + timedelta(minutes=2),
-            held_fence=None,
         )
         await create_thread_session(
             session,

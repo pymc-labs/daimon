@@ -180,7 +180,6 @@ async def test_tenant_summary_leaves_out_dm_channels(
                 recent_message_ids=[],
                 active_until=None,
             ),
-            now=datetime.now(UTC),
         )
 
     auth = replace(auth, token_kind="cli", is_platform_admin=True)

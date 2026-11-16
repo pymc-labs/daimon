@@ -37,7 +37,7 @@ def owner_dm_fence(platform: str, owner: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class OwnerDmFence:
-    """Proof the caller holds `owner_dm_fence(platform, owner)`; made by `owner_dm_turn`."""
+    """Proof the caller holds `owner_dm_fence(platform, owner)`; only `owner_dm_turn` makes one."""
 
     platform: str
     owner: str
@@ -120,9 +120,12 @@ async def get_conversation_by_scope(
     return None if row is None else DirectMessageRow.model_validate(row)
 
 
-async def start_conversation(
-    session: AsyncSession, *, conversation: DirectMessageRow, now: datetime
-) -> None:
+async def start_conversation(session: AsyncSession, *, conversation: DirectMessageRow) -> None:
+    """Open `conversation` in place of the route's current one.
+
+    A set claim is live while its owner's fence is held (see `claim_message`), so a held
+    fence is busy; one that is free is taken here, until commit, so nothing claims meanwhile.
+    """
     # Lock even an absent row, so concurrent first starts cannot both insert.
     await lock_route(
         session,
@@ -135,8 +138,7 @@ async def start_conversation(
         (conversation.platform, conversation.route_key, conversation.external_user_id),
         with_for_update=True,
     )
-    if row is not None and row.active_until is not None and row.active_until > now:
-        # A free owner fence means the claim's turn is gone; held to commit, so none claims now.
+    if row is not None and row.active_until is not None:
         try:
             await try_fence(
                 session, owner_dm_fence(row.platform, row.external_user_id), schema_scoped=True
@@ -157,26 +159,22 @@ async def start_conversation(
 async def claim_message(
     session: AsyncSession,
     *,
-    platform: str,
+    fence: OwnerDmFence,
     route_key: str,
-    external_user_id: str,
     message_id: str,
     expected_scope_id: str,
-    now: datetime,
     active_until: datetime,
-    held_fence: OwnerDmFence | None,
 ) -> DirectMessageRow | None:
-    """Claim the conversation for `message_id`; None for a duplicate delivery.
+    """Claim the conversation of `fence`'s owner for `message_id`; None for a duplicate delivery.
 
-    Every claim's turn holds the owner's fence until it finishes, and the fence frees
-    when its process dies. So with `held_fence`, an unexpired claim was left by a dead
-    process and is taken over; its turn, if still running, fails `holds_claim` before
-    writing. Without it, an unexpired claim raises `DirectMessageBusy`.
+    Each claim's turn holds the owner's fence until it finishes, and the fence frees when
+    its process dies. So a claim still set here was left by a dead process and is taken
+    over; its turn, if still running, fails `holds_claim` before writing.
     """
-    if held_fence is not None and held_fence != OwnerDmFence(platform, external_user_id):
-        raise ValueError("held_fence belongs to another DM owner")
     row = await session.get(
-        DirectMessageConversation, (platform, route_key, external_user_id), with_for_update=True
+        DirectMessageConversation,
+        (fence.platform, route_key, fence.owner),
+        with_for_update=True,
     )
     if row is None:
         raise UserFacingError(
@@ -187,42 +185,12 @@ async def claim_message(
         raise UserFacingError("That private conversation changed. Please send your message again.")
     if message_id in row.recent_message_ids:
         return None
-    if row.active_until is not None and row.active_until > now:
-        if held_fence is None:
-            raise DirectMessageBusy(
-                "A reply is still running. Please send your message again after it finishes."
-            )
+    if row.active_until is not None:
         structlog.get_logger(__name__).warning(
-            "dm.claim_taken_over", platform=platform, left_until=row.active_until.isoformat()
+            "dm.claim_taken_over", platform=fence.platform, left_until=row.active_until.isoformat()
         )
     row.active_until = active_until
     row.recent_message_ids = [*row.recent_message_ids[-49:], message_id]
-    await session.flush()
-    return DirectMessageRow.model_validate(row)
-
-
-async def extend_claim(
-    session: AsyncSession, *, conversation: DirectMessageRow, active_until: datetime
-) -> DirectMessageRow:
-    """Move this delivery's claim to a later `active_until`, once its turn's deadline is known.
-
-    Only this delivery's own claim moves, and never earlier: a lapsed or superseded claim,
-    or a later `active_until` already held, returns `conversation` unchanged.
-    """
-    row = await session.get(
-        DirectMessageConversation,
-        (conversation.platform, conversation.route_key, conversation.external_user_id),
-        with_for_update=True,
-    )
-    if (
-        row is None
-        or row.scope_id != conversation.scope_id
-        or row.active_until is None
-        or row.active_until != conversation.active_until
-        or active_until <= row.active_until
-    ):
-        return conversation
-    row.active_until = active_until
     await session.flush()
     return DirectMessageRow.model_validate(row)
 

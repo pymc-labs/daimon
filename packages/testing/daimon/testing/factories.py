@@ -580,7 +580,7 @@ async def make_dm_conversation(
         recent_message_ids=[],
         active_until=None,
     )
-    await start_conversation(session, conversation=conversation, now=datetime.now(UTC))
+    await start_conversation(session, conversation=conversation)
     return conversation
 
 

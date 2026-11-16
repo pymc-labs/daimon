@@ -8,13 +8,13 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from daimon.core import direct_messages, session_fence_retry
+from daimon.core.direct_messages import DirectMessageAccessRevoked
 from daimon.core.session_preparation_stages import turn_blocks_change, turn_is_active
 from daimon.core.stores.direct_messages import (
     DirectMessageBusy,
     DirectMessageRow,
     OwnerDmFence,
     claim_message,
-    extend_claim,
     get_conversation,
     holds_claim,
     start_conversation,
@@ -96,60 +96,16 @@ async def test_a_ninety_minute_marker_stays_active_past_45_minutes(
     assert cleared is not None and cleared.active_turn_deadline is None
 
 
-async def test_a_dm_claim_extends_to_the_admitted_deadline(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    async with db_session_factory.begin() as session:
-        tenant = await make_tenant(session)
-        account = await make_account(session, tenant=tenant)
-        original = await make_dm_conversation(session, tenant=tenant, account_id=account.id)
-        claimed = await claim_message(
-            session,
-            platform=original.platform,
-            route_key=original.route_key,
-            external_user_id=original.external_user_id,
-            message_id="m1",
-            expected_scope_id=original.scope_id,
-            now=_NOW,
-            active_until=_NOW + timedelta(seconds=TURN_CEILING_S + 60),
-            held_fence=None,
-        )
-        assert claimed is not None
-        same = await extend_claim(
-            session,
-            conversation=claimed,
-            active_until=_NOW + timedelta(seconds=TURN_CEILING_S + 60),
-        )
-        assert same == claimed, "the default 45 minutes moves nothing"
-        longer = await extend_claim(
-            session, conversation=claimed, active_until=_NOW + timedelta(minutes=91)
-        )
-        assert longer.active_until == _NOW + timedelta(minutes=91)
-        stale = await extend_claim(
-            session, conversation=claimed, active_until=_NOW + timedelta(minutes=120)
-        )
-        assert stale == claimed, "a claim that was already moved is not the caller's any more"
-
-
 async def _claim(
-    session: AsyncSession,
-    row: DirectMessageRow,
-    message_id: str,
-    *,
-    at: datetime,
-    minutes: int,
-    fence: OwnerDmFence | None = None,
+    session: AsyncSession, row: DirectMessageRow, message_id: str, *, at: datetime, minutes: int
 ) -> DirectMessageRow | None:
     return await claim_message(
         session,
-        platform=row.platform,
+        fence=OwnerDmFence(row.platform, row.external_user_id),
         route_key=row.route_key,
-        external_user_id=row.external_user_id,
         message_id=message_id,
         expected_scope_id=row.scope_id,
-        now=at,
         active_until=at + timedelta(minutes=minutes),
-        held_fence=fence,
     )
 
 
@@ -168,19 +124,15 @@ async def test_a_dm_claim_left_by_a_dead_worker_does_not_block_for_hours(
         owner=original.external_user_id,
         wait=False,
     )
-    async with turn() as fence, db_session_factory.begin() as session:
-        left = await _claim(session, original, "m1", at=_NOW, minutes=181, fence=fence)
+    async with turn(), db_session_factory.begin() as session:
+        left = await _claim(session, original, "m1", at=_NOW, minutes=181)
+        with pytest.raises(DirectMessageAccessRevoked):
+            async with turn():
+                pass
     assert left is not None, "the first message claims the conversation"
     later = _NOW + timedelta(minutes=10)
-    with pytest.raises(DirectMessageBusy):
-        async with db_session_factory.begin() as session:
-            await _claim(session, original, "m2", at=later, minutes=46)
-    stranger = OwnerDmFence(original.platform, "someone-else")
-    with pytest.raises(ValueError, match="another DM owner"):
-        async with db_session_factory.begin() as session:
-            await _claim(session, original, "m2", at=later, minutes=46, fence=stranger)
-    async with turn() as fence, db_session_factory.begin() as session:
-        taken = await _claim(session, original, "m2", at=later, minutes=46, fence=fence)
+    async with turn(), db_session_factory.begin() as session:
+        taken = await _claim(session, original, "m2", at=later, minutes=46)
         assert taken is not None, "the next message is admitted, not refused as busy"
         assert taken.active_until == later + timedelta(minutes=46), "it holds its own claim"
         assert not await holds_claim(session, conversation=left), "the dead claim lost the scope"
@@ -189,23 +141,23 @@ async def test_a_dm_claim_left_by_a_dead_worker_does_not_block_for_hours(
 async def test_a_new_dm_conversation_waits_only_for_a_live_turn(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """A set claim is busy while its owner's fence is held, past its stored time or not."""
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session)
         account = await make_account(session, tenant=tenant)
         original = await make_dm_conversation(session, tenant=tenant, account_id=account.id)
-        claimed = await _claim(session, original, "m1", at=_NOW, minutes=181)
+        claimed = await _claim(session, original, "m1", at=_NOW - timedelta(days=1), minutes=46)
     assert claimed is not None, "the turn claims the conversation"
     fresh = original.model_copy(update={"scope_id": "dm:fresh", "history": []})
-    later = _NOW + timedelta(minutes=10)
     deps = deps_for(None, db_session_factory)
     async with direct_messages.owner_dm_turn(
         deps, platform=original.platform, owner=original.external_user_id, wait=False
     ):
         with pytest.raises(DirectMessageBusy):
             async with db_session_factory.begin() as session:
-                await start_conversation(session, conversation=fresh, now=later)
+                await start_conversation(session, conversation=fresh)
     async with db_session_factory.begin() as session:
-        await start_conversation(session, conversation=fresh, now=later)
+        await start_conversation(session, conversation=fresh)
     async with db_session_factory() as session:
         stored = await get_conversation(
             session,

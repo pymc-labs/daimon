@@ -2394,7 +2394,6 @@ async def test_authenticated_routine_creation_preserves_private_or_guild_origin(
         )
         await start_conversation(
             db_session,
-            now=now,
             conversation=DirectMessageRow(
                 platform="discord",
                 route_key="physical-dm",

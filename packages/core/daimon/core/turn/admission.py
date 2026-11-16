@@ -496,7 +496,7 @@ class Admission:
         `LONGEST_TURN_CEILING_S`: a person's message reads the turn time limit set at this
         place, a turn nobody waits on (`unattended_invocation`) the unattended run limit, and a
         hand-built admission or a missing setting the built-in 45 minutes. A turn allowed
-        past 45 minutes stores its deadline for the stale-turn, DM claim and lock-wait checks."""
+        past 45 minutes stores its deadline for the stale-turn and lock-wait checks."""
         unattended = self.request is not None and unattended_invocation(
             self.request.origin, self.request.attended
         )

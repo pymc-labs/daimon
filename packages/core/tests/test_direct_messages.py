@@ -68,7 +68,11 @@ async def test_shutdown_settle_uses_owned_scope_and_cannot_interrupt_a_released_
 ):
     from datetime import UTC, datetime, timedelta
 
-    from daimon.core.stores.direct_messages import claim_message, finish_message
+    from daimon.core.stores.direct_messages import (
+        OwnerDmFence,
+        claim_message,
+        finish_message,
+    )
     from daimon.core.stores.thread_sessions import get_thread_session_by_id
     from daimon.testing.factories import make_thread_session
 
@@ -86,14 +90,11 @@ async def test_shutdown_settle_uses_owned_scope_and_cannot_interrupt_a_released_
         now = datetime.now(UTC)
         claimed = await claim_message(
             session,
-            platform=original.platform,
+            fence=OwnerDmFence(original.platform, original.external_user_id),
             route_key=original.route_key,
-            external_user_id=original.external_user_id,
             message_id="shutdown-test",
             expected_scope_id=original.scope_id,
-            now=now,
             active_until=now + timedelta(minutes=10),
-            held_fence=None,
         )
         assert claimed is not None
         if not owns_claim:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
 
 from daimon.core.agent_reach import (
     load_agent_reach,
@@ -47,7 +46,6 @@ async def _dm_from(
             recent_message_ids=[],
             active_until=None,
         ),
-        now=datetime.now(UTC),
     )
     await set_fields(
         db_session,

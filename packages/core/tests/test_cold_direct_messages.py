@@ -21,6 +21,7 @@ from daimon.core.scope import ChannelScopeRef, ResolvedConfig
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.daimon_admins import change_grant
 from daimon.core.stores.direct_messages import (
+    OwnerDmFence,
     claim_message,
     finish_message,
     get_conversation,
@@ -161,28 +162,22 @@ async def test_duplicate_message_claims_and_routine_delivery_do_not_change_mappi
     async with db_session_factory.begin() as session:
         first = await claim_message(
             session,
-            platform="discord",
+            fence=OwnerDmFence("discord", "999"),
             route_key="555",
-            external_user_id="999",
             message_id="101",
             expected_scope_id=row.scope_id,
-            now=now,
             active_until=now,
-            held_fence=None,
         )
         await finish_message(session, conversation=first, history=[{"role": "user", "text": "hi"}])
     async with db_session_factory.begin() as session:
         assert (
             await claim_message(
                 session,
-                platform="discord",
+                fence=OwnerDmFence("discord", "999"),
                 route_key="555",
-                external_user_id="999",
                 message_id="101",
                 expected_scope_id=row.scope_id,
-                now=now,
                 active_until=now,
-                held_fence=None,
             )
             is None
         )

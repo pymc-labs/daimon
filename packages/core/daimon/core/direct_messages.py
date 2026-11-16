@@ -45,7 +45,6 @@ from daimon.core.stores.direct_messages import (
     OwnerDmFence,
     claim_message,
     dm_enabled,
-    extend_claim,
     finish_message,
     get_conversation,
     get_dm_agent_name,
@@ -434,7 +433,7 @@ async def start_dm(
         active_until=None,
     )
     async with deps.sessionmaker.begin() as session:
-        await start_conversation(session, conversation=conversation, now=datetime.now(UTC))
+        await start_conversation(session, conversation=conversation)
         await set_fields(
             session,
             scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=channel_id),
@@ -536,7 +535,7 @@ async def start_cold_dm(
             or await get_dm_agent_name(session, tenant_id=tenant_id) != admission.config.agent_name
         ):
             raise AdmissionDenied(reason="invoker_not_allowed")
-        await start_conversation(session, conversation=conversation, now=datetime.now(UTC))
+        await start_conversation(session, conversation=conversation)
         if current is not None:
             # Retired mappings can never be reused by a later private turn.
             await retire_dm_scope(
@@ -778,14 +777,11 @@ async def reply_to_dm_result(
         async with deps.sessionmaker.begin() as session:
             conversation = await claim_message(
                 session,
-                platform=platform,
+                fence=fence,
                 route_key=route_key,
-                external_user_id=external_user_id,
                 message_id=message_id,
                 expected_scope_id=expected_scope_id,
-                now=now,
                 active_until=now + timedelta(seconds=TURN_CEILING_S + 60),
-                held_fence=fence,
             )
         if conversation is None:
             return None
@@ -854,14 +850,6 @@ async def reply_to_dm_result(
                 else None,
             )
             deadline = turn_deadline(now=now, ceiling_s=admission.turn_ceiling_s)
-            # The claim was taken before admission, at the standard window; a time limit
-            # past it must keep the claim until its own deadline.
-            async with deps.sessionmaker.begin() as session:
-                conversation = await extend_claim(
-                    session,
-                    conversation=conversation,
-                    active_until=deadline + timedelta(seconds=60),
-                )
             try:
                 prepared = await bind_session(
                     deps,
