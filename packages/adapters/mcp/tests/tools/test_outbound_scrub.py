@@ -517,6 +517,21 @@ async def test_a_thread_with_no_session_row_follows_its_parent_channel(
     assert await case.scrub("X1") == "discord", "a destination that can't be read"
 
 
+async def test_no_destination_lookup_when_the_callers_place_scrubs(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = await _case(db_session, sessionmaker, monkeypatch)
+    lookup = AsyncMock(return_value=None)
+    monkeypatch.setattr("daimon.adapters.mcp.tools._other_apps._discord_parent", lookup)
+    assert await case.scrub("C2") == "discord", "the caller's place is Off"
+    lookup.assert_not_awaited()
+    await case.set("workspace", "on")
+    assert await case.scrub("C2") is None
+    lookup.assert_awaited_once()
+
+
 async def test_a_chat_agent_that_names_no_verified_turn_keeps_the_scrub(
     db_session: AsyncSession,
     sessionmaker: async_sessionmaker[AsyncSession],

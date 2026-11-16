@@ -87,10 +87,12 @@ async def scrub_platform(
         if origin is not None
         else FeaturePlace.of(auth.tenant_id, platform, None)
     )
-    places = [caller]
-    if channel_id:
-        destination = await _destination(runtime, auth, platform, channel_id, origin)
-        if destination is None:
-            return platform
-        places.append(destination)
-    return await places_scrub_platform(runtime.session_factory, runtime.settings, *places)
+    sessions, settings = runtime.session_factory, runtime.settings
+    if await places_scrub_platform(sessions, settings, caller):
+        return platform  # the caller's place scrubs: no need to look up the destination
+    if not channel_id:
+        return None
+    destination = await _destination(runtime, auth, platform, channel_id, origin)
+    if destination is None:
+        return platform
+    return await places_scrub_platform(sessions, settings, destination)
