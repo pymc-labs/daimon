@@ -806,7 +806,7 @@ async def test_dm_watch_turn_runs_under_watch_posture_not_routine_posture(monkey
     monkeypatch.setattr(direct_messages, "extract_final_response", lambda _content: "report")
     prepared = MagicMock()
     prepared.admission.hold = None
-    text, session_id, _outputs = await _run_admitted_dm_turn(
+    done = await _run_admitted_dm_turn(
         MagicMock(),
         prepared,
         tenant_id=row.tenant_id,
@@ -821,7 +821,9 @@ async def test_dm_watch_turn_runs_under_watch_posture_not_routine_posture(monkey
         origin="routine",
         watch_row=row,
     )
-    assert (text, session_id) == ("report", "sess_dm")
+    assert (done.text, done.session_id) == ("report", "sess_dm"), (
+        "the turn should return its reply and session"
+    )
     kwargs = run.await_args.kwargs
     assert kwargs["watch_row"] is row and kwargs["attended"] is False
 

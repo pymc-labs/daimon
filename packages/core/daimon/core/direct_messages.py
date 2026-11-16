@@ -68,6 +68,7 @@ from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     mark_dead,
     retire_dm_scope,
+    update_watermark,
 )
 from daimon.core.turn.admission import Admission, AdmissionGrant, DmSource, admit
 from daimon.core.turn.ceiling import TURN_CEILING_S, turn_deadline
@@ -735,6 +736,16 @@ async def _reseed_prompt(context: str, prefix: Callable[[], Awaitable[str]], tex
     return f"{context}\n\n{part}\n{text}" if part else f"{context}\n\n{text}"
 
 
+@dataclass(frozen=True)
+class _DmTurn:
+    """A finished private turn: its text, and the session and mapping that answered."""
+
+    text: str
+    session_id: str
+    mapping_id: uuid.UUID | None
+    outputs: OutputRuntime | None
+
+
 async def _run_admitted_dm_turn(
     deps: TurnDeps,
     prepared: PreparedTurn,
@@ -758,7 +769,7 @@ async def _run_admitted_dm_turn(
     platform_message_id: str | None = None,
     image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
     reseed_prompt: Callable[[], Awaitable[str]] | None = None,
-) -> tuple[str, str, OutputRuntime | None]:
+) -> _DmTurn:
     """Run one admitted, bound private turn and return its final text and session.
 
     Shared by live DM replies, DM routines and DM watch reports (`watch_row`,
@@ -840,7 +851,7 @@ async def _run_admitted_dm_turn(
             "execution_incomplete", message="The run did not complete."
         )
     answer = extract_final_response(outcome.state.content) or "The reply finished without text."
-    return answer, outcome.ma_session_id, outcome.outputs
+    return _DmTurn(answer, outcome.ma_session_id, outcome.mapping_id, outcome.outputs)
 
 
 async def reply_to_dm(
@@ -943,6 +954,7 @@ async def reply_to_dm_result(
         if conversation is None:
             return None
         history: list[dict[str, str]] | None = None
+        answered: uuid.UUID | None = None
         bound = False
         try:
             async with deps.sessionmaker() as session:
@@ -1049,18 +1061,20 @@ async def reply_to_dm_result(
                 )
             )
             whole = f"{context}\n\n{prefix}\n{text}" if prefix else f"{context}\n\n{text}"
-            # A session that continues already holds the earlier turns; a new or replaced
-            # one has seen none, and a recovery rebuilds `whole` for the same reason.
-            holds_history = prepared.reused and prepared.continuity.state in (
-                "continued",
-                "updated",
+            # A session that answered a turn here (its watermark) holds the earlier turns;
+            # a new or replaced one, or one whose first turn never got through, has seen
+            # none, and a recovery rebuilds `whole` for the same reason.
+            holds_history = (
+                prepared.reused
+                and prepared.watermark is not None
+                and prepared.continuity.state in ("continued", "updated")
             )
             sent = (f"{prefix}\n{text}" if prefix else text) if holds_history else whole
 
             async def reseed_whole() -> str:
                 return whole
 
-            answer, _session_id, outputs = await _run_admitted_dm_turn(
+            done = await _run_admitted_dm_turn(
                 deps,
                 prepared,
                 tenant_id=conversation.tenant_id,
@@ -1091,11 +1105,12 @@ async def reply_to_dm_result(
                 [
                     *previous,
                     TranscriptTurn(role="user", text="\n".join([text, *history_notes]).strip()),
-                    TranscriptTurn(role="agent", text=answer),
+                    TranscriptTurn(role="agent", text=done.text),
                 ],
                 prepared.admission.dm_history,
             )
             history = [{"role": turn.role, "text": turn.text} for turn in turns]
+            answered = done.mapping_id
             grant = prepared.admission.grant
             if grant is None:
                 raise DirectMessageAccessRevoked(
@@ -1103,12 +1118,12 @@ async def reply_to_dm_result(
                 )
             revision = prepared.admission.backend_revision
             return DirectMessageReply(
-                text=answer,
+                text=done.text,
                 conversation=conversation,
                 grant=grant,
                 outputs=None
                 if revision is not None and revision.backend == "selfhosted"
-                else outputs,
+                else done.outputs,
             )
         except (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError) as error:
             raise _revoked(error) from error
@@ -1118,6 +1133,9 @@ async def reply_to_dm_result(
             raise
         finally:
             async with deps.sessionmaker.begin() as session:
+                if history is not None and answered is not None:
+                    # The session now holds this conversation; its next turn sends only new words.
+                    await update_watermark(session, id=answered, watermark_message_id=message_id)
                 await finish_message(session, conversation=conversation, history=history)
 
 
@@ -1314,7 +1332,7 @@ async def _run_dm_fire(
             raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE)
 
         try:
-            text, session_id, _outputs = await _run_admitted_dm_turn(
+            done = await _run_admitted_dm_turn(
                 deps,
                 prepared,
                 tenant_id=tenant_id,
@@ -1340,8 +1358,8 @@ async def _run_dm_fire(
                 )
             raise
         return DmRoutineReply(
-            text=text,
-            session_id=session_id,
+            text=done.text,
+            session_id=done.session_id,
             producing_agent_id=prepared.admission.agent.id,
         )
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -10,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from daimon.adapters.slack import direct_messages as dm_module
 from daimon.adapters.slack.blockkit import notice_fields
+from daimon.adapters.slack.runtime import new_dm_bursts
 from daimon.core.authz import AgentRef
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.direct_messages import DM_AGENT_REFUSED, ColdDmNotices
@@ -43,6 +45,7 @@ def fresh_notices(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _runtime(db_session_factory: async_sessionmaker[AsyncSession]) -> MagicMock:
     runtime = MagicMock()
+    runtime.dm_bursts = new_dm_bursts()
     runtime.sessionmaker = db_session_factory
     runtime.settings.direct_message_policies = {}
     runtime.settings.features = {}
@@ -253,6 +256,31 @@ async def test_cold_dm_when_several_agents_fit_then_a_pick_starts_and_answers_th
         "channel": "D_COLD",
         **notice_fields(dm_module._PICK_EXPIRED),  # pyright: ignore[reportPrivateUsage]
     }, "a second click finds the choice used"
+
+
+async def test_cold_dm_when_more_arrive_before_the_pick_then_one_offer_answers_them_all(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant = await _dms_on(db_session_factory)
+    client = _client(monkeypatch)
+    runtime = _runtime(db_session_factory)
+    monkeypatch.setattr(dm_module, "debounce_seconds", AsyncMock(return_value=0.2))
+    _decided(monkeypatch, DmChoose(("ada", "bob")), allowed=("ada", "bob"))
+    _, reply = _starts(monkeypatch, tenant.tenant_id)
+    first = asyncio.create_task(
+        dm_module.handle_direct_message(runtime, _event(), team_id="T_ROUTE")
+    )
+    await asyncio.sleep(0.05)
+    await dm_module.handle_direct_message(
+        runtime, {**_event(ts="1.2"), "text": "yes"}, team_id="T_ROUTE"
+    )
+    await first
+
+    offers = [c for c in client.chat_postMessage.await_args_list if "blocks" in c.kwargs]
+    assert len(offers) == 1, "one choice for the whole burst"
+    await dm_module.handle_dm_agent_pick(runtime, _pick("ada"))
+    texts = [c.kwargs["text"] for c in reply.await_args_list]
+    assert texts == ["hello?", "yes"], "the pick answers both, the approval on its own"
 
 
 async def test_agent_pick_when_access_changed_meanwhile_then_refused(

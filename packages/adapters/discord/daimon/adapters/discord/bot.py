@@ -1074,6 +1074,8 @@ class DaimonBot(commands.Bot):
         recovery, not abandoned: see `docs/architecture.md`.
         """
         self.draining = True
+        # Held direct messages are answered now, inside the grace window.
+        self.dispatch("drain")
         # Pending auto batches are unasked-for turns that have not started;
         # dropping them is free, whereas letting a timer fire mid-drain would
         # admit a new turn the drain is trying to stop.

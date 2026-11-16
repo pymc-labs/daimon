@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from functools import cached_property
+from typing import Any
 
 import aiohttp
 import httpx
@@ -18,6 +19,7 @@ from daimon.core.config import Settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
+from daimon.core.dm_debounce import DmBursts
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
 from daimon.core.mcp_oauth import McpTokenProbe, probe_bearer_token
@@ -53,6 +55,10 @@ class SlackRuntime:
     slack_http: aiohttp.ClientSession | None = None
     # User group members for DM grants and rules (`user_groups`), a minute at most.
     group_members: GroupMembersCache = field(default_factory=GroupMembersCache)
+    # The messages each person sent in each direct message that no turn has answered yet.
+    dm_bursts: DmBursts[tuple[str, str, str], dict[str, Any]] = field(
+        default_factory=lambda: new_dm_bursts()
+    )
 
     @cached_property
     def fernet(self) -> MultiFernet:
@@ -62,6 +68,11 @@ class SlackRuntime:
         empty key set raises `ValueError` on every access, as building did.
         """
         return build_multifernet(tuple(k.get_secret_value() for k in self.settings.crypto.keys))
+
+
+def new_dm_bursts() -> DmBursts[tuple[str, str, str], dict[str, Any]]:
+    """No open bursts, keyed by (team, channel, user) and read by each event's text."""
+    return DmBursts(lambda event: str(event.get("text") or ""))
 
 
 def resolve_bot_display_name(settings: Settings) -> str:
