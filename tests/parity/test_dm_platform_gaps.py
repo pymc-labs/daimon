@@ -33,7 +33,7 @@ def test_teams_dm_groups_when_listed_then_are_installed_teams_only() -> None:
 
 
 def test_teams_personal_chats_when_routed_then_follow_the_dm_settings() -> None:
-    """Applied in `TeamsApp._wait_out_burst`, `teams.app._history_depth` and admission."""
+    """Applied in `TeamsApp._answer_burst`, `teams.app._history_depth` and admission."""
     assert FEATURES["direct_messages"].on_platform("teams"), "Teams DMs follow the grants"
     for key in ("dm_debounce_seconds", "dm_history_depth", "dm_memory_read_only"):
         assert FEATURES[key].on_platform("teams"), f"{key} applies to a personal chat"

@@ -37,7 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message gets an eyes reaction until it is answered. An approval reply such as "yes"
   is answered on its own, at once. A restart answers held messages at once. If
   `/dm-me` moves the conversation or the turn cannot run, they are told they weren't
-  sent. It applies to Discord and Slack, set per workspace or deployment.
+  sent. It applies to Discord, Slack and Teams, set per workspace or deployment.
 - **Earlier turns are no longer sent again into a continuing session.** A Discord direct
   message into a session that already answered a turn sends only the new message. A new,
   replaced or recovered session, or one whose first turn failed, still gets the history.

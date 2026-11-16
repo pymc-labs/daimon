@@ -1,5 +1,9 @@
 """Reactions on the asker's message: 👀 once a turn is accepted, ✅ once answered, ⌛ while queued.
 
+A personal chat's burst (`daimon.core.dm_debounce`) shows 👀 on each message it holds,
+as Discord and Slack DMs do; the turn answering one neither adds its 👀 again nor
+leaves it behind.
+
 Bot Framework rate-limits a bot's reactions to two a second across every
 conversation, answering 429 past that
 (https://learn.microsoft.com/microsoftteams/platform/agents-in-teams/agent-reactions).
@@ -89,7 +93,7 @@ def _spawn_reaction(coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
 
 
 class TeamsReactions:
-    """Background, rate-spaced reactions, with the ⌛ marks still owed a removal.
+    """Background, rate-spaced reactions, with the ⌛ and held 👀 marks still owed a removal.
 
     Without `react` (no Bot Framework client) every method does nothing. Its
     tasks are its own, outside the app's: shutdown cancels them (`close`)
@@ -113,6 +117,8 @@ class TeamsReactions:
         self._chains: dict[MessageKey, asyncio.Task[None]] = {}
         # Messages showing ⌛.
         self._queued: dict[MessageKey, ReactionTarget] = {}
+        # Personal-chat messages showing 👀 while their burst holds them.
+        self._waiting: dict[MessageKey, ReactionTarget] = {}
         # Reactions whose add never reached the message: their removal is skipped.
         self._absent: OrderedDict[tuple[MessageKey, str], None] = OrderedDict()
         self._running: set[asyncio.Task[None]] = set()
@@ -127,8 +133,10 @@ class TeamsReactions:
     def acknowledge(self, target: ReactionTarget, phase: Acknowledgment) -> None:
         """👀 when the turn is accepted; ✅ in its place once it answered."""
         if phase == "accepted":
-            self._queue(target, EYES, add=True)
+            if target.key not in self._waiting:  # its burst's 👀 already shows
+                self._queue(target, EYES, add=True)
             return
+        self._waiting.pop(target.key, None)  # this removal takes the burst's 👀 off too
         self._queue(target, CHECK, add=True)
         self._queue(target, EYES, add=False)
 
@@ -145,6 +153,25 @@ class TeamsReactions:
         self._queued[(inbound.conversation_id, inbound.activity_id)] = target
         self._queue(target, HOURGLASS, add=True, allowed=allowed)
 
+    def mark_waiting(
+        self,
+        inbound: TeamsInbound,
+        *,
+        on: bool,
+        allowed: Callable[[], Awaitable[bool]] | None = None,
+    ) -> None:
+        """👀 on a personal-chat message its burst holds (`on`, once `allowed` says yes), or off.
+
+        Fits `DmBurst`'s mark. An answered message has lost it already (`acknowledge`).
+        """
+        if self._react is None or (target := reaction_target(inbound)) is None:
+            return
+        if on:
+            self._waiting[target.key] = target
+            self._queue(target, EYES, add=True, allowed=allowed)
+        elif self._waiting.pop(target.key, None) is not None:
+            self._queue(target, EYES, add=False)
+
     def clear_queued(self, items: Iterable[TeamsInbound]) -> None:
         """Remove the ⌛ from these messages, if they show one: their work started or settled."""
         for item in items:
@@ -154,7 +181,8 @@ class TeamsReactions:
                     self._queue(target, HOURGLASS, add=False)
 
     def clear_held(self, items: Iterable[TeamsInbound]) -> None:
-        """Remove ⌛ from messages an earlier process may have marked, now picked up again.
+        """Remove ⌛, and a personal chat's 👀, from messages an earlier process may have
+        marked, now picked up again.
 
         A restart can cut off that process's removal, and this one cannot tell
         which messages it marked, so the removal is sent whatever they show.
@@ -163,6 +191,9 @@ class TeamsReactions:
             if (target := reaction_target(item)) is not None:
                 self._queued.pop((item.conversation_id, item.activity_id), None)
                 self._queue(target, HOURGLASS, add=False, known=False)
+                if item.kind == "dm":
+                    self._waiting.pop(target.key, None)
+                    self._queue(target, EYES, add=False, known=False)
 
     async def close(self) -> None:
         """Cancel every reaction still waiting or in flight, and send no more."""

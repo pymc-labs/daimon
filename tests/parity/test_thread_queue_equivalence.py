@@ -95,7 +95,7 @@ class Replay:
                 "dispatch_continuations_in_thread",
             ],
             "teams": ["_orchestrate", "_holding", "_run_turns", "_release", "dispatch_after_input"]
-            + ([] if old else ["_wait_out_burst"]),
+            + ([] if old else ["_answer_burst", "_burst_mark"]),
         }[platform]
         if platform == "discord" and not old:
             names += [

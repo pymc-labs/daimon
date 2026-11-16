@@ -120,6 +120,7 @@ from daimon.core.continuity.messages import (
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.direct_messages import DirectMessageAccessRevoked, require_dm_turn_grant
 from daimon.core.dm_debounce import DmBursts, debounce_seconds
+from daimon.core.dm_debounce import React as BurstMark
 from daimon.core.errors import DaimonError
 from daimon.core.features.model_input import FULL_HISTORY, HistoryDepth
 from daimon.core.features.snapshot import FeaturePlace, may_turn_on, place_feature
@@ -485,7 +486,7 @@ class TeamsApp:
         self.provider_actions = TeamsProviderActions(self._sender, feed=feed)
         self._processing: HeldThreads[str] = HeldThreads()
         self._pending: dict[str, list[TeamsInbound]] = {}
-        # A personal chat's first message waits here for the rest of its burst.
+        # Each personal chat's open burst: the messages its next turns answer.
         self._dm_bursts: DmBursts[str, TeamsInbound] = DmBursts(lambda item: item.text)
         # Controls held for a turn's output sweep, by conversation: the next turn
         # there posts them before its own card.
@@ -1336,11 +1337,16 @@ class TeamsApp:
         # Read first: no await may split the queue check from the claim below.
         cap = await self._turn_cap(tenant_id)
         if replayed := self._replay_queued.get((key, inbound.activity_id)):
-            replayed.set()  # wakes only at the next await, after the claim or enqueue
+            replayed.set()  # wakes only at the next await, after the claim, join or enqueue
+        personal = inbound.kind == "dm" and not inbound.setup_thread_id
+        if personal and (burst := self._dm_bursts.join(key, inbound)) is not None:
+            # The turn waiting or running here answers this message too.
+            self._last_message_at[key] = datetime.now(UTC)
+            await burst.mark(inbound, self._burst_mark(tenant_id))
+            return
         if key in self._processing:
             self._last_message_at[key] = datetime.now(UTC)
             self._thread_queue.enqueue(key, inbound)
-            self._dm_bursts.join(key, inbound)  # a waiting burst waits on for more
             allowed = functools.partial(self._may_start_turn, inbound, tenant_id)
             self._reactions.mark_queued(inbound, allowed=allowed)
             generation = self._processing.generation(key)
@@ -1376,35 +1382,50 @@ class TeamsApp:
         self._last_message_at[key] = datetime.now(UTC)
         self._supersede_batch(inbound)
         async with self._holding(key, ticket):
-            queued = [inbound]
-            if inbound.kind == "dm" and not inbound.setup_thread_id:
-                queued = await self._wait_out_burst(key, tenant_id, inbound)
-            await self._run_turns(key, tenant_id, queued)
+            if personal:
+                await self._answer_burst(key, tenant_id, inbound)
+            else:
+                await self._run_turns(key, tenant_id, [inbound])
 
-    async def _wait_out_burst(
-        self, key: str, tenant_id: uuid.UUID, inbound: TeamsInbound
-    ) -> list[TeamsInbound]:
-        """A personal chat's first message waits for the rest of its burst
-        (`dm_debounce_seconds`), so one turn answers them all. What arrives
-        meanwhile queues behind the held chat (`_orchestrate`)."""
-        seconds = await debounce_seconds(
-            self.runtime.sessionmaker, self.runtime.settings, tenant_id, "teams"
-        )
-        if seconds <= 0:
-            return [inbound]
+    async def _answer_burst(self, key: str, tenant_id: uuid.UUID, inbound: TeamsInbound) -> None:
+        """A personal chat's burst, as on Discord and Slack (`DmBurst`): its first message
+        waits for the rest (`dm_debounce_seconds`), and what arrives while it waits or a
+        turn runs joins it with 👀 (`_orchestrate`), so one turn answers each group.
+
+        Opened before any await, so no message slips past it into the chat's queue. As
+        that queue's drain does, an error or cancellation leaves only the messages no turn
+        took yet, and they go back to it, which `_holding` answers or holds.
+        """
         burst = self._dm_bursts.open(key, inbound)
+        taken: set[int] = set()
+
+        async def answer(group: list[TeamsInbound]) -> None:
+            taken.update(map(id, group))
+            await self._run_turns(key, tenant_id, group)
+
         try:
-            allowed = functools.partial(self._may_start_turn, inbound, tenant_id)
-            self._reactions.mark_queued(inbound, allowed=allowed)
-            await burst.take(seconds)
+            seconds = await debounce_seconds(
+                self.runtime.sessionmaker, self.runtime.settings, tenant_id, "teams"
+            )
+            await burst.answer(seconds, self._burst_mark(tenant_id), answer)
         finally:
-            await self._dm_bursts.end(key, burst)
-        return [inbound, *self._pending.pop(key, [])]
+            left = await self._dm_bursts.end(key, burst)
+            if left := [item for item in left if id(item) not in taken]:
+                self._pending.setdefault(key, []).extend(left)
+
+    def _burst_mark(self, tenant_id: uuid.UUID) -> BurstMark[TeamsInbound]:
+        """A burst's 👀, only where admission would let the message start a turn."""
+
+        async def mark(item: TeamsInbound, on: bool) -> None:
+            allowed = functools.partial(self._may_start_turn, item, tenant_id)
+            self._reactions.mark_waiting(item, on=on, allowed=allowed if on else None)
+
+        return mark
 
     async def _may_start_turn(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> bool:
         """Whether admission's people-and-place gates let `inbound` start a turn there.
 
-        ⌛ says an answer is coming, so a protected place or someone off the
+        ⌛ and a burst's 👀 say an answer is coming, so a protected place or someone off the
         invoker allowlist gets none; nor does anyone while the policy cannot be read.
         """
         try:
