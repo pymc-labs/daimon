@@ -26,6 +26,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from html.parser import HTMLParser
+from typing import cast
 from urllib.parse import quote
 
 import httpx
@@ -207,6 +208,40 @@ def skiptoken_of(next_link: str | None) -> str | None:
 def path_segment(value: str) -> str:
     # Ids go in one path segment each, so a `/` or `..` in one cannot move the request.
     return quote(value, safe="")
+
+
+def app_token(
+    http: httpx.AsyncClient, *, tenant_id: str, client_id: str, client_secret: str
+) -> GraphToken:
+    """An app-only Graph token by the client-credentials flow, fetched once per lookup.
+
+    For a short-lived reader (an admin page); long-running processes cache per scope.
+    """
+    fetched: list[str | None] = []
+
+    async def token() -> str | None:
+        if not fetched:
+            response = await http.post(
+                f"https://login.microsoftonline.com/{path_segment(tenant_id)}/oauth2/v2.0/token",
+                data={
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "grant_type": "client_credentials",
+                    "scope": GRAPH_SCOPE,
+                },
+                timeout=GRAPH_TIMEOUT_S,
+            )
+            response.raise_for_status()
+            body: object = response.json()
+            value = (
+                cast("dict[str, object]", body).get("access_token")
+                if isinstance(body, dict)
+                else None
+            )
+            fetched.append(value if isinstance(value, str) else None)
+        return fetched[0]
+
+    return token
 
 
 class TeamGroups:

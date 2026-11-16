@@ -69,7 +69,7 @@ daimon dm default AGENT --enabled        # default agent, DMs on
 daimon dm access AGENT --mode listed --user 123 --group 456
 daimon dm rule add --group 456 --agent AGENT --locked
 daimon dm rule list | move | remove
-daimon dm explain 123                  # who would answer, and why
+daimon dm explain 123                  # who would answer, and why (groups read live)
 daimon dm import-policies --dry-run      # see DAIMON_DIRECT_MESSAGE_POLICIES as stored access
 ```
 

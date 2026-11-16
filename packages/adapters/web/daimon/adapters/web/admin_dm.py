@@ -15,13 +15,11 @@ from daimon.adapters.web.admin_common import WorkspaceAdmin, listed_agents
 from daimon.adapters.web.caller import WebCaller
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import dm_settings
-from daimon.core.authz import build_subject
-from daimon.core.dm_access import DmAgent, decide_dm, dm_agents_of, group_ids_of, load_routing
+from daimon.core.dm_access import DmAgent, dm_agents_of, group_ids_of, load_routing
+from daimon.core.dm_explain import DmExplanation, explain_dm
 from daimon.core.dm_routing import (
     DmChoose,
-    DmDecision,
     DmRefused,
-    DmRuleFact,
     DmStart,
     DmUnchecked,
 )
@@ -45,7 +43,6 @@ from daimon.core.platform_groups import (
 )
 from daimon.core.stores import dm_access as store
 from daimon.core.stores import teams_installations
-from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import get_dm_agent_name
 from daimon.core.stores.domain import DmGrantMode, DmRuleRow, DmRuleSubject
 from daimon.core.stores.platform_names import KnownName, get_user_names, search_user_names
@@ -242,33 +239,24 @@ def dm_router(runtime: WebRuntime) -> APIRouter:
 
     @router.get("/dm/explain")
     async def explain(  # pyright: ignore[reportUnusedFunction]
-        caller: WorkspaceAdmin,
-        user: Annotated[PlatformId, Query()],
-        group: Annotated[list[PlatformId] | None, Query(max_length=MAX_SUBJECTS)] = None,
+        caller: WorkspaceAdmin, user: Annotated[PlatformId, Query()]
     ) -> dict[str, Any]:
         tenant_id = caller.person.tenant_id
-        platform = await platform_of(tenant_id)
+        await platform_of(tenant_id)
         agents = await agents_of(tenant_id)
         async with runtime.sessionmaker() as db:
-            policy = await load_access_policy(db, tenant_id=tenant_id)
-            subject = build_subject(
-                is_admin=False,
-                platform_user_id=user,
-                role_ids=tuple(group or ()),
-                verified_membership=True,
-            )
-            decision = await decide_dm(
-                db,
-                runtime.settings,
-                policy,
-                tenant_id=tenant_id,
-                platform=platform,
-                agents=agents,
-                subject=subject,
-                account_id=None,
-            )
-            rules = (await load_routing(db, tenant_id=tenant_id)).rules
-        return explain_json(decision, rules)
+            tenant = await get_tenant(db, tenant_id)
+        if tenant is None:
+            raise HTTPException(status_code=409, detail=NO_DMS)
+        found = await explain_dm(
+            runtime.sessionmaker,
+            runtime.settings,
+            runtime.http_client,
+            tenant=tenant,
+            agents=agents,
+            user_id=user,
+        )
+        return explain_json(found)
 
     @router.get("/dm/people")
     async def people(  # pyright: ignore[reportUnusedFunction]
@@ -330,8 +318,12 @@ def dm_router(runtime: WebRuntime) -> APIRouter:
     return router
 
 
-def explain_json(decision: DmDecision, rules: list[DmRuleFact]) -> dict[str, Any]:
-    """What `decide_dm` chose, for the "Check a person" box; `rule` is a 0-based position."""
+def explain_json(found: DmExplanation) -> dict[str, Any]:
+    """What a DM would reach, for "Check a person"; `rule` is a 0-based position.
+
+    `groups` are the named groups the person is in, None when the platform could not say.
+    """
+    decision = found.decision
     route = decision.route
     match route:
         case DmStart():
@@ -349,7 +341,8 @@ def explain_json(decision: DmDecision, rules: list[DmRuleFact]) -> dict[str, Any
         "reason": reason,
         "agents": list(agents),
         "allowed": list(decision.allowed),
-        "rule": None if rule is None else rules.index(rule),
+        "rule": None if rule is None else found.rules.index(rule),
+        "groups": None if found.groups is None else sorted(found.groups),
     }
 
 

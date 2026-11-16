@@ -12,20 +12,19 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 
+import httpx
 import typer
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.flags import GUILD_OPTION, JSON_OPTION, TENANT_OPTION
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.adapters.cli.tenant import TenantSelector, discover_tenant, resolve_tenant_override
-from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.authz import build_subject
 from daimon.core.config import load_settings
-from daimon.core.dm_access import decide_dm, list_dm_agents
+from daimon.core.dm_access import list_dm_agents
+from daimon.core.dm_explain import explain_dm
 from daimon.core.dm_import import import_dm_policies
 from daimon.core.dm_routing import DmChoose, DmRefused, DmStart, DmUnchecked
 from daimon.core.errors import StoreError
 from daimon.core.stores import dm_access as store
-from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import dm_enabled, get_dm_agent_name, set_dm_agent_name
 from daimon.core.stores.domain import DmGrantMode
 from daimon.core.stores.tenants import get_tenant
@@ -216,35 +215,22 @@ async def dm_explain(
     console: Console,
     selector: TenantSelector | None,
     user: str,
-    groups: list[str],
     as_json: bool = False,
 ) -> None:
-    """Which agent a person's private message would reach, and why."""
+    """Which agent a person's private message would reach, and why, by their live groups."""
     tenant_id = await _tenant(rt, selector)
     async with rt.sessionmaker() as session:
         tenant = await get_tenant(session, tenant_id)
         if tenant is None:
             raise StoreError("no such workspace")
-        policy = await load_access_policy(session, tenant_id=tenant_id) or TenantAccessPolicy()
         agents = await list_dm_agents(
             session, tenant_id=tenant_id, anthropic=rt.anthropic, records=rt.sessionmaker
         )
-        subject = build_subject(
-            is_admin=False,
-            platform_user_id=user,
-            role_ids=tuple(groups),
-            verified_membership=True,
+    async with httpx.AsyncClient(timeout=10) as http:
+        found = await explain_dm(
+            rt.sessionmaker, rt.settings, http, tenant=tenant, agents=agents, user_id=user
         )
-        decision = await decide_dm(
-            session,
-            rt.settings,
-            policy,
-            tenant_id=tenant_id,
-            platform=tenant.platform,
-            agents=agents,
-            subject=subject,
-            account_id=None,
-        )
+    decision = found.decision
     route = decision.route
     if isinstance(route, DmStart):
         text = f"starts with {route.agent} ({route.reason})"
@@ -256,8 +242,10 @@ async def dm_explain(
         assert isinstance(route, DmUnchecked)
         text = "group membership unknown"
     rule = decision.rule
+    groups = None if found.groups is None else sorted(found.groups)
     lines = [
         f"{user}: {text}",
+        "  groups: " + ("unknown" if groups is None else ", ".join(groups) or "-"),
         f"  agents that admit them: {', '.join(decision.allowed) or '-'}",
         "  rule: "
         + (
@@ -269,7 +257,7 @@ async def dm_explain(
     ]
     _emit(
         console,
-        {"user": user, "route": text, "allowed": list(decision.allowed)},
+        {"user": user, "route": text, "groups": groups, "allowed": list(decision.allowed)},
         lines,
         as_json,
     )
@@ -422,17 +410,15 @@ def rule_move_command(
 def explain_command(
     ctx: typer.Context,
     user: str,
-    groups: Annotated[list[str] | None, _GROUP] = None,
     as_json: Annotated[bool, JSON_OPTION] = False,
 ) -> None:
-    """Which agent a person's private message reaches, and why."""
+    """Which agent a person's private message reaches, and why, by their groups on the platform."""
     console = Console(highlight=False)
 
     async def run() -> None:
         async with build_runtime(load_settings()) as rt:
             await dm_explain(
-                rt=rt, console=console, selector=ctx.obj, user=user, groups=groups or [],
-                as_json=as_json,
+                rt=rt, console=console, selector=ctx.obj, user=user, as_json=as_json,
             )  # fmt: skip
 
     run_cli(run(), console=console)

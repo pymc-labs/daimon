@@ -37,9 +37,9 @@ export function useDmSave() {
   }
 }
 
-/** Where a DM from `user`, in `groups`, would go. */
+/** Where a DM from `user` would go, with their groups read from the platform. */
 export const useDmExplain = () =>
-  useMutation({ mutationFn: ({ user, groups }: { user: string; groups: string[] }) => api.get<DmExplain>(`/api/admin/dm/explain?${new URLSearchParams([["user", user], ...groups.map((g) => ["group", g])])}`) })
+  useMutation({ mutationFn: ({ user }: { user: string }) => api.get<DmExplain>(`/api/admin/dm/explain?${new URLSearchParams({ user })}`) })
 
 /** Who may DM an agent, in a few words. */
 export function dmText(dm: DmGrant): string {

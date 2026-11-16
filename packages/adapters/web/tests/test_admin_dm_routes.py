@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
+from daimon.core._models import Tenant
 from daimon.core.config import DiscordSettings, Settings, TurnSettings
 from daimon.core.stores import dm_access as dm_store
 from daimon.core.stores import platform_names
@@ -16,6 +17,7 @@ from daimon.core.stores.platform_names import KnownName
 from daimon.testing.turn_router import AGENT_ID
 from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME
 from pydantic import SecretStr
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import FakeUpstream, WebClientFactory
@@ -173,21 +175,42 @@ async def test_dm_grant_on_agent_access_lists_names_and_audits_counts_once(
     )
 
 
-async def test_explain_reports_the_route_and_the_rule_that_matched(
+async def test_explain_reads_the_persons_roles_from_discord_and_names_the_rule(
     web_client: WebClientFactory,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+    """The admin types only who; their roles come from Discord, as at delivery."""
+    guild = "700000303"
+
+    def discord(request: httpx.Request) -> httpx.Response:
+        path = request.url.path.removeprefix(f"/api/v10/guilds/{guild}")
+        if path in ("/members/11", "/members/12"):
+            user = path.removeprefix("/members/")
+            roles = ["21"] if user == "11" else []
+            return httpx.Response(200, json={"user": {"id": user}, "roles": roles})
+        if path == "":
+            return httpx.Response(200, json={"id": guild, "owner_id": "1"})
+        if path == "/roles":
+            return httpx.Response(200, json=[{"id": r, "permissions": "0"} for r in (guild, "21")])
+        return httpx.Response(500)
+
+    async with signed_in_admin(
+        web_client, db_session_factory, tmp_path, settings=_DISCORD, provider=FakeUpstream(discord)
+    ) as admin:
         async with db_session_factory.begin() as db:
+            await db.execute(
+                update(Tenant).where(Tenant.id == admin.ws.tenant_id).values(external_id=guild)
+            )
             await set_dm_enabled(db, tenant_id=admin.ws.tenant_id, enabled=True)
         name = await _dm_agent(admin)
         await admin.client.post(
             "/api/admin/dm/rules",
-            json={"subject": "group", "subject_id": "r-1", "agent": name, "locked": True},
+            json={"subject": "group", "subject_id": "21", "agent": name, "locked": True},
         )
-        staff = await admin.client.get("/api/admin/dm/explain?user=u-1&group=r-1")
-        other = await admin.client.get("/api/admin/dm/explain", params={"user": "u-2"})
+        staff = await admin.client.get("/api/admin/dm/explain", params={"user": "11"})
+        other = await admin.client.get("/api/admin/dm/explain", params={"user": "12"})
+        unknown = await admin.client.get("/api/admin/dm/explain", params={"user": "13"})
         bad = await admin.client.get("/api/admin/dm/explain", params={"user": "a b"})
 
     assert staff.json() == {
@@ -197,8 +220,16 @@ async def test_explain_reports_the_route_and_the_rule_that_matched(
         "agents": [],
         "allowed": [name],
         "rule": 0,
+        "groups": ["21"],
     }, staff.text
-    assert (other.json()["reason"], other.json()["rule"]) == ("only", None), other.text
+    assert (other.json()["reason"], other.json()["rule"], other.json()["groups"]) == (
+        "only",
+        None,
+        [],
+    ), other.text
+    assert (unknown.json()["route"], unknown.json()["groups"]) == ("unchecked", None), (
+        "Discord could not say, so the lock cannot be checked"
+    )
     assert bad.status_code == 422, "an id with a space is refused"
 
 

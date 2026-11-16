@@ -106,12 +106,14 @@ async def test_access_and_rules_round_trip_and_explain_names_the_route(
     assert json.loads(out.getvalue())[0]["locked"] is True, "the rule is stored"
     out.truncate(0)
     out.seek(0)
-    await dm_explain(rt=rt, console=console, selector=selector, user="8", groups=[], as_json=True)
+    await dm_explain(rt=rt, console=console, selector=selector, user="8", as_json=True)
     assert "starts with bob (locked)" in json.loads(out.getvalue())["route"], "the lock decides"
     out.truncate(0)
     out.seek(0)
-    await dm_explain(rt=rt, console=console, selector=selector, user="7", groups=[], as_json=True)
-    assert json.loads(out.getvalue())["allowed"] == ["ada", "bob"], "the list admits them"
+    await dm_explain(rt=rt, console=console, selector=selector, user="7", as_json=True)
+    found = json.loads(out.getvalue())
+    assert found["allowed"] == ["ada", "bob"], "the list admits them"
+    assert found["groups"] == [], "no rule names a group, so none is looked up"
 
 
 async def test_rule_remove_for_a_missing_position_fails(
@@ -133,7 +135,7 @@ async def test_import_policies_lists_allowlisted_users_and_is_idempotent(
     """An env allowlist becomes a listed grant on each agent; a second run does nothing."""
     tenant, selector = await _tenant(db_session_factory)
     settings = Settings(
-        _env_file=None,
+        _env_file=None,  # pyright: ignore[reportCallIssue]
         database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
         direct_message_policies={
             tenant.id: DirectMessagePolicy(mode="allowlist", recipient_ids=["7", "9"])
@@ -169,7 +171,7 @@ async def test_import_policies_turns_a_disabled_workspace_off(
     """A `disabled` env policy turns the workspace's private messages off."""
     tenant, _ = await _tenant(db_session_factory)
     settings = Settings(
-        _env_file=None,
+        _env_file=None,  # pyright: ignore[reportCallIssue]
         database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
         direct_message_policies={tenant.id: DirectMessagePolicy(mode="disabled")},
     )

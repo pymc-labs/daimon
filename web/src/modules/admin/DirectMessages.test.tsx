@@ -121,13 +121,20 @@ describe("DmSettingsView", () => {
     await userEvent.click(await screen.findByRole("option", { name: "12345" }))
     await userEvent.keyboard("{Escape}")
     await userEvent.click(check)
-    expect(explain.mutate, "the pasted id is checked with no groups").toHaveBeenCalledWith({ user: "12345", groups: [] })
+    expect(explain.mutate, "only the person: their groups are read from the platform").toHaveBeenCalledWith({ user: "12345" })
   })
 
   it("shows the route and the rule that matched", () => {
-    explain.data = { route: "start", agent: "Ada", reason: "locked", agents: [], allowed: ["Ada"], rule: 0 }
+    explain.data = { route: "start", agent: "Ada", reason: "locked", agents: [], allowed: ["Ada"], rule: 0, groups: ["r1"] }
     wrap(<DmSettingsView s={settings} />)
     expect(screen.getByText("Rule 1, locked"), "the rule that matched, by number").toBeInTheDocument()
     expect(screen.getByText("Goes to").nextSibling?.textContent, "the agent it starts with").toBe("Ada")
+    expect(screen.getByText("Groups").nextSibling?.textContent, "the groups read, by name").toBe("Staff")
+  })
+
+  it("says when their groups could not be read", () => {
+    explain.data = { route: "unchecked", agent: null, reason: null, agents: [], allowed: [], rule: null, groups: null }
+    wrap(<DmSettingsView s={settings} />)
+    expect(screen.getByText("Groups").nextSibling?.textContent, "unknown, not empty").toBe("Unknown")
   })
 })

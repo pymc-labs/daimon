@@ -260,15 +260,16 @@ export const adminHandlers: HttpHandler[] = [
     return HttpResponse.json(dmSettings)
   }),
   http.get("/api/admin/dm/explain", ({ request }) => {
-    const q = new URL(request.url).searchParams
-    const user = q.get("user"), groups = q.getAll("group")
+    const user = new URL(request.url).searchParams.get("user")
+    const named = new Set([...dmSettings.rules.filter((r) => r.subject === "group").map((r) => r.subject_id!), ...Object.values(DM).flatMap((g) => g.groups)])
+    const groups = (user === CHAT_PEOPLE[3]!.id ? [ROLES[1]!.id] : []).filter((g) => named.has(g))
     const allowed = Object.entries(DM).filter(([, g]) => g.on).map(([id]) => AGENTS.find((a) => a.id === id)!.name)
     const rule = dmSettings.rules.findIndex((r) => r.subject === "everyone" || (r.subject === "user" ? r.subject_id === user : groups.includes(r.subject_id!)))
     const r = dmSettings.rules[rule]
     const agent = r?.agent ?? dmSettings.default_agent
     const body: DmExplain = agent
-      ? { route: "start", agent, reason: r ? (r.locked ? "locked" : "rule") : "default", agents: [], allowed, rule: r ? rule : null }
-      : { route: "choose", agent: null, reason: null, agents: allowed, allowed, rule: null }
+      ? { route: "start", agent, reason: r ? (r.locked ? "locked" : "rule") : "default", agents: [], allowed, rule: r ? rule : null, groups }
+      : { route: "choose", agent: null, reason: null, agents: allowed, allowed, rule: null, groups }
     return HttpResponse.json(body)
   }),
   http.get("/api/admin/dm/people", ({ request }) => {

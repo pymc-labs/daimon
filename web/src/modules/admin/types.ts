@@ -98,7 +98,8 @@ export type DmSettings = { platform: string | null; default_agent: string | null
 export type DmRuleAdd = { subject: DmSubject; subject_id: string | null; agent: string | null; locked: boolean }
 export type DmRuleChange = { agent?: string | null; locked?: boolean; to?: number }
 
-/** Where a DM from a person goes; `rule` is the 0-based position of the rule that matched. */
+/** Where a DM from a person goes; `rule` is the 0-based position of the rule that matched.
+ * `groups` are the named groups they are in, null when the platform could not say. */
 export type DmExplain = {
   route: "start" | "choose" | "refused" | "unchecked"
   agent: string | null
@@ -106,6 +107,7 @@ export type DmExplain = {
   agents: string[]
   allowed: string[]
   rule: number | null
+  groups: string[] | null
 }
 /** The platform's groups, live, then stored ids it no longer lists (no name). */
 export type PlatformGroups = { platform: string; groups: { id: string; name: string | null }[]; problem: "reinstall" | "unavailable" | null }

@@ -283,16 +283,17 @@ function why(e: DmExplain): string {
 
 function CheckPerson() {
   const [person, setPerson] = useState<DmPerson[]>([])
-  const [groups, setGroups] = useState<DmPerson[]>([])
   const explain = useDmExplain()
   const e = explain.data
+  const groups = usePlatformGroups(!!e?.groups?.length)
+  const named = new Map((groups.data?.groups ?? []).map((g) => [g.id, g.name]))
+  const held = e?.groups === null ? "Unknown" : e?.groups.map((g) => named.get(g) ?? g).join(", ") || "None"
   return (
     <section className="mx-auto w-full max-w-3xl">
       <h2 className="mb-2 text-sm font-semibold">Check a person</h2>
       <div className="space-y-3 rounded-lg border p-4">
         <Facts rows={[
           ["Person", <IdPicker key="p" kind="user" single value={person} onChange={(p) => { setPerson(p); explain.reset() }} />],
-          ["Groups", <IdPicker key="g" kind="group" value={groups} onChange={(g) => { setGroups(g); explain.reset() }} />],
         ]} />
         {e && (
           <div className="border-t pt-3">
@@ -300,13 +301,14 @@ function CheckPerson() {
               ["Goes to", e.route === "start" ? e.agent : e.route === "choose" ? `${ROUTE.choose}: ${e.agents.join(", ")}` : ROUTE[e.route]],
               ["Why", why(e)],
               ["Can use", e.allowed.join(", ") || "No agent"],
+              ["Groups", held],
             ]} />
           </div>
         )}
         <div className="flex justify-end">
           <Button
             size="sm" className="max-sm:flex-1" disabled={!person.length || explain.isPending}
-            onClick={() => explain.mutate({ user: person[0]!.id, groups: groups.map((g) => g.id) })}
+            onClick={() => explain.mutate({ user: person[0]!.id })}
           >Check</Button>
         </div>
       </div>
