@@ -15,7 +15,7 @@ from daimon.adapters.mcp.tools._web_admin import agent_names, now, refused, web_
 from daimon.core import dm_settings, web_admin
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.dm_access import dm_agents_of
-from daimon.core.dm_settings import MAX_SUBJECTS, DmActor, DmRuleSpec, PlatformId
+from daimon.core.dm_settings import MAX_SUBJECTS, NO_DMS, DmActor, DmRuleSpec, PlatformId
 from daimon.core.errors import UserFacingError
 from daimon.core.stores.domain import DmRuleSubject
 from daimon.core.web_admin import ModuleName, WebAdmin, WebAdminError
@@ -106,7 +106,7 @@ async def _change_dm(
     try:
         async with runtime.session_factory.begin() as db:
             if await dm_settings.dm_platform(db, admin.tenant_id) is None:
-                raise ToolError("This workspace has no direct messages.")
+                raise ToolError(NO_DMS)
             if default is not None and await dm_settings.set_default(
                 db, actor, agents, default or None
             ):

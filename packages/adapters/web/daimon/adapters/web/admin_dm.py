@@ -25,7 +25,14 @@ from daimon.core.dm_routing import (
     DmStart,
     DmUnchecked,
 )
-from daimon.core.dm_settings import MAX_SUBJECTS, DmActor, DmRuleSpec, PlatformId, dm_platform
+from daimon.core.dm_settings import (
+    MAX_SUBJECTS,
+    NO_DMS,
+    DmActor,
+    DmRuleSpec,
+    PlatformId,
+    dm_platform,
+)
 from daimon.core.errors import UserFacingError
 from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.github_credentials import decrypt_token
@@ -48,7 +55,6 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-NO_DMS: Final = "This workspace has no direct messages."
 NO_RULE: Final = "No such rule."
 
 DmWrite = Callable[[AsyncSession, DmActor, list[DmAgent]], Awaitable[object]]

@@ -27,7 +27,7 @@ from daimon.core.allowances import EVERYONE
 from daimon.core.cursor import decode_cursor, encode_cursor
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.dm_access import dm_agents_of
-from daimon.core.dm_settings import MAX_SUBJECTS, DmActor, PlatformId
+from daimon.core.dm_settings import MAX_SUBJECTS, NO_DMS, DmActor, PlatformId
 from daimon.core.errors import UserFacingError
 from daimon.core.stores import dm_access as dm_store
 from daimon.core.stores import web_identities as identities_store
@@ -349,7 +349,7 @@ async def _set_dm(
 ) -> None:
     """Who may DM `agent`, as the web's agent access page sets it."""
     if await dm_settings.dm_platform(db, admin.tenant_id) is None:
-        raise ToolError("This workspace has no direct messages.")
+        raise ToolError(NO_DMS)
     dm_agents = dm_agents_of([agent])
     if not dm_agents:
         raise ToolError("This agent doesn't take direct messages.")

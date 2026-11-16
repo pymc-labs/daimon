@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 TARGET: Final = "Direct messages"
 MAX_SUBJECTS: Final = 100
+NO_DMS: Final = "There are no direct messages here."
 """The most people, groups or rules one change may list."""
 PlatformId = Annotated[
     str,
