@@ -185,10 +185,11 @@ class AgentSpec(BaseModel):
     @model_validator(mode="after")
     def _features_have_an_agent_level(self) -> AgentSpec:
         """`features:` sets the agent level (docs/features.md); a built-in tool's agent
-        level is `tools:` itself, so `tool.*` is refused here rather than kept twice."""
+        level is `tools:` itself, so `tool.*` is refused here rather than kept twice. A pinned
+        feature needs the pin an admin's opt-in records, so it is never set here."""
         for key, value in self.features.items():
             spec = FEATURES.get(key)
-            if spec is None or "agent" not in spec.tiers or key.startswith("tool."):
+            if spec is None or "agent" not in spec.tiers or key.startswith("tool.") or spec.pinned:
                 raise ValueError(f"feature {key!r} cannot be set on an agent")
             if value not in spec.values:
                 raise ValueError(f"feature {key!r} takes {', '.join(spec.values)}")

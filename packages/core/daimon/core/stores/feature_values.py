@@ -19,20 +19,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 
-def _ids(target: FeatureTarget) -> tuple[str, str, str]:
+def _ids(target: FeatureTarget) -> tuple[str, str, str, str]:
     channel = target.channel_id or ""
     thread = target.thread_key or ""
+    routine = target.routine_id or ""
     if target.tier == "agent" and not target.agent_id:
         raise ValueError("the agent tier needs an agent_id")
     if target.tier == "channel" and not channel:
         raise ValueError("the channel tier needs a channel_id")
     if target.tier == "thread" and not thread:
         raise ValueError("the thread tier needs a thread_key")
-    return target.agent_id or "", channel if target.tier != "workspace" else "", thread
+    if target.tier == "routine" and not routine:
+        raise ValueError("the routine tier needs a routine_id")
+    if target.tier == "routine":
+        return "", "", "", routine
+    return target.agent_id or "", channel if target.tier != "workspace" else "", thread, ""
 
 
 def _match(target: FeatureTarget) -> ColumnElement[bool]:
-    agent, channel, thread = _ids(target)
+    agent, channel, thread, routine = _ids(target)
     if target.tier == "thread":
         return and_(
             FeatureValue.tier == "thread",
@@ -43,6 +48,7 @@ def _match(target: FeatureTarget) -> ColumnElement[bool]:
         FeatureValue.tier == target.tier,
         FeatureValue.agent_id == agent,
         FeatureValue.channel_id == channel,
+        FeatureValue.routine_id == routine,
     )
 
 
@@ -73,9 +79,10 @@ async def place_values(
     agent_id: str | None,
     channel_id: str | None,
     thread_key: str | None,
+    routine_id: str | None = None,
     keys: Collection[str] | None = None,
 ) -> list[FeatureValueRow]:
-    """One read for a place: its workspace, agent, channel and thread rows."""
+    """One read for a place: its workspace, agent, channel, thread and routine rows."""
     targets = [FeatureTarget("workspace")]
     if agent_id:
         targets.append(FeatureTarget("agent", agent_id=agent_id))
@@ -83,6 +90,8 @@ async def place_values(
         targets.append(FeatureTarget("channel", channel_id=channel_id))
     if thread_key:
         targets.append(FeatureTarget("thread", thread_key=thread_key))
+    if routine_id:
+        targets.append(FeatureTarget("routine", routine_id=routine_id))
     stmt = select(FeatureValue).where(
         FeatureValue.tenant_id == tenant_id, or_(*(_match(t) for t in targets))
     )
@@ -115,13 +124,14 @@ async def set_feature_value(
     surface: FeatureSurface,
 ) -> FeatureValueRow:
     """Upsert one tier's value; a thread row keeps its known channel when given none."""
-    agent, channel, thread = _ids(target)
+    agent, channel, thread, routine = _ids(target)
     stmt = pg_insert(FeatureValue).values(
         tenant_id=tenant_id,
         tier=target.tier,
         agent_id=agent,
         channel_id=channel,
         thread_key=thread,
+        routine_id=routine,
         key=key,
         value=value,
         locked=locked,
@@ -149,7 +159,7 @@ async def set_feature_value(
         )
     else:
         stmt = stmt.on_conflict_do_update(
-            index_elements=["tenant_id", "tier", "agent_id", "channel_id", "key"],
+            index_elements=["tenant_id", "tier", "agent_id", "channel_id", "routine_id", "key"],
             index_where=text("tier <> 'thread'"),
             set_=changes,
         )

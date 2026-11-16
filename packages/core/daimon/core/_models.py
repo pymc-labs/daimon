@@ -538,24 +538,6 @@ class Routine(Base):
     )
     source_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # An admin's opt-in to built-in sandbox tools for this routine's own runs;
-    # every other unattended run keeps them off. Changed only through
-    # `stores.routines.set_sandbox_tools`, which logs each change.
-    sandbox_tools_enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
-    sandbox_tools_set_by: Mapped[str | None] = mapped_column(Text, nullable=True)
-    sandbox_tools_set_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    # What the opt-in covers (`routine_sandbox.SandboxPin`): built-ins run only
-    # while a fire's agent version and environment revision still match.
-    sandbox_agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    sandbox_agent_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    sandbox_environment_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    sandbox_environment_updated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -564,79 +546,59 @@ class Routine(Base):
     )
 
 
-class RoutineSandboxHistoryRecord(Base):
-    """One change to a routine's sandbox opt-in: who, when, through what.
+class SandboxPinRecord(Base):
+    """What a `routine_sandbox_tools` On at the agent or routine tier covers.
 
-    Kept after the routine is deleted, so `routine_id` has no foreign key.
+    An agent's pin names its environment, never a version, so an agent edit keeps it; a
+    routine's names the agent version and environment revision. Written only with the
+    feature row it pins, by `features.service.change_feature`.
     """
 
-    __tablename__ = "routine_sandbox_history"
+    __tablename__ = "sandbox_pins"
     __table_args__ = (
-        ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
-        CheckConstraint("via IN ('mcp', 'cli', 'edit')", name="ck_routine_sandbox_history_via"),
-        Index("ix_routine_sandbox_history_routine", "tenant_id", "routine_id", "set_at"),
+        CheckConstraint(
+            "(tier = 'agent' AND routine_id IS NULL AND environment_name IS NOT NULL"
+            " AND agent_version IS NULL AND environment_id IS NULL"
+            " AND environment_updated_at IS NULL)"
+            " OR (tier = 'routine' AND routine_id IS NOT NULL AND environment_name IS NULL"
+            " AND agent_version IS NOT NULL AND environment_id IS NOT NULL"
+            " AND environment_updated_at IS NOT NULL)",
+            name="ck_sandbox_pins_shape",
+        ),
+        Index(
+            "uq_sandbox_pins_agent",
+            "tenant_id",
+            "agent_id",
+            unique=True,
+            postgresql_where=text("tier = 'agent'"),
+        ),
+        Index(
+            "uq_sandbox_pins_routine",
+            "tenant_id",
+            "routine_id",
+            unique=True,
+            postgresql_where=text("tier = 'routine'"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    routine_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    before_enabled: Mapped[bool] = mapped_column(Boolean)
-    after_enabled: Mapped[bool] = mapped_column(Boolean)
-    set_by: Mapped[str] = mapped_column(Text)
-    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    via: Mapped[str] = mapped_column(Text)
-    # The pin an opt-in recorded (`after_enabled`); null otherwise.
-    agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    tier: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    routine_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("routines.id", ondelete="CASCADE"), nullable=True
+    )
+    environment_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     agent_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     environment_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     environment_updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-
-
-class AgentSandboxTools(Base):
-    """An operator's opt-in of one agent's routine runs to built-in sandbox tools.
-
-    Names the agent and the environment, never a version: an agent edit keeps it.
-    A row exists while the opt-in is on; changed only through
-    `stores.agent_sandbox`, which logs each change.
-    """
-
-    __tablename__ = "agent_sandbox_tools"
-    __table_args__ = (
-        ForeignKeyConstraint(
-            ["tenant_id"], ["tenants.id"], ondelete="CASCADE", name="fk_agent_sandbox_tools_tenants"
-        ),
+    set_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    agent_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    environment_name: Mapped[str] = mapped_column(Text)
-    set_by: Mapped[str] = mapped_column(Text)
-    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-
-
-class AgentSandboxHistoryRecord(Base):
-    """One change to an agent's sandbox opt-in: who and when. Kept after the agent is gone."""
-
-    __tablename__ = "agent_sandbox_history"
-    __table_args__ = (
-        ForeignKeyConstraint(
-            ["tenant_id"],
-            ["tenants.id"],
-            ondelete="CASCADE",
-            name="fk_agent_sandbox_history_tenants",
-        ),
-        Index("ix_agent_sandbox_history_agent", "tenant_id", "agent_id", "set_at"),
-    )
-
-    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    agent_id: Mapped[str] = mapped_column(Text)
-    after_enabled: Mapped[bool] = mapped_column(Boolean)
-    environment_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    set_by: Mapped[str] = mapped_column(Text)
-    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class ThreadSession(Base):
@@ -2770,8 +2732,8 @@ class HubOAuthKv(Base):
 class FeatureValue(Base):
     """A feature set at one tier of one place; no row means the tier inherits.
 
-    Rows exist for the workspace, agent, channel and thread tiers (the deployment tier
-    is the `features` setting). Unused place columns hold ''. A thread row is keyed by
+    Rows exist for the workspace, agent, channel, thread and routine tiers (the deployment
+    tier is the `features` setting). Unused place columns hold ''. A thread row is keyed by
     its thread key alone; its `channel_id` is the channel the thread sits in, '' when
     unknown. `daimon.core.features.resolver` combines the rows; `locked` is final for
     every tier below.
@@ -2780,19 +2742,23 @@ class FeatureValue(Base):
     __tablename__ = "feature_values"
     __table_args__ = (
         CheckConstraint(
-            "tier IN ('workspace', 'agent', 'channel', 'thread')", name="ck_feature_values_tier"
+            "tier IN ('workspace', 'agent', 'channel', 'thread', 'routine')",
+            name="ck_feature_values_tier",
         ),
         CheckConstraint(
-            "surface IN ('web', 'chat', 'panel', 'cli', 'spec', 'migration')",
+            "surface IN ('web', 'chat', 'panel', 'cli', 'system', 'spec', 'migration')",
             name="ck_feature_values_surface",
         ),
-        CheckConstraint("NOT (locked AND tier = 'thread')", name="ck_feature_values_lock"),
+        CheckConstraint(
+            "NOT (locked AND tier IN ('thread', 'routine'))", name="ck_feature_values_lock"
+        ),
         Index(
             "uq_feature_values_place",
             "tenant_id",
             "tier",
             "agent_id",
             "channel_id",
+            "routine_id",
             "key",
             unique=True,
             postgresql_where=text("tier <> 'thread'"),
@@ -2817,6 +2783,7 @@ class FeatureValue(Base):
     agent_id: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
     channel_id: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
     thread_key: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    routine_id: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
     key: Mapped[str] = mapped_column(Text, nullable=False)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     locked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
@@ -4213,7 +4180,8 @@ class ChannelChange(Base):
     __table_args__ = (
         Index("ix_channel_changes_tenant_channel_at", "tenant_id", "channel_id", "at"),
         CheckConstraint(
-            "surface IN ('web', 'chat', 'panel', 'cli')", name="ck_channel_changes_surface"
+            "surface IN ('web', 'chat', 'panel', 'cli', 'system')",
+            name="ck_channel_changes_surface",
         ),
     )
 

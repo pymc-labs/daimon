@@ -281,6 +281,10 @@ class AgentSandboxPin:
     environment_name: str
 
 
+AnySandboxPin = SandboxPin | AgentSandboxPin
+"""What a `routine_sandbox_tools` On covers at the routine or the agent tier."""
+
+
 class RoutineRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -324,15 +328,6 @@ class RoutineRow(BaseModel):
     source_provenance_known: bool = False
     source_channel_id: str | None = None
     source_thread_id: str | None = None
-    #: An admin opted this routine's own runs in to built-in sandbox tools.
-    sandbox_tools_enabled: bool = False
-    sandbox_tools_set_by: str | None = None
-    sandbox_tools_set_at: datetime | None = None
-    #: The agent version and environment revision the opt-in covers.
-    sandbox_agent_id: str | None = None
-    sandbox_agent_version: int | None = None
-    sandbox_environment_id: str | None = None
-    sandbox_environment_updated_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -671,8 +666,9 @@ class ChannelBudgetRow(BaseModel):
     exhausted_notice_key: str | None = None
 
 
-ChangeSurface = Literal["web", "chat", "panel", "cli"]
-"""Where a channel change was made: the web app, a chat tool, a platform panel, the CLI."""
+ChangeSurface = Literal["web", "chat", "panel", "cli", "system"]
+"""Where a channel change was made: the web app, a chat tool, a platform panel, the CLI, or
+Daimon itself (an opt-in a routine edit or a changed agent no longer covers)."""
 ChannelSetting = str
 """What a change record names: a legacy channel setting, a `thread_*` setting or any feature key.
 The `thread_*` settings are a thread's own, recorded under its channel with the thread id in the
@@ -1297,9 +1293,9 @@ class SupportEscalationRow(BaseModel):
     created_at: datetime
 
 
-FeatureTier = Literal["workspace", "agent", "channel", "thread"]
+FeatureTier = Literal["workspace", "agent", "channel", "thread", "routine"]
 """The tiers `feature_values` stores; the deployment tier is the `features` setting."""
-FeatureSurface = Literal["web", "chat", "panel", "cli", "spec", "migration"]
+FeatureSurface = Literal["web", "chat", "panel", "cli", "system", "spec", "migration"]
 """Where a feature was set: a `ChangeSurface`, an agent spec, or the 0187 migration."""
 
 
@@ -1311,6 +1307,7 @@ class FeatureTarget:
     agent_id: str | None = None
     channel_id: str | None = None
     thread_key: str | None = None
+    routine_id: str | None = None
 
 
 class FeatureValueRow(BaseModel):
@@ -1323,6 +1320,7 @@ class FeatureValueRow(BaseModel):
     agent_id: str
     channel_id: str
     thread_key: str
+    routine_id: str = ""
     key: str
     value: str
     locked: bool

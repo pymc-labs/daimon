@@ -167,7 +167,7 @@ TAIL = (
     "0203_pending_carry_overs",
     "0204_shared_agent_copies",
     "0205_web_search_usage",
-    "0206_agent_sandbox_tools",
+    "0206_sandbox_tools_feature",
 )
 HEAD = TAIL[-1]
 
@@ -268,6 +268,17 @@ CHAIN = [
 TOP = (PREVIEW_HEAD, *TAIL)
 
 
+# Heads with the routine sandbox columns and history, which 0206 folds into features.
+SANDBOX_HEADS = (
+    SANDBOX_HEAD,
+    RECRUITMENT_HEAD,
+    REMOVAL_HEAD,
+    LONG_JOBS_HEAD,
+    ADMINS_HEAD,
+    *TOP[:-1],
+)
+
+
 SANDBOX_COLUMNS = {
     "sandbox_tools_enabled",
     "sandbox_tools_set_by",
@@ -315,8 +326,6 @@ TABLES = {
     "lead_opportunities",
     "lead_mailbox_scans",
     "lead_mailbox_messages",
-    # Added by SANDBOX_HEAD, with its index and via check; compared from there on.
-    "routine_sandbox_history",
     "long_job",
     "long_job_policy",
     "long_job_policy_history",
@@ -361,7 +370,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
         compared_tables = compared_tables - {"web_logins", "web_login_accounts"}
     else:
         # 0187 folds progress_plan_scopes (no longer modelled) into feature_values.
-        compared_tables = compared_tables | {"feature_values"}
+        compared_tables = compared_tables | {"feature_values", "sandbox_pins"}
     if expected not in (LONG_JOBS_HEAD, ADMINS_HEAD, *TOP):
         compared_tables = {name for name in compared_tables if not name.startswith("long_job")}
     if expected not in TOP:
@@ -377,15 +386,6 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
         }
     if expected not in (ADMINS_HEAD, *TOP):
         compared_tables = compared_tables - {"daimon_admins"}
-    if expected not in (
-        SANDBOX_HEAD,
-        RECRUITMENT_HEAD,
-        REMOVAL_HEAD,
-        LONG_JOBS_HEAD,
-        ADMINS_HEAD,
-        *TOP,
-    ):
-        compared_tables = compared_tables - {"routine_sandbox_history"}
 
     def include_name(name: str | None, kind: str, _parents: dict[str, str | None]) -> bool:
         return kind != "table" or name in compared_tables
@@ -513,15 +513,9 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             and expected != HEAD
         ):
             return False
-        if kind == "column" and expected not in (
-            SANDBOX_HEAD,
-            RECRUITMENT_HEAD,
-            REMOVAL_HEAD,
-            LONG_JOBS_HEAD,
-            ADMINS_HEAD,
-            *TOP,
-        ):
-            return name not in SANDBOX_COLUMNS
+        # Never modelled at HEAD; checked below instead.
+        if kind == "column" and name in SANDBOX_COLUMNS:
+            return False
         return kind != "table" or name in compared_tables
 
     migration_context = MigrationContext.configure(
@@ -531,14 +525,12 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
     inspector = inspect(connection)
     constraints = {c["name"] for c in inspector.get_check_constraints("routines")}
     assert {"ck_routines_destination_kind", "ck_routines_dm_owner"} <= constraints
-    if expected in (
-        SANDBOX_HEAD,
-        RECRUITMENT_HEAD,
-        REMOVAL_HEAD,
-        LONG_JOBS_HEAD,
-        ADMINS_HEAD,
-        *TOP,
-    ):
+    routine_columns = {c["name"] for c in inspector.get_columns("routines")}
+    if expected == HEAD:
+        assert not routine_columns & SANDBOX_COLUMNS, "0206 drops the routine sandbox columns"
+        assert not inspector.has_table("routine_sandbox_history"), "0206 folds the history"
+    if expected in SANDBOX_HEADS:
+        assert routine_columns >= SANDBOX_COLUMNS, f"{expected} keeps the routine sandbox columns"
         # compare_metadata does not compare CHECK constraints.
         [via] = [
             c

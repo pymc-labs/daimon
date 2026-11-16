@@ -42,7 +42,8 @@ log = structlog.get_logger(__name__)
 
 @dataclass(frozen=True)
 class FeaturePlace:
-    """Where a turn or session runs. `thread_key` is the stores' key (Slack: ``<channel>:<ts>``)."""
+    """Where a turn or session runs. `thread_key` is the stores' key (Slack: ``<channel>:<ts>``).
+    A routine's run also has the routine's own tier (`routine_id`)."""
 
     tenant_id: uuid.UUID
     platform: str
@@ -50,6 +51,7 @@ class FeaturePlace:
     thread_id: str | None = None
     agent_id: str | None = None
     backend: str | None = None
+    routine_id: str | None = None
 
     @classmethod
     def of(
@@ -61,6 +63,7 @@ class FeaturePlace:
         *,
         agent_id: str | None = None,
         backend: str | None = None,
+        routine_id: str | None = None,
     ) -> FeaturePlace:
         """From a turn's ids; a thread equal to its channel is none."""
         if thread_id and platform == "slack" and ":" in thread_id:
@@ -68,7 +71,9 @@ class FeaturePlace:
             channel_id = channel_id or channel
         if not thread_id or thread_id == channel_id or not channel_id:
             thread_id = None
-        return cls(tenant_id, platform, channel_id or None, thread_id, agent_id, backend)
+        return cls(
+            tenant_id, platform, channel_id or None, thread_id, agent_id, backend, routine_id
+        )
 
     @property
     def thread_key(self) -> str | None:
@@ -287,7 +292,14 @@ async def _place_rows(
     session: AsyncSession, place: FeaturePlace, cache: FeatureCache
 ) -> tuple[int, list[FeatureValueRow]]:
     revision = await feature_revision(session, tenant_id=place.tenant_id)
-    key = (place.tenant_id, revision, place.agent_id, place.channel_id, place.thread_key)
+    key = (
+        place.tenant_id,
+        revision,
+        place.agent_id,
+        place.channel_id,
+        place.thread_key,
+        place.routine_id,
+    )
     rows = cache.get(key)
     if rows is None:
         rows = await place_values(
@@ -296,6 +308,7 @@ async def _place_rows(
             agent_id=place.agent_id,
             channel_id=place.channel_id,
             thread_key=place.thread_key,
+            routine_id=place.routine_id,
         )
         cache.put(key, rows)
     return revision, rows
@@ -454,6 +467,7 @@ async def feature_in(
         agent_id=place.agent_id,
         channel_id=place.channel_id,
         thread_key=place.thread_key,
+        routine_id=place.routine_id,
         keys=(key,),
     )
     return resolve_one(FEATURES[key], settings, place, rows)
