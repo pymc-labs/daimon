@@ -75,9 +75,10 @@ from daimon.adapters.teams.identity import DENIED, TeamsInbound
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.output_delivery import Spawn
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.adapters.teams.team_owners import team_owner_lookup
+from daimon.adapters.teams.team_owners import team_group_lookup, team_owner_lookup
 from daimon.core.authz import Action, Place, Subject, authorize
 from daimon.core.config import DirectMessagePolicy, Settings
+from daimon.core.dm_access import sender_admits
 from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -520,7 +521,8 @@ class SupportCommand:
 
         False at once for the 1:1 chat or a channel with no admins of its own,
         so it keeps the escalation channel. Each recipient is held to the
-        tenant's DM policy and must be on the channel's team roster.
+        tenant's DM policy and the default agent's DM grant (Daimon sends it, no
+        agent does), and must be on the channel's team roster.
         """
         direct = self._direct
         if asked.place is None or direct is None:
@@ -537,9 +539,18 @@ class SupportCommand:
         )
         policies = self._runtime.settings.direct_message_policies
         policy = policies.get(tenant_id, DirectMessagePolicy())
+        groups = team_group_lookup(self._runtime)
         for tier in tiers:
             landed = 0
-            for user_id in (uid for uid in tier if policy.allows(uid)):
+            for user_id in tier:
+                if not policy.allows(user_id) or not await sender_admits(
+                    self._runtime.sessionmaker,
+                    tenant_id=tenant_id,
+                    agent_name=None,
+                    user_id=user_id.lower(),
+                    groups=groups,
+                ):
+                    continue
                 try:
                     member = await direct.member(channel_id, user_id)
                     if member is not None:

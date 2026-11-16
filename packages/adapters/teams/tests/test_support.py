@@ -418,3 +418,50 @@ async def test_support_from_a_channel_is_refused_to_someone_who_could_not_ask_th
 
     assert support.NOT_ALLOWED_THERE in reply and '"ask"' not in reply, "no form to send"
     assert await _rows(db_session_factory) == []
+
+
+async def test_admin_dms_for_a_request_follow_the_default_agents_dm_grant(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Support DMs reach only the admins the default agent's DM grant admits."""
+    from datetime import UTC, datetime
+
+    from daimon.adapters.teams.answer_access import AnswerPlace
+    from daimon.core.stores.direct_messages import set_dm_agent_name
+    from daimon.core.stores.dm_access import set_grant
+
+    async with db_session_factory.begin() as session:
+        await set_dm_agent_name(session, tenant_id=TENANT, agent_name="daimon")
+        await set_grant(
+            session, tenant_id=TENANT, agent_name="daimon", who="excluded",
+            user_ids=[LEAD], group_ids=[], set_by=None, now=datetime.now(UTC),
+        )  # fmt: skip
+
+    async def tiers(*_args: object, **_kwargs: object) -> list[list[str]]:
+        return [[LEAD, OTHER_AAD_OBJECT_ID]]
+
+    monkeypatch.setattr(support, "support_recipient_tiers", tiers)
+    sent: list[str] = []
+
+    class _Direct:
+        async def member(self, _channel: str, user_id: str) -> str:
+            return f"29:{user_id}"
+
+        async def open_chat(self, member: str) -> str:
+            return f"a:{member}"
+
+        async def post(self, conversation: str, _body: str) -> None:
+            sent.append(conversation)
+
+    command = SupportCommand(
+        build_teams_runtime(db_session_factory),
+        _Direct(),
+        spawn=MagicMock(),  # type: ignore[arg-type]
+    )
+    asked = support._Asked(  # pyright: ignore[reportPrivateUsage]
+        user_id=AAD_OBJECT_ID, user_name=None, conversation_id=CONVERSATION_ID,
+        thread_id=THREAD_ID, message_id="1", link="",
+        place=AnswerPlace(CHANNEL_ID, "1", is_channel=True),
+    )  # fmt: skip
+    assert await command._chat_admins(TENANT, asked, "help")  # pyright: ignore[reportPrivateUsage]
+    assert sent == [f"a:29:{OTHER_AAD_OBJECT_ID}"], "the excluded admin gets no DM"
