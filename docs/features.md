@@ -556,7 +556,7 @@ Conversations may move to a direct message with the agent. The agent that answer
 
 ## Direct message wait
 
-A direct message waits this long for the next one before the agent starts, so a burst of messages is answered in one reply instead of several. Off answers each message at once. However long the burst goes on, the wait ends after ten seconds. A reply to an approval is never held.
+A direct message waits this long for the next one before the agent starts, so a burst of messages is answered in one reply instead of several. Off answers each message at once. However long the burst goes on, the wait ends ten seconds after its first message. A reply to an approval is never held.
 
 | | |
 | --- | --- |
