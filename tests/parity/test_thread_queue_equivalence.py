@@ -17,6 +17,7 @@ from daimon.adapters.slack import app as slack
 from daimon.adapters.teams import app as teams
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.reactions import TeamsReactions
+from daimon.core.dm_debounce import DmBursts
 from daimon.core.errors import DaimonError
 from daimon.core.turn.thread_queue import HeldThreads, ThreadQueue
 from daimon.core.turn_queue import TurnQueue
@@ -68,9 +69,10 @@ class Replay:
             _recovery=None,
             _participation=None,
             draining=draining,
-            runtime=SimpleNamespace(sessionmaker=None),
+            runtime=SimpleNamespace(sessionmaker=None, settings=None),
             _processing_tasks={},
             _track_processing_task=lambda thread_id: None,
+            _dm_bursts=DmBursts(lambda item: item.text),
         )
         self.obj._thread_queue = ThreadQueue(
             self.obj._processing, self.obj._pending, start_turn=self.obj._processing.start_turn
@@ -92,7 +94,8 @@ class Replay:
                 "_release_thread",
                 "dispatch_continuations_in_thread",
             ],
-            "teams": ["_orchestrate", "_holding", "_run_turns", "_release", "dispatch_after_input"],
+            "teams": ["_orchestrate", "_holding", "_run_turns", "_release", "dispatch_after_input"]
+            + ([] if old else ["_wait_out_burst"]),
         }[platform]
         if platform == "discord" and not old:
             names += [
@@ -342,6 +345,11 @@ def route_without_io(monkeypatch):
         return item
 
     monkeypatch.setattr(teams, "route_to_setup", route)
+
+    async def no_dm_wait(*_args):
+        return 0.0  # the frozen base predates the DM wait; off, a chat runs as before
+
+    monkeypatch.setattr(teams, "debounce_seconds", no_dm_wait)
 
 
 async def replay(platform, old, authors, pause_at, fault, cancel, draining):

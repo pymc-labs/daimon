@@ -1390,11 +1390,12 @@ class TeamsApp:
         seconds = await debounce_seconds(
             self.runtime.sessionmaker, self.runtime.settings, tenant_id, "teams"
         )
+        if seconds <= 0:
+            return [inbound]
         burst = self._dm_bursts.open(key, inbound)
         try:
-            if seconds > 0:
-                allowed = functools.partial(self._may_start_turn, inbound, tenant_id)
-                self._reactions.mark_queued(inbound, allowed=allowed)
+            allowed = functools.partial(self._may_start_turn, inbound, tenant_id)
+            self._reactions.mark_queued(inbound, allowed=allowed)
             await burst.take(seconds)
         finally:
             await self._dm_bursts.end(key, burst)
