@@ -1,9 +1,9 @@
 """sandbox_tools_feature: built-in sandbox tools become the `routine_sandbox_tools` feature.
 
 `feature_values` gains the `routine` tier (`routine_id`), the most specific for a
-routine's runs; it takes no lock. `sandbox_pins` records what an On at the agent tier
-(agent id and environment name) or the routine tier (agent version and environment
-revision) covers. Each routine opt-in moves to a routine-tier On with its pin, and its
+routine's runs; it takes no lock. `sandbox_pins` records what an On covers: the agent
+id and environment name at the agent tier, the agent version and environment revision
+at the routine tier. Each routine opt-in moves to a routine-tier On with its pin, and its
 history to `channel_changes`; DM routines never ran built-ins, so theirs are dropped.
 The routine columns and `routine_sandbox_history` go. `system` joins both surface
 checks for changes Daimon makes itself. Downgrading restores routine opt-ins and their

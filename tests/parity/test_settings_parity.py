@@ -26,6 +26,7 @@ _DIRECT_WRITERS = {
     "mcp/daimon/adapters/mcp/tools/scope_settings.py": "`change_setting`, over the core service",
     "teams/daimon/adapters/teams/channel_settings.py": "the Teams channel dialog's own switches",
     "cli/daimon/adapters/cli/commands/features.py": "`daimon features set`, over the core service",
+    "cli/daimon/adapters/cli/commands/routines.py": "`daimon routines sandbox-tools --agent`",
     "web/daimon/adapters/web/features.py": "`PUT /api/features`, over the core service",
 }
 #: Deliberate gap. A Slack slash command carries no thread, and a message shortcut needs an
