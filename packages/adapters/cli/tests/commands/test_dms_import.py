@@ -1,4 +1,4 @@
-"""DM carry-over import: bounded files, one transaction per file, safe to repeat."""
+"""DM carry-over import: bounded files, one transaction per run, safe to repeat."""
 
 import json
 import uuid
@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 import typer
 from daimon.adapters.cli.commands import dms
-from daimon.adapters.cli.commands.dms import import_carry_overs
+from daimon.adapters.cli.commands.dms import check_agent, import_carry_overs
 from daimon.adapters.cli.main import app
 from daimon.core.dm_carry_over import CarryOverExport
 from daimon.core.stores.direct_messages import COLD_DM_ORIGIN, DirectMessageRow, start_conversation
@@ -20,6 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner
 
 TENANT_ARG = "00000000-0000-0000-0000-000000000000"
+AGENT = "helper"
+CLI = ["dms", "import"]
+CLI_OPTIONS = ["--tenant", TENANT_ARG, "--agent", AGENT]
 
 
 def body(guild: str = "777", users: list[dict[str, object]] | None = None) -> dict[str, object]:
@@ -43,10 +46,12 @@ def body(guild: str = "777", users: list[dict[str, object]] | None = None) -> di
     }
 
 
-async def taken(factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, user: str):
+async def taken(
+    factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, user: str, agent: str = AGENT
+):
     async with factory.begin() as db:
         return await take_carry_over(
-            db, tenant_id=tenant_id, platform="discord", external_user_id=user
+            db, tenant_id=tenant_id, platform="discord", external_user_id=user, agent_name=agent
         )
 
 
@@ -55,7 +60,9 @@ async def test_import_holds_each_conversation_and_skips_empty_ones(db_session_fa
         tenant = await make_tenant(db, platform="discord", workspace_id="777")
     export = CarryOverExport.model_validate(body())
 
-    counts = await import_carry_overs(db_session_factory, tenant_id=tenant.id, exports=[export])
+    counts = await import_carry_overs(
+        db_session_factory, tenant_id=tenant.id, agent_name=AGENT, exports=[export]
+    )
 
     assert (counts["new"], counts["empty"]) == (1, 1)
     held = await taken(db_session_factory, tenant.id, "1")
@@ -67,13 +74,19 @@ async def test_repeat_updates_waiting_ones_and_never_revives_used_ones(db_sessio
     async with db_session_factory.begin() as db:
         tenant = await make_tenant(db, platform="discord", workspace_id="777")
     export = CarryOverExport.model_validate(body())
-    await import_carry_overs(db_session_factory, tenant_id=tenant.id, exports=[export])
+    await import_carry_overs(
+        db_session_factory, tenant_id=tenant.id, agent_name=AGENT, exports=[export]
+    )
 
-    again = await import_carry_overs(db_session_factory, tenant_id=tenant.id, exports=[export])
+    again = await import_carry_overs(
+        db_session_factory, tenant_id=tenant.id, agent_name=AGENT, exports=[export]
+    )
     assert again["updated"] == 1 and again["new"] == 0
     assert await taken(db_session_factory, tenant.id, "1") is not None
 
-    after = await import_carry_overs(db_session_factory, tenant_id=tenant.id, exports=[export])
+    after = await import_carry_overs(
+        db_session_factory, tenant_id=tenant.id, agent_name=AGENT, exports=[export]
+    )
     assert after["consumed"] == 1
     assert await taken(db_session_factory, tenant.id, "1") is None
 
@@ -106,7 +119,9 @@ async def test_people_who_already_have_a_private_conversation_still_get_theirs_a
         )
     export = CarryOverExport.model_validate(body())
 
-    counts = await import_carry_overs(db_session_factory, tenant_id=tenant.id, exports=[export])
+    counts = await import_carry_overs(
+        db_session_factory, tenant_id=tenant.id, agent_name=AGENT, exports=[export]
+    )
 
     assert counts["existing"] == 1 and counts["new"] == 1, counts
     held = await taken(db_session_factory, tenant.id, "1")
@@ -120,12 +135,14 @@ async def test_other_server_or_unknown_tenant_changes_nothing(db_session_factory
         await import_carry_overs(
             db_session_factory,
             tenant_id=tenant.id,
+            agent_name=AGENT,
             exports=[CarryOverExport.model_validate(body(guild="888"))],
         )
     with pytest.raises(typer.BadParameter, match="No such tenant"):
         await import_carry_overs(
             db_session_factory,
             tenant_id=uuid.uuid4(),
+            agent_name=AGENT,
             exports=[CarryOverExport.model_validate(body())],
         )
     assert await taken(db_session_factory, tenant.id, "1") is None
@@ -146,6 +163,7 @@ async def test_one_person_in_several_files_is_merged_not_replaced(db_session_fac
     counts = await import_carry_overs(
         db_session_factory,
         tenant_id=tenant.id,
+        agent_name=AGENT,
         exports=[CarryOverExport.model_validate(one), CarryOverExport.model_validate(two)],
     )
 
@@ -166,6 +184,7 @@ async def test_one_person_from_different_sources_fails_loudly(db_session_factory
         await import_carry_overs(
             db_session_factory,
             tenant_id=tenant.id,
+            agent_name=AGENT,
             exports=[CarryOverExport.model_validate(one), CarryOverExport.model_validate(two)],
         )
     assert await taken(db_session_factory, tenant.id, "1") is None, "nothing was written"
@@ -174,8 +193,8 @@ async def test_one_person_from_different_sources_fails_loudly(db_session_factory
 def test_cli_rejects_oversized_file(tmp_path: Path):
     big = tmp_path / "big.json"
     big.write_text("x" * 1048577)
-    result = CliRunner().invoke(app, ["dms", "import", str(big), "--tenant", TENANT_ARG])
-    assert result.exit_code == 2 and "exceeds 1 MiB" in result.output
+    result = CliRunner().invoke(app, [*CLI, str(big), *CLI_OPTIONS])
+    assert result.exit_code == 2 and "exceeds 1 MiB" in result.output, result.output
 
 
 @pytest.mark.parametrize(
@@ -197,33 +216,69 @@ def test_cli_rejects_oversized_file(tmp_path: Path):
 def test_cli_rejects_a_file_with_the_wrong_shape(tmp_path: Path, mutate):
     path = tmp_path / "dms.json"
     path.write_text(json.dumps(mutate(body())))
-    result = CliRunner().invoke(app, ["dms", "import", str(path), "--tenant", TENANT_ARG])
-    assert result.exit_code != 0
+    result = CliRunner().invoke(app, [*CLI, str(path), *CLI_OPTIONS])
+    assert result.exit_code != 0, result.output
 
 
 def test_cli_imports_all_files_in_one_run_and_prints_counts(tmp_path: Path, monkeypatch):
     @asynccontextmanager
     async def runtime(_settings):
-        yield SimpleNamespace(sessionmaker=object())
+        yield SimpleNamespace(sessionmaker=object(), anthropic=object())
 
-    seen: list[list[str]] = []
+    seen: list[tuple[str, list[str]]] = []
 
-    async def fake(sessionmaker, *, tenant_id, exports):
-        seen.append([e.guild_id for e in exports])
+    async def agent(_client, *, tenant_id, name, records):
+        return SimpleNamespace(name=name)
+
+    async def fake(sessionmaker, *, tenant_id, agent_name, exports):
+        seen.append((agent_name, [e.guild_id for e in exports]))
         from collections import Counter
 
         return Counter(new=2, existing=1)
 
     monkeypatch.setattr(dms, "build_runtime", runtime)
     monkeypatch.setattr(dms, "load_settings", lambda: None)
+    monkeypatch.setattr(dms, "find_agent_by_daimon_tag", agent)
     monkeypatch.setattr(dms, "import_carry_overs", fake)
     first, second = tmp_path / "a.json", tmp_path / "b.json"
     first.write_text(json.dumps(body("1")))
     second.write_text(json.dumps(body("2")))
 
-    result = CliRunner().invoke(
-        app, ["dms", "import", str(first), str(second), "--tenant", TENANT_ARG]
+    result = CliRunner().invoke(app, [*CLI, str(first), str(second), *CLI_OPTIONS])
+
+    assert result.exit_code == 0 and seen == [(AGENT, ["1", "2"])], result.output
+    assert "2 files: 2 new, 0 updated, 0 already used, 1 already have a private" in result.output
+
+
+async def test_the_conversation_waits_for_the_agent_it_was_imported_for(db_session_factory):
+    async with db_session_factory.begin() as db:
+        tenant = await make_tenant(db, platform="discord", workspace_id="777")
+    export = CarryOverExport.model_validate(body())
+
+    await import_carry_overs(
+        db_session_factory, tenant_id=tenant.id, agent_name=AGENT, exports=[export]
     )
 
-    assert result.exit_code == 0 and seen == [["1", "2"]], result.output
-    assert "2 files: 2 new, 0 updated, 0 already used, 1 already have a private" in result.output
+    assert await taken(db_session_factory, tenant.id, "1", agent="other") is None, (
+        "another agent's private start does not use it up"
+    )
+    assert await taken(db_session_factory, tenant.id, "1") is not None, (
+        "its own agent still takes it"
+    )
+
+
+async def test_an_agent_outside_the_tenant_is_refused(monkeypatch):
+    async def missing(_client, *, tenant_id, name, records):
+        return None
+
+    monkeypatch.setattr(dms, "find_agent_by_daimon_tag", missing)
+    runtime = SimpleNamespace(anthropic=object(), sessionmaker=object())
+    with pytest.raises(typer.BadParameter, match="No agent helper in this tenant"):
+        await check_agent(runtime, tenant_id=uuid.uuid4(), agent_name=AGENT)
+
+
+def test_cli_needs_the_agent(tmp_path: Path):
+    path = tmp_path / "dms.json"
+    path.write_text(json.dumps(body()))
+    result = CliRunner().invoke(app, [*CLI, str(path), "--tenant", TENANT_ARG])
+    assert result.exit_code == 2 and "--agent" in result.output, result.output

@@ -24,7 +24,7 @@ already opted out.
 ## Earlier private conversations
 
 ```bash
-daimon dms import dms.json --tenant TENANT_UUID
+daimon dms import dms.json --tenant TENANT_UUID --agent AGENT_NAME
 ```
 
 The file holds each person's earlier turns, `user` or `assistant`, in any
@@ -37,7 +37,9 @@ order:
             "turns": [{"role": "user", "text": "Hi", "at": "2026-03-01T10:00:00Z"}]}]}
 ```
 
-A person's first private conversation here starts from theirs without saying so. The latest twelve turns, within 16,000
+A person's first private conversation here with `--agent`, which must be one of
+the tenant's agents, starts from theirs without saying so. One with another agent
+leaves it waiting. The latest twelve turns, within 16,000
 characters, are the conversation's history. Older turns, within 8,000
 characters, are quoted as untrusted context. The conversation waits with no
 expiry and is used once; a new conversation after that starts empty, and

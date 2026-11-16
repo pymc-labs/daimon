@@ -166,7 +166,9 @@ async def seed(factory: async_sessionmaker):
     return tenant, admission, deps
 
 
-async def hold(factory: async_sessionmaker, tenant, user: str = "999") -> None:
+async def hold(
+    factory: async_sessionmaker, tenant, user: str = "999", agent: str = "private"
+) -> None:
     built = build_carry_over(turns(4), source_name="Old Bot", exported_at=NOW)
     async with factory.begin() as session:
         result = await put_carry_over(
@@ -174,6 +176,7 @@ async def hold(factory: async_sessionmaker, tenant, user: str = "999") -> None:
             tenant_id=tenant.id,
             platform="discord",
             external_user_id=user,
+            agent_name=agent,
             source_name="Old Bot",
             exported_at=NOW,
             history=built.history,
@@ -267,10 +270,34 @@ async def test_a_busy_start_leaves_it_for_the_next_one(db_session_factory):
     async with db_session_factory.begin() as session:
         assert (
             await take_carry_over(
-                session, tenant_id=tenant.id, platform="discord", external_user_id="999"
+                session,
+                tenant_id=tenant.id,
+                platform="discord",
+                external_user_id="999",
+                agent_name="private",
             )
             is not None
         )
+
+
+async def test_a_start_on_another_agent_leaves_it_waiting(db_session_factory):
+    tenant, admission, deps = await seed(db_session_factory)
+    await hold(db_session_factory, tenant)
+    other = replace(
+        admission,
+        agent=ma_agent(id="ag_other", name="other", tenant_id=tenant.id),
+        config=ResolvedConfig(agent_name="other", environment_name="default"),
+    )
+    async with db_session_factory.begin() as session:
+        await set_dm_agent_name(session, tenant_id=tenant.id, agent_name="other")
+
+    elsewhere = await start(deps, other, tenant)
+    assert elsewhere.history == [] and elsewhere.context == "", "another agent starts fresh"
+
+    async with db_session_factory.begin() as session:
+        await set_dm_agent_name(session, tenant_id=tenant.id, agent_name="private")
+    own = await start(deps, admission, tenant, expected_scope_id=elsewhere.scope_id)
+    assert len(own.history) == 4, "the agent it was imported for still starts from it"
 
 
 async def test_re_importing_replaces_an_unused_one_but_never_a_used_one(db_session_factory):
@@ -282,6 +309,7 @@ async def test_re_importing_replaces_an_unused_one_but_never_a_used_one(db_sessi
             tenant_id=tenant.id,
             platform="discord",
             external_user_id="999",
+            agent_name="private",
             source_name="Old Bot",
             exported_at=NOW,
             history=[{"role": "user", "text": "newer"}],
@@ -297,6 +325,7 @@ async def test_re_importing_replaces_an_unused_one_but_never_a_used_one(db_sessi
             tenant_id=tenant.id,
             platform="discord",
             external_user_id="999",
+            agent_name="private",
             source_name="Old Bot",
             exported_at=NOW,
             history=[{"role": "user", "text": "again"}],

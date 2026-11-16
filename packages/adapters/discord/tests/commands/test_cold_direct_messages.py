@@ -201,6 +201,7 @@ async def test_first_start_continues_an_imported_earlier_conversation(
             tenant_id=tenants[0].id,
             platform="discord",
             external_user_id="999",
+            agent_name="private-0",
             source_name="Old Bot",
             exported_at=datetime(2026, 3, 1, tzinfo=UTC),
             history=[{"role": "user", "text": "earlier question"}],

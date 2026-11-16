@@ -4042,7 +4042,8 @@ class DmCarryOver(Base):
     """An earlier private conversation, held for the person's first DM here.
 
     Keyed by platform user, not account: it is imported before the person has
-    one. Taking it sets `consumed_at` and empties the words.
+    one. Only a private start with `agent_name` takes it, whichever agent a person's
+    DMs route to. Taking it sets `consumed_at` and empties the words.
     """
 
     __tablename__ = "dm_carry_overs"
@@ -4052,6 +4053,7 @@ class DmCarryOver(Base):
     )
     platform: Mapped[str] = mapped_column(Text, primary_key=True)
     external_user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
     source_name: Mapped[str] = mapped_column(Text, nullable=False)
     exported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     history: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)

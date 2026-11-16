@@ -535,9 +535,15 @@ async def start_cold_dm(
             or await get_dm_agent_name(session, tenant_id=tenant_id) != admission.config.agent_name
         ):
             raise AdmissionDenied(reason="invoker_not_allowed")
-        # An imported earlier conversation is used by the first private start, once.
+        # An imported earlier conversation is used once, by the first private start on
+        # the agent it was imported for: with several DM agents, a start on another
+        # agent must not use it up.
         carried = await take_carry_over(
-            session, tenant_id=tenant_id, platform="discord", external_user_id=external_user_id
+            session,
+            tenant_id=tenant_id,
+            platform=conversation.platform,
+            external_user_id=external_user_id,
+            agent_name=admission.config.agent_name,
         )
         if carried is not None:
             conversation = conversation.model_copy(

@@ -16,7 +16,8 @@ a callback watch may be permanent (`callback_watch_lifetime` set to `0`);
 its links then have no expiry either.
 
 `held_timers` keeps imported one-shot timers until an operator confirms them, and
-`dm_carry_overs` an earlier private conversation until the person's first DM here.
+`dm_carry_overs` an earlier private conversation until the person's first DM here with
+the agent it was imported for.
 Settling or taking one empties its words and keeps the row, so a repeated import adds
 nothing.
 
@@ -263,6 +264,7 @@ def upgrade() -> None:
         sa.Column("tenant_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("platform", sa.Text(), nullable=False),
         sa.Column("external_user_id", sa.Text(), nullable=False),
+        sa.Column("agent_name", sa.Text(), nullable=False),
         sa.Column("source_name", sa.Text(), nullable=False),
         sa.Column("exported_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("history", postgresql.JSONB(astext_type=sa.Text()), nullable=False),

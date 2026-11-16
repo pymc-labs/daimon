@@ -19,9 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the file dropped, and `unpause`, `renew` and `rotate-link` manage what came in.
   Moving people in never messages them.
 - **Operators can move people in from another bot.** `daimon tags import` opts
-  listed Discord members out of being tagged. `daimon dms import` holds each
-  person's earlier private conversation for their first DM here, which starts
-  from it once, without saying so.
+  listed Discord members out of being tagged. `daimon dms import` holds
+  each person's earlier private conversation for their first DM here with the
+  agent it names, which starts from it once, without saying so.
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and
   the MCP tools. A run nobody started, such as a routine, never applies one at once.

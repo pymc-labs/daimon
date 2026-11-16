@@ -32,13 +32,16 @@ async def put_carry_over(
     tenant_id: uuid.UUID,
     platform: str,
     external_user_id: str,
+    agent_name: str,
     source_name: str,
     exported_at: datetime,
     history: list[dict[str, str]],
     context: str,
 ) -> PutResult:
-    """Store or replace a waiting conversation; a taken one is never brought back."""
+    """Store or replace a waiting conversation for `agent_name`; a taken one is never
+    brought back."""
     values: dict[str, object] = {
+        "agent_name": agent_name,
         "source_name": source_name,
         "exported_at": exported_at,
         "history": history,
@@ -81,15 +84,22 @@ async def has_conversation(
 
 
 async def take_carry_over(
-    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, external_user_id: str
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    external_user_id: str,
+    agent_name: str,
 ) -> CarryOver | None:
-    """Take the waiting conversation once. It keeps only a marker afterwards."""
+    """Take the waiting conversation once, on the agent it was imported for. It keeps
+    only a marker afterwards; a start on any other agent leaves it waiting."""
     row = await session.scalar(
         select(DmCarryOver)
         .where(
             DmCarryOver.tenant_id == tenant_id,
             DmCarryOver.platform == platform,
             DmCarryOver.external_user_id == external_user_id,
+            DmCarryOver.agent_name == agent_name,
             DmCarryOver.consumed_at.is_(None),
         )
         .with_for_update()

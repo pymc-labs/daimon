@@ -11,8 +11,9 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from daimon.adapters.cli.runtime import build_runtime
+from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.config import load_settings
+from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.dm_carry_over import (
     MAX_EXPORT_BYTES,
     CarryOverExport,
@@ -53,9 +54,11 @@ async def import_carry_overs(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     tenant_id: uuid.UUID,
+    agent_name: str,
     exports: Sequence[CarryOverExport],
 ) -> Counter[str]:
-    """Hold each person's earlier conversation for their next fresh private start.
+    """Hold each person's earlier conversation for their next fresh private start with
+    `agent_name`.
 
     Counts `new`, `updated`, `consumed` (already used, never brought back), `empty`, and
     `existing`: the person already has a private conversation here, so their earlier
@@ -72,7 +75,7 @@ async def import_carry_overs(
             )
         for user_id, (export, turns) in merge_users(exports).items():
             if await has_conversation(
-                db, tenant_id=tenant_id, platform="discord", external_user_id=user_id
+                db, tenant_id=tenant_id, platform=tenant.platform, external_user_id=user_id
             ):
                 counts["existing"] += 1
             built = build_carry_over(
@@ -85,8 +88,9 @@ async def import_carry_overs(
                 await put_carry_over(
                     db,
                     tenant_id=tenant_id,
-                    platform="discord",
+                    platform=tenant.platform,
                     external_user_id=user_id,
+                    agent_name=agent_name,
                     source_name=export.source_name,
                     exported_at=export.exported_at,
                     history=built.history,
@@ -96,15 +100,28 @@ async def import_carry_overs(
     return counts
 
 
+async def check_agent(runtime: CliRuntime, *, tenant_id: uuid.UUID, agent_name: str) -> None:
+    """The conversations wait for this agent, so it must be one of the tenant's."""
+    agent = await find_agent_by_daimon_tag(
+        runtime.anthropic, tenant_id=tenant_id, name=agent_name, records=runtime.sessionmaker
+    )
+    if agent is None:
+        raise typer.BadParameter(f"No agent {agent_name} in this tenant", param_hint="--agent")
+
+
 @dms_app.command("import")
 def import_command(
     export_files: Annotated[list[Path], typer.Argument(metavar="EXPORT_FILE...")],
     tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
+    agent: Annotated[
+        str, typer.Option("--agent", help="Agent whose first private conversation takes it")
+    ],
 ) -> None:
     """Import v1 JSON files of earlier conversations into --tenant, in one transaction.
 
     Give every file of one export in the same run: a person split over files is merged.
-    Their next fresh private conversation (first message or /new) starts from theirs, once.
+    Their next fresh private conversation with --agent (first message or /new) starts
+    from theirs, once; one with another agent leaves it waiting.
     """
     exports: list[CarryOverExport] = []
     for path in export_files:
@@ -114,8 +131,9 @@ def import_command(
 
     async def run() -> None:
         async with build_runtime(load_settings()) as runtime:
+            await check_agent(runtime, tenant_id=tenant, agent_name=agent)
             counts = await import_carry_overs(
-                runtime.sessionmaker, tenant_id=tenant, exports=exports
+                runtime.sessionmaker, tenant_id=tenant, agent_name=agent, exports=exports
             )
             typer.echo(
                 f"{len(exports)} files: {counts['new']} new, {counts['updated']} updated, "
