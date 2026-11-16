@@ -104,6 +104,16 @@ async def set_thread_model(
         .on_conflict_do_update(constraint="pk_thread_model_settings", set_=changes)
     )
     await session.execute(stmt)
+    # A row with neither a model nor an effort says nothing the absent row does not.
+    await session.execute(
+        delete(ThreadModelSetting).where(
+            ThreadModelSetting.tenant_id == tenant_id,
+            ThreadModelSetting.platform == platform,
+            ThreadModelSetting.thread_id == thread_id,
+            ThreadModelSetting.model.is_(None),
+            ThreadModelSetting.effort.is_(None),
+        )
+    )
     await session.flush()
 
 

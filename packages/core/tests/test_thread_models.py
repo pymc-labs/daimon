@@ -11,6 +11,7 @@ import uuid
 
 import pytest
 from anthropic.types.beta import BetaManagedAgentsModelConfig
+from daimon.core._models import ThreadModelSetting
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.thread_models import (
@@ -33,6 +34,7 @@ from daimon.core.thread_models import (
 )
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _AGENT = ma_agent(id="ag_1", name="daimon", model="claude-sonnet-5-5")
@@ -378,6 +380,32 @@ async def test_an_effort_alone_runs_the_agents_own_model_and_default_hands_it_ba
     await choose_thread_model(db_session_factory, choice="default", **pick)
     async with db_session_factory() as session:
         assert await get_thread_effort(session, **pick) is None, "default clears both"
+
+
+async def test_handing_everything_back_keeps_no_row(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A conversation on the agent's own model and effort has no row, not an empty one."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    pick = {"tenant_id": tenant.id, "platform": "discord", "thread_id": "T1"}
+
+    async def rows() -> int:
+        async with db_session_factory() as session:
+            found = await session.scalars(
+                select(ThreadModelSetting).where(ThreadModelSetting.thread_id == "T1")
+            )
+            return len(found.all())
+
+    await choose_thread_model(db_session_factory, effort="default", **pick)
+    assert await rows() == 0, "defaulting an untouched conversation stores nothing"
+    await choose_thread_model(db_session_factory, effort="max", **pick)
+    assert await rows() == 1, "an effort alone is a choice"
+    await choose_thread_model(db_session_factory, effort="default", **pick)
+    assert await rows() == 0, "handing the effort back leaves no empty row"
+    await choose_thread_model(db_session_factory, choice="default", effort="default", **pick)
+    assert await rows() == 0, "defaulting both stores nothing"
 
 
 async def test_a_refused_effort_or_an_empty_pick_writes_nothing(
