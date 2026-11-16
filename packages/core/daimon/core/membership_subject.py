@@ -7,7 +7,6 @@ from uuid import UUID
 
 from daimon.core.admin_actions import DelegatedAction, admin_for_action
 from daimon.core.authz import Subject, build_subject
-from daimon.core.config import DirectMessagePolicy
 from daimon.core.membership import MembershipResolver
 from daimon.core.native_admins import is_daimon_admin
 from daimon.core.stores.tenants import get_tenant
@@ -95,19 +94,3 @@ async def resolve_subject(
             platform_admin=platform_admin, daimon_admin=subject.is_admin, action=action
         ),
     )
-
-
-async def dm_policy_allows(
-    policy: DirectMessagePolicy,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    resolver: MembershipResolver | None,
-    *,
-    tenant_id: UUID,
-    user_id: str,
-) -> bool:
-    """Whether the DM policy lets `user_id` be messaged; role mode reads their roles
-    (a cached read is fine) and refuses when membership cannot be verified."""
-    if policy.mode != "role":
-        return policy.allows(user_id)
-    subject = await resolve_subject(sessionmaker, resolver, tenant_id=tenant_id, user_id=user_id)
-    return policy.allows(user_id, subject.role_ids if subject.verified_membership is True else None)

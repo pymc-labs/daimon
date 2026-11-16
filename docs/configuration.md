@@ -107,8 +107,7 @@ JSON object.
 
 Per-tenant DM recipient policies keyed by tenant UUID (normalized at load; invalid keys
 rejected). Default is members (live membership required). Set mode=disabled to disable
-DMs, or mode=allowlist with recipient_ids to restrict delivery to listed members. On
-Discord, mode=role with role_ids limits delivery to members holding one of those roles.
+DMs, or mode=allowlist with recipient_ids to restrict delivery to listed members.
 Configure DAIMON_DIRECT_MESSAGE_POLICIES as a JSON object.
 
 ### `DAIMON_TABLE_RENDERING`

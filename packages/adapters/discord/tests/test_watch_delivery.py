@@ -178,31 +178,6 @@ async def test_blocked_recipient_gets_nothing_and_the_watch_pauses(dm_store):
     assert dm_store.paused
 
 
-@pytest.mark.parametrize("holds_role", [True, False])
-async def test_role_policy_pauses_the_watch_once_the_owner_loses_the_role(
-    dm_store, monkeypatch, holds_role
-):
-    seen = []
-
-    async def allows(policy, _sessionmaker, resolver, *, tenant_id, user_id):
-        seen.append((policy.mode, user_id))
-        return holds_role
-
-    monkeypatch.setattr(watch_delivery, "dm_policy_allows", allows)
-    ports, dm = _ports()
-    ports["dm_policy"] = lambda _tenant: DirectMessagePolicy(mode="role", role_ids=["7"])
-    if holds_role:
-        assert await deliver_dm_report(_Sessions(), _row(dm_store.watch), **ports) == 1
-        assert not dm_store.paused
-    else:
-        with pytest.raises(AdmissionDenied):
-            await deliver_dm_report(_Sessions(), _row(dm_store.watch), **ports)
-        ports["run_turn"].assert_not_awaited()
-        dm.send.assert_not_awaited()
-        assert dm_store.paused
-    assert set(seen) == {("role", "555")}
-
-
 async def test_lost_membership_between_chunks_stops_the_rest(dm_store):
     answers = iter([True, True, False])
     ports, dm = _ports(text="word " * 1200, present=lambda *_: next(answers))

@@ -44,7 +44,7 @@ from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authori
 from daimon.core.channel_tidy import record_turn_post
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.membership import MembershipResolver
-from daimon.core.membership_subject import dm_policy_allows, resolve_subject
+from daimon.core.membership_subject import resolve_subject
 from daimon.core.message_split import split_fenced
 from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.output_delivery import DeliverableFile
@@ -194,15 +194,6 @@ def make_discord_routine_poster(
         GatewayMembershipResolver(client) if client is not None else None
     )
 
-    async def _dm_allowed(row: RoutineRow, user_id: str) -> bool:
-        return await dm_policy_allows(
-            dm_policy(row),
-            sessionmaker,
-            membership_resolver,
-            tenant_id=row.tenant_id,
-            user_id=user_id,
-        )
-
     def refusal(row: RoutineRow, reason: str) -> DeliveryOutcome:
         private_reasons = {
             "invoker_not_allowed": "The owner is no longer a verified, allowed server member.",
@@ -245,9 +236,7 @@ def make_discord_routine_poster(
                     return DeliveryOutcome(
                         status="skipped", note="Routine DMs are disabled for this server."
                     )
-        if row.destination_kind == "dm" and not await _dm_allowed(
-            row, row.created_by_user_id or ""
-        ):
+        if row.destination_kind == "dm" and not dm_policy(row).allows(row.created_by_user_id or ""):
             return DeliveryOutcome(
                 status="skipped", note="The owner is not allowed to receive DMs."
             )
@@ -359,7 +348,7 @@ def make_discord_routine_poster(
             creator is None
             or not creator.isdigit()
             or not guild_id.isdigit()
-            or not await _dm_allowed(row, creator)
+            or not dm_policy(row).allows(creator)
         ):
             return DeliveryOutcome(status="skipped", note=reason)
         try:
@@ -419,7 +408,7 @@ def make_discord_routine_poster(
             if not await tenant_dm_still_open(sessionmaker, row, tenant.external_id):
                 return False
             creator = row.created_by_user_id
-            if creator is None or not await _dm_allowed(row, creator):
+            if creator is None or not dm_policy(row).allows(creator):
                 return False
             current_policy = await clear_creator(
                 sessionmaker, row, platform="discord", membership_resolver=membership_resolver

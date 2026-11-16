@@ -154,39 +154,3 @@ def test_only_the_resolvers_and_the_subject_builder_mark_membership_fresh() -> N
         "core/daimon/core/membership_subject.py",
         "adapters/mcp/daimon/adapters/mcp/tools/routines.py",
     }
-
-
-@pytest.mark.parametrize(
-    ("change", "role_mode", "allowed"),
-    [
-        ({}, True, True),
-        ({"role_ids": ("9",)}, True, False),
-        ({"role_ids": ()}, True, False),
-        ({"verified_membership": None}, True, False),
-        ({"verified_membership": False}, True, False),
-        ({"role_ids": ()}, False, True),
-    ],
-)
-async def test_dm_policy_allows_reads_roles_only_in_role_mode(
-    monkeypatch: pytest.MonkeyPatch, change: dict[str, object], role_mode: bool, allowed: bool
-) -> None:
-    from daimon.core import membership_subject
-    from daimon.core.config import DirectMessagePolicy
-
-    subject = replace(OWNER, **change)
-
-    async def fake_resolve(*_a: object, **_k: object) -> Subject:
-        return subject
-
-    monkeypatch.setattr(membership_subject, "resolve_subject", fake_resolve)
-    policy = (
-        DirectMessagePolicy(mode="role", role_ids=["123"]) if role_mode else DirectMessagePolicy()
-    )
-    got = await membership_subject.dm_policy_allows(
-        policy,
-        None,  # type: ignore[arg-type]
-        None,
-        tenant_id=uuid.uuid4(),
-        user_id="u1",
-    )
-    assert got is allowed

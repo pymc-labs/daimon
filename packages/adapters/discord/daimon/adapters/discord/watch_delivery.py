@@ -27,8 +27,6 @@ from datetime import UTC, datetime
 import structlog
 from daimon.adapters.discord.watch_access import require_watch_parent_access
 from daimon.core.config import DirectMessagePolicy
-from daimon.core.membership import MembershipResolver
-from daimon.core.membership_subject import dm_policy_allows
 from daimon.core.message_split import split_fenced
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import TaskContinuationRow, WatchRow
@@ -88,7 +86,6 @@ async def deliver_dm_report(
     open_dm: DmOpener,
     member_present: MemberPresent,
     dm_policy: DmPolicyLookup,
-    membership_resolver: MembershipResolver | None = None,
 ) -> int:
     """Run the DM turn and send its text to the owner in chunks; how many chunks were sent.
 
@@ -107,13 +104,7 @@ async def deliver_dm_report(
             raise AdmissionDenied(reason="invoker_not_allowed")
         if not enabled:
             raise await _pause(sessionmaker, watch, "Watch paused: Daimon DMs are off here.")
-        if not await dm_policy_allows(
-            dm_policy(watch.tenant_id),
-            sessionmaker,
-            membership_resolver,
-            tenant_id=watch.tenant_id,
-            user_id=owner,
-        ):
+        if not dm_policy(watch.tenant_id).allows(owner):
             raise await _pause(
                 sessionmaker, watch, "Watch paused: you can no longer get DMs from Daimon here."
             )

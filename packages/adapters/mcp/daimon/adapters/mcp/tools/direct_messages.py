@@ -61,11 +61,7 @@ async def send_direct_message_impl(
     if re.fullmatch(_RECIPIENT[auth.platform], recipient_id) is None:
         raise ToolError("recipient_id must be one platform user ID, not a mention or channel")
     policy = runtime.settings.direct_message_policies.get(auth.tenant_id, DirectMessagePolicy())
-    if policy.mode == "role":
-        # Roles are read from the live member in the Discord branch below.
-        if auth.platform != "discord":
-            raise ToolError("role-restricted direct messages are available on Discord only")
-    elif not policy.allows(recipient_id):
+    if not policy.allows(recipient_id):
         raise ToolError("direct messages to this recipient are not allowed here")
     await require_dm_recipient_allowed(runtime, auth, recipient_id=recipient_id)
     chunks = [content[i : i + 1900] for i in range(0, len(content), 1900)]
@@ -87,10 +83,6 @@ async def send_direct_message_impl(
                 recipient = await guild.fetch_member(int(recipient_id))
                 if recipient.bot:
                     raise ToolError("recipient must be a person in this server")
-                if policy.mode == "role" and not policy.allows(
-                    recipient_id, [str(role.id) for role in recipient.roles]
-                ):
-                    raise ToolError("direct messages to this recipient are not allowed here")
                 dm = await recipient.create_dm()
                 for chunk in chunks:
                     message = await dm.send(chunk, allowed_mentions=discord.AllowedMentions.none())
