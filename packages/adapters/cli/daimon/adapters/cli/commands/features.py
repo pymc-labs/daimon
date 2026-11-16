@@ -202,6 +202,8 @@ async def features_set(
     spec = FEATURES[key]
     if spec.authority.native and not (reason and reason.strip()):
         raise StoreError(f"{spec.name} is set from the CLI only with --reason.")
+    if spec.authority.native and not rt.settings.cli.local_user.strip():
+        raise StoreError(f"{spec.name} needs cli.local_user, the operator's name, to be set.")
     target = await _target(rt, selector)
     agent_id = await _agent_id(rt, target, agent) if agent else None
     if thread and not channel:

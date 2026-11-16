@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 from daimon.core.admin_actions import DelegatedAction
+from daimon.core.authz import Subject
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.config import (
     AnthropicSettings,
@@ -18,8 +19,10 @@ from daimon.core.config import (
     DiscordSettings,
     Settings,
 )
+from daimon.core.features import service
 from daimon.core.features.service import FeatureActor, OperatorActor, change_feature
 from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.settings_panel import chat_actor
 from daimon.core.stores.domain import ChangeSurface
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_tenant
@@ -124,18 +127,64 @@ def test_an_operator_actor_needs_a_name_a_reason_and_the_cli(
         OperatorActor(uuid.uuid4(), None, surface, None, _yes, **merged)  # pyright: ignore[reportArgumentType]
 
 
+def _mentions_the_operator_type(tree: ast.AST) -> bool:
+    """Any use of the type: a call, an attribute (`service.OperatorActor`), a class
+    argument (`dataclasses.replace`, `cast`, a subclass base) or a string annotation."""
+    return any(
+        (isinstance(node, ast.Name) and node.id == "OperatorActor")
+        or (isinstance(node, ast.Attribute) and node.attr == "OperatorActor")
+        or (isinstance(node, ast.Constant) and node.value == "OperatorActor")
+        for node in ast.walk(tree)
+    )
+
+
 def test_only_the_cli_entrypoint_builds_an_operator_actor() -> None:
     """The operator path is reachable from the CLI alone; a second constructor would make a
-    chat or MCP path able to approve its own writes."""
+    chat or MCP path able to approve its own writes. The check reads every use of the type
+    (not only a bare call), so an attribute call or `dataclasses.replace` is caught too."""
+    service = REPO / "packages/core/daimon/core/features/service.py"
     builders = {
         path.relative_to(REPO).as_posix()
         for path in (REPO / "packages").rglob("*.py")
         if "tests" not in path.parts
-        and any(
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "OperatorActor"
-            for node in ast.walk(ast.parse(path.read_text()))
-        )
+        and path != service
+        and _mentions_the_operator_type(ast.parse(path.read_text()))
     }
     assert builders == {"packages/adapters/cli/daimon/adapters/cli/commands/features.py"}, builders
+
+
+def test_the_check_sees_attribute_calls_and_replace_on_the_type() -> None:
+    for source in (
+        "service.OperatorActor(t, None, 'cli', None, f, operator='x', reason='y')",
+        "dataclasses.replace(op, via_agent_key=True); cast('OperatorActor', op)",
+        "class Other(OperatorActor): ...",
+    ):
+        assert _mentions_the_operator_type(ast.parse(source)), source
+
+
+async def test_a_settings_panel_actor_is_refused_unless_the_live_check_says_admin(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`chat_actor` (the chat settings panels) vouches via `admin_for`, which approvals ignore."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    asked: list[str] = []
+
+    async def not_admin(*_: object, user_id: str, **__: object) -> Subject:
+        asked.append(user_id)
+        return Subject(is_admin=False, platform_user_id=user_id)
+
+    monkeypatch.setattr(service, "approval_admin", not_admin)
+    actor = await chat_actor(
+        db_session_factory, tenant_id=tenant.id, platform="discord", user_id="u1", admin_for=_yes
+    )
+    with pytest.raises(ChannelChangeRefused):
+        await _set(db_session_factory, actor)
+    assert asked == ["u1"], "the live native check ran for the panel user"
+    assert not [
+        e
+        for e in await list_events(db_session, tenant_id=tenant.id)
+        if e.tool_name == "approval_gate"
+    ]

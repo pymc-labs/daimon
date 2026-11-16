@@ -230,6 +230,30 @@ async def test_approvals_need_a_reason_from_the_cli(
     assert row["value"] == "on", "a refused change writes nothing"
 
 
+async def test_a_blank_operator_name_refuses_cleanly(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """With `cli.local_user` blank the audit row would name no one: a refusal, not a traceback."""
+    rt = _runtime(db_session_factory, [])
+    object.__setattr__(rt.settings.cli, "local_user", "  ")
+    selector = await _tenant(db_session_factory)
+    console, _ = _console()
+    with pytest.raises(StoreError, match="cli.local_user"):
+        await features_set(
+            rt=rt,
+            console=console,
+            selector=selector,
+            key="approvals",
+            value="off",
+            reason="bridge",
+            tier=None,
+            agent=None,
+            channel=None,
+            thread=None,
+        )
+    assert _row(await _rows(rt, selector), "approvals")["value"] == "on"
+
+
 async def test_the_operator_sets_approvals_and_the_change_is_audited(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
