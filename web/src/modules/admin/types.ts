@@ -35,6 +35,8 @@ export type AgentAccess = {
   groups: string[]
   fixed_to: string | null
   fixed_name: string | null
+  /** Null where the workspace has no direct messages. */
+  dm: DmGrant | null
 }
 
 export type AuditSource = "web" | "security"
@@ -80,3 +82,30 @@ export type SettingsPatch = {
 export type FeedbackReason = { code: string; label: string; count: number | null }
 export type AgentFeedback = { id: string | null; name: string; up: number | null; down: number | null; reasons: FeedbackReason[] }
 export type Feedback = { days: number; agents: AgentFeedback[] }
+
+/** Who may DM an agent: everyone, only the listed people and groups, or everyone but them. */
+export type DmWho = "members" | "listed" | "excluded"
+/** A person by platform id; `name` is null when the platform never told us. */
+export type DmPerson = { id: string; name: string | null }
+export type DmGrant = { on: boolean; who: DmWho; users: DmPerson[]; groups: string[] }
+export type DmGrantChange = { who: DmWho; user_ids: string[]; group_ids: string[] }
+
+export type DmSubject = "user" | "group" | "everyone"
+/** `agent` null is the default agent; `name` is a listed person's stored name. */
+export type DmRule = { position: number; subject: DmSubject; subject_id: string | null; name: string | null; agent: string | null; locked: boolean }
+/** `platform` is null where the workspace has no direct messages. */
+export type DmSettings = { platform: string | null; default_agent: string | null; agents: { id: string; name: string }[]; rules: DmRule[] }
+export type DmRuleAdd = { subject: DmSubject; subject_id: string | null; agent: string | null; locked: boolean }
+export type DmRuleChange = { agent?: string | null; locked?: boolean; to?: number }
+
+/** Where a DM from a person goes; `rule` is the 0-based position of the rule that matched. */
+export type DmExplain = {
+  route: "start" | "choose" | "refused" | "unchecked"
+  agent: string | null
+  reason: "locked" | "pick" | "rule" | "default" | "only" | "no_agent" | "locked_unavailable" | null
+  agents: string[]
+  allowed: string[]
+  rule: number | null
+}
+/** The platform's groups, live, then stored ids it no longer lists (no name). */
+export type PlatformGroups = { platform: string; groups: { id: string; name: string | null }[]; problem: "reinstall" | "unavailable" | null }

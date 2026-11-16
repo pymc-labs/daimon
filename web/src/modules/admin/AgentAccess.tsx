@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Lock } from "lucide-react"
+import { toast } from "sonner"
 import { AgentAvatar } from "@/components/common"
 import { Drawer } from "@/components/Drawer"
 import { QueryState } from "@/components/QueryState"
@@ -12,7 +13,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { api } from "@/lib/api"
 import { channelLabel } from "@/lib/format"
 import { useGroups } from "@/lib/hooks"
-import type { AgentAccess } from "./types"
+import { AgentDm } from "./DirectMessages"
+import { dmText } from "./dm"
+import type { AgentAccess, DmGrant } from "./types"
 import { ChannelLink } from "@/components/links"
 import { Facts, PanelHead, PanelSection, Tag } from "@/components/panel"
 
@@ -49,15 +52,35 @@ function useSaveAccess() {
   })
 }
 
+/** Who may DM an agent; the change shows at once and a refusal puts the old one back. */
+function useSaveDm() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, dm }: { id: string; dm: DmGrant }) =>
+      api.patch(`/api/admin/agent-access/${id}`, { dm: { who: dm.who, user_ids: dm.users.map((u) => u.id), group_ids: dm.groups } }),
+    onMutate: async ({ id, dm }) => {
+      await qc.cancelQueries({ queryKey: KEY })
+      const before = qc.getQueryData<AgentAccess[]>(KEY)
+      qc.setQueryData<AgentAccess[]>(KEY, (rows) => rows?.map((r) => (r.agent.id === id ? { ...r, dm } : r)))
+      return { before }
+    },
+    onError: (e, _v, ctx) => { qc.setQueryData(KEY, ctx?.before); toast.error(e.message) },
+    onSettled: () => void qc.invalidateQueries({ queryKey: KEY }),
+  })
+}
+
 function AccessTable({ data }: { data: AgentAccess[] }) {
   const [, setAgent] = useParam("agent")
   const save = useSaveAccess()
+  const saveDm = useSaveDm()
+  const dms = data.some((a) => a.dm)
   return (
     <>
       <Table>
         <TableHeader>
           <TableRow className="hover:bg-transparent">
             <TableHead>Agent</TableHead><TableHead className="w-28">Web chat</TableHead><TableHead>Who</TableHead>
+            {dms && <TableHead>Direct messages</TableHead>}
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -74,6 +97,7 @@ function AccessTable({ data }: { data: AgentAccess[] }) {
                 {a.fixed_to ? <Lock className="size-4 text-faint" aria-label="Locked" /> : <span className="text-muted-foreground">{a.web ? "On" : "Off"}</span>}
               </TableCell>
               <TableCell className="max-w-64 truncate text-muted-foreground">{whoText(a)}</TableCell>
+              {dms && <TableCell className="text-muted-foreground">{a.dm ? dmText(a.dm) : null}</TableCell>}
             </TableRow>
           ))}
         </TableBody>
@@ -81,14 +105,14 @@ function AccessTable({ data }: { data: AgentAccess[] }) {
       <Drawer param="agent" title="Agent access" ids={data.map((a) => a.agent.id)}>
         {(id) => {
           const a = data.find((r) => r.agent.id === id)
-          return a ? <AccessBody a={a} save={(b) => save.mutate({ id, ...b })} /> : null
+          return a ? <AccessBody a={a} save={(b) => save.mutate({ id, ...b })} saveDm={(dm) => saveDm.mutate({ id, dm })} /> : null
         }}
       </Drawer>
     </>
   )
 }
 
-function AccessBody({ a, save }: { a: AgentAccess; save: (b: Partial<AgentAccess>) => void }) {
+function AccessBody({ a, save, saveDm }: { a: AgentAccess; save: (b: Partial<AgentAccess>) => void; saveDm: (dm: DmGrant) => void }) {
   const { data: groups } = useGroups()
   // Everyone is the "Everyone" choice; a group is a named subset.
   const names = [...new Set([...(groups ?? []).filter((g) => g.id !== "everyone").map((g) => g.name), ...a.groups])]
@@ -132,6 +156,7 @@ function AccessBody({ a, save }: { a: AgentAccess; save: (b: Partial<AgentAccess
           ) : <Tag>No groups</Tag>}
         </PanelSection>
       )}
+      {a.dm && <AgentDm agent={a.agent} dm={a.dm} save={saveDm} />}
     </div>
   )
 }

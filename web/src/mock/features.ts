@@ -12,7 +12,8 @@ const schema = (key: string, name: string, tiers: Tier[] = ALL): FeatureSchema =
 })
 const SCHEMA = [
   schema("progress_plans", "Progress plans"), schema("participation", "Thread participation"),
-  schema("guidance", "Setup guidance", ["deployment", "workspace", "agent"]), schema("tool.bash", "Built-in tool: bash"), schema("cost_footer", "Cost footer"),
+  schema("guidance", "Setup guidance", ["deployment", "workspace", "agent"]),
+  schema("direct_messages", "Direct messages", ["deployment", "workspace", "agent"]), schema("tool.bash", "Built-in tool: bash"), schema("cost_footer", "Cost footer"),
 ]
 /** Locked at the workspace, so every level below reads it as locked; `value` is what the lock holds. */
 const locks = new Map<string, string>([["cost_footer", "off"]])
@@ -20,7 +21,7 @@ const locks = new Map<string, string>([["cost_footer", "off"]])
 const NO_SANDBOX = "c_general"
 const REASON = "Needs a sandbox. Ask an admin."
 /** `place|tier|key` to the value set there. */
-const own = new Map<string, string>([[`/${NO_SANDBOX}/|channel|tool.bash`, "off"], [`/${NO_SANDBOX}/t_launch|thread|tool.bash`, "off"]])
+const own = new Map<string, string>([["ag_review//|agent|direct_messages", "off"], [`/${NO_SANDBOX}/|channel|tool.bash`, "off"], [`/${NO_SANDBOX}/t_launch|thread|tool.bash`, "off"]])
 const place = (url: URL) => ["agent", "channel", "thread"].map((k) => url.searchParams.get(k) ?? "").join("/")
 const tiersOf = (url: URL): Tier[] => ["workspace", ...(url.searchParams.get("agent") ? ["agent"] : []), ...(url.searchParams.get("channel") ? ["channel"] : []), ...(url.searchParams.get("thread") ? ["thread"] : [])] as Tier[]
 
