@@ -37,14 +37,23 @@ from typing import Final, Literal
 
 import structlog
 from anthropic import AsyncAnthropic
-from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.access_policy import TenantAccessPolicy, agent_invoker_roles
 from daimon.core.agent_identity import (
     AgentIdentity,
     identity_enabled_for,
     is_builtin_agent,
     resolve_agent_identity,
 )
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_subject
+from daimon.core.authz import (
+    Action,
+    AgentRef,
+    Place,
+    Subject,
+    Surface,
+    authorize,
+    build_subject,
+    holds_agent_roles,
+)
 from daimon.core.config import Settings
 from daimon.core.cron_words import routine_phrase, schedule_words
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
@@ -354,17 +363,29 @@ _TURN_NOTICE_FAILURES = (
 )
 
 
-def lapsed_role_text(row: RoutineRow, missing: tuple[tuple[str, ...], ...]) -> str:
-    """The one line sent to a routine's owner when it was paused for a lapsed role.
+def lapsed_role(
+    policy: TenantAccessPolicy, agent_names: tuple[str | None, ...], owner: Subject
+) -> bool:
+    """The owner is a freshly verified member missing a role the agent needs.
 
-    `missing` is each unmet requirement as the role names that would satisfy it.
+    Such a routine is paused at fire time and listed by `daimon routines
+    check-roles`. An owner who left, or whose membership could not be read, is
+    not lapsed: their fire is refused and retried.
     """
-    needs = " and ".join(" or ".join(names) for names in missing) or "a role"
+    return (
+        bool(agent_invoker_roles(policy, agent_names))
+        and owner.membership_fresh
+        and not holds_agent_roles(policy, agent_names, owner)
+    )
+
+
+def lapsed_role_card(row: RoutineRow) -> tuple[str, str]:
+    """The error card DMed to a routine's owner when it was paused for a lapsed role."""
     label = row.name or routine_phrase(row.cron_expr, row.timezone)
     return (
-        f'Your routine "{label}" ({row.agent_name}) is paused because you no longer '
-        f"have the role it needs: {needs}. Once you have it back, resume the routine "
-        "from the /routines panel."
+        f'Your routine "{label}" ({row.agent_name}) is paused: you no longer have a role'
+        " its agent needs.",
+        "Ask an admin for the role, then resume it from /routines.",
     )
 
 

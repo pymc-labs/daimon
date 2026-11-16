@@ -3033,7 +3033,7 @@ async def _fire_with_fake_turn(
     agent_posts_to: str | None,
     policy: object | None = None,
     membership_resolver=None,
-    discord_rest=None,
+    send_dm=None,
     dm_mode: str | None = None,
     tenant_dms: bool = True,
 ) -> tuple[RoutineRow, dict[str, object]]:
@@ -3104,7 +3104,7 @@ async def _fire_with_fake_turn(
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
         membership_resolver=membership_resolver,
-        discord_rest=discord_rest,
+        send_dm=send_dm,
     )
 
     async def fake_resolve(*args: object, **kwargs: object) -> str:
@@ -4274,7 +4274,7 @@ async def _role_gated_fire(
     monkeypatch: pytest.MonkeyPatch,
     fetch: Callable[..., Awaitable[object]] | None,
     *,
-    discord_rest: object | None = None,
+    send_dm: _SentDms | None = None,
 ) -> tuple[RoutineRow, dict[str, object]]:
     from daimon.core.access_policy import AgentRule, TenantAccessPolicy
     from daimon.core.membership import CachedMembershipResolver
@@ -4287,7 +4287,7 @@ async def _role_gated_fire(
         agent_posts_to=None,
         policy=TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("123",))}),
         membership_resolver=CachedMembershipResolver(fetch) if fetch is not None else None,  # type: ignore[arg-type]
-        discord_rest=discord_rest,
+        send_dm=send_dm,
     )
 
 
@@ -4306,25 +4306,19 @@ async def test_routine_fires_role_gated_agent_for_owner_holding_the_role(
     assert after.last_error is None
 
 
-class _FakeDiscordRest:
-    def __init__(self, *, accepts: bool = True, reads_roles: bool = True) -> None:
+class _SentDms:
+    """Records each owner DM card; `accepts=False` fails the send as Discord would."""
+
+    def __init__(self, *, accepts: bool = True) -> None:
         self.accepts = accepts
-        self.reads_roles = reads_roles
         self.sent: list[tuple[str, str]] = []
 
-    async def send_dm(self, user_id: str, text: str) -> None:
-        from daimon.core.discord_dm import DiscordRestError
-
-        self.sent.append((user_id, text))
+    async def __call__(self, user_id: str, title: str, todo: str) -> None:
+        self.sent.append((user_id, f"{title}\n{todo}"))
         if not self.accepts:
-            raise DiscordRestError("POST users/@me/channels: HTTP 403")
-
-    async def role_names(self, guild_id: str) -> dict[str, str]:
-        from daimon.core.discord_dm import DiscordRestError
-
-        if not self.reads_roles:
-            raise DiscordRestError("GET guilds/roles: HTTP 500")
-        return {"123": "Staff"}
+            raise httpx.HTTPStatusError(
+                "403", request=httpx.Request("POST", "https://x"), response=httpx.Response(403)
+            )
 
 
 def _lapsed(roles: tuple[str, ...]):  # type: ignore[no-untyped-def]
@@ -4344,9 +4338,9 @@ async def test_lapsed_role_pauses_the_routine_and_dms_the_owner_once(
     roles: tuple[str, ...],
 ) -> None:
     """An admin without the role is no bypass; the owner hears once, in plain words."""
-    rest = _FakeDiscordRest()
+    rest = _SentDms()
     after, seen = await _role_gated_fire(
-        db_session, db_session_factory, monkeypatch, _lapsed(roles), discord_rest=rest
+        db_session, db_session_factory, monkeypatch, _lapsed(roles), send_dm=rest
     )
     assert not seen
     assert after.last_error == "owner_lacks_agent_role"
@@ -4355,7 +4349,7 @@ async def test_lapsed_role_pauses_the_routine_and_dms_the_owner_once(
     assert after.delivery_status is None, "no failure notice is queued for the destination"
     ((user, text),) = rest.sent
     assert user == "U_DEST"
-    assert "paused" in text and "Staff" in text and "/routines" in text
+    assert "paused" in text and "/routines" in text and "123" not in text, "no role ids"
 
 
 async def test_lapsed_role_still_pauses_when_the_dm_cannot_be_sent(
@@ -4366,29 +4360,15 @@ async def test_lapsed_role_still_pauses_when_the_dm_cannot_be_sent(
     """A refused DM is logged with the routine; the pause stands."""
     from structlog.testing import capture_logs
 
-    rest = _FakeDiscordRest(accepts=False)
+    rest = _SentDms(accepts=False)
     with capture_logs() as logs:
         after, _ = await _role_gated_fire(
-            db_session, db_session_factory, monkeypatch, _lapsed(()), discord_rest=rest
+            db_session, db_session_factory, monkeypatch, _lapsed(()), send_dm=rest
         )
     assert after.enabled is False, "the routine is paused even though the DM failed"
     assert len(rest.sent) == 1, "the DM was tried once"
     failed = [e for e in logs if e["event"] == "routine.lapsed_role_dm_failed"]
     assert [e["routine_id"] for e in failed] == [str(after.id)], "the failure names the routine"
-
-
-async def test_lapsed_role_dm_names_roles_by_id_when_names_are_unreadable(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    rest = _FakeDiscordRest(reads_roles=False)
-    after, _ = await _role_gated_fire(
-        db_session, db_session_factory, monkeypatch, _lapsed(()), discord_rest=rest
-    )
-    assert after.enabled is False
-    ((_, text),) = rest.sent
-    assert "123" in text and "Staff" not in text, "the role id stands in for its name"
 
 
 async def test_lapsed_role_pauses_without_a_dm_when_dms_are_disabled_or_unavailable(
@@ -4399,7 +4379,7 @@ async def test_lapsed_role_pauses_without_a_dm_when_dms_are_disabled_or_unavaila
     from daimon.core.access_policy import AgentRule, TenantAccessPolicy
     from daimon.core.membership import CachedMembershipResolver
 
-    rest = _FakeDiscordRest()
+    rest = _SentDms()
 
     after, _ = await _fire_with_fake_turn(
         db_session,
@@ -4409,7 +4389,7 @@ async def test_lapsed_role_pauses_without_a_dm_when_dms_are_disabled_or_unavaila
         agent_posts_to=None,
         policy=TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("123",))}),
         membership_resolver=CachedMembershipResolver(_lapsed(())),
-        discord_rest=rest,
+        send_dm=rest,
         dm_mode="disabled",
     )
     assert after.enabled is False
@@ -4423,7 +4403,7 @@ async def test_lapsed_role_pauses_without_a_dm_when_dms_are_disabled_or_unavaila
         agent_posts_to=None,
         policy=TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("123",))}),
         membership_resolver=CachedMembershipResolver(_lapsed(())),
-        discord_rest=rest,
+        send_dm=rest,
         tenant_dms=False,
     )
     assert off.enabled is False
@@ -4441,10 +4421,10 @@ async def test_the_dm_is_sent_only_after_the_pause_commits(
 ) -> None:
     from sqlalchemy import text
 
-    class _Rest(_FakeDiscordRest):
+    class _Rest(_SentDms):
         committed_when_sent = 0
 
-        async def send_dm(self, user_id: str, text_: str) -> None:
+        async def __call__(self, user_id: str, title: str, todo: str) -> None:
             async with db_session_factory() as other:  # a separate connection sees commits only
                 self.committed_when_sent = (
                     await other.scalar(
@@ -4455,12 +4435,10 @@ async def test_the_dm_is_sent_only_after_the_pause_commits(
                     )
                     or 0
                 )
-            return await super().send_dm(user_id, text_)
+            return await super().__call__(user_id, title, todo)
 
     rest = _Rest()
-    await _role_gated_fire(
-        db_session, db_session_factory, monkeypatch, _lapsed(()), discord_rest=rest
-    )
+    await _role_gated_fire(db_session, db_session_factory, monkeypatch, _lapsed(()), send_dm=rest)
     assert rest.committed_when_sent == 1
 
 
@@ -4486,9 +4464,9 @@ async def test_routine_refuses_a_non_member_without_pausing(
     async def fetch(*_args: object) -> Membership:
         return Membership(is_member=False)
 
-    rest = _FakeDiscordRest()
+    rest = _SentDms()
     after, seen = await _role_gated_fire(
-        db_session, db_session_factory, monkeypatch, fetch, discord_rest=rest
+        db_session, db_session_factory, monkeypatch, fetch, send_dm=rest
     )
     assert not seen
     assert after.last_error == "invoker_not_allowed"

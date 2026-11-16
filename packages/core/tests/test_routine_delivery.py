@@ -883,16 +883,44 @@ def test_a_routine_result_never_names_another_chat_app(
     assert render_fallback_post(row).endswith(payload), "no platform, no scrubbing"
 
 
-def test_lapsed_role_text_names_the_routine_and_the_missing_roles() -> None:
+def test_lapsed_role_card_names_the_routine_and_how_to_resume() -> None:
     from types import SimpleNamespace
 
-    from daimon.core.routine_delivery import lapsed_role_text
+    from daimon.core.routine_delivery import lapsed_role_card
 
     row = SimpleNamespace(
         name="Weekly digest", agent_name="helper", cron_expr="0 9 * * 1", timezone="UTC"
     )
-    text = lapsed_role_text(row, (("Staff", "Lead"), ("Insiders",)))  # type: ignore[arg-type]
-    assert "Weekly digest" in text and "Staff or Lead and Insiders" in text
-    assert "/routines" in text
+    title, todo = lapsed_role_card(row)  # type: ignore[arg-type]
+    assert "Weekly digest" in title and "paused" in title
+    assert "admin" in todo and "/routines" in todo
     unnamed = SimpleNamespace(name=None, agent_name="helper", cron_expr="0 9 * * 1", timezone="UTC")
-    assert "Monday routine at 09:00 UTC" in lapsed_role_text(unnamed, ())  # type: ignore[arg-type]
+    assert "Monday routine at 09:00 UTC" in lapsed_role_card(unnamed)[0]  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("roles", "fresh", "gated", "lapsed"),
+    [
+        ((), True, True, True),
+        (("999",), True, True, True),
+        (("123",), True, True, False),
+        ((), False, True, False),
+        ((), True, False, False),
+    ],
+)
+def test_lapsed_role_is_a_fresh_member_missing_a_gated_agents_role(
+    roles: tuple[str, ...], fresh: bool, gated: bool, lapsed: bool
+) -> None:
+    """Admins get no bypass; a stale or missing membership is retried, not paused."""
+    from daimon.core.authz import build_subject
+    from daimon.core.routine_delivery import lapsed_role
+
+    rules = {"helper": AgentRule(invoker_role_ids=("123",))} if gated else {}
+    owner = build_subject(
+        is_admin=roles == ("999",),
+        platform_user_id="U1",
+        role_ids=roles,
+        verified_membership=fresh or None,
+        membership_fresh=fresh,
+    )
+    assert lapsed_role(TenantAccessPolicy(agent_rules=rules), ("helper",), owner) is lapsed
