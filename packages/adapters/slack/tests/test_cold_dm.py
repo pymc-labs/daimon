@@ -44,7 +44,6 @@ _ON = (
 @pytest.fixture(autouse=True)
 def fresh_notices(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dm_module, "_COLD_DM_NOTICES", ColdDmNotices())
-    monkeypatch.setattr(dm_module, "_PENDING_PICKS", {})
     monkeypatch.setattr(dm_module, "debounce_seconds", AsyncMock(return_value=0.0))
     monkeypatch.setattr(dm_module, "list_dm_agents", AsyncMock(return_value=[]))
 
@@ -52,6 +51,7 @@ def fresh_notices(monkeypatch: pytest.MonkeyPatch) -> None:
 def _runtime(db_session_factory: async_sessionmaker[AsyncSession]) -> MagicMock:
     runtime = MagicMock()
     runtime.dm_bursts = new_dm_bursts()
+    runtime.dm_picks = {}
     runtime.sessionmaker = db_session_factory
     runtime.settings.direct_message_policies = {}
     runtime.settings.features = {}
@@ -315,6 +315,27 @@ async def test_cold_dm_when_more_arrive_before_the_pick_then_one_offer_answers_t
     await dm_module.handle_dm_agent_pick(runtime, _pick("ada"))
     texts = [c.kwargs["text"] for c in reply.await_args_list]
     assert texts == ["hello?", "yes"], "the pick answers both, the approval on its own"
+
+
+async def test_cold_dm_when_a_later_burst_comes_before_the_pick_then_the_open_offer_answers_it(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A burst after the choice was posted joins it: one card, and the pick answers both."""
+    tenant = await _dms_on(db_session_factory)
+    client = _client(monkeypatch)
+    runtime = _runtime(db_session_factory)
+    _decided(monkeypatch, DmChoose(("ada", "bob")), allowed=("ada", "bob"))
+    _, reply = _starts(monkeypatch, tenant.tenant_id)
+    await dm_module.handle_direct_message(runtime, _event(), team_id="T_ROUTE")
+    await dm_module.handle_direct_message(
+        runtime, {**_event(ts="1.2"), "text": "still there?"}, team_id="T_ROUTE"
+    )
+
+    offers = [c for c in client.chat_postMessage.await_args_list if "blocks" in c.kwargs]
+    assert len(offers) == 1, "the open choice is not posted again"
+    await dm_module.handle_dm_agent_pick(runtime, _pick("ada"))
+    texts = [c.kwargs["text"] for c in reply.await_args_list]
+    assert texts == ["hello?\n\nstill there?"], "one turn answers both bursts"
 
 
 async def test_agent_pick_when_access_changed_meanwhile_then_refused(

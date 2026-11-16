@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from time import monotonic
@@ -19,7 +18,7 @@ from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.errors import bound_request_id, render_error
 from daimon.adapters.slack.gating import is_slack_connect_external
 from daimon.adapters.slack.interactions import resolve_web_client
-from daimon.adapters.slack.runtime import SlackRuntime, admission_refusal_message
+from daimon.adapters.slack.runtime import DmPick, SlackRuntime, admission_refusal_message
 from daimon.adapters.slack.user_groups import user_group_lookup
 from daimon.core.agent_identity import (
     AgentIdentity,
@@ -417,15 +416,9 @@ async def _answer_burst(
         )
         route = decision.route
         if isinstance(route, DmChoose):
-            choices, held = route.agents, list[dict[str, Any]]()
-
-            async def hold(group: list[dict[str, Any]]) -> None:
-                offer = not held
-                held.extend(group)  # the pick answers every message held so far
-                if offer:
-                    await _offer_agents(client, key, choices, held)
-
-            await burst.answer(seconds, react, hold)
+            await burst.answer(
+                seconds, react, partial(_offer_agents, runtime, client, key, route.agents)
+            )
             return
         if not isinstance(route, DmStart):
             await runtime.dm_bursts.end(key, burst)  # one refusal speaks for the whole burst
@@ -576,17 +569,6 @@ _UNCHECKED = "I couldn't check your access just now.\n\nTry again in a minute."
 _PICK_EXPIRED = "This choice expired.\n\nSend a new message to choose again."
 
 
-@dataclass(frozen=True)
-class _PendingPick:
-    agents: tuple[str, ...]
-    events: list[dict[str, Any]]
-    expires_at: float
-
-
-#: Each person's open agent choice and the messages it answers, by (team, channel, user).
-_PENDING_PICKS: dict[tuple[str, str, str], _PendingPick] = {}
-
-
 async def _decide_cold(
     runtime: SlackRuntime, client: AsyncWebClient, *, team_id: str, user_id: str, role: Role
 ) -> tuple[DmDecision, frozenset[str] | None]:
@@ -694,16 +676,25 @@ async def _refuse_cold(
 
 
 async def _offer_agents(
+    runtime: SlackRuntime,
     client: AsyncWebClient,
     key: tuple[str, str, str],
     agents: tuple[str, ...],
     events: list[dict[str, Any]],
 ) -> None:
-    """Ask which agent answers; the messages wait for the pick."""
-    now = monotonic()
-    for stale in [k for k, pick in _PENDING_PICKS.items() if pick.expires_at <= now]:
-        del _PENDING_PICKS[stale]
-    _PENDING_PICKS[key] = _PendingPick(agents, events, now + _PICK_SECONDS)
+    """Ask which agent answers; `events` wait for the pick with those held before them.
+
+    While a choice of the same agents is open, it answers these too and no second one is
+    posted.
+    """
+    picks, now = runtime.dm_picks, monotonic()
+    for stale in [k for k, pick in picks.items() if pick.expires_at <= now]:
+        del picks[stale]
+    if (open_pick := picks.get(key)) is not None and open_pick.agents == agents:
+        open_pick.events.extend(events)
+        return
+    held = [] if open_pick is None else open_pick.events
+    picks[key] = DmPick(agents, [*held, *events], now + _PICK_SECONDS)
     text = "Choose who to talk to for this private conversation."
     options = [
         {"text": {"type": "plain_text", "text": name[:75]}, "value": name} for name in agents[:100]
@@ -737,7 +728,7 @@ async def handle_dm_agent_pick(runtime: SlackRuntime, payload: dict[str, Any]) -
     if not team_id or not user_id or not channel_id:
         return
     key = (team_id, channel_id, user_id)
-    pending = _PENDING_PICKS.pop(key, None)
+    pending = runtime.dm_picks.pop(key, None)
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
         return

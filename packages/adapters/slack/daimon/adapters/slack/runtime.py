@@ -39,6 +39,15 @@ def new_dm_bursts() -> DmBursts[tuple[str, str, str], dict[str, Any]]:
     return DmBursts(lambda event: str(event.get("text") or ""))
 
 
+@dataclass
+class DmPick:
+    """An open agent choice in a DM: who may be picked, and the messages the pick answers."""
+
+    agents: tuple[str, ...]
+    events: list[dict[str, Any]]
+    expires_at: float
+
+
 @dataclass(frozen=True)
 class SlackRuntime:
     settings: Settings
@@ -62,6 +71,10 @@ class SlackRuntime:
     group_members: GroupMembersCache = field(default_factory=GroupMembersCache)
     # The messages each person sent in each direct message that no turn has answered yet.
     dm_bursts: DmBursts[tuple[str, str, str], dict[str, Any]] = field(default_factory=new_dm_bursts)
+    # Each person's open agent choice in a direct message, by (team, channel, user).
+    dm_picks: dict[tuple[str, str, str], DmPick] = field(
+        default_factory=dict[tuple[str, str, str], DmPick]
+    )
 
     @cached_property
     def fernet(self) -> MultiFernet:
