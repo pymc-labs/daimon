@@ -30,6 +30,9 @@ def base(platform):
     namespace = dict(vars(MODULES[platform]))
     # The frozen base predates the turn queue and calls the old pure gate.
     namespace["should_admit_turn"] = lambda *, current_in_flight, cap: current_in_flight < cap
+    if platform == "discord":
+        # The frozen base predates the shared compose helper.
+        namespace["_compose_queued_content"] = discord.compose_queued_content
     path = Path(__file__).with_name("thread_queue_base") / f"{platform}.txt"
     exec(compile(path.read_text(), str(path), "exec"), namespace)
     return namespace["Base"], namespace
