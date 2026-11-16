@@ -304,12 +304,29 @@ def compose_queued_content(messages: list[discord.Message]) -> str:
     return "\n\n".join(f"[{m.author.display_name}]: {m.content}" for m in messages)
 
 
-def forwarded_lines(messages: Sequence[discord.Message]) -> list[str]:
+def _oversized_note(omit_url: bool) -> str:
+    if omit_url:
+        return (
+            f"Larger than {MAX_VISION_IMAGE_DIMENSION}px on an edge. Its URL is withheld: "
+            "reading it at full size already ended a conversation."
+        )
+    return (
+        f"Larger than {MAX_VISION_IMAGE_DIMENSION}px on an edge. Do NOT read this at full "
+        "size, which the API rejects and ends this conversation. Downscale a copy "
+        "first, then read the copy."
+    )
+
+
+def forwarded_lines(
+    messages: Sequence[discord.Message], *, omit_oversized_image_urls: bool = False
+) -> list[str]:
     """The ``<forwarded>`` block for messages that forward another message, else nothing.
 
     A forward carries a snapshot of the original: its text, embeds and attachments.
     The person could see it, but it is someone else's text, so it is untrusted
     content. Attachments are URL lines (the agent fetches them), never vision blocks.
+    An image over the API's pixel cap is marked, and with ``omit_oversized_image_urls``
+    (a rebuild after a dead session) its URL is left out.
     """
     body: list[str] = []
     for message in messages:
@@ -320,11 +337,18 @@ def forwarded_lines(messages: Sequence[discord.Message]) -> list[str]:
             if snapshot.attachments:
                 lines.append("<attachments>")
                 for att in snapshot.attachments:
+                    oversized = is_oversized_image(att)
+                    omit = oversized and omit_oversized_image_urls
+                    url = "" if omit else f" url={quoteattr(att.url)}"
+                    mark = (
+                        f' oversized="true" note={quoteattr(_oversized_note(omit))}'
+                        if oversized
+                        else ""
+                    )
                     lines.append(
-                        f"<attachment filename={quoteattr(att.filename)}"
-                        f" url={quoteattr(att.url)}"
+                        f"<attachment filename={quoteattr(att.filename)}{url}"
                         f" content_type={quoteattr(att.content_type or 'unknown')}"
-                        f" size={quoteattr(str(att.size))}/>"
+                        f" size={quoteattr(str(att.size))}{mark}/>"
                     )
                 lines.append("</attachments>")
             lines.append("</message>")
@@ -348,6 +372,7 @@ async def input_context(
     *,
     bot_user_id: int | None,
     bot_display_name: str,
+    omit_oversized_image_urls: bool = False,
 ) -> str:
     """Reply targets and forwarded content of messages sent without a history rendering.
 
@@ -361,9 +386,9 @@ async def input_context(
             (),
             bot_user_id=bot_user_id,
             bot_display_name=bot_display_name,
-            omit_oversized_image_urls=False,
+            omit_oversized_image_urls=omit_oversized_image_urls,
         ),
-        *forwarded_lines(messages),
+        *forwarded_lines(messages, omit_oversized_image_urls=omit_oversized_image_urls),
     ]
     return "\n".join(lines)
 

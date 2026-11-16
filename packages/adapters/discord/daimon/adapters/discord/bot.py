@@ -5731,16 +5731,19 @@ class DaimonBot(commands.Bot):
         # are not dropped: their signed CDN URL is surfaced in the prefix so the
         # agent can still reach them (curl + read to view, or pass to an external
         # API). Inlined images get a URL line too, a handle for external APIs.
-        synthetic_prefix, image_blocks = await prepare_attachments(attachments)
-        # A forwarded message's content is untrusted text the person could see.
-        synthetic_prefix = "\n".join(
-            part
-            for part in (
-                synthetic_prefix,
-                "\n".join(forwarded_lines(query_messages or (message,))),
+        attachment_prefix, image_blocks = await prepare_attachments(attachments)
+        forward_messages = query_messages or (message,)
+
+        def _prefix_with_forwards(*, omit_oversized_image_urls: bool) -> str:
+            # A forwarded message's content is untrusted text the person could see.
+            forwarded = "\n".join(
+                forwarded_lines(
+                    forward_messages, omit_oversized_image_urls=omit_oversized_image_urls
+                )
             )
-            if part
-        )
+            return "\n".join(part for part in (attachment_prefix, forwarded) if part)
+
+        synthetic_prefix = _prefix_with_forwards(omit_oversized_image_urls=False)
         if synthetic_prefix:
             user_message = synthetic_prefix + "\n" + user_message
 
@@ -5780,8 +5783,9 @@ class DaimonBot(commands.Bot):
                     *(i for i in (lifecycle_holder[0].card_message_id,) if i is not None),
                 ),
             )
-            if synthetic_prefix:
-                full_message = synthetic_prefix + "\n" + full_message
+            reseed_prefix = _prefix_with_forwards(omit_oversized_image_urls=True)
+            if reseed_prefix:
+                full_message = reseed_prefix + "\n" + full_message
             async with self.runtime.sessionmaker() as session:
                 recovery_origin = await get_active_origin(
                     session,

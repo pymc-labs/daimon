@@ -2130,6 +2130,20 @@ class TestForwardedInput:
         assert "chart.png?hm=1" in text, "a forwarded file is a URL the agent can fetch"
         assert forwarded_names([msg]) == ["chart.png"], "history keeps names, not URLs"
 
+    def test_an_oversized_forwarded_image_is_marked_and_a_reseed_withholds_its_url(self) -> None:
+        huge = _make_attachment(
+            filename="huge.jpg", content_type="image/jpeg", width=12000, height=4000
+        )
+        msg = _forward(attachments=[huge])
+
+        live = "\n".join(forwarded_lines([msg]))
+        reseed = "\n".join(forwarded_lines([msg], omit_oversized_image_urls=True))
+
+        assert 'oversized="true"' in live
+        assert huge.url in live, "a live turn keeps the URL so the agent can downscale it"
+        assert 'oversized="true"' in reseed
+        assert huge.url not in reseed, "a replay must never hand the session the huge image"
+
     def test_a_plain_message_forwards_nothing(self) -> None:
         msg = _make_message(content="hi")
         msg.message_snapshots = []

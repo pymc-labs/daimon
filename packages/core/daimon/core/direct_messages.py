@@ -610,6 +610,11 @@ async def _dm_destination(
                 await delete_slack_turn_context(session, id=context.id)
 
 
+async def _reseed_prompt(context: str, prefix: Callable[[], Awaitable[str]], text: str) -> str:
+    part = await prefix()
+    return f"{context}\n\n{part}\n{text}" if part else f"{context}\n\n{text}"
+
+
 async def _run_admitted_dm_turn(
     deps: TurnDeps,
     prepared: PreparedTurn,
@@ -632,6 +637,7 @@ async def _run_admitted_dm_turn(
     platform_channel_id: str | None = None,
     platform_message_id: str | None = None,
     image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
+    reseed_prompt: Callable[[], Awaitable[str]] | None = None,
 ) -> tuple[str, str, OutputRuntime | None]:
     """Run one admitted, bound private turn and return its final text and session.
 
@@ -673,7 +679,8 @@ async def _run_admitted_dm_turn(
         user_message = f"{controls}\n{prompt}"
 
         async def reseed() -> str:
-            return user_message
+            # A recovery rebuilds the prompt, without what ended the dead session.
+            return f"{controls}\n{await reseed_prompt()}" if reseed_prompt else user_message
 
         cancel = asyncio.Event()
         lifecycle = (
@@ -762,6 +769,7 @@ async def reply_to_dm_result(
     role_ids: tuple[str, ...] = (),
     merged_message_ids: Sequence[str] = (),
     prefix: str = "",
+    reseed_prefix: Callable[[], Awaitable[str]] | None = None,
     image_blocks: Sequence[BetaManagedAgentsImageBlockParam] | None = None,
     history_notes: Sequence[str] = (),
     verified_membership: bool | None = None,
@@ -780,7 +788,9 @@ async def reply_to_dm_result(
     (attachment lines, quoted or forwarded content) and `image_blocks` are inline
     images; both go to this turn only. The stored history keeps `text` and
     `history_notes` (such as `[attachment: name]`), never the prefix, whose
-    signed links expire.
+    signed links expire. `reseed_prefix` builds the prefix again when a dead
+    session is rebuilt, so it can leave out what ended that session (an
+    oversized image's link).
 
     A duplicate delivery returns None. The adapter verifies live membership
     and supplies the current role before entering; stored admin roles never
@@ -923,6 +933,11 @@ async def reply_to_dm_result(
                 platform_channel_id=platform_channel_id,
                 platform_message_id=message_id if platform_channel_id is not None else None,
                 image_blocks=image_blocks,
+                reseed_prompt=(
+                    None
+                    if reseed_prefix is None
+                    else lambda: _reseed_prompt(context, reseed_prefix, text)
+                ),
             )
             turns = bounded_turns(
                 [
