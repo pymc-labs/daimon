@@ -15,8 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   choice. `/dm-me`, cold DMs (Slack too), Teams personal chats (DMs on by default
   there), hand-overs and agents that send DMs follow the same grants, and a failed
   group lookup refuses. Slack user groups need the `usergroups:read` scope and a
-  reinstall. Manage it with `daimon dm default|access|rule|explain`; `daimon dm
-  import-policies` moves `DAIMON_DIRECT_MESSAGE_POLICIES` into stored access.
+  reinstall. Manage it with `daimon dm default|access|rule|explain`, in the web app
+  (Admin > Agent access and Admin > Workspace, with a "Check a person" box) or from
+  chat; `daimon dm import-policies` moves `DAIMON_DIRECT_MESSAGE_POLICIES` into
+  stored access.
   Erasing a person removes their pick, rules and grant entries.
 - **Teams personal chats follow the DM settings.** The DM wait, DM history depth
   and read-only DM memory apply to them as they do to Discord and Slack DMs.
