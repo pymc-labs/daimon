@@ -378,6 +378,7 @@ source_modules = [
     "daimon.core.slack_files",
     "daimon.core.slack_oauth",
     "daimon.core.slack_customize_scope",
+    "daimon.core.slack_user_groups",
     "daimon.core.smoke",
     "daimon.core.specs",
     "daimon.core.support_escalation",
