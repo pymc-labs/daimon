@@ -13,6 +13,7 @@ import pytest
 from daimon.adapters.slack import direct_messages as dm_module
 from daimon.adapters.slack.blockkit import notice_fields
 from daimon.adapters.slack.runtime import new_dm_bursts
+from daimon.core._models import Account
 from daimon.core.authz import AgentRef
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.direct_messages import DM_AGENT_REFUSED, ColdDmNotices
@@ -20,7 +21,11 @@ from daimon.core.dm_access import DmAgent
 from daimon.core.dm_routing import DmChoose, DmDecision, DmRefused, DmStart, DmUnchecked, Route
 from daimon.core.native_admins import GroupMembersCache
 from daimon.core.stores import dm_access as dm_store
-from daimon.core.stores.direct_messages import DirectMessageRow, set_dm_enabled
+from daimon.core.stores.direct_messages import (
+    DirectMessageRow,
+    set_dm_enabled,
+    start_conversation,
+)
 from daimon.core.stores.domain import Role
 from daimon.testing.factories import make_account, make_dm_conversation, make_tenant
 from slack_sdk.errors import SlackApiError
@@ -232,6 +237,34 @@ async def test_cold_dm_when_one_agent_is_routed_then_it_starts_and_answers_at_on
     ), "the route is the workspace's DM; the binding names the DM channel"  # fmt: skip
     assert reply.await_args.kwargs["text"] == "hello?", "the first message is answered"
     assert client.chat_postMessage.await_args.kwargs["text"] == "hi there", "the reply is posted"
+
+
+async def test_cold_dm_when_another_message_started_it_then_that_conversation_answers(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant = await _dms_on(db_session_factory)
+    client = _client(monkeypatch)
+    _decided(monkeypatch, DmStart("ada", "only"))
+    start, reply = _starts(monkeypatch, tenant.tenant_id)
+
+    async def lose(*_: Any, **__: Any) -> None:
+        async with db_session_factory.begin() as session:
+            account = Account(tenant_id=tenant.tenant_id)
+            session.add(account)
+            await session.flush()
+            won = _row(tenant.tenant_id).model_copy(
+                update={"scope_id": "dm:won", "account_id": account.id}
+            )
+            await start_conversation(session, conversation=won, now=datetime.now(UTC))
+
+    start.side_effect = lose
+
+    await dm_module.handle_direct_message(_runtime(db_session_factory), _event(), team_id="T_ROUTE")
+
+    assert reply.await_args.kwargs["expected_scope_id"] == "dm:won", "the started one answers"
+    assert reply.await_args.kwargs["text"] == "hello?"
+    posted = [c.kwargs.get("text") for c in client.chat_postMessage.await_args_list]
+    assert posted == ["hi there"], "nothing is dropped as not sent"
 
 
 async def test_cold_dm_when_several_agents_fit_then_a_pick_starts_and_answers_the_wait(

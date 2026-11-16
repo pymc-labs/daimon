@@ -444,7 +444,7 @@ async def _answer_burst(
             groups=groups,
         )
         if conversation is None:
-            return  # another start won: the burst is asked to send again
+            return  # it ended meanwhile: the burst is asked to send again
     else:
         groups = await lookup_dm_groups(
             runtime.sessionmaker,
@@ -638,8 +638,12 @@ async def _start_cold(
     groups: frozenset[str] | None,
     remember_pick: bool = False,
 ) -> DirectMessageRow | None:
-    """Start a private conversation on `agent` in this DM; None if another message won."""
+    """Start a private conversation on `agent` in this DM.
+
+    When another message started one first, that conversation answers instead.
+    """
     tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    route_key = f"{team_id}:{channel_id}"
     admission = await admit_cold_dm(
         runtime.turn_deps,
         tenant_id=tenant_id,
@@ -651,18 +655,24 @@ async def _start_cold(
         agent_name=agent,
         platform="slack",
     )
-    return await start_cold_dm(
+    started = await start_cold_dm(
         runtime.turn_deps,
         admission,
         tenant_id=tenant_id,
         workspace_id=team_id,
-        route_key=f"{team_id}:{channel_id}",
+        route_key=route_key,
         external_user_id=user_id,
         remember_pick=remember_pick,
         platform="slack",
         groups=groups,
         channel_id=channel_id,
     )
+    if started is not None:
+        return started
+    async with runtime.sessionmaker() as session:
+        return await get_conversation(
+            session, platform="slack", route_key=route_key, external_user_id=user_id
+        )
 
 
 async def _refuse_cold(
