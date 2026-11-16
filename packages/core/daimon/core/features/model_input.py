@@ -29,7 +29,7 @@ PER_TURN_KEYS: Final[tuple[str, ...]] = (
 MODEL_INPUT_KEYS: Final[tuple[str, ...]] = ("guidance", *SESSION_KEYS, *TURN_KEYS)
 
 HISTORY_KEYS: Final[tuple[str, ...]] = ("history_depth", "channel_history")
-LIMIT_KEYS: Final[tuple[str, ...]] = ("turn_time_limit", "answer_messages")
+LIMIT_KEYS: Final[tuple[str, ...]] = ("turn_time_limit", "unattended_time_limit", "answer_messages")
 ANSWER_MESSAGES: Final = 5
 """Messages one answer may post before it becomes a file, until a setting says otherwise."""
 """Limits every admitted turn reads."""
@@ -91,10 +91,11 @@ def answer_message_cap(features: FeatureSnapshot | None) -> int:
     return ANSWER_MESSAGES if found is None else limit_int(found.value)
 
 
-def turn_limit_minutes(features: FeatureSnapshot | None) -> int | None:
-    """The turn time limit in minutes; None, for a hand-built admission or a snapshot without
-    the key, leaves the built-in ceiling."""
-    found = features.features.get("turn_time_limit") if features is not None else None
+def turn_limit_minutes(features: FeatureSnapshot | None, *, unattended: bool = False) -> int | None:
+    """The turn time limit in minutes (the unattended run limit when `unattended`); None, for a
+    hand-built admission or a snapshot without the key, leaves the built-in ceiling."""
+    key = "unattended_time_limit" if unattended else "turn_time_limit"
+    found = features.features.get(key) if features is not None else None
     return None if found is None else limit_int(found.value)
 
 

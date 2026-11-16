@@ -79,6 +79,7 @@ Where each feature can be set, and its default.
 | Long job dollar cap | `long_jobs_max_usd` | Limit | $5 | ✓ | ✓ | ✓ |  |  |  |
 | Long job time limit | `long_jobs_max_deadline` | Limit | 70 minutes | ✓ | ✓ | ✓ |  |  |  |
 | Answer time limit | `turn_time_limit` | Limit | 45 minutes |  | ✓ | ✓ |  |  |  |
+| Unattended run time limit | `unattended_time_limit` | Limit | 45 minutes |  | ✓ | ✓ |  |  |  |
 | New threads per reply | `outbound_threads` | Limit | 2 threads | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Places per reply | `outbound_places` | Limit | 2 places | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | People tagged per reply | `outbound_people` | Limit | 5 people | ✓ | ✓ | ✓ | ✓ | ✓ |  |
@@ -850,12 +851,24 @@ The longest one long job may run. The smallest setting wins.
 
 ## Answer time limit
 
-The longest one answer may take before it is stopped: the standard 45 minutes, shorter, or up to 3 hours. The smallest setting wins. Routines, watches and agent-to-agent chats keep the standard limit.
+The longest one answer may take before it is stopped when someone is talking to the agent in a chat, a direct message or the web app: the standard 45 minutes, shorter, or up to 3 hours. The smallest setting wins. Routines and watches use the unattended run limit.
 
 | | |
 | --- | --- |
 | Key | `turn_time_limit` |
-| Values | `180` (180 minutes), `90` (90 minutes), `45` (45 minutes), `30` (30 minutes), `15` (15 minutes) |
+| Values | `180` (180 minutes), `90` (90 minutes), `45` (45 minutes), `30` (30 minutes), `20` (20 minutes), `15` (15 minutes) |
+| Default | `45` |
+| Levels | Workspace, Agent |
+| Combines | Lowest wins |
+
+## Unattended run time limit
+
+The longest one routine run or watch wake-up may take before it is stopped: the standard 45 minutes, shorter, or up to 3 hours. The smallest setting wins. Chats use the answer time limit; agent-to-agent chats and command-line runs keep 45 minutes.
+
+| | |
+| --- | --- |
+| Key | `unattended_time_limit` |
+| Values | `180` (180 minutes), `90` (90 minutes), `45` (45 minutes), `30` (30 minutes), `20` (20 minutes), `15` (15 minutes) |
 | Default | `45` |
 | Levels | Workspace, Agent |
 | Combines | Lowest wins |

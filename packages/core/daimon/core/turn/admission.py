@@ -491,11 +491,13 @@ class Admission:
 
     @property
     def turn_ceiling_s(self) -> float:
-        """How long a turn here may run before it is stopped: the turn time limit set at this
-        place, else the built-in 45 minutes, and never past `LONGEST_TURN_CEILING_S`. A turn
-        allowed past 45 minutes stores its deadline for the stale-turn, DM claim and lock-wait
-        checks. Only chat turns read this; unattended runs keep `TURN_CEILING_S`."""
-        minutes = turn_limit_minutes(self.features)
+        """How long a turn here may run before it is stopped, never past
+        `LONGEST_TURN_CEILING_S`: a person's message reads the turn time limit set at this
+        place, a wake or routine the unattended run limit, and a hand-built admission or a
+        missing setting the built-in 45 minutes. A turn allowed past 45 minutes stores its
+        deadline for the stale-turn, DM claim and lock-wait checks."""
+        unattended = self.grant is not None and not self.grant.human_invocation
+        minutes = turn_limit_minutes(self.features, unattended=unattended)
         return TURN_CEILING_S if minutes is None else min(minutes * 60.0, LONGEST_TURN_CEILING_S)
 
     def feature_on(self, key: str) -> bool:

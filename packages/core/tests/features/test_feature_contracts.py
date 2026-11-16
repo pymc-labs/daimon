@@ -98,6 +98,7 @@ _NARROWED: dict[str, str] = {
     "model_reactions": "a workspace or agent display choice, read when the turn starts",
     "tool_server_names": "a workspace or agent display choice, read when the turn starts",
     "turn_time_limit": "a workspace or agent limit, read once when the turn starts",
+    "unattended_time_limit": "a workspace or agent limit, read once when the run starts",
     **{f"web.{module}": "workspace-only web app surface" for module in WEB_MODULES},
 }
 

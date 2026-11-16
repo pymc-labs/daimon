@@ -446,6 +446,15 @@ _CALL_GATE_PLATFORMS: Final = frozenset({"discord", "slack", "teams", "web"})
 _SETTINGS: Final = Authority(DelegatedAction.AGENT_SETTINGS)
 # Long jobs spend money in the background: server admins only, no delegation, no owners.
 _SERVER_ADMIN: Final = Authority(None, agent_owner=False)
+_TIME_LIMITS: Final[Mapping[str, str]] = {
+    "180": "180 minutes",
+    "90": "90 minutes",
+    "45": "45 minutes",
+    "30": "30 minutes",
+    "20": "20 minutes",
+    "15": "15 minutes",
+}
+"""Choices of both time limits, loosest first: the one set keeps them in step."""
 _CHANNELS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "channel")
 _ADMIN: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS)
 WEB_MODULES: Final[tuple[str, ...]] = (
@@ -923,17 +932,27 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "turn_time_limit",
         "Answer time limit",
         (
-            "The longest one answer may take before it is stopped: the standard 45 minutes, "
-            "shorter, or up to 3 hours. The smallest setting wins. Routines, watches and "
-            "agent-to-agent chats keep the standard limit."
+            "The longest one answer may take before it is stopped when someone is talking to "
+            "the agent in a chat, a direct message or the web app: the standard 45 minutes, "
+            "shorter, or up to 3 hours. The smallest setting wins. Routines and watches use "
+            "the unattended run limit."
         ),
-        {
-            "180": "180 minutes",
-            "90": "90 minutes",
-            "45": "45 minutes",
-            "30": "30 minutes",
-            "15": "15 minutes",
-        },
+        _TIME_LIMITS,
+        default="45",
+        tiers=("workspace", "agent"),
+        authority=_SERVER_ADMIN,
+        minimum=1,
+    ),
+    _limit(
+        "unattended_time_limit",
+        "Unattended run time limit",
+        (
+            "The longest one routine run or watch wake-up may take before it is stopped: the "
+            "standard 45 minutes, shorter, or up to 3 hours. The smallest setting wins. Chats "
+            "use the answer time limit; agent-to-agent chats and command-line runs keep 45 "
+            "minutes."
+        ),
+        _TIME_LIMITS,
         default="45",
         tiers=("workspace", "agent"),
         authority=_SERVER_ADMIN,

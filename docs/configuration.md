@@ -2110,14 +2110,15 @@ by the adapters.
 
 ### `DAIMON_SCHEDULER__DISPATCH_TIMEOUT_S`
 
-`float` · optional · default `3000.0`
+`float` · optional · default `11100.0`
 
-An OUTER PROCESS GUARD (asyncio.wait_for), not the turn's deadline. The core ~45-minute
-ceiling (daimon.core.turn.ceiling) is enforced inside headless_runner.run_turn and fires
-first, producing a TurnError(kind='ceiling'). This bound only catches a fire that hangs
-OUTSIDE the ceiling's two legs (routine row bookkeeping, agent/environment resolution,
-the usage-recorder factory, record_result), and must stay strictly above TURN_CEILING_S
-or the core ceiling becomes unreachable for routines. Each routine has its own timeout;
+An OUTER PROCESS GUARD (asyncio.wait_for), not the turn's deadline. The core turn
+ceiling (daimon.core.turn.ceiling: 45 minutes, or up to 3 hours by the unattended run
+limit) is enforced inside headless_runner.run_turn and fires first, producing a
+TurnError(kind='ceiling'). This bound only catches a fire that hangs OUTSIDE the
+ceiling's two legs (routine row bookkeeping, agent/environment resolution, the usage-
+recorder factory, record_result), and must stay strictly above LONGEST_TURN_CEILING_S or
+the core ceiling becomes unreachable for routines. Each routine has its own timeout;
 continuous scheduler ticks do not await in-flight routines. Missed slots follow the
 routine's catch_up_policy.
 

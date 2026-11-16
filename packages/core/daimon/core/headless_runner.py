@@ -8,20 +8,21 @@ the hardened render error policy — instead of a bespoke bare drain
 loop, and answers tool confirmations via `unattended_posture`.
 
 A routine/headless turn is bounded end to end by the core per-turn ceiling
-(`daimon.core.turn.ceiling`, ~45 minutes): one shared deadline covers BOTH
+(`daimon.core.turn.ceiling`: 45 minutes, or the unattended run limit set at the run's
+place, up to 3 hours): one shared deadline covers BOTH
 session assembly (the `agent`/`environment` retrieve calls plus
 `create_session`) and the delegated drain, mirroring how the chat path
 splits its own ceiling coverage between `bind_session` and
 `run_prepared_turn`. `deadline` is fail-safe like those two sites: a caller
 that passes none (every caller today, including the scheduler's `_fire`)
-still gets `turn_deadline(now=datetime.now(UTC))` computed here. A breach
+still gets that deadline computed here (`unattended_ceiling_s`). A breach
 during assembly is raised as `TurnError(kind="ceiling")`; a breach during
 the drain comes back the same way via the driver's own `state.error` and
 this function's existing `if state.error is not None: raise state.error`.
 Either way it reaches the scheduler's `_fire_guarded` boundary as
 `"TurnError: ceiling: ..."` via `_record_fire_error`, not the adapter's own
 bespoke `"timeout: exceeded Ns"` string — the scheduler's `dispatch_timeout_s`
-is now strictly above `TURN_CEILING_S` and exists only as an outer process
+is strictly above `LONGEST_TURN_CEILING_S` and exists only as an outer process
 guard that this ceiling always fires ahead of.
 
 Used by `daimon.adapters.scheduler` for routine fires and by
@@ -71,7 +72,7 @@ from daimon.core.config import (
     load_turn_settings,
 )
 from daimon.core.context_prompt import TurnContext, context_prompt
-from daimon.core.features.model_input import DEFAULT_TOOLSET
+from daimon.core.features.model_input import DEFAULT_TOOLSET, turn_limit_minutes
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.session_identity import DEFAULT_IDENTITY
 from daimon.core.features.snapshot import FeaturePlace, place_guardrail, resolve_features
@@ -86,7 +87,13 @@ from daimon.core.sessions import create_session
 from daimon.core.stores import access_policy as policy_store
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn.approvals import daimon_rule_tools_for
-from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
+from daimon.core.turn.ceiling import (
+    LONGEST_TURN_CEILING_S,
+    TURN_CEILING_S,
+    ceiling_error,
+    remaining_s,
+    turn_deadline,
+)
 from daimon.core.turn.driver import run_turn as drive_turn
 from daimon.core.turn.driver import unattended_sends
 from daimon.core.turn.lifecycle import TurnLifecycle
@@ -156,6 +163,36 @@ def _assert_satisfies_turn_lifecycle(lifecycle: TurnLifecycle) -> None:
 
 
 _assert_satisfies_turn_lifecycle(_NoOpLifecycle())
+
+
+async def unattended_ceiling_s(
+    session_factory: async_sessionmaker[AsyncSession] | None,
+    feature_settings: Settings | None,
+    *,
+    tenant_id: uuid.UUID | None,
+    agent_id: str,
+    platform: str | None,
+    channel_id: str | None,
+    thread_id: str | None,
+) -> float:
+    """How long an unattended run may take: the unattended run limit at its place, else the
+    built-in 45 minutes (a run without a workspace has no place to read one), never past
+    `LONGEST_TURN_CEILING_S`."""
+    if session_factory is None or tenant_id is None:
+        return TURN_CEILING_S
+    place = FeaturePlace.of(
+        tenant_id,
+        platform or "routine",
+        channel_id,
+        thread_id,
+        agent_id=agent_id,
+        backend=MANAGED_AGENTS.provider,
+    )
+    snapshot = await resolve_features(
+        session_factory, feature_settings, place, keys=("unattended_time_limit",)
+    )
+    minutes = turn_limit_minutes(snapshot, unattended=True)
+    return TURN_CEILING_S if minutes is None else min(minutes * 60.0, LONGEST_TURN_CEILING_S)
 
 
 async def run_turn(
@@ -458,7 +495,24 @@ async def run_turn_impl(
             authorization_id="headless-turn",
         )
 
-    effective_deadline = deadline if deadline is not None else turn_deadline(now=datetime.now(UTC))
+    effective_deadline = (
+        deadline
+        if deadline is not None
+        else turn_deadline(
+            now=datetime.now(UTC),
+            ceiling_s=await unattended_ceiling_s(
+                session_factory,
+                feature_settings,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                platform=platform,
+                channel_id=origin_place.channel_id
+                if origin_place is not None
+                else budget_channel_id,
+                thread_id=origin_place.thread_id if origin_place is not None else None,
+            ),
+        )
+    )
     public_url = (
         str(mcp_settings.public_url)
         if mcp_settings is not None and mcp_settings.public_url is not None

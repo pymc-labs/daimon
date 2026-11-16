@@ -50,7 +50,7 @@ from daimon.core.stores.task_continuations import (
     settle_wake_row,
     start_wake_row,
 )
-from daimon.core.turn.ceiling import TURN_CEILING_S
+from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -85,9 +85,9 @@ __all__ = [
 #: and the platform history fetch, nothing slow.
 WAKE_CLAIM_LEASE: Final[timedelta] = timedelta(minutes=5)
 
-#: The lease once the fence is committed: the whole turn, plus room for the
-#: settle write. After this a started row is `interrupted`, never re-run.
-WAKE_RUN_LEASE: Final[timedelta] = timedelta(seconds=TURN_CEILING_S) + timedelta(minutes=5)
+#: The lease once the fence is committed: the longest turn the unattended run limit allows,
+#: plus room for the settle write. After this a started row is `interrupted`, never re-run.
+WAKE_RUN_LEASE: Final[timedelta] = timedelta(seconds=LONGEST_TURN_CEILING_S) + timedelta(minutes=5)
 
 #: Claims per row before it settles `attempts_exhausted`. Only claims that were
 #: lost to a crash count (a release refunds its claim), so a row that keeps
