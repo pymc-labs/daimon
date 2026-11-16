@@ -494,7 +494,24 @@ def _pin_refusal(
             "with `daimon routines sandbox-tools`.",
             "needs_pin",
         )
+    if not _pin_fits(pin, place):
+        return _refused(
+            f"{spec.name} can only be turned on with the agent and environment it runs in, so "
+            "this On was not saved. Nothing was changed.",
+            "pin_mismatch",
+        )
     return None
+
+
+def _pin_fits(pin: AnySandboxPin, place: FeaturePlace) -> bool:
+    """Whether a pin names the agent of the place it is stored at and an environment, so a stored
+    On always reads back (`stored_pin`). An agent's version and an environment's revision are
+    only known to the provider; each run checks those."""
+    if pin.agent_id != place.agent_id:
+        return False
+    if isinstance(pin, AgentSandboxPin):
+        return bool(pin.environment_name)
+    return bool(pin.environment_id)
 
 
 async def _change_approvals(

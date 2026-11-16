@@ -6,8 +6,9 @@ covers: the agent id and environment name at the agent tier, the agent version a
 environment revision at the routine tier. Each routine opt-in moves to a routine-tier On
 with its pin, and its history to `channel_changes`; DM routines never ran built-ins, so
 theirs are dropped. The routine columns and `routine_sandbox_history` go. `system` joins
-both surface checks for changes Daimon makes itself. Downgrading restores routine opt-ins
-and their history and drops agent opt-ins and routine Offs.
+both surface checks for changes Daimon makes itself. A `routine_sandbox_tools` On must carry
+its pin. Downgrading restores routine opt-ins and their history and drops agent opt-ins,
+routine Offs and every change Daimon made itself (`system`).
 
 downgrade: destructive
 """
@@ -86,6 +87,11 @@ def upgrade() -> None:
     _place_index("tier NOT IN ('thread', 'routine')")
     _change_surfaces("'web', 'chat', 'panel', 'cli', 'system'")
     op.add_column("feature_values", sa.Column("pin", postgresql.JSONB(), nullable=True))
+    op.create_check_constraint(
+        "ck_feature_values_sandbox_pin",
+        "feature_values",
+        f"key <> '{_KEY}' OR value <> 'on' OR coalesce(jsonb_typeof(pin), '') = 'object'",
+    )
     # An opt-in without a full pin never ran built-ins, so it is not carried over.
     opted_in = (
         "sandbox_tools_enabled AND sandbox_agent_id IS NOT NULL"
@@ -198,5 +204,6 @@ def downgrade() -> None:
         "'web', 'chat', 'panel', 'cli', 'spec', 'migration'",
         "'thread'",
     )
+    op.drop_constraint("ck_feature_values_sandbox_pin", "feature_values", type_="check")
     op.drop_column("feature_values", "pin")
     op.drop_column("feature_values", "routine_id")

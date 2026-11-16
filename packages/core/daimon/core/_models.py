@@ -2701,6 +2701,11 @@ class FeatureValue(Base):
         CheckConstraint(
             "(tier = 'routine') = (routine_id IS NOT NULL)", name="ck_feature_values_routine"
         ),
+        CheckConstraint(
+            "key <> 'routine_sandbox_tools' OR value <> 'on'"
+            " OR coalesce(jsonb_typeof(pin), '') = 'object'",
+            name="ck_feature_values_sandbox_pin",
+        ),
         Index(
             "uq_feature_values_place",
             "tenant_id",

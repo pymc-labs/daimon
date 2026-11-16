@@ -40,6 +40,7 @@ from daimon.core.stores.feature_values import (
 from daimon.core.stores.routines import create_routine, delete_routine, update_routine
 from daimon.testing.factories import make_tenant
 from pydantic import PostgresDsn, SecretStr
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 PIN = SandboxPin("agent_a", 3, "env_1", datetime(2026, 10, 1, tzinfo=UTC))
@@ -174,17 +175,47 @@ async def test_an_on_needs_a_pin_at_the_agent_or_routine_tier(
     assert written == [], "nothing written"
 
 
-async def test_an_on_without_its_pin_covers_nothing(
+async def test_an_on_that_does_not_fit_its_place_is_not_stored(
     db_session: AsyncSession, db_session_factory: Sessions
 ) -> None:
-    """A feature row whose pin is missing gives no built-ins."""
+    """A pin must name the agent it is stored at and a whole environment, so a stored On
+    always reads back; the database refuses an On with no pin at all."""
     row = await _routine(db_session)
+    other_agent = AgentSandboxPin("agent_b", "default")
+    bad: list[tuple[Any, Any]] = [
+        ("agent", other_agent),
+        ("agent", AgentSandboxPin("agent_a", "")),
+        ("routine", SandboxPin("agent_b", 3, "env_1", PIN.environment_updated_at)),
+        ("routine", SandboxPin("agent_a", 3, "", PIN.environment_updated_at)),
+    ]
+    for tier, pin in bad:
+        with pytest.raises(ChannelChangeRefused, match="not saved") as refused:
+            await _set(db_session_factory, row, tier, "on", pin=pin)
+        assert refused.value.reason == "pin_mismatch", f"{tier} {pin}"
+    async with db_session_factory() as session:
+        written = await list_feature_values(session, tenant_id=row.tenant_id, keys=[SANDBOX_KEY])
+    assert written == [], "nothing written"
+    place = routine_place(row, "discord")
+    assert await own_opt_in(db_session_factory, place) == (None, None), "reads back as unset"
+
+
+async def test_the_database_refuses_an_on_without_its_pin(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    """No writer can leave a pinned feature's On covering nothing."""
+    row = await _routine(db_session)
+    with pytest.raises(IntegrityError, match="ck_feature_values_sandbox_pin"):
+        async with db_session_factory.begin() as session:
+            await set_feature_value(
+                session, tenant_id=row.tenant_id, key=SANDBOX_KEY, value="on", set_by=None,
+                target=FeatureTarget("routine", routine_id=row.id), surface="cli",
+            )  # fmt: skip
     async with db_session_factory.begin() as session:
         await set_feature_value(
-            session, tenant_id=row.tenant_id, key=SANDBOX_KEY, value="on", set_by=None,
+            session, tenant_id=row.tenant_id, key=SANDBOX_KEY, value="off", set_by=None,
             target=FeatureTarget("routine", routine_id=row.id), surface="cli",
         )  # fmt: skip
-    assert await _pin(db_session_factory, row) is None, "no pin, no built-ins"
+    assert await _pin(db_session_factory, row) is None, "an Off needs no pin"
 
 
 async def test_each_change_is_recorded_with_its_pin(

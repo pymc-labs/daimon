@@ -113,8 +113,9 @@ async def test_opt_ins_and_history_move_to_the_routine_tier_and_back(
             assert not [d for d in differences if any(t in str(d) for t in _TABLES)], differences
 
             sync.execute(text(
-                "INSERT INTO feature_values (tenant_id, tier, agent_id, key, value, surface)"
-                " VALUES (:t, 'agent', 'agent_a', 'routine_sandbox_tools', 'on', 'cli')"
+                "INSERT INTO feature_values (tenant_id, tier, agent_id, key, value, pin, surface)"
+                " VALUES (:t, 'agent', 'agent_a', 'routine_sandbox_tools', 'on',"
+                " '{\"agent_id\": \"agent_a\", \"environment_name\": \"default\"}', 'cli')"
             ), {"t": tenant.id})  # fmt: skip
             module.downgrade()
             assert _rows(

@@ -304,7 +304,8 @@ async def own_opt_in(
     sessions: async_sessionmaker[AsyncSession], place: FeaturePlace
 ) -> tuple[str | None, AnySandboxPin | None]:
     """The own `routine_sandbox_tools` value (None when unset) and pin of the place's routine,
-    or of its agent when it names none."""
+    or of its agent when it names none. A pin is stored only when it fits its place and an On
+    only with one (`change_feature`, `ck_feature_values_sandbox_pin`), so this reads any row."""
     target = FeatureTarget(
         "routine" if place.routine_id else "agent",
         agent_id=place.agent_id,
