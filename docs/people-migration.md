@@ -63,7 +63,9 @@ The file lists at most 25 watches, plus `timers`. A callback watch keeps its
 token's SHA-256 and also gets a new private link. The links go only to
 `--urls-out` (mode 0600), as `{source id: url}`, merged with an earlier file;
 they are never printed. Set `DAIMON_WATCHES__CALLBACK_BASE_URL` first. Owners
-without an identity get one. The file must name the server (`guild_id`) of
+without an identity get one.
+
+The file must name the server (`guild_id`) of
 `--tenant`, and the agent must belong to it. A callback watch ends at its old
 expiry; a permanent one or one over 30 days ends 30 days after it is confirmed,
 and past ones are skipped. An owner already at the live-watch limit is skipped
