@@ -26,6 +26,7 @@ from daimon.core.continuity.wakes import (
     WAKE_POLL_INTERVAL_S,
     busy_retry_at,
     claim_wake,
+    keep_wake,
     release_wake,
     settle_wake,
     start_wake,
@@ -102,7 +103,8 @@ async def dispatch_watch_report(
             return
         skip_reason: str | None = None
         try:
-            await run_report(row, seed)
+            async with keep_wake(sessionmaker, claim, now=now):
+                await run_report(row, seed)
         except AnthropicDisabled:
             log.warning("watch_report.provider_guard_denied", row_id=str(row.id))
             await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))

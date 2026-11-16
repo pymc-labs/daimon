@@ -33,6 +33,7 @@ from daimon.core.continuity.wakes import (
     WakeClaim,
     busy_retry_at,
     claim_wake,
+    keep_wake,
     list_dispatchable_wakes,
     release_wake,
     settle_wake,
@@ -264,11 +265,12 @@ async def dispatch_pending_continuations(
             if not await start_wake(sessionmaker, claim, now=now()):
                 continue  # Another dispatcher took the row over while this one decided.
             try:
-                if run_decision is not None:
-                    await run_decision(row, decision)
-                else:
-                    assert run_follow_up is not None and seed is not None
-                    await run_follow_up(row, seed)
+                async with keep_wake(sessionmaker, claim, now=now):
+                    if run_decision is not None:
+                        await run_decision(row, decision)
+                    else:
+                        assert run_follow_up is not None and seed is not None
+                        await run_follow_up(row, seed)
             except AnthropicDisabled:
                 log.warning("continuation.provider_guard_denied", row_id=str(row.id))
                 await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))

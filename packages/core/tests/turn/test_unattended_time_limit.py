@@ -1,10 +1,7 @@
-"""Unattended runs read their own time limit, and every wait that outlives one covers the longest."""
+"""Unattended runs read their own time limit at their place."""
 
 from __future__ import annotations
 
-from datetime import timedelta
-
-from daimon.core.continuity.wakes import WAKE_RUN_LEASE
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.service import set_workspace_feature
 from daimon.core.headless_runner import unattended_ceiling_s
@@ -16,13 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 def test_both_time_limits_offer_the_same_choices() -> None:
     chat, unattended = FEATURES["turn_time_limit"], FEATURES["unattended_time_limit"]
     assert dict(chat.values) == dict(unattended.values), "the two limits stay in step"
-    assert set(chat.values) == {"15", "20", "30", "45", "90", "180"}
+    assert set(chat.values) == {"15", "20", "30", "45", "90", "180"}, "the offered minutes"
     assert (chat.default, unattended.default) == ("45", "45"), "the standard stays 45 minutes"
-    assert (chat.tiers, unattended.tiers) == (("workspace", "agent"),) * 2
-
-
-def test_a_woken_turn_lease_covers_the_longest_limit() -> None:
-    assert timedelta(seconds=LONGEST_TURN_CEILING_S) < WAKE_RUN_LEASE
+    assert (chat.tiers, unattended.tiers) == (("workspace", "agent"),) * 2, "same tiers"
 
 
 async def test_a_headless_run_reads_the_unattended_limit(
@@ -77,4 +70,4 @@ async def test_a_headless_run_without_a_workspace_keeps_45_minutes(
             thread_id=None,
         )
         == TURN_CEILING_S
-    )
+    ), "a run without a workspace keeps the standard 45 minutes"

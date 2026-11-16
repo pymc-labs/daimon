@@ -10,8 +10,8 @@ The ladder, every step one conditional UPDATE:
 
 - `enqueue_wake` writes `pending` with `available_at`.
 - `claim_wake` takes it with an owner and a lease (`WAKE_CLAIM_LEASE`).
-- `start_wake` commits the fence right before the turn begins, and stretches
-  the lease over the whole turn.
+- `start_wake` commits the fence right before the turn begins; `keep_wake`
+  renews the lease while the turn runs, however long its time limit.
 - `settle_wake` / `release_wake` close it out or hand it back.
 
 Why the fence: a process can die after its turn became visible and before it
@@ -31,7 +31,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Final, Literal
 
@@ -47,11 +48,12 @@ from daimon.core.stores.task_continuations import (
     list_due_wake_rows,
     record_continuation,
     release_wake_row,
+    renew_wake_row,
     settle_wake_row,
     start_wake_row,
 )
-from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -60,6 +62,7 @@ __all__ = [
     "WAKE_CLAIM_LEASE",
     "WAKE_MAX_ATTEMPTS",
     "WAKE_POLL_INTERVAL_S",
+    "WAKE_RENEW_INTERVAL",
     "WAKE_RETRY_DELAY",
     "WAKE_RUN_LEASE",
     "WAKE_UNAVAILABLE_DELAY",
@@ -71,6 +74,7 @@ __all__ = [
     "cancel_wake",
     "claim_wake",
     "enqueue_wake",
+    "keep_wake",
     "list_dispatchable_wakes",
     "list_due_wake_threads",
     "poll_wakes_once",
@@ -85,9 +89,13 @@ __all__ = [
 #: and the platform history fetch, nothing slow.
 WAKE_CLAIM_LEASE: Final[timedelta] = timedelta(minutes=5)
 
-#: The lease once the fence is committed: the longest turn the unattended run limit allows,
-#: plus room for the settle write. After this a started row is `interrupted`, never re-run.
-WAKE_RUN_LEASE: Final[timedelta] = timedelta(seconds=LONGEST_TURN_CEILING_S) + timedelta(minutes=5)
+#: The lease once the fence is committed. The running process renews it every
+#: `WAKE_RENEW_INTERVAL`, so a turn runs to its time limit while a row whose process
+#: died settles `interrupted` within this, never re-run.
+WAKE_RUN_LEASE: Final[timedelta] = timedelta(minutes=5)
+
+#: How often a running turn renews its lease; a few missed renewals still hold it.
+WAKE_RENEW_INTERVAL: Final[timedelta] = timedelta(minutes=1)
 
 #: Claims per row before it settles `attempts_exhausted`. Only claims that were
 #: lost to a crash count (a release refunds its claim), so a row that keeps
@@ -234,6 +242,50 @@ async def start_wake(
             now=now,
             lease=WAKE_RUN_LEASE,
         )
+
+
+@asynccontextmanager
+async def keep_wake(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    claim: WakeClaim,
+    *,
+    now: Callable[[], datetime],
+) -> AsyncIterator[None]:
+    """Renew a started wake's lease while its turn runs, and stop when it ends."""
+
+    async def renew() -> None:
+        while True:
+            await asyncio.sleep(WAKE_RENEW_INTERVAL.total_seconds())
+            try:
+                async with sessionmaker.begin() as session:
+                    held = await renew_wake_row(
+                        session,
+                        idempotency_key=claim.idempotency_key,
+                        owner=claim.owner,
+                        now=now(),
+                        lease=WAKE_RUN_LEASE,
+                    )
+            except SQLAlchemyError:
+                # Retried next interval; the lease outlasts a few misses.
+                log.warning(
+                    "wake.renew_failed", idempotency_key=str(claim.idempotency_key), exc_info=True
+                )
+                continue
+            if not held:
+                # Cancelled or settled elsewhere: this turn's settle write is refused too.
+                log.warning("wake.lease_lost", idempotency_key=str(claim.idempotency_key))
+                return
+
+    renewer = asyncio.create_task(renew())
+    try:
+        yield
+    finally:
+        renewer.cancel()
+        await asyncio.wait([renewer])
+        if not renewer.cancelled() and (error := renewer.exception()) is not None:
+            log.error(
+                "wake.renewer_crashed", idempotency_key=str(claim.idempotency_key), exc_info=error
+            )
 
 
 async def settle_wake(
