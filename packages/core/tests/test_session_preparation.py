@@ -2743,20 +2743,22 @@ def test_only_a_mounted_store_that_changes_is_a_memory_boundary(
 
 
 @pytest.mark.parametrize(
-    ("sealed", "is_dm", "dm_read_only", "expected"),
+    ("sealed", "is_dm", "dm_read_only", "expected", "platform"),
     [
-        (False, False, False, False),
-        (True, False, False, True),
-        (False, True, False, False),
-        (False, True, True, True),
+        (False, False, False, False, "discord"),
+        (True, False, False, True, "discord"),
+        (False, True, False, False, "discord"),
+        (False, True, True, True, "discord"),
+        (False, True, True, True, "teams"),
     ],
-    ids=["open-channel", "sealed-thread", "open-dm", "restricted-dm"],
+    ids=["open-channel", "sealed-thread", "open-dm", "restricted-dm", "restricted-teams-chat"],
 )
 async def test_admission_origin_controls_the_actual_memory_mount(
     sealed: bool,
     is_dm: bool,
     dm_read_only: bool,
     expected: bool,
+    platform: str,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -2780,7 +2782,7 @@ async def test_admission_origin_controls_the_actual_memory_mount(
         db_session,
         None,
         tenant_id=tenant.id,
-        platform="discord",
+        platform=platform,
         key="dm_memory_read_only",
         value="on" if dm_read_only else "off",
         account_id=None,
@@ -2800,7 +2802,7 @@ async def test_admission_origin_controls_the_actual_memory_mount(
         origin="chat",
         tenant_id=tenant.id,
         requester_org=RequesterOrg.HOST,
-        platform="discord",
+        platform=platform,
         external_user_id="user-1",
         channel_id="channel-1",
         thread_id="thread-1",
@@ -2811,7 +2813,7 @@ async def test_admission_origin_controls_the_actual_memory_mount(
         deps,
         admission,
         tenant_id=tenant.id,
-        platform="discord",
+        platform=platform,
         thread_id="thread-1",
         session_account_id=admission.account_id,
     )

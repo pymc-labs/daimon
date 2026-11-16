@@ -441,7 +441,7 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
 )
 
 _DM_PLATFORMS: Final = frozenset({"discord", "slack"})
-_DM_MEMORY_PLATFORMS: Final = frozenset({"discord", "slack", "web"})
+_DM_MEMORY_PLATFORMS: Final = frozenset({"discord", "slack", "teams", "web"})
 _DISCORD: Final = frozenset({"discord"})
 _CALL_GATE_PLATFORMS: Final = frozenset({"discord", "slack", "teams", "web"})
 _SETTINGS: Final = Authority(DelegatedAction.AGENT_SETTINGS)
@@ -595,7 +595,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
             "message at once. However long the burst goes on, the wait ends ten seconds "
             "after its first message. A reply to an approval is never held."
         ),
-        platforms=_DM_PLATFORMS,
+        platforms=_DM_PLATFORMS | {"teams"},
         authority=_ADMIN,
     ),
     FeatureSpec(
@@ -608,7 +608,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace"),
         binds="turn",
         doc="A reply in a direct message can read the agent's memory but not change it.",
-        platforms=_DM_PLATFORMS,
+        platforms=_DM_PLATFORMS | {"teams"},
         authority=_ADMIN,
     ),
 )

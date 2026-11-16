@@ -1,7 +1,7 @@
 """Executable record of where direct messages deliberately differ between platforms.
 
-Discord and Slack hold a direct message until the sender goes quiet and answer a
-burst as one turn (`daimon.core.dm_debounce.DmBursts`); the web chat has no such
+Discord, Slack and Teams hold a direct message until the sender goes quiet and answer
+a burst as one turn (`daimon.core.dm_debounce.DmBursts`); the web chat has no such
 wait. Only a Discord direct message goes into a continuing session as the new
 words alone; Slack opens a new session for every turn, so each one carries the
 earlier turns.
@@ -43,7 +43,7 @@ def test_the_web_chat_does_not_hold_and_merge_messages() -> None:
     The page shows one running turn and sends one message at a time, so there is no burst
     to merge. If the web chat gains a hold, route it through `DmBursts` and replace this.
     """
-    assert FEATURES["dm_debounce_seconds"].platforms == frozenset({"discord", "slack"}), (
+    assert FEATURES["dm_debounce_seconds"].platforms == frozenset({"discord", "slack", "teams"}), (
         "the wait is offered only where direct messages are held"
     )
     streams = StreamRegistry()

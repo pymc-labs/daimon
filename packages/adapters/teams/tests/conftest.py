@@ -483,7 +483,7 @@ def build_teams_runtime(
     if admins:
         settings.teams = settings.teams.model_copy(update={"admin_team_id": ADMIN_TEAM})
     settings.turn_queue = TurnQueueSettings()
-    settings.features = {}
+    settings.features = {"dm_debounce_seconds": "0"}  # a test sets the wait it needs
     settings.crypto.keys = ()
     settings.mcp.public_url = None
     settings.defaults_root = MagicMock()

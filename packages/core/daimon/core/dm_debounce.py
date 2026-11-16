@@ -104,7 +104,7 @@ class DmBurst[T]:
         """
         if seconds > 0 and not (self._flush or self._stopped):
             await self.mark(self.unanswered[0], react)
-        while batch := await self._take(seconds):
+        while batch := await self.take(seconds):
             for group in split_approvals(batch, self._text_of):
                 await answer_group(group)
                 del self.unanswered[: len(group)]
@@ -117,7 +117,7 @@ class DmBurst[T]:
         await self._unmark()
         return left
 
-    async def _take(self, seconds: float) -> list[T]:
+    async def take(self, seconds: float) -> list[T]:
         """Wait out the burst; the messages waiting, or none, which closes it.
 
         The cap counts from the first waiting message, so the lookups and the turn before

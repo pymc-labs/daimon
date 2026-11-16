@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reinstall. Manage it with `daimon dm default|access|rule|explain`; `daimon dm
   import-policies` moves `DAIMON_DIRECT_MESSAGE_POLICIES` into stored access.
   Erasing a person removes their pick, rules and grant entries.
+- **Teams personal chats follow the DM settings.** The DM wait, DM history depth
+  and read-only DM memory apply to them as they do to Discord and Slack DMs.
 - **Direct messages take files, forwards and replies.** A picture or a file sent in a
   direct message reaches the agent as it does in a channel, and a message with only a
   picture is answered. A forwarded message is passed as untrusted content, and a

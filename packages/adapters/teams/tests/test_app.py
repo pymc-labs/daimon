@@ -29,6 +29,7 @@ from daimon.adapters.teams.identity import INPUT_TOO_LONG, MAX_INBOUND_MESSAGE_B
 from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.errors import DaimonError
+from daimon.core.features.model_input import DmHistoryCap, HistoryDepth
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.native_admins import GroupLookupFailed
@@ -139,6 +140,35 @@ async def test_messages_during_a_turn_queue_and_run_once_per_author(
     assert ran[1].message_ids == (two.activity_id, three.activity_id), (
         "the composed turn knows every message it answers, for media and history"
     )
+
+
+async def test_a_personal_chat_burst_waits_for_the_dm_wait_then_runs_as_one_turn(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    teams = _app(db_session_factory, FakeSender())
+    wait = AsyncMock(return_value=0.3)
+    monkeypatch.setattr(app_module, "debounce_seconds", wait)
+    ran: list[TeamsInbound] = []
+
+    async def _turn(self: TeamsApp, inbound: TeamsInbound, tenant_id: uuid.UUID) -> None:
+        ran.append(inbound)
+
+    with patch.object(TeamsApp, "_run_turn", _turn):
+        first = asyncio.create_task(teams._orchestrate(make_inbound("one"), TENANT))
+        while CONVERSATION_ID not in teams._processing:  # pyright: ignore[reportPrivateUsage]
+            await asyncio.sleep(0.01)
+        await teams._orchestrate(make_inbound("two"), TENANT)
+        assert [i.text for i in ran] == [], "the first message waits for the rest of the burst"
+        await first
+    assert [i.text for i in ran] == ["one\n\ntwo"], "one turn answers the burst"
+    assert wait.await_args.args[2:] == (TENANT, "teams"), "the Teams setting decides"
+
+
+@pytest.mark.parametrize(("kind", "replay"), [("dm", 12), ("channel", 100)])
+def test_a_personal_chat_reads_as_much_history_as_a_dm_conversation(kind: Any, replay: int) -> None:
+    admission = SimpleNamespace(history_depth=HistoryDepth(), dm_history=DmHistoryCap())
+    depth = app_module._history_depth(make_inbound(kind=kind), admission)  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+    assert depth.replay == replay
 
 
 async def test_a_queued_message_shows_an_hourglass_until_its_turn_starts(

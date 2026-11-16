@@ -18,11 +18,13 @@ def test_the_setting_defaults_to_three_seconds_with_off_and_presets() -> None:
     spec = FEATURES["dm_debounce_seconds"]
     assert spec.default == "3"
     assert {"0", "1", "3", "5"} <= set(spec.values)
-    assert spec.platforms == frozenset({"discord", "slack"}), "web has no hold-and-merge path"
+    assert spec.platforms == frozenset({"discord", "slack", "teams"}), (
+        "web has no hold-and-merge path"
+    )
     assert dm_debounce.MAX_WAIT_S == 10.0
 
 
-@pytest.mark.parametrize("platform", ["discord", "slack"])
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams"])
 async def test_the_wait_follows_the_workspace_setting(db_session_factory, platform) -> None:
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform=platform)

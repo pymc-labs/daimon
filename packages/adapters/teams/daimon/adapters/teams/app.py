@@ -119,6 +119,7 @@ from daimon.core.continuity.messages import (
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller
 from daimon.core.direct_messages import DirectMessageAccessRevoked, require_dm_turn_grant
+from daimon.core.dm_debounce import DmBursts, debounce_seconds
 from daimon.core.errors import DaimonError
 from daimon.core.features.model_input import FULL_HISTORY, HistoryDepth
 from daimon.core.features.snapshot import FeaturePlace, may_turn_on, place_feature
@@ -334,6 +335,14 @@ def _as_mention(inbound: TeamsInbound) -> TeamsInbound:
     return dataclasses.replace(inbound, text=text, by_name=False, unprompted=False)
 
 
+def _history_depth(inbound: TeamsInbound, admission: Admission) -> HistoryDepth:
+    """How much earlier chat a turn reads; a personal chat carries what a DM does."""
+    depth = admission.history_depth
+    if inbound.kind != "dm":
+        return depth
+    return HistoryDepth(min(depth.replay, admission.dm_history.turns))
+
+
 def _by_author(queued: list[TeamsInbound]) -> list[list[TeamsInbound]]:
     return group_by_author(
         queued, lambda item: item.user_id, separate=lambda item: item.handover_agent_id is not None
@@ -476,6 +485,8 @@ class TeamsApp:
         self.provider_actions = TeamsProviderActions(self._sender, feed=feed)
         self._processing: HeldThreads[str] = HeldThreads()
         self._pending: dict[str, list[TeamsInbound]] = {}
+        # A personal chat's first message waits here for the rest of its burst.
+        self._dm_bursts: DmBursts[str, TeamsInbound] = DmBursts(lambda item: item.text)
         # Controls held for a turn's output sweep, by conversation: the next turn
         # there posts them before its own card.
         self._held_controls: dict[str, TeamsTurnLifecycle] = {}
@@ -863,6 +874,7 @@ class TeamsApp:
         session's next sweep.
         """
         self.draining = True
+        self._dm_bursts.stop()
         if self._participation is not None:
             self._participation.cancel_all()
         pollers = (
@@ -1328,6 +1340,7 @@ class TeamsApp:
         if key in self._processing:
             self._last_message_at[key] = datetime.now(UTC)
             self._thread_queue.enqueue(key, inbound)
+            self._dm_bursts.join(key, inbound)  # a waiting burst waits on for more
             allowed = functools.partial(self._may_start_turn, inbound, tenant_id)
             self._reactions.mark_queued(inbound, allowed=allowed)
             generation = self._processing.generation(key)
@@ -1363,7 +1376,29 @@ class TeamsApp:
         self._last_message_at[key] = datetime.now(UTC)
         self._supersede_batch(inbound)
         async with self._holding(key, ticket):
-            await self._run_turns(key, tenant_id, [inbound])
+            queued = [inbound]
+            if inbound.kind == "dm" and not inbound.setup_thread_id:
+                queued = await self._wait_out_burst(key, tenant_id, inbound)
+            await self._run_turns(key, tenant_id, queued)
+
+    async def _wait_out_burst(
+        self, key: str, tenant_id: uuid.UUID, inbound: TeamsInbound
+    ) -> list[TeamsInbound]:
+        """A personal chat's first message waits for the rest of its burst
+        (`dm_debounce_seconds`), so one turn answers them all. What arrives
+        meanwhile queues behind the held chat (`_orchestrate`)."""
+        seconds = await debounce_seconds(
+            self.runtime.sessionmaker, self.runtime.settings, tenant_id, "teams"
+        )
+        burst = self._dm_bursts.open(key, inbound)
+        try:
+            if seconds > 0:
+                allowed = functools.partial(self._may_start_turn, inbound, tenant_id)
+                self._reactions.mark_queued(inbound, allowed=allowed)
+            await burst.take(seconds)
+        finally:
+            await self._dm_bursts.end(key, burst)
+        return [inbound, *self._pending.pop(key, [])]
 
     async def _may_start_turn(self, inbound: TeamsInbound, tenant_id: uuid.UUID) -> bool:
         """Whether admission's people-and-place gates let `inbound` start a turn there.
@@ -1831,7 +1866,7 @@ class TeamsApp:
         # The messages this turn answers and its status card are not history.
         skip = frozenset(filter(None, (*inbound.message_ids, lifecycle.message_id)))
         watermark = prepared.watermark if prepared.reused else None
-        depth = admission.history_depth
+        depth = _history_depth(inbound, admission)
         history = await self._history(inbound, watermark=watermark, skip_ids=skip, depth=depth)
         read = [history]
         # An unprompted turn without its thread has nothing to answer: it stays silent.

@@ -4,8 +4,7 @@ A grant's groups are each platform's own: Discord roles come with the member,
 Slack user groups need the `usergroups:read` scope (an existing install must be
 reinstalled), and Teams groups are teams the app is installed in, read with the
 team roster permission; Entra groups would need tenant-wide consent. A Teams
-personal chat routes by the same grants, but keeps its own chat session: the
-DM wait, history depth and read-only DM memory settings do not apply to it.
+personal chat routes by the same grants and follows the same DM settings.
 No database -- this is a scope check.
 """
 
@@ -33,7 +32,8 @@ def test_teams_dm_groups_when_listed_then_are_installed_teams_only() -> None:
     assert "GroupMember.Read.All" not in str(manifest), "no tenant-wide group consent"
 
 
-def test_teams_personal_chats_when_routed_then_keep_their_own_session_settings() -> None:
+def test_teams_personal_chats_when_routed_then_follow_the_dm_settings() -> None:
+    """Applied in `TeamsApp._wait_out_burst`, `teams.app._history_depth` and admission."""
     assert FEATURES["direct_messages"].on_platform("teams"), "Teams DMs follow the grants"
     for key in ("dm_debounce_seconds", "dm_history_depth", "dm_memory_read_only"):
-        assert not FEATURES[key].on_platform("teams"), f"{key} is a DM conversation setting"
+        assert FEATURES[key].on_platform("teams"), f"{key} applies to a personal chat"
