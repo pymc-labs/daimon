@@ -1,13 +1,12 @@
-"""active_turn_deadline: each in-flight turn's own deadline on the thread marker.
+"""thread_sessions: a turn's own deadline and the last model marks.
 
-`thread_sessions` gains the nullable `active_turn_deadline`, written with the
-rest of the active-turn marker. A turn may now run longer than the standard 45
-minutes (the answer time limit allows 90 and 180), so the stale-marker check
-reads the turn's own deadline. NULL, which every existing row and every turn
-without a limit of its own carries, keeps the 45-minute window.
+`active_turn_deadline`, nullable, is written with the rest of the active-turn
+marker. A time limit may let a turn run past the standard 45 minutes, so the
+stale-marker check reads the turn's own deadline; NULL, as on every existing
+row, keeps the 45-minute window.
 
-It also gains the nullable `model_marks`: the model and effort emoji a turn
-last showed in the thread, so a restart does not show the same pair again.
+`model_marks`, nullable, holds the model and effort emoji a turn last showed in
+the thread, so a restart does not show the same pair again.
 
 downgrade: safe
 """

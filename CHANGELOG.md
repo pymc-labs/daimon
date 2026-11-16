@@ -7,15 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Longer answer time limits.** The answer time limit setting now also allows 90 and
-  180 minutes, besides the standard 45 and the shorter 30, 20 and 15. A longer turn stays live
-  past 45 minutes: its deadline is stored with the turn's marker, and the stale-turn check,
-  a direct message's claim and lock waits follow it. It covers chats, direct messages and the
-  web app. A turn whose worker stopped no longer holds its thread or direct message for the
-  rest of its limit.
-- **An unattended run time limit.** A new workspace or agent setting, with the same choices,
-  limits one run nobody is watching (45 minutes by default): a routine, a watch wake-up,
-  an agent-to-agent chat or a `daimon run`.
+- **Answer and unattended run time limits.** Two new workspace and agent settings, set
+  by server admins, limit how long one turn may run: `turn_time_limit` for a person's
+  message in a chat, a direct message or the web app, and `unattended_time_limit` for a run
+  nobody is watching (a routine, a watch wake-up, an agent-to-agent chat or a `daimon run`).
+  Each takes 15, 20, 30, 45, 90 or 180 minutes, 45 by default, and the smallest setting wins.
+  A turn allowed past 45 minutes stays live until its own deadline, and one whose worker
+  stopped no longer holds its thread or direct message.
 - **Hide the server name on tool lines.** A new workspace or agent setting,
   `tool_server_names`, drops the connected server's name from the working card's tool lines.
 - **Model and effort reactions in Discord.** A new setting, off by default, reacts
@@ -24,13 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **An answer message cap setting.** In Discord, an answer posts up to 5 messages
   as before, and past that is attached as a file. A setting from 1 to 1000
   changes the cap for a workspace, agent, channel or thread.
+- **A channel background setting.** A new setting, `channel_history`, sets how many recent
+  channel messages (none, 10, 25, 50 or 100; 25 by default) a thread started from a channel
+  message reads for background, never more than its chat history setting allows.
 - **Answers in a thread another bot already opened.** When a channel's other
   bot threads every message, Discord answers in that thread instead of
   reporting that it could not open one.
 - **An edit that adds a mention gets an answer.** Editing a message to mention
   the bot in Discord answers it like a new mention, once.
-- **A turn time limit setting.** Server admins can shorten the time one answer may
-  run to 30 or 15 minutes instead of 45, for a workspace or an agent; the smallest setting wins.
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and
   the MCP tools. A run nobody started, such as a routine, never applies one at once.
