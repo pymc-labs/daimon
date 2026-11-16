@@ -207,84 +207,50 @@ async def test_diff_lists_only_the_features_two_agents_differ_on(
     assert keys == ["tool.bash"]
 
 
-async def test_approvals_need_a_reason_from_the_cli(
+@pytest.mark.parametrize(
+    ("key", "reason", "operator", "refusal"),
+    [
+        ("approvals", None, "ops", "only with --reason"),
+        ("approvals", "   ", "ops", "only with --reason"),
+        ("approvals", "bridge", "  ", "needs cli.local_user"),
+        ("progress_plans", "why", "ops", "--reason is only for approvals"),
+    ],
+)
+async def test_a_set_the_audit_could_not_explain_is_refused_before_any_write(
     db_session_factory: async_sessionmaker[AsyncSession],
+    key: str,
+    reason: str | None,
+    operator: str,
+    refusal: str,
 ) -> None:
-    """The operator path is audited, so a change with no reason is refused before any write."""
+    """Approvals need a reason and an operator name; a reason anywhere else would be dropped."""
     rt = _runtime(db_session_factory, [])
+    rt.settings.cli.local_user = operator
     selector = await _tenant(db_session_factory)
     console, _ = _console()
-    place: dict[str, Any] = {"tier": None, "agent": None, "channel": None, "thread": None}
-    for reason in (None, "", "   "):
-        with pytest.raises(StoreError, match="--reason"):
-            await features_set(
-                rt=rt,
-                console=console,
-                selector=selector,
-                key="approvals",
-                value="off",
-                reason=reason,
-                **place,
-            )
-    row = _row(await _rows(rt, selector), "approvals")
-    assert row["value"] == "on", "a refused change writes nothing"
-
-
-async def test_a_blank_operator_name_refuses_cleanly(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """With `cli.local_user` blank the audit row would name no one: a refusal, not a traceback."""
-    rt = _runtime(db_session_factory, [])
-    object.__setattr__(rt.settings.cli, "local_user", "  ")
-    selector = await _tenant(db_session_factory)
-    console, _ = _console()
-    with pytest.raises(StoreError, match="cli.local_user"):
+    before = _row(await _rows(rt, selector), key)
+    with pytest.raises(StoreError, match=refusal):
         await features_set(
             rt=rt,
             console=console,
             selector=selector,
-            key="approvals",
+            key=key,
             value="off",
-            reason="bridge",
+            reason=reason,
             tier=None,
             agent=None,
             channel=None,
             thread=None,
         )
-    assert _row(await _rows(rt, selector), "approvals")["value"] == "on"
-
-
-async def test_a_reason_on_a_feature_that_keeps_none_is_refused(
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """Only approvals audit a reason; elsewhere `--reason` would be dropped, so it is refused."""
-    rt = _runtime(db_session_factory, [])
-    selector = await _tenant(db_session_factory)
-    console, _ = _console()
-    with pytest.raises(StoreError, match="--reason is only for approvals"):
-        await features_set(
-            rt=rt,
-            console=console,
-            selector=selector,
-            key="progress_plans",
-            value="on",
-            reason="why",
-            tier=None,
-            agent=None,
-            channel=None,
-            thread=None,
-        )
-    assert _row(await _rows(rt, selector), "progress_plans")["source"] != "workspace"
+    assert _row(await _rows(rt, selector), key) == before, "a refused set writes nothing"
 
 
 async def test_the_operator_sets_approvals_and_the_change_is_audited(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """`features set approvals` works with a reason; the audit row names operator, old, new, why."""
     rt = _runtime(db_session_factory, [])
     selector = await _tenant(db_session_factory)
     console, _ = _console()
-    place: dict[str, Any] = {"tier": None, "agent": None, "channel": None, "thread": None}
     await features_set(
         rt=rt,
         console=console,
@@ -292,17 +258,15 @@ async def test_the_operator_sets_approvals_and_the_change_is_audited(
         key="approvals",
         value="off",
         reason="bridge writes run unattended",
-        **place,
+        tier=None,
+        agent=None,
+        channel=None,
+        thread=None,
     )
-    row = _row(await _rows(rt, selector), "approvals")
-    assert row["value"] == "off", "Allow writes is in effect at the workspace"
+    assert _row(await _rows(rt, selector), "approvals")["value"] == "off", "the set takes effect"
     async with db_session_factory() as session:
-        tenant_id = uuid.UUID(cast(str, selector.tenant_id))
-        (event,) = [
-            e
-            for e in await list_events(session, tenant_id=tenant_id)
-            if e.tool_name == "approval_gate"
-        ]
+        events = await list_events(session, tenant_id=uuid.UUID(cast(str, selector.tenant_id)))
+    (event,) = [e for e in events if e.tool_name == "approval_gate"]
     assert event.platform_user_id == f"operator:{rt.settings.cli.local_user}", "operator named"
     assert event.reason == "server:inherit->off (bridge writes run unattended)", event.reason
     assert event.outcome == "allowed", "the change is recorded as allowed"
