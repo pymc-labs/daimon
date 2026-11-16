@@ -592,13 +592,11 @@ async def callback_lifetime(
     session: AsyncSession, settings: Settings | None, tenant_id: uuid.UUID
 ) -> timedelta | None:
     """How long a callback watch lasts in this workspace: the `callback_watch_lifetime`
-    feature. None is unlimited. A stored value nobody can read counts as the default."""
+    feature. None is unlimited. The resolver only returns values `accepts` takes: finite
+    numbers."""
     place = FeaturePlace.of(tenant_id, "discord", None)
     resolved = await feature_in(session, settings, place, "callback_watch_lifetime")
-    try:
-        days = limit_int(resolved.value)
-    except ValueError:
-        days = MAX_LIFETIME.days
+    days = limit_int(resolved.value)
     return None if days == 0 else timedelta(days=days)
 
 
