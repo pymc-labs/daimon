@@ -187,6 +187,7 @@ OBSERVED_TIME_FIELDS = frozenset(
         "claimed_at",
         "completed_at",
         "active_turn_started_at",
+        "active_turn_deadline",
         "fresh_start_requested_at",
         "recorded_at",
         "last_seen_at",
