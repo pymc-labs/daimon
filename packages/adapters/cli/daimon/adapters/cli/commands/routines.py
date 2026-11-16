@@ -9,7 +9,8 @@ into the row.
 Operators create owner-DM and channel or thread routines; interactive edits use chat tools
 and the adapters' `/routines` command. `sandbox-tools` is the operator's
 switch for a routine's built-in sandbox tools, one routine or a confirmed list
-of them (the cutover), with a dry run.
+of them, or `--agent` for every routine run of an agent (kept through agent edits),
+with a dry run.
 """
 
 from __future__ import annotations
@@ -46,8 +47,10 @@ from daimon.core.routine_move import (
     seed_scheduler_action,
 )
 from daimon.core.routine_sandbox import (
+    AgentSandboxPin,
     SandboxPin,
     SandboxPinUnavailable,
+    current_agent_pin,
     current_pin,
     pin_of,
 )
@@ -62,6 +65,7 @@ from daimon.core.routine_service import (
 from daimon.core.routine_service import create_routine as create_routine_checked
 from daimon.core.routines import routine_for_reader
 from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.agent_sandbox import agent_sandbox_pin, set_agent_sandbox_tools
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.identity import get_or_create_cli_principal
@@ -450,8 +454,24 @@ async def run_create_channel_routine(
 
 @routines_app.command("sandbox-tools")
 def sandbox_tools_command(
-    routine_ids: Annotated[list[uuid.UUID], typer.Argument(help="Routine ids to change.")],
+    routine_ids: Annotated[
+        list[uuid.UUID] | None, typer.Argument(help="Routine ids to change.")
+    ] = None,
+    *,
     tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
+    agent: Annotated[
+        str | None,
+        typer.Option(
+            "--agent",
+            help="Change every routine run of this agent instead, through agent edits.",
+        ),
+    ] = None,
+    environment: Annotated[
+        str | None,
+        typer.Option(
+            "--environment", help="With --agent: the environment name; default is the workspace's."
+        ),
+    ] = None,
     off: Annotated[
         bool, typer.Option("--off", help="Turn sandbox tools off instead of on.")
     ] = False,
@@ -461,22 +481,110 @@ def sandbox_tools_command(
 
     Operator only. Every id must name a routine in --tenant, or nothing is
     changed. A routine already set that way is left alone, so re-running is
-    safe. Each change records the CLI operator and the time.
+    safe. Each change records the CLI operator and the time. With --agent the
+    opt-in is the agent's instead, naming the agent and environment but no
+    version, so editing the agent keeps it; it covers its DM routines too, and
+    the `unattended_capabilities` setting still caps it.
     """
+    if (agent is None) == (not routine_ids):
+        raise typer.BadParameter("Give routine ids, or --agent, not both or neither.")
+    if environment is not None and agent is None:
+        raise typer.BadParameter("--environment needs --agent.")
     settings = load_settings()
 
     async def run() -> None:
         async with build_runtime(settings) as rt:
+            console = Console(highlight=False)
+            if agent is not None:
+                await run_agent_sandbox_tools(
+                    rt=rt,
+                    console=console,
+                    tenant_id=tenant,
+                    agent_name=agent,
+                    environment_name=environment,
+                    enabled=not off,
+                    dry_run=dry_run,
+                )
+                return
             await run_sandbox_tools(
                 rt=rt,
-                console=Console(highlight=False),
+                console=console,
                 tenant_id=tenant,
-                routine_ids=routine_ids,
+                routine_ids=routine_ids or [],
                 enabled=not off,
                 dry_run=dry_run,
             )
 
     asyncio.run(run())
+
+
+async def run_agent_sandbox_tools(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    tenant_id: uuid.UUID,
+    agent_name: str,
+    environment_name: str | None,
+    enabled: bool,
+    dry_run: bool,
+) -> None:
+    """Opt one agent's routine runs in or out, after checking it and its environment are live."""
+    async with rt.sessionmaker.begin() as session:
+        tenant = await get_tenant(session, tenant_id)
+        if tenant is None or tenant.archived_at is not None:
+            raise UserFacingError("Select an active tenant.")
+        pin: AgentSandboxPin | None
+        if enabled:
+            try:
+                pin = await current_agent_pin(
+                    rt.anthropic,
+                    rt.sessionmaker,
+                    tenant_id=tenant_id,
+                    agent_name=agent_name,
+                    environment_name=environment_name,
+                    default=rt.deployment_default,
+                )
+            except SandboxPinUnavailable as exc:
+                raise UserFacingError(
+                    f"Can't read agent {agent_name} or its environment, so sandbox tools "
+                    f"can't be turned on for it. Nothing was changed. ({exc})"
+                ) from exc
+            agent_id = pin.agent_id
+        else:
+            pin = None
+            found = await find_agent_by_daimon_tag(
+                rt.anthropic,
+                tenant_id=tenant_id,
+                name=agent_name,
+                include_archived=True,
+                records=rt.sessionmaker,
+            )
+            if found is None:
+                raise UserFacingError(f"No agent named {agent_name}. Nothing was changed.")
+            agent_id = found.id
+        recorded = await agent_sandbox_pin(session, tenant_id=tenant_id, agent_id=agent_id)
+        state = "on" if enabled else "off"
+        if recorded == pin:
+            console.print(f"Agent {agent_name}: already {state}.")
+            return
+        detail = f" (environment {pin.environment_name}, any agent version)" if pin else ""
+        console.print(f"Agent {agent_name}: turn {state}{detail}")
+        if dry_run:
+            console.print("Dry run: nothing written.")
+            return
+        principal = await get_or_create_cli_principal(
+            session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
+        )
+        await set_agent_sandbox_tools(
+            session,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            pin=pin,
+            set_by=str(principal.id),
+            # Whoever holds the database credentials is the operator.
+            actor=Subject(is_admin=True),
+        )
+    console.print(f"Sandbox tools {state} for agent {agent_name}.")
 
 
 async def run_sandbox_tools(

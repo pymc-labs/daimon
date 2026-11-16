@@ -251,7 +251,7 @@ def test_empty_roster_disables_all_but_done_and_refresh() -> None:
         ({"sandbox_tools_enabled": True}, "Sandbox tools: on (admin opt-in)"),
         (
             {"destination_kind": "dm", "destination_id": "u1", "created_by_user_id": "u1"},
-            "Sandbox tools: off (DM routines can't use sandbox tools)",
+            "Sandbox tools: set per agent for DM routines",
         ),
     ],
     ids=["default", "opted_in", "dm"],

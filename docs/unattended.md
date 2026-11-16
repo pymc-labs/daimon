@@ -95,7 +95,27 @@ until the operator runs the command again.
 
 Editing the routine's agent, trigger message, destination or budget channel
 also clears it. Changing the schedule, pausing or resuming does not. DM
-routines cannot be opted in, and owning a routine is not enough.
+routines cannot be opted in individually, only through their agent, and
+owning a routine is not enough.
+
+### Per agent
+
+An operator can instead opt in an agent, which covers every routine run of
+that agent, DM routines included:
+
+```bash
+daimon routines sandbox-tools --tenant TENANT_UUID --agent AGENT_NAME [--environment NAME] --dry-run
+daimon routines sandbox-tools --tenant TENANT_UUID --agent AGENT_NAME
+daimon routines sandbox-tools --tenant TENANT_UUID --agent AGENT_NAME --off
+```
+
+This records the agent and the environment's name (the workspace default
+unless `--environment` is given), not a version, so editing the agent keeps
+the built-ins. Another agent or environment still runs without them. A change
+of agent provider needs a new opt-in. It takes precedence over a routine's own
+opt-in and never clears itself. Every change is recorded with who and when.
+The `unattended_capabilities` setting still wins: with it off, built-ins stay
+off. Turn it on only for agents whose runs you trust.
 
 The record does not cover what Daimon attaches to a run, such as the agent's
 keys, repository or channel skills. Review an opted-in routine after changing

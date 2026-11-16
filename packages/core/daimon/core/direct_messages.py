@@ -35,6 +35,7 @@ from daimon.core.mux_backend import resource_scope
 from daimon.core.output_runtime import OutputRuntime
 from daimon.core.permissions import dm_source_limited, limited_ids
 from daimon.core.platform_words import words_for
+from daimon.core.routine_sandbox import RoutineSandbox
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.session_fence_retry import FenceUnavailable, retry_fences, try_fence
 from daimon.core.setup_conversations import BoundAgentUnavailable
@@ -75,6 +76,7 @@ from daimon.core.turn.prepare import PreparedTurn, bind_session
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.termination import TerminationReason
+from daimon.core.turn.unattended import dm_routine_sandbox
 from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_origin import render_turn_origin, turn_origin
 from mux.profiles import MANAGED_AGENTS
@@ -957,6 +959,7 @@ async def run_dm_routine(
     prompt: str,
     source: DmSource | None,
     budget_channel_id: str | None,
+    sandbox: RoutineSandbox | None = None,
 ) -> DmRoutineReply:
     """Run a DM routine's fire as a fresh, unattended private DM turn of its owner.
 
@@ -964,17 +967,22 @@ async def run_dm_routine(
     scope with no history. Every session is gated, so a call needing Approve is
     refused; only Managed Agents agents run (`MANAGED_AGENTS_ONLY`). `source` is
     rechecked for a seal whenever the session is built; `budget_channel_id` only
-    bills. Nothing is posted here: the caller queues the final output.
+    bills. Nothing is posted here: the caller queues the final output. Built-ins stay
+    off unless `sandbox` is an operator's agent-level opt-in the session matches.
     """
-    return await _run_dm_fire(
-        deps,
-        tenant_id=tenant_id,
-        owner_user_id=owner_user_id,
-        agent_name=agent_name,
-        prompt=prompt,
-        source=source,
-        budget_channel_id=budget_channel_id,
-    )
+    token = dm_routine_sandbox.set(sandbox)
+    try:
+        return await _run_dm_fire(
+            deps,
+            tenant_id=tenant_id,
+            owner_user_id=owner_user_id,
+            agent_name=agent_name,
+            prompt=prompt,
+            source=source,
+            budget_channel_id=budget_channel_id,
+        )
+    finally:
+        dm_routine_sandbox.reset(token)
 
 
 async def run_dm_watch(

@@ -149,6 +149,7 @@ from daimon.core.memory_resource import (
 )
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import agent_posts as agent_posts_store
+from daimon.core.stores import agent_sandbox as agent_sandbox_store
 from daimon.core.stores import coding_key_claims as coding_key_claims_store
 from daimon.core.stores import connector_tokens as connector_tokens_store
 from daimon.core.stores import credential_requests as credential_requests_store
@@ -614,6 +615,9 @@ async def _purge_account_transaction(
         session,
         ids=[str(account_id), *(str(principal.id) for principal in cli_list)],
         platform_users=[(pp.tenant_id, pp.external_id) for pp in pp_list],
+    )
+    await agent_sandbox_store.erase_agent_sandbox_setter(
+        session, ids=[str(principal.id) for principal in cli_list]
     )
     for principal in (*cli_list, *pp_list):
         sub = await _purge_principal_in_session(session, principal=principal)

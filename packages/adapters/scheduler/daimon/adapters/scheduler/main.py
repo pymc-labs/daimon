@@ -138,6 +138,7 @@ from daimon.core.spend_gate import (
 )
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
+from daimon.core.stores.agent_sandbox import agent_sandbox_pin
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import Role, RoutineRow, ThreadSessionRow
 from daimon.core.stores.github_connect import delete_expired_flows
@@ -291,15 +292,38 @@ async def _acquire_advisory_lock(engine: AsyncEngine, key: int) -> AsyncConnecti
     return conn
 
 
-def _routine_sandbox(
+async def _agent_sandbox(
     sm: async_sessionmaker[AsyncSession], row: RoutineRow
 ) -> RoutineSandbox | None:
-    """The routine's opt-in for this fire, or None when it has none recorded.
+    """An operator's opt-in for the routine's agent, or None when it has none."""
+    try:
+        async with sm() as session:
+            pin = await agent_sandbox_pin(session, tenant_id=row.tenant_id, agent_id=row.agent_id)
+    except Exception:  # unreadable: no opt-in
+        log.exception("routine.agent_sandbox_unreadable", routine_id=str(row.id))
+        return None
+    if pin is None:
+        return None
 
-    When the run's agent or environment no longer matches what the admin
-    approved, the run goes ahead without built-ins and the opt-in is cleared,
-    so the admin has to approve the new agent or environment.
+    async def on_drift() -> None:
+        log.info("routine.agent_sandbox_mismatch", routine_id=str(row.id))
+
+    return RoutineSandbox(pin=pin, on_drift=on_drift)
+
+
+async def _routine_sandbox(
+    sm: async_sessionmaker[AsyncSession], row: RoutineRow
+) -> RoutineSandbox | None:
+    """The opt-in for this fire, or None when there is none recorded.
+
+    An operator's opt-in for the routine's agent comes first: it covers an agent
+    edit. Otherwise the routine's own: when the run's agent or environment no
+    longer matches what the admin approved, the run goes ahead without built-ins
+    and the opt-in is cleared, so the admin has to approve the new agent or
+    environment.
     """
+    if (agent_level := await _agent_sandbox(sm, row)) is not None:
+        return agent_level
     pin = pin_of(row)
     if pin is None:
         return None
@@ -489,6 +513,8 @@ async def _build_fire(
                 prompt=prompt,
                 source=source,
                 budget_channel_id=row.channel_id,
+                # Built-ins only under an operator's agent-level opt-in.
+                sandbox=await _agent_sandbox(sm, row),
             )
         except (AdmissionDenied, DirectMessageAccessRevoked) as error:
             log.info(
@@ -945,7 +971,7 @@ async def _build_fire(
             ),
             # Built-in sandbox tools only for a routine an admin opted in, and
             # only while its agent version and environment are the ones approved.
-            sandbox=_routine_sandbox(sm, row),
+            sandbox=await _routine_sandbox(sm, row),
             # The owner's personal memory, read-only, only for a routine whose
             # result goes to nobody else; decided again from the row each fire.
             personal_memory=mounts_personal_memory(row),

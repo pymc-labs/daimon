@@ -20,6 +20,7 @@ from daimon.core.host_web_fetch import (
     fetch_page,
 )
 from daimon.core.mcp_tool_call import pinned_http_client
+from daimon.core.stores.agent_sandbox import agent_sandbox_pin
 from daimon.core.stores.routines import get_routine
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -63,7 +64,13 @@ async def _routine_keeps_builtins(runtime: McpRuntime, auth: AuthIdentity) -> bo
         return False
     async with runtime.session_factory() as session:
         row = await get_routine(session, auth.routine_id, tenant_id=auth.tenant_id)
-    if row is None or not row.sandbox_tools_enabled:
+        agent_level = (
+            row is not None
+            and await agent_sandbox_pin(session, tenant_id=auth.tenant_id, agent_id=row.agent_id)
+            is not None
+        )
+    # The run already matched the pin before built-ins were allowed (headless runner).
+    if row is None or not (row.sandbox_tools_enabled or agent_level):
         return False
     place = FeaturePlace.of(auth.tenant_id, auth.platform or "routine", None, agent_id=row.agent_id)
     found = await place_guardrail(

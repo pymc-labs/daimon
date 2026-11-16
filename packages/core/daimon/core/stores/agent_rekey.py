@@ -93,6 +93,8 @@ KEPT: Final[dict[tuple[str, str], str]] = {
     ("long_job_policy_history", "agent_id"): "history",
     ("long_job", "agent_id"): "history; running jobs block the move",
     ("routine_sandbox_history", "agent_id"): "history",
+    ("agent_sandbox_tools", "agent_id"): "an operator approved the old provider's agent only",
+    ("agent_sandbox_history", "agent_id"): "history",
     ("turn_outcomes", "agent_id"): "history",
     ("security_audit_events", "agent_id"): "audit trail",
     ("neutral_agent_revisions", "agent"): "per-account native catalog, keyed by name",

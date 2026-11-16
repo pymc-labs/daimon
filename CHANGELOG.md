@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Operators can turn on sandbox tools for an agent's routine runs.**
+  `daimon routines sandbox-tools --agent NAME` records an opt-in for the agent
+  and its environment's name instead of one routine and one version, so
+  editing the agent no longer takes the built-in tools away. It covers every
+  routine run of that agent, DM routines included, which cannot be opted in
+  one by one. Only an operator can set it, each change is recorded, and
+  another agent or environment still runs without them. The unattended
+  capabilities setting still wins: with it off, built-ins stay off. A change
+  of agent provider needs a new opt-in.
 - **A server admin can let agents make watches without a card.** The new
   `watch_approval` setting, for the team or for one agent, defaults to Ask,
   which keeps today's card. Skip makes, edits and resumes a watch straight

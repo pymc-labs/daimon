@@ -10,8 +10,10 @@ import pytest
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import create_owned_environment
 from daimon.core.routine_sandbox import (
+    AgentSandboxPin,
     SandboxPin,
     SandboxPinUnavailable,
+    current_agent_pin,
     current_pin,
     run_matches_pin,
 )
@@ -168,3 +170,95 @@ async def test_a_run_in_a_daimon_owned_environment_matches_its_pin(
     assert not await run_matches_pin(_client(tenant.id), pin, session, tenant_id=tenant.id), (
         "without the records the same id cannot be read and the run is a mismatch"
     )
+
+
+AGENT_PIN = AgentSandboxPin("ag", "default")
+
+
+@pytest.mark.parametrize(
+    ("session_version", "env_updated", "agent_id", "environment_id", "matches"),
+    [
+        (7, EDITED, "ag", "env_1", True),
+        (8, EDITED, "ag", "env_1", True),
+        (7, "2026-10-04T00:00:00Z", "ag", "env_1", True),
+        (7, EDITED, "other", "env_1", False),
+        (7, EDITED, "ag", "env_2", False),
+    ],
+    ids=["unchanged", "agent_edited", "environment_edited", "other_agent", "other_environment"],
+)
+async def test_an_agent_opt_in_matches_the_agent_and_environment_but_not_a_version(
+    session_version: int, env_updated: str, agent_id: str, environment_id: str, matches: bool
+) -> None:
+    """An agent edit or an in-place environment edit is not drift for an agent pin."""
+    import uuid
+
+    tenant_id = uuid.uuid4()
+    session = ma_session(agent_id=agent_id, environment_id=environment_id)
+    session = session.model_copy(
+        update={"agent": session.agent.model_copy(update={"version": session_version})}
+    )
+
+    assert (
+        await run_matches_pin(
+            _client(tenant_id, env_updated=env_updated), AGENT_PIN, session, tenant_id=tenant_id
+        )
+        is matches
+    ), "only the agent id and the environment its name resolves to count"
+
+
+async def test_an_agent_edit_keeps_builtins_under_the_agent_pin_and_drops_them_under_a_routine_pin():
+    """The same edited agent matches an agent pin and no longer matches a routine pin."""
+    import uuid
+
+    tenant_id = uuid.uuid4()
+    routine_pin = SandboxPin("ag", 7, "env_1", datetime(2026, 10, 2, 9, tzinfo=UTC))
+    session = ma_session(agent_id="ag", environment_id="env_1")
+    edited = session.model_copy(update={"agent": session.agent.model_copy(update={"version": 8})})
+    client = _client(tenant_id)
+
+    assert await run_matches_pin(client, AGENT_PIN, edited, tenant_id=tenant_id)
+    assert not await run_matches_pin(client, routine_pin, edited, tenant_id=tenant_id)
+
+
+async def test_an_agent_pin_needs_a_tenant() -> None:
+    """Without a tenant nothing can be read, so the run is a mismatch."""
+    session = ma_session(agent_id="ag", environment_id="env_1")
+    import uuid
+
+    assert not await run_matches_pin(_client(uuid.uuid4()), AGENT_PIN, session, tenant_id=None)
+
+
+async def test_current_agent_pin_names_the_agent_and_the_default_environment(
+    db_session, db_session_factory
+) -> None:
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    router = MARouter()
+    agent = ma_agent(id="ag", name="daimon", tenant_id=tenant.id)
+    environment = ma_environment(id="env_1", name="default", tenant_id=tenant.id)
+    router.add("GET", r"/v1/agents$", lambda r, m: list_response([agent.model_dump(mode="json")]))
+    router.add(
+        "GET",
+        r"/v1/environments$",
+        lambda r, m: list_response([environment.model_dump(mode="json")]),
+    )
+    client = build_fake_anthropic(router.dispatch)
+
+    pin = await current_agent_pin(
+        client,
+        db_session_factory,
+        tenant_id=tenant.id,
+        agent_name="daimon",
+        environment_name=None,
+        default=DeploymentDefault(),
+    )
+    assert pin == AgentSandboxPin("ag", "default")
+    with pytest.raises(SandboxPinUnavailable):
+        await current_agent_pin(
+            client,
+            db_session_factory,
+            tenant_id=tenant.id,
+            agent_name="daimon",
+            environment_name="missing",
+            default=DeploymentDefault(),
+        )

@@ -7,12 +7,14 @@ from unittest.mock import AsyncMock
 
 import daimon.adapters.cli.commands.routines as routines_cli
 import pytest
-from daimon.adapters.cli.commands.routines import run_sandbox_tools
+from daimon.adapters.cli.commands.routines import run_agent_sandbox_tools, run_sandbox_tools
 from daimon.core.errors import UserFacingError
 from daimon.core.routine_sandbox import SandboxPinUnavailable
-from daimon.core.stores.domain import SandboxPin
+from daimon.core.stores.agent_sandbox import agent_sandbox_history, agent_sandbox_pin
+from daimon.core.stores.domain import AgentSandboxPin, SandboxPin
 from daimon.core.stores.routines import create_routine, get_routine, sandbox_tools_history
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma_models import ma_agent
 from rich.console import Console
 
 from ..harness import build_cli_runtime
@@ -219,3 +221,80 @@ async def test_re_running_after_an_agent_edit_re_approves_it(
     async with db_session_factory() as session:
         row = await get_routine(session, rows[0].id, tenant_id=tenant_id)
     assert row is not None and row.sandbox_agent_version == 4
+
+
+async def test_agent_opt_in_records_the_agent_and_environment_not_a_version(
+    db_session_factory, monkeypatch
+) -> None:
+    """`--agent` pins the agent id and environment name, then `--off` forgets them."""
+    tenant_id, _ = await _routines(db_session_factory, 0)
+    pin = AgentSandboxPin("ag", "default")
+    monkeypatch.setattr(routines_cli, "current_agent_pin", AsyncMock(return_value=pin))
+    monkeypatch.setattr(
+        routines_cli, "find_agent_by_daimon_tag", AsyncMock(return_value=ma_agent(id="ag"))
+    )
+    output = StringIO()
+    kwargs = {
+        "rt": build_cli_runtime(db_session_factory),
+        "console": Console(file=output, width=200),
+        "tenant_id": tenant_id,
+        "agent_name": "daimon",
+        "environment_name": None,
+        "dry_run": False,
+    }
+
+    await run_agent_sandbox_tools(enabled=True, **kwargs)
+    async with db_session_factory() as session:
+        assert await agent_sandbox_pin(session, tenant_id=tenant_id, agent_id="ag") == pin
+    await run_agent_sandbox_tools(enabled=True, **kwargs)
+    assert "already on" in output.getvalue(), "a repeat writes nothing"
+    await run_agent_sandbox_tools(enabled=False, **kwargs)
+
+    async with db_session_factory() as session:
+        assert await agent_sandbox_pin(session, tenant_id=tenant_id, agent_id="ag") is None
+        history = await agent_sandbox_history(session, tenant_id=tenant_id, agent_id="ag")
+    assert [h.after_enabled for h in history] == [True, False]
+
+
+async def test_agent_dry_run_writes_nothing(db_session_factory, monkeypatch) -> None:
+    tenant_id, _ = await _routines(db_session_factory, 0)
+    monkeypatch.setattr(
+        routines_cli,
+        "current_agent_pin",
+        AsyncMock(return_value=AgentSandboxPin("ag", "default")),
+    )
+    output = StringIO()
+
+    await run_agent_sandbox_tools(
+        rt=build_cli_runtime(db_session_factory),
+        console=Console(file=output, width=200),
+        tenant_id=tenant_id,
+        agent_name="daimon",
+        environment_name=None,
+        enabled=True,
+        dry_run=True,
+    )
+
+    async with db_session_factory() as session:
+        assert await agent_sandbox_pin(session, tenant_id=tenant_id, agent_id="ag") is None
+    assert "Dry run: nothing written." in output.getvalue()
+
+
+async def test_agent_opt_in_refuses_an_unreadable_agent(db_session_factory, monkeypatch) -> None:
+    tenant_id, _ = await _routines(db_session_factory, 0)
+    monkeypatch.setattr(
+        routines_cli,
+        "current_agent_pin",
+        AsyncMock(side_effect=SandboxPinUnavailable("archived")),
+    )
+
+    with pytest.raises(UserFacingError, match="Nothing was changed"):
+        await run_agent_sandbox_tools(
+            rt=build_cli_runtime(db_session_factory),
+            console=Console(file=StringIO()),
+            tenant_id=tenant_id,
+            agent_name="daimon",
+            environment_name=None,
+            enabled=True,
+            dry_run=False,
+        )

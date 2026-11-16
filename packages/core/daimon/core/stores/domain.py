@@ -272,6 +272,15 @@ class SandboxPin:
     environment_updated_at: datetime
 
 
+@dataclass(frozen=True)
+class AgentSandboxPin:
+    """An operator's agent-level opt-in: the agent and the environment, never a version."""
+
+    agent_id: str
+    #: The environment's `daimon` name, resolved at each fire; edits to it are not drift.
+    environment_name: str
+
+
 class RoutineRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 

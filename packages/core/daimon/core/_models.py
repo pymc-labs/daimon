@@ -594,6 +594,51 @@ class RoutineSandboxHistoryRecord(Base):
     )
 
 
+class AgentSandboxTools(Base):
+    """An operator's opt-in of one agent's routine runs to built-in sandbox tools.
+
+    Names the agent and the environment, never a version: an agent edit keeps it.
+    A row exists while the opt-in is on; changed only through
+    `stores.agent_sandbox`, which logs each change.
+    """
+
+    __tablename__ = "agent_sandbox_tools"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id"], ["tenants.id"], ondelete="CASCADE", name="fk_agent_sandbox_tools_tenants"
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    environment_name: Mapped[str] = mapped_column(Text)
+    set_by: Mapped[str] = mapped_column(Text)
+    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AgentSandboxHistoryRecord(Base):
+    """One change to an agent's sandbox opt-in: who and when. Kept after the agent is gone."""
+
+    __tablename__ = "agent_sandbox_history"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            ondelete="CASCADE",
+            name="fk_agent_sandbox_history_tenants",
+        ),
+        Index("ix_agent_sandbox_history_agent", "tenant_id", "agent_id", "set_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    agent_id: Mapped[str] = mapped_column(Text)
+    after_enabled: Mapped[bool] = mapped_column(Boolean)
+    environment_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    set_by: Mapped[str] = mapped_column(Text)
+    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class ThreadSession(Base):
     __tablename__ = "thread_sessions"
     __table_args__ = (

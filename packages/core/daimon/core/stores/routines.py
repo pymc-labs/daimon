@@ -701,8 +701,8 @@ PIN_UNAVAILABLE_REFUSAL = (
 SANDBOX_DRIFT_SETTER: Final = "agent_changed"
 
 DM_SANDBOX_REFUSAL = (
-    "DM routines can't use sandbox tools: they run as the owner's private conversation. "
-    "Nothing was changed."
+    "DM routines can't use sandbox tools of their own: they run as the owner's private "
+    "conversation. An operator can turn them on for the agent. Nothing was changed."
 )
 
 

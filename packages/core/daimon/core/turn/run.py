@@ -161,6 +161,7 @@ from daimon.core.turn.provider_actions import (
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.turn.unattended import (
+    dm_routine_sandbox,
     dm_session_authority,
     is_provider_turn,
     refuse_ungated_confirmation,
@@ -1919,14 +1920,16 @@ async def run_prepared_turn_impl(
                     ):
                         if not gateable:
                             raise AdmissionDenied(reason="backend_unsupported")
-                        posture, dm_gate = await dm_session_authority(
+                        posture, dm_gate, dm_builtins = await dm_session_authority(
                             deps,
                             admission,
                             session_id,
                             tenant_id=tenant_id,
                             read_session=read_session,
                             entry_point=unattended_entry_point(origin),
+                            sandbox=dm_routine_sandbox.get(),
                         )
+                        host_builtins[0] = dm_builtins
                         stack.enter_context(unattended_sends(dm_gate))
                     elif gateable:
                         if watch_row is None and job_row is None:

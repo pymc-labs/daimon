@@ -31,6 +31,7 @@ from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.adapters.scheduler.main import _build_fire
 from daimon.core import direct_messages
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import Subject
 from daimon.core.config import DirectMessagePolicy, Settings
 from daimon.core.direct_messages import (
     admit_cold_dm,
@@ -47,13 +48,14 @@ from daimon.core.routine_delivery import poll_deliveries_once
 from daimon.core.scheduler import RoutineDispatcher, run_one_tick
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.agent_sandbox import set_agent_sandbox_tools
 from daimon.core.stores.credential_requests import create_credential_request
 from daimon.core.stores.direct_messages import (
     get_conversation,
     set_dm_agent_name,
     set_dm_enabled,
 )
-from daimon.core.stores.domain import Role, RoutineRow
+from daimon.core.stores.domain import AgentSandboxPin, Role, RoutineRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.mcp_oauth_flows import create_flow, mark_flow_completed
 from daimon.core.stores.routines import create_routine, get_routine
@@ -1824,6 +1826,70 @@ async def test_dm_routine_disables_sandbox_and_gates_all_mcp_calls(harness: Harn
             assert all(
                 config["permission_policy"] == {"type": "always_ask"} for config in body["configs"]
             )
+    assert reply.text == "private answer"
+
+
+def _bash_agent(harness: Harness) -> None:
+    harness.upstream.state.ma.agents["ag_daimon"]["tools"].append(
+        {
+            "type": "agent_toolset_20260401",
+            "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            "configs": [
+                {"name": "bash", "enabled": True, "permission_policy": {"type": "always_allow"}}
+            ],
+        }
+    )
+
+
+def _builtins_on(harness: Harness, session_id: str) -> bool:
+    toolsets = [
+        tool.model_dump(mode="json")
+        for tool in harness.upstream.state.sessions[session_id].agent.tools
+        if tool.type == "agent_toolset_20260401"
+    ]
+    return bool(toolsets) and any(body["default_config"]["enabled"] for body in toolsets)
+
+
+@pytest.mark.parametrize(
+    ("environment", "guardrail", "kept"),
+    [
+        ("default", "on", True),
+        ("default", "off", False),
+        ("other", "on", False),
+        (None, "on", False),
+    ],
+    ids=["opted_in", "guardrail_off_wins", "other_environment", "no_opt_in"],
+)
+async def test_dm_routine_keeps_builtins_only_under_the_agent_opt_in(
+    harness: Harness, environment: str | None, guardrail: str, kept: bool
+):
+    """A DM routine's built-ins need the agent-level opt-in, and `unattended_capabilities` caps it."""
+    _bash_agent(harness)
+    async with harness.factory.begin() as db:
+        if environment is not None:
+            await set_agent_sandbox_tools(
+                db,
+                tenant_id=harness.tenant.id,
+                agent_id="ag_daimon",
+                pin=AgentSandboxPin("ag_daimon", environment),
+                set_by="operator",
+                actor=Subject(is_admin=True),
+            )
+        if guardrail == "off":
+            await set_workspace_feature(
+                db,
+                None,
+                tenant_id=harness.tenant.id,
+                platform="discord",
+                key="unattended_capabilities",
+                value="off",
+                account_id=None,
+                surface="cli",
+            )
+    reply = await harness.routine()
+    assert _builtins_on(harness, reply.session_id) is kept, (
+        "built-ins stay on only for the opted-in agent in its environment, under the guardrail"
+    )
     assert reply.text == "private answer"
 
 
