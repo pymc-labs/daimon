@@ -193,19 +193,35 @@ async def test_a_notice_no_admin_received_frees_the_window(
     assert len(calls) == 1, "the notifier ran once"
 
 
-def test_the_dm_policy_filters_recipients() -> None:
+async def test_allowed_recipients_when_policy_or_grant_refuses_then_skipped() -> None:
     notice = BudgetNotice(
         tenant_id=uuid.uuid4(),
         workspace_id="g",
         platform="discord",
         channel_id="c",
-        recipient_ids=("a", "b"),
+        recipient_ids=("a", "b", "c"),
         limit_line="$5.00",
         monthly=False,
         budget_id=uuid.uuid4(),
         window_key="window",
     )
-    allow_b = DirectMessagePolicy(mode="allowlist", recipient_ids=["b"])
-    assert notice.allowed_recipients(allow_b) == ("b",)
-    assert notice.allowed_recipients(DirectMessagePolicy(mode="disabled")) == ()
-    assert notice.text("c") == "c has used its $5.00 budget.\n\nRaise the budget to resume now."
+
+    async def everyone(_user_id: str) -> bool:
+        return True
+
+    async def not_c(user_id: str) -> bool:
+        return user_id != "c"
+
+    allow_bc = DirectMessagePolicy(mode="allowlist", recipient_ids=["b", "c"])
+    assert await notice.allowed_recipients(allow_bc, everyone) == ("b", "c"), (
+        "the env policy filters recipients"
+    )
+    assert await notice.allowed_recipients(allow_bc, not_c) == ("b",), (
+        "the default agent's grant filters recipients too"
+    )
+    assert await notice.allowed_recipients(DirectMessagePolicy(mode="disabled"), everyone) == (), (
+        "a disabled policy admits nobody"
+    )
+    assert notice.text("c") == "c has used its $5.00 budget.\n\nRaise the budget to resume now.", (
+        "the notice names the channel and the limit"
+    )

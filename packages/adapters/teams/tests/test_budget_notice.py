@@ -8,6 +8,8 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import pytest
+from daimon.adapters.teams import budget_notice
 from daimon.adapters.teams.budget_notice import teams_budget_notifier, with_budget_notifier
 from daimon.adapters.teams.card import notice_card
 from daimon.adapters.teams.runtime import TeamsRuntime
@@ -15,6 +17,14 @@ from daimon.core.channel_budget_notice import BudgetNotice
 from daimon.core.turn.deps import TurnDeps
 
 _TENANT = uuid.uuid4()
+
+
+@pytest.fixture(autouse=True)
+def default_agent_grant(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """The default agent's grant admits everyone unless a test says otherwise."""
+    admits = AsyncMock(return_value=True)
+    monkeypatch.setattr(budget_notice, "sender_admits", admits)
+    return admits
 
 
 def _required(cls: Any, **given: object) -> dict[str, object]:
@@ -60,6 +70,38 @@ async def test_recipients_on_the_roster_get_a_1_1_message() -> None:
         "#ops-room has used its $1.00 monthly budget.\n\n"
         "Raise the budget to resume now, or wait until next month."
     ).model_dump(by_alias=True)
+
+
+async def test_a_recipient_the_default_agent_does_not_admit_gets_no_message(
+    default_agent_grant: AsyncMock,
+) -> None:
+    settings = MagicMock()
+    settings.direct_message_policies = {}
+    runtime = TeamsRuntime(**_required(TeamsRuntime, settings=settings))
+    default_agent_grant.side_effect = lambda *_a, user_id, **_k: user_id == "aad-2"
+    direct = MagicMock()
+    direct.member = AsyncMock(side_effect=lambda _c, aad: f"29:{aad}")
+    direct.open_chat = AsyncMock(side_effect=lambda m: f"chat-{m}")
+    direct.post_card = AsyncMock()
+    notice = BudgetNotice(
+        tenant_id=_TENANT,
+        workspace_id="entra",
+        platform="teams",
+        channel_id="19:chan@thread.tacv2",
+        recipient_ids=("AAD-1", "AAD-2"),
+        limit_line="$1.00",
+        monthly=True,
+        budget_id=uuid.uuid4(),
+        window_key="window",
+    )
+    delivered = await teams_budget_notifier(runtime, direct)(notice)
+
+    assert delivered == 1, "only the admitted recipient is messaged"
+    asked = [c.kwargs["user_id"] for c in default_agent_grant.await_args_list]
+    assert asked == ["aad-1", "aad-2"], "grants hold lower-case Entra ids"
+    assert [c.args[0] for c in direct.member.await_args_list] == [notice.channel_id], (
+        "the roster is read only for an admitted recipient"
+    )
 
 
 def test_a_runtime_without_1_1_chats_gets_no_notifier() -> None:

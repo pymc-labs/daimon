@@ -14,7 +14,7 @@ from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.channel_budget_notice import BudgetNotice, BudgetNotifier
 from daimon.core.config import DirectMessagePolicy
-from daimon.core.dm_access import agent_dm_admits
+from daimon.core.dm_access import sender_admits
 from daimon.core.stores.watches import (
     REFUSED,
     UNCLEAR,
@@ -45,21 +45,19 @@ def discord_budget_notifier(
         policies = runtime.settings.direct_message_policies
         text = notice.text(f"<#{notice.channel_id}>")
         delivered = 0
-        for user_id in notice.allowed_recipients(
-            policies.get(notice.tenant_id, DirectMessagePolicy())
+
+        async def admits(user_id: str) -> bool:
+            return await _default_agent_admits(runtime, notice.tenant_id, user_id)
+
+        for user_id in await notice.allowed_recipients(
+            policies.get(notice.tenant_id, DirectMessagePolicy()), admits
         ):
             if is_closed():
                 log.info("channel_budget.notice_undelivered", err_type="ClientClosed")
                 break
             try:
-                landed = await send_member_notice(
-                    runtime,
-                    open_dm,
-                    is_closed,
-                    tenant_id=notice.tenant_id,
-                    workspace_id=notice.workspace_id,
-                    recipient_id=user_id,
-                    text=text,
+                landed = await _deliver_notice(
+                    open_dm, workspace_id=notice.workspace_id, recipient_id=user_id, text=text
                 )
                 delivered += int(landed)
             except (discord.HTTPException, LookupError, ValueError) as exc:
@@ -102,10 +100,9 @@ async def _default_agent_admits(
     runtime: DiscordRuntime, tenant_id: uuid.UUID, recipient_id: str
 ) -> bool:
     """A notice has no sending agent: the workspace default agent's grant decides."""
-    async with runtime.turn_deps.sessionmaker() as session:
-        return await agent_dm_admits(
-            session, tenant_id=tenant_id, agent_name=None, user_id=recipient_id
-        )
+    return await sender_admits(
+        runtime.turn_deps.sessionmaker, tenant_id=tenant_id, agent_name=None, user_id=recipient_id
+    )
 
 
 async def send_member_notice(
@@ -124,6 +121,14 @@ async def send_member_notice(
         return False
     if not await _default_agent_admits(runtime, tenant_id, recipient_id):
         return False
+    return await _deliver_notice(
+        open_dm, workspace_id=workspace_id, recipient_id=recipient_id, text=text
+    )
+
+
+async def _deliver_notice(
+    open_dm: OpenDm, *, workspace_id: str, recipient_id: str, text: str
+) -> bool:
     try:
         dm = await open_dm(int(workspace_id), int(recipient_id))
         await dm.send(

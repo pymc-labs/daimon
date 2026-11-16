@@ -7,6 +7,7 @@ from dataclasses import MISSING, fields
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from daimon.adapters.slack import budget_notice
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.channel_budget_notice import BudgetNotice
@@ -17,6 +18,14 @@ from slack_sdk.errors import SlackApiError
 from .conftest import shown_text
 
 _TENANT = uuid.uuid4()
+
+
+@pytest.fixture(autouse=True)
+def default_agent_grant(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """The default agent's grant admits everyone unless a test says otherwise."""
+    admits = AsyncMock(return_value=True)
+    monkeypatch.setattr(budget_notice, "sender_admits", admits)
+    return admits
 
 
 def _required(cls: Any, **given: object) -> dict[str, object]:
@@ -66,6 +75,26 @@ async def test_each_allowed_recipient_gets_a_dm_and_one_failure_skips_only_them(
     assert shown_text(kwargs) == (
         "<#C1> has used its $2.00 budget.\n\nRaise the budget to resume now."
     )
+
+
+async def test_a_recipient_the_default_agent_does_not_admit_gets_no_dm(
+    default_agent_grant: AsyncMock,
+) -> None:
+    settings = MagicMock()
+    settings.direct_message_policies = {}
+    runtime = SlackRuntime(**_required(SlackRuntime, settings=settings))
+    default_agent_grant.side_effect = lambda *_a, user_id, **_k: user_id == "U2"
+    client = MagicMock()
+    client.conversations_open = AsyncMock(return_value={"channel": {"id": "D-U2"}})
+    client.chat_postMessage = AsyncMock()
+    with patch.object(budget_notice, "resolve_web_client", AsyncMock(return_value=client)):
+        delivered = await budget_notice.slack_budget_notifier(runtime)(_notice())
+
+    assert delivered == 1, "only the admitted recipient is messaged"
+    opened = [c.kwargs["users"] for c in client.conversations_open.await_args_list]
+    assert opened == ["U2"], "the grant check runs before any DM opens"
+    asked = {c.kwargs["agent_name"] for c in default_agent_grant.await_args_list}
+    assert asked == {None}, "a budget notice is held to the workspace default agent"
 
 
 def test_a_real_runtime_gets_the_notifier() -> None:

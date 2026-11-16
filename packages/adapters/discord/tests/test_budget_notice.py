@@ -24,7 +24,7 @@ _TENANT = uuid.uuid4()
 def default_agent_grant(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     """The default agent's grant admits everyone unless a test says otherwise."""
     admits = AsyncMock(return_value=True)
-    monkeypatch.setattr(budget_notice, "agent_dm_admits", admits)
+    monkeypatch.setattr(budget_notice, "sender_admits", admits)
     return admits
 
 
