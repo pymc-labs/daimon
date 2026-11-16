@@ -24,7 +24,7 @@ already opted out.
 ## Earlier private conversations
 
 ```bash
-daimon dms import dms.json --tenant TENANT_UUID --agent AGENT_NAME
+daimon dm import-history dms.json --tenant TENANT_UUID --agent AGENT_NAME
 ```
 
 The file holds each person's earlier turns, `user` or `assistant`, in any

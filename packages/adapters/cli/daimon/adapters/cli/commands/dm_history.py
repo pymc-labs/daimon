@@ -1,4 +1,4 @@
-"""Operator-only offline import of earlier private conversations."""
+"""`daimon dm import-history`: operator-only offline import of earlier private conversations."""
 
 from __future__ import annotations
 
@@ -23,8 +23,6 @@ from daimon.core.dm_carry_over import (
 from daimon.core.stores.dm_carry_overs import has_conversation, put_carry_over
 from daimon.core.stores.tenants import get_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-dms_app = typer.Typer(help="Import earlier private conversations from another deployment.")
 
 
 def merge_users(
@@ -109,8 +107,7 @@ async def check_agent(runtime: CliRuntime, *, tenant_id: uuid.UUID, agent_name: 
         raise typer.BadParameter(f"No agent {agent_name} in this tenant", param_hint="--agent")
 
 
-@dms_app.command("import")
-def import_command(
+def import_history_command(
     export_files: Annotated[list[Path], typer.Argument(metavar="EXPORT_FILE...")],
     tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
     agent: Annotated[

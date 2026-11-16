@@ -1,4 +1,4 @@
-"""DM carry-over import: bounded files, one transaction per run, safe to repeat."""
+"""`daimon dm import-history`: bounded files, one transaction per run, safe to repeat."""
 
 import json
 import uuid
@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 import typer
-from daimon.adapters.cli.commands import dms
-from daimon.adapters.cli.commands.dms import check_agent, import_carry_overs
+from daimon.adapters.cli.commands import dm_history
+from daimon.adapters.cli.commands.dm_history import check_agent, import_carry_overs
 from daimon.adapters.cli.main import app
 from daimon.core.dm_carry_over import CarryOverExport
 from daimon.core.stores.direct_messages import COLD_DM_ORIGIN, DirectMessageRow, start_conversation
@@ -21,7 +21,7 @@ from typer.testing import CliRunner
 
 TENANT_ARG = "00000000-0000-0000-0000-000000000000"
 AGENT = "helper"
-CLI = ["dms", "import"]
+CLI = ["dm", "import-history"]
 CLI_OPTIONS = ["--tenant", TENANT_ARG, "--agent", AGENT]
 
 
@@ -236,10 +236,10 @@ def test_cli_imports_all_files_in_one_run_and_prints_counts(tmp_path: Path, monk
 
         return Counter(new=2, existing=1)
 
-    monkeypatch.setattr(dms, "build_runtime", runtime)
-    monkeypatch.setattr(dms, "load_settings", lambda: None)
-    monkeypatch.setattr(dms, "find_agent_by_daimon_tag", agent)
-    monkeypatch.setattr(dms, "import_carry_overs", fake)
+    monkeypatch.setattr(dm_history, "build_runtime", runtime)
+    monkeypatch.setattr(dm_history, "load_settings", lambda: None)
+    monkeypatch.setattr(dm_history, "find_agent_by_daimon_tag", agent)
+    monkeypatch.setattr(dm_history, "import_carry_overs", fake)
     first, second = tmp_path / "a.json", tmp_path / "b.json"
     first.write_text(json.dumps(body("1")))
     second.write_text(json.dumps(body("2")))
@@ -271,7 +271,7 @@ async def test_an_agent_outside_the_tenant_is_refused(monkeypatch):
     async def missing(_client, *, tenant_id, name, records):
         return None
 
-    monkeypatch.setattr(dms, "find_agent_by_daimon_tag", missing)
+    monkeypatch.setattr(dm_history, "find_agent_by_daimon_tag", missing)
     runtime = SimpleNamespace(anthropic=object(), sessionmaker=object())
     with pytest.raises(typer.BadParameter, match="No agent helper in this tenant"):
         await check_agent(runtime, tenant_id=uuid.uuid4(), agent_name=AGENT)
