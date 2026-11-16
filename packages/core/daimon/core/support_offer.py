@@ -44,14 +44,9 @@ async def _answer_agent(
             session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
         )
     rows = await list_feature_values(session, tenant_id=tenant_id, keys=(KEY,), tier="agent")
-    return next(
-        (
-            row.agent_id
-            for row in rows
-            if derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=row.agent_id) == recorded.agent_id
-        ),
-        None,
-    )
+    owners = {derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=r.agent_id): r for r in rows}
+    owner = owners.get(recorded.agent_id)
+    return owner.agent_id if owner else None
 
 
 async def support_offered(
