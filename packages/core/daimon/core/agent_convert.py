@@ -35,6 +35,7 @@ from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import create_agent, legacy_call, retrieve_agent, source_agent_record
+from daimon.core.routine_sandbox import clear_agent_opt_ins
 from daimon.core.skills.add import add_agent_skill
 from daimon.core.skills.ingest import SkillIngestError, bundle_from_files, retained_archive_files
 from daimon.core.specs import merge_default_agent_toolset
@@ -506,6 +507,8 @@ async def _move_rows(
     async with sessionmaker() as session, session.begin():
         if await open_agent_work(session, tenant_id=tenant_id, agent_id=old_id):
             raise UserFacingError(f"{name} is still working. Try again when it's done.")
+        # Built-in sandbox opt-ins name the old id: the new provider needs a new one.
+        await clear_agent_opt_ins(session, tenant_id=tenant_id, agent_id=old_id)
         moved = await rekey_agent(session, tenant_id=tenant_id, old_id=old_id, new_id=new_id)
         # Consent covered the old record, archived next: no delete would ever find it.
         await thread_models.delete_consents_for_agent(

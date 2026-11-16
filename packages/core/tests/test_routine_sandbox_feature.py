@@ -6,10 +6,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from daimon.core import agent_convert
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.features.registry import DEFAULT
 from daimon.core.features.service import FeatureActor, change_feature
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.routine_sandbox import (
     SANDBOX_KEY,
     builtins_allowed,
@@ -24,7 +26,7 @@ from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
 from daimon.core.stores.domain import AgentSandboxPin, FeatureTarget, RoutineRow, SandboxPin
 from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.routines import create_routine, update_routine
-from daimon.core.stores.sandbox_pins import list_sandbox_pins
+from daimon.core.stores.sandbox_pins import list_sandbox_pins, pin_json
 from daimon.testing.factories import make_tenant
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -188,7 +190,10 @@ async def test_a_routine_drift_clears_only_the_opt_in_it_ran_under(
     assert await _pin(db_session_factory, row) is None, "the drifted opt-in is cleared"
     async with db_session_factory() as session:
         [last, *_] = await list_changes(session, tenant_id=row.tenant_id, channel_id=WORKSPACE_ID)
-    assert (last.after, last.surface) == (None, "system"), "recorded as Daimon's own change"
+    on = {"routine": str(row.id), "value": "on", "pin": pin_json(NEWER)}
+    assert (last.before, last.after, last.surface) == (on, None, "system"), (
+        "recorded as Daimon's own change, with what the On covered"
+    )
 
 
 async def test_an_agent_drift_keeps_the_agent_opt_in(
@@ -220,6 +225,36 @@ async def test_a_material_edit_clears_the_routine_on_and_a_schedule_edit_keeps_i
             session, row.id, tenant_id=row.tenant_id, trigger_message="new", edited_by="owner-1"
         )
     assert await own_opt_in(db_session_factory, place, "routine") == (None, None), "cleared"
+    async with db_session_factory() as session:
+        [last, *_] = await list_changes(session, tenant_id=row.tenant_id, channel_id=WORKSPACE_ID)
+    assert (last.after, last.surface) == (None, "system"), "recorded as Daimon's own change"
+
+
+async def test_a_provider_move_clears_the_opt_ins_naming_the_old_agent(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    """Moving an agent to another id clears its On and its routines' On; others stay."""
+    row = await _routine(db_session)
+    other = FeaturePlace(row.tenant_id, "discord", agent_id="agent_b")
+    other_pin = AgentSandboxPin("agent_b", "default")
+    await _set(db_session_factory, row, "agent", "on", pin=AGENT_PIN)
+    await _set(db_session_factory, row, "routine", "on", pin=PIN)
+    await change_feature(
+        db_session_factory, SETTINGS, _actor(row), key=SANDBOX_KEY, tier="agent", value="on",
+        place=other, pin=other_pin,
+    )  # fmt: skip
+    await agent_convert._move_rows(  # pyright: ignore[reportPrivateUsage]
+        db_session_factory, tenant_id=row.tenant_id, name="daimon", old_id="agent_a", new_id="dm_x"
+    )
+    moved = FeaturePlace(row.tenant_id, "discord", agent_id="dm_x", routine_id=str(row.id))
+    assert await own_opt_in(db_session_factory, moved, "agent") == (None, None), "not moved"
+    assert await own_opt_in(db_session_factory, moved, "routine") == (None, None), "cleared"
+    assert await own_opt_in(db_session_factory, other, "agent") == ("on", other_pin), "kept"
+    async with db_session_factory() as session:
+        pins = await list_sandbox_pins(session, tenant_id=row.tenant_id)
+        changes = await list_changes(session, tenant_id=row.tenant_id, channel_id=WORKSPACE_ID)
+    assert [entry.pin for entry in pins] == [other_pin], "no pin is left on the old id"
+    assert [c.surface for c in changes[:2]] == ["system", "system"], "both clears recorded"
 
 
 async def test_a_dm_routine_takes_no_on_of_its_own(db_session: AsyncSession) -> None:

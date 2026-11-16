@@ -38,7 +38,7 @@ from daimon.core.stores.domain import (
     RoutineRow,
     UnattendedRequester,
 )
-from daimon.core.stores.sandbox_pins import drop_routine_opt_in
+from daimon.core.stores.sandbox_pins import SANDBOX_KEY
 from daimon.core.stores.security_audit import append_event
 from sqlalchemy import and_, delete, false, func, or_, select, true, update
 from sqlalchemy.engine import CursorResult
@@ -459,7 +459,7 @@ async def _save_routine_edit(
     """All configuration writers share CAS, monotone revisions and erasure.
 
     An edit that changes what an admin approved (`_SANDBOX_MATERIAL`) clears
-    the routine's own sandbox opt-in (`drop_routine_opt_in`) in the same
+    the routine's own sandbox opt-in (`clear_pinned_on`) in the same
     transaction, so the owner cannot carry an opt-in over to a new agent,
     prompt or destination.
     """
@@ -562,15 +562,24 @@ async def _save_routine_edit(
             reason="material_edit",
             turn_ref=f"routine:{current.id}",
         )
-    if material_changed and await drop_routine_opt_in(
-        session, tenant_id=current.tenant_id, routine_id=current.id
-    ):
-        log.info(
-            "routine.sandbox_tools_cleared_by_edit",
-            tenant_id=str(current.tenant_id),
-            routine_id=str(current.id),
-            edited_by=edited_by,
-        )
+    if material_changed:
+        # Imported here: the feature service reads these stores.
+        from daimon.core.features.service import clear_pinned_on
+
+        if await clear_pinned_on(
+            session,
+            None,
+            tenant_id=current.tenant_id,
+            key=SANDBOX_KEY,
+            tier="routine",
+            holder=str(current.id),
+        ):
+            log.info(
+                "routine.sandbox_tools_cleared_by_edit",
+                tenant_id=str(current.tenant_id),
+                routine_id=str(current.id),
+                edited_by=edited_by,
+            )
     await session.flush()
     return RoutineRow.model_validate(orm)
 

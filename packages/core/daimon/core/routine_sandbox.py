@@ -26,7 +26,12 @@ from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, find_environment_by_daimon_tag
 from daimon.core.features.registry import DEFAULT, FEATURES
-from daimon.core.features.service import FeatureActor, FeatureChange, change_feature
+from daimon.core.features.service import (
+    FeatureActor,
+    FeatureChange,
+    change_feature,
+    clear_pinned_on,
+)
 from daimon.core.features.snapshot import FeaturePlace, place_guardrail
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent, retrieve_environment
@@ -40,12 +45,7 @@ from daimon.core.stores.domain import (
     SandboxPin,
 )
 from daimon.core.stores.feature_values import get_feature_value
-from daimon.core.stores.sandbox_pins import (
-    SANDBOX_KEY,
-    PinnedTier,
-    drop_routine_opt_in,
-    sandbox_pin,
-)
+from daimon.core.stores.sandbox_pins import SANDBOX_KEY, PinnedTier, list_sandbox_pins, sandbox_pin
 from daimon.core.stores.scoped_config_read import resolve
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -59,6 +59,7 @@ __all__ = [
     "SandboxPinUnavailable",
     "builtins_allowed",
     "change_routine_sandbox",
+    "clear_agent_opt_ins",
     "current_agent_pin",
     "current_pin",
     "own_opt_in",
@@ -333,6 +334,27 @@ async def change_routine_sandbox(
     )
 
 
+async def clear_agent_opt_ins(session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: str) -> int:
+    """Clear the agent's own On and every routine On pinned to it, in the caller's
+    transaction, before its rows move to another agent id: an opt-in covers that id only.
+    Returns how many it cleared."""
+    cleared = await clear_pinned_on(
+        session, None, tenant_id=tenant_id, key=SANDBOX_KEY, tier="agent", holder=agent_id
+    )
+    for entry in await list_sandbox_pins(session, tenant_id=tenant_id):
+        if entry.tier == "routine" and entry.pin.agent_id == agent_id:
+            cleared += await clear_pinned_on(
+                session,
+                None,
+                tenant_id=tenant_id,
+                key=SANDBOX_KEY,
+                tier="routine",
+                holder=entry.key,
+                only_pin=entry.pin,
+            )
+    return cleared
+
+
 async def routine_sandbox(
     sessions: async_sessionmaker[AsyncSession],
     settings: Settings | None,
@@ -368,8 +390,14 @@ async def routine_sandbox(
             return
         try:
             async with sessions.begin() as session:
-                await drop_routine_opt_in(
-                    session, tenant_id=row.tenant_id, routine_id=row.id, only_pin=pin
+                await clear_pinned_on(
+                    session,
+                    settings,
+                    tenant_id=row.tenant_id,
+                    key=SANDBOX_KEY,
+                    tier="routine",
+                    holder=str(row.id),
+                    only_pin=pin,
                 )
         except Exception:  # the run already went ahead without built-ins
             log.exception("routine.sandbox_drift_clear_failed", routine_id=str(row.id))

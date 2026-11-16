@@ -66,6 +66,7 @@ from daimon.core.stores.domain import (
 )
 from daimon.core.stores.feature_values import (
     clear_feature_value,
+    get_feature_value,
     list_feature_values,
     lock_tenant,
     place_values,
@@ -73,6 +74,7 @@ from daimon.core.stores.feature_values import (
     set_feature_value,
 )
 from daimon.core.stores.sandbox_pins import PinnedTier, pin_json, put_sandbox_pin, sandbox_pin
+from daimon.core.stores.tenants import get_tenant
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -768,6 +770,49 @@ async def set_workspace_feature(
         None,
         check_own_lock=False,
     )
+
+
+async def clear_pinned_on(
+    session: AsyncSession,
+    settings: Settings | None,
+    *,
+    tenant_id: uuid.UUID,
+    key: str,
+    tier: PinnedTier,
+    holder: str,
+    only_pin: AnySandboxPin | None = None,
+) -> bool:
+    """Clear a pinned feature's On at the agent (`holder` is its id) or a routine (its id)
+    in the caller's transaction, once what it covered changed: an edit, a drift, a move to
+    another agent id. An Off stays. With `only_pin`, only while that is still the tier's
+    pin, so a fresh opt-in is kept. Recorded as a `system` change; returns whether it
+    cleared one."""
+    spec = FEATURES[key]
+    assert spec.pinned, f"{key} has no pin"
+    await lock_tenant(session, tenant_id)
+    tenant = await get_tenant(session, tenant_id)
+    place = FeaturePlace(
+        tenant_id,
+        "" if tenant is None else tenant.platform,
+        agent_id=holder if tier == "agent" else None,
+        routine_id=holder if tier == "routine" else None,
+    )
+    found = await get_feature_value(
+        session, tenant_id=tenant_id, target=_target(tier, place), key=key
+    )
+    if found is None or found.value != "on":
+        return False
+    pin = await sandbox_pin(session, tenant_id=tenant_id, tier=tier, key=holder)
+    if only_pin is not None and pin != only_pin:
+        return False
+
+    async def _nobody(_: DelegatedAction | None) -> bool:
+        return False
+
+    actor = FeatureActor(tenant_id, None, "system", None, _nobody)
+    after = TierSetting(tier, DEFAULT)
+    await _write_in(session, settings, actor, spec, after, place, None, check_own_lock=False)
+    return True
 
 
 async def import_env(session: AsyncSession, settings: Settings) -> int:

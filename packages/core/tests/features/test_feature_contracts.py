@@ -50,8 +50,6 @@ _MAY_WRITE = {
     "core/stores/feature_values.py",
     "core/channel_settings.py",
     "core/features/service.py",
-    # Daimon's own clear of a routine's sandbox On, in the routine edit's transaction.
-    "core/stores/sandbox_pins.py",
 }
 _LEGACY_MODE = {"progress_plans", "thread_participation"}
 

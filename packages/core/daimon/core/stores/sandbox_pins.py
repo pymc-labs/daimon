@@ -1,8 +1,8 @@
 """Async store for `sandbox_pins`: what a `routine_sandbox_tools` On covers.
 
-A pin is written only with the feature row it pins (`features.service.change_feature`);
-a pin without its row, or a row without its pin, covers nothing. Callers own the
-transaction.
+A pin is written only with the feature row it pins, by `features.service`
+(`change_feature`, `clear_pinned_on`); a pin without its row, or a row without its pin,
+covers nothing. Callers own the transaction.
 """
 
 from __future__ import annotations
@@ -11,11 +11,8 @@ import uuid
 from datetime import datetime
 from typing import Final, Literal
 
-import structlog
-from daimon.core._models import SandboxPinRecord, Tenant
-from daimon.core.stores.channel_changes import WORKSPACE_ID, record_change
-from daimon.core.stores.domain import AgentSandboxPin, AnySandboxPin, FeatureTarget, SandboxPin
-from daimon.core.stores.feature_values import clear_feature_value, get_feature_value
+from daimon.core._models import SandboxPinRecord
+from daimon.core.stores.domain import AgentSandboxPin, AnySandboxPin, SandboxPin
 from pydantic import BaseModel, ConfigDict, JsonValue
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,14 +22,11 @@ __all__ = [
     "SANDBOX_KEY",
     "PinnedTier",
     "SandboxPinEntry",
-    "drop_routine_opt_in",
     "list_sandbox_pins",
     "pin_json",
     "put_sandbox_pin",
     "sandbox_pin",
 ]
-
-log = structlog.get_logger(__name__)
 
 PinnedTier = Literal["agent", "routine"]
 SANDBOX_KEY: Final = "routine_sandbox_tools"
@@ -150,43 +144,3 @@ async def put_sandbox_pin(
             )
         )
     await session.flush()
-
-
-async def drop_routine_opt_in(
-    session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    routine_id: uuid.UUID,
-    only_pin: SandboxPin | None = None,
-) -> bool:
-    """Clear a routine's own On and its pin, recorded as Daimon's change; an Off stays.
-
-    With `only_pin`, only while that is still the routine's pin, so a fresh opt-in made
-    since the run read it is kept. Returns whether an On was cleared.
-    """
-    key = str(routine_id)
-    target = FeatureTarget("routine", routine_id=key)
-    found = await get_feature_value(session, tenant_id=tenant_id, target=target, key=SANDBOX_KEY)
-    if found is None or found.value != "on":
-        return False
-    pin = await sandbox_pin(session, tenant_id=tenant_id, tier="routine", key=key)
-    if only_pin is not None and pin != only_pin:
-        return False
-    await clear_feature_value(session, tenant_id=tenant_id, target=target, key=SANDBOX_KEY)
-    await put_sandbox_pin(session, tenant_id=tenant_id, tier="routine", key=key, pin=None)
-    before: dict[str, JsonValue] = {"routine": key, "value": "on"}
-    if pin is not None:
-        before["pin"] = pin_json(pin)
-    platform = await session.scalar(select(Tenant.platform).where(Tenant.id == tenant_id))
-    await record_change(
-        session,
-        tenant_id=tenant_id,
-        platform=platform or "",
-        channel_id=WORKSPACE_ID,
-        setting=SANDBOX_KEY,
-        before=before,
-        after=None,
-        actor_account_id=None,
-        surface="system",
-    )
-    return True
