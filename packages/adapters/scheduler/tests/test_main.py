@@ -3035,11 +3035,14 @@ async def _fire_with_fake_turn(
     membership_resolver=None,
     discord_rest=None,
     dm_mode: str | None = None,
+    tenant_dms: bool = True,
 ) -> tuple[RoutineRow, dict[str, object]]:
+    from daimon.core.stores.direct_messages import set_dm_enabled
     from daimon.core.turn.state import ToolUseBlock, TurnState
 
     now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=UTC)
     tenant = await make_tenant(db_session)
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=tenant_dms)
     if policy is not None:
         from daimon.core.stores.access_policy import set_access_policy
 
@@ -4383,9 +4386,57 @@ async def test_lapsed_role_pauses_without_a_dm_when_dms_are_disabled_or_unavaila
     )
     assert after.enabled is False
     assert not rest.sent
+    # The workspace's own direct-message switch is off: paused, no DM.
+    off, _ = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=None,
+        agent_posts_to=None,
+        policy=TenantAccessPolicy(agent_rules={"daimon": AgentRule(invoker_role_ids=("123",))}),
+        membership_resolver=CachedMembershipResolver(_lapsed(())),
+        discord_rest=rest,
+        tenant_dms=False,
+    )
+    assert off.enabled is False
+    assert off.last_error == "owner_lacks_agent_role"
+    assert not rest.sent
     # No Discord credential at all: still paused.
     bare, _ = await _role_gated_fire(db_session, db_session_factory, monkeypatch, _lapsed(()))
     assert bare.enabled is False
+
+
+async def test_the_dm_is_sent_only_after_the_pause_commits(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from daimon.core._models import Routine
+    from sqlalchemy import func, select
+
+    class _Rest(_FakeDiscordRest):
+        committed_when_sent = 0
+
+        async def send_dm(self, user_id: str, text: str) -> bool:
+            async with db_session_factory() as other:  # a separate connection sees commits only
+                self.committed_when_sent = (
+                    await other.scalar(
+                        select(func.count())
+                        .select_from(Routine)
+                        .where(
+                            Routine.last_error == "owner_lacks_agent_role",
+                            Routine.enabled.is_(False),
+                        )
+                    )
+                    or 0
+                )
+            return await super().send_dm(user_id, text)
+
+    rest = _Rest()
+    await _role_gated_fire(
+        db_session, db_session_factory, monkeypatch, _lapsed(()), discord_rest=rest
+    )
+    assert rest.committed_when_sent == 1
 
 
 async def test_a_paused_lapsed_routine_does_not_fire_or_dm_again(

@@ -6,7 +6,7 @@ httpx transport for offline tests.
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Any, cast
 
 import httpx
 import structlog
@@ -37,16 +37,17 @@ class DiscordRest:
             async with self._client() as client:
                 opened = await client.post("users/@me/channels", json={"recipient_id": user_id})
                 opened.raise_for_status()
-                channel = cast("dict[str, object]", opened.json()).get("id")
-                if not isinstance(channel, str):
+                body = opened.json()
+                channel = cast("dict[str, Any]", body).get("id") if isinstance(body, dict) else None
+                if not isinstance(channel, str) or not channel.isdecimal():
                     return False
                 sent = await client.post(
                     f"channels/{channel}/messages",
                     json={"content": text[:1900], "allowed_mentions": {"parse": []}},
                 )
                 sent.raise_for_status()
-        except (httpx.HTTPError, ValueError):
-            log.info("discord_dm.send_failed")
+        except Exception as exc:  # best effort: any malformed reply must not break a fire
+            log.info("discord_dm.send_failed", error=type(exc).__name__)
             return False
         return True
 
@@ -58,12 +59,19 @@ class DiscordRest:
             async with self._client() as client:
                 response = await client.get(f"guilds/{guild_id}/roles")
                 response.raise_for_status()
-                roles = cast("list[dict[str, object]]", response.json())
-        except (httpx.HTTPError, ValueError):
+                roles = response.json()
+        except Exception as exc:  # best effort: any malformed reply must not break a fire
+            log.info("discord_dm.role_names_failed", error=type(exc).__name__)
             return {}
+        if not isinstance(roles, list):
+            return {}
+        roles = cast("list[Any]", roles)
         names: dict[str, str] = {}
         for role in roles:
-            role_id, name = role.get("id"), role.get("name")
+            if not isinstance(role, dict):
+                continue
+            fields = cast("dict[str, Any]", role)
+            role_id, name = fields.get("id"), fields.get("name")
             if isinstance(role_id, str) and isinstance(name, str):
                 names[role_id] = name
         return names

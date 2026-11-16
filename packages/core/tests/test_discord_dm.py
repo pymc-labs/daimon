@@ -41,3 +41,30 @@ async def test_role_names_maps_ids_and_is_empty_on_failure() -> None:
     assert await _rest(ok).role_names("5") == {"1": "Staff"}
     down = httpx.MockTransport(lambda _r: httpx.Response(500))
     assert await _rest(down).role_names("5") == {}
+
+
+async def test_malformed_replies_fail_soft() -> None:
+    for body in ([], "x", 7, {"id": 5}, {"id": "abc"}):
+        odd = httpx.MockTransport(lambda _r, b=body: httpx.Response(200, json=b))
+        assert not await _rest(odd).send_dm("42", "hi")
+    for body in ({}, "x", [1, "a", None, {"id": "1", "name": "Staff"}]):
+        odd = httpx.MockTransport(lambda _r, b=body: httpx.Response(200, json=b))
+        names = await _rest(odd).role_names("5")
+        assert names == ({"1": "Staff"} if isinstance(body, list) else {})
+    garbled = httpx.MockTransport(lambda _r: httpx.Response(200, content=b"<html>"))
+    assert not await _rest(garbled).send_dm("42", "hi")
+    assert await _rest(garbled).role_names("5") == {}
+
+
+async def test_failures_never_log_the_token_or_message_text() -> None:
+    from structlog.testing import capture_logs
+
+    secret = "tok-SECRET-value"
+    failing = httpx.MockTransport(lambda _r: httpx.Response(500, text="tok-SECRET-value body-text"))
+    with capture_logs() as logs:
+        rest = DiscordRest(secret, transport=failing)
+        assert not await rest.send_dm("42", "private message text")
+        assert await rest.role_names("5") == {}
+    assert logs
+    dumped = repr(logs)
+    assert secret not in dumped and "private message text" not in dumped

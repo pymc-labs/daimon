@@ -130,3 +130,25 @@ async def test_private_transfer_redirects_to_editor_and_erases_prior_output(
     assert changed.created_by_user_id == changed.destination_id == "222222222222222222"
     assert changed.last_result_tail is None and changed.delivery_payload is None
     assert changed.delivery_lease_owner is None
+
+
+async def test_resume_after_a_lapsed_role_pause_clears_the_pause_error(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    row = await routines.create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="owner",
+        agent_id="agent",
+        agent_name="Helper",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="task",
+    )
+    assert await routines.pause_for_lapsed_role(db_session, row, error="owner_lacks_agent_role")
+    resumed = await routines.resume_routine(
+        db_session, row.id, tenant_id=tenant.id, now=datetime.now(UTC)
+    )
+    assert resumed is not None and resumed.enabled
+    assert resumed.last_error is None

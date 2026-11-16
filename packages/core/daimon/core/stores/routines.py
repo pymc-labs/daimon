@@ -1000,6 +1000,8 @@ async def resume_routine(
         {
             "enabled": True,
             "next_fire_at": nxt,
+            # A pause's error would otherwise block failure notices until a success.
+            "last_error": None,
         },
         expected_updated_at=expected_updated_at,
     )

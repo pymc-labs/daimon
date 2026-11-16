@@ -432,6 +432,7 @@ async def _build_fire(
     async def _pause_for_lapsed_role(
         s: AsyncSession,
         row: RoutineRow,
+        notices: list[Callable[[], Awaitable[None]]],
         *,
         platform: str,
         policy: TenantAccessPolicy | None,
@@ -442,7 +443,8 @@ async def _build_fire(
 
         The pause is fenced on the claimed row, so only one fire wins it and later
         fires never run. The DM is best effort: when it cannot be sent, the routine
-        is still paused.
+        is still paused. It is queued on `notices` and sent by `_fire` only after
+        the pause commits, outside the transaction.
         """
         if not await pause_for_lapsed_role(s, row, error=OWNER_LACKS_ROLE_ERROR):
             return
@@ -455,6 +457,7 @@ async def _build_fire(
             or not settings.direct_message_policies.get(
                 row.tenant_id, DirectMessagePolicy()
             ).allows(owner)
+            or not await dm_enabled(s, tenant_id=row.tenant_id)
         ):
             return
         tenant = await get_tenant(s, row.tenant_id)
@@ -463,14 +466,22 @@ async def _build_fire(
             for required in (agent_invoker_roles(policy, names) if policy is not None else ())
             if not set(held).intersection(required)
         )
-        role_names = await discord_rest.role_names(tenant.external_id) if tenant else {}
-        await discord_rest.send_dm(
-            owner,
-            lapsed_role_text(
-                row,
-                tuple(tuple(role_names.get(rid, rid) for rid in required) for required in unmet),
-            ),
-        )
+        guild_id = tenant.external_id if tenant else None
+        rest = discord_rest
+
+        async def notify() -> None:
+            role_names = await rest.role_names(guild_id) if guild_id else {}
+            await rest.send_dm(
+                owner,
+                lapsed_role_text(
+                    row,
+                    tuple(
+                        tuple(role_names.get(rid, rid) for rid in required) for required in unmet
+                    ),
+                ),
+            )
+
+        notices.append(notify)
 
     async def _refused_over_channel_budget(row: RoutineRow, *, platform: str) -> bool:
         """Record and refuse a fire over its channel budget. Keyed on `row.channel_id`,
@@ -574,6 +585,13 @@ async def _build_fire(
             )
 
     async def _fire(row: RoutineRow) -> None:
+        notices: list[Callable[[], Awaitable[None]]] = []
+        await _fire_claimed(row, notices)
+        # Only after the fire's transactions committed: a failed commit sends nothing.
+        for notice in notices:
+            await notice()
+
+    async def _fire_claimed(row: RoutineRow, notices: list[Callable[[], Awaitable[None]]]) -> None:
         if row.created_by_user_id is None:
             async with sm() as s, s.begin():
                 await _refuse(s, row, "This routine has no owner. Create it again.")
@@ -779,6 +797,7 @@ async def _build_fire(
                     await _pause_for_lapsed_role(
                         s,
                         row,
+                        notices,
                         platform=platform,
                         policy=fire_policy,
                         names=(row.agent_name,),
@@ -915,6 +934,7 @@ async def _build_fire(
                         await _pause_for_lapsed_role(
                             pin_s,
                             row,
+                            notices,
                             platform=platform,
                             policy=fire_policy,
                             names=ran_ref.names,
