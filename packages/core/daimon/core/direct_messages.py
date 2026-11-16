@@ -543,7 +543,7 @@ async def start_cold_dm(
             tenant_id=tenant_id,
             platform=conversation.platform,
             external_user_id=external_user_id,
-            agent_name=admission.config.agent_name,
+            agent_name=admission.config.agent_name or admission.agent.name,
         )
         if carried is not None:
             conversation = conversation.model_copy(
