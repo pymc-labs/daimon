@@ -30,9 +30,9 @@ MODEL_INPUT_KEYS: Final[tuple[str, ...]] = ("guidance", *SESSION_KEYS, *TURN_KEY
 
 HISTORY_KEYS: Final[tuple[str, ...]] = ("history_depth", "channel_history")
 LIMIT_KEYS: Final[tuple[str, ...]] = ("turn_time_limit", "unattended_time_limit", "answer_messages")
+"""Limits every admitted turn reads."""
 ANSWER_MESSAGES: Final = 5
 """Messages one answer may post before it becomes a file, until a setting says otherwise."""
-"""Limits every admitted turn reads."""
 CHAT_KEYS: Final[tuple[str, ...]] = (
     "completion_pings",
     "table_rendering",
