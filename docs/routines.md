@@ -44,7 +44,8 @@ numbers"). Each platform also has a panel:
   resume or delete one.
 
 The CLI creates owner-DM routines (`daimon routines create`), sets
-[sandbox tools](unattended.md#opt-a-routine-into-sandbox-tools) and
+[sandbox tools](unattended.md#opt-a-routine-into-sandbox-tools), checks
+[owners' roles](admins.md#limit-an-agent-to-roles) and
 [moves routines in from another system](routine-migration.md).
 
 `create_routine` refuses a caller with no platform user identity (a CLI-only

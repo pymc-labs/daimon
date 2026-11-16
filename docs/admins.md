@@ -132,17 +132,23 @@ checked the same way before each send. Long jobs and handoffs from an
 unattended turn stay refused.
 
 If the owner loses a role, the next run is skipped and the routine is paused
-with the error `owner_lacks_agent_role`. On Discord the owner gets one direct
-message naming the routine and the missing role (when the direct-message
-policy allows it; the routine is paused either way, and a message Discord
-refuses is logged). It stays paused until
-someone resumes it from the `/routines` panel; if the role is still missing it
-pauses again at its next run.
+with the error `owner_lacks_agent_role`. The owner gets one Discord direct
+message naming the routine, when routine DMs to them are allowed; a message
+Discord refuses is logged. It stays paused until someone resumes it from the
+`/routines` panel; if the role is still missing it pauses again at its next run.
 
-An owner whose membership cannot be read is not paused or told; the run is
-retried at the next fire. Changing a routine's owner (an edit by another
-admin) moves who must hold the roles. Handing a thread away from a
-role-gated agent carries the transcript but skips the workspace checkpoint.
+An owner who left the server is refused at each run, not paused. One whose
+membership cannot be read is not told; the run is retried at the next fire.
+Changing a routine's owner (an edit by another admin) moves who must hold the
+roles. Handing a thread away from a role-gated agent carries the transcript but
+skips the workspace checkpoint.
+
+To list the enabled routines whose owner would be paused or refused, without
+changing anything, run:
+
+```bash
+daimon routines check-roles --tenant TENANT_UUID
+```
 
 ## How membership is checked
 
