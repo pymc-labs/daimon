@@ -327,7 +327,12 @@ class DirectMessageCog(commands.Cog):
             return _Eligibility()
         try:
             async with runtime.sessionmaker() as session:
-                agents = await list_dm_agents(runtime.turn_deps, session, tenant_id=tenant.id)
+                agents = await list_dm_agents(
+                    session,
+                    tenant_id=tenant.id,
+                    anthropic=runtime.turn_deps.anthropic,
+                    records=runtime.turn_deps.sessionmaker,
+                )
                 principal = await find_platform_principal(
                     session,
                     tenant_id=tenant.id,

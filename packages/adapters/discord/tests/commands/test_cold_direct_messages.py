@@ -147,7 +147,7 @@ async def setup(db_session_factory, monkeypatch, count=1):
         for i, tenant in enumerate(tenants)
     }
 
-    async def list_agents(deps, session, *, tenant_id):
+    async def list_agents(session, *, tenant_id, **_):
         return offered[tenant_id]
 
     monkeypatch.setattr(module, "list_dm_agents", list_agents)

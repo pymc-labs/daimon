@@ -12,6 +12,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
+from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.anthropic_guard import anthropic_disabled
@@ -34,8 +35,7 @@ from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.stores import dm_access as store
 from daimon.core.stores.direct_messages import dm_enabled, get_dm_agent_name
 from daimon.core.stores.selfhosted_resources import list_live_agent_facts
-from daimon.core.turn.deps import TurnDeps
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 @dataclass(frozen=True)
@@ -67,15 +67,17 @@ def dm_agent_of(agent: BetaManagedAgentsAgent, config_name: str | None = None) -
 
 
 async def list_dm_agents(
-    deps: TurnDeps, session: AsyncSession, *, tenant_id: uuid.UUID
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    anthropic: AsyncAnthropic | None,
+    records: async_sessionmaker[AsyncSession],
 ) -> list[DmAgent]:
     """The workspace's own agents by name; published report readers are never DM agents."""
     agents = (
         await list_live_agent_facts(session, tenant_id=tenant_id)
         if anthropic_disabled()
-        else await list_agents_by_tenant(
-            deps.anthropic, tenant_id=tenant_id, records=deps.sessionmaker
-        )
+        else await list_agents_by_tenant(anthropic, tenant_id=tenant_id, records=records)
     )
     return [dm_agent_of(a) for a in agents if MA_METADATA_KEY_READER_OF not in a.metadata]
 

@@ -956,7 +956,7 @@ def tenants_dm_policy_command(
     enabled: Annotated[bool | None, typer.Option("--enabled/--disabled")] = None,
     json_output: Annotated[bool, JSON_OPTION] = False,
 ) -> None:
-    """Inspect or update tenant DMs; an unset agent leaves /dm-me moves available."""
+    """Inspect or update tenant DMs (`daimon dm default` is the same, per workspace)."""
 
     console = Console()
 
@@ -998,8 +998,6 @@ async def tenants_dm_policy(
         tenant = await get_tenant(session, tenant_id)
         if tenant is None:
             raise typer.BadParameter("tenant not found")
-        if agent is not None and tenant.platform != "discord":
-            raise typer.BadParameter("cold DMs currently require Discord")
         if agent is not None or clear_agent:
             await set_dm_agent_name(session, tenant_id=tenant_id, agent_name=agent)
         if enabled is not None:
