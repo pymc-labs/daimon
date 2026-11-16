@@ -67,7 +67,7 @@ async def _selfhosted_failure_reason(
 ) -> str | None:
     """Why selfhosted turns could not answer with the default agent and environment, or None."""
     if not load_selfhosted_settings().admission_enabled:
-        return "selfhosted admission is off (DAIMON_SELFHOSTED__ADMISSION_ENABLED)"
+        return "selfhosted model replies are off (DAIMON_SELFHOSTED__ADMISSION_ENABLED)"
     if deployment_default.agent_name is None or deployment_default.environment_name is None:
         return "no default agent and environment configured"
     try:

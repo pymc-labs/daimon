@@ -185,7 +185,7 @@ async def test_without_an_anthropic_key_or_selfhosted_admission_records_promote_
     assert tenant is not None
     assert tenant.provision_status == ("ready" if was_ready else "failed")
     assert tenant.last_reconcile_error == (
-        "selfhosted admission is off (DAIMON_SELFHOSTED__ADMISSION_ENABLED)"
+        "selfhosted model replies are off (DAIMON_SELFHOSTED__ADMISSION_ENABLED)"
     )
 
 
