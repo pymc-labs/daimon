@@ -29,7 +29,9 @@ PER_TURN_KEYS: Final[tuple[str, ...]] = (
 MODEL_INPUT_KEYS: Final[tuple[str, ...]] = ("guidance", *SESSION_KEYS, *TURN_KEYS)
 
 HISTORY_KEYS: Final[tuple[str, ...]] = ("history_depth", "channel_history")
-LIMIT_KEYS: Final[tuple[str, ...]] = ("turn_time_limit",)
+LIMIT_KEYS: Final[tuple[str, ...]] = ("turn_time_limit", "answer_messages")
+ANSWER_MESSAGES: Final = 5
+"""Messages one answer may post before it becomes a file, until a setting says otherwise."""
 """Limits every admitted turn reads."""
 CHAT_KEYS: Final[tuple[str, ...]] = (
     "completion_pings",
@@ -79,6 +81,12 @@ class HistoryDepth:
 
 
 FULL_HISTORY: Final[HistoryDepth] = HistoryDepth()
+
+
+def answer_message_cap(features: FeatureSnapshot | None) -> int:
+    """The most messages one answer may post; the built-in 5 for a hand-built admission."""
+    found = features.features.get("answer_messages") if features is not None else None
+    return ANSWER_MESSAGES if found is None else limit_int(found.value)
 
 
 def turn_limit_minutes(features: FeatureSnapshot | None) -> int | None:

@@ -634,6 +634,7 @@ def _make_lifecycle(
     in_dm: bool | None = None,
     clock: Callable[[], float] = time.monotonic,
     requester_is_admin: bool = True,
+    answer_message_cap: int = 5,
 ) -> tuple[DiscordTurnLifecycle, list[dict[str, Any]], list[tuple[Any, dict[str, Any]]]]:
     """Create lifecycle with recorder callables.
 
@@ -657,6 +658,7 @@ def _make_lifecycle(
         requester_id=123,
         requester_is_admin=requester_is_admin,
         render_tables=render_tables,
+        answer_message_cap=answer_message_cap,
         edit=fake_edit,
         agent_name=agent_name,
         model_id=model_id,
@@ -3199,6 +3201,47 @@ async def test_long_final_answer_is_attached_instead_of_flooding(notify):
     assert len(thread.messages) == 1
     assert files[0].filename == "answer.txt"
     assert text in files[0].fp.read().decode()
+
+
+async def test_answer_message_cap_decides_inline_or_attached():
+    """Seven chunks stay inline under a cap of 10 and become answer.txt under the default 5."""
+    text = " ".join(["word"] * 3600)  # about 18000 characters: seven chunks
+    for cap, attached in ((10, False), (5, True)):
+        lc, sends, edits = _make_lifecycle(answer_message_cap=cap)
+        await lc.on_terminal_success(TurnState(content=[TextBlock(kind="text", text=text)]))
+        posted = [s for s in sends if s.get("content")]
+        edited = [e[1] for e in edits if e[1].get("attachments")]
+        assert bool(edited) == attached, f"answer.txt only past the cap of {cap}"
+        if attached:
+            assert not posted, "the whole answer moves to the file"
+        else:
+            assert len(posted) >= 6, f"the answer stays inline under a cap of {cap}"
+
+
+async def test_sealed_posts_shrink_the_answer_message_budget():
+    """Two sealed posts leave room for 3 of a cap of 5: a 4-chunk final answer is attached."""
+    text = " ".join(["word"] * 1700)  # about 8500 characters: four chunks
+    for sealed, attached in ((0, False), (2, True)):
+        lc, sends, edits = _make_lifecycle(answer_message_cap=5)
+        state = TurnState()
+        for index in range(sealed):
+            state.content.extend(
+                [
+                    TextBlock(kind="text", text=f"Step {index}: " + "x" * 600),
+                    ToolUseBlock(
+                        kind="tool_use",
+                        id=str(index),
+                        type="agent.tool_use",
+                        name="bash",
+                        input={},
+                    ),
+                ]
+            )
+            await lc.on_render(state)
+        state.content.append(TextBlock(kind="text", text=text))
+        await lc.on_terminal_success(state)
+        edited = [e[1] for e in edits if e[1].get("attachments")]
+        assert bool(edited) == attached, f"{sealed} sealed posts and a four-chunk answer"
 
 
 async def test_huge_sealed_block_is_deferred_without_using_message_budget():

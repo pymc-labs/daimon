@@ -620,12 +620,15 @@ async def test_admit_happy_path_returns_admission_with_retrieved_agent_and_accou
     )
 
 
-async def test_admission_turn_ceiling_follows_the_turn_time_limit_setting(
+async def test_admission_limits_follow_their_settings(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """The default stays 45 minutes; a workspace setting of 90 extends it; authority still caps."""
+    """Defaults stay 45 minutes and 5 messages; workspace settings change them.
+
+    A retained authority deadline still caps the longer time limit.
+    """
     tenant = await make_tenant(db_session)
     await make_tenant_config(
         db_session, tenant=tenant, agent_name="daimon", environment_name="default"
@@ -638,7 +641,7 @@ async def test_admission_turn_ceiling_follows_the_turn_time_limit_setting(
     )
     deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
 
-    async def ceiling() -> float:
+    async def admitted() -> Admission:
         admission = await admit(
             deps,
             origin="chat",
@@ -650,9 +653,11 @@ async def test_admission_turn_ceiling_follows_the_turn_time_limit_setting(
             now=_NOW,
         )
         assert isinstance(admission, Admission), "the turn is admitted"
-        return admission.turn_ceiling_s
+        return admission
 
-    assert await ceiling() == TURN_CEILING_S == 45 * 60.0, "the default stays 45 minutes"
+    first = await admitted()
+    assert first.answer_message_cap == 5, "an answer may post 5 messages by default"
+    assert first.turn_ceiling_s == TURN_CEILING_S == 45 * 60.0, "the default stays 45 minutes"
     await set_workspace_feature(
         db_session,
         None,
@@ -664,7 +669,20 @@ async def test_admission_turn_ceiling_follows_the_turn_time_limit_setting(
         surface="cli",
     )
     await db_session.commit()
-    extended = await ceiling()
+    await set_workspace_feature(
+        db_session,
+        None,
+        tenant_id=tenant.id,
+        platform="discord",
+        key="answer_messages",
+        value="10",
+        account_id=None,
+        surface="cli",
+    )
+    await db_session.commit()
+    later = await admitted()
+    assert later.answer_message_cap == 10, "a workspace setting raises the answer message cap"
+    extended = later.turn_ceiling_s
     assert extended == 90 * 60.0, "a workspace setting of 90 minutes extends the turn"
     capped = turn_deadline(
         now=_NOW, ceiling_s=extended, authority_deadline=_NOW + timedelta(minutes=10)

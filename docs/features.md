@@ -41,6 +41,7 @@ Where each feature can be set, and its default.
 | Thread participation | `participation` | Chat | Off | ✓ | ✓ |  | ✓ | ✓ | Only Discord, Teams |
 | Progress plans | `progress_plans` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Cost footer | `cost_footer` | Chat | Shown |  | ✓ |  | ✓ | ✓ |  |
+| Answer messages | `answer_messages` | Chat | 5 messages | ✓ | ✓ | ✓ | ✓ | ✓ | Only Discord |
 | Thread titles | `thread_naming` | Chat | On | ✓ | ✓ |  | ✓ |  | Only Discord |
 | Typed mentions | `plain_text_mentions` | Chat | Off | ✓ | ✓ |  | ✓ |  |  |
 | Completion pings | `completion_pings` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |
@@ -187,6 +188,18 @@ How many recent channel messages a new thread reads for background when a messag
 | Key | `channel_history` |
 | Values | `100` (100 messages), `50` (50 messages), `25` (25 messages), `10` (10 messages), `0` (None) |
 | Default | `25` |
+| Levels | Deployment, Workspace, Agent, Channel, Thread |
+| Combines | Most specific wins |
+
+## Answer messages
+
+The most messages one answer may post in a thread. A longer answer is attached as a single file instead.
+
+| | |
+| --- | --- |
+| Key | `answer_messages` |
+| Values | `1000` (1000 messages), `100` (100 messages), `25` (25 messages), `10` (10 messages), `5` (5 messages), `3` (3 messages), `1` (1 message) |
+| Default | `5` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
 

@@ -881,6 +881,7 @@ class DirectMessageCog(commands.Cog):
                 requester_is_admin=admission.is_admin,
                 in_dm=True,
                 render_tables=admission.shown("table_rendering"),
+                answer_message_cap=admission.answer_message_cap,
                 sessionmaker=runtime.sessionmaker,
                 tenant_id=conversation.tenant_id,
                 budget_channel_id=admission.budget_channel_id,

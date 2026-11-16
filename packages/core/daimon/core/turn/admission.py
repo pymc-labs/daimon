@@ -72,6 +72,7 @@ from daimon.core.features.model_input import (
     HistoryDepth,
     SessionToolset,
     agent_toolset,
+    answer_message_cap,
     builtins_of,
     turn_limit_minutes,
 )
@@ -482,6 +483,11 @@ class Admission:
     def history_depth(self) -> HistoryDepth:
         """How much earlier chat a context builder reads at this place."""
         return HistoryDepth.of(self.features)
+
+    @property
+    def answer_message_cap(self) -> int:
+        """The most messages one answer may post here before it is attached as a file."""
+        return answer_message_cap(self.features)
 
     @property
     def turn_ceiling_s(self) -> float:

@@ -1128,6 +1128,30 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         platforms=frozenset({"discord", "slack", "teams"}),
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
+    FeatureSpec(
+        key="answer_messages",
+        name="Answer messages",
+        category="chat",
+        effect="display",
+        values={
+            "1000": "1000 messages",
+            "100": "100 messages",
+            "25": "25 messages",
+            "10": "10 messages",
+            "5": "5 messages",
+            "3": "3 messages",
+            "1": "1 message",
+        },
+        default="5",
+        tiers=TIERS,
+        binds="turn",
+        doc=(
+            "The most messages one answer may post in a thread. A longer answer is attached "
+            "as a single file instead."
+        ),
+        platforms=frozenset({"discord"}),
+        authority=Authority(DelegatedAction.AGENT_SETTINGS),
+    ),
     *_MODEL_INPUT,
     *_SESSION_IDENTITY,
     *_CHAT_BEHAVIOUR,

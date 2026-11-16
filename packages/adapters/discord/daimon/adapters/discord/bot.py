@@ -4318,6 +4318,7 @@ class DaimonBot(commands.Bot):
                 in_dm=isinstance(thread, discord.DMChannel),
                 notify_on_completion=admission.shown("completion_pings"),
                 render_tables=admission.shown("table_rendering"),
+                answer_message_cap=admission.answer_message_cap,
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
@@ -4494,6 +4495,7 @@ class DaimonBot(commands.Bot):
                 in_dm=isinstance(thread, discord.DMChannel),
                 notify_on_completion=admission.shown("completion_pings"),
                 render_tables=admission.shown("table_rendering"),
+                answer_message_cap=admission.answer_message_cap,
                 send=recorder.sender(
                     thread, turn_card_intent_id=turn_card_intent.id, transport=transport
                 ),
@@ -5371,6 +5373,7 @@ class DaimonBot(commands.Bot):
                 trigger_message=message,
                 acknowledgment_managed=True,
                 render_tables=admission.shown("table_rendering"),
+                answer_message_cap=admission.answer_message_cap,
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,
@@ -5898,6 +5901,7 @@ class DaimonBot(commands.Bot):
                 trigger_message=message,
                 acknowledgment_managed=True,
                 render_tables=admission.shown("table_rendering"),
+                answer_message_cap=admission.answer_message_cap,
                 send=turn_send,
                 edit=_edit_message,
                 urgent_edit=_urgent_edit_message,

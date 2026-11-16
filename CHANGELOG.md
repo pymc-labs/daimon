@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **An answer message cap setting.** In Discord, an answer posts up to 5 messages
+  as before, and past that is attached as a file. A setting from 1 to 1000
+  changes the cap for a workspace, agent, channel or thread.
 - **Answers in a thread another bot already opened.** When a channel's other
   bot threads every message, Discord answers in that thread instead of
   reporting that it could not open one.
