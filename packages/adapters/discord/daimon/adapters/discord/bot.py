@@ -103,7 +103,7 @@ from daimon.adapters.discord.vision import (
     is_vision_image_attachment,
 )
 from daimon.adapters.discord.watch_access import require_watch_thread_access
-from daimon.core.access_policy import DM_SCOPE_PREFIX
+from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX, DM_SCOPE_PREFIX
 from daimon.core.agent_identity import AgentIdentity, identity_enabled_for, resolve_agent_identity
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_guard import guard_selfhosted_channel
@@ -118,12 +118,12 @@ from daimon.core.continuity.continuation import (
     continuation_attended,
     load_asking_agent_id,
 )
-from daimon.core.continuity.dm_timers import RunDmTimer
 from daimon.core.continuity.messages import (
     render_access_changed_try_again,
     render_current_work_must_finish,
     render_preparation_failed,
 )
+from daimon.core.continuity.scope_timers import RunScopeTimer
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller, skip_thread_wakes
 from daimon.core.continuity.watch_notices import poll_watch_notices
 from daimon.core.continuity.watch_reports import run_watch_report_poller
@@ -169,7 +169,6 @@ from daimon.core.stores.domain import (
 )
 from daimon.core.stores.github_access_requests import AccessRequest
 from daimon.core.stores.github_connect_notices import ConnectNotice
-from daimon.core.stores.held_timers import CHANNEL_SCOPE_PREFIX
 from daimon.core.stores.pending_skill_adds import is_affirmative
 from daimon.core.stores.promo_codes import has_redeemable_promo_code
 from daimon.core.stores.tenant_ledger import get_prepaid_balance
@@ -3892,9 +3891,9 @@ class DaimonBot(commands.Bot):
         if self.draining:
             return True
         if wake.thread_id.startswith(DM_SCOPE_PREFIX):
-            return await self._open_dm_timers(wake)
+            return await self._open_scope_timers(wake)
         if wake.thread_id.startswith(CHANNEL_SCOPE_PREFIX):
-            return await self._open_dm_timers(wake, run_timer=self._run_channel_timer)
+            return await self._open_scope_timers(wake, run_timer=self._run_channel_timer)
         try:
             thread_id = int(wake.thread_id)
         except ValueError:
@@ -3928,11 +3927,11 @@ class DaimonBot(commands.Bot):
         )
         return True
 
-    async def _open_dm_timers(
-        self, wake: WakeThread, *, run_timer: RunDmTimer | None = None
+    async def _open_scope_timers(
+        self, wake: WakeThread, *, run_timer: RunScopeTimer | None = None
     ) -> bool:
         """Dispatch the due timers of a private DM or channel scope, each in its own task."""
-        from daimon.core.continuity.dm_timers import dispatch_dm_timer
+        from daimon.core.continuity.scope_timers import dispatch_scope_timer
         from daimon.core.continuity.wakes import (
             claim_wake,
             list_dispatchable_wakes,
@@ -3964,7 +3963,7 @@ class DaimonBot(commands.Bot):
                     )
                 continue
             self._spawn(
-                dispatch_dm_timer(
+                dispatch_scope_timer(
                     self.runtime.sessionmaker,
                     row,
                     run_timer=run_timer or self._run_dm_timer,
@@ -3975,7 +3974,7 @@ class DaimonBot(commands.Bot):
 
     async def _run_channel_timer(self, row: TaskContinuationRow, seed: str) -> None:
         """Run one started timer as an unattended turn of its owner and post it in the channel."""
-        from daimon.adapters.discord.channel_timer_delivery import (
+        from daimon.adapters.discord.timer_delivery import (
             ChannelAccess,
             deliver_channel_timer,
             require_channel_timer_access,
@@ -4015,7 +4014,7 @@ class DaimonBot(commands.Bot):
 
     async def _run_dm_timer(self, row: TaskContinuationRow, seed: str) -> None:
         """Run one started timer as a private DM turn of its owner and DM the reply."""
-        from daimon.adapters.discord.dm_timer_delivery import deliver_dm_timer
+        from daimon.adapters.discord.timer_delivery import deliver_dm_timer
         from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_timer
 
         async def run_turn() -> str:

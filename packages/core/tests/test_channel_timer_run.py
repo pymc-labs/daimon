@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from daimon.core import direct_messages
+from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX
 from daimon.core.authz import AgentRef, Place, Surface, build_subject
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.wakes import enqueue_wake
@@ -17,7 +18,6 @@ from daimon.core.direct_messages import DirectMessageAccessRevoked, run_channel_
 from daimon.core.scope import ResolvedConfig
 from daimon.core.stores.domain import ContinuationReason, Role
 from daimon.core.stores.held_timers import (
-    CHANNEL_SCOPE_PREFIX,
     import_held_timer,
     settle_held_timers,
     supported,

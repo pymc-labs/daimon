@@ -10,25 +10,25 @@ from unittest.mock import AsyncMock, MagicMock
 import aiohttp
 import discord
 import pytest
-from daimon.adapters.discord import channel_timer_delivery, dm_timer_delivery
-from daimon.adapters.discord.channel_timer_delivery import (
+from daimon.adapters.discord import timer_delivery
+from daimon.adapters.discord.timer_delivery import (
     ChannelAccess,
     deliver_channel_timer,
     require_channel_timer_access,
 )
+from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX
 from daimon.core.continuity.continuation import ContinuationRequest
-from daimon.core.continuity.dm_timers import DeliveryFailed, DeliveryRetry
+from daimon.core.continuity.scope_timers import DeliveryFailed, DeliveryRetry
 from daimon.core.continuity.wakes import enqueue_wake
 from daimon.core.direct_messages import DirectMessageAccessRevoked, DmRoutineReply
 from daimon.core.stores.domain import Role, TaskContinuationRow
-from daimon.core.stores.held_timers import CHANNEL_SCOPE_PREFIX
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import make_bot
 from .test_continuation_dispatch_entry import _make_runtime  # pyright: ignore[reportPrivateUsage]
-from .test_dm_timer_dispatch import _poll, _row  # pyright: ignore[reportPrivateUsage]
+from .test_dm_timer_delivery import _poll, _row  # pyright: ignore[reportPrivateUsage]
 
 _GUILD = 710000099
 _CHANNEL = 4241
@@ -38,7 +38,7 @@ _BOT = 999
 
 @pytest.fixture(autouse=True)
 def no_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(dm_timer_delivery, "DELIVERY_BACKOFF", (0.0, 0.0))
+    monkeypatch.setattr(timer_delivery, "DELIVERY_BACKOFF", (0.0, 0.0))
 
 
 def _http_error(status: int = 503) -> discord.HTTPException:
@@ -189,7 +189,7 @@ async def test_a_lost_channel_stops_the_timer_without_a_message(
         rest.channel_type = 2
     if case == "channel_closed_by_rules":
         monkeypatch.setattr(
-            channel_timer_delivery,
+            timer_delivery,
             "protection_state",
             AsyncMock(return_value=SimpleNamespace(may_post=False)),
         )
@@ -344,7 +344,7 @@ def _channel_bot(
     member.guild_permissions = discord.Permissions.none()
     seen = ChannelAccess(member=member, category_id="300")
     monkeypatch.setattr(
-        channel_timer_delivery,
+        timer_delivery,
         "require_channel_timer_access",
         access or AsyncMock(return_value=seen),
     )

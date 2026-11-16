@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 import anthropic
 import structlog
 from daimon.core.access_policy import (
+    CHANNEL_SCOPE_PREFIX,
     DM_SCOPE_PREFIX,
     TenantAccessPolicy,
 )
@@ -54,7 +55,6 @@ from daimon.core.stores.direct_messages import (
 )
 from daimon.core.stores.dm_carry_overs import take_carry_over
 from daimon.core.stores.domain import ChatPlatform, Role, TaskContinuationRow, TenantRow
-from daimon.core.stores.held_timers import CHANNEL_SCOPE_PREFIX
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_turn_contexts import (
     create_slack_turn_context,

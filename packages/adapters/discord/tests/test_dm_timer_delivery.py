@@ -15,12 +15,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
-from daimon.adapters.discord import dm_timer_delivery
+from daimon.adapters.discord import timer_delivery
 from daimon.adapters.discord.bot import DaimonBot
-from daimon.adapters.discord.dm_timer_delivery import deliver_dm_timer
+from daimon.adapters.discord.timer_delivery import deliver_dm_timer
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.continuity.continuation import ContinuationRequest
-from daimon.core.continuity.dm_timers import DeliveryFailed, DeliveryRetry
+from daimon.core.continuity.scope_timers import DeliveryFailed, DeliveryRetry
 from daimon.core.continuity.wakes import WAKE_MAX_ATTEMPTS, enqueue_wake, poll_wakes_once
 from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.core.stores.domain import ContinuationReason, TaskContinuationRow
@@ -303,7 +303,7 @@ def _http_error(status: int = 503) -> discord.HTTPException:
 
 @pytest.fixture(autouse=True)
 def no_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(dm_timer_delivery, "DELIVERY_BACKOFF", (0.0, 0.0))
+    monkeypatch.setattr(timer_delivery, "DELIVERY_BACKOFF", (0.0, 0.0))
 
 
 async def test_a_transient_membership_error_puts_the_timer_back_not_skipped(

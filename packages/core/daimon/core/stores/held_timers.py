@@ -271,7 +271,6 @@ async def _settle_one(
 
 
 __all__ = [
-    "CHANNEL_SCOPE_PREFIX",
     "EMPTY_NOTE_PROMPT",
     "MIN_LEAD",
     "TimerImport",

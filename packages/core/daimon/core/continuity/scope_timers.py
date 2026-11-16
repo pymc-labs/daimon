@@ -37,10 +37,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 
-__all__ = ["DeliveryFailed", "DeliveryRetry", "RunDmTimer", "dispatch_dm_timer"]
+__all__ = ["DeliveryFailed", "DeliveryRetry", "RunScopeTimer", "dispatch_scope_timer"]
 
 #: Runs one started timer with its seed and delivers the reply; raises on refusal.
-RunDmTimer = Callable[[TaskContinuationRow, str], Awaitable[None]]
+RunScopeTimer = Callable[[TaskContinuationRow, str], Awaitable[None]]
 
 
 class DeliveryFailed(DaimonError):
@@ -51,15 +51,15 @@ class DeliveryRetry(Exception):
     """A transient error before the turn ran: offer the timer again, up to a cap."""
 
 
-async def dispatch_dm_timer(
+async def dispatch_scope_timer(
     sessionmaker: async_sessionmaker[AsyncSession],
     row: TaskContinuationRow,
     *,
-    run_timer: RunDmTimer,
+    run_timer: RunScopeTimer,
     dispatch_errors: tuple[type[Exception], ...] = (),
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> None:
-    """Claim, fence, run and settle one DM timer; a lost race does nothing."""
+    """Claim, fence, run and settle one scope timer; a lost race does nothing."""
     if row.reason != "timer":
         raise ValueError("Only timers run here")
     async with independent_wake_provider_context():
@@ -73,7 +73,7 @@ async def dispatch_dm_timer(
             # An imported timer carries no set time; the seed leaves it out.
             await run_timer(row, render_timer_seed(row.requested_work or ""))
         except AnthropicDisabled:
-            log.warning("dm_timer.provider_guard_denied", row_id=str(row.id))
+            log.warning("scope_timer.provider_guard_denied", row_id=str(row.id))
             await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
             return
         except SessionBusyError as busy:
@@ -89,7 +89,7 @@ async def dispatch_dm_timer(
                     sessionmaker, claim, retry_at=now() + WAKE_RETRY_DELAY, refund=False
                 )
                 return
-            log.warning("dm_timer.retries_exhausted", row_id=str(row.id))
+            log.warning("scope_timer.retries_exhausted", row_id=str(row.id))
             skip_reason = "dispatch_failed"
         except TurnNotStarted as exc:
             if exc.capacity:
@@ -102,7 +102,7 @@ async def dispatch_dm_timer(
             skip_reason = f"admission_denied:{exc.reason}"
         except (DaimonError, anthropic_pkg.APIError, *dispatch_errors) as exc:
             log.warning(
-                "dm_timer.dispatch_failed", row_id=str(row.id), error_type=type(exc).__name__
+                "scope_timer.dispatch_failed", row_id=str(row.id), error_type=type(exc).__name__
             )
             skip_reason = "dispatch_failed"
         await settle_wake(
