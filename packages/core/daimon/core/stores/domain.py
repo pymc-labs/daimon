@@ -1831,6 +1831,47 @@ class WebAgentGrantRow(BaseModel):
     groups: tuple[str, ...] = ()
 
 
+DmGrantMode = Literal["members", "listed", "excluded"]
+DmRuleSubject = Literal["user", "group", "everyone"]
+
+
+class DmAgentGrantRow(BaseModel):
+    """Who may DM one agent (see `DmAgentGrant`); `members` when unset."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    agent_name: str
+    who: DmGrantMode = "members"
+    user_ids: tuple[str, ...] = ()
+    group_ids: tuple[str, ...] = ()
+    set_by: str | None = None
+
+
+class DmRuleRow(BaseModel):
+    """One ordered routing rule (see `DmRule`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    position: int
+    subject: DmRuleSubject
+    subject_id: str | None = None
+    agent_name: str | None = None
+    locked: bool = False
+    set_by: str | None = None
+
+
+class DmAgentPickRow(BaseModel):
+    """A person's chosen DM agent in a workspace (see `DmAgentPick`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    account_id: uuid.UUID
+    agent_name: str
+
+
 class WebWorkspaceSettingsRow(BaseModel):
     """A workspace's web app choices (see `WebWorkspaceSettings`); defaults when unset."""
 

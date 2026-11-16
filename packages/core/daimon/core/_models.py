@@ -4056,6 +4056,73 @@ class DirectMessagePolicy(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
 
 
+class DmAgentGrant(Base):
+    """Who may start a direct message with one agent. No row: every member."""
+
+    __tablename__ = "dm_agent_grants"
+    __table_args__ = (
+        CheckConstraint("who IN ('members', 'listed', 'excluded')", name="ck_dm_agent_grants_who"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    agent_name: Mapped[str] = mapped_column(Text, primary_key=True)
+    who: Mapped[str] = mapped_column(Text, nullable=False, server_default="members")
+    user_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'")
+    )
+    group_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'")
+    )
+    set_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class DmRule(Base):
+    """One ordered routing rule: who lands on which agent, optionally locked."""
+
+    __tablename__ = "dm_rules"
+    __table_args__ = (
+        CheckConstraint("subject IN ('user', 'group', 'everyone')", name="ck_dm_rules_subject"),
+        CheckConstraint(
+            "(subject = 'everyone') = (subject_id IS NULL)", name="ck_dm_rules_subject_id"
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    subject: Mapped[str] = mapped_column(Text, nullable=False)
+    subject_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    locked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    set_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class DmAgentPick(Base):
+    """The agent a person chose for their direct messages in a workspace."""
+
+    __tablename__ = "dm_agent_picks"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class DirectMessageConversation(Base):
     """One user's selected workspace for a private platform conversation."""
 
