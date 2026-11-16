@@ -13,10 +13,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Literal
 
-import structlog
 from daimon.core.stores.domain import CHAT_PLATFORMS, ChatPlatform
-
-log = structlog.get_logger()
 
 #: Where a message was sent: a private chat with Daimon, a channel, or a group chat.
 Place = Literal["dm", "channel", "group"]
