@@ -340,6 +340,79 @@ class TestNewThreadCreation:
         assert bot.turn_queue.depth() == 0
         assert bot._processing == set()  # pyright: ignore[reportPrivateUsage]
 
+    @pytest.mark.parametrize(
+        ("lookup", "reused"),
+        [
+            ("own_parent", True),
+            ("other_parent", False),
+            ("not_found", False),
+        ],
+    )
+    @patch("daimon.adapters.discord.bot.TurnPostRecorder.opened_thread", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_agent", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_environment", new_callable=AsyncMock)
+    @patch("daimon.core.turn.run.run_turn", new_callable=AsyncMock)
+    @patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
+    @patch("daimon.core.turn.admission.resolve_config", new_callable=AsyncMock)
+    async def test_a_thread_another_bot_opened_on_the_message_is_reused(
+        self,
+        mock_resolve: AsyncMock,
+        mock_create_session: AsyncMock,
+        mock_run_turn: AsyncMock,
+        mock_find_env: AsyncMock,
+        mock_find_agent: AsyncMock,
+        mock_opened_thread: AsyncMock,
+        lookup: str,
+        reused: bool,
+        db_session: AsyncSession,
+        db_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """When creating a thread fails, the thread already on the message is answered in.
+
+        Only a thread under this channel counts; it is not recorded as ours.
+        Otherwise the asker gets the usual notice.
+        """
+        tenant = await make_tenant(db_session, platform="discord", workspace_id="123456")
+        await _setup_workspace_and_config(db_session, tenant.id)
+        mock_resolve.return_value = _stub_resolved_config()
+        mock_create_session.return_value = ma_session(id="sess-foreign")
+        mock_find_agent.return_value = "ag_test"
+        mock_find_env.return_value = "env_test"
+        runtime = _make_runtime(tenant.id, db_session_factory)
+        assert runtime.settings.discord is not None
+        runtime.settings.discord.thread_open_notice_after_s = 0
+        bot = make_bot(runtime)
+        message = _make_channel_message()
+        message.id = 9999
+        message.reply = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+        message.add_reaction = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+        message.remove_reaction = AsyncMock()  # pyright: ignore[reportAttributeAccessIssue]
+        message.create_thread = AsyncMock(side_effect=RuntimeError("thread already exists"))  # pyright: ignore[reportAttributeAccessIssue]
+        thread = MagicMock(spec=discord.Thread)
+        thread.id = 9999
+        thread.parent_id = 789 if lookup == "own_parent" else 555
+        thread.send = AsyncMock()
+        fetch = (
+            AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "unknown channel"))
+            if lookup == "not_found"
+            else AsyncMock(return_value=thread)
+        )
+
+        with (
+            patch.object(bot, "get_channel", MagicMock(return_value=None)),
+            patch.object(bot, "fetch_channel", fetch),
+        ):
+            await bot.on_message(message)
+
+        assert mock_run_turn.await_count == (1 if reused else 0), (
+            f"the turn runs in the other bot's thread only when it is ours to use ({lookup})"
+        )
+        assert message.reply.await_count == (0 if reused else 1), (
+            f"the asker is told the thread could not open only when none can be used ({lookup})"
+        )
+        mock_opened_thread.assert_not_awaited()
+        assert bot._processing == set()  # pyright: ignore[reportPrivateUsage]
+
     @patch(
         "daimon.adapters.discord.bot.TurnPostRecorder.opened_thread",
         new_callable=AsyncMock,

@@ -3807,6 +3807,16 @@ class DaimonBot(commands.Bot):
         finally:
             await self._release_and_clear(thread.id, tenant_id, clear_reactions=False)
 
+    async def _thread_started_from(self, message: discord.Message) -> discord.Thread | None:
+        """The thread already opened on `message` (it shares the message's id), if any."""
+        try:
+            found = await self._channel_by_id(message.id)
+        except Exception:  # best effort: any miss keeps the usual notice
+            return None
+        if isinstance(found, discord.Thread) and found.parent_id == message.channel.id:
+            return found
+        return None
+
     async def _channel_by_id(self, channel_id: int) -> object:
         """Cached channel, else a REST fetch (raises NotFound/Forbidden)."""
         return self.get_channel(channel_id) or await self.fetch_channel(channel_id)
@@ -5262,9 +5272,20 @@ class DaimonBot(commands.Bot):
                         name=thread_name, auto_archive_duration=10080
                     )
                 except Exception as exc:
-                    # Only a failure before the thread exists is "couldn't open".
-                    await _explain_thread_open_failure(message)
-                    raise _ThreadOpenFailed(str(exc)) from exc
+                    # Another bot may have threaded this message first; answer there.
+                    opened = await self._thread_started_from(message)
+                    if opened is None:
+                        # Only a failure before the thread exists is "couldn't open".
+                        await _explain_thread_open_failure(message)
+                        raise _ThreadOpenFailed(str(exc)) from exc
+                    log.info("discord.thread_reused_foreign", thread_id=opened.id)
+                    # Not recorded as an `auto_thread` post: it is not our thread to tidy.
+                    self._processing.add(opened.id)
+                    self._thread_stops.claim(opened.id)
+                    self._track_processing_task(opened.id)
+                    if created_thread_ids is not None:
+                        created_thread_ids.append(opened.id)
+                    return opened
                 # No await between creation and registration: follow-ups must queue
                 # behind this turn. The channel branch owns the eventual cleanup.
                 self._processing.add(opened.id)

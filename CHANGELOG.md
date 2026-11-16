@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Answers in a thread another bot already opened.** When a channel's other
+  bot threads every message, Discord answers in that thread instead of
+  reporting that it could not open one.
 - **An edit that adds a mention gets an answer.** Editing a message to mention
   the bot in Discord answers it like a new mention, once.
 - **A turn time limit setting.** Server admins can let one answer run for 90 or 180
