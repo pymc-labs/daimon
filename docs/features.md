@@ -90,7 +90,7 @@ Where each feature can be set, and its default.
 
 ## Approvals
 
-Ask before an agent writes to an outside service in a chat reply. Allow writes covers chat replies only: routines and watches follow the unattended rule whoever runs Daimon set. Only an admin of the chat app can change it.
+Ask before an agent writes to an outside service in a chat reply. Allow writes covers chat replies only: routines and watches follow the unattended rule whoever runs Daimon set. Only an admin of the chat app can change it, or the operator at the command line, who gives a reason that is audited.
 
 | | |
 | --- | --- |

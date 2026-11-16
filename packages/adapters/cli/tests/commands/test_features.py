@@ -7,7 +7,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from io import StringIO
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -25,6 +25,7 @@ from daimon.core.errors import StoreError
 from daimon.core.features.registry import FEATURES
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from rich.console import Console
@@ -206,25 +207,58 @@ async def test_diff_lists_only_the_features_two_agents_differ_on(
     assert keys == ["tool.bash"]
 
 
-async def test_the_cli_has_no_approvals_setter(
+async def test_approvals_need_a_reason_from_the_cli(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Approvals need a live chat admin; the CLI has none, so the core refuses."""
+    """The operator path is audited, so a change with no reason is refused before any write."""
     rt = _runtime(db_session_factory, [])
     selector = await _tenant(db_session_factory)
     console, _ = _console()
-    with pytest.raises(StoreError):
-        await features_set(
-            rt=rt,
-            console=console,
-            selector=selector,
-            key="approvals",
-            value="native",
-            tier=None,
-            agent=None,
-            channel=None,
-            thread=None,
-        )
+    place: dict[str, Any] = {"tier": None, "agent": None, "channel": None, "thread": None}
+    for reason in (None, "", "   "):
+        with pytest.raises(StoreError, match="--reason"):
+            await features_set(
+                rt=rt,
+                console=console,
+                selector=selector,
+                key="approvals",
+                value="off",
+                reason=reason,
+                **place,
+            )
+    row = _row(await _rows(rt, selector), "approvals")
+    assert row["value"] == "on", "a refused change writes nothing"
+
+
+async def test_the_operator_sets_approvals_and_the_change_is_audited(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """`features set approvals` works with a reason; the audit row names operator, old, new, why."""
+    rt = _runtime(db_session_factory, [])
+    selector = await _tenant(db_session_factory)
+    console, _ = _console()
+    place: dict[str, Any] = {"tier": None, "agent": None, "channel": None, "thread": None}
+    await features_set(
+        rt=rt,
+        console=console,
+        selector=selector,
+        key="approvals",
+        value="off",
+        reason="bridge writes run unattended",
+        **place,
+    )
+    row = _row(await _rows(rt, selector), "approvals")
+    assert row["value"] == "off", "Allow writes is in effect at the workspace"
+    async with db_session_factory() as session:
+        tenant_id = uuid.UUID(cast(str, selector.tenant_id))
+        (event,) = [
+            e
+            for e in await list_events(session, tenant_id=tenant_id)
+            if e.tool_name == "approval_gate"
+        ]
+    assert event.platform_user_id == f"operator:{rt.settings.cli.local_user}", "operator named"
+    assert event.reason == "server:inherit->off (bridge writes run unattended)", event.reason
+    assert event.outcome == "allowed", "the change is recorded as allowed"
 
 
 async def test_set_refuses_a_stale_expected_value(

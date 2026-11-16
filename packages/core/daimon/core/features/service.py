@@ -97,6 +97,25 @@ class FeatureActor:
 
 
 @dataclass(frozen=True)
+class OperatorActor(FeatureActor):
+    """The deployment operator at the CLI, who holds the database and has no chat identity.
+
+    A distinct type, not a flag on `FeatureActor`: only `_native_admin` accepts it for a
+    setting that needs a native admin (approvals), and only the CLI entrypoint builds one
+    (`test_operator_actor.py` checks that). It names the operator and carries the stated
+    reason, which the audit row records."""
+
+    operator: str = ""
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.operator.strip() or not self.reason.strip():
+            raise ValueError("an operator change names the operator and gives a reason")
+        if self.via_agent_key or self.surface != "cli":
+            raise ValueError("an operator acts from the CLI, never through an agent key")
+
+
+@dataclass(frozen=True)
 class TierSetting:
     """One tier's own value at a place; `DEFAULT` when it sets none."""
 
@@ -345,7 +364,10 @@ def feature_refusal(
 async def _native_admin(
     sessions: Sessions, settings: Settings, actor: FeatureActor, platform: str
 ) -> Subject:
-    """A live, uncached native admin check of the actor's chat identity, or a refusal."""
+    """A live, uncached native admin check of the actor's chat identity, or a refusal.
+    The operator at the CLI is the one other admin; it is checked by type, nothing else."""
+    if isinstance(actor, OperatorActor):
+        return Subject(is_admin=True, platform_user_id=f"operator:{actor.operator}")
     if not actor.via_agent_key and actor.native_user_id:
         subject = await approval_admin(
             sessions, settings, tenant_id=actor.tenant_id, user_id=actor.native_user_id
@@ -482,6 +504,7 @@ async def _change_approvals(
             actor.on_write,
         ),
         expected=raw(expected.value) if expected is not None else None,
+        note=actor.reason if isinstance(actor, OperatorActor) else None,
     )
     before = gate.before or "inherit"
     return TierSetting(tier, DEFAULT if before == "inherit" else before)
