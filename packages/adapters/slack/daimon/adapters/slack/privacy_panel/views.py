@@ -156,8 +156,9 @@ def build_privacy_main_container(
     policy_url: str,
     display_name: str = "daimon",
     delete_enabled: bool = True,
+    monitored: bool = False,
 ) -> dict[str, Any]:
-    """Main privacy view: the title, two lines on who stores what, then the buttons.
+    """Main privacy view: the title, the lines on who stores what, then the buttons.
 
     Port of privacy_panel/panel.py (Discord) adapted to Block Kit. The detail
     categories live in the policy behind the Policy button.
@@ -206,7 +207,9 @@ def build_privacy_main_container(
     elif slack_connect_url is not None:
         action_elements.append(_connect_button(slack_connect_url))
 
-    body = "\n\n".join(escape_mrkdwn(line) for line in privacy_lines(display_name))
+    body = "\n\n".join(
+        escape_mrkdwn(line) for line in privacy_lines(display_name, monitored=monitored)
+    )
     blocks: list[dict[str, Any]] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": f"*{PRIVACY_TITLE}*"}},
         {"type": "section", "text": {"type": "mrkdwn", "text": body}},

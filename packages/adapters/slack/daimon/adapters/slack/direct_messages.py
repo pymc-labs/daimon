@@ -39,6 +39,7 @@ from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.monitoring import MonitoringNotice
 from daimon.core.stores.direct_messages import dm_enabled, get_conversation
 from daimon.core.stores.domain import Role
 from daimon.core.turn.admission import admit
@@ -259,7 +260,7 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
         else:
             refusal = (
                 "That option isn't recognized.\n\n"
-                "Run `/dm-me` in a channel to continue privately. "
+                "Run `/dm-me` in a channel to continue in a direct message. "
                 "Admins: `/dm-me enable` or `/dm-me disable`."
             )
         fields: dict[str, Any] = (
@@ -369,6 +370,11 @@ async def handle_direct_message(
             except (anthropic.APIError, SQLAlchemyError) as exc:
                 log.warning("slack.dm.identity_lookup_failed", error_type=type(exc).__name__)
 
+        async def tell(notice: MonitoringNotice) -> None:
+            await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+                channel=channel_id, **notice_fields(notice.text, neutral=True), **thread_kwargs
+            )
+
         answer = await reply_to_dm(
             runtime.turn_deps,
             platform="slack",
@@ -380,6 +386,7 @@ async def handle_direct_message(
             text=content,
             role=role,
             on_agent=on_agent,
+            tell=tell,
         )
         if answer is not None:
             for offset in range(0, len(answer), 3500):

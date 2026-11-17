@@ -20,8 +20,7 @@ _OFF = (
     "Mention me in a channel, or ask a workspace admin to run `/dm-me enable`."
 )
 _ON = (
-    "I answer in channels first.\n"
-    "Mention me in a channel, or run `/dm-me` in one to continue privately here."
+    "I answer in channels first.\nMention me in a channel, or run `/dm-me` in one to continue here."
 )
 
 

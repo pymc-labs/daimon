@@ -41,6 +41,7 @@ def _build_runtime(
     fernet_key: str, db_factory: async_sessionmaker[AsyncSession], *, mintable: bool = False
 ) -> SlackRuntime:
     settings = MagicMock()
+    settings.features = {}  # the privacy panel reads the monitoring features
     if mintable:
         settings.slack.signing_secret = SecretStr("shh-secret")
         settings.slack.bot_display_name = "research-bot"
