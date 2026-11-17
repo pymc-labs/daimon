@@ -16,14 +16,20 @@ const MMM: Turn[] = [
   { q: "Share the summary with Tomás.", tools: [["notion_get_page", "cancelled"]], a: "I stopped before posting. Tell me where it should go and I will send it." },
 ]
 
-type Row = { id: string; agent: string; person: MonitoredConversation["person"]; where: MonitoredWhere; turns: Turn[]; at: number; span: number }
+const CODING: Turn[] = [
+  { q: "Pull the Tidewater elasticity table into my notebook.", tools: [["query_table", "completed"], ["get_item", "completed"]], a: "The table is in the notebook as `tidewater_elasticity`, 14 rows by 6 columns." },
+  { q: "Refit the model on it.", tools: [["run_notebook", "error"], ["run_notebook", "completed"]], a: "The first run timed out. The second finished: elasticity is -1.4, with an interval of -1.7 to -1.1." },
+  { q: "Save the result to the shared pricing sheet.", tools: [["save_brief", "denied"]], a: "I can't write to the shared sheet from here. I left the result in your notebook." },
+]
+
+type Row = { id: string; agent: string; person: MonitoredConversation["person"]; where: MonitoredWhere; turns: Turn[]; at: number; span: number; told?: boolean }
 const ROWS: Row[] = [
   { id: "mc_1", agent: "ag_pricing", person: { id: "p_owen", name: "Owen Brooks" }, where: "direct_messages", turns: PRICING.slice(0, 4), at: 2, span: 1.5 },
   { id: "mc_2", agent: "ag_pricing", person: { id: "p_ines", name: "Inês Duarte" }, where: "web", turns: PRICING.slice(0, 2), at: 26, span: 0.4 },
-  { id: "mc_3", agent: "ag_pricing", person: { id: "p_priya", name: "Priya Raman" }, where: "coding_tools", turns: PRICING.slice(1, 2), at: 31, span: 2 },
+  { id: "mc_3", agent: "ag_pricing", person: { id: "p_priya", name: "Priya Raman" }, where: "coding_tools", turns: CODING, at: 31, span: 2 },
   { id: "mc_4", agent: "ag_pricing", person: { id: "p_jordan", name: "Jordan Ellis" }, where: "web", turns: PRICING.slice(2, 4), at: 52, span: 0.3 },
   { id: "mc_5", agent: "ag_pricing", person: { id: null, name: "Sam Ortiz" }, where: "direct_messages", turns: PRICING.slice(0, 1), at: 75, span: 0.1 },
-  { id: "mc_6", agent: "ag_pricing", person: { id: "p_owen", name: "Owen Brooks" }, where: "coding_tools", turns: PRICING.slice(0, 3), at: 120, span: 5 },
+  { id: "mc_6", agent: "ag_pricing", person: { id: "p_owen", name: "Owen Brooks" }, where: "coding_tools", turns: CODING.slice(0, 2), at: 120, span: 5, told: false },
   { id: "mc_7", agent: "ag_mmm", person: { id: "p_aiko", name: "Aiko Tanaka" }, where: "direct_messages", turns: MMM, at: 5, span: 1 },
   { id: "mc_8", agent: "ag_mmm", person: { id: "p_tomas", name: "Tomás Okafor" }, where: "direct_messages", turns: MMM.slice(0, 2), at: 29, span: 0.6 },
   { id: "mc_9", agent: "ag_mmm", person: { id: "p_rafael", name: "Rafael Costa" }, where: "web", turns: MMM.slice(1, 3), at: 99, span: 0.8 },
@@ -41,9 +47,10 @@ export function transcriptOf(agent: string, id: string): MonitoredEvent[] | null
   const r = ROWS.find((x) => x.agent === agent && x.id === id)
   if (!r) return null
   const out: MonitoredEvent[] = []
-  const step = r.span / (r.turns.length * 4)
+  const step = r.span / (r.turns.length * 4 + 1)
   let h = r.at + r.span
   const at = () => hoursAgo((h -= step))
+  if (r.told !== false) out.push({ id: `${id}_notice`, at: at(), kind: "notice", content: null, tool: null, outcome: null })
   r.turns.forEach((t, i) => {
     const e = (kind: MonitoredEvent["kind"], fields: Partial<MonitoredEvent>): MonitoredEvent =>
       ({ id: `${id}_${i}_${out.length}`, at: at(), kind, content: null, tool: null, outcome: null, ...fields })

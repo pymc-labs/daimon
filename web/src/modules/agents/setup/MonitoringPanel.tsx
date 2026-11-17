@@ -35,7 +35,7 @@ export function MonitoringPanel({ agent }: Pick<Props, "agent">) {
     const ownValue = own && own.value !== DEFAULT ? own.value : null
     const label_ = (value: string) => s.values.find((o) => o.value === value)?.label ?? value
     return (
-      <Field key={key} label={label}>
+      <Field key={key} label={label} top>
         {v.locked && v.source !== "agent" ? (
           <span className="flex min-w-0 flex-wrap items-center gap-x-2 text-sm">
             <span className="inline-flex items-center gap-1.5"><Lock className="size-3.5 text-muted-foreground" />{label_(v.value)}</span>
@@ -65,11 +65,9 @@ export function MonitoringPanel({ agent }: Pick<Props, "agent">) {
         {error && <p role="alert" className="mt-3 text-xs text-destructive">{error}</p>}
       </Section>
       {state.isSuccess && (
-        <Section>
-          <div className="flex justify-end">
-            <Button size="sm" asChild><Link to={`/admin/monitoring?agent=${encodeURIComponent(agent.id)}`}>View activity</Link></Button>
-          </div>
-        </Section>
+        <div className="mt-auto flex justify-end border-t px-5 py-3 max-sm:[&>a]:flex-1">
+          <Button size="sm" asChild><Link to={`/admin/monitoring?agent=${encodeURIComponent(agent.id)}`}>View activity</Link></Button>
+        </div>
       )}
     </>
   )

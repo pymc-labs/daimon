@@ -15,7 +15,7 @@ const KEPT: Tier[] = ["deployment", "workspace", "agent"]
 const SCHEMA = [
   schema("progress_plans", "Progress plans"), schema("participation", "Thread participation"),
   schema("guidance", "Setup guidance", ["deployment", "workspace", "agent"]), schema("tool.bash", "Built-in tool: bash"), schema("cost_footer", "Cost footer"),
-  schema("monitor_direct_messages", "Monitor direct messages", KEPT, GUARDRAILS), schema("monitor_mcp", "Monitor MCP", KEPT, GUARDRAILS),
+  schema("monitor_direct_messages", "Monitor direct messages", KEPT, GUARDRAILS), schema("monitor_mcp", "Monitor coding tools", KEPT, GUARDRAILS),
 ]
 /** Locked at the workspace, so every level below reads it as locked; `value` is what the lock holds. */
 const locks = new Map<string, string>([["cost_footer", "off"]])

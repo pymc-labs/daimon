@@ -4,6 +4,7 @@ import { http, HttpResponse, type HttpHandler } from "msw"
 
 import type { ChatSession } from "@/lib/types"
 import type { Card, CardAnswer, FileOut, Msg, StreamEvent } from "@/modules/chat/types"
+import { monitoringOn } from "./features"
 import { forbidden, notFound, paged, sleep, sse, unauthorized, wait } from "./util"
 import { agent, AGENTS, me, session, SESSIONS, spend } from "./world"
 
@@ -334,7 +335,8 @@ export const chatHandlers: HttpHandler[] = [
     const q = new URL(request.url).searchParams
     const end = q.has("before") ? Number(q.get("before")) : msgs.length
     const start = Math.max(0, end - (Math.min(Number(q.get("limit")) || 200, 200)))
-    return HttpResponse.json({ session: s, messages: msgs.slice(start, end), ...(start > 0 && { next: start }) })
+    const monitoring = monitoringOn(s.agent.id, "monitor_direct_messages") && { monitoring: { line: "Admins can read what you and this agent say here.", help: "Ask an admin if you have questions." } }
+    return HttpResponse.json({ session: s, messages: msgs.slice(start, end), ...(start > 0 && { next: start }), ...monitoring })
   }),
   http.patch("/api/chat/sessions/:id", async ({ params, request }) => {
     await wait(120)

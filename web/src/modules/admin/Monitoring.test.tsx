@@ -46,11 +46,13 @@ beforeEach(() => {
 describe("Monitoring", () => {
   it("asks for the filters in the address and nothing else", async () => {
     serve([conversation])
-    view("/admin/monitoring?agent=ag1&person=p1&where=coding_tools&from=2026-03-01&to=2026-03-31")
+    view("/admin/monitoring?agent=ag1&person=p1&where=coding_tools&days=7")
     await screen.findByText("Owen Brooks")
     const path = pageCalls().find((p) => p.includes("/conversations"))!
     expect(path.startsWith("/api/admin/monitoring/agents/ag1/conversations?")).toBe(true)
-    expect(new URL(path, "http://x").searchParams.toString()).toBe("person=p1&where=coding_tools&from=2026-03-01&to=2026-03-31")
+    const q = new URL(path, "http://x").searchParams
+    expect([...q.keys()]).toEqual(["person", "where", "from"])
+    expect(q.get("from")).toBe(new Date(Date.now() - 6 * 86_400_000).toISOString().slice(0, 10))
   })
 
   it("opens a conversation with its notice, questions, answers and tool outcomes", async () => {
@@ -62,7 +64,7 @@ describe("Monitoring", () => {
     expect(screen.queryByText("Admins can read what you say here.")).not.toBeInTheDocument()
     expect(screen.getByText("Eighteen thousand dollars.")).toBeInTheDocument()
     expect(screen.getByText("hubspot_search_crm")).toBeInTheDocument()
-    expect(screen.getByText("Denied")).toBeInTheDocument()
+    expect(screen.getByText("Refused")).toBeInTheDocument()
     await waitFor(() => expect(pageCalls()).toContain("/api/admin/monitoring/agents/ag1/conversations/mc1"))
   })
 
@@ -70,6 +72,6 @@ describe("Monitoring", () => {
     serve([], false)
     view("/admin/monitoring?agent=ag1")
     expect(await screen.findByText("Monitoring is off for this agent")).toBeInTheDocument()
-    expect(screen.getByRole("link", { name: "Open monitoring" })).toHaveAttribute("href", "/agents/ag1?node=monitoring")
+    expect(screen.getByRole("link", { name: "Turn on" })).toHaveAttribute("href", "/agents/ag1?node=monitoring")
   })
 })
