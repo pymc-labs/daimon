@@ -418,7 +418,7 @@ async def test_channel_when_the_workspace_is_not_the_tenants_then_refuses_and_sa
     tenant, account_id = await _seed(committing_sessionmaker)
     runtime = _runtime(committing_sessionmaker)
     auth = dataclasses.replace(_auth(tenant, account_id), external_id="another-guild")
-    with pytest.raises(ToolError, match="not in this workspace"):
+    with pytest.raises(ToolError, match="not available here"):
         await _set_channel_impl(
             runtime, auth, channel_id=_PARENT, service_url=None, expected_revision=None
         )
@@ -447,7 +447,7 @@ async def test_channel_on_teams_when_no_service_url_then_refuses_and_with_one_sa
         await _set_channel_impl(
             runtime, auth, channel_id="19:c", service_url=None, expected_revision=None
         )
-    with pytest.raises(ToolError, match="not in this workspace"):
+    with pytest.raises(ToolError, match="not available here"):
         await _set_channel_impl(
             runtime,
             auth,

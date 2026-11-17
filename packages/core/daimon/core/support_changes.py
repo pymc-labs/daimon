@@ -59,7 +59,7 @@ SETTLE_SETTING = "support_settle"
 MENU_IN_USE = "A place still uses this menu. Change that place first"
 NO_MENU = "No menu has that key."
 OWN_CHANNEL_LOCKED = "Requests go to the default channel. Ask whoever runs Daimon."
-NOT_IN_WORKSPACE = "That channel is not in this workspace."
+NOT_IN_WORKSPACE = "That channel is not available here."
 
 
 def may_set_support(subject: Subject) -> Decision:

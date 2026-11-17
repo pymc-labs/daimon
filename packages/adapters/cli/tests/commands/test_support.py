@@ -373,7 +373,7 @@ async def test_channel_set_when_teams_then_needs_the_team_and_service_url(
         await channel_set(
             rt=rt, console=console, selector=selector, channel_id="19:abc@thread.tacv2"
         )
-    with pytest.raises(ChannelChangeRefused, match="not in this workspace"):
+    with pytest.raises(ChannelChangeRefused, match="not available here"):
         await channel_set(
             rt=rt,
             console=console,
