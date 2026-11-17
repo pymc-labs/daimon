@@ -2615,14 +2615,159 @@ class FileUpload(Base):
     )
 
 
+class SupportCatalog(Base):
+    """A tenant's menu for Ask a person (`support_plans.SupportCatalogSpec`).
+
+    `revision` rises on every set: a menu carries it, and a submit against an
+    older one is refused as stale rather than charged on terms the person never saw.
+    """
+
+    __tablename__ = "support_catalogs"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "key", name="uq_support_catalogs_tenant_key"),
+        CheckConstraint("key ~ '^[a-z0-9-]{1,32}$'", name="ck_support_catalogs_key"),
+        CheckConstraint("revision >= 1", name="ck_support_catalogs_revision"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    key: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    # `SupportOption`s as JSON; the menu is `name` and these.
+    options: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class SupportPlan(Base):
+    """Support credits for a workspace, an agent or a channel. No row = the default plan.
+
+    The most specific plan governs and plans never stack. `pool` is shared by
+    everyone under the plan and `per_person` caps each person; either may be
+    unset, not both. The window works as on `ChannelBudget`, except that a plan
+    outside its window still governs, with nothing available. `catalog_id` NULL
+    is the implicit default catalog.
+    """
+
+    __tablename__ = "support_plans"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "scope", "scope_id", name="uq_support_plans_scope"),
+        CheckConstraint(
+            "scope IN ('workspace', 'agent', 'channel')", name="ck_support_plans_scope"
+        ),
+        CheckConstraint(
+            "(scope = 'workspace') = (scope_id = '')", name="ck_support_plans_scope_id"
+        ),
+        CheckConstraint(
+            "(pool IS NOT NULL OR per_person IS NOT NULL) AND pool >= 0 AND per_person >= 0",
+            name="ck_support_plans_limits",
+        ),
+        CheckConstraint(
+            "\"window\" IN ('monthly', 'total', 'fixed')", name="ck_support_plans_window"
+        ),
+        CheckConstraint(
+            "(\"window\" = 'fixed' AND starts_at IS NOT NULL AND ends_at IS NOT NULL "
+            "AND starts_at < ends_at) "
+            "OR (\"window\" = 'total' AND ends_at IS NULL) "
+            "OR (\"window\" = 'monthly' AND starts_at IS NULL AND ends_at IS NULL)",
+            name="ck_support_plans_bounds",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    scope: Mapped[str] = mapped_column(Text, nullable=False)
+    scope_id: Mapped[str] = mapped_column(Text, nullable=False)
+    catalog_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("support_catalogs.id", ondelete="RESTRICT"), nullable=True
+    )
+    pool: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    per_person: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    window: Mapped[str] = mapped_column(Text, nullable=False)
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class SupportAllowance(Base):
+    """One person's own cap under a plan, or under the default plan when `plan_id` is NULL."""
+
+    __tablename__ = "support_allowances"
+    __table_args__ = (
+        Index(
+            "uq_support_allowances_plan_user",
+            "tenant_id",
+            "plan_id",
+            "platform_user_id",
+            unique=True,
+            postgresql_where=text("plan_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_support_allowances_default_user",
+            "tenant_id",
+            "platform_user_id",
+            unique=True,
+            postgresql_where=text("plan_id IS NULL"),
+        ),
+        CheckConstraint("credits >= 0", name="ck_support_allowances_credits"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("support_plans.id", ondelete="CASCADE"), nullable=True
+    )
+    platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    credits: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class SupportEscalation(Base):
     """One row per human-support request. The rows ARE the credit ledger.
 
-    There is no counter column and no `credits_remaining`: remaining is the
-    configured allowance minus the number of rows for that (tenant,
-    platform_user_id). A counter would be a second source of truth that can
-    drift from the rows it summarises, and it would need to be written in the
-    same transaction as the insert anyway -- which counting already is.
+    There is no counter column and no `credits_remaining`: spent credit is
+    `SUM(COALESCE(charge, hold))` over the rows of one ledger (`charged_to`: the
+    default plan per (tenant, platform_user_id), or one support plan; `exempt`
+    rows count nowhere). A counter would be a second source of truth that can
+    drift from the rows it summarises. Rows from before plans are charged 1, so
+    the default sum equals the old row count.
 
     `platform_user_id` is the identity key for the same reason it is on
     `message_feedback`: somebody can ask for help without ever having taken a
@@ -2647,6 +2792,29 @@ class SupportEscalation(Base):
             "support_escalations_tenant_user_idx",
             "tenant_id",
             "platform_user_id",
+        ),
+        Index("support_escalations_plan_idx", "tenant_id", "plan_id", "created_at"),
+        Index(
+            "support_escalations_pending_idx",
+            "tenant_id",
+            "created_at",
+            postgresql_where=text("status = 'pending'"),
+        ),
+        CheckConstraint(
+            "charged_to IN ('default', 'plan', 'exempt')",
+            name="ck_support_escalations_charged_to",
+        ),
+        CheckConstraint(
+            "charged_to <> 'default' OR plan_id IS NULL", name="ck_support_escalations_default"
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'settled', 'declined')", name="ck_support_escalations_status"
+        ),
+        CheckConstraint(
+            "(status = 'pending') = (charge IS NULL)", name="ck_support_escalations_pending"
+        ),
+        CheckConstraint(
+            "hold >= 0 AND (charge IS NULL OR charge >= 0)", name="ck_support_escalations_amounts"
         ),
     )
 
@@ -2675,6 +2843,30 @@ class SupportEscalation(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # Support plans (0208). The server defaults are a default-ledger row charged
+    # 1, which is what a writer that predates plans means.
+    charged_to: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    # SET NULL: a cleared plan's rows count nowhere, never in the default ledger.
+    plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("support_plans.id", ondelete="SET NULL"), nullable=True
+    )
+    option_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The terms requested on (`support_plans.OptionSnapshot`); settling reads these.
+    option: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    answers: Mapped[dict[str, str] | None] = mapped_column(JSONB, nullable=True)
+    hold: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, server_default="1")
+    # NULL while pending; spent credit is COALESCE(charge, hold).
+    charge: Mapped[Decimal | None] = mapped_column(
+        Numeric(10, 2), nullable=True, server_default="1"
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="settled")
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    settled_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    settled_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    support_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    support_post_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class DeploymentIdentity(Base):
