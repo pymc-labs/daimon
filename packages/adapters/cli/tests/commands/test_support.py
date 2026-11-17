@@ -65,7 +65,7 @@ def _console() -> tuple[Console, StringIO]:
 
 async def _tenant(factory: Factory, platform: str = "slack") -> tuple[uuid.UUID, TenantSelector]:
     async with factory.begin() as session:
-        tenant = await make_tenant(session, platform=platform, workspace_id="g1")  # type: ignore[arg-type]
+        tenant = await make_tenant(session, platform=platform, workspace_id="g1")
     return tenant.id, TenantSelector(tenant_id=str(tenant.id), guild_id=None)
 
 
@@ -233,3 +233,17 @@ def test_support_help_when_invoked_then_lists_each_group() -> None:
     assert result.exit_code == 0, result.stdout
     for group in ("catalog", "plan", "allowance", "requests"):
         assert group in result.stdout, f"{group} listed"
+
+
+async def test_catalog_when_expected_zero_then_it_means_none_as_in_the_mcp_tool(
+    db_session_factory: Factory,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, settings=_settings())
+    _, selector = await _tenant(db_session_factory)
+    console, out = _console()
+    where = {"rt": rt, "console": console, "selector": selector}
+    await catalog_set(**where, key="support", text=MENU, expected="0")
+    with pytest.raises(StoreError):
+        await catalog_set(**where, key="support", text=MENU, expected="0")
+    with pytest.raises(StoreError):
+        await catalog_rm(**where, key="support", expected="0")

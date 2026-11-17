@@ -229,6 +229,11 @@ def _run(impl: Callable[[CliRuntime, Console], Awaitable[None]]) -> None:
     run_cli(run(), console=console)
 
 
+def _revision(raw: str) -> int | None:
+    """A menu revision; 0 means none, as in the MCP tool and the web page."""
+    return int(raw) or None
+
+
 # ---------- catalog ----------
 
 
@@ -250,7 +255,7 @@ async def catalog_set(
             platform=target.platform,
             key=key,
             spec=spec,
-            expected=_expected_none_or(expected, int),
+            expected=_expected_none_or(expected, _revision),
         )
     except StaleChannelValue as exc:
         raise _stale(exc) from exc
@@ -322,7 +327,7 @@ async def catalog_rm(
             _actor(target, command="catalog rm", reason=f"catalog:{key}"),
             platform=target.platform,
             key=key,
-            expected=_expected_none_or(expected, int),
+            expected=_expected_none_or(expected, _revision),
         )
     except StaleChannelValue as exc:
         raise _stale(exc) from exc
