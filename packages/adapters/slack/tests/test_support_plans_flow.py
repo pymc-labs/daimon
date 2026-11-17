@@ -156,6 +156,7 @@ async def _seed(
 
 def _runtime(fernet_key: str, factory: async_sessionmaker[AsyncSession], **support: Any) -> Any:
     settings = MagicMock()
+    support = {"slack_escalation_team_id": _TEAM, **support}
     settings.support = SupportSettings(slack_escalation_channel_id=_ESC_CHANNEL, **support)
     return build_slack_runtime(fernet_key, factory, settings=settings)
 
@@ -350,6 +351,27 @@ async def test_send_when_option_has_no_fields_then_posts_pending_with_settle_but
     ((row_id, status, hold, _charge, post_id, _answers, _by),) = await _rows(db_session_factory)
     assert row_id.hex == escalation_id
     assert (status, hold, post_id) == ("pending", D(1), _POST_TS), "holds its minimum; post id"
+
+
+async def test_send_when_no_escalation_workspace_is_named_then_no_settle_buttons_and_no_settle(
+    db_session_factory: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    key, _revision = await _seed(db_session_factory)
+    runtime = _runtime(key, db_session_factory, slack_escalation_team_id=None)
+    picked = await _pick(runtime, fake, await _menu(runtime, fake), "review")
+    await run_support_submission(
+        runtime, evaluate_plan_submission(_send(picked, {OPTION_BLOCK_ID: _picked("review")}))
+    )
+    post = _sent(fake, _POST)[-1]
+    assert "blocks" not in post, "a shared channel's other workspaces could settle"
+    ((escalation_id, *_rest),) = await _rows(db_session_factory)
+    message = {"ts": _POST_TS, "text": post["text"]}
+    await handle_settle_click(
+        runtime, _settle_click(SETTLE_DECLINE_ACTION_ID, escalation_id.hex, message=message)
+    )
+    assert _said(fake) == SETTLE_ELSEWHERE
+    ((_id, status, *_rest),) = await _rows(db_session_factory)
+    assert status == "pending", "nothing settled"
 
 
 async def test_send_when_option_has_steps_and_fields_then_charged_at_submit(

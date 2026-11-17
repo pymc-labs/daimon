@@ -82,9 +82,11 @@ def _settler(by: str | None) -> str | None:
 
 
 def _in_support_channel(support: SupportSettings, *, team_id: str, channel_id: str) -> bool:
-    """The configured channel, in the escalation workspace when one is named."""
-    team = support.slack_escalation_team_id
-    if team is not None and team != team_id:
+    """The configured channel, in the configured escalation workspace.
+
+    With no workspace named, another workspace sharing the channel could settle.
+    """
+    if support.slack_escalation_team_id != team_id:
         return False
     return is_support_channel(
         configured=support.slack_escalation_channel_id, channel_id=channel_id, parent_id=None

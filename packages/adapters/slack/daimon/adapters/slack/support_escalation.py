@@ -897,7 +897,12 @@ async def _post_to_escalation_channel(
         facts = request_facts(row, menu=view.catalog is not None, balance=balance)
     blocks: Callable[[str | None], list[dict[str, Any]]] | None = None
     text_facts = facts
-    if facts is not None and row.status == "pending":
+    # Settling is accepted only in the named escalation workspace (`support_settle`).
+    if (
+        facts is not None
+        and row.status == "pending"
+        and runtime.settings.support.slack_escalation_team_id is not None
+    ):
         pending_facts = facts
         text_facts = f"{facts}\n{NOT_NOTIFIED_LINE}"
 
