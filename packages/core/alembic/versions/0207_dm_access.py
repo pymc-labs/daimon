@@ -18,6 +18,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    op.execute("SET LOCAL lock_timeout = '5s'")
     op.create_table(
         "dm_agent_grants",
         sa.Column("tenant_id", sa.UUID(), nullable=False),
