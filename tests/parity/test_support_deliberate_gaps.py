@@ -25,13 +25,13 @@ from daimon.adapters.discord import support_settle as discord_settle
 from daimon.adapters.discord.support_escalation import SupportOptionModal
 from daimon.adapters.mcp.tools.support import _refused  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.slack import support_settle as slack_settle
-from daimon.adapters.slack.support_plan_form import (
+from daimon.adapters.slack.support_menu_form import (
     OPTION_ACTION_ID,
     OPTION_BLOCK_ID,
-    build_plan_menu,
-    read_plan_form,
+    build_menu_modal,
+    read_menu_form,
 )
-from daimon.adapters.teams import support_plan_card as teams_card
+from daimon.adapters.teams import support_menu_card as teams_card
 from daimon.adapters.teams.support import SupportCommand
 from daimon.adapters.teams.support_settle import TeamsSupportSettle
 from daimon.adapters.web.channels import channel_refusals
@@ -89,7 +89,7 @@ def _view() -> LimitView:
 
 
 def _picked(key: str) -> dict[str, Any]:
-    menu = build_plan_menu(
+    menu = build_menu_modal(
         channel_id="C1", message_ts="1.2", thread_ts="1.0", view=_view(), sealed=False, picked=key
     )
     option = _MENU.option(key)
@@ -104,12 +104,12 @@ def test_option_without_fields_when_picked_then_each_platform_confirms_its_own_w
     assert slack["submit"], "Slack: the picked option keeps the modal's Send"
     inputs = [b for b in slack["blocks"] if b["type"] == "input"]
     assert [b["block_id"] for b in inputs] == [OPTION_BLOCK_ID], "Slack: nothing more to fill in"
-    form = read_plan_form(slack)
+    form = read_menu_form(slack)
     assert form.errors is None and form.choice is not None, "Slack: Send submits the pick"
     assert form.choice.option_key == "quick"
     discord = SupportOptionModal(runtime=MagicMock(), origin=MagicMock(), option=_MENU.options[0])
     assert [type(c) for c in discord.children] == [TextDisplay], (
-        "Discord: the terms alone; packages/adapters/discord/tests/test_support_plans_flow.py "
+        "Discord: the terms alone; packages/adapters/discord/tests/test_support_limits_flow.py "
         "proves Submit posts it"
     )
     teams = teams_card.option_body(_MENU.options[0])
@@ -163,7 +163,7 @@ def test_menu_when_shown_then_teams_asks_for_the_option_alone_and_slack_rerender
     assert inputs == [teams_card.OPTION_INPUT], "Teams: the menu asks only for the option"
     form = teams_card.option_body(_MENU.options[2])
     assert [e.id for e in form if isinstance(e, TeamsTextInput)] == ["field_what"], (
-        "Teams: Next shows the fields; packages/adapters/teams/tests/test_support_plans_flow.py"
+        "Teams: Next shows the fields; packages/adapters/teams/tests/test_support_limits_flow.py"
     )
     slack = [b["block_id"] for b in _picked("long")["blocks"] if b["type"] == "input"]
     assert slack[0] == OPTION_BLOCK_ID and len(slack) == 2, "Slack: one modal, re-rendered"

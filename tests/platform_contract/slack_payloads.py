@@ -110,13 +110,13 @@ _SUPPORT_MENU = {
 }
 
 
-def _support_plan_view() -> Any:
+def _support_menu_view() -> Any:
     from daimon.core.stores.support_rows import LimitView, SupportMenuRow
     from daimon.core.support import Balance, parse_menu
 
     spec = parse_menu(_SUPPORT_MENU)
     now = datetime(2026, 1, 1, tzinfo=UTC)
-    catalog = SupportMenuRow(
+    menu = SupportMenuRow(
         id=uuid.UUID(int=1),
         tenant_id=uuid.UUID(int=2),
         key="support",
@@ -127,8 +127,8 @@ def _support_plan_view() -> Any:
         created_at=now,
         updated_at=now,
     )
-    balance = Balance(pool=Decimal(10), pool_used=Decimal(2), cap=None, person_used=Decimal(0))
-    return LimitView(plan=None, catalog=catalog, balance=balance, state="active")
+    balance = Balance(shared=Decimal(10), shared_used=Decimal(2), cap=None, person_used=Decimal(0))
+    return LimitView(limit=None, person=None, menu=menu, balance=balance, state="active")
 
 
 def _support_pending_row() -> Any:
@@ -157,24 +157,24 @@ def _support_pending_row() -> Any:
     )
 
 
-@entry("support_plan_menu", "slack", "view")
-def support_plan_menu() -> Any:
-    from daimon.adapters.slack.support_plan_form import build_plan_menu
+@entry("support_menu", "slack", "view")
+def support_menu() -> Any:
+    from daimon.adapters.slack.support_menu_form import build_menu_modal
 
-    return build_plan_menu(
-        channel_id="C1", message_ts="1.2", thread_ts="1.0", view=_support_plan_view(), sealed=True
+    return build_menu_modal(
+        channel_id="C1", message_ts="1.2", thread_ts="1.0", view=_support_menu_view(), sealed=True
     )
 
 
-@entry("support_plan_option_form", "slack", "view")
-def support_plan_option_form() -> Any:
-    from daimon.adapters.slack.support_plan_form import build_plan_menu
+@entry("support_option_form", "slack", "view")
+def support_option_form() -> Any:
+    from daimon.adapters.slack.support_menu_form import build_menu_modal
 
-    return build_plan_menu(
+    return build_menu_modal(
         channel_id="C1",
         message_ts="1.2",
         thread_ts="1.0",
-        view=_support_plan_view(),
+        view=_support_menu_view(),
         sealed=False,
         picked="call",
     )
@@ -193,7 +193,7 @@ def _support_pending_blocks() -> list[dict[str, Any]]:
     row = _support_pending_row()
     return pending_post_blocks(
         head="*Support request* from <@U1>",
-        facts=request_facts(row, menu=True, balance="8 credits left this plan."),
+        facts=request_facts(row, menu=True, balance="8 of 10 credits left"),
         rest=["<https://example.slack.com/archives/C1/p12|Open the thread>"],
         note=row.note,
         escalation_id=row.id,
