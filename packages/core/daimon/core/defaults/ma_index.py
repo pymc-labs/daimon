@@ -179,10 +179,18 @@ def pick_renamed_seeded_agent(
 
 
 async def find_renamed_seeded_agent(
-    client: AsyncAnthropic, *, tenant_id: uuid.UUID
+    client: AsyncAnthropic | None,
+    *,
+    tenant_id: uuid.UUID,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> BetaManagedAgentsAgent | None:
-    """The tenant's live seeded agent renamed to `default` (`SEEDED_AGENT_RENAME`), or None."""
-    return pick_renamed_seeded_agent(await list_agents_by_tenant(client, tenant_id=tenant_id))
+    """The tenant's live seeded agent renamed to `default` (`SEEDED_AGENT_RENAME`), or None.
+
+    `records` adds the Daimon-owned records, for an install with no Anthropic key.
+    """
+    return pick_renamed_seeded_agent(
+        await list_agents_by_tenant(client, tenant_id=tenant_id, records=records)
+    )
 
 
 async def find_environments_by_daimon_tag(
