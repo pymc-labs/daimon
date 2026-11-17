@@ -11,7 +11,11 @@ import uuid
 
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.defaults.metadata import build_metadata
+from daimon.core.defaults.metadata import (
+    SEEDED_AGENT_RENAME,
+    build_metadata,
+    is_renamed_seeded_record,
+)
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.errors import DaimonError
 from daimon.core.model_presets import model_choice_id
@@ -21,6 +25,7 @@ from daimon.core.provider_keys import DEFAULT_KEY_ENV, provider_key_present
 from daimon.core.specs import AgentSpec, EnvironmentSpec, dump_agent_spec
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents, SelfHostedEnvironments
 from mux.contracts.ids import ModelRef, Provider, Scope
+from mux.contracts.resources import Agent
 from mux.contracts.resources import AgentSpec as RecordAgentSpec
 from mux.contracts.resources import EnvironmentSpec as RecordEnvironmentSpec
 from mux.errors import ProviderError
@@ -101,6 +106,34 @@ def owned_agent_spec(
     )
 
 
+async def resolve_owned_agent(
+    sessions: async_sessionmaker[AsyncSession],
+    scope: Scope,
+    name: str,
+    *,
+    seeded_rename: bool = True,
+) -> Agent:
+    """The live Daimon record `name` answers to; `daimon` falls back to its renamed seed.
+
+    A miss on the seeded name finds the tenant's defaults-managed record named
+    `default` instead (`SEEDED_AGENT_RENAME`), so code from before that rename
+    neither loses the record nor creates a second `daimon` beside it. A record
+    named `daimon` always wins; a workspace's own `default` never matches.
+    `seeded_rename=False` is for a caller creating a workspace's own agent.
+    Raises `ProviderError` (`not_found`) when neither exists.
+    """
+    agents = SelfHostedAgents(sessions)
+    try:
+        return await agents.resolve(scope, name)
+    except ProviderError as miss:
+        if miss.category != "not_found" or not seeded_rename or name != SEEDED_AGENT_RENAME[0]:
+            raise
+        renamed = await agents.resolve(scope, SEEDED_AGENT_RENAME[1])
+        if not is_renamed_seeded_record(renamed.spec.name, renamed.spec.metadata):
+            raise miss from None
+        return renamed
+
+
 async def reconcile_owned_agent(
     sessions: async_sessionmaker[AsyncSession],
     spec: AgentSpec,
@@ -117,7 +150,7 @@ async def reconcile_owned_agent(
     """
     scope = owned_scope(tenant_id, account_id)
     try:
-        existing = await SelfHostedAgents(sessions).resolve(scope, spec.name)
+        existing = await resolve_owned_agent(sessions, scope, spec.name, seeded_rename=managed)
     except ProviderError as error:
         if error.category != "not_found":
             raise

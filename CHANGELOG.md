@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   272k input tokens is priced wholly at twice the input and cache rates and 1.5x
   the output rate, an upper bound, and each model has its own daily cap. "astra"
   names GPT-6.2 Astra and "gpt 6 astra" GPT-6 Astra; "sol" names GPT-6.2 Sol.
+- **Agents Daimon stores itself keep working when the built-in agent is
+  named `default`.** On an install that runs agents from its own records (for
+  example with an OpenAI or Gemini key and no Anthropic key), asking for
+  `daimon` now answers with the workspace's built-in agent renamed to
+  `default`. Defaults sync no longer creates a second `daimon` beside it, and
+  setup conversations find it. A user's own agent named `default` is never
+  taken for it.
 - **Admin > Support follows the order an admin sets Ask a person up.** Turn it
   on for the workspace, choose where it shows, pick the request channel, then
   set credit limits and menus in one list. The later steps stay open when it is
