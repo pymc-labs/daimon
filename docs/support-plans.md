@@ -18,7 +18,8 @@ the first plan that exists for the place it was asked in:
 
 Plans never stack. A request is charged to one plan only, and plan requests
 never count toward the default allowance. A request from a workspace admin is
-sent but charged nowhere.
+sent but charged nowhere. To hide Ask a person in one place, turn its
+[feature](features.md#ask-a-person) off there.
 
 ## Credits and windows
 

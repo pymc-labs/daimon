@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or channel, menus of priced options and one person's own cap are set under
   **Channels** > **Support** in the web app, with `daimon support` and with the
   `support_*` MCP tools. See [Support plans](docs/support-plans.md).
+- **Ask a person offers a support plan's menu in Discord, Slack and Teams.** A
+  person picks an option, fills in its fields and sees what it costs and what is
+  left. A request priced by staff holds its minimum until someone in the support
+  channel sets the charge or declines it from the request's post. On Teams the
+  charge box and buttons are on the post itself. The person who asked is not told
+  the final charge. Workspace admins' requests are sent but charged nowhere.
+  Ask a person can be turned off for an agent or a channel as well as the
+  workspace, and locked. See [Support plans](docs/support-plans.md).
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and
   the MCP tools. A run nobody started, such as a routine, never applies one at once.

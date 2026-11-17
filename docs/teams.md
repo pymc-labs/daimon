@@ -290,7 +290,7 @@ agent.
 | `memory` | Show what the agent remembers here. `memory mine` shows your personal memory, and `memory forget-mine` clears it after a code. |
 | `privacy` | See, export or delete what Daimon stores about you, or disconnect your Microsoft account. |
 | `billing` | Your usage and credit left. Admins also see spend, channel budgets and can add credit. |
-| `support` | Ask a person, spending one support credit. |
+| `support` | Ask a person; the [support plan](support-plans.md) sets the cost. |
 
 Platform admins are the owners of the admin team. The app must be
 installed in that team so Daimon can read its owners. See
