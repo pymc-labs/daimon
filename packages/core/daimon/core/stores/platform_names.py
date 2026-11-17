@@ -20,9 +20,14 @@ from collections.abc import Collection, Mapping
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
-from daimon.core._models import PlatformChannelName, PlatformPrincipal, PlatformUserName
+from daimon.core._models import (
+    PlatformChannelName,
+    PlatformPrincipal,
+    PlatformUserName,
+    WorkspaceMember,
+)
 from daimon.core.stores.domain import ChannelNameRow
-from sqlalchemy import CursorResult, delete, func, select, update
+from sqlalchemy import CursorResult, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -132,6 +137,48 @@ async def get_user_names(
             PlatformUserName.platform_user_id.in_(list(user_ids)),
         )
     )
+    return {user_id: KnownName(display, handle) for user_id, display, handle in rows.all()}
+
+
+async def search_user_names(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    query: str,
+    members_only: bool = False,
+    limit: int,
+) -> dict[str, KnownName]:
+    """Up to `limit` people whose stored display name or handle contains `query`, ignoring
+    case, by id; ordered by label so a page of them is stable.
+
+    `members_only` keeps those the workspace's member list has: pass it only when that
+    list was loaded in full, or it would hide people the platform never listed.
+    """
+    stmt = select(
+        PlatformUserName.platform_user_id, PlatformUserName.display_name, PlatformUserName.handle
+    ).where(
+        PlatformUserName.tenant_id == tenant_id,
+        PlatformUserName.platform == platform,
+        or_(
+            PlatformUserName.display_name.icontains(query, autoescape=True),
+            PlatformUserName.handle.icontains(query, autoescape=True),
+        ),
+    )
+    if members_only:
+        stmt = stmt.where(
+            select(WorkspaceMember.platform_user_id)
+            .where(
+                WorkspaceMember.tenant_id == tenant_id,
+                WorkspaceMember.platform_user_id == PlatformUserName.platform_user_id,
+            )
+            .exists()
+        )
+    stmt = stmt.order_by(
+        func.lower(func.coalesce(PlatformUserName.display_name, PlatformUserName.handle)),
+        PlatformUserName.platform_user_id,
+    ).limit(limit)
+    rows = await session.execute(stmt)
     return {user_id: KnownName(display, handle) for user_id, display, handle in rows.all()}
 
 
