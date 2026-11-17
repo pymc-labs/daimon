@@ -330,6 +330,7 @@ async def monitored_notice(
 
 async def capture_answer(
     sessions: async_sessionmaker[AsyncSession],
+    settings: Settings | None = None,
     *,
     tenant_id: uuid.UUID,
     conversation: str,
@@ -340,7 +341,8 @@ async def capture_answer(
 ) -> bool:
     """Keep the agent's answer when its question was kept: a turn is monitored or not as
     a whole, decided when it was asked. A continuation passes the `question_ref` it carries
-    on and its own `turn_ref`. True when kept."""
+    on and its own `turn_ref`; it is kept only while the question's agent is still
+    monitored, since the question's own turn has long ended by then. True when kept."""
     try:
         async with sessions() as session, session.begin():
             if question_ref is None:
@@ -353,6 +355,16 @@ async def capture_answer(
                 )
             if question is None:
                 return False
+            if question_ref is not None:
+                state = await monitoring_state(
+                    session,
+                    settings,
+                    tenant_id=tenant_id,
+                    agent_id=question.agent_id,
+                    platform=question.platform,
+                )
+                if not state.on:
+                    return False
             subject = store.MonitoredSubject(
                 tenant_id, question.agent_id, question.platform, question.account_id, conversation
             )
@@ -371,25 +383,35 @@ async def continued_question(
     settings: Settings | None,
     *,
     tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
     platform: str,
     conversation: str,
     account_id: uuid.UUID,
     queued_at: datetime,
 ) -> str | None:
-    """The ref of the kept question a continuation carries on: the person's question in
-    `conversation` that was still waiting for its answer when the work was queued."""
+    """The ref of the kept question a continuation carries on: the person's question to
+    `agent_id` in `conversation` that was still waiting for its answer when the work was
+    queued. None unless the agent is monitored now, and a question kept before monitoring
+    was last switched on is no longer carried on."""
     if platform not in ("discord", "slack", "teams", "web"):
         return None
     try:
         if not await may_monitor(sessions, settings, tenant_id=tenant_id, platform=platform):
             return None
         async with sessions() as session:
+            state = await monitoring_state(
+                session, settings, tenant_id=tenant_id, agent_id=agent_id, platform=platform
+            )
+            if not state.on:
+                return None
             return await store.question_open_at(
                 session,
                 tenant_id=tenant_id,
+                agent_id=agent_id,
                 conversation=conversation,
                 account_id=account_id,
                 at=queued_at,
+                since=state.since,
             )
     # As for the question: the queued work runs on; only the kept copy is missing.
     except Exception:

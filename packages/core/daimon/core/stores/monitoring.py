@@ -115,16 +115,19 @@ async def question_open_at(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
     conversation: str,
     account_id: uuid.UUID,
     at: datetime,
+    since: datetime | None = None,
 ) -> str | None:
-    """The ref of the person's newest kept question in `conversation` asked by `at`, when
-    it had no kept answer yet at `at`."""
-    ref = await session.scalar(
+    """The ref of the person's newest kept question to `agent_id` in `conversation` asked
+    by `at` (and, with `since`, not before it), when it had no kept answer yet at `at`."""
+    stmt = (
         select(MonitoredEvent.turn_ref)
         .where(
             MonitoredEvent.tenant_id == tenant_id,
+            MonitoredEvent.agent_id == agent_id,
             MonitoredEvent.conversation == conversation,
             MonitoredEvent.account_id == account_id,
             MonitoredEvent.kind == "question",
@@ -134,6 +137,9 @@ async def question_open_at(
         .order_by(MonitoredEvent.created_at.desc())
         .limit(1)
     )
+    if since is not None:
+        stmt = stmt.where(MonitoredEvent.created_at >= since)
+    ref = await session.scalar(stmt)
     if ref is None:
         return None
     answered = await session.scalar(

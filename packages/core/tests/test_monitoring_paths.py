@@ -10,7 +10,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -203,13 +203,15 @@ async def _keep(
     )
 
 
-async def _switch_on(session: AsyncSession, tenant_id: uuid.UUID, key: str) -> None:
+async def _switch_on(
+    session: AsyncSession, tenant_id: uuid.UUID, key: str, value: str = "on"
+) -> None:
     await set_feature_value(
         session,
         tenant_id=tenant_id,
         target=FeatureTarget("agent", agent_id="agt_a"),
         key=key,
-        value="on",
+        value=value,
         set_by=None,
         surface="web",
     )
@@ -290,6 +292,7 @@ async def test_queued_work_keeps_its_answer_with_the_question_it_carries_on(
             sm,
             None,
             tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agt_a"),
             platform="teams",
             conversation="thread-1",
             account_id=account_id,
@@ -329,6 +332,87 @@ async def test_queued_work_keeps_its_answer_with_the_question_it_carries_on(
         ("answer", work, "done"),
         ("question", "m1", "hello"),
     ]
+
+
+async def test_a_continuation_is_kept_only_while_its_agent_is_monitored(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Work queued while a kept question waits loses its answer when monitoring is switched
+    off before the work ends, and is not linked at all once it is off."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await _switch_on(db_session, tenant.id, "monitor_direct_messages")
+    sm = db_session_factory
+    assert await _keep(sm, tenant.id, account.id, platform="teams", request_ref="m1")
+    agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agt_a")
+
+    async def carried() -> str | None:
+        return await continued_question(
+            sm,
+            None,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            platform="teams",
+            conversation="thread-1",
+            account_id=account.id,
+            queued_at=datetime.now(UTC),
+        )
+
+    assert await carried() == "m1", "the question was not carried while monitored"
+    await _switch_on(db_session, tenant.id, "monitor_direct_messages", "off")
+    assert await carried() is None, "linked a continuation of an unmonitored agent"
+    assert not await capture_answer(
+        sm,
+        None,
+        tenant_id=tenant.id,
+        conversation="thread-1",
+        turn_ref="w1",
+        content="done",
+        outcome="ok",
+        question_ref="m1",
+    ), "kept a continuation's answer after monitoring was switched off"
+    async with sm() as session:
+        rows = await store.list_events(session, tenant_id=tenant.id, agent_id=agent_id)
+    assert [row.kind for row in rows] == ["question"], rows
+
+
+async def test_a_continuation_is_not_linked_to_a_question_kept_before_monitoring_resumed(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """An old kept question still waiting for its answer is not the one a later turn's
+    continuation carries on after monitoring was switched off and on again; a question kept
+    since is."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await _switch_on(db_session, tenant.id, "monitor_direct_messages")
+    sm = db_session_factory
+    agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agt_a")
+    subject = store.MonitoredSubject(tenant.id, agent_id, "teams", account.id, "thread-1")
+    old = datetime.now(UTC) - timedelta(days=1)
+    async with sm() as session, session.begin():
+        await store.record_events(
+            session,
+            subject,
+            (store.MonitoredEntry("question", "old", turn_ref="m0", created_at=old),),
+        )
+    await _switch_on(db_session, tenant.id, "monitor_direct_messages", "off")
+    await _switch_on(db_session, tenant.id, "monitor_direct_messages")
+
+    async def carried() -> str | None:
+        return await continued_question(
+            sm,
+            None,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            platform="teams",
+            conversation="thread-1",
+            account_id=account.id,
+            queued_at=datetime.now(UTC),
+        )
+
+    assert await carried() is None, "linked to a question kept before monitoring resumed"
+    assert await _keep(sm, tenant.id, account.id, platform="teams", request_ref="m1")
+    assert await carried() == "m1", "did not link to the question kept since"
 
 
 def _event(kind: str, event_id: str = "", text: str = "", stop: str = "end_turn") -> Any:

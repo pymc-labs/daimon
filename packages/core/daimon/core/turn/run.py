@@ -1335,6 +1335,9 @@ async def run_prepared_turn(
             deps.sessionmaker,
             deps.settings,
             tenant_id=tenant_id,
+            agent_id=derive_agent_uuid(
+                tenant_id=tenant_id, ma_agent_id=prepared.admission.agent.id
+            ),
             platform=platform,
             conversation=thread_id,
             account_id=continues.requester_account_id,
@@ -1424,6 +1427,7 @@ async def run_prepared_turn(
         if kept_question is not None and isinstance(exc, Exception):
             await capture_answer(
                 deps.sessionmaker,
+                deps.settings,
                 tenant_id=tenant_id,
                 conversation=thread_id,
                 turn_ref=kept_question,
@@ -1469,6 +1473,7 @@ async def run_prepared_turn(
     if kept_question is not None:
         await capture_answer(
             deps.sessionmaker,
+            deps.settings,
             tenant_id=tenant_id,
             conversation=thread_id,
             turn_ref=kept_question,
