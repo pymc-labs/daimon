@@ -37,6 +37,7 @@ nav:
       - Repository memory: repo-memory.md
       - Context providers: context-providers.md
       - Lead intake: lead-intake.md
+      - Support plans: support-plans.md
   - Concepts:
       - Architecture: architecture.md
       - Isolation: isolation.md

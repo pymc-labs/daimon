@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Admins manage support plans for Ask a person.** Plans on a workspace, agent
+  or channel, menus of priced options and one person's own cap are set under
+  **Channels** > **Support** in the web app, with `daimon support` and with the
+  `support_*` MCP tools. See [Support plans](docs/support-plans.md).
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and
   the MCP tools. A run nobody started, such as a routine, never applies one at once.
