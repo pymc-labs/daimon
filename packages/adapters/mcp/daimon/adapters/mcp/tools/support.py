@@ -662,11 +662,11 @@ def register_support_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         (a thread id resolves to its parent). The most specific place with a limit
         governs a request; limits never stack. Arguments left out keep the limit's
         values; ``"none"`` clears ``shared``, ``each_person`` or a date. ``shared``
-        is credits everyone there uses together, ``each_person`` each person's
-        cap, decimal strings such as ``"0.5"``. ``window``: ``total`` or
+        is credits everyone there uses together, ``each_person`` each person may use,
+        decimal strings such as ``"0.5"``. ``window``: ``total`` or
         ``monthly`` (per UTC month). ``starts_at`` and ``ends_at`` (exclusive) are
         set by hand; outside them, requests are refused. ``person`` is a
-        platform user id or ``<@id>``: it sets that person's own cap at the place
+        platform user id or ``<@id>``: it sets that person's own limit at the place
         (``workspace`` means everywhere) with ``each_person`` only.
         ``expected_revision``: the ``revision`` last read, or 0 when you expect no
         limit; a mismatch saves nothing. Example: ``scope="channel"``,
@@ -694,7 +694,7 @@ def register_support_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         person: str | None = None,
         expected_revision: int | None = None,
     ) -> ClearSupportLimitResult:
-        """Remove a support limit, or one person's own cap at a place. Admin-only.
+        """Remove a support limit, or one person's own limit at a place. Admin-only.
 
         Clearing a place's limit declines its pending requests at no charge.
         Requests there then use the limit above it, or the default credits per
@@ -800,7 +800,7 @@ def register_support_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Send this workspace's support requests to its own channel, or reset it. Admin-only.
 
         ``channel_id`` null goes back to the default channel. A thread id resolves to
-        its parent channel. On Teams, pass ``service_url``, the bot's service URL.
+        its parent channel. On Teams, pass ``service_url``, the Teams service URL.
         Requests already open stay where they were posted. A deployment that keeps
         its own channel refuses. ``expected_revision``: the ``revision`` of
         ``support_channel_get``, or 0 when none is set. Example: ``channel_id="222"``.

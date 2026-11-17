@@ -618,7 +618,7 @@ credentials.
 | --- | --- | --- |
 | `support_channel_get` | admin only | Show where this workspace's support requests go. |
 | `support_channel_set` | admin only | Send this workspace's support requests to its own channel, or reset it. |
-| `support_limit_clear` | admin only | Remove a support limit, or one person's own cap at a place. |
+| `support_limit_clear` | admin only | Remove a support limit, or one person's own limit at a place. |
 | `support_limit_list` | admin only | List the support limits for Ask a person, with credits used. |
 | `support_limit_set` | admin only | Set a support limit for the workspace, an agent or a channel. |
 | `support_menu_get` | admin only | Show one support menu by key, or every menu with no key. |
