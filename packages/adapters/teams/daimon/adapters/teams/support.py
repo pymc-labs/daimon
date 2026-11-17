@@ -10,8 +10,9 @@ prose such as "support vector machines" stays a turn. As on Discord, the row
 is committed before the post and stamped delivered only once the post lands,
 so a failed post loses nothing. Delivery runs in the background once the row
 is committed: a Teams invoke must be answered within seconds, and the post
-can take longer, so the person is told the request is
-recorded before it lands. `enabled` decides whether the command is registered.
+can take longer, so a send waits on it only briefly: a post that has failed by
+then is told as undelivered, any other reads as recorded. `enabled` decides whether
+the command is registered.
 
 A request asked from a channel is open to the people who could have asked the
 agent there (`answer_access`), as on Slack, decided when the form is shown and
@@ -35,6 +36,7 @@ post is cut line by line, each cut marked, to fit Teams' cap (`post_size`).
 
 from __future__ import annotations
 
+import asyncio
 import secrets
 import uuid
 from collections import OrderedDict
@@ -75,7 +77,6 @@ from daimon.adapters.teams.card_actions import (
     toast,
 )
 from daimon.adapters.teams.commands import CommandContext
-from daimon.adapters.teams.deployment_admins import live_admin_ids
 from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.identity import DENIED, TeamsInbound
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
@@ -96,9 +97,8 @@ from daimon.adapters.teams.support_menu_card import (
     settle_card,
     subtle,
 )
-from daimon.adapters.teams.team_owners import team_owner_lookup
 from daimon.core.authz import Action, Place, Subject, authorize
-from daimon.core.config import DirectMessagePolicy, Settings
+from daimon.core.config import Settings
 from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
@@ -135,6 +135,7 @@ from daimon.core.support_escalation import (
     ESCALATE,
     OUT_OF_CREDITS,
     RECEIVED,
+    RECORDED_UNDELIVERED,
     SEALED_NOTE_HINT,
     SEALED_POST_MARKER,
     UNAVAILABLE,
@@ -145,7 +146,6 @@ from daimon.core.support_routing import (
     log_undelivered,
     own_channel_allowed,
     support_destination,
-    support_recipient_tiers,
 )
 from daimon.core.teams_bot_framework import SERVICE_URL
 from microsoft_teams.api import (
@@ -191,6 +191,7 @@ log = structlog.get_logger(__name__)
 VERB = "support"
 NOTE_INPUT = "note"
 _DM_LINK = "(sent in the 1:1 chat)"
+_DELIVERY_WAIT = 3.0  # seconds a send waits on its post before answering anyway
 _MAX_PENDING = 256  # forms whose "asked in" is remembered; older ones name the 1:1 chat
 TITLE = "Ask a person"
 FORM_TEXT = MENU_PROMPT + "\n{remaining} {request_word} left"
@@ -305,6 +306,13 @@ class _Asked:
             SEALED_LINE if self.sealed else "",
             *note.splitlines(),
         )
+
+
+@dataclass
+class _Delivery:
+    """Whether the post landed: None until it is known."""
+
+    landed: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -506,8 +514,13 @@ def _option_dialog(
 
 
 def _facts(row: SupportEscalationRow, view: LimitView) -> list[str]:
-    """A limit request's lines for the post; the default post is unchanged."""
-    if row.charged_to == "default":
+    """A request's lines for the post: its option, status and balance.
+
+    Whatever the ledger: a default-charged pick still names its option and a
+    pending one its price. Only a plain default request, with no menu and
+    nothing to settle, posts as before.
+    """
+    if row.charged_to == "default" and view.menu is None and row.status != "pending":
         return []
     balance = balance_text(view.balance, view.period) if row.charged_to == "limit" else None
     return request_facts(row, menu=view.menu is not None, balance=balance)
@@ -844,48 +857,43 @@ class SupportCommand:
             return limit_refusal(outcome, now=datetime.now(UTC))
         log.info("support.escalation_recorded", escalation_id=str(row.id))
         asked = replace(asked, sealed=sealed)
-        self._spawn(
-            self._deliver(tenant_id, asked, row, view, destination), name="teams.support.deliver"
+        outcome = _Delivery()
+        delivery = self._spawn(
+            self._deliver(asked, row, view, destination, outcome), name="teams.support.deliver"
         )
-        return received_text(row, view)
+        # A post that fails fast is told as undelivered, as on Discord and Slack; a
+        # slow one is not waited for past the invoke's budget, and reads as received.
+        await asyncio.wait({delivery}, timeout=_DELIVERY_WAIT)
+        return RECORDED_UNDELIVERED if outcome.landed is False else received_text(row, view)
 
     async def _deliver(
         self,
-        tenant_id: uuid.UUID,
         asked: _Asked,
         row: SupportEscalationRow,
         view: LimitView,
         destination: SupportDestination,
+        outcome: _Delivery,
     ) -> None:
         """Best effort: the row is committed, and stays undelivered unless a post lands.
 
-        A database or Graph failure while picking admins still leaves the
-        escalation channel to try, as on Slack. A request still to be charged
-        is posted there whatever the chats did: its post is where staff set it.
+        A request still to be charged posts as a card: its post is where staff
+        set it. `outcome` tells `_escalate` whether the post landed, if it is
+        still waiting.
         """
         facts = _facts(row, view)
-        body = asked.body(row.note, facts)
-        delivered = False
-        try:
-            delivered = await self._chat_admins(tenant_id, asked, body)
-        except (SQLAlchemyError, *TEAMS_SEND_ERRORS) as exc:
-            # OSError (in TEAMS_SEND_ERRORS): asyncpg raises a refused connection raw.
-            log.warning(
-                "support.admin_routing_failed",
-                escalation_id=str(row.id),
-                err_type=type(exc).__name__,
-            )
         post_id = None
         if row.status == "pending":
             card = settle_card(row, asked.lines(facts))
             post_id = await post_card_to_support_channel(
                 self._runtime, self._direct, destination, card
             )
-        elif not delivered:
+            delivered = post_id is not None
+        else:
+            body = asked.body(row.note, facts)
             delivered = await post_to_support_channel(
                 self._runtime, self._direct, destination, body
             )
-        delivered = delivered or post_id is not None
+        outcome.landed = delivered
         if delivered:
             channel = destination.channel_id
             try:
@@ -906,43 +914,6 @@ class SupportCommand:
         else:
             log_undelivered(row)
         log.info("support.escalation_delivered", escalation_id=str(row.id), delivered=delivered)
-
-    async def _chat_admins(self, tenant_id: uuid.UUID, asked: _Asked, body: str) -> bool:
-        """Message the channel's admins, else the deployment's. True once a tier got it.
-
-        False at once for the 1:1 chat or a channel with no admins of its own,
-        so it keeps the escalation channel. Each recipient is held to the
-        tenant's DM policy and must be on the channel's team roster.
-        """
-        direct = self._direct
-        if asked.place is None or direct is None:
-            return False
-        channel_id = asked.place.channel_id
-        tiers = await support_recipient_tiers(
-            self._runtime.sessionmaker,
-            tenant_id=tenant_id,
-            platform="teams",
-            channel_id=channel_id,
-            requester_id=asked.user_id,
-            members=team_owner_lookup(self._runtime),
-            server_admins=live_admin_ids(self._runtime),
-        )
-        policies = self._runtime.settings.direct_message_policies
-        policy = policies.get(tenant_id, DirectMessagePolicy())
-        for tier in tiers:
-            landed = 0
-            for user_id in (uid for uid in tier if policy.allows(uid)):
-                try:
-                    member = await direct.member(channel_id, user_id)
-                    if member is not None:
-                        await direct.post(await direct.open_chat(member), body)
-                        landed += 1
-                except TEAMS_SEND_ERRORS as exc:
-                    log.info("support.admin_dm_undelivered", err_type=type(exc).__name__)
-            if landed:
-                log.info("support.sent_to_admins", recipients=landed)
-                return True
-        return False
 
 
 async def post_to_support_channel(

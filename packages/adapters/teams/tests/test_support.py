@@ -23,6 +23,7 @@ from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.config import SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.support_escalation import RECORDED_UNDELIVERED
 from daimon.testing.settings_mock import mock_settings
 from microsoft_teams.common.http.client import MiddlewareContext
 from sqlalchemy import select
@@ -234,15 +235,18 @@ async def test_a_failed_post_keeps_the_request_undelivered(
     assert fake.posting.is_set(), "the post was tried, and failed"
     assert [e["log_level"] for e in logs if e["event"] == "support.request_undelivered"] == [
         "error"
-    ], "the reply says received, so the failure is an error an operator sees"
-    assert support.RECEIVED.format(remaining=2) in reply, "recorded, whatever delivery does"
+    ], "the failure is an error an operator sees"
+    assert RECORDED_UNDELIVERED in reply, "the one shared undelivered reply"
+    assert "Used" not in reply and "left" not in reply, "no used or left line"
     [row] = await _rows(db_session_factory)
     assert row.delivered_at is None, "kept as undelivered"
 
 
-async def test_the_request_is_answered_before_its_delivery_lands(
-    db_session_factory: async_sessionmaker[AsyncSession],
+async def test_a_slow_delivery_does_not_hold_the_invoke(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The invoke waits only briefly for the post, then answers as received."""
+    monkeypatch.setattr(support, "_DELIVERY_WAIT", 0.05)
     fake = _OpsFake()
     async with _running(db_session_factory, fake) as svc:
         card = await _form(svc, fake, make_message_activity(text="support"))

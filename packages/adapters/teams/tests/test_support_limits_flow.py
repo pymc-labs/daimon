@@ -114,8 +114,9 @@ async def _seed(
     spec: MenuSpec = MENU,
     per_person: Decimal = TWO,
     ends_at: datetime | None = None,
+    limit: bool = True,
 ) -> None:
-    """A workspace limit for the provisioned tenant, on `spec` unless `menu` is False."""
+    """A workspace limit (unless `limit` is False) for the provisioned tenant, on `spec` unless `menu` is."""
     async with factory() as session, session.begin():
         if menu:
             row = await store.set_menu(
@@ -129,19 +130,20 @@ async def _seed(
                 menu_id=row.id,
                 set_by_account_id=None,
             )
-        await store.set_limit(
-            session,
-            tenant_id=TENANT,
-            scope="workspace",
-            scope_id="",
-            platform_user_id=None,
-            shared=None,
-            each_person=per_person,
-            window="total",
-            starts_at=None if ends_at is None else ends_at - timedelta(days=30),
-            ends_at=ends_at,
-            set_by_account_id=None,
-        )
+        if limit:
+            await store.set_limit(
+                session,
+                tenant_id=TENANT,
+                scope="workspace",
+                scope_id="",
+                platform_user_id=None,
+                shared=None,
+                each_person=per_person,
+                window="total",
+                starts_at=None if ends_at is None else ends_at - timedelta(days=30),
+                ends_at=ends_at,
+                set_by_account_id=None,
+            )
 
 
 def _value(key: str) -> str:
@@ -405,6 +407,28 @@ async def test_send_when_option_has_no_fields_then_posts_pending_with_settle_con
     assert set(_settle_buttons(post)) == {"set", "decline"}, "Set charge and Decline"
     row = await _row(db_session_factory, post)
     assert (row.status, row.hold, row.support_post_id) == ("pending", D(1), "m-2"), row
+
+
+async def test_send_when_charged_to_the_default_then_the_open_and_closed_posts_agree(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """A range option with no limit: facts and controls open, the same facts closed, no balance."""
+    await _seed(db_session_factory, limit=False)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        _sent, post = await _pending(service, teams_api_fake)
+        before = len(teams_api_fake.activity_requests)
+        buttons = _settle_buttons(post)
+        await post_activity(service, _settle(buttons["set"], post_id="m-2", charge=2))
+        [edit] = teams_api_fake.activity_requests[before:]
+
+    shown, closed = _text(post), _text(edit.body)
+    for line in ("Review: 1-3 credits", "Pending: 1-3 credits"):
+        assert line in shown, f"the open post names its terms and price: {line}"
+    assert "credits left" not in shown, "no limit, so no balance"
+    assert CLIENT_NOT_NOTIFIED in shown, "the settler is told the client is not notified"
+    assert set(_settle_buttons(post)) == {"set", "decline"}, "Set charge and Decline"
+    assert "Review: 1-3 credits" in closed, "the closed post keeps the option's terms"
+    assert "Charged 2 credits" in closed
 
 
 async def test_send_when_every_field_is_full_then_the_post_shows_each_unclipped(
