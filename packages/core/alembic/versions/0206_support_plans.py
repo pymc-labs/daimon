@@ -7,7 +7,8 @@ a row is charged to, its plan, the option snapshot and answers, the hold and
 charge, the settle status and the support post. Server defaults make existing
 rows, and rows written by older pods, default-ledger rows charged 1, so the
 default sum equals the old count. Downgrading drops the tables and columns,
-losing every plan, catalog, allowance and settlement.
+losing every plan, catalog, allowance and settlement, and deletes the requests
+that did not count as default credits (plan, exempt, declined or pending).
 
 downgrade: destructive
 """
@@ -66,9 +67,9 @@ def _audit_columns() -> list[sa.Column[uuid.UUID] | sa.Column[datetime]]:
 
 def upgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
-    op.create_table(
     # One counter for every menu, so a deleted and recreated menu never repeats a revision.
     op.execute("CREATE SEQUENCE support_catalog_revision_seq")
+    op.create_table(
         "support_catalogs",
         _id(),
         _tenant(),
@@ -203,6 +204,9 @@ def _upgrade_escalations() -> None:
 def downgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
     table = "support_escalations"
+    # The old ledger counts every row as one default credit. Plan, exempt, declined
+    # and pending rows would be charged to the person's default allowance.
+    op.execute(f"DELETE FROM {table} WHERE charged_to <> 'default' OR status <> 'settled'")
     op.drop_index("support_escalations_pending_idx", table_name=table)
     op.drop_index("support_escalations_plan_idx", table_name=table)
     for name in (
