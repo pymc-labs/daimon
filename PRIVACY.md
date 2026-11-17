@@ -45,9 +45,9 @@ organisation a Teams deployment serves), daimon stores:
   what people ask it in direct messages, web chat and MCP, and its answers, for
   workspace admins to read. Over MCP it also keeps the name, time and outcome of
   each other tool a person calls on that agent, never what the call sent or
-  returned. People are told in the conversation, and the privacy panel says so.
-  Records are kept 90 days by default (`DAIMON_MONITORING__RETENTION_DAYS`);
-  account deletion removes them.
+  returned. People are told in the conversation or their first tool result, and
+  the privacy panel says so. Records are kept 90 days by default
+  (`DAIMON_MONITORING__RETENTION_DAYS`); account deletion removes them.
 - **Agent credentials** — any bound external credentials (e.g. a GitHub
   personal access token used by `get_cli_token`), encrypted at rest.
 

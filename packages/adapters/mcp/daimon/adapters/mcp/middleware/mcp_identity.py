@@ -50,7 +50,7 @@ from daimon.core.host_memory import HOST_MEMORY_TAG, HOST_MEMORY_TOOLS
 from daimon.core.host_web_fetch import HOST_WEB_FETCH_TAG
 from daimon.core.mcp_auth import HOST_BUILTINS_CLAIM
 from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
-from daimon.core.monitoring import MCP_NOTICE, capture_tool_call, record_notice
+from daimon.core.monitoring import MCP_NOTICE, capture_tool_call, mcp_notice_due, record_notice
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.operator_tokens import scope_tag
 from daimon.core.security_audit import capture_decision, record_denial
@@ -66,7 +66,10 @@ from fastmcp.exceptions import AuthorizationError, NotFoundError, ToolError
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.transforms.visibility import disable_components, enable_components
+from fastmcp.tools import ToolResult
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
+
+from mcp.types import CallToolResult, TextContent
 
 if TYPE_CHECKING:
     from daimon.adapters.mcp.middleware.host_call_gate import HostCallGate
@@ -250,6 +253,11 @@ class IdentityMiddleware(Middleware):
                         MonitoredSubject(tenant_id, monitored_agent, "mcp", account_id, None),
                         result,
                     )
+                elif monitored_agent is not None and account_id is not None:
+                    result = await self._tell_on_first_call(
+                        MonitoredSubject(tenant_id, monitored_agent, "mcp", account_id, None),
+                        result,
+                    )
                 return result
             except BaseException as exc:
                 if isinstance(exc, (AuthorizationError, NotFoundError)):
@@ -316,6 +324,40 @@ class IdentityMiddleware(Middleware):
                             at=started_at,
                         ),
                     )
+
+    async def _tell_on_first_call(self, subject: MonitoredSubject, result: object) -> object:
+        """Add the notice to the person's first call result since monitoring was switched
+        on, as one more text block, and note it once that result is built. Their calls are
+        kept only from then on, so a refused call before it is not."""
+        if not isinstance(result, ToolResult | CallToolResult):
+            return result
+        try:
+            async with asyncio.timeout(self._audit_timeout):
+                if not await mcp_notice_due(
+                    self._audit_sessionmaker,
+                    self._settings,
+                    tenant_id=subject.tenant_id,
+                    agent_id=subject.agent_id,
+                    account_id=subject.account_id,
+                ):
+                    return result
+        except TimeoutError:
+            structlog.get_logger(__name__).warning(
+                "monitoring.capture_failed", kind="notice", error_type="TimeoutError"
+            )
+            return result
+        told = result.model_copy(
+            update={"content": [*result.content, TextContent(type="text", text=MCP_NOTICE.text)]}
+        )
+        try:
+            # Noted before it goes back, so the person's next call sees it.
+            async with asyncio.timeout(self._audit_timeout):
+                await record_notice(self._audit_sessionmaker, subject, MCP_NOTICE)
+        except TimeoutError:
+            structlog.get_logger(__name__).warning(
+                "monitoring.capture_failed", kind="notice", error_type="TimeoutError"
+            )
+        return told
 
     def _note_shown_notice(self, subject: MonitoredSubject, result: object) -> None:
         """Note the notice an agent-chat result carries as `monitoring` (its handle and

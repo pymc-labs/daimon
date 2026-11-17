@@ -962,7 +962,7 @@ Keeps what people ask this agent in direct messages and web chat, and what it an
 
 ## Monitor coding tools
 
-Keeps what people ask this agent from their coding tools and what it answers, and the name, time and outcome of each other tool they call on it, never what the call sent or returned. People are told in the conversation. Kept from when it is turned on, for the retention period.
+Keeps what people ask this agent from their coding tools and what it answers, and the name, time and outcome of each other tool they call on it, never what the call sent or returned. People are told in the conversation or their first tool result. Kept from when it is turned on, for the retention period.
 
 | | |
 | --- | --- |

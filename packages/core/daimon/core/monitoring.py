@@ -2,10 +2,11 @@
 
 `monitor_direct_messages` covers direct messages (Discord, Slack, Teams) and web chat;
 `monitor_mcp` covers MCP agent chat and the person's other MCP tool calls on that agent,
-by name, time and outcome only. Both are keyed on the agent that answers and read when a
-question is asked, so a conversation begun earlier is kept from the switch on, never
-before it, and an answer is kept only when its question was. `must_tell` decides when the
-person is told, with the same words on every path, and `record_notice` notes it once shown.
+by name, time and outcome only, from the call whose result told them. Both are keyed on
+the agent that answers and read when a question is asked, so a conversation begun earlier
+is kept from the switch on, never before it, and an answer is kept only when its question
+was. `must_tell` decides when the person is told, with the same words on every path, and
+`record_notice` notes it once shown.
 """
 
 from __future__ import annotations
@@ -320,6 +321,53 @@ async def open_questions(
     return frozenset(refs)
 
 
+async def mcp_notice_due(
+    sessions: async_sessionmaker[AsyncSession],
+    settings: Settings | None,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    account_id: uuid.UUID,
+) -> bool:
+    """Whether a person's MCP tool call on the agent must carry the notice: monitored, and
+    they were not told since it was switched on. Until then their calls are not kept."""
+    try:
+        async with sessions() as session:
+            untold = await _untold(
+                session, settings, tenant_id=tenant_id, agent_id=agent_id, account_id=account_id
+            )
+        return untold is True
+    # Unknown, the result goes back as it is; its call is kept only once they are told.
+    except Exception:
+        log.warning("monitoring.capture_failed", kind="notice", platform="mcp", exc_info=True)
+        return False
+
+
+async def _untold(
+    session: AsyncSession,
+    settings: Settings | None,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    account_id: uuid.UUID,
+) -> bool | None:
+    """None when the agent is not monitored over MCP, else whether the person must be told."""
+    state = await monitoring_state(
+        session, settings, tenant_id=tenant_id, agent_id=agent_id, platform="mcp"
+    )
+    if not state.on:
+        return None
+    told_at = await _told_at(
+        session,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        platform="mcp",
+        account_id=account_id,
+        conversation=None,
+    )
+    return must_tell(state, told_at)
+
+
 async def capture_tool_call(
     sessions: async_sessionmaker[AsyncSession],
     settings: Settings | None,
@@ -332,15 +380,15 @@ async def capture_tool_call(
     at: datetime | None = None,
 ) -> bool:
     """Keep an MCP tool call's name, time (`at`, when it began) and outcome, never its
-    arguments or result."""
+    arguments or result, once the person was told (`mcp_notice_due`)."""
     if account_id is None:
         return False
     try:
         async with sessions() as session, session.begin():
-            state = await monitoring_state(
-                session, settings, tenant_id=tenant_id, agent_id=agent_id, platform="mcp"
+            untold = await _untold(
+                session, settings, tenant_id=tenant_id, agent_id=agent_id, account_id=account_id
             )
-            if not state.on:
+            if untold is not False:
                 return False
             subject = store.MonitoredSubject(tenant_id, agent_id, "mcp", account_id, None)
             entry = store.MonitoredEntry(

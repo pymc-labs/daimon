@@ -7,6 +7,7 @@ import ast
 import datetime as dt
 import uuid
 from pathlib import Path
+from typing import cast
 
 import pytest
 from daimon.adapters.mcp.auth.verifier import CHAT_EXECUTION_CLAIM, TOKEN_KIND_CLAIM
@@ -137,11 +138,12 @@ async def test_a_monitored_agents_tool_calls_keep_name_and_outcome_only(
 
     rows = await _calls(mcp, sm, tenant, agent)
 
-    assert sorted((row.tool_name, row.outcome) for row in rows) == [
-        ("broken", "error"),
-        ("lookup", "completed"),
+    assert sorted((row.kind, row.tool_name, row.outcome) for row in rows) == [
+        ("notice", None, None),
+        ("tool", "broken", "error"),
+        ("tool", "lookup", "completed"),
     ], rows
-    assert all(row.kind == "tool" and row.account_id == account for row in rows), rows
+    assert all(row.account_id == account for row in rows), rows
     assert "ARG_SECRET" not in repr(rows) and "result" not in repr(rows), rows
 
 
@@ -173,19 +175,56 @@ async def test_refused_calls_are_kept_as_denied_not_completed(
     mcp = _server(sm, tenant, account, agent_id=str(agent))
     app = mcp.http_app()
 
-    for name in ("refused_by_policy", "refused_by_authorization", "no_such_tool", "lookup"):
+    for name in ("lookup", "refused_by_policy", "refused_by_authorization", "no_such_tool"):
         await call_mcp_tool(app, token=TOKEN, name=name, arguments={"secret": "ARG_SECRET"})
     await _drain(mcp)
     async with sm() as session:
         rows = await store.list_events(session, tenant_id=tenant, agent_id=agent)
 
-    assert sorted((row.tool_name, row.outcome) for row in rows) == [
+    assert sorted((row.tool_name, row.outcome) for row in rows if row.kind == "tool") == [
         ("lookup", "completed"),
         ("no_such_tool", "denied"),
         ("refused_by_authorization", "denied"),
         ("refused_by_policy", "denied"),
     ], rows
     assert "ARG_SECRET" not in repr(rows), "a refused call kept its arguments"
+
+
+def _texts(response: dict[str, object]) -> list[str]:
+    result = cast("dict[str, list[dict[str, str]]]", response["result"])
+    return [block["text"] for block in result["content"]]
+
+
+def _structured(response: dict[str, object]) -> object:
+    return cast("dict[str, object]", response["result"]).get("structuredContent")
+
+
+async def test_the_first_kept_call_tells_the_person(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Its result carries the notice as one more text block, structured content left as
+    it is; a call before it, which could not tell them, is not kept."""
+    sm = committing_sessionmaker
+    tenant, account, agent = await _seed(sm, monitored=True)
+    mcp = _server(sm, tenant, account, agent_id=str(agent))
+    app = mcp.http_app()
+    args: dict[str, object] = {"secret": "x"}
+
+    await call_mcp_tool(app, token=TOKEN, name="broken", arguments=args)
+    first = await call_mcp_tool(app, token=TOKEN, name="lookup", arguments=args)
+    second = await call_mcp_tool(app, token=TOKEN, name="lookup", arguments=args)
+    await _drain(mcp)
+    async with sm() as session:
+        rows = await store.list_events(session, tenant_id=tenant, agent_id=agent)
+
+    assert _texts(first) == ["result x", MCP_NOTICE.text], first
+    assert _texts(second) == ["result x"], second
+    assert _structured(first) == _structured(second), first
+    assert sorted((row.kind, row.tool_name) for row in rows) == [
+        ("notice", None),
+        ("tool", "lookup"),
+        ("tool", "lookup"),
+    ], rows
 
 
 @pytest.mark.parametrize(

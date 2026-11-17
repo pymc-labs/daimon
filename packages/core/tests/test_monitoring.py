@@ -7,6 +7,7 @@ account erasure. `test_monitoring_paths.py` checks that every chat and MCP path 
 from __future__ import annotations
 
 import base64
+import functools
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -14,9 +15,11 @@ import pytest
 from daimon.core import monitoring, monitoring_view
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.monitoring import (
+    MCP_NOTICE,
     capture_answer,
     capture_question,
     capture_tool_call,
+    mcp_notice_due,
     monitoring_state,
     record_notice,
 )
@@ -84,6 +87,27 @@ async def _ask(
     if told and kept is not None and kept.notice is not None:
         assert await record_notice(sessions, kept.subject, kept.notice, turn_ref=turn_ref)
     return kept is not None
+
+
+async def _tell_over_mcp(sessions: Sessions, tenant_id: uuid.UUID, account_id: uuid.UUID) -> None:
+    agent = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="agt_a")
+    subject = store.MonitoredSubject(tenant_id, agent, "mcp", account_id, None)
+    assert await record_notice(sessions, subject, MCP_NOTICE)
+
+
+async def _tool(
+    sessions: Sessions, tenant_id: uuid.UUID, account_id: uuid.UUID, *, at: datetime | None = None
+) -> bool:
+    return await capture_tool_call(
+        sessions,
+        None,
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="agt_a"),
+        account_id=account_id,
+        tool_name="notion_search",
+        outcome="error",
+        at=at,
+    )
 
 
 async def _answer(sessions: Sessions, tenant_id: uuid.UUID, turn_ref: str) -> bool:
@@ -240,20 +264,10 @@ async def test_a_tool_call_keeps_its_name_time_and_outcome_only(
     account = await make_account(db_session, tenant=tenant)
     await _switch(db_session, tenant.id, "monitor_mcp", agent="agt_a")
     at = datetime(2026, 11, 1, 9, 30, tzinfo=UTC)
+    await _tell_over_mcp(db_session_factory, tenant.id, account.id)
 
-    kept = await capture_tool_call(
-        db_session_factory,
-        None,
-        tenant_id=tenant.id,
-        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agt_a"),
-        account_id=account.id,
-        tool_name="notion_search",
-        outcome="error",
-        at=at,
-    )
-
-    assert kept, "a monitored agent's tool call is kept"
-    [row] = await _rows(db_session_factory, tenant.id)
+    assert await _tool(db_session_factory, tenant.id, account.id, at=at), "kept once told"
+    [row] = [row for row in await _rows(db_session_factory, tenant.id) if row.kind == "tool"]
     assert (row.kind, row.tool_name, row.outcome, row.created_at) == (
         "tool",
         "notion_search",
@@ -261,6 +275,25 @@ async def test_a_tool_call_keeps_its_name_time_and_outcome_only(
         at,
     ), row
     assert row.content is None and row.conversation is None and row.turn_ref is None, row
+
+
+async def test_a_tool_call_is_kept_only_once_the_person_was_told(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    """Until a notice row since the switch on, the call's result must carry the notice."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await _switch(db_session, tenant.id, "monitor_mcp", agent="agt_a")
+    agent = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agt_a")
+    due = functools.partial(
+        mcp_notice_due, db_session_factory, None, tenant_id=tenant.id, agent_id=agent
+    )
+
+    assert await due(account_id=account.id), "an untold person is due the notice"
+    assert not await _tool(db_session_factory, tenant.id, account.id), "kept untold"
+    await _tell_over_mcp(db_session_factory, tenant.id, account.id)
+    assert not await due(account_id=account.id), "told once per switch on"
+    assert await _tool(db_session_factory, tenant.id, account.id), "told, the call is kept"
 
 
 async def test_a_tool_day_transcript_holds_that_utc_day_only(
@@ -271,17 +304,9 @@ async def test_a_tool_day_transcript_holds_that_utc_day_only(
     account = await make_account(db_session, tenant=tenant)
     await _switch(db_session, tenant.id, "monitor_mcp", agent="agt_a")
     day = datetime(2026, 11, 1, tzinfo=UTC)
+    await _tell_over_mcp(db_session_factory, tenant.id, account.id)
     for at in (day, day + timedelta(hours=23, minutes=59), day + timedelta(days=1)):
-        await capture_tool_call(
-            db_session_factory,
-            None,
-            tenant_id=tenant.id,
-            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agt_a"),
-            account_id=account.id,
-            tool_name="notion_search",
-            outcome="completed",
-            at=at,
-        )
+        assert await _tool(db_session_factory, tenant.id, account.id, at=at)
 
     async with db_session_factory() as session:
         rows = await monitoring_view.list_conversations(

@@ -15,8 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it on the agent page, in a Monitoring tab in admin, with the
   `list_monitored_activity` and `get_monitored_conversation` tools, or with
   `daimon monitoring list`. People see a neutral notice at their first direct
-  message, in web chat and in the MCP descriptions, and the privacy panel says
-  what admins can read. Rows are deleted with the person's account and after
+  message, in web chat, in the MCP descriptions and in their first tool result.
+  The privacy panel says what admins can read. Rows are deleted with the person's account and after
   `DAIMON_MONITORING__RETENTION_DAYS` (default 90).
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and
