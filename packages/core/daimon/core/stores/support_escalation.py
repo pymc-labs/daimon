@@ -40,7 +40,6 @@ from typing import Any, Final, Literal, cast
 from daimon.core._models import SupportEscalation
 from daimon.core.stores.access_policy import lock_access_policy
 from daimon.core.stores.support import (
-    get_limit,
     get_limit_by_id,
     limits_for_place,
     menu_for_place,
@@ -52,7 +51,6 @@ from daimon.core.support import (
     RequestChoice,
     RequestStatus,
     SettleProblem,
-    SupportScope,
     governing_limit,
     hold_for,
     limit_period,
@@ -872,7 +870,8 @@ async def submit_request(
             ma_session_id=ma_session_id,
             note=request_note(option, answers),
             charged_to=view.charged_to,
-            limit_id=None if governing.limit is None else governing.limit.id,
+            limit_id=_limit_key(governing.limit),
+            person_limit_id=_limit_key(governing.person),
             option_key=option.key,
             option=snapshot.model_dump(mode="json", exclude_none=True),
             answers=answers,
@@ -962,30 +961,12 @@ class SettleOutcome:
 
 
 async def _settle_person(
-    session: AsyncSession, *, row: SupportEscalationRow, limit: SupportLimitRow | None
+    session: AsyncSession, *, row: SupportEscalationRow
 ) -> SupportLimitRow | None:
-    """The person's own limit for a settle: at the limit's place, else Everywhere.
-
-    A default-ledger row looks at its channel, then Everywhere; the agent of a
-    past request is not stored, so an agent's person row is not found here.
-    """
-    places: list[tuple[SupportScope, str]] = []
-    if limit is not None:
-        places.append((limit.scope, limit.scope_id))
-    else:
-        places.append(("channel", row.channel_id))
-    places.append(("workspace", ""))
-    for scope, scope_id in places:
-        person = await get_limit(
-            session,
-            tenant_id=row.tenant_id,
-            scope=scope,
-            scope_id=scope_id,
-            platform_user_id=row.platform_user_id,
-        )
-        if person is not None:
-            return person
-    return None
+    """The person's own limit that capped the request at submit, as it stands now."""
+    if row.person_limit_id is None:
+        return None
+    return await get_limit_by_id(session, tenant_id=row.tenant_id, limit_id=row.person_limit_id)
 
 
 async def _ledger_available(
@@ -999,7 +980,7 @@ async def _ledger_available(
         limit = await get_limit_by_id(session, tenant_id=row.tenant_id, limit_id=row.limit_id)
         if limit is None:
             return None
-    person = await _settle_person(session, row=row, limit=limit)
+    person = await _settle_person(session, row=row)
     balance = await _balance(
         session,
         tenant_id=row.tenant_id,

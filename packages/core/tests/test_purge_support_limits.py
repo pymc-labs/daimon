@@ -1,17 +1,16 @@
-"""Erasure on support plans: the person leaves their plan rows, the charges stay (decision 7)."""
+"""Erasure on support limits: the person leaves their limit rows, the charges stay."""
 
 from __future__ import annotations
 
 import uuid
 from decimal import Decimal
 
-from daimon.core._models import SupportAllowance, SupportEscalation
+from daimon.core._models import SupportEscalation, SupportLimit
 from daimon.core.privacy import collect_purge_preview
 from daimon.core.purge import purge_account, purge_principal
-from daimon.core.stores import support as plans
+from daimon.core.stores import support as store
 from daimon.core.stores import support_escalation as ledger
 from daimon.core.support import RequestChoice, SupportPlace, parse_menu
-from daimon.core.windows import WindowBounds
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -35,36 +34,43 @@ MENU = parse_menu(
 type Factory = async_sessionmaker[AsyncSession]
 
 
-async def _person_with_plan_history(db_session: AsyncSession) -> tuple[uuid.UUID, uuid.UUID]:
-    """GONE asked on the plan and on the default, holds an allowance and settled STAY's request."""
+async def _person_with_limit_history(db_session: AsyncSession) -> tuple[uuid.UUID, uuid.UUID]:
+    """GONE asked on C1's limit and on the default, has two own limits, settled STAY's request."""
     tenant = await make_tenant(db_session, platform="slack", workspace_id="T_PURGE_PLAN")
     account = await make_account(db_session, tenant=tenant)
     principal = await make_platform_principal(
         db_session, platform="slack", external_id=GONE, tenant=tenant, account=account
     )
-    menu = await plans.set_catalog(
+    menu = await store.set_menu(
         db_session, tenant_id=tenant.id, key="support", spec=MENU, set_by_account_id=None
     )
-    plan = await plans.set_plan(
+    await store.set_menu_use(
         db_session,
         tenant_id=tenant.id,
-        platform="slack",
-        scope="channel",
-        scope_id="C1",
-        catalog_id=menu.id,
-        pool=D(10),
-        per_person=None,
-        window=WindowBounds("total", None, None),
+        scope="workspace",
+        scope_id="",
+        menu_id=menu.id,
         set_by_account_id=None,
     )
-    await plans.set_allowance(
-        db_session,
-        tenant_id=tenant.id,
-        limit_id=plan.id,
-        platform_user_id=GONE,
-        credits=D(4),
-        set_by_account_id=None,
+    places = (
+        ("channel", "C1", None, D(10)),
+        ("channel", "C1", GONE, None),
+        ("workspace", "", GONE, None),
     )
+    for scope, scope_id, person, shared in places:
+        await store.set_limit(
+            db_session,
+            tenant_id=tenant.id,
+            scope=scope,
+            scope_id=scope_id,
+            platform_user_id=person,
+            shared=shared,
+            each_person=None if shared else D(4),
+            window="total",
+            starts_at=None,
+            ends_at=None,
+            set_by_account_id=None,
+        )
     choice = RequestChoice.of(MENU.options[0], answers={"note": "my private words"})
     ids: dict[str, uuid.UUID] = {}
     for user, account_id in ((GONE, account.id), (STAY, None)):
@@ -81,7 +87,7 @@ async def _person_with_plan_history(db_session: AsyncSession) -> tuple[uuid.UUID
             choice=choice,
             default_allowance=20,
         )
-        assert outcome.row, f"{user} recorded on the plan"
+        assert outcome.row, f"{user} recorded on the limit"
         ids[user] = outcome.row.id
     settled = await ledger.settle_request(
         db_session,
@@ -115,10 +121,10 @@ async def _rows(db_session: AsyncSession) -> list[SupportEscalation]:
     return list((await db_session.execute(stmt)).scalars().all())
 
 
-async def test_purge_principal_when_plan_history_then_anonymizes_and_keeps_charges(
+async def test_purge_principal_when_limit_history_then_anonymizes_and_keeps_charges(
     db_session: AsyncSession, db_session_factory: Factory
 ) -> None:
-    principal_id, _ = await _person_with_plan_history(db_session)
+    principal_id, _ = await _person_with_limit_history(db_session)
     report = (
         await purge_principal(sm=db_session_factory, principal_id=principal_id, kind="platform")
     ).db
@@ -128,7 +134,7 @@ async def test_purge_principal_when_plan_history_then_anonymizes_and_keeps_charg
         report.support_allowances,
         report.support_settlers_cleared,
     )
-    assert counts == (1, 1, 1, 1), "legacy row deleted; plan row, allowance and settler handled"
+    assert counts == (1, 1, 2, 1), "legacy row deleted; limit row, own limits and settler handled"
     rows = {r.message_id: r for r in await _rows(db_session)}
     assert set(rows) == {f"m-{GONE}", f"m-{STAY}"}, "only the default-ledger row is deleted"
     gone = rows[f"m-{GONE}"]
@@ -136,24 +142,25 @@ async def test_purge_principal_when_plan_history_then_anonymizes_and_keeps_charg
         ledger.PURGED_USER,
         None,
         None,
-    ), "the person is erased from their plan row"
+    ), "the person is erased from their limit row"
     assert (gone.note, gone.answers) == ("", None), "their words go with them"
-    assert (gone.status, gone.hold) == ("pending", D(1)), "the pool keeps the hold"
+    assert (gone.status, gone.hold) == ("pending", D(1)), "the shared credits keep the hold"
+    assert (gone.limit_id is not None, gone.person_limit_id) == (True, None), "own limit unlinked"
     stay = rows[f"m-{STAY}"]
     assert (stay.settled_by, stay.settled_by_account_id) == (None, None), "the settler is cleared"
     assert (stay.platform_user_id, stay.charge) == (STAY, D("1.5")), "the bystander's row stays"
-    allowances = (await db_session.execute(select(SupportAllowance))).scalars().all()
-    assert list(allowances) == [], "the person's allowance is deleted"
+    limits = (await db_session.execute(select(SupportLimit))).scalars().all()
+    assert [lim.platform_user_id for lim in limits] == [None], "only C1's own limit is left"
     again = (
         await purge_principal(sm=db_session_factory, principal_id=principal_id, kind="platform")
     ).db
     assert again.support_requests_anonymized == 0, "a re-run finds no one left to erase"
 
 
-async def test_purge_account_when_plan_history_then_matches_its_preview(
+async def test_purge_account_when_limit_history_then_matches_its_preview(
     db_session: AsyncSession, db_session_factory: Factory
 ) -> None:
-    _, account_id = await _person_with_plan_history(db_session)
+    _, account_id = await _person_with_limit_history(db_session)
     preview = await collect_purge_preview(sm=db_session_factory, account_id=account_id)
     report = (await purge_account(sm=db_session_factory, account_id=account_id)).db
     assert (
@@ -167,7 +174,7 @@ async def test_purge_account_when_plan_history_then_matches_its_preview(
             report.support_allowances,
             report.support_settlers_cleared,
         )
-        == (1, 1, 1)
+        == (1, 2, 1)
     ), "the preview names exactly what the purge does"
     rows = await _rows(db_session)
-    assert [r.platform_user_id for r in rows] == [ledger.PURGED_USER, STAY], "plan rows remain"
+    assert [r.platform_user_id for r in rows] == [ledger.PURGED_USER, STAY], "limit rows remain"

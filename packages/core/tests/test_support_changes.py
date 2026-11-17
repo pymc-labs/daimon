@@ -1,8 +1,7 @@
-"""Support plan changes: admin only, compared against what the caller read, audited."""
+"""Support changes: admin only, compared against what the caller read, audited."""
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import uuid
 from decimal import Decimal
@@ -17,24 +16,25 @@ from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.support import RequestChoice, SupportPlace, parse_limit_spec, parse_menu
 from daimon.core.support_changes import (
-    ALLOWANCE_SETTING,
-    CATALOG_SETTING,
-    PLAN_SETTING,
+    CHANNEL_SETTING,
+    LIMIT_SETTING,
+    MENU_SETTING,
+    MENU_USE_SETTING,
     SETTLE_SETTING,
-    PlanValue,
-    clear_allowance,
-    clear_plan,
-    is_support_channel,
+    ChannelPick,
+    clear_limit,
     may_set_support,
-    read_plan,
-    remove_catalog,
-    set_allowance,
-    set_catalog,
-    set_plan,
+    read_menu_use,
+    remove_menu,
+    set_limit,
+    set_menu,
+    set_menu_use,
+    set_support_channel,
     settle,
     settle_from_post,
     stale_text,
 )
+from daimon.core.support_routing import in_channel
 from daimon.testing.factories import make_platform_principal, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -47,7 +47,7 @@ MENU = parse_menu(
         ],
     }
 )
-PLAN = parse_limit_spec(scope="channel", scope_id="C1", catalog="support", pool="5")
+LIMIT = parse_limit_spec(scope="channel", scope_id="C1", shared="5")
 
 type Factory = async_sessionmaker[AsyncSession]
 
@@ -67,7 +67,15 @@ async def _tenant(db_session: AsyncSession) -> uuid.UUID:
     return tenant.id
 
 
+async def _menu(factory: Factory, actor: ChannelActor) -> None:
+    await set_menu(factory, actor, platform="slack", key="support", spec=MENU)
+    await set_menu_use(
+        factory, actor, platform="slack", scope="workspace", scope_id="", key="support"
+    )
+
+
 async def _pending(factory: Factory, tenant_id: uuid.UUID, message: str = "m1") -> uuid.UUID:
+    """A request in C1, posted to the support channel S1."""
     async with factory.begin() as session:
         outcome = await ledger.submit_request(
             session,
@@ -82,11 +90,34 @@ async def _pending(factory: Factory, tenant_id: uuid.UUID, message: str = "m1") 
             choice=RequestChoice.of(MENU.options[0]),
             default_allowance=20,
         )
-    assert outcome.status == "recorded" and outcome.row, "a pending request"
+        assert outcome.status == "recorded" and outcome.row, "a pending request"
+        await ledger.mark_delivered(session, escalation_id=outcome.row.id, support_channel_id="S1")
     return outcome.row.id
 
 
-def test_may_set_support_plan_when_any_subject_then_matches_channel_budgets() -> None:
+async def _from_post(
+    factory: Factory,
+    request_id: uuid.UUID,
+    charge: Decimal | None,
+    *,
+    by: str = "Staff",
+    account: uuid.UUID | None = None,
+    channel: str = "S1",
+) -> ledger.SettleOutcome:
+    return await settle_from_post(
+        factory,
+        escalation_id=request_id,
+        charge=charge,
+        settled_by=by,
+        settled_by_account_id=account,
+        default_allowance=20,
+        channel_id=channel,
+        parent_id=None,
+        default_channel_id="SDEFAULT",
+    )
+
+
+def test_may_set_support_when_any_subject_then_matches_channel_budgets() -> None:
     # Spec: server admin only, as SET_CHANNEL_BUDGET is (an admin's agent key included).
     subjects = (
         Subject(),
@@ -103,11 +134,11 @@ def test_may_set_support_plan_when_any_subject_then_matches_channel_budgets() ->
     assert not may_set_support(Subject()), "a member may not"
 
 
-def test_is_support_channel_when_post_or_its_thread_then_true() -> None:
-    assert is_support_channel(configured="S1", channel_id="S1", parent_id=None), "the channel"
-    assert is_support_channel(configured="S1", channel_id="T1", parent_id="S1"), "a thread in it"
-    assert not is_support_channel(configured="S1", channel_id="C1", parent_id=None), "elsewhere"
-    assert not is_support_channel(configured=None, channel_id="S1", parent_id=None), "unset"
+def test_in_channel_when_post_or_its_thread_then_true() -> None:
+    assert in_channel(configured="S1", channel_id="S1", parent_id=None), "the channel"
+    assert in_channel(configured="S1", channel_id="T1", parent_id="S1"), "a thread in it"
+    assert not in_channel(configured="S1", channel_id="C1", parent_id=None), "elsewhere"
+    assert not in_channel(configured=None, channel_id="S1", parent_id=None), "unset"
 
 
 async def test_changes_when_not_an_admin_then_forbidden_and_unrecorded(
@@ -115,76 +146,97 @@ async def test_changes_when_not_an_admin_then_forbidden_and_unrecorded(
 ) -> None:
     tenant_id = await _tenant(db_session)
     member = _actor(tenant_id, Subject(platform_user_id="U1"))
+    f = db_session_factory
     attempts = (
-        set_plan(db_session_factory, member, platform="slack", spec=PLAN),
-        set_catalog(db_session_factory, member, platform="slack", key="support", spec=MENU),
-        set_allowance(
-            db_session_factory, member, platform="slack", platform_user_id="U1", credits=D(9)
-        ),
-        settle(
-            db_session_factory,
-            member,
-            escalation_id=uuid.uuid4(),
-            charge=D(1),
-            default_allowance=20,
-        ),
+        set_limit(f, member, platform="slack", spec=LIMIT),
+        clear_limit(f, member, platform="slack", scope="channel", scope_id="C1"),
+        set_menu(f, member, platform="slack", key="support", spec=MENU),
+        remove_menu(f, member, platform="slack", key="support"),
+        set_menu_use(f, member, platform="slack", scope="workspace", scope_id="", key=None),
+        set_support_channel(f, member, pick=ChannelPick("slack", "S9"), own_allowed=True),
+        settle(f, member, escalation_id=uuid.uuid4(), charge=D(1), default_allowance=20),
     )
     for attempt in attempts:
         with pytest.raises(ChannelChangeRefused) as refused:
             await attempt
-        assert refused.value.kind == "forbidden", "only an admin changes support plans"
+        assert refused.value.kind == "forbidden", "only an admin changes support"
     changes = await list_changes(db_session, tenant_id=tenant_id, channel_id=WORKSPACE_ID)
     assert changes == [], "a refusal records nothing"
 
 
-async def test_set_plan_when_expected_is_stale_then_refuses_and_records_once(
+async def test_set_limit_when_expected_is_stale_then_refuses_and_records_once(
     db_session: AsyncSession, db_session_factory: Factory
 ) -> None:
     tenant_id = await _tenant(db_session)
     actor = _actor(tenant_id)
-    with pytest.raises(ChannelChangeRefused) as missing:
-        await set_plan(db_session_factory, actor, platform="slack", spec=PLAN)
-    assert missing.value.kind == "not_found", "the plan names a menu that does not exist"
-    await set_catalog(
-        db_session_factory,
-        actor,
-        platform="slack",
-        key="support",
-        spec=MENU,
-        expected=Expected(None),
+    row = await set_limit(
+        db_session_factory, actor, platform="slack", spec=LIMIT, expected=Expected(None)
     )
-    await set_plan(db_session_factory, actor, platform="slack", spec=PLAN, expected=Expected(None))
     with pytest.raises(StaleChannelValue) as stale:
-        await set_plan(
-            db_session_factory, actor, platform="slack", spec=PLAN, expected=Expected(None)
+        await set_limit(
+            db_session_factory, actor, platform="slack", spec=LIMIT, expected=Expected(None)
         )
-    assert isinstance(stale.value.current, dict), "the stale error carries the plan now"
-    current = await read_plan(db_session, tenant_id=tenant_id, scope="channel", scope_id="C1")
-    assert current and current.catalog == "support" and current.pool == 5, "the plan as read"
-    cleared = await clear_plan(
+    assert stale_text(stale.value).endswith(f"Now: revision {row.revision}."), "the limit now"
+    with pytest.raises(StaleChannelValue):
+        await clear_limit(
+            db_session_factory,
+            actor,
+            platform="slack",
+            scope="channel",
+            scope_id="C1",
+            expected=Expected(row.revision - 1),
+        )
+    cleared = await clear_limit(
         db_session_factory,
         actor,
         platform="slack",
         scope="channel",
         scope_id="C1",
-        expected=Expected(current),
+        expected=Expected(row.revision),
     )
     assert cleared, "cleared against what was read"
     changes = await list_changes(db_session, tenant_id=tenant_id, channel_id="C1")
     assert [(c.before is None, c.after is None, c.surface) for c in changes] == [
         (False, True, "web"),
         (True, False, "web"),
-    ], "a channel plan is recorded on its channel; the stale attempt left no row"
+    ], "a channel limit is recorded on its channel; the stale attempts left no row"
 
 
-async def test_remove_catalog_when_a_plan_uses_it_then_refused_until_cleared(
+async def test_set_limit_when_a_persons_own_then_the_audit_names_no_person(
     db_session: AsyncSession, db_session_factory: Factory
 ) -> None:
     tenant_id = await _tenant(db_session)
     actor = _actor(tenant_id)
-    menu = await set_catalog(db_session_factory, actor, platform="slack", key="support", spec=MENU)
+    spec = parse_limit_spec(scope="workspace", platform_user_id="USECRET", each_person="3")
+    await set_limit(db_session_factory, actor, platform="slack", spec=spec, expected=Expected(None))
+
+    async def clear() -> bool:
+        return await clear_limit(
+            db_session_factory,
+            actor,
+            platform="slack",
+            scope="workspace",
+            scope_id="",
+            platform_user_id="USECRET",
+        )
+
+    assert (await clear(), await clear()) == (True, False), "cleared once"
+    changes = await list_changes(db_session, tenant_id=tenant_id, channel_id=WORKSPACE_ID)
+    limits = [c for c in changes if c.setting == LIMIT_SETTING]
+    assert [c.after is None for c in limits] == [True, False], "set then cleared"
+    assert isinstance(limits[1].after, dict) and limits[1].after["person"] is True
+    dumped = json.dumps([[c.before, c.after] for c in changes])
+    assert "USECRET" not in dumped, "channel_changes never names a person"
+
+
+async def test_remove_menu_when_a_place_uses_it_then_refused_until_dropped(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    tenant_id = await _tenant(db_session)
+    actor = _actor(tenant_id)
+    menu = await set_menu(db_session_factory, actor, platform="slack", key="support", spec=MENU)
     with pytest.raises(StaleChannelValue):
-        await set_catalog(
+        await set_menu(
             db_session_factory,
             actor,
             platform="slack",
@@ -192,40 +244,75 @@ async def test_remove_catalog_when_a_plan_uses_it_then_refused_until_cleared(
             spec=MENU,
             expected=Expected(menu.revision - 1),
         )
-    await set_plan(db_session_factory, actor, platform="slack", spec=PLAN)
+    await set_menu_use(
+        db_session_factory, actor, platform="slack", scope="channel", scope_id="C1", key="support"
+    )
     with pytest.raises(ChannelChangeRefused) as in_use:
-        await remove_catalog(db_session_factory, actor, platform="slack", key="support")
+        await remove_menu(db_session_factory, actor, platform="slack", key="support")
     assert in_use.value.kind == "invalid", "a menu in use stays"
-    await clear_plan(db_session_factory, actor, platform="slack", scope="channel", scope_id="C1")
-    await remove_catalog(
+    old = await set_menu_use(
+        db_session_factory, actor, platform="slack", scope="channel", scope_id="C1", key=None
+    )
+    assert old == "support", "returns the place's old pick"
+    await remove_menu(
         db_session_factory, actor, platform="slack", key="support", expected=Expected(menu.revision)
     )
-    with pytest.raises(ChannelChangeRefused, match="key support. There are no menus yet") as gone:
-        await remove_catalog(db_session_factory, actor, platform="slack", key="support")
+    with pytest.raises(ChannelChangeRefused, match="key. There are no menus yet") as gone:
+        await remove_menu(db_session_factory, actor, platform="slack", key="support")
     assert gone.value.kind == "not_found", "removing a menu twice is refused"
+    changes = await list_changes(db_session, tenant_id=tenant_id, channel_id="C1")
+    assert [(c.setting, c.before, c.after) for c in changes] == [
+        (MENU_USE_SETTING, {"menu": "support"}, None),
+        (MENU_USE_SETTING, None, {"menu": "support"}),
+    ], "a place's menu is recorded on its channel"
 
 
-async def test_set_plan_when_the_menu_key_is_unknown_then_names_the_keys_there_are(
+async def test_set_menu_use_when_unknown_or_stale_then_refused(
     db_session: AsyncSession, db_session_factory: Factory
 ) -> None:
-    actor = _actor(await _tenant(db_session))
-    await set_catalog(db_session_factory, actor, platform="slack", key="support", spec=MENU)
-    await set_catalog(db_session_factory, actor, platform="slack", key="calls", spec=MENU)
-    spec = dataclasses.replace(PLAN, catalog="suport")
-    with pytest.raises(ChannelChangeRefused, match="key suport. Menus: calls, support.$"):
-        await set_plan(db_session_factory, actor, platform="slack", spec=spec)
+    tenant_id = await _tenant(db_session)
+    actor = _actor(tenant_id)
+    for key in ("support", "calls"):
+        await set_menu(db_session_factory, actor, platform="slack", key=key, spec=MENU)
+    with pytest.raises(ChannelChangeRefused, match="Menus: calls, support.$"):
+        await set_menu_use(
+            db_session_factory, actor, platform="slack", scope="agent", scope_id="a1", key="suport"
+        )
+    await set_menu_use(
+        db_session_factory,
+        actor,
+        platform="slack",
+        scope="agent",
+        scope_id="a1",
+        key="calls",
+        expected=Expected(None),
+    )
+    with pytest.raises(StaleChannelValue) as stale:
+        await set_menu_use(
+            db_session_factory,
+            actor,
+            platform="slack",
+            scope="agent",
+            scope_id="a1",
+            key="support",
+            expected=Expected(None),
+        )
+    assert stale_text(stale.value).endswith("Now: menu calls."), "what the place offers now"
+    picked = await read_menu_use(db_session, tenant_id=tenant_id, scope="agent", scope_id="a1")
+    assert picked == "calls", "the stale attempt changed nothing"
 
 
 @pytest.mark.parametrize(
     ("setting", "current", "now"),
     [
-        (CATALOG_SETTING, {"key": "support", "revision": 3, "options": []}, "revision 3"),
-        (CATALOG_SETTING, None, "no menu"),
-        (ALLOWANCE_SETTING, "1.5", "1.5 credits"),
-        (ALLOWANCE_SETTING, None, "no own cap"),
+        (MENU_SETTING, {"key": "support", "revision": 3, "options": []}, "revision 3"),
+        (MENU_SETTING, None, "no menu"),
+        (MENU_USE_SETTING, None, "no menu"),
+        (LIMIT_SETTING, {"scope": "workspace", "revision": 7}, "revision 7"),
+        (LIMIT_SETTING, None, "no limit"),
+        (CHANNEL_SETTING, None, "the default channel"),
         (SETTLE_SETTING, {"request": "r", "status": "settled", "charge": "1"}, "settled, 1 credit"),
         (SETTLE_SETTING, {"request": "r", "status": "declined", "charge": None}, "declined"),
-        (PLAN_SETTING, None, "no plan"),
     ],
 )
 def test_stale_text_when_each_setting_then_says_what_is_there_in_brief(
@@ -234,58 +321,32 @@ def test_stale_text_when_each_setting_then_says_what_is_there_in_brief(
     assert stale_text(StaleChannelValue(setting, current)).endswith(f" Now: {now}."), setting
 
 
-def test_stale_text_when_a_plan_then_its_terms_not_its_json() -> None:
-    value = PlanValue("channel", "C1", "support", D(5), D(2), "monthly").as_json()
-    text = stale_text(StaleChannelValue(PLAN_SETTING, value))
-    assert text.endswith("Now: menu support, pool 5, 2 per person, monthly."), text
-
-
-async def test_set_allowance_when_recorded_then_the_audit_names_no_person(
+async def test_set_support_channel_when_set_and_dropped_then_audited_on_the_workspace(
     db_session: AsyncSession, db_session_factory: Factory
 ) -> None:
     tenant_id = await _tenant(db_session)
     actor = _actor(tenant_id)
-    with pytest.raises(ChannelChangeRefused) as no_plan:
-        await set_allowance(
-            db_session_factory,
-            actor,
-            platform="slack",
-            platform_user_id="USECRET",
-            credits=D(3),
-            scope="workspace",
-        )
-    assert no_plan.value.kind == "not_found", "an allowance needs its plan"
-    await set_allowance(
-        db_session_factory,
-        actor,
-        platform="slack",
-        platform_user_id="USECRET",
-        credits=D(3),
-        expected=Expected(None),
+    pick = ChannelPick("slack", "S9")
+    with pytest.raises(ChannelChangeRefused) as locked:
+        await set_support_channel(db_session_factory, actor, pick=pick, own_allowed=False)
+    assert locked.value.kind == "forbidden", "the operator keeps the default channel"
+    row = await set_support_channel(
+        db_session_factory, actor, pick=pick, own_allowed=True, expected=Expected(None)
     )
+    assert row and row.channel_id == "S9"
     with pytest.raises(StaleChannelValue):
-        await clear_allowance(
-            db_session_factory,
-            actor,
-            platform="slack",
-            platform_user_id="USECRET",
-            expected=Expected(D(2)),
+        await set_support_channel(
+            db_session_factory, actor, pick=None, own_allowed=True, expected=Expected(None)
         )
-    first = await clear_allowance(
-        db_session_factory, actor, platform="slack", platform_user_id="USECRET"
+    dropped = await set_support_channel(
+        db_session_factory, actor, pick=None, own_allowed=True, expected=Expected(row.revision)
     )
-    second = await clear_allowance(
-        db_session_factory, actor, platform="slack", platform_user_id="USECRET"
-    )
-    assert (first, second) == (True, False), "cleared once"
+    assert dropped is None, "the default applies again"
     changes = await list_changes(db_session, tenant_id=tenant_id, channel_id=WORKSPACE_ID)
-    allowances = [c for c in changes if c.setting == ALLOWANCE_SETTING]
-    assert [(c.before, c.after) for c in allowances] == [
-        ({"plan": "default", "credits": "3"}, None),
-        (None, {"plan": "default", "credits": "3"}),
-    ], "set then cleared, on the default plan"
-    dumped = json.dumps([[c.before, c.after] for c in changes])
-    assert "USECRET" not in dumped, "channel_changes never names a person"
+    assert [(c.setting, c.before is None, c.after is None) for c in changes] == [
+        (CHANNEL_SETTING, False, True),
+        (CHANNEL_SETTING, True, False),
+    ]
 
 
 async def test_settle_when_admin_then_charges_and_audits_the_amount_only(
@@ -293,8 +354,8 @@ async def test_settle_when_admin_then_charges_and_audits_the_amount_only(
 ) -> None:
     tenant_id = await _tenant(db_session)
     actor = _actor(tenant_id)
-    await set_catalog(db_session_factory, actor, platform="slack", key="support", spec=MENU)
-    await set_plan(db_session_factory, actor, platform="slack", spec=PLAN)
+    await _menu(db_session_factory, actor)
+    await set_limit(db_session_factory, actor, platform="slack", spec=LIMIT)
     request_id = await _pending(db_session_factory, tenant_id)
     done = await settle(
         db_session_factory,
@@ -337,26 +398,14 @@ async def test_settle_from_post_when_staff_click_then_recorded_as_the_panel(
 ) -> None:
     tenant_id = await _tenant(db_session)
     actor = _actor(tenant_id)
-    await set_catalog(db_session_factory, actor, platform="slack", key="support", spec=MENU)
-    await set_plan(db_session_factory, actor, platform="slack", spec=PLAN)
+    await _menu(db_session_factory, actor)
+    await set_limit(db_session_factory, actor, platform="slack", spec=LIMIT)
     request_id = await _pending(db_session_factory, tenant_id)
-    declined = await settle_from_post(
-        db_session_factory,
-        escalation_id=request_id,
-        charge=None,
-        settled_by="Staff",
-        settled_by_account_id=None,
-        default_allowance=20,
-    )
+    elsewhere = await _from_post(db_session_factory, request_id, D(1), channel="SDEFAULT")
+    assert elsewhere.status == "not_here", "the channel it was posted to, not the default now"
+    declined = await _from_post(db_session_factory, request_id, None)
     assert declined.status == "declined", "staff decline from the post"
-    again = await settle_from_post(
-        db_session_factory,
-        escalation_id=request_id,
-        charge=D(1),
-        settled_by="Other",
-        settled_by_account_id=None,
-        default_allowance=20,
-    )
+    again = await _from_post(db_session_factory, request_id, D(1), by="Other")
     assert again.status == "already_settled" and again.row, "the second click sees it done"
     assert again.row.settled_by == "Staff", "the first settler stands"
     changes = await list_changes(db_session, tenant_id=tenant_id, channel_id="C1")
@@ -369,8 +418,8 @@ async def test_settle_from_post_when_settler_is_another_tenant_then_audit_names_
 ) -> None:
     tenant_id = await _tenant(db_session)
     actor = _actor(tenant_id)
-    await set_catalog(db_session_factory, actor, platform="slack", key="support", spec=MENU)
-    await set_plan(db_session_factory, actor, platform="slack", spec=PLAN)
+    await _menu(db_session_factory, actor)
+    await set_limit(db_session_factory, actor, platform="slack", spec=LIMIT)
     first = await _pending(db_session_factory, tenant_id, "m1")
     second = await _pending(db_session_factory, tenant_id, "m2")
     home = await make_tenant(db_session, platform="slack")
@@ -386,14 +435,7 @@ async def test_settle_from_post_when_settler_is_another_tenant_then_audit_names_
         (first, "USTAFF", foreign.account_id),
         (second, "ULOCAL", local.account_id),
     ):
-        await settle_from_post(
-            db_session_factory,
-            escalation_id=request_id,
-            charge=D(1),
-            settled_by=user,
-            settled_by_account_id=account,
-            default_allowance=20,
-        )
+        await _from_post(db_session_factory, request_id, D(1), by=user, account=account)
     rows = [await ledger.get_request(db_session, escalation_id=i) for i in (first, second)]
     assert [r and r.settled_by_account_id for r in rows] == [
         foreign.account_id,
@@ -401,35 +443,30 @@ async def test_settle_from_post_when_settler_is_another_tenant_then_audit_names_
     ], "the request keeps both, and the purge clears them there"
     changes = await list_changes(db_session, tenant_id=tenant_id, channel_id="C1")
     actors = {
-        c.after["request"]: c.actor_account_id for c in changes if c.setting == SETTLE_SETTING
+        c.after["request"]: c.actor_account_id
+        for c in changes
+        if c.setting == SETTLE_SETTING and isinstance(c.after, dict)
     }
     assert actors == {str(first): None, str(second): local.account_id}, (
         "an account of another tenant never enters this tenant's audit"
     )
 
 
-async def test_clear_plan_when_requests_pending_then_declined_and_audited(
+async def test_clear_limit_when_requests_pending_then_declined_and_audited(
     db_session: AsyncSession, db_session_factory: Factory
 ) -> None:
     tenant_id = await _tenant(db_session)
     actor = _actor(tenant_id)
-    await set_catalog(db_session_factory, actor, platform="slack", key="support", spec=MENU)
-    await set_plan(db_session_factory, actor, platform="slack", spec=PLAN)
+    await _menu(db_session_factory, actor)
+    await set_limit(db_session_factory, actor, platform="slack", spec=LIMIT)
     request_id = await _pending(db_session_factory, tenant_id)
-    await clear_plan(db_session_factory, actor, platform="slack", scope="channel", scope_id="C1")
+    await clear_limit(db_session_factory, actor, platform="slack", scope="channel", scope_id="C1")
     row = await ledger.get_request(db_session, escalation_id=request_id)
     assert row and (row.status, row.charge, row.limit_id) == ("declined", 0, None), (
-        "a request left pending would settle with no plan to bound it"
+        "a request left pending would settle with no limit to bound it"
     )
-    assert row.settled_by == "UADMIN", "the admin who cleared the plan declined it"
-    late = await settle_from_post(
-        db_session_factory,
-        escalation_id=request_id,
-        charge=D(3),
-        settled_by="Staff",
-        settled_by_account_id=None,
-        default_allowance=20,
-    )
+    assert row.settled_by == "UADMIN", "the admin who cleared the limit declined it"
+    late = await _from_post(db_session_factory, request_id, D(3))
     assert late.status == "already_settled", "a click on the old post finds it declined"
     changes = await list_changes(db_session, tenant_id=tenant_id, channel_id="C1")
     settles = [(c.before, c.after) for c in changes if c.setting == SETTLE_SETTING]

@@ -1,4 +1,4 @@
-"""Support plans under concurrent submits and settles: real Postgres, separate connections."""
+"""Support limits under concurrent submits and settles: real Postgres, separate connections."""
 
 from __future__ import annotations
 
@@ -6,10 +6,9 @@ import asyncio
 import uuid
 from decimal import Decimal
 
-from daimon.core.stores import support as plans
+from daimon.core.stores import support as store
 from daimon.core.stores import support_escalation as ledger
 from daimon.core.support import RequestChoice, SupportPlace, parse_menu
-from daimon.core.windows import WindowBounds
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -39,21 +38,30 @@ def _choice(key: str) -> RequestChoice:
     return RequestChoice.of(option)
 
 
-async def _setup(session: AsyncSession, *, pool: Decimal) -> uuid.UUID:
+async def _setup(session: AsyncSession, *, shared: Decimal) -> uuid.UUID:
     tenant = await make_tenant(session, platform="slack", workspace_id="T_PLAN_RACE")
-    menu = await plans.set_catalog(
+    menu = await store.set_menu(
         session, tenant_id=tenant.id, key="support", spec=MENU, set_by_account_id=None
     )
-    await plans.set_plan(
+    await store.set_menu_use(
         session,
         tenant_id=tenant.id,
-        platform="slack",
         scope="workspace",
         scope_id="",
-        catalog_id=menu.id,
-        pool=pool,
-        per_person=None,
-        window=WindowBounds("total", None, None),
+        menu_id=menu.id,
+        set_by_account_id=None,
+    )
+    await store.set_limit(
+        session,
+        tenant_id=tenant.id,
+        scope="workspace",
+        scope_id="",
+        platform_user_id=None,
+        shared=shared,
+        each_person=None,
+        window="total",
+        starts_at=None,
+        ends_at=None,
         set_by_account_id=None,
     )
     await session.commit()
@@ -95,18 +103,18 @@ async def _settle(factory: Factory, escalation_id: uuid.UUID, charge: Decimal) -
         return outcome.status
 
 
-async def test_submit_when_eight_people_race_for_a_pool_of_two_then_four_are_recorded(
+async def test_submit_when_eight_people_race_for_two_shared_credits_then_four_are_recorded(
     db_session: AsyncSession, db_committing_engine: AsyncEngine
 ) -> None:
     factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
-    tenant_id = await _setup(db_session, pool=D(2))
+    tenant_id = await _setup(db_session, shared=D(2))
     quick = _choice("quick")
     results = await asyncio.gather(
         *(_submit(factory, tenant_id, quick, user=f"U{i}", message=f"m{i}") for i in range(8))
     )
     statuses = sorted(r.status for r in results)
     assert statuses == ["out_of_credits"] * 4 + ["recorded"] * 4, (
-        "the plan lock serializes people on one pool: 8 x 0.5 into 2 records 4"
+        "the limit lock serializes people on one limit: 8 x 0.5 into 2 records 4"
     )
 
 
@@ -114,7 +122,7 @@ async def test_settle_when_two_staff_click_at_once_then_one_wins(
     db_session: AsyncSession, db_committing_engine: AsyncEngine
 ) -> None:
     factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
-    tenant_id = await _setup(db_session, pool=D(5))
+    tenant_id = await _setup(db_session, shared=D(5))
     outcome = await _submit(factory, tenant_id, _choice("review"), user="U1", message="m1")
     assert outcome.row, "recorded"
     results = await asyncio.gather(
@@ -127,7 +135,7 @@ async def test_submit_and_settle_when_concurrent_then_both_finish_without_deadlo
     db_session: AsyncSession, db_committing_engine: AsyncEngine
 ) -> None:
     factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
-    tenant_id = await _setup(db_session, pool=D(3))
+    tenant_id = await _setup(db_session, shared=D(3))
     review = _choice("review")
     first = await _submit(factory, tenant_id, review, user="U1", message="m1")
     assert first.row, "recorded"
@@ -141,9 +149,9 @@ async def test_submit_and_settle_when_concurrent_then_both_finish_without_deadlo
     assert settle == "settled", "the settle went through"
     assert submit.status in ("recorded", "out_of_credits"), "the submit finished either way"
     async with factory() as session:
-        plan = await plans.get_plan(session, tenant_id=tenant_id, scope="workspace", scope_id="")
-        assert plan, "the plan is there"
+        limit = await store.get_limit(session, tenant_id=tenant_id, scope="workspace", scope_id="")
+        assert limit, "the limit is there"
         spent, _ = await ledger.limit_spent(
-            session, plan=plan, platform_user_id="U1", as_of=first.row.created_at
+            session, limit=limit, platform_user_id="U1", as_of=first.row.created_at
         )
-    assert spent <= D(3), "the pool is never overspent whichever ran first"
+    assert spent <= D(3), "shared credits are never overspent whichever ran first"

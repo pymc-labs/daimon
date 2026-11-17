@@ -5,7 +5,8 @@ person's own limit at one of them (scope workspace: everywhere).
 `support_menus` holds each tenant's option menus and `support_menu_places`
 which menu a place uses. `support_channels` is a workspace's own request
 channel. `support_escalations` gains the ledger columns: which ledger a row is
-charged to, its limit, the option snapshot and answers, the hold and charge,
+charged to, its limit and the person's own limit that capped it, the option
+snapshot and answers, the hold and charge,
 the settle status and the support post. Server defaults make existing rows,
 and rows written by older pods, default-ledger rows charged 1, so the default
 sum equals the old count. Downgrading drops the tables and columns, losing
@@ -178,6 +179,12 @@ def _upgrade_escalations() -> None:
             sa.ForeignKey("support_limits.id", ondelete="SET NULL"),
             nullable=True,
         ),
+        sa.Column(
+            "person_limit_id",
+            UUID(as_uuid=True),
+            sa.ForeignKey("support_limits.id", ondelete="SET NULL"),
+            nullable=True,
+        ),
         sa.Column("option_key", sa.Text(), nullable=True),
         sa.Column("option", JSONB(), nullable=True),
         sa.Column("answers", JSONB(), nullable=True),
@@ -243,6 +250,7 @@ def downgrade() -> None:
         "answers",
         "option",
         "option_key",
+        "person_limit_id",
         "limit_id",
         "charged_to",
     ):

@@ -1,12 +1,10 @@
-"""The admin read of support plans and the settle wording every admin surface shares."""
+"""The admin read of support limits and the settle wording every admin surface shares."""
 
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
-from types import SimpleNamespace
-from typing import cast
 
 import pytest
 from daimon.core.authz import Subject
@@ -23,21 +21,15 @@ from daimon.core.support import (
 )
 from daimon.core.support_admin import (
     NO_REQUEST,
-    PlanChange,
-    get_plan_usage,
-    list_plan_usage,
-    merge_plan,
-    parse_plan_value,
+    LimitChange,
+    get_limit_usage,
+    list_limit_usage,
+    merge_limit,
+    merge_limit_change,
     settle_outcome_text,
     usage_text,
 )
-from daimon.core.support_changes import (
-    PlanValue,
-    set_allowance,
-    set_catalog,
-    set_plan,
-    settle,
-)
+from daimon.core.support_changes import set_limit, set_menu, set_menu_use, settle
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -62,33 +54,23 @@ def _actor(tenant_id: uuid.UUID) -> ChannelActor:
 
 
 async def _setup(db_session: AsyncSession, factory: Factory) -> tuple[uuid.UUID, uuid.UUID]:
+    """Everywhere: 2 each in October (ended); C1: 5 shared, U1 capped at 4; one pending request."""
     tenant = await make_tenant(db_session, platform="slack")
     await db_session.commit()
     actor = _actor(tenant.id)
-    await set_catalog(factory, actor, platform="slack", key="support", spec=MENU)
-    spec = parse_limit_spec(scope="channel", scope_id="C1", catalog="support", pool="5")
-    await set_plan(factory, actor, platform="slack", spec=spec)
-    await set_plan(
-        factory,
-        actor,
-        platform="slack",
-        spec=parse_limit_spec(
-            scope="workspace",
-            per_person="2",
-            window="fixed",
-            starts_at="2026-10-01",
-            ends_at="2026-11-01",
+    await set_menu(factory, actor, platform="slack", key="support", spec=MENU)
+    await set_menu_use(
+        factory, actor, platform="slack", scope="workspace", scope_id="", key="support"
+    )
+    limits = [
+        parse_limit_spec(scope="channel", scope_id="C1", shared="5"),
+        parse_limit_spec(
+            scope="workspace", each_person="2", starts_at="2026-10-01", ends_at="2026-11-01"
         ),
-    )
-    await set_allowance(
-        factory,
-        actor,
-        platform="slack",
-        platform_user_id="U1",
-        credits=D(4),
-        scope_id="C1",
-        scope="channel",
-    )
+        parse_limit_spec(scope="channel", scope_id="C1", platform_user_id="U1", each_person="4"),
+    ]
+    for spec in limits:
+        await set_limit(factory, actor, platform="slack", spec=spec)
     async with factory.begin() as session:
         outcome = await ledger.submit_request(
             session,
@@ -107,58 +89,54 @@ async def _setup(db_session: AsyncSession, factory: Factory) -> tuple[uuid.UUID,
     return tenant.id, outcome.row.id
 
 
-async def test_list_plan_usage_when_plans_exist_then_workspace_first_with_pool_used(
+async def test_list_limit_usage_when_limits_exist_then_workspace_first_with_shared_used(
     db_session: AsyncSession, db_session_factory: Factory
 ) -> None:
     tenant_id, _ = await _setup(db_session, db_session_factory)
-    plans = await list_plan_usage(db_session, tenant_id=tenant_id, now=NOW)
-    assert [p.plan.scope for p in plans] == ["workspace", "channel"], "workspace first"
-    workspace, channel = plans
-    assert workspace.state == "ended", "the fixed window ended on 1 Nov"
-    assert workspace.summary == ("Ended: 2 per person, 1 Oct 00:00 UTC until 1 Nov 00:00 UTC"), (
-        "an ended plan says so, with the exact window an admin set"
+    usage = await list_limit_usage(db_session, tenant_id=tenant_id, now=NOW)
+    assert [u.limit.scope for u in usage] == ["workspace", "channel"], (
+        "places only, workspace first"
     )
-    assert channel.pool_used == D(1), "the pending range request holds its minimum"
-    assert channel.summary == "1 of 5 credits used, all time", "the pool and window in words"
-    assert channel.value.catalog == "support", "the menu key, not its id"
-    assert [a.platform_user_id for a in channel.allowances] == ["U1"], "own cap listed"
+    workspace, channel = usage
+    assert workspace.state == "ended", "its dates ended on 1 Nov"
+    assert workspace.summary == "Ended: 2 each, from 1 Oct 00:00 UTC to 1 Nov 00:00 UTC", (
+        "an ended limit says so, with the exact dates an admin set"
+    )
+    assert (workspace.menu, channel.menu) == ("support", None), "the menu a place picked itself"
+    assert channel.shared_used == D(1), "the pending range request holds its minimum"
+    assert channel.summary == "1 of 5 credits used, all time", "shared credits and dates in words"
+    assert [p.platform_user_id for p in channel.people] == ["U1"], "own limits listed"
+    assert workspace.people == (), "U1's row is in C1, not everywhere"
 
 
-async def test_get_plan_usage_when_missing_then_none(
+async def test_get_limit_usage_when_missing_then_none(
     db_session: AsyncSession, db_session_factory: Factory
 ) -> None:
     tenant_id, _ = await _setup(db_session, db_session_factory)
-    found = await get_plan_usage(
+    found = await get_limit_usage(
         db_session, tenant_id=tenant_id, scope="channel", scope_id="C1", now=NOW
     )
-    missing = await get_plan_usage(
+    missing = await get_limit_usage(
         db_session, tenant_id=tenant_id, scope="agent", scope_id="agent_x", now=NOW
     )
-    assert found is not None and found.plan.pool == D(5), "the channel plan"
-    assert missing is None, "no agent plan"
+    assert found is not None and found.limit.shared == D(5), "the channel limit"
+    assert missing is None, "no agent limit"
 
 
-async def test_parse_plan_value_when_round_tripped_then_expected_matches(
+async def test_merge_limit_change_when_a_person_row_then_reads_that_row_and_its_revision(
     db_session: AsyncSession, db_session_factory: Factory
 ) -> None:
     tenant_id, _ = await _setup(db_session, db_session_factory)
-    plans = await list_plan_usage(db_session, tenant_id=tenant_id, now=NOW)
-    for usage in plans:
-        assert parse_plan_value(usage.value.as_json()) == usage.value, "as_json round-trips"
-
-
-@pytest.mark.parametrize(
-    "data",
-    [
-        {"scope": "workspace", "window": "weekly"},
-        {"scope": "nowhere", "window": "total"},
-        {"scope": "workspace", "window": "total", "pool": 1.5},
-        {"scope": "workspace", "window": "total", "ends_at": "soon"},
-    ],
-)
-def test_parse_plan_value_when_malformed_then_refused(data: dict[str, object]) -> None:
-    with pytest.raises(SupportError):
-        parse_plan_value(data)
+    spec, revision = await merge_limit_change(
+        db_session,
+        tenant_id=tenant_id,
+        scope="channel",
+        scope_id="C1",
+        change=LimitChange(ends_at="2027-01-01"),
+        platform_user_id="U1",
+    )
+    assert (spec.platform_user_id, spec.each_person, spec.shared) == ("U1", D(4), None), "kept"
+    assert spec.ends_at == datetime(2027, 1, 1, tzinfo=UTC) and revision is not None
 
 
 async def test_settle_outcome_text_when_each_outcome_then_worded_for_the_settler(
@@ -193,59 +171,93 @@ async def test_settle_outcome_text_when_each_outcome_then_worded_for_the_settler
     assert settle_outcome_text(missing) == NO_REQUEST, "no such request"
 
 
-def test_usage_text_when_window_spans_years_then_exact_times_in_utc() -> None:
-    plan = SimpleNamespace(
-        pool=D(10),
-        per_person=None,
-        window="fixed",
+def _row(**fields: object) -> SupportLimitRow:
+    row: dict[str, object] = {
+        "id": uuid.uuid4(),
+        "tenant_id": uuid.uuid4(),
+        "scope": "channel",
+        "scope_id": "C1",
+        "platform_user_id": None,
+        "shared": D(10),
+        "each_person": D(2),
+        "window": "total",
+        "starts_at": datetime(2026, 11, 18, 9, tzinfo=UTC),
+        "ends_at": datetime(2026, 11, 24, 9, tzinfo=UTC),
+        "revision": 1,
+        "set_by_account_id": None,
+        "created_at": NOW,
+        "updated_at": NOW,
+    }
+    return SupportLimitRow.model_validate(row | fields)
+
+
+def test_usage_text_when_dates_span_years_then_exact_times_in_utc() -> None:
+    limit = _row(
+        each_person=None,
         starts_at=datetime(2026, 11, 24, 9, tzinfo=UTC),
         ends_at=datetime(2027, 1, 1, tzinfo=UTC),
     )
-    text = usage_text(cast("SupportLimitRow", plan), pool_used=D(1), now=NOW)
-    assert (
-        text == "Not started: 1 of 10 credits used, 24 Nov 09:00 UTC until 1 Jan 2027 00:00 UTC"
+    text = usage_text(limit, shared_used=D(1), now=NOW)
+    assert text == (
+        "Not started: 1 of 10 credits used, from 24 Nov 09:00 UTC to 1 Jan 2027 00:00 UTC"
     ), text
+    monthly = usage_text(
+        _row(window="monthly", starts_at=None, ends_at=None), shared_used=D(0), now=NOW
+    )
+    assert monthly == "0 of 10 credits used, 2 each, each month", monthly
 
 
-FIXED = PlanValue(
-    "channel",
-    "C1",
-    "support",
-    D(10),
-    D(2),
-    "fixed",
-    datetime(2026, 11, 18, 9, tzinfo=UTC),
-    datetime(2026, 11, 24, 9, tzinfo=UTC),
-)
+DATED = _row()
 
 
-def test_merge_plan_when_options_left_out_then_keeps_menu_limits_and_dates() -> None:
-    spec = merge_plan(FIXED, scope="channel", scope_id="C1", change=PlanChange(pool="12"))
-    assert (spec.catalog, spec.pool, spec.per_person) == ("support", D(12), D(2)), "kept"
-    assert (spec.window.window, spec.window.starts_at, spec.window.ends_at) == (
-        "fixed",
-        FIXED.starts_at,
-        FIXED.ends_at,
-    ), "the dates are kept"
-    new = merge_plan(None, scope="channel", scope_id="C1", change=PlanChange(pool="1"))
-    assert (new.catalog, new.per_person, new.window.window) == (None, None, "total"), (
-        "with no plan, what is left out is unset"
+def test_merge_limit_when_options_left_out_then_keeps_amounts_and_dates() -> None:
+    spec = merge_limit(DATED, scope="channel", scope_id="C1", change=LimitChange(shared="12"))
+    assert (spec.shared, spec.each_person, spec.window) == (D(12), D(2), "total"), "kept"
+    assert (spec.starts_at, spec.ends_at) == (DATED.starts_at, DATED.ends_at), "dates kept"
+    new = merge_limit(None, scope="channel", scope_id="C1", change=LimitChange(shared="1"))
+    assert (new.each_person, new.window, new.ends_at) == (None, "total", None), (
+        "with no limit, what is left out is unset"
     )
 
 
-def test_merge_plan_when_none_or_a_new_window_then_clears_what_it_cannot_hold() -> None:
-    cleared = merge_plan(
-        FIXED,
+def test_merge_limit_when_none_or_a_new_window_then_clears_only_what_it_names() -> None:
+    cleared = merge_limit(
+        DATED,
         scope="channel",
         scope_id="C1",
-        change=PlanChange(catalog="default", per_person="none"),
+        change=LimitChange(each_person="none", ends_at="none"),
     )
-    assert (cleared.catalog, cleared.per_person, cleared.pool) == (None, None, D(10)), "cleared"
-    total = merge_plan(FIXED, scope="channel", scope_id="C1", change=PlanChange(window="total"))
-    assert (total.window.starts_at, total.window.ends_at) == (FIXED.starts_at, None), (
-        "a total window keeps its start, not the end"
+    assert (cleared.shared, cleared.each_person, cleared.ends_at) == (D(10), None, None), "cleared"
+    monthly = merge_limit(
+        DATED, scope="channel", scope_id="C1", change=LimitChange(window="monthly")
     )
-    monthly = merge_plan(FIXED, scope="channel", scope_id="C1", change=PlanChange(window="monthly"))
-    assert monthly.window.starts_at is None, "a monthly window holds no dates"
-    with pytest.raises(SupportError, match="needs both starts_at and ends_at"):
-        merge_plan(FIXED, scope="channel", scope_id="C1", change=PlanChange(ends_at="none"))
+    assert (monthly.window, monthly.starts_at, monthly.ends_at) == (
+        "monthly",
+        DATED.starts_at,
+        DATED.ends_at,
+    ), "dates bind a monthly limit too"
+    with pytest.raises(SupportError, match="Set a shared limit"):
+        merge_limit(
+            DATED,
+            scope="channel",
+            scope_id="C1",
+            change=LimitChange(shared="none", each_person="none"),
+        )
+    with pytest.raises(SupportError, match="end must be after"):
+        merge_limit(DATED, scope="channel", scope_id="C1", change=LimitChange(ends_at="2026-11-01"))
+
+
+def test_merge_limit_when_a_person_row_then_shared_credits_are_refused() -> None:
+    person = _row(platform_user_id="U1", shared=None, starts_at=None, ends_at=None)
+    kept = merge_limit(
+        person, scope="channel", scope_id="C1", change=LimitChange(), platform_user_id="U1"
+    )
+    assert (kept.platform_user_id, kept.each_person) == ("U1", D(2)), "their own cap"
+    with pytest.raises(SupportError, match="no shared credits"):
+        merge_limit(
+            person,
+            scope="channel",
+            scope_id="C1",
+            change=LimitChange(shared="5"),
+            platform_user_id="U1",
+        )

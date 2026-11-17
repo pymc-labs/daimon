@@ -107,6 +107,7 @@ class SupportEscalationRow(_Row):
     created_at: datetime
     charged_to: ChargedTo = "default"
     limit_id: uuid.UUID | None = None
+    person_limit_id: uuid.UUID | None = None
     option_key: str | None = None
     option: OptionSnapshot | None = None
     answers: dict[str, str] | None = None

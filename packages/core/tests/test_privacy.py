@@ -1066,7 +1066,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "coding_key_claims": "account_id FK -> accounts.id; counted and deleted with mcp_tokens",
         "wizard_session": "account_id FK -> accounts.id",
         "message_feedback": "account_id FK -> accounts.id",
-        "support_escalations": "account_id FK -> accounts.id; plan rows anonymized, not deleted",
+        "support_escalations": "account_id FK -> accounts.id; limit rows anonymized, not deleted",
         "support_allowances": "the person's rows deleted by platform user; set_by is SET NULL",
         "direct_message_conversations": "account_id FK -> accounts.id",
         # The web app: a person, with their identities, tokens and browser sessions, and
@@ -1215,10 +1215,13 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # shared by everyone there; `set_by` is attribution only, severed by
             # ON DELETE SET NULL. Deleting the row would change the place for others.
             "feature_values",
-            # Support plans and menus are tenant config; `set_by_account_id` is
-            # attribution only, severed by ON DELETE SET NULL.
-            "support_plans",
-            "support_catalogs",
+            # Support limits, menus and channels are tenant config; `set_by_account_id`
+            # is attribution only, severed by ON DELETE SET NULL. A person's own
+            # limit rows are deleted by platform user (`support_allowances`).
+            "support_limits",
+            "support_menus",
+            "support_menu_places",
+            "support_channels",
         }
     )
 

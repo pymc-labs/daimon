@@ -2880,6 +2880,10 @@ class SupportEscalation(Base):
     limit_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("support_limits.id", ondelete="SET NULL"), nullable=True
     )
+    # The person's own limit that capped the request, so a settle reads the same cap.
+    person_limit_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("support_limits.id", ondelete="SET NULL"), nullable=True
+    )
     option_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The terms requested on (`support.OptionSnapshot`); settling reads these.
     option: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
