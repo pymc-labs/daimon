@@ -2003,6 +2003,24 @@ class MonitoredEventRow(BaseModel):
     created_at: datetime
 
 
+class MonitoredConversationRow(BaseModel):
+    """One person's kept conversation with an agent: its question and tool counts and
+    span. MCP tool calls have no conversation, so a day of them is one (`conversation` is
+    None and `day` the UTC date); `cursor_id` pages the list (`stores.monitoring`)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    platform: MonitoredPlatform
+    account_id: uuid.UUID
+    conversation: str | None
+    day: str
+    questions: int
+    tools: int
+    first_at: datetime
+    last_at: datetime
+    cursor_id: uuid.UUID
+
+
 class PendingCarryOverRow(BaseModel):
     """A replacement session's framing not yet sent (`stores.pending_carry_overs`)."""
 

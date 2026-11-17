@@ -13,11 +13,17 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from daimon.core._models import MonitoredEvent
-from daimon.core.stores.domain import MonitoredEventRow, MonitoredKind, MonitoredPlatform
-from sqlalchemy import delete, func, select, tuple_
+from daimon.core.stores.domain import (
+    MonitoredConversationRow,
+    MonitoredEventRow,
+    MonitoredKind,
+    MonitoredPlatform,
+)
+from sqlalchemy import String, cast, delete, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
+from sqlalchemy.orm import InstrumentedAttribute, aliased
+from sqlalchemy.sql.elements import ColumnElement
 
 
 @dataclass(frozen=True)
@@ -122,9 +128,15 @@ async def list_events(
     account_id: uuid.UUID | None = None,
     conversation: str | None = None,
     before: tuple[datetime, uuid.UUID] | None = None,
+    after: tuple[datetime, uuid.UUID] | None = None,
+    day: str | None = None,
+    tool_calls_only: bool = False,
+    oldest_first: bool = False,
     limit: int = 100,
 ) -> list[MonitoredEventRow]:
-    """One agent's kept rows, newest first; `before` is the last row's (created_at, id)."""
+    """One agent's kept rows, newest first; `before` is the last row's (created_at, id).
+    With `after` they run oldest first, from that row on (a transcript). `day` keeps the
+    rows of one UTC date (`YYYY-MM-DD`); `tool_calls_only` those with no conversation."""
     stmt = select(MonitoredEvent).where(
         MonitoredEvent.tenant_id == tenant_id, MonitoredEvent.agent_id == agent_id
     )
@@ -138,10 +150,92 @@ async def list_events(
         stmt = stmt.where(MonitoredEvent.account_id == account_id)
     if conversation is not None:
         stmt = stmt.where(MonitoredEvent.conversation == conversation)
+    if tool_calls_only:
+        stmt = stmt.where(MonitoredEvent.conversation.is_(None))
+    if day is not None:
+        stmt = stmt.where(_day_of(MonitoredEvent.created_at) == day)
     if before is not None:
         stmt = stmt.where(tuple_(MonitoredEvent.created_at, MonitoredEvent.id) < before)
-    stmt = stmt.order_by(MonitoredEvent.created_at.desc(), MonitoredEvent.id.desc()).limit(limit)
-    return [MonitoredEventRow.model_validate(row) for row in await session.scalars(stmt)]
+    if after is not None:
+        stmt = stmt.where(tuple_(MonitoredEvent.created_at, MonitoredEvent.id) > after)
+    if before is None and (after is not None or oldest_first):
+        stmt = stmt.order_by(MonitoredEvent.created_at, MonitoredEvent.id)
+    else:
+        stmt = stmt.order_by(MonitoredEvent.created_at.desc(), MonitoredEvent.id.desc())
+    return [
+        MonitoredEventRow.model_validate(row) for row in await session.scalars(stmt.limit(limit))
+    ]
+
+
+def _day_of(created_at: InstrumentedAttribute[datetime]) -> ColumnElement[str]:
+    """The UTC date of a row, as `YYYY-MM-DD`."""
+    return func.to_char(func.timezone("UTC", created_at), "YYYY-MM-DD")
+
+
+async def list_conversations(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    platforms: Sequence[MonitoredPlatform] | None = None,
+    account_id: uuid.UUID | None = None,
+    before: tuple[datetime, uuid.UUID] | None = None,
+    limit: int = 100,
+) -> list[MonitoredConversationRow]:
+    """One agent's kept conversations, most recently active first; `before` is the last
+    row's (last_at, cursor_id). A person's MCP tool calls have no conversation, so each
+    UTC day of them is one row."""
+    day = _day_of(MonitoredEvent.created_at)
+    last_at = func.max(MonitoredEvent.created_at)
+    cursor_id = func.min(cast(MonitoredEvent.id, String))
+    stmt = (
+        select(
+            MonitoredEvent.platform,
+            MonitoredEvent.account_id,
+            MonitoredEvent.conversation,
+            func.min(day).label("day"),
+            func.count().filter(MonitoredEvent.kind == "question").label("questions"),
+            func.count().filter(MonitoredEvent.kind == "tool").label("tools"),
+            func.min(MonitoredEvent.created_at).label("first_at"),
+            last_at.label("last_at"),
+            cursor_id.label("cursor_id"),
+        )
+        .where(MonitoredEvent.tenant_id == tenant_id, MonitoredEvent.agent_id == agent_id)
+        .group_by(
+            MonitoredEvent.platform,
+            MonitoredEvent.account_id,
+            MonitoredEvent.conversation,
+            # A tool row has no conversation: group its person's calls by day.
+            func.coalesce(MonitoredEvent.conversation, day),
+        )
+    )
+    if since is not None:
+        stmt = stmt.where(MonitoredEvent.created_at >= since)
+    if until is not None:
+        stmt = stmt.where(MonitoredEvent.created_at < until)
+    if platforms is not None:
+        stmt = stmt.where(MonitoredEvent.platform.in_(platforms))
+    if account_id is not None:
+        stmt = stmt.where(MonitoredEvent.account_id == account_id)
+    if before is not None:
+        stmt = stmt.having(tuple_(last_at, cursor_id) < (before[0], str(before[1])))
+    stmt = stmt.order_by(last_at.desc(), cursor_id.desc()).limit(limit)
+    return [
+        MonitoredConversationRow(
+            platform=row.platform,
+            account_id=row.account_id,
+            conversation=row.conversation,
+            day=row.day,
+            questions=row.questions,
+            tools=row.tools,
+            first_at=row.first_at,
+            last_at=row.last_at,
+            cursor_id=uuid.UUID(row.cursor_id),
+        )
+        for row in await session.execute(stmt)
+    ]
 
 
 async def count_events(
