@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Final
 
-from daimon.adapters.teams.card_actions import clip, error_text, text_lines
+from daimon.adapters.teams.card_actions import error_text, text_lines
 from daimon.core.stores.support_rows import PlanView, SupportEscalationRow
 from daimon.core.support_escalation import SEALED_NOTE_HINT
 from daimon.core.support_plans import (
@@ -177,7 +177,8 @@ def request_facts(row: SupportEscalationRow, *, menu: bool, balance: str | None)
 
 
 def _note_blocks(note: str) -> list[CardElement]:
-    return text_lines(*(line for line in clip(note, MAX_NOTE_CHARS).splitlines() if line.strip()))
+    """The note in full, a block per line: each field's `Label: answer` starts its own."""
+    return text_lines(*(line for line in note.splitlines() if line.strip()))
 
 
 def settle_card(row: SupportEscalationRow, lines: Sequence[str]) -> AdaptiveCard:

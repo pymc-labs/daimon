@@ -36,6 +36,7 @@ from daimon.core.support_plans import (
     OPTIONS_CHANGED,
     SETTLE_ELSEWHERE,
     RequestChoice,
+    SupportCatalogSpec,
     SupportPlace,
     option_value,
     parse_catalog,
@@ -109,15 +110,16 @@ async def _seed(
     factory: async_sessionmaker[AsyncSession],
     *,
     menu: bool = True,
+    spec: SupportCatalogSpec = MENU,
     per_person: Decimal = TWO,
     ends_at: datetime | None = None,
 ) -> None:
-    """A workspace plan for the provisioned tenant, on MENU unless `menu` is False."""
+    """A workspace plan for the provisioned tenant, on `spec` unless `menu` is False."""
     async with factory() as session, session.begin():
         catalog = None
         if menu:
             catalog = await plans.set_catalog(
-                session, tenant_id=TENANT, key="support", spec=MENU, set_by_account_id=None
+                session, tenant_id=TENANT, key="support", spec=spec, set_by_account_id=None
             )
         window = WindowBounds("total", None, None)
         if ends_at is not None:
@@ -390,6 +392,32 @@ async def test_send_when_option_has_no_fields_then_posts_pending_with_settle_con
     assert set(_settle_buttons(post)) == {"set", "decline"}, "Set charge and Decline"
     row = await _row(db_session_factory, post)
     assert (row.status, row.hold, row.support_post_id) == ("pending", D(1), "m-2"), row
+
+
+async def test_send_when_every_field_is_full_then_the_post_shows_each_unclipped(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """Four full paragraph fields reach the support post whole, each on its own block."""
+    fields = [{"key": f"part{n}", "kind": "paragraph", "label": f"Part {n}"} for n in range(1, 5)]
+    price = {"kind": "range", "min": "1", "max": "2"}
+    spec = parse_catalog(
+        {
+            "name": "Support",
+            "options": [{"key": "brief", "label": "Brief", "price": price, "fields": fields}],
+        }
+    )
+    await _seed(db_session_factory, spec=spec)
+    answers = {f"field_part{n}": str(n) * 3000 for n in range(1, 5)}
+    async with _running(db_session_factory, teams_api_fake) as service:
+        menu = await _typed(service, teams_api_fake)
+        picked = await _click(service, _button(menu), option=option_value(spec.options[0]))
+        await _click(service, _button(picked["value"]), **answers)
+
+    [post] = _posts(teams_api_fake)
+    assert_teams_accepts(post)
+    texts = [b["text"] for b in _card(post)["body"] if b["type"] == "TextBlock"]
+    for n in range(1, 5):
+        assert f"Part {n}: {str(n) * 3000}" in texts, f"part {n} whole, on its own block"
 
 
 async def test_send_when_option_has_a_step_and_fields_then_charged_at_submit(
