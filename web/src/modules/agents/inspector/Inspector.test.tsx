@@ -29,7 +29,7 @@ function serve(reads: boolean) {
   vi.mocked(api.get).mockImplementation(async (path: string) => {
     if (path === "/api/features/schema") return [schema("monitor_direct_messages"), schema("monitor_mcp")]
     if (path.startsWith("/api/features")) return { platform: "discord", features: [view("monitor_direct_messages"), view("monitor_mcp")] }
-    if (!reads) throw new ApiError(403, "Only platform admins can read monitored conversations.")
+    if (!reads) throw new ApiError(403, "Only workspace admins can read monitored conversations.")
     return { id: "ag_w", name: "W", direct_messages: { on: false, since: null }, coding_tools: { on: false, since: null } }
   })
 }
@@ -44,13 +44,13 @@ beforeEach(() => {
 })
 
 describe("Inspector monitoring panel", () => {
-  it("shows the switches to a platform admin who can read the state", async () => {
+  it("shows the switches to a workspace admin who can read the state", async () => {
     serve(true)
     show()
     expect(await screen.findByRole("combobox", { name: "Direct messages" })).toBeInTheDocument()
   })
 
-  it("shows nothing to a workspace owner who may not read the state", async () => {
+  it("shows nothing to an agent owner who is no workspace admin", async () => {
     serve(false)
     const { container } = show()
     await waitFor(() => expect(api.get).toHaveBeenCalledWith("/api/admin/monitoring/agents/ag_w"))
