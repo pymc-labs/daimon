@@ -23,6 +23,11 @@ const STATES = { not_started: "Not started", ended: "Ended" } as const
 const DEFAULT = "default"
 
 const day = (iso: string | null) => (iso ? iso.slice(0, 10) : "")
+const DAY_MS = 86_400_000
+/** The end is exclusive: the last day is the date of the instant just before it. */
+const lastDay = (iso: string | null) => (iso ? new Date(Date.parse(iso) - 1).toISOString().slice(0, 10) : "")
+/** A bare date is read as 00:00 UTC, so the exclusive end that includes `d` is the next day. */
+const dayAfter = (d: string) => new Date(Date.parse(`${d}T00:00:00Z`) + DAY_MS).toISOString().slice(0, 10)
 const keyOf = (p: { scope: PlanScope; scope_id: string }) => `${p.scope}:${p.scope_id}`
 const placeOf = (p: SupportPlan) => p.scope === "workspace" ? "Workspace" : p.scope === "channel" ? channelLabel(p.name ?? p.scope_id) : (p.name ?? p.scope_id)
 const valueOf = ({ scope, scope_id, catalog, pool, per_person, window, starts_at, ends_at }: SupportPlan): PlanValue =>
@@ -104,9 +109,10 @@ function PlanForm({ d, plan, onDone }: { d: SupportPlans; plan?: SupportPlan; on
   const [each, setEach] = useState(plan?.per_person ?? "")
   const [window, setWindow] = useState<PlanWindow>(plan?.window ?? "total")
   const [starts, setStarts] = useState(day(plan?.starts_at ?? null))
-  const [ends, setEnds] = useState(day(plan?.ends_at ?? null))
+  const [ends, setEnds] = useState(lastDay(plan?.ends_at ?? null))
   // Keep the instant as read when its day is untouched.
-  const instant = (v: string, was: string | null) => (!v ? null : v === day(was) ? was : v)
+  const start = (v: string, was: string | null) => (!v ? null : v === day(was) ? was : v)
+  const end = (v: string, was: string | null) => (!v ? null : v === lastDay(was) ? was : dayAfter(v))
   const channels = (list?.channels ?? []).filter((c) => c.kind === "channel" && c.platform === d.platform)
   const choices = (scope === "agent" ? d.agents : channels.map((c) => ({ id: c.id, name: channelLabel(c.name, c.kind) })))
     .filter((c) => free(scope, c.id))
@@ -114,7 +120,7 @@ function PlanForm({ d, plan, onDone }: { d: SupportPlans; plan?: SupportPlan; on
   /** Fill the form from a plan as the server has it now, and expect that value. */
   const load = (p: SupportPlan) => {
     setExpected(valueOf(p)); setMenu(p.catalog ?? DEFAULT); setPool(p.pool ?? ""); setEach(p.per_person ?? "")
-    setWindow(p.window); setStarts(day(p.starts_at)); setEnds(day(p.ends_at))
+    setWindow(p.window); setStarts(day(p.starts_at)); setEnds(lastDay(p.ends_at))
   }
   const finish = (r: SupportOutcome) => {
     setOut(r)
@@ -129,8 +135,8 @@ function PlanForm({ d, plan, onDone }: { d: SupportPlans; plan?: SupportPlan; on
     scope, scope_id: target, expected,
     plan: {
       catalog: menu === DEFAULT ? null : menu, pool: pool || null, per_person: each || null, window,
-      starts_at: window === "monthly" ? null : instant(starts, expected?.starts_at ?? null),
-      ends_at: window === "fixed" ? instant(ends, expected?.ends_at ?? null) : null,
+      starts_at: window === "monthly" ? null : start(starts, expected?.starts_at ?? null),
+      ends_at: window === "fixed" ? end(ends, expected?.ends_at ?? null) : null,
     },
   }))
   const remove = async () => {
@@ -180,7 +186,7 @@ function PlanForm({ d, plan, onDone }: { d: SupportPlans; plan?: SupportPlan; on
           </Select>
         </Field>
         {window !== "monthly" && <Field label={`${window === "fixed" ? "From" : "Counting from"} (UTC)`}><Input aria-label={`${window === "fixed" ? "From" : "Counting from"} (UTC)`} type="date" value={starts} onChange={(e) => setStarts(e.target.value)} /></Field>}
-        {window === "fixed" && <Field label="Until (UTC)"><Input aria-label="Until (UTC)" type="date" value={ends} onChange={(e) => setEnds(e.target.value)} /></Field>}
+        {window === "fixed" && <Field label="Last day (UTC)"><Input aria-label="Last day (UTC)" type="date" value={ends} onChange={(e) => setEnds(e.target.value)} /></Field>}
       </div>
       <Actions pending={save.pending} ready={!!plan || scope === "workspace" || !!place} onSave={() => void submit()} onCancel={onDone} onRemove={plan && (() => void remove())} />
       <Notice out={out} />

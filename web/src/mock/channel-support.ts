@@ -99,9 +99,14 @@ let menus: SupportMenu[] = [menu("support", { name: "Support", options: [{ key: 
 let plans: SupportPlan[] = []
 let defaults: PersonCap[] = [{ platform_user_id: "u_ana", name: "Ana", credits: "5" }]
 
-function planOf(v: PlanValue, allowances: PersonCap[] = []): SupportPlan {
-  const until = v.window === "fixed" && v.ends_at ? new Date(v.ends_at) : null
-  const end = until && `until ${until.getUTCDate()} ${until.toLocaleString("en", { month: "short", timeZone: "UTC" })} ${until.toISOString().slice(11, 16)} UTC`
+/** A bare date is read as 00:00 UTC, as the server does. */
+const instant = (v: string | null) => (v && /^\d{4}-\d{2}-\d{2}$/.test(v) ? `${v}T00:00:00Z` : v)
+
+function planOf(w: PlanValue, allowances: PersonCap[] = []): SupportPlan {
+  const v = { ...w, starts_at: instant(w.starts_at), ends_at: instant(w.ends_at) }
+  // The end is exclusive: the plan runs through the day before it.
+  const last = v.window === "fixed" && v.ends_at ? new Date(Date.parse(v.ends_at) - 1) : null
+  const end = last && `until ${last.getUTCDate()} ${last.toLocaleString("en", { month: "short", timeZone: "UTC" })}`
   const summary = [v.pool && `0 of ${word(v.pool)} used`, v.per_person && `${v.per_person} per person`, v.window === "monthly" && "this month", end].filter(Boolean).join(", ")
   return { ...v, name: v.scope === "workspace" ? null : (PLACES[v.scope_id] ?? null), pool_used: "0", state: "active", summary, allowances }
 }

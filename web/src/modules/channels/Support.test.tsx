@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { render, screen, waitFor, within } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -20,8 +20,8 @@ const data: SupportPlans = {
 
 let current = data
 let qc: QueryClient
-const view = () => {
-  current = data
+const view = (start: SupportPlans = data) => {
+  current = start
   qc = new QueryClient()
   vi.mocked(api.get).mockImplementation(async (path: string) => (path === "/api/channels" ? { platform: "discord", channels: [] } : current) as never)
   vi.mocked(api.put).mockResolvedValue(data as never)
@@ -97,6 +97,34 @@ describe("SupportTab", () => {
     view()
     await userEvent.click(await screen.findByRole("button", { name: "Add plan" }))
     expect(screen.getByLabelText("Counting from (UTC)")).toHaveAttribute("type", "date")
+  })
+
+  describe("last day", () => {
+    const fixed = (ends_at: string) => ({ ...data, plans: [{ ...data.plans[0], window: "fixed" as const, starts_at: "2026-11-01T00:00:00Z", ends_at }] })
+    const edit = async (ends_at: string) => {
+      view(fixed(ends_at))
+      const plans = (await screen.findByRole("heading", { name: "Plans" })).closest("section")!
+      await userEvent.click(within(plans).getByRole("button", { name: "Edit" }))
+      return screen.getByLabelText("Last day (UTC)")
+    }
+    const sent = () => (vi.mocked(api.put).mock.calls.at(-1)![1] as { plan: { ends_at: string | null } }).plan.ends_at
+
+    it("sends the day after the one picked", async () => {
+      const input = await edit("2026-12-21T00:00:00Z")
+      fireEvent.change(input, { target: { value: "2026-12-17" } })
+      await userEvent.click(screen.getByRole("button", { name: "Save" }))
+      expect(sent()).toBe("2026-12-18")
+    })
+
+    it("shows an end at midnight as the day before", async () => {
+      expect(await edit("2026-12-18T00:00:00Z")).toHaveValue("2026-12-17")
+    })
+
+    it("keeps an end set mid-day as it was when untouched", async () => {
+      expect(await edit("2026-11-24T09:00:00Z")).toHaveValue("2026-11-24")
+      await userEvent.click(screen.getByRole("button", { name: "Save" }))
+      expect(sent()).toBe("2026-11-24T09:00:00Z")
+    })
   })
 
   it("reloads the cap form after a 409 with the credits now there", async () => {

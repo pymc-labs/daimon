@@ -41,6 +41,13 @@ function Tools({ what, i, n, onMove, onRemove, canRemove = true }: { what: strin
   )
 }
 
+/** Field rows: label, kind, max characters, tools. On a phone the label and tools share a line, kind and max the next. */
+const ROW = "grid items-start gap-2 max-sm:grid-cols-[1fr_auto] sm:grid-cols-[1fr_8rem_6rem_4.5rem]"
+/** An input with a caption of its own on a phone; on wider screens the header row above names it. */
+const Cell = ({ caption, children }: { caption: string; children: React.ReactNode }) => (
+  <div className="min-w-0 space-y-1.5"><span className="block h-4 text-xs text-muted-foreground sm:hidden">{caption}</span>{children}</div>
+)
+
 const swap = <T,>(list: T[], i: number, f: (x: T) => T) => list.map((x, j) => (j === i ? f(x) : x))
 const drop = <T,>(list: T[], i: number) => list.filter((_, j) => j !== i)
 
@@ -107,7 +114,7 @@ function PriceEditor({ o, name, p, at, onChange }: { o: OptionDraft; name: strin
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-3 gap-3 max-sm:grid-cols-2">
-        <Field label="Price"><Pick value={price.kind} onChange={(kind: PriceKind) => set({ kind })} choices={PRICES} aria={`Price of ${name}`} /></Field>
+        <div className={price.kind === "range" || price.kind === "quoted" ? "max-sm:col-span-2" : undefined}><Field label="Price"><Pick value={price.kind} onChange={(kind: PriceKind) => set({ kind })} choices={PRICES} aria={`Price of ${name}`} /></Field></div>
         {price.kind === "fixed" && money("Credits", "amount", "1")}
         {price.kind === "range" && <>{money("Min", "min", "1")}{money("Max", "max", "3")}</>}
         {price.kind === "quoted" && <>{money("Min", "min", "0")}{money("Max", "max", "No limit")}</>}
@@ -143,22 +150,29 @@ function FieldsEditor({ o, name, p, at, onChange }: { o: OptionDraft; name: stri
         <Button type="button" size="xs" variant="outline" disabled={used(o) >= LIMITS.fields} aria-label={`Add field to ${name}`} onClick={() => set([...o.fields, newField()])}>Add field</Button>
       </div>
       <Err>{at[`${p}.fields`]}</Err>
+      {o.fields.length > 0 && (
+        <div className={`${ROW} text-xs text-muted-foreground max-sm:hidden`}>
+          <span>Label</span><span>Kind</span><span>Max characters</span>
+        </div>
+      )}
       {o.fields.map((f, k) => {
         const q = `${p}.fields.${k}`
         const what = `field ${k + 1} of ${name}`
         return (
           <div key={f.id} className="space-y-2">
-            <div className="flex items-start gap-2">
-              <div className="flex min-w-0 flex-1 flex-wrap gap-2">
-                <div className="min-w-40 flex-1"><Txt aria={`Label of ${what}`} maxLength={LIMITS.fieldLabel} placeholder="What do you need?" value={f.label} error={at[`${q}.label`]} onChange={(label) => setField(k, (x) => ({ ...x, label }))} /></div>
-                <Pick value={f.kind} onChange={(kind: FieldKind) => setField(k, (x) => ({ ...x, kind }))} choices={FIELDS} aria={`Kind of ${what}`} className="w-32" />
+            <div className={ROW}>
+              <Cell caption="Label"><Txt aria={`Label of ${what}`} maxLength={LIMITS.fieldLabel} placeholder="What do you need?" value={f.label} error={at[`${q}.label`]} onChange={(label) => setField(k, (x) => ({ ...x, label }))} /></Cell>
+              <div className="grid grid-cols-2 gap-2 max-sm:order-3 max-sm:col-span-2 sm:contents">
+                <Cell caption="Kind"><Pick value={f.kind} onChange={(kind: FieldKind) => setField(k, (x) => ({ ...x, kind }))} choices={FIELDS} aria={`Kind of ${what}`} /></Cell>
                 {f.kind !== "choice" && (
-                  <div className="w-24">
+                  <Cell caption="Max characters">
                     <Txt aria={`Max characters of ${what}`} inputMode="numeric" placeholder={f.kind === "text" ? `Max ${LIMITS.text}` : `Max ${LIMITS.paragraph}`} value={f.max} error={at[`${q}.max_chars`]} onChange={(max) => setField(k, (x) => ({ ...x, max: max.replace(/\D/g, "") }))} />
-                  </div>
+                  </Cell>
                 )}
               </div>
-              <Tools what={what} i={k} n={o.fields.length} onMove={(by) => set(move(o.fields, k, by))} onRemove={() => set(drop(o.fields, k))} />
+              <div className="max-sm:order-2 max-sm:mt-5 sm:justify-self-end">
+                <Tools what={what} i={k} n={o.fields.length} onMove={(by) => set(move(o.fields, k, by))} onRemove={() => set(drop(o.fields, k))} />
+              </div>
             </div>
             {f.kind === "choice" && (
               <div className="space-y-1">
