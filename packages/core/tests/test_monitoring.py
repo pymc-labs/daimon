@@ -6,11 +6,12 @@ account erasure. `test_monitoring_paths.py` checks that every chat and MCP path 
 
 from __future__ import annotations
 
+import base64
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from daimon.core import monitoring
+from daimon.core import monitoring, monitoring_view
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.monitoring import (
     capture_answer,
@@ -230,6 +231,45 @@ async def test_a_tool_call_keeps_its_name_time_and_outcome_only(
         at,
     ), row
     assert row.content is None and row.conversation is None and row.turn_ref is None, row
+
+
+async def test_a_tool_day_transcript_holds_that_utc_day_only(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    """A tool-call day reads by a `created_at` range: both ends of the day, not the next."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await _switch(db_session, tenant.id, "monitor_mcp", agent="agt_a")
+    day = datetime(2026, 11, 1, tzinfo=UTC)
+    for at in (day, day + timedelta(hours=23, minutes=59), day + timedelta(days=1)):
+        await capture_tool_call(
+            db_session_factory,
+            None,
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agt_a"),
+            account_id=account.id,
+            tool_name="notion_search",
+            outcome="completed",
+            at=at,
+        )
+
+    async with db_session_factory() as session:
+        rows = await monitoring_view.list_conversations(
+            session, tenant_id=tenant.id, ma_agent_id="agt_a"
+        )
+        [first] = [row for row in rows if row.day == "2026-11-01"]
+        events = await monitoring_view.get_transcript(
+            session,
+            tenant_id=tenant.id,
+            ma_agent_id="agt_a",
+            conversation=monitoring_view.conversation_id(first),
+        )
+        bad = base64.urlsafe_b64encode(f"{account.id}|tools:nope".encode()).decode()
+        refused = await monitoring_view.get_transcript(
+            session, tenant_id=tenant.id, ma_agent_id="agt_a", conversation=bad
+        )
+    assert events is not None and len(events) == 2, events
+    assert refused is None, "a tool day that is not a date is not a handle"
 
 
 async def test_a_failed_write_never_fails_the_caller(

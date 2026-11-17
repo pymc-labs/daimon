@@ -143,14 +143,13 @@ async def list_events(
     conversation: str | None = None,
     before: tuple[datetime, uuid.UUID] | None = None,
     after: tuple[datetime, uuid.UUID] | None = None,
-    day: str | None = None,
     tool_calls_only: bool = False,
     oldest_first: bool = False,
     limit: int = 100,
 ) -> list[MonitoredEventRow]:
     """One agent's kept rows, newest first; `before` is the last row's (created_at, id).
-    With `after` they run oldest first, from that row on (a transcript). `day` keeps the
-    rows of one UTC date (`YYYY-MM-DD`); `tool_calls_only` those with no conversation."""
+    With `after` they run oldest first, from that row on (a transcript);
+    `tool_calls_only` keeps those with no conversation."""
     stmt = select(MonitoredEvent).where(
         MonitoredEvent.tenant_id == tenant_id, MonitoredEvent.agent_id == agent_id
     )
@@ -166,8 +165,6 @@ async def list_events(
         stmt = stmt.where(MonitoredEvent.conversation == conversation)
     if tool_calls_only:
         stmt = stmt.where(MonitoredEvent.conversation.is_(None))
-    if day is not None:
-        stmt = stmt.where(_day_of(MonitoredEvent.created_at) == day)
     if before is not None:
         stmt = stmt.where(tuple_(MonitoredEvent.created_at, MonitoredEvent.id) < before)
     if after is not None:

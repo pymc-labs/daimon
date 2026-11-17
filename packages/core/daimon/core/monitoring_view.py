@@ -116,13 +116,21 @@ async def get_transcript(
         return None
     account_id, key = parsed
     tools = key.startswith(_TOOLS_PREFIX)
+    since = until = None
+    if tools:
+        try:
+            day = date.fromisoformat(key.removeprefix(_TOOLS_PREFIX))
+        except ValueError:
+            return None
+        since, until = day_range(day, day)
     return await store.list_events(
         session,
         tenant_id=tenant_id,
         agent_id=agent_uuid(tenant_id, ma_agent_id),
         account_id=account_id,
         conversation=None if tools else key,
-        day=key.removeprefix(_TOOLS_PREFIX) if tools else None,
+        since=since,
+        until=until,
         tool_calls_only=tools,
         after=after,
         oldest_first=True,
