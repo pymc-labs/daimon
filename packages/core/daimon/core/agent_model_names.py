@@ -152,6 +152,7 @@ def resolve_model(value: str, *, available: Sequence[ModelRef] | None = None) ->
         {"haiku"},
         {"flash"},
         {"flash", "lite"},
+        {"astra"},
     ):
         if "lite" not in family:
             matches = [model for model in matches if "lite" not in _key(model.id).split()]

@@ -17,7 +17,7 @@ class SessionControls(Contract):
     (a shared thread carries no per-caller credential).
     """
 
-    model: Literal["gpt-6-luna", "gpt-6-astra"] | None = None
+    model: Literal["gpt-6-luna", "gpt-6-astra", "gpt-6.2-astra", "gpt-6.2-sol"] | None = None
     multi_agent_enabled: Literal[False] | None = None
     container_size: Literal["small", "medium", "large"] | None = None
     spend_limit_usd_cents: int | None = Field(default=None, gt=0, strict=True)

@@ -7,9 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Agents Daimon stores itself keep working when the built-in agent is named `default`.**
-  On an install that runs agents from its own records (for example with an OpenAI or Gemini key and no Anthropic key), asking for `daimon` now answers with the workspace's built-in agent renamed to `default`, defaults sync no longer creates a second `daimon` beside it, and setup conversations find it. A user's own agent named `default` is never taken for it.
-
+- **Agents and threads can use GPT-6.2 Astra and GPT-6.2 Sol on OpenAI.** Pick
+  `gpt-6.2-astra` or `gpt-6.2-sol` as an agent's or a thread's model; `gpt-6-luna`
+  stays the default and `gpt-6-astra` stays available. GPT-6.2 Astra costs $8
+  input, $40 output, $0.40 cached input and $10 cache writes per million tokens;
+  GPT-6.2 Sol costs $2, $10, $0.10 and $2.50. Like GPT-6 Astra, a request above
+  272k input tokens is priced wholly at twice the input and cache rates and 1.5x
+  the output rate, an upper bound, and each model has its own daily cap. "astra"
+  names GPT-6.2 Astra and "gpt 6 astra" GPT-6 Astra; "sol" names GPT-6.2 Sol.
+- **Agents Daimon stores itself keep working when the built-in agent is
+  named `default`.** On an install that runs agents from its own records (for
+  example with an OpenAI or Gemini key and no Anthropic key), asking for
+  `daimon` now answers with the workspace's built-in agent renamed to
+  `default`. Defaults sync no longer creates a second `daimon` beside it, and
+  setup conversations find it. A user's own agent named `default` is never
+  taken for it.
 - **Admin > Support follows the order an admin sets Ask a person up.** Turn it
   on for the workspace, choose where it shows, pick the request channel, then
   set credit limits and menus in one list. The later steps stay open when it is
