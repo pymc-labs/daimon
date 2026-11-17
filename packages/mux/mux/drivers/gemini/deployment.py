@@ -85,7 +85,7 @@ class _ConfiguredTransport:
         self._api_key = api_key
         self._protect_storage_credentials = protect_storage_credentials
         self._storage_tokens: set[RedactedCredential] = set()
-        # Interaction id -> digests of mount headers sent (never the token).
+        # Interaction id -> digests of mount and MCP headers sent (never the token).
         self._mount_echoes = MountEchoBook()
         # Shared like the storage tokens: each call gets a fresh SDKTransport, and
         # every later read must scrub a credential an earlier create dispatched.
