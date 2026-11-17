@@ -3,9 +3,10 @@
 Anyone acting in the configured support channel may settle (decision 4);
 `settle_from_post` audits it. The requester is never messaged (decision 8):
 the post and the settler's confirmation say so. The charge is an input on the
-post itself, sent with Set charge (Action.Execute); the buttons carry the
-request id and the post's lines, so they work after a restart. Settling edits
-the post: the final status and settler in place of the pending line, no buttons.
+post itself, sent with Set charge (Action.Execute); the buttons carry only the
+request id, so they work after a restart. Settling edits
+the post, rebuilt from the stored request: the final status and settler in
+place of the pending line, no buttons.
 """
 
 from __future__ import annotations
@@ -14,7 +15,6 @@ import asyncio
 import uuid
 from collections.abc import Mapping
 from decimal import Decimal
-from typing import cast
 
 import structlog
 from daimon.adapters.teams.card_actions import (
@@ -28,6 +28,7 @@ from daimon.adapters.teams.card_actions import (
 from daimon.adapters.teams.identity import DENIED, canonical_uuid
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.adapters.teams.support import closed_post_lines
 from daimon.adapters.teams.support_plan_card import CHARGE_INPUT, closed_card
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.platform_names import get_user_names
@@ -62,13 +63,6 @@ def _escalation_id(value: object) -> uuid.UUID | None:
         return uuid.UUID(hex=str(value or ""))
     except ValueError:
         return None
-
-
-def _post_lines(data: Mapping[str, object]) -> list[str]:
-    """The post's lines, carried in the buttons: a bot cannot read a channel post back."""
-    raw = data.get("post")
-    lines = cast("list[object]", raw) if isinstance(raw, list) else []
-    return [str(line) for line in lines]
 
 
 class TeamsSupportSettle:
@@ -109,6 +103,8 @@ class TeamsSupportSettle:
         activity = ctx.activity
         actor = await card_actor(self._runtime, activity)
         if actor is None:
+            return toast(DENIED)
+        if actor.foreign:
             return toast(DENIED)
         if not self._in_support_channel(activity):
             return toast(SETTLE_ELSEWHERE)
@@ -181,7 +177,7 @@ class TeamsSupportSettle:
         by = ctx.activity.from_.name if settled_now else None
         by = by or await self._settler(actor.tenant_id, after.settled_by)
         if after.status != "pending":
-            await self._close_post(ctx, data, before=before, after=after, by=by)
+            await self._close_post(ctx, before=before, after=after, by=by)
         if outcome.status == "settled":
             return toast(settled_text(charge=after.charge))
         if outcome.status == "declined":
@@ -191,8 +187,6 @@ class TeamsSupportSettle:
     async def _close_post(
         self,
         ctx: ActivityContext[AdaptiveCardInvokeActivity],
-        data: Mapping[str, object],
-        *,
         before: SupportEscalationRow,
         after: SupportEscalationRow,
         by: str | None,
@@ -202,7 +196,20 @@ class TeamsSupportSettle:
         if not post_id:
             log.warning("support.post_edit_failed", escalation_id=str(after.id), error="missing")
             return
-        card = closed_card(_post_lines(data), before=before, after=after, by=by)
+        async with self._runtime.sessionmaker() as session:
+            names = await get_user_names(
+                session,
+                tenant_id=after.tenant_id,
+                platform="teams",
+                user_ids=(after.platform_user_id,),
+            )
+        known = names.get(after.platform_user_id)
+        lines = closed_post_lines(
+            before,
+            user_name=None if known is None else known.label,
+            entra_tenant_id=ctx.activity.conversation.tenant_id or "",
+        )
+        card = closed_card(lines, before=before, after=after, by=by)
         try:
             await asyncio.wait_for(
                 ctx.send(MessageActivityInput(id=post_id).add_card(card)), _EDIT_TIMEOUT_S

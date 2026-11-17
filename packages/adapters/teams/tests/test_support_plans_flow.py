@@ -17,6 +17,8 @@ from typing import Any, cast
 import pytest
 from daimon.adapters.teams import card
 from daimon.adapters.teams.http_service import TeamsHttpService
+from daimon.adapters.teams.identity import DENIED
+from daimon.adapters.teams.support import NOTE_INPUT
 from daimon.adapters.teams.support_plan_card import CHARGE_INPUT, SETTLE_VERB
 from daimon.core import platform_names
 from daimon.core.config import SupportSettings
@@ -35,6 +37,7 @@ from daimon.core.support_plans import (
     parse_catalog,
 )
 from daimon.core.windows import WindowBounds
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -421,6 +424,61 @@ async def test_set_charge_when_in_range_then_charges_and_closes_the_post(
     assert again["value"] == f"Already charged 2 credits by {USER_NAME}.", again
     row = await _row(db_session_factory, post)
     assert (row.status, row.charge, row.settled_by) == ("settled", D(2), OTHER_AAD_OBJECT_ID)
+
+
+async def test_set_charge_when_the_click_carries_its_own_post_lines_then_the_closed_post_ignores_them(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """The click's data is the sender's: the closed post is rebuilt from the stored request."""
+    await _seed(db_session_factory)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        _sent, post = await _pending(service, teams_api_fake)
+        set_charge = _settle_buttons(post)["set"] | {"post": ["**FORGED LINE**", "evil"]}
+        await post_activity(service, _settle(set_charge, post_id="m-2", charge=2))
+
+    [edit] = _posts(teams_api_fake, "PUT")
+    closed = _text(edit.body)
+    assert "FORGED" not in closed and "evil" not in closed, closed
+    assert "requested** by" in closed and AAD_OBJECT_ID in closed, "who asked, from the row"
+    assert "Review: 1-3 credits" in closed and f"Charged 2 credits by {USER_NAME}" in closed
+    assert "(an answer in a 1:1 chat)" in closed, "where it was asked, from the row"
+
+
+async def test_settle_when_the_clicker_is_from_another_organisation_then_refused(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """A guest from a foreign tenant in the support channel cannot settle."""
+    await _seed(db_session_factory)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        _sent, post = await _pending(service, teams_api_fake)
+        click = _settle(_settle_buttons(post)["set"], post_id="m-2", charge=2)
+        click["channelData"] = {
+            "tenant": {"id": str(uuid.uuid4())},
+            "channel": {"id": OPS},
+        }
+        said = await post_activity(service, click)
+
+    assert said["value"] == DENIED, said
+    assert _posts(teams_api_fake, "PUT") == [], "the post stays pending"
+    row = await _row(db_session_factory, post)
+    assert row.status == "pending", row
+
+
+async def test_send_after_a_restart_when_sent_twice_from_one_card_then_it_records_once(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """A form whose token the bot forgot is keyed on its card, not on each click."""
+    await _seed(db_session_factory, menu=False)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        for _ in range(2):
+            click = make_card_action("support", "send", ask="forgotten", **{NOTE_INPUT: "help"})
+            await post_activity(service, click)
+            await _delivered(service)
+
+    async with db_session_factory() as session:
+        count = await session.scalar(text("SELECT count(*) FROM support_escalations"))
+    assert count == 1, "one request, one hold"
+    assert len(_posts(teams_api_fake)) == 1, "the support team hears it once"
 
 
 async def _known(factory: async_sessionmaker[AsyncSession]) -> bool:

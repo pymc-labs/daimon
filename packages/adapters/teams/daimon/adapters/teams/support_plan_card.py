@@ -184,7 +184,7 @@ def settle_card(row: SupportEscalationRow, lines: Sequence[str]) -> AdaptiveCard
     The input starts at the request's hold; Decline sends no input.
     """
     shown = [line for line in lines if line]
-    data: dict[str, object] = {"action": SETTLE_VERB, "request": row.id.hex, "post": shown}
+    data: dict[str, object] = {"action": SETTLE_VERB, "request": row.id.hex}
     actions: list[Action] = [
         ExecuteAction(
             title=SET_CHARGE, verb=SETTLE_VERB, data=data | {"op": "set"}, style="positive"

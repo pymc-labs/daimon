@@ -204,6 +204,19 @@ def requester(user_name: str | None, user_id: str) -> str:
     return f"{user_name or 'Someone'} (Teams user `{user_id}`)"
 
 
+def closed_post_lines(
+    row: SupportEscalationRow, *, user_name: str | None, entra_tenant_id: str
+) -> list[str]:
+    """A settled request's post lines, rebuilt from the stored row: who asked, its terms and
+    status, and the answer's link. Never read back from a card a client sent."""
+    head = f"**{ESCALATE} Human support requested** by {requester(user_name, row.platform_user_id)}"
+    place = AnswerPlace(
+        row.channel_id, row.message_id, row.channel_id.split(";", 1)[0].endswith("@thread.tacv2")
+    )
+    facts = request_facts(row, menu=row.option is not None, balance=None)
+    return [head, *facts, _link_text(place.link(entra_tenant_id))]
+
+
 def enabled(settings: Settings) -> bool:
     """Whether escalation is on: a Teams channel to post in and credits to spend."""
     support = settings.support
@@ -603,7 +616,10 @@ class SupportCommand:
         asked = self._asked.get(token)
         if asked is None or asked.user_id != actor.user_id:
             chat = actor.conversation_id
-            asked = _Asked(actor.user_id, activity.from_.name, chat, chat, activity.id, _DM_LINK)
+            # After a restart the form's token is gone. The card the click came from
+            # names the request: a second Send on it must find the first one.
+            card_id = activity.reply_to_id or activity.id
+            asked = _Asked(actor.user_id, activity.from_.name, chat, chat, card_id, _DM_LINK)
         if op == "pick" or (op == "send" and data.get(OPTION_INPUT)):
             return await self._act_plan(actor, token, asked, data, send=op == "send")
         note = str(data.get(NOTE_INPUT) or "").strip()[:MAX_NOTE_CHARS]
