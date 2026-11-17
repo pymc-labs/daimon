@@ -24,7 +24,7 @@ from daimon.adapters.cli.tenant import TenantSelector, discover_tenant, resolve_
 from daimon.core import dm_settings
 from daimon.core.config import load_settings
 from daimon.core.dm_access import DmAgent, list_dm_agents
-from daimon.core.dm_explain import explain_dm
+from daimon.core.dm_explain import DmExplanation, explain_dm
 from daimon.core.dm_import import import_dm_policies
 from daimon.core.dm_routing import DmChoose, DmRefused, DmStart, DmUnchecked
 from daimon.core.dm_settings import DmActor, DmRuleSpec
@@ -222,6 +222,21 @@ async def dm_rules(
     )
 
 
+def explain_route(found: DmExplanation) -> str:
+    """The `dm explain` line for where the person's DM goes."""
+    route = found.decision.route
+    if found.own_agent:
+        return "starts with the chat's own agent (unrouted)"
+    if isinstance(route, DmStart):
+        return f"starts with {route.agent} ({route.reason})"
+    if isinstance(route, DmChoose):
+        return f"chooses among {', '.join(route.agents)}"
+    if isinstance(route, DmRefused):
+        return f"refused ({route.reason})"
+    assert isinstance(route, DmUnchecked)
+    return "group membership unknown"
+
+
 async def dm_explain(
     *,
     rt: CliRuntime,
@@ -244,16 +259,7 @@ async def dm_explain(
             rt.sessionmaker, rt.settings, http, tenant=tenant, agents=agents, user_id=user
         )
     decision = found.decision
-    route = decision.route
-    if isinstance(route, DmStart):
-        text = f"starts with {route.agent} ({route.reason})"
-    elif isinstance(route, DmChoose):
-        text = f"chooses among {', '.join(route.agents)}"
-    elif isinstance(route, DmRefused):
-        text = f"refused ({route.reason})"
-    else:
-        assert isinstance(route, DmUnchecked)
-        text = "group membership unknown"
+    text = explain_route(found)
     rule = decision.rule
     groups = None if found.groups is None else sorted(found.groups)
     lines = [

@@ -132,6 +132,12 @@ describe("DmSettingsView", () => {
     expect(screen.getByText("Groups").nextSibling?.textContent, "the groups read, by name").toBe("Staff")
   })
 
+  it("says the chat's own agent answers an unrouted Teams chat", () => {
+    explain.data = { route: "start", agent: null, reason: "unrouted", agents: [], allowed: ["Ada"], rule: null, groups: [] }
+    wrap(<DmSettingsView s={settings} />)
+    expect(screen.getByText("Goes to").nextSibling?.textContent, "no agent is named").toBe("The chat's own agent")
+  })
+
   it("says when their groups could not be read", () => {
     explain.data = { route: "unchecked", agent: null, reason: null, agents: [], allowed: [], rule: null, groups: null }
     wrap(<DmSettingsView s={settings} />)

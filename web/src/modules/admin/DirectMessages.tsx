@@ -277,6 +277,8 @@ function why(e: DmExplain): string {
     case "pick": return "Their last pick"
     case "no_agent": return "No agent lets them in"
     case "locked_unavailable": return `${rule} names an agent they can't use`
+    case "default_unavailable": return "The default agent can't take them"
+    case "unrouted": return "No default agent, rules or access limits"
     default: return e.route === "unchecked" ? "Couldn't read their groups" : ""
   }
 }
@@ -298,7 +300,7 @@ function CheckPerson() {
         {e && (
           <div className="border-t pt-3">
             <Facts rows={[
-              ["Goes to", e.route === "start" ? e.agent : e.route === "choose" ? `${ROUTE.choose}: ${e.agents.join(", ")}` : ROUTE[e.route]],
+              ["Goes to", e.route === "start" ? e.agent ?? "The chat's own agent" : e.route === "choose" ? `${ROUTE.choose}: ${e.agents.join(", ")}` : ROUTE[e.route]],
               ["Why", why(e)],
               ["Can use", e.allowed.join(", ") || "No agent"],
               ["Groups", held],

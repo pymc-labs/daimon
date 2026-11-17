@@ -25,7 +25,7 @@ from daimon.core.dm_access import (
     member_roles,
     resolve_groups,
 )
-from daimon.core.dm_routing import DmDecision, DmRuleFact
+from daimon.core.dm_routing import DmDecision, DmRefused, DmRuleFact
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.native_admins import GroupLookupFailed, GroupMembers
@@ -43,6 +43,8 @@ class DmExplanation:
     rules: list[DmRuleFact]
     groups: frozenset[str] | None
     """The named groups the person is in; None when the platform could not say."""
+    own_agent: bool = False
+    """Unrouted, and the platform answers with the chat's own agent (a Teams personal chat)."""
 
 
 async def explain_dm(
@@ -105,7 +107,9 @@ async def explain_dm(
             account_id=None,
             groups=groups,
         )
-    return DmExplanation(decision, routing.rules, groups)
+    # As `daimon.adapters.teams.personal_chat` answers an unrouted chat.
+    own = tenant.platform == "teams" and decision.route == DmRefused("unrouted")
+    return DmExplanation(decision, routing.rules, groups, own_agent=own)
 
 
 async def _discord_member(

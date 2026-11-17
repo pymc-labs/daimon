@@ -322,10 +322,13 @@ def explain_json(found: DmExplanation) -> dict[str, Any]:
     """What a DM would reach, for "Check a person"; `rule` is a 0-based position.
 
     `groups` are the named groups the person is in, None when the platform could not say.
+    A start with no agent is the chat's own agent (`DmExplanation.own_agent`).
     """
     decision = found.decision
     route = decision.route
     match route:
+        case DmRefused() if found.own_agent:
+            kind, agent, reason, agents = "start", None, route.reason, ()
         case DmStart():
             kind, agent, reason, agents = "start", route.agent, route.reason, ()
         case DmChoose():

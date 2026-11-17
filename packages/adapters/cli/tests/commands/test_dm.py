@@ -23,7 +23,12 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import dm_access as dm_store
 from daimon.core.stores import web_audit
-from daimon.core.stores.direct_messages import dm_enabled, get_dm_agent_name, set_dm_enabled
+from daimon.core.stores.direct_messages import (
+    dm_enabled,
+    get_dm_agent_name,
+    set_dm_agent_name,
+    set_dm_enabled,
+)
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
@@ -126,6 +131,8 @@ async def test_explain_when_the_env_policy_leaves_them_out_then_refused(
 ) -> None:
     """Explain applies the deprecated env allowlist, as delivery does."""
     tenant, selector = await _tenant(db_session_factory)
+    async with db_session_factory.begin() as session:
+        await set_dm_agent_name(session, tenant_id=tenant.id, agent_name="ada")
     settings = Settings(
         _env_file=None,  # pyright: ignore[reportCallIssue]
         database={"url": "postgresql+asyncpg://u:p@h/db"},  # pyright: ignore[reportArgumentType]
@@ -139,7 +146,7 @@ async def test_explain_when_the_env_policy_leaves_them_out_then_refused(
         settings,
     )
     console, out = _console()
-    for user, route in (("7", "starts with ada (only)"), ("8", "refused (no_agent)")):
+    for user, route in (("7", "starts with ada (default)"), ("8", "refused (no_agent)")):
         await dm_explain(rt=rt, console=console, selector=selector, user=user, as_json=True)
         assert json.loads(out.getvalue())["route"] == route, user
         out.truncate(0)

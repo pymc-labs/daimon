@@ -99,11 +99,12 @@ export type DmRuleAdd = { subject: DmSubject; subject_id: string | null; agent: 
 export type DmRuleChange = { agent?: string | null; locked?: boolean; to?: number }
 
 /** Where a DM from a person goes; `rule` is the 0-based position of the rule that matched.
- * `groups` are the named groups they are in, null when the platform could not say. */
+ * A start with no `agent` is the chat's own agent. `groups` are the named groups they are
+ * in, null when the platform could not say. */
 export type DmExplain = {
   route: "start" | "choose" | "refused" | "unchecked"
   agent: string | null
-  reason: "locked" | "pick" | "rule" | "default" | "only" | "no_agent" | "locked_unavailable" | null
+  reason: "locked" | "pick" | "rule" | "default" | "only" | "no_agent" | "locked_unavailable" | "default_unavailable" | "unrouted" | null
   agents: string[]
   allowed: string[]
   rule: number | null
