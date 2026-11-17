@@ -35,6 +35,10 @@ from daimon.adapters.mcp.tools.promo_issuing import (
     _revoke_promo_code_impl,
 )
 from daimon.adapters.mcp.tools.routines import _caller  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools.support_plans import (
+    _list_plans_impl,
+    _settle_request_impl,
+)
 from daimon.adapters.mcp.tools.tenant_summary import _get_tenant_summary_impl
 from daimon.core.config import DiscordSettings
 from daimon.core.discord_membership import DiscordRestMembershipResolver
@@ -203,6 +207,10 @@ async def test_routine_runs_as_editor_and_execution_never_has_human_money_author
             _list_promo_codes_impl(runtime, auth),
             _revoke_promo_code_impl(runtime, auth, str(uuid.uuid4())),
             _get_tenant_summary_impl(runtime, auth),
+            _list_plans_impl(runtime, auth),
+            _settle_request_impl(
+                runtime, auth, request_id=str(uuid.uuid4()), charge=None, expected_charge=None
+            ),
         ]
         for call in calls:
             with pytest.raises(ToolError, match="personal user credential"):

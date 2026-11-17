@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 222 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 229 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -608,6 +608,21 @@ Skill tools: sync / list / get / delete.
 | `get_skill` | all callers | Look up a visible skill by name, including version count. |
 | `list_skills` | all callers | List visible custom skills. |
 | `sync_skills` | admin only | Install skills from a GitHub repo into the workspace's shared skill library. |
+
+## `support_plans`
+
+Support plans for Ask a person, for platform admins acting with personal user
+credentials.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `support_catalog_get` | admin only | Show one support menu by key, or every menu with no key. |
+| `support_catalog_set` | admin only | Set, replace or remove (``catalog`` null) a support menu. |
+| `support_plan_clear` | admin only | Remove a support plan and the own caps under it. |
+| `support_plan_list` | admin only | List support plans for Ask a person, with credits used. |
+| `support_plan_set` | admin only | Set or replace the support plan of the workspace, an agent or a channel. |
+| `support_requests_list` | admin only | List support requests, newest first; pending only by default. |
+| `support_requests_settle` | admin only | Settle a support request at ``charge`` credits, or decline it (null). |
 
 ## `task_continuity`
 

@@ -10140,6 +10140,351 @@
         'type': 'object',
       }),
     }),
+    'support_catalog_get': dict({
+      'description': 'Show one support menu by key, or every menu with no key. Admin-only.',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'key': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
+    'support_catalog_set': dict({
+      'description': '''
+        Set, replace or remove (``catalog`` null) a support menu. Admin-only.
+        <blank line>
+        ``catalog``: ``{"name", "options": [{"key", "label", "description",
+        "price", "fields"}]}``. ``price`` is ``{"kind": "fixed", "credits"}``,
+        ``steps``, ``range`` (``min``, ``max``) or ``quoted`` (``min``), credits
+        as decimal strings. ``expected_revision``: the revision last read, or 0
+        when you expect none; a mismatch saves nothing. A menu a plan uses
+        cannot be removed.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'catalog': dict({
+            'anyOf': list([
+              dict({
+                'additionalProperties': True,
+                'type': 'object',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+          }),
+          'expected_revision': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'key': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'key',
+          'catalog',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'support_plan_clear': dict({
+      'description': '''
+        Remove a support plan and the own caps under it. Admin-only.
+        <blank line>
+        Requests there fall back to the next plan up, or the default allowance.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'expected': dict({
+            'anyOf': list([
+              dict({
+                'additionalProperties': True,
+                'type': 'object',
+              }),
+              dict({
+                'const': 'none',
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'scope': dict({
+            'enum': list([
+              'workspace',
+              'agent',
+              'channel',
+            ]),
+            'type': 'string',
+          }),
+          'scope_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'scope',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'support_plan_list': dict({
+      'description': '''
+        List support plans for Ask a person, with credits used. Admin-only.
+        <blank line>
+        Workspace first, then agents, then channels. Read ``summary`` back.
+        With no plan, requests use the default allowance per person.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
+    'support_plan_set': dict({
+      'description': '''
+        Set or replace the support plan of the workspace, an agent or a channel. Admin-only.
+        <blank line>
+        ``scope_id``: none for the workspace, an agent name or id, or a channel id
+        (a thread id resolves to its parent). The most specific plan governs a
+        request; plans never stack. ``pool`` is credits shared by everyone,
+        ``per_person`` each person's cap, both decimal strings such as ``"0.5"``.
+        ``catalog`` is a menu key; none is the default menu. ``window``: ``total``
+        since ``starts_at``, ``monthly`` per UTC month, ``fixed`` between the dates.
+        A plan outside its dates refuses requests. ``expected``: the plan as
+        ``support_plan_list`` gave it, or ``"none"``; a mismatch saves nothing.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'catalog': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'ends_at': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'expected': dict({
+            'anyOf': list([
+              dict({
+                'additionalProperties': True,
+                'type': 'object',
+              }),
+              dict({
+                'const': 'none',
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'per_person': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'pool': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'scope': dict({
+            'enum': list([
+              'workspace',
+              'agent',
+              'channel',
+            ]),
+            'type': 'string',
+          }),
+          'scope_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'starts_at': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'window': dict({
+            'default': 'total',
+            'enum': list([
+              'total',
+              'monthly',
+              'fixed',
+            ]),
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'scope',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'support_requests_list': dict({
+      'description': '''
+        List support requests, newest first; pending only by default. Admin-only.
+        <blank line>
+        Pass ``scope`` and ``scope_id`` to list one plan's requests.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'limit': dict({
+            'default': 50,
+            'type': 'integer',
+          }),
+          'pending': dict({
+            'default': True,
+            'type': 'boolean',
+          }),
+          'scope': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'workspace',
+                  'agent',
+                  'channel',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'scope_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
+    'support_requests_settle': dict({
+      'description': '''
+        Settle a support request at ``charge`` credits, or decline it (null). Admin-only.
+        <blank line>
+        A range or quoted option takes an amount within its bounds. To correct
+        or refund a settled request, pass its current charge as
+        ``expected_charge``. The person who asked is not told; read ``text`` back.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'charge': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+          }),
+          'expected_charge': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'request_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'request_id',
+          'charge',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'sync_skills': dict({
       'description': '''
         Install skills from a GitHub repo into the workspace's shared skill library.
