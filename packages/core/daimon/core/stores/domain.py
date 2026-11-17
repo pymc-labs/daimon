@@ -15,6 +15,7 @@ from typing import Annotated, Any, Literal, cast
 
 from anthropic.types.beta import BetaManagedAgentsSystemContentBlockParam
 from daimon.core.session_snapshot import SessionSnapshot
+from daimon.core.windows import BudgetWindow as BudgetWindow
 from mux.contracts.config import CapabilityRequirement, ThreadMode
 from mux.contracts.ids import PROVIDERS, Provider, Scope, SkillRef
 from mux.contracts.profile import Capability, Effort
@@ -638,9 +639,6 @@ class UsageEventRow(BaseModel):
     observation_revision: int | None = None
     channel_id: str | None = None
     agent_id: str | None = None
-
-
-BudgetWindow = Literal["monthly", "total", "fixed"]
 
 
 class ChannelBudgetRow(BaseModel):
