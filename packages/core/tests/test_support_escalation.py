@@ -10,25 +10,9 @@ from daimon.core.support_escalation import (
     CUSTOM_ID_PREFIX,
     ESCALATE,
     build_custom_id,
-    has_credit,
     is_escalation_reaction,
     parse_custom_id,
-    remaining_credits,
 )
-
-
-def test_remaining_credits_floors_at_zero_when_allowance_is_lowered() -> None:
-    # Allowance is deployment config and can be cut below what someone already
-    # spent. A negative would render as "-2 left" and invites a caller to
-    # compare it against > 0 and disagree with has_credit.
-    assert remaining_credits(allowance=1, used=3) == 0
-    assert has_credit(allowance=1, used=3) is False
-
-
-def test_has_credit_boundary() -> None:
-    assert has_credit(allowance=3, used=2) is True
-    assert has_credit(allowance=3, used=3) is False
-    assert has_credit(allowance=0, used=0) is False
 
 
 def test_escalate_emoji_is_not_a_vote_and_thumbs_are_not_escalations() -> None:

@@ -195,6 +195,8 @@ async def test_cold_thread_feedback_before_session_create(
             surface="cli",
         )
         await session.commit()
+    if platform == "slack":
+        await driver.set_no_request_channel(db_session_factory, tenant.id)
     deps = replace(
         runtime.turn_deps,
         defaults_root=Path("/nonexistent"),

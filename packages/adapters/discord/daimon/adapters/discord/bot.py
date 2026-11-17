@@ -1312,10 +1312,16 @@ class DaimonBot(commands.Bot):
         # class-level registration rather than a live view. Local import for
         # the same cycle reason as above.
         from daimon.adapters.discord.feedback_button import FeedbackButton
-        from daimon.adapters.discord.support_escalation import SupportEscalateButton
+        from daimon.adapters.discord.support_escalation import (
+            SupportEscalateButton,
+            SupportMenuSelect,
+        )
+        from daimon.adapters.discord.support_settle import SupportSettleButton
 
         self.add_dynamic_items(FeedbackButton)
-        self.add_dynamic_items(SupportEscalateButton)
+        self.add_dynamic_items(SupportEscalateButton, SupportMenuSelect)
+        # Set charge and Decline sit on support posts that outlive the process.
+        self.add_dynamic_items(SupportSettleButton)
 
         # The Hand over button rides a notice posted by an earlier process
         # too, so it is a class-level registration as well.

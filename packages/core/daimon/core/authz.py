@@ -106,6 +106,8 @@ class Action(StrEnum):
     MANAGE_AGENTS = "manage_agents"
     # Set, clear or raise the budget of one channel (`Place.channel_id`).
     SET_CHANNEL_BUDGET = "set_channel_budget"
+    # Set support limits, menus and the request channel, or settle a request by hand.
+    SET_SUPPORT = "set_support"
     # Add or remove the extra skills one channel's turns run with (`Place.channel_id`).
     SET_CHANNEL_SKILLS = "set_channel_skills"
     # Set or clear an agent's third-party MCP tool rule: current human admins only.
@@ -373,6 +375,7 @@ _CLIENT_REFUSED_ACTIONS = frozenset(
         Action.MANAGE_INTEGRATIONS,
         Action.MANAGE_AGENTS,
         Action.SET_CHANNEL_BUDGET,
+        Action.SET_SUPPORT,
         Action.SET_CHANNEL_SKILLS,
         Action.SET_AGENT_TOOL_RULE,
         Action.SET_CHANNEL_AGENT_TOOL_RULE,
@@ -693,7 +696,11 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
     ):
         return ALLOW if subject.is_admin and not subject.via_agent_key else _deny("admin_required")
 
-    if req.action in (Action.SET_CHANNEL_BUDGET, Action.SET_CHANNEL_SKILLS):
+    if req.action in (
+        Action.SET_CHANNEL_BUDGET,
+        Action.SET_SUPPORT,
+        Action.SET_CHANNEL_SKILLS,
+    ):
         # Money, and what a shared agent may do, stay with server admins; an
         # admin's own agent key keeps the rights it always had.
         return ALLOW if subject.is_admin else _deny("admin_required")
