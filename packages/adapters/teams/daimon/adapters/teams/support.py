@@ -141,6 +141,7 @@ from daimon.core.support_escalation import (
 )
 from daimon.core.support_routing import (
     SupportDestination,
+    deployment_channel,
     log_undelivered,
     own_channel_allowed,
     support_destination,
@@ -239,7 +240,8 @@ def enabled(settings: Settings) -> bool:
 
     `support_escalation` at the answer's place decides each request.
     """
-    return bool(settings.support.teams_escalation_channel_id) or own_channel_allowed(settings)
+    deployment = deployment_channel(settings.support, "teams")
+    return deployment is not None or own_channel_allowed(settings)
 
 
 def _refusal(access: AnswerAccess) -> str:

@@ -8,7 +8,6 @@ import json
 import re
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -24,6 +23,7 @@ from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.config import SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.testing.settings_mock import mock_settings
 from microsoft_teams.common.http.client import MiddlewareContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -261,41 +261,24 @@ async def test_the_request_is_answered_before_its_delivery_lands(
 
 
 @pytest.mark.parametrize(
-    ("teams_channel", "discord_channel", "credits", "on"),
+    ("teams_channel", "discord_channel", "own", "on"),
     [
-        (None, None, 3, False),
-        (OPS, None, 0, False),
-        (None, "123", 3, False),
-        (OPS, "123", 3, True),
-        (OPS, None, 3, True),
+        (None, None, "off", False),
+        (None, "123", "off", False),
+        (OPS, None, "off", True),
+        (None, None, "on", True),
     ],
+    ids=["nothing", "discord-only", "deployment", "own-allowed"],
 )
-def test_the_command_exists_only_with_a_teams_channel_and_credits(
-    teams_channel: str | None, discord_channel: str | None, credits: int, on: bool
+def test_the_command_exists_only_when_a_teams_channel_could_take_requests(
+    teams_channel: str | None, discord_channel: str | None, own: str, on: bool
 ) -> None:
     """Discord's channel is Discord's: Teams never posts there, as Slack never does."""
-    settings: Any = SimpleNamespace(
-        support=SupportSettings(
-            teams_escalation_channel_id=teams_channel,
-            escalation_channel_id=discord_channel,
-            credits_per_user=credits,
-        )
+    settings = mock_settings(support_own_channel=own)
+    settings.support = SupportSettings(
+        teams_escalation_channel_id=teams_channel, escalation_channel_id=discord_channel
     )
-    assert support.enabled(settings) is on
-
-
-def test_routed_feedback_needs_the_teams_channel() -> None:
-    """A tenant's 👎 forms never go to Discord's channel, which Teams once posted to."""
-    tenant = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
-    routed = {tenant: True}
-    discord_only: Any = SimpleNamespace(
-        support=SupportSettings(escalation_channel_id="123", feedback_to_support=routed)
-    )
-    teams: Any = SimpleNamespace(
-        support=SupportSettings(teams_escalation_channel_id=OPS, feedback_to_support=routed)
-    )
-    assert not support.routes_feedback(discord_only, tenant)
-    assert support.routes_feedback(teams, tenant)
+    assert support.enabled(settings) is on, f"{teams_channel=} {discord_channel=} {own=}"
 
 
 def _ask(op: str, **data: object) -> dict[str, object]:

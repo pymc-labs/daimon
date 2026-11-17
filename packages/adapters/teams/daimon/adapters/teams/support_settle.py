@@ -46,7 +46,7 @@ from daimon.core.support import (
     settled_text,
 )
 from daimon.core.support_changes import settle_from_post
-from daimon.core.support_routing import settle_channel_ok
+from daimon.core.support_routing import deployment_channel, settle_channel_ok
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
@@ -90,7 +90,7 @@ class TeamsSupportSettle:
             row=row,
             channel_id=conversation.id.split(";", 1)[0],
             parent_id=None,
-            default_channel_id=self._runtime.settings.support.teams_escalation_channel_id,
+            default_channel_id=deployment_channel(self._runtime.settings.support, "teams"),
         )
 
     async def _settler(self, tenant_id: uuid.UUID, by: str | None) -> str | None:
@@ -161,7 +161,7 @@ class TeamsSupportSettle:
             default_allowance=self._runtime.settings.support.credits_per_user,
             channel_id=ctx.activity.conversation.id.split(";", 1)[0],
             parent_id=None,
-            default_channel_id=self._runtime.settings.support.teams_escalation_channel_id,
+            default_channel_id=deployment_channel(self._runtime.settings.support, "teams"),
         )
         log.info("support.request_settled", escalation_id=str(row.id), status=outcome.status)
         return await self._finish(ctx, actor, data, before=row, outcome=outcome)

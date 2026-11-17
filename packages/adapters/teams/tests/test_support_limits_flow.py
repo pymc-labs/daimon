@@ -1,6 +1,6 @@
-"""Support plans on Teams: the menu, option forms, admin exemption and settling a post.
+"""Support limits on Teams: the menu, option forms, admin exemption and settling a post.
 
-Real Postgres and the real SDK route, as `test_support.py`; the plan and menu are
+Real Postgres and the real SDK route, as `test_support.py`; the limit and menu are
 set through the store, the request read back through it.
 """
 
@@ -23,7 +23,7 @@ from daimon.adapters.teams.support_menu_card import CHARGE_INPUT, SETTLE_VERB
 from daimon.core import platform_names
 from daimon.core.config import SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.stores import support as plans
+from daimon.core.stores import support as store
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.platform_names import get_user_names
 from daimon.core.stores.support_escalation import get_request, submit_request
@@ -41,7 +41,7 @@ from daimon.core.support import (
     parse_menu,
 )
 from daimon.core.support_escalation import ALREADY_REQUESTED
-from daimon.core.windows import WindowBounds
+from daimon.core.teams_bot_framework import SERVICE_URL
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -65,6 +65,7 @@ from .conftest import (
 
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token", "provisioned_tenant")
 OPS = "19:ops@thread.tacv2"
+OWN = "19:own@thread.tacv2"
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
 D = Decimal
 TWO = D(2)
@@ -114,26 +115,31 @@ async def _seed(
     per_person: Decimal = TWO,
     ends_at: datetime | None = None,
 ) -> None:
-    """A workspace plan for the provisioned tenant, on `spec` unless `menu` is False."""
+    """A workspace limit for the provisioned tenant, on `spec` unless `menu` is False."""
     async with factory() as session, session.begin():
-        catalog = None
         if menu:
-            catalog = await plans.set_catalog(
+            row = await store.set_menu(
                 session, tenant_id=TENANT, key="support", spec=spec, set_by_account_id=None
             )
-        window = WindowBounds("total", None, None)
-        if ends_at is not None:
-            window = WindowBounds("fixed", ends_at - timedelta(days=30), ends_at)
-        await plans.set_plan(
+            await store.set_menu_use(
+                session,
+                tenant_id=TENANT,
+                scope="workspace",
+                scope_id="",
+                menu_id=row.id,
+                set_by_account_id=None,
+            )
+        await store.set_limit(
             session,
             tenant_id=TENANT,
-            platform="teams",
             scope="workspace",
             scope_id="",
-            catalog_id=None if catalog is None else catalog.id,
-            pool=None,
-            per_person=per_person,
-            window=window,
+            platform_user_id=None,
+            shared=None,
+            each_person=per_person,
+            window="total",
+            starts_at=None if ends_at is None else ends_at - timedelta(days=30),
+            ends_at=ends_at,
             set_by_account_id=None,
         )
 
@@ -196,8 +202,8 @@ async def _click(service: TeamsHttpService, data: dict[str, Any], **inputs: obje
     return answer
 
 
-def _posts(fake: TeamsApiFake, method: str = "POST") -> list[SentRequest]:
-    return [r for r in fake.activity_requests if r.method == method and OPS in r.url]
+def _posts(fake: TeamsApiFake, method: str = "POST", channel: str = OPS) -> list[SentRequest]:
+    return [r for r in fake.activity_requests if r.method == method and channel in r.url]
 
 
 async def _pending(service: TeamsHttpService, fake: TeamsApiFake) -> tuple[Any, dict[str, Any]]:
@@ -241,7 +247,7 @@ def _text(content: dict[str, Any]) -> str:
     return json.dumps(content, ensure_ascii=False)
 
 
-async def test_support_when_plan_has_a_menu_then_shows_options_and_balance(
+async def test_support_when_limit_has_a_menu_then_shows_options_and_balance(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     """A typed `support` on a menu plan answers with the menu, its prices and the balance."""
@@ -303,7 +309,7 @@ async def test_pick_when_balance_cannot_cover_it_then_the_menu_says_why(
 
 async def _asked_before(
     factory: async_sessionmaker[AsyncSession], key: str, *, message_id: str = "m-7"
-) -> None:
+) -> uuid.UUID:
     """The person already asked with `key` on `message_id` (the conftest card), via the ledger."""
     option = MENU.option(key)
     assert option is not None, f"{key} is on the menu"
@@ -323,6 +329,7 @@ async def _asked_before(
             exempt=False,
         )
     assert outcome.status == "recorded", outcome.status
+    return outcome.row.id
 
 
 async def test_support_when_nothing_is_affordable_then_the_refusal_and_balance_without_a_menu(
@@ -368,7 +375,7 @@ async def test_ask_a_person_when_already_asked_and_nothing_else_is_affordable_th
     assert ALREADY_REQUESTED in shown and "Input.ChoiceSet" not in shown, shown
 
 
-async def test_support_when_the_plan_ended_then_says_so(
+async def test_support_when_the_limit_ended_then_says_so(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     """A plan past its window offers no form and names the day it ended."""
@@ -476,7 +483,7 @@ async def test_support_when_requester_is_admin_then_uses_no_credits(
     assert "No charge: an admin asked" in str(post.body["text"]), "and the post"
 
 
-async def test_ask_a_person_when_plan_has_a_menu_then_the_dialog_continues_to_the_option(
+async def test_ask_a_person_when_limit_has_a_menu_then_the_dialog_continues_to_the_option(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     """Ask a person on an answer: the menu, then the option's card in the same dialog."""
@@ -694,3 +701,99 @@ async def test_settle_click_when_outside_the_support_channel_then_refuses(
     assert said["value"] == SETTLE_ELSEWHERE, said
     row = await _row(db_session_factory, post)
     assert row.status == "pending", "nothing settled"
+
+
+async def _own_channel(factory: async_sessionmaker[AsyncSession]) -> None:
+    """The workspace picks OWN as its request channel."""
+    async with factory() as session, session.begin():
+        await store.set_support_channel(
+            session,
+            tenant_id=TENANT,
+            platform="teams",
+            channel_id=OWN,
+            teams_team_id="team-own",
+            teams_service_url=SERVICE_URL,
+            set_by_account_id=None,
+        )
+
+
+async def test_send_when_the_workspace_has_its_own_channel_then_posts_and_stamps_there(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """A workspace's own channel takes its requests instead of the deployment's."""
+    await _seed(db_session_factory)
+    await _own_channel(db_session_factory)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        picked = await _click(
+            service, _button(await _typed(service, teams_api_fake)), option=_value("review")
+        )
+        await _click(service, _button(picked["value"]))
+
+    assert _posts(teams_api_fake) == [], "nothing in the deployment channel"
+    [post] = _posts(teams_api_fake, channel=OWN)
+    row = await _row(db_session_factory, _card(post))
+    assert row.support_channel_id == OWN and row.support_post_id, "stamped with the own channel"
+
+
+async def test_send_when_own_channels_are_off_then_posts_in_the_deployment_channel(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """With `support_own_channel` off a picked channel is ignored."""
+    await _seed(db_session_factory)
+    await _own_channel(db_session_factory)
+    runtime = build_teams_runtime(db_session_factory)
+    runtime.settings.support = SupportSettings(teams_escalation_channel_id=OPS)
+    runtime.settings.features = {"support_own_channel": "off"}
+    async with running_service(runtime, teams_api_fake) as service:
+        _sent, post = await _pending(service, teams_api_fake)
+
+    assert _posts(teams_api_fake, channel=OWN) == [], "the own channel gets nothing"
+    row = await _row(db_session_factory, post)
+    assert row.support_channel_id == OPS, "stamped with the deployment channel"
+
+
+async def test_settle_when_the_channel_changed_since_the_post_then_only_the_posted_channel_settles(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """An open request settles where it was posted, not in the newly picked channel."""
+    await _seed(db_session_factory)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        _sent, post = await _pending(service, teams_api_fake)
+        await _own_channel(db_session_factory)
+        decline = _settle_buttons(post)["decline"]
+        moved = await post_activity(service, _settle(decline, post_id="m-2", channel=OWN))
+        said = await post_activity(service, _settle(decline, post_id="m-2"))
+
+    assert moved["value"] == SETTLE_ELSEWHERE, moved
+    assert said["value"] == f"Declined. No credits used. {CLIENT_NOT_NOTIFIED}", said
+    row = await _row(db_session_factory, post)
+    assert row.status == "declined", row
+
+
+@pytest.mark.parametrize(
+    ("own", "channel", "settles"),
+    [(False, OPS, True), (True, OWN, True), (True, OPS, False)],
+    ids=["deployment", "own", "not-the-deployment-once-own"],
+)
+async def test_settle_when_the_request_has_no_stamp_then_its_default_channel_settles(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    own: bool,
+    channel: str,
+    settles: bool,
+) -> None:
+    """A request from before the stamp settles in the own channel, else the deployment's."""
+    await _seed(db_session_factory)
+    if own:
+        await _own_channel(db_session_factory)
+    request = await _asked_before(db_session_factory, "review")
+    data = {"action": SETTLE_VERB, "op": "decline", "request": request.hex}
+    async with _running(db_session_factory, teams_api_fake) as service:
+        said = await post_activity(service, _settle(data, post_id="m-old", channel=channel))
+
+    async with db_session_factory() as session:
+        row = await get_request(session, escalation_id=request)
+    assert row is not None, "the request exists"
+    assert (row.status == "declined") is settles, row.status
+    if not settles:
+        assert said["value"] == SETTLE_ELSEWHERE, said
