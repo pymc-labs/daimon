@@ -55,7 +55,12 @@ def _spaced(*lines: str) -> list[CardElement]:
 
 
 def panel_card(
-    *, bot: str, policy_url: str, delete_enabled: bool = True, microsoft_connected: bool = False
+    *,
+    bot: str,
+    policy_url: str,
+    delete_enabled: bool = True,
+    microsoft_connected: bool = False,
+    monitored: bool = False,
 ) -> AdaptiveCard:
     """Who stores what, with Policy, Export and Delete; the detail is the policy's."""
     actions: list[Action] = [
@@ -68,7 +73,7 @@ def panel_card(
         actions.append(button(VERB, "🗑 Delete…", "delete", style="destructive"))
     body: list[CardElement] = [
         heading(PRIVACY_TITLE),
-        *_spaced(*privacy_lines(bot)),
+        *_spaced(*privacy_lines(bot, monitored=monitored)),
         ActionSet(actions=actions, spacing="Medium"),
     ]
     return AdaptiveCard(body=body, fallback_text="Privacy")

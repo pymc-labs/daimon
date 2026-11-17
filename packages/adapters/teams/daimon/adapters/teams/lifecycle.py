@@ -40,6 +40,7 @@ from daimon.core.channel_budget import balance_footer
 from daimon.core.channel_tidy import record_turn_post, relabel_turn_post
 from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.message_split import split_fenced
+from daimon.core.monitoring import MonitoringNotice
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.outbound.opt_out import tag_opt_outs
@@ -860,6 +861,10 @@ class TeamsTurnLifecycle(OutputGate):
         if phase == "done" and not self._answered:
             return
         self._acknowledge(phase)
+
+    async def on_monitoring_notice(self, notice: MonitoringNotice) -> None:
+        """Tell the person, in a card apart from the reply, that admins can read this."""
+        await self._send(card.notice_card(notice.text, error=False), message_id=None, role="notice")
 
     async def on_reconnect(self, reason: ReconnectReason) -> None:
         return None
