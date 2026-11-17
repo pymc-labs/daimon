@@ -128,6 +128,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
 from daimon.core.mcp_identity import identity_relay_urls
 from daimon.core.mcp_vault import archive_relay_vaults, refresh_mounted_mcp_vaults
+from daimon.core.monitoring import capture_question
 from daimon.core.mux_compat import retrieve_agent, retrieve_agent_version
 from daimon.core.permissions import agent_permissions, channel_permissions, memory_writable
 from daimon.core.pricing import MODEL_PRICING, cost_of
@@ -248,6 +249,29 @@ async def _send_billed(
         # Named boundary: the turn is running and its request stands.
         log.exception("billing.settle_request_unnamed", managed_session_id=session_id)
     return turn_event_id
+
+
+async def _keep_question(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    session: BetaManagedAgentsSession,
+    *,
+    turn_event_id: str,
+    message: str,
+) -> None:
+    """Keep the sent message when its agent is monitored over MCP; the settle that sees
+    the turn end keeps the reply (`usage_sweep.settle_finished_turn`)."""
+    await capture_question(
+        runtime.session_factory,
+        runtime.settings,
+        tenant_id=auth.tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=session.agent.id),
+        platform="mcp",
+        account_id=auth.account_id,
+        conversation=session.id,
+        turn_ref=turn_event_id,
+        content=message,
+    )
 
 
 def _settle_when_finished(runtime: McpRuntime) -> OnRead:
@@ -953,6 +977,7 @@ async def _start_turn_impl(
     await gate(runtime, auth, session)
     turn_started_at = now()
     turn_event_id = await _send_billed(runtime, session, message, scope=mcp_scope(auth))
+    await _keep_question(runtime, auth, session, turn_event_id=turn_event_id, message=message)
     channel = rules_channel(auth, session)
     await record_turn(runtime, session.id, turn_event_id=turn_event_id, rules_channel_id=channel)
     watch_turn(runtime, auth, session.id, turn_event_id=turn_event_id, rules_channel_id=channel)
@@ -1092,6 +1117,7 @@ async def _continue_turn_impl(
         turn_started_at = now()
         # Inside the fence, so settle requests follow the order of the sends.
         turn_event_id = await _send_billed(runtime, current, message, scope=mcp_scope(auth))
+        await _keep_question(runtime, auth, current, turn_event_id=turn_event_id, message=message)
         channel = rules_channel(auth, current)
         await record_turn(runtime, handle, turn_event_id=turn_event_id, rules_channel_id=channel)
         watch_turn(runtime, auth, handle, turn_event_id=turn_event_id, rules_channel_id=channel)
