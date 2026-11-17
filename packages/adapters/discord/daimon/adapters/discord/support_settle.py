@@ -17,7 +17,7 @@ import structlog
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.adapters.discord.support_post import discord_channel, settled_content, status_line
+from daimon.adapters.discord.support_post import settled_content, status_line
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.support_escalation import SettleOutcome, get_request
@@ -39,7 +39,7 @@ from daimon.core.support import (
     settled_text,
 )
 from daimon.core.support_changes import settle_from_post
-from daimon.core.support_routing import settle_channel_ok
+from daimon.core.support_routing import deployment_channel, settle_channel_ok
 
 import discord
 from discord.ext import commands
@@ -156,7 +156,7 @@ async def _settle(
         default_allowance=runtime.settings.support.credits_per_user,
         channel_id=str(interaction.channel_id),
         parent_id=_parent_id(interaction),
-        default_channel_id=discord_channel(runtime.settings.support),
+        default_channel_id=deployment_channel(runtime.settings.support, "discord"),
     )
     _log.info("support.request_settled", escalation_id=str(row.id), status=outcome.status)
     await _finish(interaction, before=row, outcome=outcome)
@@ -249,7 +249,7 @@ class SupportSettleButton(
                     row=row,
                     channel_id=str(interaction.channel_id),
                     parent_id=_parent_id(interaction),
-                    default_channel_id=discord_channel(runtime.settings.support),
+                    default_channel_id=deployment_channel(runtime.settings.support, "discord"),
                 )
             if row is None:
                 await interaction.response.send_message(

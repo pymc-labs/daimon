@@ -52,12 +52,7 @@ from daimon.adapters.discord.bot import DaimonBot, requester_role
 from daimon.adapters.discord.checks import is_member_guild_admin
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.adapters.discord.support_post import (
-    discord_channel,
-    discord_destination,
-    post_to_support_channel,
-    request_facts,
-)
+from daimon.adapters.discord.support_post import post_to_support_channel, request_facts
 from daimon.adapters.discord.support_settle import settle_view
 from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -109,7 +104,7 @@ from daimon.core.support_escalation import (
     UNAVAILABLE,
     build_custom_id,
 )
-from daimon.core.support_routing import log_undelivered
+from daimon.core.support_routing import log_undelivered, support_destination
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import discord
@@ -355,8 +350,8 @@ async def submit_answer_request(
     destination = None
     if offered.on:
         async with runtime.sessionmaker() as session:
-            destination = await discord_destination(
-                session, tenant_id=origin.tenant_id, settings=settings
+            destination = await support_destination(
+                session, tenant_id=origin.tenant_id, platform="discord", settings=settings
             )
     if destination is None:
         # Disabled between the offer and the submit. Nothing is spent.
@@ -804,7 +799,6 @@ __all__ = [
     "SupportOptionModal",
     "answer_origin",
     "answer_place",
-    "discord_channel",
     "menu_message",
     "post_to_support_channel",
     "requester_is_admin",

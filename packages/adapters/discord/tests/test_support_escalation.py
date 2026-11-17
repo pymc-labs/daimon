@@ -11,7 +11,6 @@ import pytest
 from daimon.adapters.discord.support_escalation import (
     SupportEscalateButton,
     SupportModal,
-    discord_channel,
     post_to_support_channel,
 )
 from daimon.adapters.discord.support_post import (
@@ -207,15 +206,6 @@ def test_the_dm_button_and_form_say_ask_the_team_like_slack() -> None:
     assert modal.note_input.label == "What do you need help with?"
     assert modal.note_input.placeholder == "Write a few words."
     assert len(modal.note_input.label) <= 45, "Discord rejects a longer text-input label"
-
-
-def test_a_teams_escalation_channel_is_not_a_discord_one() -> None:
-    """A Teams id left from when Teams shared the setting is not Discord's."""
-    teams = SupportSettings(escalation_channel_id="19:support@thread.tacv2")
-    assert discord_channel(teams) is None, "the Discord bot cannot post in a Teams channel"
-    assert discord_channel(SupportSettings(escalation_channel_id=_ESCALATION)) == _ESCALATION, (
-        "a Discord channel id stays the destination"
-    )
 
 
 def _channel_bot(channel: Any) -> Any:

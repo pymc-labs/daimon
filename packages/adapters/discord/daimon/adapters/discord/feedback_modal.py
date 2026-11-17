@@ -37,15 +37,13 @@ import structlog
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.support_escalation import answer_place
-from daimon.adapters.discord.support_post import (
-    discord_feedback_destination,
-    post_to_support_channel,
-)
+from daimon.adapters.discord.support_post import post_to_support_channel
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.stores.domain import MessageFeedbackRow
 from daimon.core.stores.message_feedback import attach_feedback_text
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import get_latest_thread_session
+from daimon.core.support_routing import feedback_destination
 
 import discord
 from discord.ext import commands
@@ -177,5 +175,5 @@ async def support_channel_for(
         )
         agent_id = None if row is None else row.ma_agent_id
         place = FeaturePlace.of(tenant_id, "discord", parent, thread, agent_id=agent_id)
-        destination = await discord_feedback_destination(session, runtime.settings, place)
+        destination = await feedback_destination(session, runtime.settings, place)
     return None if destination is None else destination.channel_id
