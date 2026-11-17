@@ -451,10 +451,10 @@ async def _decide_click(
 
     if not view.active:
         return ended_text(view, now=datetime.now(UTC))
-    if already is not None:
-        return ALREADY_REQUESTED
     sealed = readers_limited_at(access.policy, channel_id=channel_id, thread_id=thread_ts)
     if view.catalog is not None:
+        # A menu asks once per option: `submit_request` dedups, so another
+        # option on the same answer stays open.
         return build_plan_menu(
             channel_id=channel_id,
             message_ts=message_ts,
@@ -462,6 +462,8 @@ async def _decide_click(
             view=view,
             sealed=sealed,
         )
+    if already is not None:
+        return ALREADY_REQUESTED
     if not view.affordable(price_bounds(view.spec.options[0].price)):
         return out_of_credits_text(view.charged_to)
     left = view.available if view.charged_to == "default" else None

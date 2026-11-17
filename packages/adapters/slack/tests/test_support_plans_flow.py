@@ -374,6 +374,17 @@ async def test_send_when_no_escalation_workspace_is_named_then_no_settle_buttons
     assert status == "pending", "nothing settled"
 
 
+async def test_click_when_another_option_was_asked_on_the_answer_then_the_menu_shows_again(
+    db_session_factory: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    key, _revision = await _seed(db_session_factory)
+    runtime = _runtime(key, db_session_factory)
+    await _pending(runtime, fake)
+    again = await _menu(runtime, fake)
+    blocks = [b.get("block_id") for b in again.get("blocks", [])]
+    assert OPTION_BLOCK_ID in blocks, "a menu asks once per option, not once per answer"
+
+
 async def test_send_when_option_has_steps_and_fields_then_charged_at_submit(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
