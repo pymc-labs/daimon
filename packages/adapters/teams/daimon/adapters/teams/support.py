@@ -103,6 +103,7 @@ from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.support_escalation import (
     SubmitOutcome,
+    asked_options,
     mark_delivered,
     resolve_plan,
     submit_request,
@@ -120,19 +121,17 @@ from daimon.core.support_escalation import (
 )
 from daimon.core.support_plans import (
     CHOOSE_OPTION,
-    NOT_ENOUGH_CREDITS,
     OPTIONS_CHANGED,
     RequestChoice,
     SupportOption,
     SupportPlace,
     SupportPlanError,
     balance_text,
-    cheapest_bounds,
     ended_text,
+    offer_refusal,
     option_value,
-    out_of_credits_text,
+    pick_refusal,
     picked_option,
-    price_bounds,
     received_text,
 )
 from daimon.core.support_plans import refusal_text as plan_refusal
@@ -355,6 +354,12 @@ class _Decided:
     origin: _Origin
     view: PlanView
     sealed: bool
+    repeats: frozenset[str]
+    """The options this person already asked with on this message (`asked_options`)."""
+
+    def refusal(self) -> str | None:
+        """Why nothing can be asked here, with the balance; None while an option is open."""
+        return offer_refusal(self.view, asked=self.repeats)
 
 
 def form_text(remaining: int | None) -> str:
@@ -374,15 +379,9 @@ def _form_hints(view: PlanView) -> tuple[int | None, str | None]:
     return None, footer(view)
 
 
-def _unaffordable(view: PlanView) -> str | None:
-    """Why the note form cannot be sent on this plan, None when it can."""
-    if view.affordable(price_bounds(view.spec.options[0].price)):
-        return None
-    return out_of_credits_text(view.charged_to)
-
-
-def _pick(view: PlanView, data: Mapping[str, object]) -> SupportOption | str:
+def _pick(decided: _Decided, data: Mapping[str, object]) -> SupportOption | str:
     """The option a menu sent, or why not: OPTIONS_CHANGED ends the form, the rest re-ask."""
+    view = decided.view
     if view.catalog is None:
         return OPTIONS_CHANGED
     value = str(data.get(OPTION_INPUT) or "")
@@ -391,9 +390,8 @@ def _pick(view: PlanView, data: Mapping[str, object]) -> SupportOption | str:
     option = picked_option(view.spec, value)
     if option is None:
         return OPTIONS_CHANGED
-    if not view.affordable(cheapest_bounds(option.price)):
-        return NOT_ENOUGH_CREDITS
-    return option
+    refused = pick_refusal(view, option, asked=decided.repeats)
+    return option if refused is None else refused
 
 
 def _hints(note: str | None, sealed: bool) -> list[CardElement]:
@@ -565,9 +563,17 @@ class SupportCommand:
                 default_allowance=self._runtime.settings.support.credits_per_user,
                 exempt=actor.is_platform_admin,
             )
+            repeats = await asked_options(
+                session,
+                tenant_id=actor.tenant_id,
+                platform="teams",
+                platform_user_id=actor.user_id,
+                channel_id=asked.conversation_id,
+                message_id=asked.message_id,
+            )
         if not view.active:
             return ended_text(view, now=datetime.now(UTC))
-        return _Decided(origin, view, sealed)
+        return _Decided(origin, view, sealed, repeats)
 
     def _remember(self, asked: _Asked) -> str:
         token = secrets.token_urlsafe(16)
@@ -592,11 +598,11 @@ class SupportCommand:
             await context.send(notice_card(decided))
             return
         asked, view = replace(asked, sealed=decided.sealed), decided.view
+        if (refused := decided.refusal()) is not None:
+            await context.send(notice_card(refused))
+            return
         if view.catalog is not None:
             await context.send_card(menu_card(self._remember(asked), view, sealed=asked.sealed))
-            return
-        if (refused := _unaffordable(view)) is not None:
-            await context.send(notice_card(refused))
             return
         remaining, hint = _form_hints(view)
         token = self._remember(asked)
@@ -643,7 +649,7 @@ class SupportCommand:
         if isinstance(decided, str):
             return replace_card(text_card(TITLE, *decided.splitlines()))
         view, sealed = decided.view, decided.sealed
-        picked = _pick(view, data)
+        picked = _pick(decided, data)
         if picked == OPTIONS_CHANGED:
             return replace_card(text_card(TITLE, OPTIONS_CHANGED))
         if isinstance(picked, str):
@@ -700,10 +706,10 @@ class SupportCommand:
         if isinstance(decided, str):
             return dialog_notice(TITLE, decided)
         view, sealed = decided.view, decided.sealed
+        if (refused := decided.refusal()) is not None:
+            return dialog_notice(TITLE, refused)
         if view.catalog is not None:
             return dialog(TITLE, _menu_dialog(place.message_id, view, sealed=sealed))
-        if (refused := _unaffordable(view)) is not None:
-            return dialog_notice(TITLE, refused)
         remaining, hint = _form_hints(view)
         return dialog(TITLE, ask_form(place.message_id, remaining, sealed=sealed, footer=hint))
 
@@ -744,7 +750,7 @@ class SupportCommand:
         if isinstance(decided, str):
             return dialog_message(decided)
         view, sealed, message_id = decided.view, decided.sealed, asked.message_id
-        picked = _pick(view, data)
+        picked = _pick(decided, data)
         if picked == OPTIONS_CHANGED:
             return dialog_message(OPTIONS_CHANGED)
         if isinstance(picked, str):

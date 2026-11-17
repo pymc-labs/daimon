@@ -25,11 +25,14 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores import support_plans as plans
 from daimon.core.stores.domain import Role
 from daimon.core.stores.platform_names import ChannelSighting, upsert_channel_names
-from daimon.core.stores.support_escalation import get_request
+from daimon.core.stores.support_escalation import get_request, submit_request
+from daimon.core.support_escalation import ALREADY_REQUESTED
 from daimon.core.support_escalation import CUSTOM_ID_TEMPLATE as BUTTON_TEMPLATE
 from daimon.core.support_plans import (
     CLIENT_NOT_NOTIFIED,
     NOT_ENOUGH_CREDITS,
+    RequestChoice,
+    SupportPlace,
     option_value,
     parse_catalog,
 )
@@ -265,6 +268,68 @@ async def test_pick_when_balance_cannot_cover_it_then_not_enough_credits(
     interaction = await _pick(_bot(db_session_factory), "review")
     assert _said(interaction.response.send_message) == NOT_ENOUGH_CREDITS
     interaction.response.send_modal.assert_not_awaited()
+
+
+async def _asked_before(
+    sessionmaker: async_sessionmaker[AsyncSession], key: str, *, message_id: str = _ANSWER
+) -> None:
+    """User 7 already asked with `key` on an answer, straight through the ledger."""
+    option = MENU.option(key)
+    assert option is not None, f"{key} is on the menu"
+    async with sessionmaker() as session, session.begin():
+        outcome = await submit_request(
+            session,
+            tenant_id=derive_tenant_uuid(platform="discord", workspace_id=_GUILD),
+            account_id=None,
+            platform="discord",
+            platform_user_id="7",
+            channel_id=_THREAD,
+            message_id=message_id,
+            ma_session_id=None,
+            place=SupportPlace(channel_id="222", agent_id=None),
+            choice=RequestChoice.of(option),
+            default_allowance=20,
+            exempt=False,
+        )
+    assert outcome.status == "recorded", outcome.status
+
+
+async def _press(bot: Any) -> Any:
+    interaction = _interaction(bot)
+    button = SupportEscalateButton(guild_id=_GUILD, channel_id=_THREAD, message_id=_ANSWER)
+    await button.callback(interaction)
+    return interaction
+
+
+async def test_pick_when_already_asked_at_no_credits_then_already_asked_not_credits(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed(db_session_factory, per_person=D("0.5"))
+    await _asked_before(db_session_factory, "quick")
+    interaction = await _pick(_bot(db_session_factory), "quick")
+    assert _said(interaction.response.send_message) == ALREADY_REQUESTED, "asked comes first"
+    interaction.response.send_modal.assert_not_awaited()
+
+
+async def test_button_when_nothing_is_affordable_then_the_refusal_and_balance_without_a_menu(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed(db_session_factory, per_person=D("0.5"))
+    await _asked_before(db_session_factory, "quick", message_id="445")
+    interaction = await _press(_bot(db_session_factory))
+    kwargs = interaction.followup.send.await_args.kwargs
+    assert "view" not in kwargs, "no picker when nothing can be picked"
+    assert _said(interaction.followup.send) == f"{NOT_ENOUGH_CREDITS}\n0 of 0.5 credits left."
+
+
+async def test_button_when_already_asked_and_nothing_else_is_affordable_then_already_asked(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed(db_session_factory, per_person=D("0.5"))
+    await _asked_before(db_session_factory, "quick")
+    interaction = await _press(_bot(db_session_factory))
+    assert "view" not in interaction.followup.send.await_args.kwargs, "no picker"
+    assert _said(interaction.followup.send) == f"{ALREADY_REQUESTED}\n0 of 0.5 credits left."
 
 
 def _cold_bot(sessionmaker: async_sessionmaker[AsyncSession]) -> Any:
@@ -529,3 +594,20 @@ async def test_reaction_when_no_plan_then_dms_the_note_button_with_requests_left
     )
     assert kwargs["embed"].to_dict() == expected.to_dict(), "today's prompt, unchanged"
     assert isinstance(kwargs["view"].children[0], SupportEscalateButton)
+
+
+async def test_reaction_when_nothing_is_affordable_then_dms_the_refusal_without_a_menu(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed(db_session_factory, per_person=D("0.5"))
+    await _asked_before(db_session_factory, "quick")
+    bot = _bot(db_session_factory)
+    user = MagicMock()
+    user.send = AsyncMock()
+    bot.get_user = MagicMock(return_value=user)
+    payload = MagicMock(guild_id=int(_GUILD), channel_id=int(_THREAD), message_id=int(_ANSWER))
+    payload.user_id = 7
+    await FeedbackReactionCog(bot)._offer_support(payload)  # pyright: ignore[reportPrivateUsage]
+    kwargs = user.send.await_args.kwargs
+    assert "view" not in kwargs, "no picker when nothing can be picked"
+    assert kwargs["embed"].description == f"{ALREADY_REQUESTED}\n0 of 0.5 credits left."

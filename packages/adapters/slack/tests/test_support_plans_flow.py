@@ -43,14 +43,19 @@ from daimon.adapters.slack.support_settle import (
 )
 from daimon.core.config import SupportSettings
 from daimon.core.github_credentials import build_multifernet, encrypt_token
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores import support_plans as plans
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
+from daimon.core.stores.support_escalation import submit_request
+from daimon.core.support_escalation import ALREADY_REQUESTED
 from daimon.core.support_plans import (
     CLIENT_NOT_NOTIFIED,
     EXEMPT_OFFER,
     NOT_ENOUGH_CREDITS,
     OPTIONS_CHANGED,
     SETTLE_ELSEWHERE,
+    RequestChoice,
+    SupportPlace,
     option_value,
     parse_catalog,
 )
@@ -345,6 +350,66 @@ async def test_pick_when_balance_cannot_cover_it_then_send_is_refused(
         "response_action": "errors",
         "errors": {OPTION_BLOCK_ID: NOT_ENOUGH_CREDITS},
     }
+
+
+async def _asked_before(
+    factory: async_sessionmaker[AsyncSession], key: str, *, message_ts: str = _ANSWER_TS
+) -> None:
+    """The asker already asked with `key` on an answer, straight through the ledger."""
+    option = MENU.option(key)
+    assert option is not None, f"{key} is on the menu"
+    async with factory() as session, session.begin():
+        outcome = await submit_request(
+            session,
+            tenant_id=derive_tenant_uuid(platform="slack", workspace_id=_TEAM),
+            account_id=None,
+            platform="slack",
+            platform_user_id=_USER,
+            channel_id=_CHANNEL,
+            message_id=message_ts,
+            ma_session_id=None,
+            place=SupportPlace(channel_id=_CHANNEL, agent_id=None),
+            choice=RequestChoice.of(option),
+            default_allowance=20,
+            exempt=False,
+        )
+    assert outcome.status == "recorded", outcome.status
+
+
+async def test_click_when_nothing_is_affordable_then_says_why_with_the_balance_and_no_radio(
+    db_session_factory: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    key = await _seed(db_session_factory, per_person=D("0.5"))
+    await _asked_before(db_session_factory, "quick", message_ts="1700000002.000100")
+    shown = json.dumps(await _menu(_runtime(key, db_session_factory), fake))
+    assert OPTION_BLOCK_ID not in shown, "no radio when nothing can be picked"
+    assert NOT_ENOUGH_CREDITS in shown and "0 of 0.5 credits left." in shown, shown
+
+
+async def test_click_when_already_asked_and_nothing_else_is_affordable_then_already_asked(
+    db_session_factory: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    key = await _seed(db_session_factory, per_person=D("0.5"))
+    await _asked_before(db_session_factory, "quick")
+    shown = json.dumps(await _menu(_runtime(key, db_session_factory), fake))
+    assert OPTION_BLOCK_ID not in shown, "no radio"
+    assert json.dumps(ALREADY_REQUESTED)[1:-1] in shown, "asked comes before credits"
+
+
+async def test_pick_when_already_asked_at_no_credits_then_already_asked_and_send_refused(
+    db_session_factory: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    key = await _seed(db_session_factory, per_person=D("0.5"))
+    runtime = _runtime(key, db_session_factory)
+    menu = await _menu(runtime, fake)
+    await _asked_before(db_session_factory, "quick")
+    view = await _pick(runtime, fake, menu, "quick")
+    assert json.dumps(ALREADY_REQUESTED)[1:-1] in json.dumps(view), "the menu says why"
+    sent = evaluate_plan_submission(_send(view, {OPTION_BLOCK_ID: _picked("quick")}))
+    assert sent.response_payload == {
+        "response_action": "errors",
+        "errors": {OPTION_BLOCK_ID: ALREADY_REQUESTED},
+    }, "a Send on it is refused the same way"
 
 
 async def test_send_when_option_has_no_fields_then_posts_pending_with_settle_buttons(

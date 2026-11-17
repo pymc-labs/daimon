@@ -67,6 +67,7 @@ from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.platform_names import get_channel_row
 from daimon.core.stores.support_escalation import (
     SubmitOutcome,
+    asked_options,
     mark_delivered,
     resolve_plan,
     submit_request,
@@ -75,6 +76,7 @@ from daimon.core.stores.support_plans import plans_for_place
 from daimon.core.stores.support_rows import PlanView, SupportEscalationRow
 from daimon.core.stores.thread_sessions import get_latest_thread_session
 from daimon.core.support_escalation import (
+    ALREADY_REQUESTED,
     ASK_THE_TEAM,
     CUSTOM_ID_TEMPLATE,
     EMPTY_NOTE,
@@ -88,7 +90,6 @@ from daimon.core.support_plans import (
     CHOOSE_OPTION,
     EXEMPT_OFFER,
     MAX_PARAGRAPH_CHARS,
-    NOT_ENOUGH_CREDITS,
     OPTIONS_CHANGED,
     ChoiceField,
     RequestChoice,
@@ -98,17 +99,19 @@ from daimon.core.support_plans import (
     SupportPlanError,
     TextField,
     balance_text,
-    cheapest_bounds,
     credits_text,
     ended_text,
     governing_plan,
     inactive_text,
+    offer_refusal,
     option_value,
+    pick_refusal,
     picked_option,
     price_text,
     received_text,
     refusal_text,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
 
 import discord
 from discord.ext import commands
@@ -270,11 +273,14 @@ async def _notice(
     await interaction.followup.send(embed=build_notice_embed(text, neutral=neutral), ephemeral=True)
 
 
-async def _report_failure(interaction: discord.Interaction[Any], text: str) -> None:
+async def _report_failure(
+    interaction: discord.Interaction[Any], text: str, *, neutral: bool = False
+) -> None:
+    embed = build_notice_embed(text, neutral=neutral)
     if interaction.response.is_done():
-        await interaction.followup.send(embed=build_notice_embed(text), ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
     else:
-        await interaction.response.send_message(embed=build_notice_embed(text), ephemeral=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 async def _refuse(interaction: discord.Interaction[Any], outcome: SubmitOutcome) -> None:
@@ -282,6 +288,18 @@ async def _refuse(interaction: discord.Interaction[Any], outcome: SubmitOutcome)
         _log.info("support.out_of_credits", charged_to=outcome.view.charged_to)
     text = refusal_text(outcome, now=datetime.now(UTC))
     await _notice(interaction, text, neutral=outcome.status == "duplicate")
+
+
+async def _asked(session: AsyncSession, origin: AnswerOrigin, user_id: str) -> frozenset[str]:
+    """The options `user_id` already asked with on this answer."""
+    return await asked_options(
+        session,
+        tenant_id=origin.tenant_id,
+        platform="discord",
+        platform_user_id=user_id,
+        channel_id=origin.channel_id,
+        message_id=origin.message_id,
+    )
 
 
 def _post_body(
@@ -632,6 +650,9 @@ class SupportMenuSelect(
             fetch=False,
         )
         user_id = str(interaction.user.id)
+        # No Discord request before the form: it must open inside the
+        # interaction's three seconds. The submit decides who is an admin.
+        exempt = requester_is_admin_cached(interaction, bot, guild_id=origin.guild_id)
         async with runtime.sessionmaker() as session:
             view = await resolve_plan(
                 session,
@@ -639,7 +660,9 @@ class SupportMenuSelect(
                 place=origin.support_place,
                 platform_user_id=user_id,
                 default_allowance=runtime.settings.support.credits_per_user,
+                exempt=exempt,
             )
+            asked = await _asked(session, origin, user_id)
         values = self.item.values
         option = picked_option(view.spec, str(values[0])) if values else None
         if option is None:
@@ -648,12 +671,8 @@ class SupportMenuSelect(
         if not view.active:
             await _report_failure(interaction, ended_text(view, now=datetime.now(UTC)))
             return
-        # No Discord request before the form: it must open inside the
-        # interaction's three seconds. The submit decides who is an admin.
-        if not view.affordable(cheapest_bounds(option.price)) and not requester_is_admin_cached(
-            interaction, bot, guild_id=origin.guild_id
-        ):
-            await _report_failure(interaction, NOT_ENOUGH_CREDITS)
+        if (refused := pick_refusal(view, option, asked=asked)) is not None:
+            await _report_failure(interaction, refused, neutral=refused == ALREADY_REQUESTED)
             return
         if not option.fields and not isinstance(option.price, StepsPrice):
             await interaction.response.defer(ephemeral=True, thinking=True)
@@ -752,6 +771,10 @@ class SupportEscalateButton(
                     default_allowance=runtime.settings.support.credits_per_user,
                     exempt=exempt,
                 )
+                asked = await _asked(session, origin, user_id)
+            if (refused := offer_refusal(view, asked=asked)) is not None:
+                await _notice(interaction, refused, neutral=refused.startswith(ALREADY_REQUESTED))
+                return
             embed, menu = menu_message(origin, view)
             await interaction.followup.send(embed=embed, view=menu, ephemeral=True)
             return

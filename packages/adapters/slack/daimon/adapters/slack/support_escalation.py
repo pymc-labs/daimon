@@ -97,7 +97,7 @@ from daimon.core.permissions import readers_limited_at
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.support_escalation import (
     SubmitOutcome,
-    find_escalation_for_message,
+    asked_options,
     mark_delivered,
     resolve_plan,
     submit_request,
@@ -123,11 +123,10 @@ from daimon.core.support_plans import (
     SupportPlace,
     SupportPlanError,
     balance_text,
-    cheapest_bounds,
     ended_text,
-    out_of_credits_text,
+    offer_refusal,
+    pick_refusal,
     picked_option,
-    price_bounds,
     received_text,
     refusal_text,
 )
@@ -400,6 +399,20 @@ def evaluate_plan_submission(payload: dict[str, Any]) -> SupportSubmission:
     return dataclasses.replace(base, proceed=True, choice=form.choice)
 
 
+async def _asked(
+    session: AsyncSession, origin: AnswerOrigin, *, user_id: str, message_ts: str
+) -> frozenset[str]:
+    """The options `user_id` already asked with on this answer."""
+    return await asked_options(
+        session,
+        tenant_id=origin.tenant_id,
+        platform="slack",
+        platform_user_id=user_id,
+        channel_id=origin.channel_id,
+        message_id=message_ts,
+    )
+
+
 async def _decide_click(
     runtime: SlackRuntime,
     client: AsyncWebClient,
@@ -441,17 +454,14 @@ async def _decide_click(
             default_allowance=support.credits_per_user,
             exempt=exempt,
         )
-        already = await find_escalation_for_message(
-            session,
-            tenant_id=tenant_id,
-            platform="slack",
-            platform_user_id=user_id,
-            channel_id=channel_id,
-            message_id=message_ts,
-        )
+        asked = await _asked(session, origin, user_id=user_id, message_ts=message_ts)
 
     if not view.active:
         return ended_text(view, now=datetime.now(UTC))
+    if view.plan is None and asked:
+        return ALREADY_REQUESTED
+    if (refused := offer_refusal(view, asked=asked)) is not None:
+        return refused
     sealed = readers_limited_at(access.policy, channel_id=channel_id, thread_id=thread_ts)
     if view.catalog is not None:
         # A menu asks once per option: `submit_request` dedups, so another
@@ -463,10 +473,6 @@ async def _decide_click(
             view=view,
             sealed=sealed,
         )
-    if already is not None:
-        return ALREADY_REQUESTED
-    if not view.affordable(price_bounds(view.spec.options[0].price)):
-        return out_of_credits_text(view.charged_to)
     left = view.available if view.charged_to == "default" else None
     return build_support_modal(
         channel_id=channel_id,
@@ -618,6 +624,7 @@ async def _picked_menu(
             default_allowance=runtime.settings.support.credits_per_user,
             exempt=exempt,
         )
+        asked = await _asked(session, origin, user_id=user_id, message_ts=message_ts)
         try:
             policy = await load_access_policy(session, tenant_id=origin.tenant_id)
         except AccessPolicyUnreadable:
@@ -631,15 +638,15 @@ async def _picked_menu(
     sealed = policy is None or readers_limited_at(
         policy, channel_id=channel_id, thread_id=thread_ts
     )
-    affordable = view.affordable(cheapest_bounds(option.price))
+    refusal = pick_refusal(view, option, asked=asked)
     return build_plan_menu(
         channel_id=channel_id,
         message_ts=message_ts,
         thread_ts=thread_ts,
         view=view,
         sealed=sealed,
-        picked=option.key if affordable else None,
-        unaffordable=None if affordable else option.key,
+        picked=option.key if refusal is None else None,
+        refused=None if refusal is None else (option.key, refusal),
     )
 
 

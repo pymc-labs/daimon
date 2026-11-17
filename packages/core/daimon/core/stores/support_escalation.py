@@ -707,6 +707,26 @@ async def _find_request(
     return None if orm is None else SupportEscalationRow.model_validate(orm)
 
 
+async def asked_options(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    platform_user_id: str,
+    channel_id: str,
+    message_id: str,
+) -> frozenset[str]:
+    """The options this person already asked with on one message; a legacy row is the default."""
+    stmt = select(func.coalesce(SupportEscalation.option_key, DEFAULT_OPTION_KEY)).where(
+        SupportEscalation.tenant_id == tenant_id,
+        SupportEscalation.platform == platform,
+        SupportEscalation.platform_user_id == platform_user_id,
+        SupportEscalation.channel_id == channel_id,
+        SupportEscalation.message_id == message_id,
+    )
+    return frozenset((await session.scalars(stmt)).all())
+
+
 async def submit_request(
     session: AsyncSession,
     *,

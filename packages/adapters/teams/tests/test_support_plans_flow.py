@@ -26,14 +26,17 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores import support_plans as plans
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.platform_names import get_user_names
-from daimon.core.stores.support_escalation import get_request
+from daimon.core.stores.support_escalation import get_request, submit_request
 from daimon.core.stores.support_rows import SupportEscalationRow
+from daimon.core.support_escalation import ALREADY_REQUESTED
 from daimon.core.support_plans import (
     CLIENT_NOT_NOTIFIED,
     EXEMPT_OFFER,
     NOT_ENOUGH_CREDITS,
     OPTIONS_CHANGED,
     SETTLE_ELSEWHERE,
+    RequestChoice,
+    SupportPlace,
     option_value,
     parse_catalog,
 )
@@ -43,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
     AAD_OBJECT_ID,
+    CONVERSATION_ID,
     ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
     USER_NAME,
@@ -287,6 +291,73 @@ async def test_pick_when_balance_cannot_cover_it_then_the_menu_says_why(
 
     assert NOT_ENOUGH_CREDITS in _text(picked["value"]), "the menu says why"
     assert _posts(teams_api_fake) == [], "nothing sent"
+
+
+async def _asked_before(
+    factory: async_sessionmaker[AsyncSession], key: str, *, message_id: str = "m-7"
+) -> None:
+    """The person already asked with `key` on `message_id` (the conftest card), via the ledger."""
+    option = MENU.option(key)
+    assert option is not None, f"{key} is on the menu"
+    async with factory() as session, session.begin():
+        outcome = await submit_request(
+            session,
+            tenant_id=TENANT,
+            account_id=None,
+            platform="teams",
+            platform_user_id=AAD_OBJECT_ID,
+            channel_id=CONVERSATION_ID,
+            message_id=message_id,
+            ma_session_id=None,
+            place=SupportPlace(channel_id=CONVERSATION_ID, agent_id=None),
+            choice=RequestChoice.of(option),
+            default_allowance=20,
+            exempt=False,
+        )
+    assert outcome.status == "recorded", outcome.status
+
+
+async def test_support_when_nothing_is_affordable_then_the_refusal_and_balance_without_a_menu(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """With no option the balance covers, `support` says why and what is left: no menu."""
+    await _seed(db_session_factory, per_person=D("0.5"))
+    await _asked_before(db_session_factory, "quick", message_id="m-earlier")
+    async with _running(db_session_factory, teams_api_fake) as service:
+        notice = await _typed(service, teams_api_fake)
+
+    shown = _text(notice)
+    assert "Input.ChoiceSet" not in shown and "ActionSet" not in shown, "no menu"
+    assert NOT_ENOUGH_CREDITS in shown and "0 of 0.5 credits left." in shown, shown
+
+
+async def test_pick_when_already_asked_and_unaffordable_then_already_asked_not_credits(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """A repeat of an option the balance no longer covers says already asked."""
+    await _seed(db_session_factory, per_person=D("1.5"))
+    await _asked_before(db_session_factory, "review")
+    async with _running(db_session_factory, teams_api_fake) as service:
+        menu = await _typed(service, teams_api_fake)
+        picked = await _click(service, _button(menu), option=_value("review"))
+
+    shown = _text(picked["value"])
+    assert ALREADY_REQUESTED in shown and NOT_ENOUGH_CREDITS not in shown, shown
+    assert _posts(teams_api_fake) == [], "nothing sent"
+
+
+async def test_ask_a_person_when_already_asked_and_nothing_else_is_affordable_then_already_asked(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """Ask a person again on the same answer at no credits: already asked, no menu."""
+    await _seed(db_session_factory, per_person=D("0.5"))
+    await _asked_before(db_session_factory, "quick")
+    fetch = make_invoke("task/fetch", {"data": {"dialog_id": card.ASK_HUMAN_DIALOG}})
+    async with _running(db_session_factory, teams_api_fake) as service:
+        opened = await post_activity(service, fetch)
+
+    shown = _text(opened["task"]["value"]["card"]["content"])
+    assert ALREADY_REQUESTED in shown and "Input.ChoiceSet" not in shown, shown
 
 
 async def test_support_when_the_plan_ended_then_says_so(

@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime
 from typing import cast
 
@@ -64,17 +65,20 @@ from daimon.core.message_feedback import (
 from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.message_feedback import record_vote
-from daimon.core.stores.support_escalation import resolve_plan
+from daimon.core.stores.support_escalation import asked_options, resolve_plan
 from daimon.core.stores.support_rows import PlanView
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import get_latest_thread_session
-from daimon.core.support_escalation import is_enabled, is_escalation_reaction
+from daimon.core.support_escalation import (
+    ALREADY_REQUESTED,
+    is_enabled,
+    is_escalation_reaction,
+)
 from daimon.core.support_plans import (
     EXEMPT_OFFER,
     balance_text,
     ended_text,
-    out_of_credits_text,
-    price_bounds,
+    offer_refusal,
 )
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -116,15 +120,15 @@ def support_prompt_embed(link: str, *, remaining: int) -> discord.Embed:
 
 
 def support_offer(
-    origin: AnswerOrigin, view: PlanView
+    origin: AnswerOrigin, view: PlanView, *, asked: AbstractSet[str] = frozenset()
 ) -> tuple[discord.Embed, discord.ui.View] | str:
     """The direct message an escalate reaction sends: a menu, the note button, or why not."""
     if not view.active:
         return ended_text(view, now=datetime.now(UTC))
+    if (refused := offer_refusal(view, asked=asked)) is not None:
+        return refused
     if view.catalog is not None:
         return menu_message(origin, view)
-    if not view.affordable(price_bounds(view.spec.options[0].price)):
-        return out_of_credits_text(view.charged_to)
     available = view.available
     if view.charged_to == "default" and available is not None:
         embed = support_prompt_embed(origin.link, remaining=int(available))
@@ -465,13 +469,22 @@ class FeedbackReactionCog(commands.Cog):
                 default_allowance=allowance,
                 exempt=exempt,
             )
-        offer = support_offer(origin, view)
+            asked = await asked_options(
+                session,
+                tenant_id=origin.tenant_id,
+                platform="discord",
+                platform_user_id=user_id,
+                channel_id=origin.channel_id,
+                message_id=origin.message_id,
+            )
+        offer = support_offer(origin, view, asked=asked)
         try:
             user = self._bot.get_user(payload.user_id)
             if user is None:
                 user = await self._bot.fetch_user(payload.user_id)
             if isinstance(offer, str):
-                await user.send(embed=build_notice_embed(offer))
+                neutral = offer.startswith(ALREADY_REQUESTED)
+                await user.send(embed=build_notice_embed(offer, neutral=neutral))
             else:
                 await user.send(embed=offer[0], view=offer[1])
         except discord.HTTPException as exc:

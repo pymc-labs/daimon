@@ -124,12 +124,13 @@ def build_plan_menu(
     view: PlanView,
     sealed: bool,
     picked: str | None = None,
-    unaffordable: str | None = None,
+    refused: tuple[str, str] | None = None,
 ) -> dict[str, Any]:
     """The menu with each option's price and the balance; a picked option adds its form.
 
-    `unaffordable` is a pick the balance cannot cover: Slack keeps it selected,
-    so the menu says why and a Send on it is refused the same way.
+    `refused` is a pick that opens no form (already asked, or the balance cannot
+    cover it), with the reason: Slack keeps it selected, so the menu says why
+    and a Send on it is refused the same way.
     """
     options = view.spec.options
     choices = [_radio(o.label, option_value(o), price_text(o.price)) for o in options]
@@ -145,7 +146,7 @@ def build_plan_menu(
         {"type": "section", "text": {"type": "mrkdwn", "text": OFFER_PROMPT}}
     ]
     footer = EXEMPT_OFFER if view.exempt else balance_text(view.balance, view.plan)
-    problem = NOT_ENOUGH_CREDITS if unaffordable else None
+    problem = refused[1] if refused else None
     hints = (footer, SEALED_NOTE_HINT if sealed else None, problem)
     blocks.extend(_context(text) for text in hints if text)
     blocks.append(
@@ -166,8 +167,9 @@ def build_plan_menu(
     }
     if option is not None:
         meta["option"] = option_value(option)
-    if unaffordable and (refused := view.spec.option(unaffordable)) is not None:
-        meta["unaffordable"] = option_value(refused)
+    if refused and (refused_option := view.spec.option(refused[0])) is not None:
+        meta["refused"] = option_value(refused_option)
+        meta["refusal"] = refused[1]
     return finish_modal(
         title=ASK_THE_TEAM,
         blocks=blocks,
@@ -219,8 +221,9 @@ def read_plan_form(view: dict[str, Any]) -> PlanForm:
     )
     rendered = str(meta.get("option") or "")
     picked = _selected(_dict(_dict(values.get(OPTION_BLOCK_ID)).get(OPTION_ACTION_ID)))
-    if picked and picked == meta.get("unaffordable"):
-        return dataclasses.replace(form, errors={OPTION_BLOCK_ID: NOT_ENOUGH_CREDITS})
+    if picked and picked == meta.get("refused"):
+        refusal = str(meta.get("refusal") or NOT_ENOUGH_CREDITS)
+        return dataclasses.replace(form, errors={OPTION_BLOCK_ID: refusal})
     if not rendered or picked != rendered:
         return dataclasses.replace(form, errors={OPTION_BLOCK_ID: FORM_LOADING})
     key, _, terms = rendered.partition(":")

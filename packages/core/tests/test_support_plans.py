@@ -9,7 +9,12 @@ from decimal import Decimal
 
 import pytest
 from daimon.core.stores.support_escalation import SubmitOutcome, SubmitStatus
-from daimon.core.stores.support_rows import PlanView, SupportEscalationRow
+from daimon.core.stores.support_rows import (
+    PlanView,
+    SupportCatalogRow,
+    SupportEscalationRow,
+    SupportPlanRow,
+)
 from daimon.core.support_escalation import ALREADY_REQUESTED, OUT_OF_CREDITS, UNAVAILABLE
 from daimon.core.support_plans import (
     CLIENT_NOT_NOTIFIED,
@@ -34,12 +39,14 @@ from daimon.core.support_plans import (
     inactive_text,
     load_catalog,
     may_submit,
+    offer_refusal,
     option_text,
     option_value,
     parse_amount,
     parse_catalog,
     parse_credits,
     parse_plan_spec,
+    pick_refusal,
     picked_option,
     post_status_text,
     price_bounds,
@@ -437,3 +444,68 @@ def test_refusal_text_when_each_status_then_one_shared_line() -> None:
     for status, view, want in cases:
         got = refusal_text(SubmitOutcome(status=status, row=None, view=view), now=now)
         assert got == want, (status, got)
+
+
+def _menu_view(left: str, *, exempt: bool = False) -> PlanView:
+    """A plan on CATALOG with `left` of 2 team credits."""
+    now = datetime(2026, 12, 1, tzinfo=UTC)
+    tenant_id = uuid.uuid4()
+    spec = parse_catalog(CATALOG)
+    catalog = SupportCatalogRow(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        key="support",
+        name=spec.name,
+        revision=1,
+        options=spec.options,
+        set_by_account_id=None,
+        created_at=now,
+        updated_at=now,
+    )
+    plan = SupportPlanRow(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        platform="slack",
+        scope="workspace",
+        scope_id="",
+        catalog_id=catalog.id,
+        pool=D(2),
+        per_person=None,
+        window="total",
+        starts_at=None,
+        ends_at=None,
+        set_by_account_id=None,
+        created_at=now,
+        updated_at=now,
+    )
+    balance = Balance(pool=D(2), pool_used=D(2) - D(left), cap=None, person_used=D(0))
+    return PlanView(plan=plan, catalog=catalog, balance=balance, state="active", exempt=exempt)
+
+
+def test_offer_refusal_when_nothing_open_then_why_with_the_balance() -> None:
+    broke, some = _menu_view("0"), _menu_view("0.5")
+    assert offer_refusal(some, asked=frozenset()) is None, "an affordable option opens the menu"
+    no_credits = offer_refusal(broke, asked=frozenset())
+    assert no_credits == f"{NOT_ENOUGH_CREDITS}\n0 of 2 team credits left.", no_credits
+    repeat = offer_refusal(broke, asked={"quick"})
+    assert repeat == f"{ALREADY_REQUESTED}\n0 of 2 team credits left.", "already asked first"
+    open_left = offer_refusal(some, asked={"quick"})
+    assert open_left is None, "the 0.5 call step is still open"
+    exempt = offer_refusal(_menu_view("0", exempt=True), asked=frozenset())
+    assert exempt is None, "decision 5: an admin is never short"
+    default = PlanView(
+        plan=None,
+        catalog=None,
+        balance=Balance(pool=None, pool_used=D(0), cap=D(1), person_used=D(1)),
+        state="active",
+    )
+    assert offer_refusal(default, asked={"default"}) == OUT_OF_CREDITS, "no plan: credits only"
+
+
+def test_pick_refusal_when_already_asked_or_short_then_in_the_submit_order() -> None:
+    broke, some = _menu_view("0"), _menu_view("0.5")
+    quick, call, review, _ = some.spec.options
+    assert pick_refusal(broke, quick, asked={"quick"}) == ALREADY_REQUESTED, "a repeat at 0"
+    assert pick_refusal(broke, call, asked={"quick"}) == NOT_ENOUGH_CREDITS, "then credits"
+    assert pick_refusal(some, review, asked=frozenset()) == NOT_ENOUGH_CREDITS, "min 1 > 0.5"
+    assert pick_refusal(some, call, asked=frozenset()) is None, "the 0.5 step fits"

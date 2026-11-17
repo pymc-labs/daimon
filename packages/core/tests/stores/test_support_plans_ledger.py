@@ -10,6 +10,7 @@ from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores import support_plans as plans
 from daimon.core.stores.support_rows import SupportCatalogRow, SupportPlanRow
 from daimon.core.support_plans import (
+    DEFAULT_OPTION_KEY,
     PlanScope,
     RequestChoice,
     SupportCatalogSpec,
@@ -284,6 +285,33 @@ async def test_submit_when_same_message_and_option_then_duplicate(
     other = await _submit(db_session, tenant.id, _choice("review"))
     assert again.status == "duplicate" and again.row == first.row, "the earlier row comes back"
     assert other.status == "recorded", "another option on the same message is a new request"
+
+
+async def test_asked_options_when_options_and_a_legacy_row_then_keys_per_message(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack")
+    menu = await _menu(db_session, tenant.id)
+    await _legacy(db_session, tenant.id, "m0")
+    await _plan(db_session, tenant.id, catalog=menu, pool=D(5))
+    await _submit(db_session, tenant.id, _choice("quick"))
+    await _submit(db_session, tenant.id, _choice("review"))
+    await _submit(db_session, tenant.id, _choice("quick"), message="m2")
+
+    async def asked(message: str, user: str = "U1") -> frozenset[str]:
+        return await ledger.asked_options(
+            db_session,
+            tenant_id=tenant.id,
+            platform="slack",
+            platform_user_id=user,
+            channel_id="C1",
+            message_id=message,
+        )
+
+    assert await asked("m1") == {"quick", "review"}, "each option asked on the message"
+    assert await asked("m2") == {"quick"}, "per message"
+    assert await asked("m1", user="U2") == frozenset(), "per person"
+    assert await asked("m0") == {DEFAULT_OPTION_KEY}, "a legacy row is the default option"
 
 
 async def test_submit_when_window_ended_then_plan_inactive_even_for_an_admin(

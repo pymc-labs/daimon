@@ -19,6 +19,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -853,6 +854,33 @@ def received_text(row: SupportEscalationRow, view: PlanView) -> str:
 def out_of_credits_text(charged_to: ChargedTo) -> str:
     """The default plan keeps its request count's words; a configured plan speaks credits."""
     return OUT_OF_CREDITS if charged_to == "default" else NOT_ENOUGH_CREDITS
+
+
+def offer_refusal(view: PlanView, *, asked: AbstractSet[str]) -> str | None:
+    """Why Ask a person offers nothing here, with the balance; None while an option is open.
+
+    `asked` is `asked_options` on this answer. On a plan, a repeat reads as
+    already asked before any credit check, as at submit, so the menu shows no
+    picker. With no plan only credits count, as on each platform before plans.
+    """
+    if view.plan is None:
+        cheapest = cheapest_bounds(view.spec.options[0].price)
+        return None if view.affordable(cheapest) else out_of_credits_text(view.charged_to)
+    open_options = [o for o in view.spec.options if o.key not in asked]
+    if any(view.affordable(cheapest_bounds(o.price)) for o in open_options):
+        return None
+    refusal = ALREADY_REQUESTED if asked else NOT_ENOUGH_CREDITS
+    left = None if view.exempt else balance_text(view.balance, view.plan)
+    return f"{refusal}\n{left}." if left else refusal
+
+
+def pick_refusal(view: PlanView, option: SupportOption, *, asked: AbstractSet[str]) -> str | None:
+    """Why a picked option opens no form, in the submit's order: already asked, then credits."""
+    if option.key in asked:
+        return ALREADY_REQUESTED
+    if not view.affordable(cheapest_bounds(option.price)):
+        return NOT_ENOUGH_CREDITS
+    return None
 
 
 def ended_text(view: PlanView, *, now: datetime) -> str:
