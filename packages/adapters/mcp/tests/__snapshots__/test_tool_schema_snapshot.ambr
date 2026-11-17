@@ -10140,6 +10140,76 @@
         'type': 'object',
       }),
     }),
+    'support_allowance_set': dict({
+      'description': '''
+        Give one person their own cap under a plan, or clear it (``credits`` null). Admin-only.
+        <blank line>
+        No ``scope`` is the default allowance, where no plan applies; otherwise
+        the plan's place as for ``support_plan_set``. ``credits`` is a decimal
+        string. ``expected``: the cap last read, or ``"none"``; a mismatch saves nothing.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'credits': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+          }),
+          'expected': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'platform_user_id': dict({
+            'type': 'string',
+          }),
+          'scope': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'workspace',
+                  'agent',
+                  'channel',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'scope_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'platform_user_id',
+          'credits',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'support_catalog_get': dict({
       'description': 'Show one support menu by key, or every menu with no key. Admin-only.',
       'parameters': dict({

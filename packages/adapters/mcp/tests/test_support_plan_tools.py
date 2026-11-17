@@ -22,6 +22,7 @@ from daimon.adapters.mcp.tools.support_plans import (
     _get_catalogs_impl,  # pyright: ignore[reportPrivateUsage]
     _list_plans_impl,  # pyright: ignore[reportPrivateUsage]
     _list_requests_impl,  # pyright: ignore[reportPrivateUsage]
+    _set_allowance_impl,  # pyright: ignore[reportPrivateUsage]
     _set_catalog_impl,  # pyright: ignore[reportPrivateUsage]
     _set_plan_impl,  # pyright: ignore[reportPrivateUsage]
     _settle_request_impl,  # pyright: ignore[reportPrivateUsage]
@@ -144,7 +145,7 @@ async def test_an_agent_plan_is_stored_under_the_agents_id(
         await _set_plan_impl(runtime, auth, **{**plan, "scope_id": "nobody"})
 
 
-@pytest.mark.parametrize("call", ["list", "set", "clear", "catalog", "requests"])
+@pytest.mark.parametrize("call", ["list", "set", "clear", "catalog", "allowance", "requests"])
 async def test_every_tool_is_admin_only(committing_sessionmaker: Factory, call: str) -> None:
     tenant, account_id = await _seed(committing_sessionmaker)
     runtime, member = _runtime(committing_sessionmaker), _auth(tenant, account_id, admin=False)
@@ -159,12 +160,57 @@ async def test_every_tool_is_admin_only(committing_sessionmaker: Factory, call: 
             await _set_catalog_impl(
                 runtime, member, key="support", catalog=_MENU, expected_revision=None
             )
+        elif call == "allowance":
+            await _set_allowance_impl(
+                runtime,
+                member,
+                platform_user_id="u1",
+                credits="1",
+                scope=None,
+                scope_id=None,
+                expected=None,
+            )
         else:
             await _list_requests_impl(
                 runtime, member, pending=True, scope=None, scope_id=None, limit=50
             )
     async with committing_sessionmaker() as session:
         assert await store.list_plans(session, tenant_id=tenant.id) == [], "nothing written"
+
+
+async def test_a_cap_sets_under_a_threads_plan_and_the_default_then_clears(
+    committing_sessionmaker: Factory,
+) -> None:
+    tenant, account_id = await _seed(committing_sessionmaker)
+    runtime, auth = _runtime(committing_sessionmaker), _auth(tenant, account_id)
+    await _set_plan_impl(
+        runtime, auth, **{**_PLAN, "scope": "channel", "scope_id": _PARENT, "pool": "5"}
+    )
+
+    async def cap(
+        credits: str | None, *, scope: str | None = "channel", expected: str | None = None
+    ):
+        return await _set_allowance_impl(
+            runtime,
+            auth,
+            platform_user_id="u1",
+            credits=credits,
+            scope=scope,
+            scope_id=_THREAD if scope else None,
+            expected=expected,
+        )
+
+    capped = await cap("0.5")
+    assert (capped.scope_id, capped.credits) == (_PARENT, "0.5"), "the thread's parent plan"
+    (listed,) = await _list_plans_impl(runtime, auth)
+    assert listed.allowances == {"u1": "0.5"}, "listed under the plan"
+    default = await cap("3", scope=None)
+    assert (default.scope, default.credits) == (None, "3"), "the default allowance"
+    with pytest.raises(ToolError, match="Nothing was saved"):
+        await cap(None, expected="2")
+    assert (await cap(None, expected="0.5")).credits is None, "cleared"
+    (listed,) = await _list_plans_impl(runtime, auth)
+    assert listed.allowances == {}, "back to the plan's cap"
 
 
 async def test_catalog_set_checks_the_revision_and_removes_with_none(

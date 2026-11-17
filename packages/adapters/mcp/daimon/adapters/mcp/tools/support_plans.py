@@ -42,9 +42,11 @@ from daimon.core.support_plan_admin import (
 )
 from daimon.core.support_plan_changes import (
     PlanValue,
+    clear_allowance,
     clear_plan,
     may_set_support_plan,
     remove_catalog,
+    set_allowance,
     set_catalog,
     set_plan,
     settle,
@@ -94,6 +96,16 @@ class ClearSupportPlanResult:
     scope_id: str
     cleared: bool
     """False when there was no plan to clear."""
+
+
+@dataclass(frozen=True)
+class SupportAllowanceResult:
+    platform_user_id: str
+    scope: str | None
+    """Null for the default allowance, where no plan applies."""
+    scope_id: str
+    credits: str | None
+    """The person's own cap; null once cleared."""
 
 
 @dataclass(frozen=True)
@@ -337,6 +349,59 @@ async def _clear_plan_impl(
     return ClearSupportPlanResult(scope=plan_scope, scope_id=place_id, cleared=cleared)
 
 
+async def _set_allowance_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    platform_user_id: str,
+    credits: str | None,
+    scope: str | None,
+    scope_id: str | None,
+    expected: str | None,
+) -> SupportAllowanceResult:
+    platform = _require_support_admin(auth)
+    user_id = platform_user_id.strip()
+    if not user_id:
+        raise ToolError("platform_user_id is empty. Nothing was saved.")
+    plan_scope: PlanScope | None = None
+    place_id = ""
+    if scope is not None:
+        plan_scope, place_id = await _place(runtime, auth, scope, scope_id, lenient=credits is None)
+    try:
+        last: Expected[Decimal | None] | None = None
+        if expected is not None:
+            last = Expected(
+                None if expected == "none" else parse_credits(expected, name="expected")
+            )
+        place = {"platform": platform, "platform_user_id": user_id}
+        if credits is None:
+            await clear_allowance(
+                runtime.session_factory,
+                _actor(auth),
+                **place,
+                scope=plan_scope,
+                scope_id=place_id,
+                expected=last,
+            )
+            cap = None
+        else:
+            row = await set_allowance(
+                runtime.session_factory,
+                _actor(auth),
+                **place,
+                credits=parse_credits(credits, name="credits"),
+                scope=plan_scope,
+                scope_id=place_id,
+                expected=last,
+            )
+            cap = format_credits(row.credits)
+    except (SupportPlanError, ChannelChangeRefused, StaleChannelValue) as exc:
+        raise _refused(exc) from exc
+    return SupportAllowanceResult(
+        platform_user_id=user_id, scope=plan_scope, scope_id=place_id, credits=cap
+    )
+
+
 async def _get_catalogs_impl(
     runtime: McpRuntime, auth: AuthIdentity, key: str | None
 ) -> list[SupportCatalogResult]:
@@ -513,6 +578,31 @@ def register_support_plan_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """
         return await _clear_plan_impl(
             runtime, await _auth(ctx), scope=scope, scope_id=scope_id, expected=expected
+        )
+
+    @mcp.tool(tags={"admin"})
+    async def support_allowance_set(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context,
+        platform_user_id: str,
+        credits: str | None,
+        scope: Literal["workspace", "agent", "channel"] | None = None,
+        scope_id: str | None = None,
+        expected: str | None = None,
+    ) -> SupportAllowanceResult:
+        """Give one person their own cap under a plan, or clear it (``credits`` null). Admin-only.
+
+        No ``scope`` is the default allowance, where no plan applies; otherwise
+        the plan's place as for ``support_plan_set``. ``credits`` is a decimal
+        string. ``expected``: the cap last read, or ``"none"``; a mismatch saves nothing.
+        """
+        return await _set_allowance_impl(
+            runtime,
+            await _auth(ctx),
+            platform_user_id=platform_user_id,
+            credits=credits,
+            scope=scope,
+            scope_id=scope_id,
+            expected=expected,
         )
 
     @mcp.tool(tags={"admin"})

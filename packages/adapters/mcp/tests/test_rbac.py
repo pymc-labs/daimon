@@ -332,6 +332,7 @@ STILL_ADMIN_TOOL_NAMES = (
     "set_channel_budget",
     "clear_channel_budget",
     "support_plan_list",
+    "support_allowance_set",
     "support_plan_set",
     "support_plan_clear",
     "support_catalog_get",

@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 229 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 230 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -616,6 +616,7 @@ credentials.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
+| `support_allowance_set` | admin only | Give one person their own cap under a plan, or clear it (``credits`` null). |
 | `support_catalog_get` | admin only | Show one support menu by key, or every menu with no key. |
 | `support_catalog_set` | admin only | Set, replace or remove (``catalog`` null) a support menu. |
 | `support_plan_clear` | admin only | Remove a support plan and the own caps under it. |
