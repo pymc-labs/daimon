@@ -22,6 +22,7 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.message_feedback import record_vote
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.settings_mock import mock_settings
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -32,7 +33,7 @@ _OTHER_USER_ID = "200000000000000002"
 
 def _runtime(*, sessionmaker: async_sessionmaker[AsyncSession]) -> DiscordRuntime:
     return DiscordRuntime(
-        settings=MagicMock(),
+        settings=mock_settings(),
         anthropic=build_stub_anthropic(),
         sessionmaker=sessionmaker,
         notebook_rate_limiter=RateLimiter(max_requests=999),

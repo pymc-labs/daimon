@@ -48,7 +48,9 @@ from daimon.core.features.snapshot import (
     CACHE,
     FeaturePlace,
     approvals_from_gate,
+    env_map_values,
     resolve_one,
+    support_setup,
     tier_values,
     unavailable_reason,
 )
@@ -64,6 +66,7 @@ from daimon.core.stores.feature_values import (
     replace_agent_values,
     set_feature_value,
 )
+from daimon.core.stores.support_rows import SupportSetup
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -198,6 +201,7 @@ async def read_features(
             if any(spec.key == "approvals" for spec in specs)
             else None
         )
+        support = await support_setup(session, settings, place, specs)
     wanted = {spec.key for spec in specs}
     resolved: dict[str, ResolvedFeature] = {}
     views: dict[str, FeatureView] = {}
@@ -210,7 +214,7 @@ async def read_features(
             view = FeatureView(
                 spec,
                 _own(spec, place, values),
-                resolve_one(spec, settings, place, rows, resolved, agent_builtins),
+                resolve_one(spec, settings, place, rows, resolved, agent_builtins, support),
             )
         resolved[spec.key] = view.resolved
         views[spec.key] = view
@@ -293,15 +297,17 @@ def feature_refusal(
     locked: bool,
     place: FeaturePlace,
     settings: Settings | None,
+    support: SupportSetup | None = None,
 ) -> ChannelChangeRefused | None:
-    """Why the names, place or lock rule out the change, before any read; None if not. Pure."""
+    """Why the names, place or lock rule out the change, before any read; None if not. Pure;
+    `support` is the workspace's own support setup (`support_setup`)."""
     spec = FEATURES.get(key)
     if spec is None:
         return _refused(
             f"There is no such setting. Open {_settings_pointer(place.platform)} to see them.",
             "unknown_key",
         )
-    reason = unavailable_reason(spec, settings, place)
+    reason = unavailable_reason(spec, settings, place, support)
     for failed, message, code in (
         (
             value != DEFAULT and value not in spec.values,
@@ -571,7 +577,13 @@ async def change_feature(
 
     Raises `ChannelChangeRefused` (its message is for people) or `StaleChannelValue` when
     `expected` is not the tier's own `TierSetting.text` now."""
-    refusal = feature_refusal(key, tier, value, locked=locked, place=place, settings=settings)
+    support = None
+    if key in FEATURES:
+        async with sessions() as session:
+            support = await support_setup(session, settings, place, (FEATURES[key],))
+    refusal = feature_refusal(
+        key, tier, value, locked=locked, place=place, settings=settings, support=support
+    )
     if refusal is not None:
         raise refusal
     spec = FEATURES[key]
@@ -684,7 +696,11 @@ async def set_workspace_feature(
     settings writers (typed mentions, direct messages, web modules) that have already
     checked their admin. Same refusals and records as `change_feature`; returns what it was."""
     place = FeaturePlace(tenant_id, platform)
-    refusal = feature_refusal(key, "workspace", value, locked=False, place=place, settings=settings)
+    specs = (FEATURES[key],) if key in FEATURES else ()
+    support = await support_setup(session, settings, place, specs)
+    refusal = feature_refusal(
+        key, "workspace", value, locked=False, place=place, settings=settings, support=support
+    )
     if refusal is not None:
         raise refusal
 
@@ -709,10 +725,7 @@ async def import_env(session: AsyncSession, settings: Settings) -> int:
     already stored is kept. Returns how many rows were written."""
     workspace = FeatureTarget("workspace")
     specs = [spec for spec in FEATURES.values() if spec.env_map is not None]
-    maps = {
-        spec.key: cast("Mapping[uuid.UUID, bool]", getattr(settings, cast(str, spec.env_map)))
-        for spec in specs
-    }
+    maps = {spec.key: env_map_values(settings, cast(str, spec.env_map)) for spec in specs}
     written = 0
     for tenant_id in sorted({tenant for values in maps.values() for tenant in values}, key=str):
         stored = await list_feature_values(

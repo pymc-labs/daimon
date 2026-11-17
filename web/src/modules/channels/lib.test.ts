@@ -185,6 +185,15 @@ describe("describeChange", () => {
   it("reads budgets", () => {
     expect(describeChange(entry("budget", null, { limit_usd: "25.00", window: "monthly" }), labels)).toEqual({ what: "Budget", from: ["None"], to: ["$25.00 monthly"] })
   })
+  it("reads support limits, menus, the request channel and requests", () => {
+    const limit = { scope: "channel", scope_id: "c1", person: false, shared: "5", each_person: "2", window: "monthly", starts_at: null, ends_at: null, revision: 1 }
+    expect(describeChange(entry("support_limit", null, limit), labels)).toEqual({ what: "Support limit", from: ["None"], to: ["5 credits, 2 per person, each month"] })
+    expect(describeChange(entry("support_limit", { ...limit, shared: null, each_person: null, window: "total" }, null), labels).from).toEqual(["Default credits"])
+    expect(describeChange(entry("support_menu", null, { key: "main", name: "Help", options: [] }), labels)).toEqual({ what: "Support menu", from: ["None"], to: ["Help"] })
+    expect(describeChange(entry("support_menu_use", { menu: "main" }, { menu: "extra" }), labels)).toEqual({ what: "Support menu in use", from: ["main"], to: ["extra"] })
+    expect(describeChange(entry("support_channel", null, { platform: "slack", channel_id: "C1", revision: 1 }), labels)).toEqual({ what: "Support requests go to", from: ["None"], to: ["C1"] })
+    expect(describeChange(entry("support_settle", null, { request: "r", status: "settled", charge: "2" }), labels)).toEqual({ what: "Support request", from: ["None"], to: ["Done, 2 credits"] })
+  })
 })
 
 describe("leaving its own agents", () => {

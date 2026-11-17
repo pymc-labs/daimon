@@ -15,11 +15,12 @@ import httpx
 from anthropic import AsyncAnthropic
 from daimon.adapters.slack.app import SlackApp
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.core.config import OutboundSettings, TurnQueueSettings
+from daimon.core.config import OutboundSettings, SupportSettings, TurnQueueSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing.ma import make_agent_env_echo_handler
+from daimon.testing.settings_mock import mock_settings
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic, make_fake_ma_handler
 from pydantic import SecretStr
@@ -35,13 +36,14 @@ def build_slack_runtime(
 ) -> SlackRuntime:
     """A `SlackRuntime` for handlers that never enter the turn path.
 
-    `settings` is a `MagicMock` (a fresh one unless the caller passes its own
-    pre-configured mock) that gets the crypto key; the resolver cache and turn
+    `settings` is a `MagicMock` (a fresh `mock_settings()` with default support
+    settings unless the caller passes its own pre-configured mock) that gets the crypto key; the resolver cache and turn
     deps are stubs. `anthropic` defaults to a fake backed by
     `make_fake_ma_handler`.
     """
     if settings is None:
-        settings = MagicMock()
+        settings = mock_settings()
+        settings.support = SupportSettings()
     settings.crypto.keys = (SecretStr(fernet_key),)
     return SlackRuntime(
         settings=settings,
