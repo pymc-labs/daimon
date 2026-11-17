@@ -14,6 +14,7 @@ import { useCan } from "@/lib/hooks"
 import { NotFound } from "@/pages/Status"
 import { useAgent, useCatalog, useConnectNode, useDraft, useDraftEditor } from "./api"
 import { Canvas } from "./Canvas"
+import { useMonitoringState } from "./setup/useMonitoringState"
 import { DraftBar } from "./Draft"
 import { Inspector } from "./inspector/Inspector"
 import { nodeId, nodeUi } from "./nodes/registry"
@@ -25,6 +26,7 @@ const ICON_ON_PHONE = "max-sm:w-7 max-sm:px-0"
 export function AgentPage() {
   const { id = "" } = useParams()
   const can = useCan()
+  const monitored = useMonitoringState(id, can("workspace.manage")).isSuccess
   const query = useAgent(id)
   const { data: agent, error } = query
   const { data: draft } = useDraft(id, agent?.can_edit === true)
@@ -76,7 +78,7 @@ export function AgentPage() {
           <Button variant={node === "features" ? "secondary" : "outline"} size="sm" className={ICON_ON_PHONE} onClick={() => setNode(node === "features" ? null : "features")}>
             <SlidersHorizontal /><span className="max-sm:sr-only">Features</span>
           </Button>
-          {can("workspace.manage") && (
+          {monitored && (
             <Button variant={node === "monitoring" ? "secondary" : "outline"} size="sm" className={ICON_ON_PHONE} onClick={() => setNode(node === "monitoring" ? null : "monitoring")}>
               <ScanEye /><span className="max-sm:sr-only">Monitoring</span>
             </Button>

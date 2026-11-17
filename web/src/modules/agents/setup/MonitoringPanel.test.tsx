@@ -22,11 +22,10 @@ const view = (key: string, over: object = {}) => ({
   key, tiers: [{ tier: "agent", value: "default", locked: false, text: "default" }], value: "off", source: "default", locked: false, unavailable: null, summary: "Off", ...over,
 })
 
-function serve(features: object[], reads = true) {
+function serve(features: object[]) {
   vi.mocked(api.get).mockImplementation(async (path: string) => {
     if (path === "/api/features/schema") return [schema("monitor_direct_messages", "Monitor direct messages"), schema("monitor_mcp", "Monitor coding tools")]
     if (path.startsWith("/api/features")) return { platform: "discord", features }
-    if (!reads) throw new Error("Only platform admins can read monitored conversations.")
     return { id: "ag_w", name: "W", direct_messages: { on: false, since: null }, coding_tools: { on: false, since: null } }
   })
 }
@@ -57,13 +56,5 @@ describe("MonitoringPanel", () => {
     expect(await screen.findByText("Locked by the workspace")).toBeInTheDocument()
     expect(screen.queryByRole("combobox", { name: "Direct messages" })).toBeNull()
     expect(await screen.findByRole("link", { name: "View activity" })).toHaveAttribute("href", "/admin/monitoring?agent=ag_w")
-  })
-
-  it("offers no way to the activity to an admin who may not read it", async () => {
-    serve([view("monitor_direct_messages"), view("monitor_mcp")], false)
-    show()
-    expect(await screen.findByRole("combobox", { name: "Direct messages" })).toBeInTheDocument()
-    await waitFor(() => expect(api.get).toHaveBeenCalledWith("/api/admin/monitoring/agents/ag_w"))
-    expect(screen.queryByRole("link", { name: "View activity" })).toBeNull()
   })
 })

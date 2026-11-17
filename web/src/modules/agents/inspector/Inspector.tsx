@@ -20,6 +20,7 @@ import { GoogleBadge, ToolRulesPanel } from "../setup/ToolRulesPanel"
 import { GithubPanel } from "../setup/GithubPanel"
 import { KeysPanel } from "../setup/KeysPanel"
 import { MonitoringPanel } from "../setup/MonitoringPanel"
+import { useMonitoringState } from "../setup/useMonitoringState"
 import { PeoplePanel } from "../setup/PeoplePanel"
 import { usePendingPreview } from "../usePendingPreview"
 import { unsupportedOf } from "../unsupported"
@@ -35,6 +36,7 @@ export function Inspector(props: Props) {
   const { node, agent, config, select } = props
   const p = { ...props, unsupported: unsupportedOf(usePendingPreview(agent, config.model).data) }
   const can = useCan()
+  const monitoring = useMonitoringState(agent.id, can("workspace.manage")).isSuccess
   useKey((e) => { if (e.key === "Escape") select("") }, [select])
   const kind = node.split(/[:/]/)[0]!
   const server = kind === "mcp" ? config.mcp_servers.find((s) => node.startsWith(`mcp:${s.key}`)) : undefined
@@ -54,7 +56,7 @@ export function Inspector(props: Props) {
   else if (node === "coding") body = <CodingPanel {...p} />
   else if (node === "knowledge") body = <KnowledgePanel {...p} />
   else if (node === "github") body = <GithubPanel {...p} />
-  else if (node === "monitoring" && can("workspace.manage")) body = <MonitoringPanel agent={agent} />
+  else if (node === "monitoring" && monitoring) body = <MonitoringPanel agent={agent} />
   else if (node === "places" || kind === "place") body = <PlacesEditor {...p} />
   else if (node === "helpers" || kind === "helper") body = <HelpersEditor {...p} />
   else if (node === "mcp:new") body = <NewServer {...p} />

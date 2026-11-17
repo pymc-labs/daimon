@@ -1,16 +1,14 @@
-import { useQuery } from "@tanstack/react-query"
 import { Lock } from "lucide-react"
 import { useState } from "react"
 import { Link } from "react-router"
 
 import { InheritedSelect } from "@/components/inherited"
 import { Button } from "@/components/ui/button"
-import { api } from "@/lib/api"
 import { absolute } from "@/lib/format"
 import { useFeatureSave, useFeatures, useFeatureSchema } from "@/modules/features/api"
 import type { FeatureSchema, FeatureView } from "@/modules/features/types"
-import type { AgentMonitoring } from "../../admin/types"
 import { Field, Section, type Props } from "../inspector/parts"
+import { useMonitoringState } from "./useMonitoringState"
 
 const DEFAULT = "default"
 const FROM: Record<string, string> = { deployment: "Built-in", default: "Built-in", workspace: "Workspace" }
@@ -19,13 +17,13 @@ const SWITCHES = [
   { key: "monitor_mcp", label: "Coding tools", state: "coding_tools" },
 ] as const
 
-/** The two monitoring switches of one agent, and, for a platform admin, the way to the activity they keep. */
+/** The two monitoring switches of one agent and the way to the activity they keep; shown only where `useMonitoringState` succeeds. */
 export function MonitoringPanel({ agent }: Pick<Props, "agent">) {
   const place = { agent: agent.id }
   const schema = useFeatureSchema()
   const doc = useFeatures(place)
   const save = useFeatureSave(place)
-  const state = useQuery({ queryKey: ["admin", "monitoring", agent.id, "state"], queryFn: () => api.get<AgentMonitoring>(`/api/admin/monitoring/agents/${encodeURIComponent(agent.id)}`) })
+  const state = useMonitoringState(agent.id)
   const [error, setError] = useState<string | null>(null)
   const views = new Map((doc.data?.features ?? []).map((f) => [f.key, f]))
 
