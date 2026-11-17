@@ -12,8 +12,8 @@ downgrade: safe
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0206_skill_manifest_bytes"
-down_revision: str | None = "0205_web_search_usage"
+revision: str = "0207_skill_manifest_bytes"
+down_revision: str | None = "0206_support_plans"
 branch_labels: str | None = None
 depends_on: str | None = None
 

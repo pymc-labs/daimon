@@ -21,7 +21,9 @@ from mux.drivers.gemini.transport import (
     Object,
     SDKTransport,
     checked_storage_response,
+    mcp_header_digest,
     mcp_request_tokens,
+    mount_header_digest,
     scrub_mcp_echo,
 )
 from mux.errors import ProviderError
@@ -77,7 +79,7 @@ def test_our_echoed_header_is_scrubbed_and_the_answer_survives() -> None:
     assert "headers" not in clean["tools"][0]  # pyright: ignore[reportIndexIssue,reportArgumentType]
     assert clean["steps"][0]["content"][0]["text"] == "final answer"  # pyright: ignore[reportIndexIssue,reportArgumentType]
     assert TOKEN not in json.dumps(clean)
-    nested = scrub_mcp_echo({"event_type": "x", "interaction": completed()}, {TOKEN})
+    nested, _ = scrub_mcp_echo({"event_type": "x", "interaction": completed()}, {TOKEN})
     assert "headers" not in nested["interaction"]["tools"][0]  # pyright: ignore[reportIndexIssue,reportArgumentType]
 
 
@@ -113,6 +115,8 @@ def test_without_mcp_tokens_an_unprotected_response_is_untouched() -> None:
 @asynccontextmanager
 async def transport(
     respond: Callable[[httpx.Request], httpx.Response],
+    *,
+    mcp_tokens: set[RedactedCredential] | None = None,
 ) -> AsyncIterator[SDKTransport]:
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
         client = genai.Client(
@@ -122,7 +126,7 @@ async def transport(
             ),
         )
         try:
-            yield SDKTransport(client)
+            yield SDKTransport(client, mcp_tokens=mcp_tokens)
         finally:
             await client.aio.aclose()
 
@@ -288,3 +292,90 @@ def test_the_shape_r12_actually_echoed_is_scrubbed() -> None:
     clean = checked_storage_response(completed(tools=tools), protected=True, mcp_tokens={TOKEN})
     assert "headers" not in clean["tools"][3]  # pyright: ignore[reportIndexIssue,reportArgumentType]
     assert TOKEN not in json.dumps(clean)
+
+
+NEXT = RedactedCredential("offline-next-turn-mcp-token")
+
+
+async def test_create_records_the_mcp_header_digest_for_the_accepted_interaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The driver persists this digest with the acceptance, before any read."""
+
+    async def already_bound(request: Object) -> Object:
+        return request
+
+    monkeypatch.setattr(transport_module, "refresh_bound_request", already_bound)
+    async with transport(lambda request: httpx.Response(200, json=completed())) as gemini:
+        await gemini.create(
+            {"agent": "agents/base", "agent_config": {"type": "antigravity"}, "tools": [mcp_tool()]}
+        )
+        recorded = gemini.mount_echo_digests("native")
+    assert recorded == {mcp_header_digest("Bearer " + TOKEN)}, "only a digest, keyed to the id"
+    assert all(TOKEN not in digest for digest in recorded), "the token is never recorded"
+
+
+@asynccontextmanager
+async def restarted(
+    body: Object, bound: dict[str, str], dispatched: set[RedactedCredential] | None = None
+) -> AsyncIterator[SDKTransport]:
+    """A fresh worker: it knows earlier headers only by their recorded digests."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=body)
+
+    async with transport(
+        respond, mcp_tokens={NEXT} if dispatched is None else dispatched
+    ) as gemini:
+        for interaction, digest in bound.items():
+            gemini.bind_mount_echo(interaction, {digest})
+        yield gemini
+
+
+@pytest.mark.parametrize(
+    "dispatched", [{NEXT}, set[RedactedCredential]()], ids=["next-turn-sent", "nothing-sent"]
+)
+async def test_a_restarted_worker_clears_the_recorded_header_of_an_earlier_interaction(
+    dispatched: set[RedactedCredential],
+) -> None:
+    """A turn interrupted by a worker restart: reconcile re-reads its interaction."""
+    bound = {"native": mcp_header_digest("Bearer " + TOKEN)}
+    async with restarted(completed(), bound, dispatched) as gemini:
+        read = await gemini.get("native")
+    echoed = json.dumps(read)
+    assert TOKEN not in echoed and "Authorization" not in echoed, "the recorded header is scrubbed"
+
+
+async def test_a_header_cleared_by_digest_is_still_leak_checked_elsewhere() -> None:
+    body = completed(text="leaked " + TOKEN)
+    async with restarted(body, {"native": mcp_header_digest("Bearer " + TOKEN)}) as gemini:
+        with pytest.raises(ProviderError) as refused:
+            await gemini.get("native")
+    assert refused.value.native_code == "mcp_token_echo", "the matched token joins the leak check"
+    assert TOKEN not in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    ("bound", "identity"),
+    [
+        ({}, "native"),
+        ({"turn-one": mcp_header_digest("Bearer " + TOKEN)}, "native"),
+        ({"native": mcp_header_digest("Bearer " + TOKEN)}, "someone-else"),
+        ({"native": mount_header_digest("Bearer " + TOKEN)}, "native"),
+    ],
+    ids=["unrecorded", "recorded-for-another", "echo-claims-another-id", "mount-digest"],
+)
+async def test_a_restarted_worker_refuses_a_header_not_recorded_for_that_interaction(
+    bound: dict[str, str], identity: str
+) -> None:
+    body = completed()
+    body["id"] = identity
+    async with restarted(body, bound) as gemini:
+        with pytest.raises(ProviderError) as refused:
+            await gemini.get("native")
+    error = refused.value
+    assert (error.native_code, error.native_message) == (
+        "mcp_header_echo",
+        "header_value_not_dispatched",
+    ), "anything unrecorded fails closed as before"
+    assert TOKEN not in str(error)

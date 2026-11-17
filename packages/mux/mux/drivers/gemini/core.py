@@ -1507,7 +1507,7 @@ class GeminiEvents(Base):
                 resource=session,
                 result=receipt.model_dump(mode="json"),
             )
-            # Persist the mount-header digests with the acceptance, before any read.
+            # Persist the mount and MCP header digests with the acceptance, before any read.
             dispatched = getattr(self._transport, "mount_echo_digests", None)
             if dispatched is not None and (sent := dispatched(interaction)):
                 record.mount_echo_digests[interaction] = sorted(sent)

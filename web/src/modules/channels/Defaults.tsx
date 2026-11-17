@@ -4,6 +4,7 @@ import { Link } from "react-router"
 import { InheritedSelect } from "@/components/inherited"
 import { QueryState } from "@/components/QueryState"
 import { FeatureList } from "@/modules/features/Settings"
+import { SUPPORT_KEYS } from "@/modules/admin/support/lib"
 import { SettingsList } from "@/components/settings"
 import { useConfirm } from "@/lib/confirm"
 import { plural } from "@/lib/format"
@@ -76,7 +77,7 @@ export function DefaultsTab() {
           ]} />
           <div className="mx-auto max-w-3xl"><Notice out={out} /></div>
         </div>
-        <FeatureList place={{}} tier="workspace" edit />
+        <FeatureList place={{}} tier="workspace" edit hide={SUPPORT_KEYS} />
         </>
       )
     }}</QueryState>

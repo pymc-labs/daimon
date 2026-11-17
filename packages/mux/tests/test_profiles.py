@@ -406,7 +406,12 @@ def test_selectable_models_list_the_default_first_and_never_pro() -> None:
         *OPT_IN_MODELS,
     )
     assert OPT_IN_MODELS == ("gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen")
-    assert selectable_models("openai") == ("gpt-6-luna", "gpt-6-astra")
+    assert selectable_models("openai") == (
+        "gpt-6-luna",
+        "gpt-6-astra",
+        "gpt-6.2-astra",
+        "gpt-6.2-sol",
+    ), "Luna stays the default; both Astras and Sol are allowed"
     assert not any("pro" in model for model in selectable_models("gemini"))
 
 
