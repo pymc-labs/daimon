@@ -10,7 +10,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.web import directory
 from daimon.adapters.web.caller import FILES_OFF, WebCaller, requires
 from daimon.adapters.web.cards import CardChoice
-from daimon.adapters.web.chat_json import agent_json, message_json, session_json
+from daimon.adapters.web.chat_json import agent_json, message_json, notice_json, session_json
 from daimon.adapters.web.chat_model import thread_model
 from daimon.adapters.web.chat_switch_back import switch_back
 from daimon.adapters.web.chat_thread_model import (
@@ -31,6 +31,8 @@ from daimon.adapters.web.stream import OTHER_TURN, Event, sse_response
 from daimon.adapters.web.turns import WebTurns
 from daimon.core.cursor import MAX_PAGE
 from daimon.core.host_calls import WAKE_SEED, wake_prefix
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.monitoring import monitored_notice
 from daimon.core.stores import file_uploads
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores import web_workspace_settings as workspace_settings
@@ -287,6 +289,16 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
             )
             messages[:] = [m for m in messages if m["id"] != reply_id] + [live]
             out["resume_from"] = stream.event_id(stream.last_id)
+        notice = await monitored_notice(
+            runtime.sessionmaker,
+            runtime.settings,
+            tenant_id=thread.tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=thread.tenant_id, ma_agent_id=thread.agent_id),
+            platform="web",
+        )
+        if notice is not None:
+            # Shown while monitored, not once: the page keeps no earlier notice, as a DM does.
+            out["monitoring"] = notice_json(notice)
         agent = agent_of(caller, thread.agent_id)
         out["session"] = session_json(
             thread,
