@@ -114,3 +114,42 @@ def test_routing_when_a_chat_adapter_runs_then_it_reads_no_channel_setting(platf
         if isinstance(node, ast.Attribute) and node.attr in DEPLOYMENT_READS
     }
     assert not reads, f"{platform} reads Ask a person's settings directly: {sorted(reads)}"
+
+
+UNDELIVERED_REPLY = {
+    "discord": "discord/support_escalation.py",
+    "slack": "slack/support_escalation.py",
+    "teams": "teams/support.py",
+}
+"""Where each platform answers a request whose post failed."""
+
+
+@pytest.mark.parametrize("platform", CHAT)
+def test_failed_post_when_a_request_is_recorded_then_the_reply_is_the_shared_text(
+    platform: str,
+) -> None:
+    """One undelivered reply for all three: core's text, never a platform's own wording."""
+    module = UNDELIVERED_REPLY[platform]
+    tree = _trees(platform)[module]
+    used = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and n.id == "RECORDED_UNDELIVERED"]
+    assert used, f"{module} answers a failed post with core's RECORDED_UNDELIVERED"
+    texts = [
+        n.value
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and "Request sent" in n.value
+    ]
+    assert not texts, f"{module} words its own request reply: {texts}"
+
+
+@pytest.mark.parametrize("platform", CHAT)
+def test_request_when_a_chat_adapter_posts_it_then_no_admin_is_messaged(platform: str) -> None:
+    """Staff see a request on the support channel; no platform reaches admins by message."""
+    named = {
+        module
+        for module, tree in _trees(platform).items()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name | ast.Attribute)
+        and (node.id if isinstance(node, ast.Name) else node.attr)
+        in {"support_recipient_tiers", "_chat_admins"}
+    }
+    assert not named, f"{platform} messages admins about a request: {sorted(named)}"

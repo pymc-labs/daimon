@@ -32,7 +32,6 @@ from daimon.adapters.slack.support_menu_form import (
     read_menu_form,
 )
 from daimon.adapters.teams import support_menu_card as teams_card
-from daimon.adapters.teams.support import SupportCommand
 from daimon.adapters.teams.support_settle import TeamsSupportSettle
 from daimon.adapters.web.channels import channel_refusals
 from daimon.core.errors import StaleChannelValue
@@ -198,13 +197,6 @@ def test_closed_post_when_settled_then_teams_names_the_settler_by_stored_name() 
     assert "get_user_names" in teams, "Teams: stored names, so a settler without one is unnamed"
     assert slack_settle._settler("U123") == "<@U123>", "Slack: a mention"  # pyright: ignore[reportPrivateUsage]
     assert discord_settle._settler("123") == "<@123>", "Discord: a mention"  # pyright: ignore[reportPrivateUsage]
-
-
-def test_pending_request_when_admins_were_messaged_then_teams_still_posts_it() -> None:
-    """Teams messages admins first; a pending request is posted anyway, where staff settle it."""
-    deliver = inspect.getsource(SupportCommand._deliver)  # pyright: ignore[reportPrivateUsage]
-    pending = deliver.index('if row.status == "pending":')
-    assert pending < deliver.index("elif not delivered:"), "Teams: posted whatever the chats did"
 
 
 def test_stale_admin_change_when_refused_then_cli_and_mcp_say_what_is_there_now() -> None:
