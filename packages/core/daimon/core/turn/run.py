@@ -48,6 +48,7 @@ from daimon.core.ma import replay_events
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_tool_annotations import agent_mcp_token_for, mcp_annotation_lookup
 from daimon.core.model_presets import model_choice_id
+from daimon.core.monitoring import capture_answer, capture_question
 from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime, turn_backend
 from daimon.core.mux_compat import legacy_call
 from daimon.core.output_runtime import (
@@ -158,7 +159,7 @@ from daimon.core.turn.provider_actions import (
     ProviderActionHook,
     ProviderActionRequester,
 )
-from daimon.core.turn.state import TurnState
+from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.turn.unattended import (
     dm_session_authority,
@@ -1305,6 +1306,15 @@ async def run_prepared_turn(
             reseed_user_message=reseed_user_message,
             now=now(),
         )
+    kept_question = await _keep_question(
+        deps,
+        prepared,
+        tenant_id=tenant_id,
+        platform=platform,
+        thread_id=thread_id,
+        origin=origin,
+        request_text=request_text,
+    )
     observation.thread_id = thread_id
     observation.account_id = prepared.admission.account_id
     observation.agent_id = prepared.admission.agent.id
@@ -1378,6 +1388,16 @@ async def run_prepared_turn(
                 )
     except BaseException as exc:
         observation.finish(error=exc)
+        # A cancelled turn has no answer to keep; its question stays unanswered.
+        if kept_question is not None and isinstance(exc, Exception):
+            await capture_answer(
+                deps.sessionmaker,
+                tenant_id=tenant_id,
+                conversation=thread_id,
+                turn_ref=kept_question,
+                content=None,
+                outcome=str(termination_reason(exc)),
+            )
         if seeded is not None and not sent:
             await _restore_handoff_summary(
                 deps, prepared, seeded, tenant_id=tenant_id, platform=platform, thread_id=thread_id
@@ -1413,6 +1433,15 @@ async def run_prepared_turn(
             structlog.contextvars.reset_contextvars(**bound)
     observation.session_id = result.ma_session_id
     observation.finish(state=result.state, recovered=result.recovered)
+    if kept_question is not None:
+        await capture_answer(
+            deps.sessionmaker,
+            tenant_id=tenant_id,
+            conversation=thread_id,
+            turn_ref=kept_question,
+            content=extract_final_response(result.state.content),
+            outcome=str(result.termination),
+        )
     if seeded is not None and not sent and result.state.error is not None:
         await _restore_handoff_summary(
             deps, prepared, seeded, tenant_id=tenant_id, platform=platform, thread_id=thread_id
@@ -1440,6 +1469,39 @@ async def run_prepared_turn(
 
 #: Origins whose lifecycle draws the turn in a chat for a person to read.
 _CHAT_RENDERED_ORIGINS: frozenset[TurnContext] = frozenset({"chat", "handoff"})
+
+
+async def _keep_question(
+    deps: TurnDeps,
+    prepared: PreparedTurn,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    thread_id: str,
+    origin: TurnContext,
+    request_text: str | None,
+) -> str | None:
+    """Keep a person's direct message or web chat question when the answering agent is
+    monitored (`daimon.core.monitoring`); returns the turn's ref for its answer."""
+    grant = prepared.admission.grant
+    direct = platform == "web" or (grant is not None and grant.is_dm)
+    if origin != "chat" or request_text is None or not direct:
+        return None
+    if platform not in ("discord", "slack", "teams", "web"):
+        return None
+    turn_ref = str(uuid.uuid4())
+    kept = await capture_question(
+        deps.sessionmaker,
+        deps.settings,
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=prepared.admission.agent.id),
+        platform=platform,
+        account_id=prepared.admission.account_id,
+        conversation=thread_id,
+        turn_ref=turn_ref,
+        content=request_text,
+    )
+    return turn_ref if kept else None
 
 
 async def _repo_memory_state(

@@ -66,6 +66,7 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsSessionEvent,
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
+from daimon.core import monitoring
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_BILLING_EXEMPT,
@@ -566,6 +567,81 @@ async def turn_ended(
     return bool(unnamed_turn)
 
 
+async def _keep_monitored_replies(
+    anthropic: AsyncAnthropic,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    session: BetaManagedAgentsSession,
+) -> None:
+    """Keep the replies to this agent chat session's kept questions whose turns ended
+    (`daimon.core.monitoring`): each turn's newest `agent.message` text. A turn paused on
+    a confirmation has not ended; it is kept by a later settle."""
+    # Imported here: `daimon.core.turn` imports this module.
+    from daimon.core.turn.termination import TerminationReason
+
+    try:
+        tenant_id = uuid.UUID(session.metadata.get(MA_METADATA_KEY_TENANT) or "")
+    except ValueError:
+        return
+    try:
+        waiting = set(
+            await monitoring.open_questions(
+                sessionmaker, tenant_id=tenant_id, conversation=session.id
+            )
+        )
+        if not waiting:
+            return
+        page = await _list_events(
+            anthropic,
+            session.id,
+            scope=_stamped_scope(session),
+            query=EventQuery(
+                order="desc",
+                limit=_PAGE_SIZE,
+                types=[
+                    "user.message",
+                    "agent.message",
+                    "session.status_idle",
+                    "session.status_terminated",
+                ],
+            ),
+        )
+        # Newest first: the end and the reply seen since the previous `user.message`.
+        ended: TerminationReason | Literal["paused"] | None = None
+        reply: str | None = None
+        for _ in range(SETTLE_MAX_PAGES):
+            for event in page.data:
+                if event.type == "session.status_terminated":
+                    ended = ended or TerminationReason.SESSION_TERMINATED
+                elif event.type == "session.status_idle":
+                    paused = event.stop_reason.type == "requires_action"
+                    ended = ended or ("paused" if paused else TerminationReason.COMPLETED)
+                elif event.type == "agent.message":
+                    text = "\n".join(block.text for block in event.content if block.text)
+                    reply = reply or text or None
+                elif event.type == "user.message":
+                    if event.id in waiting and ended not in (None, "paused"):
+                        waiting.discard(event.id)
+                        await monitoring.capture_answer(
+                            sessionmaker,
+                            tenant_id=tenant_id,
+                            conversation=session.id,
+                            turn_ref=event.id,
+                            content=reply,
+                            outcome=str(ended),
+                        )
+                    if not waiting:
+                        return
+                    ended, reply = None, None
+            if not page.has_next_page():
+                return
+            page = await page.get_next_page()
+    except _anthropic.RateLimitError:
+        raise
+    # Billing goes on without the kept reply: the question stays open for a later settle.
+    except (_anthropic.APIError, SQLAlchemyError):
+        log.warning("monitoring.capture_failed", kind="answer", exc_info=True)
+
+
 async def settle_finished_turn(
     anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -611,6 +687,7 @@ async def settle_finished_turn(
                 anthropic, session.id, request, scope=_stamped_scope(session)
             ):
                 return None
+            await _keep_monitored_replies(anthropic, sessionmaker, session)
             result = await settle_stamped_session(
                 anthropic,
                 sessionmaker,
