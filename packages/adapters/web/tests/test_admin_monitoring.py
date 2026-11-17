@@ -4,12 +4,16 @@ an admin's viewing leaves."""
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from daimon.core import monitoring_view
 from daimon.core.stores import monitoring as store
+from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import FeatureTarget, MonitoredPlatform
+from daimon.core.stores.domain import Role as AccountRole
 from daimon.core.stores.feature_values import set_feature_value
 from daimon.testing.turn_router import AGENT_ID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -19,6 +23,17 @@ from .test_admin_routes import Admin, signed_in_admin
 
 _AT = datetime(2030, 1, 15, 12, tzinfo=UTC)
 _BASE = f"/api/admin/monitoring/agents/{AGENT_ID}"
+
+
+@asynccontextmanager
+async def platform_admin(
+    web_client: WebClientFactory, factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> AsyncIterator[Admin]:
+    """The workspace owner, whose account is also a platform admin."""
+    async with signed_in_admin(web_client, factory, tmp_path) as admin:
+        async with factory.begin() as db:
+            await set_role(db, admin.ws.person.account_id, AccountRole.ADMIN)
+        yield admin
 
 
 async def _keep(
@@ -60,7 +75,7 @@ async def test_conversations_are_listed_newest_first_with_who_and_where(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+    async with platform_admin(web_client, db_session_factory, tmp_path) as admin:
         await _keep(db_session_factory, admin, platform="web", conversation="w1", at=_AT)
         await _keep(
             db_session_factory,
@@ -98,7 +113,7 @@ async def test_conversations_filter_by_day_and_page_with_a_cursor(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+    async with platform_admin(web_client, db_session_factory, tmp_path) as admin:
         for n in range(3):
             await _keep(
                 db_session_factory,
@@ -123,7 +138,7 @@ async def test_a_transcript_reads_in_order_and_a_tool_day_shows_its_calls(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+    async with platform_admin(web_client, db_session_factory, tmp_path) as admin:
         await _keep(db_session_factory, admin, platform="web", conversation="w1", at=_AT)
         await _keep(
             db_session_factory,
@@ -163,7 +178,7 @@ async def test_viewing_the_list_and_a_transcript_is_audited_once_per_open(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+    async with platform_admin(web_client, db_session_factory, tmp_path) as admin:
         await _keep(db_session_factory, admin, platform="web", conversation="w1", at=_AT)
         [row] = (await admin.client.get(f"{_BASE}/conversations")).json()
         await admin.client.get(f"{_BASE}/conversations/{row['id']}")
@@ -181,7 +196,7 @@ async def test_the_switches_say_since_when_each_is_on(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+    async with platform_admin(web_client, db_session_factory, tmp_path) as admin:
         async with db_session_factory.begin() as db:
             await set_feature_value(
                 db,
@@ -205,10 +220,27 @@ async def test_an_unknown_agent_or_a_bad_handle_is_not_found(
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+    async with platform_admin(web_client, db_session_factory, tmp_path) as admin:
         agent = await admin.client.get("/api/admin/monitoring/agents/ag_nope/conversations")
         handle = await admin.client.get(f"{_BASE}/conversations/not-a-handle")
         trail = await admin.trail(db_session_factory)
 
     assert (agent.status_code, handle.status_code) == (404, 404), "nothing is kept for either"
+    assert trail == [], "a refused read leaves no audit row"
+
+
+async def test_a_workspace_owner_who_is_no_platform_admin_reads_nothing(
+    web_client: WebClientFactory,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """The bar is the switch's and the chat tools': a web grant alone is refused, unaudited."""
+    async with signed_in_admin(web_client, db_session_factory, tmp_path) as admin:
+        await _keep(db_session_factory, admin, platform="web", conversation="w1", at=_AT)
+        paths = (_BASE, f"{_BASE}/conversations", f"{_BASE}/conversations/w1")
+        refused = [await admin.client.get(path) for path in paths]
+        trail = await admin.trail(db_session_factory)
+
+    assert [r.status_code for r in refused] == [403, 403, 403]
+    assert refused[1].json()["detail"] == "Only platform admins can read monitored conversations."
     assert trail == [], "a refused read leaves no audit row"

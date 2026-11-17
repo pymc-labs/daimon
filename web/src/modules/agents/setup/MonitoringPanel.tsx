@@ -19,7 +19,7 @@ const SWITCHES = [
   { key: "monitor_mcp", label: "Coding tools", state: "coding_tools" },
 ] as const
 
-/** The two monitoring switches of one agent, and the way to the activity they keep. For workspace admins. */
+/** The two monitoring switches of one agent, and, for a platform admin, the way to the activity they keep. */
 export function MonitoringPanel({ agent }: Pick<Props, "agent">) {
   const place = { agent: agent.id }
   const schema = useFeatureSchema()
@@ -66,11 +66,13 @@ export function MonitoringPanel({ agent }: Pick<Props, "agent">) {
         </div>
         {error && <p role="alert" className="mt-3 text-xs text-destructive">{error}</p>}
       </Section>
-      <Section>
-        <div className="flex justify-end">
-          <Button size="sm" asChild><Link to={`/admin/monitoring?agent=${encodeURIComponent(agent.id)}`}>View activity</Link></Button>
-        </div>
-      </Section>
+      {state.isSuccess && (
+        <Section>
+          <div className="flex justify-end">
+            <Button size="sm" asChild><Link to={`/admin/monitoring?agent=${encodeURIComponent(agent.id)}`}>View activity</Link></Button>
+          </div>
+        </Section>
+      )}
     </>
   )
 }

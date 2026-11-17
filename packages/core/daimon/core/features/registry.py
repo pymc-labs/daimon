@@ -726,8 +726,8 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
                 "monitor_direct_messages",
                 "Monitor direct messages",
                 "Keeps what people ask this agent in direct messages and web chat, and what "
-                "it answers, for admins to read. People are told in the conversation. Kept "
-                "from when it is turned on, for the retention period.",
+                "it answers, for platform admins to read. People are told in the conversation. "
+                "Kept from when it is turned on, for the retention period.",
             ),
             (
                 "monitor_mcp",
