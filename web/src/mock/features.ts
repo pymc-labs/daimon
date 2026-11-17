@@ -6,13 +6,16 @@ import { wait } from "./util"
 
 const ON_OFF = [{ value: "on", label: "On" }, { value: "off", label: "Off" }]
 const ALL: Tier[] = ["deployment", "workspace", "agent", "channel", "thread"]
-const schema = (key: string, name: string, tiers: Tier[] = ALL): FeatureSchema => ({
+const schema = (key: string, name: string, tiers: Tier[] = ALL, more: Partial<FeatureSchema> = {}): FeatureSchema => ({
   key, name, category: "chat", categoryName: "Chat", values: ON_OFF, default: "on", tiers, lockable: tiers.filter((t) => t === "workspace" || t === "channel"),
-  platforms: ["discord", "slack", "teams"], threadAnyone: false, native: false, doc: "",
+  platforms: ["discord", "slack", "teams"], threadAnyone: false, native: false, doc: "", ...more,
 })
+const GUARDRAILS = { category: "guardrails", categoryName: "Guardrails", default: "off" }
+const KEPT: Tier[] = ["deployment", "workspace", "agent"]
 const SCHEMA = [
   schema("progress_plans", "Progress plans"), schema("participation", "Thread participation"),
   schema("guidance", "Setup guidance", ["deployment", "workspace", "agent"]), schema("tool.bash", "Built-in tool: bash"), schema("cost_footer", "Cost footer"),
+  schema("monitor_direct_messages", "Monitor direct messages", KEPT, GUARDRAILS), schema("monitor_mcp", "Monitor MCP", KEPT, GUARDRAILS),
 ]
 /** Locked at the workspace, so every level below reads it as locked; `value` is what the lock holds. */
 const locks = new Map<string, string>([["cost_footer", "off"]])
@@ -21,6 +24,13 @@ const NO_SANDBOX = "c_general"
 const REASON = "Needs a sandbox. Ask an admin."
 /** `place|tier|key` to the value set there. */
 const own = new Map<string, string>([[`/${NO_SANDBOX}/|channel|tool.bash`, "off"], [`/${NO_SANDBOX}/t_launch|thread|tool.bash`, "off"]])
+/** Monitoring on an agent's own tier: seeded for two agents so the admin pages have something to show. */
+const SEEDED: [string, string, string][] = [
+  ["ag_pricing", "monitor_direct_messages", "on"], ["ag_pricing", "monitor_mcp", "on"], ["ag_mmm", "monitor_direct_messages", "on"],
+]
+for (const [agent, key, value] of SEEDED) own.set(`${agent}//|agent|${key}`, value)
+/** Whether a monitoring key is on for an agent, as the features set it. */
+export const monitoringOn = (agent: string, key: "monitor_direct_messages" | "monitor_mcp") => (own.get(`${agent}//|agent|${key}`) ?? "off") === "on"
 const place = (url: URL) => ["agent", "channel", "thread"].map((k) => url.searchParams.get(k) ?? "").join("/")
 const tiersOf = (url: URL): Tier[] => ["workspace", ...(url.searchParams.get("agent") ? ["agent"] : []), ...(url.searchParams.get("channel") ? ["channel"] : []), ...(url.searchParams.get("thread") ? ["thread"] : [])] as Tier[]
 

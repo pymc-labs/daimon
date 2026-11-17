@@ -80,3 +80,30 @@ export type SettingsPatch = {
 export type FeedbackReason = { code: string; label: string; count: number | null }
 export type AgentFeedback = { id: string | null; name: string; up: number | null; down: number | null; reasons: FeedbackReason[] }
 export type Feedback = { days: number; agents: AgentFeedback[] }
+
+// Monitoring: what an admin may read of a monitored agent's conversations.
+export type MonitoredWhere = "direct_messages" | "web" | "mcp"
+export type MonitoredConversation = {
+  id: string
+  person: { id: string | null; name: string }
+  where: MonitoredWhere
+  questions: number
+  tools: number
+  first_at: string
+  last_at: string
+}
+/** One kept line: a question, the answer, or a tool call with how it ended. */
+export type MonitoredEvent = {
+  id: string
+  at: string
+  kind: "question" | "answer" | "tool"
+  content: string | null
+  tool: string | null
+  outcome: "completed" | "error" | "denied" | "cancelled" | null
+}
+export type AgentMonitoring = {
+  id: string
+  name: string
+  direct_messages: { on: boolean; since: string | null }
+  mcp: { on: boolean; since: string | null }
+}

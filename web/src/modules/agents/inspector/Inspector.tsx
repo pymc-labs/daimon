@@ -19,6 +19,7 @@ import { KnowledgePanel } from "../setup/KnowledgePanel"
 import { GoogleBadge, ToolRulesPanel } from "../setup/ToolRulesPanel"
 import { GithubPanel } from "../setup/GithubPanel"
 import { KeysPanel } from "../setup/KeysPanel"
+import { MonitoringPanel } from "../setup/MonitoringPanel"
 import { PeoplePanel } from "../setup/PeoplePanel"
 import { usePendingPreview } from "../usePendingPreview"
 import { unsupportedOf } from "../unsupported"
@@ -27,7 +28,7 @@ import { FeatureSettings } from "@/modules/features/Settings"
 
 const TITLES: Record<string, string> = {
   agent: "Agent", instructions: "Instructions", model: "Model", skills: "Skills", tools: "Tools", places: "Channels", helpers: "Helpers",
-  history: "History", features: "Features", "mcp:new": "New MCP server", keys: "Keys", coding: "Access via MCP", people: "People", knowledge: "Knowledge", github: "GitHub",
+  history: "History", features: "Features", "mcp:new": "New MCP server", keys: "Keys", coding: "Access via MCP", people: "People", knowledge: "Knowledge", github: "GitHub", monitoring: "Monitoring",
 }
 
 export function Inspector(props: Props) {
@@ -40,7 +41,7 @@ export function Inspector(props: Props) {
   const skill = kind === "skill" ? config.skills.find((s) => `skill:${s.skill_id}` === node) : undefined
   const platform = kind === "node" ? agent.nodes.find((n) => `node:${n.kind}` === node && n.server) : undefined
   const title = server ? "MCP server" : skill ? "Skill" : platform ? platform.label : kind === "place" ? TITLES.places! : kind === "helper" ? TITLES.helpers! : TITLES[node] ?? ""
-  const effect = ["history", "features", "mcp:new", "keys", "coding", "people", "knowledge", "github"].includes(node) || (p.ro && kind !== "node") ? null : nodeEffect(kind === "place" ? "places" : kind === "helper" ? "helpers" : kind, agent.model.backend)
+  const effect = ["history", "features", "mcp:new", "keys", "coding", "people", "knowledge", "github", "monitoring"].includes(node) || (p.ro && kind !== "node") ? null : nodeEffect(kind === "place" ? "places" : kind === "helper" ? "helpers" : kind, agent.model.backend)
   let body: React.ReactNode = null
   if (node === "agent") body = <AgentEditor {...p} />
   else if (node === "instructions") body = <InstructionsEditor {...p} />
@@ -53,6 +54,7 @@ export function Inspector(props: Props) {
   else if (node === "coding") body = <CodingPanel {...p} />
   else if (node === "knowledge") body = <KnowledgePanel {...p} />
   else if (node === "github") body = <GithubPanel {...p} />
+  else if (node === "monitoring" && can("workspace.manage")) body = <MonitoringPanel agent={agent} />
   else if (node === "places" || kind === "place") body = <PlacesEditor {...p} />
   else if (node === "helpers" || kind === "helper") body = <HelpersEditor {...p} />
   else if (node === "mcp:new") body = <NewServer {...p} />
@@ -69,7 +71,7 @@ export function Inspector(props: Props) {
       <div className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
         <span className="pl-1 text-xs font-medium text-muted-foreground">{title}</span>
         {effect && <EffectTag effect={effect} />}
-        {p.ro && !["history", "features", "keys", "coding", "people", "knowledge", "github"].includes(node) && kind !== "node" && <Pill>View only</Pill>}
+        {p.ro && !["history", "features", "keys", "coding", "people", "knowledge", "github", "monitoring"].includes(node) && kind !== "node" && <Pill>View only</Pill>}
         <Button variant="ghost" size="icon-sm" className="ml-auto" aria-label="Close" onClick={() => select("")}><X /></Button>
       </div>
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">{body}</div>
