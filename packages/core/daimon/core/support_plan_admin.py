@@ -25,14 +25,14 @@ from daimon.core.support_plans import (
     already_settled_text,
     credits_text,
     format_credits,
-    inactive_text,
+    instant_text,
     parse_credits,
     parse_scope,
     price_text,
     settle_range_text,
     settled_text,
 )
-from daimon.core.windows import WINDOWS, WindowState, window_state
+from daimon.core.windows import WINDOWS, Windowed, WindowState, window_state
 from sqlalchemy.ext.asyncio import AsyncSession
 
 NO_REQUEST = "No such request."
@@ -51,23 +51,34 @@ class PlanUsage:
     state: WindowState
     allowances: tuple[SupportAllowanceRow, ...]
     summary: str
-    """`1.5 of 10 credits used, 2 per person, this month` or `Support ended on 18 Dec.`."""
+    """`1.5 of 10 credits used, 2 per person, this month`; outside its window `Ended: ...`."""
+
+
+def window_text(plan: Windowed, *, now: datetime) -> str | None:
+    """`this month`, `since 18 Nov 09:00 UTC` or `18 Nov 00:00 UTC until 18 Dec 00:00 UTC`."""
+    if plan.window == "monthly":
+        return "this month"
+    if plan.window == "fixed" and plan.starts_at is not None and plan.ends_at is not None:
+        start, end = instant_text(plan.starts_at, now=now), instant_text(plan.ends_at, now=now)
+        return f"{start} until {end}"
+    if plan.starts_at is not None:
+        return f"since {instant_text(plan.starts_at, now=now)}"
+    return None
 
 
 def usage_text(plan: SupportPlanRow, *, pool_used: Decimal, now: datetime) -> str:
-    inactive = inactive_text(plan, now=now)
-    if inactive is not None:
-        return inactive
     parts: list[str] = []
     if plan.pool is not None:
         parts.append(f"{format_credits(pool_used)} of {credits_text(plan.pool)} used")
     if plan.per_person is not None:
         parts.append(f"{format_credits(plan.per_person)} per person")
-    if plan.window == "monthly":
-        parts.append("this month")
-    elif plan.window == "fixed" and plan.ends_at is not None:
-        parts.append(f"until {plan.ends_at.day} {plan.ends_at:%b}")
-    return ", ".join(parts)
+    if (window := window_text(plan, now=now)) is not None:
+        parts.append(window)
+    text = ", ".join(parts)
+    state = window_state(plan, now=now)
+    if state == "active":
+        return text
+    return f"{'Ended' if state == 'ended' else 'Not started'}: {text}"
 
 
 async def _usage(
@@ -199,4 +210,5 @@ __all__ = [
     "parse_plan_value",
     "settle_outcome_text",
     "usage_text",
+    "window_text",
 ]

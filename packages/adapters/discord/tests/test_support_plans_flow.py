@@ -346,7 +346,7 @@ async def test_button_when_the_plan_ended_then_says_so(
     await SupportEscalateButton(guild_id=_GUILD, channel_id=_THREAD, message_id=_ANSWER).callback(
         interaction
     )
-    assert _said(interaction.response.send_message) == "Support ended on 18 Jan."
+    assert _said(interaction.response.send_message) == "Support ended on 17 Jan."
 
 
 async def test_default_note_when_requester_is_admin_then_uses_no_credits(

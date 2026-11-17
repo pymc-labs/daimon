@@ -5,17 +5,21 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from daimon.core.authz import Subject
 from daimon.core.channel_changes import ChannelActor, Expected
 from daimon.core.stores import support_escalation as ledger
+from daimon.core.stores.support_rows import SupportPlanRow
 from daimon.core.support_plan_admin import (
     NO_REQUEST,
     get_plan_usage,
     list_plan_usage,
     parse_plan_value,
     settle_outcome_text,
+    usage_text,
 )
 from daimon.core.support_plan_changes import set_allowance, set_catalog, set_plan, settle
 from daimon.core.support_plans import (
@@ -103,7 +107,9 @@ async def test_list_plan_usage_when_plans_exist_then_workspace_first_with_pool_u
     assert [p.plan.scope for p in plans] == ["workspace", "channel"], "workspace first"
     workspace, channel = plans
     assert workspace.state == "ended", "the fixed window ended on 1 Nov"
-    assert workspace.summary == "Support ended on 1 Nov.", "an ended plan says so"
+    assert workspace.summary == ("Ended: 2 per person, 1 Oct 00:00 UTC until 1 Nov 00:00 UTC"), (
+        "an ended plan says so, with the exact window an admin set"
+    )
     assert channel.pool_used == D(1), "the pending range request holds its minimum"
     assert channel.summary == "1 of 5 credits used", "the pool in words"
     assert channel.value.catalog == "support", "the menu key, not its id"
@@ -177,3 +183,17 @@ async def test_settle_outcome_text_when_each_outcome_then_worded_for_the_settler
         db_session_factory, actor, escalation_id=uuid.uuid4(), charge=D(1), default_allowance=20
     )
     assert settle_outcome_text(missing) == NO_REQUEST, "no such request"
+
+
+def test_usage_text_when_window_spans_years_then_exact_times_in_utc() -> None:
+    plan = SimpleNamespace(
+        pool=D(10),
+        per_person=None,
+        window="fixed",
+        starts_at=datetime(2026, 11, 24, 9, tzinfo=UTC),
+        ends_at=datetime(2027, 1, 1, tzinfo=UTC),
+    )
+    text = usage_text(cast("SupportPlanRow", plan), pool_used=D(1), now=NOW)
+    assert (
+        text == "Not started: 1 of 10 credits used, 24 Nov 09:00 UTC until 1 Jan 2027 00:00 UTC"
+    ), text

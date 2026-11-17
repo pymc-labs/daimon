@@ -296,7 +296,7 @@ def test_balance_text_when_fixed_window_then_names_the_end() -> None:
         "fixed", datetime(2026, 11, 1, tzinfo=UTC), datetime(2026, 12, 18, tzinfo=UTC)
     )
     text = balance_text(balance, window)
-    assert text == "1.5 of 2 team credits left, until 18 Dec", text
+    assert text == "1.5 of 2 team credits left, until 17 Dec", "the last day the end includes"
     one = balance_text(Balance(pool=None, pool_used=D(0), cap=D(1), person_used=D(0)))
     assert one == "1 of 1 credit left", one
 
@@ -308,7 +308,7 @@ def test_inactive_text_when_outside_the_window_then_says_when() -> None:
     before = inactive_text(window, now=datetime(2026, 11, 1, tzinfo=UTC))
     after = inactive_text(window, now=datetime(2026, 12, 20, tzinfo=UTC))
     assert before == "Support starts on 18 Nov.", before
-    assert after == "Support ended on 18 Dec.", after
+    assert after == "Support ended on 17 Dec.", "its last included day"
     assert inactive_text(window, now=datetime(2026, 12, 1, tzinfo=UTC)) is None, "active"
 
 

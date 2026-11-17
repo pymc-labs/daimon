@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Annotated, Final, Literal, Protocol, cast
 
@@ -691,6 +691,18 @@ def _day(value: datetime) -> str:
     return f"{value.day} {value:%b}"
 
 
+def last_day_text(ends_at: datetime) -> str:
+    """The last day an exclusive end still includes: an end of 18 Dec 00:00 is `17 Dec`."""
+    return _day(ends_at.astimezone(UTC) - timedelta(microseconds=1))
+
+
+def instant_text(value: datetime, *, now: datetime) -> str:
+    """An admin's exact time: `24 Nov 09:00 UTC`, with the year when it is not `now`'s."""
+    value = value.astimezone(UTC)
+    year = "" if value.year == now.year else f" {value.year}"
+    return f"{_day(value)}{year} {value:%H:%M} UTC"
+
+
 def _credits_word(amount: Decimal) -> str:
     return "credit" if amount == 1 else "credits"
 
@@ -701,7 +713,10 @@ def credits_text(amount: Decimal) -> str:
 
 
 def balance_text(balance: Balance, window: Windowed | None = None) -> str | None:
-    """`1.5 of 2 team credits left, until 18 Dec` or `1 of 2 credits left`; None if unbounded."""
+    """`1.5 of 2 team credits left, until 17 Dec` or `1 of 2 credits left`; None if unbounded.
+
+    The day is the last one the window includes (`last_day_text`).
+    """
     axis = balance.axis
     if axis is None:
         return None
@@ -710,19 +725,19 @@ def balance_text(balance: Balance, window: Windowed | None = None) -> str | None
     noun = ("team " if axis == "pool" else "") + _credits_word(limit)
     text = f"{format_credits(left)} of {format_credits(limit)} {noun} left"
     if window is not None and window.window == "fixed" and window.ends_at is not None:
-        text += f", until {_day(window.ends_at)}"
+        text += f", until {last_day_text(window.ends_at)}"
     elif window is not None and window.window == "monthly":
         text += ", this month"
     return text
 
 
 def inactive_text(window: Windowed, *, now: datetime) -> str | None:
-    """`Support starts on 18 Nov.` or `Support ended on 18 Dec.`; None while active."""
+    """`Support starts on 18 Nov.` or `Support ended on 17 Dec.` (its last day); None if active."""
     state = window_state(window, now=now)
     if state == "not_started" and window.starts_at is not None:
         return f"Support starts on {_day(window.starts_at)}."
     if state == "ended" and window.ends_at is not None:
-        return f"Support ended on {_day(window.ends_at)}."
+        return f"Support ended on {last_day_text(window.ends_at)}."
     return None
 
 

@@ -289,7 +289,7 @@ async def test_support_when_the_plan_ended_then_says_so(
     async with _running(db_session_factory, teams_api_fake) as service:
         notice = await _typed(service, teams_api_fake)
 
-    assert "Support ended on 18 Jan." in _text(notice), _text(notice)
+    assert "Support ended on 17 Jan." in _text(notice), _text(notice)
     assert "ActionSet" not in _text(notice), "no form to send"
 
 
