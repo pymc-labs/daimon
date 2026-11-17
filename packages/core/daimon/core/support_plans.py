@@ -20,7 +20,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Annotated, Final, Literal, Protocol
+from typing import TYPE_CHECKING, Annotated, Final, Literal, Protocol, cast
 
 import yaml
 from daimon.core.errors import DaimonError
@@ -292,15 +292,64 @@ class SupportCatalogSpec(_Spec):
         return next((o for o in self.options if o.key == key), None)
 
 
-def _readable(exc: ValidationError) -> str:
+_ENTRIES: Final = {"options": "option", "fields": "field", "steps": "step"}
+_PRICE_KINDS: Final = frozenset({"fixed", "steps", "range", "quoted"})
+_FIELD_KINDS: Final = frozenset({"text", "paragraph", "choice"})
+
+
+_NO_TAGS: Final = frozenset[str]()
+
+
+def _child(node: object, part: int | str) -> object:
+    if isinstance(part, int):
+        if isinstance(node, list | tuple) and part < len(cast("Sequence[object]", node)):
+            return cast("Sequence[object]", node)[part]
+        return None
+    return cast("Mapping[str, object]", node).get(part) if isinstance(node, Mapping) else None
+
+
+def _entry(kind: str, item: object, index: int) -> str:
+    """`option "review"`, by key, else label, else position (1-based)."""
+    for name in ("key", "label"):
+        value = _child(item, name)
+        if isinstance(value, str) and value.strip():
+            return f'{kind} "{value.strip()}"'
+    return f"{kind} {index + 1}"
+
+
+def _where(loc: tuple[int | str, ...], data: object) -> str:
+    """A pydantic path read against the input: `option "review", field "details", max_chars`."""
+    names: list[str] = []
+    node, entry, tags = data, "", _NO_TAGS
+    for part in loc:
+        if isinstance(part, str) and (part.startswith("function-") or part in tags):
+            tags = _NO_TAGS  # a union's tag, e.g. the "range" in price.range.min
+            continue
+        tags = _NO_TAGS
+        node = _child(node, part)
+        if isinstance(part, int) and entry:
+            names.append(_entry(entry, node, part))
+            tags = _FIELD_KINDS if entry == "field" else _NO_TAGS
+        elif part not in _ENTRIES:
+            names.append(str(part))
+            tags = _PRICE_KINDS if part == "price" else _NO_TAGS
+        entry = _ENTRIES.get(part, "") if isinstance(part, str) else ""
+    if entry:  # the list itself, e.g. too few options
+        names.append(str(loc[-1]))
+    return ", ".join(names)
+
+
+def _readable(exc: ValidationError, data: object) -> str:
     errors = exc.errors()
     # A tuple whose item failed also reports itself too short; the item is the news.
     own = [e for e in errors if e["type"] != "too_short"] or errors
     problems: list[str] = []
     for error in own[:3]:
-        parts = [str(part) for part in error["loc"]]
-        where = ".".join(p for p in parts if not p.startswith("function-"))
+        loc = tuple(error["loc"])
+        where = _where(loc, data)
         message = str(error["msg"]).removeprefix("Value error, ")
+        if loc[-2:] == ("text", "max_chars") and error["type"] == "less_than_equal":
+            message = f"a text field takes at most {MAX_TEXT_CHARS}; use a paragraph field"
         problems.append(f"{where}: {message}" if where else message)
     return "; ".join(problems)
 
@@ -310,7 +359,7 @@ def parse_catalog(data: object) -> SupportCatalogSpec:
     try:
         return SupportCatalogSpec.model_validate(data)
     except ValidationError as exc:
-        raise SupportPlanError(f"Catalog not valid: {_readable(exc)}") from exc
+        raise SupportPlanError(f"Catalog not valid: {_readable(exc, data)}") from exc
 
 
 def load_catalog(text: str) -> SupportCatalogSpec:
@@ -318,8 +367,17 @@ def load_catalog(text: str) -> SupportCatalogSpec:
     try:
         data: object = yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise SupportPlanError("Catalog not valid: not YAML or JSON") from exc
+        raise SupportPlanError(f"Catalog not valid: not YAML or JSON{_yaml_where(exc)}") from exc
     return parse_catalog(data)
+
+
+def _yaml_where(exc: yaml.YAMLError) -> str:
+    """` at line 3, column 7: expected ',' or ']'`, from the parser's mark (1-based)."""
+    if not isinstance(exc, yaml.MarkedYAMLError) or exc.problem_mark is None:
+        return ""
+    mark = exc.problem_mark
+    problem = f": {exc.problem}" if exc.problem else ""
+    return f" at line {mark.line + 1}, column {mark.column + 1}{problem}"
 
 
 def parse_catalog_key(key: str) -> str:

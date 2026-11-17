@@ -136,7 +136,10 @@ def test_parse_catalog_when_valid_then_round_trips_as_decimal_strings() -> None:
             },
             "min below max",
         ),
-        ({"options": [{"key": "A!", "label": "A", "price": {"kind": "quoted"}}]}, "options.0.key"),
+        (
+            {"options": [{"key": "A!", "label": "A", "price": {"kind": "quoted"}}]},
+            'option "A!", key',
+        ),
     ],
 )
 def test_parse_catalog_when_invalid_then_names_the_problem(
@@ -147,6 +150,16 @@ def test_parse_catalog_when_invalid_then_names_the_problem(
     assert says in str(caught.value), f"the error should name the bad entry: {caught.value}"
 
 
+def test_parse_catalog_when_long_text_field_then_names_it_and_points_to_paragraph() -> None:
+    field = {"key": "details", "kind": "text", "label": "Details", "max_chars": 3000}
+    review = {"key": "review", "label": "Review", "price": {"kind": "quoted"}, "fields": [field]}
+    with pytest.raises(SupportPlanError) as caught:
+        parse_catalog({**CATALOG, "options": [CATALOG["options"][0], review]})
+    said = str(caught.value)
+    assert 'option "review", field "details", max_chars' in said, f"names by key: {said}"
+    assert "use a paragraph field" in said, f"says what to use instead: {said}"
+
+
 def test_parse_catalog_when_steps_and_four_fields_then_refuses_as_too_many() -> None:
     fields = [{"key": f"f{i}", "kind": "text", "label": f"F{i}"} for i in range(4)]
     call = {"key": "call", "label": "Call", "price": STEPS, "fields": fields}
@@ -155,9 +168,10 @@ def test_parse_catalog_when_steps_and_four_fields_then_refuses_as_too_many() -> 
     assert "at most 4 fields" in str(caught.value), "a steps price takes one modal slot"
 
 
-def test_load_catalog_when_not_yaml_then_refuses() -> None:
-    with pytest.raises(SupportPlanError):
-        load_catalog("name: [unclosed")
+def test_load_catalog_when_not_yaml_then_names_the_line_and_column() -> None:
+    with pytest.raises(SupportPlanError) as caught:
+        load_catalog('name: S\noptions: [{"key": "a",, }]\n')
+    assert "at line 2, column" in str(caught.value), f"names where it broke: {caught.value}"
 
 
 def test_price_bounds_when_each_kind_then_gives_lower_and_upper() -> None:
