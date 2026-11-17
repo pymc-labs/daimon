@@ -1043,6 +1043,13 @@ def already_settled_text(*, status: RequestStatus, charge: Decimal | None, by: s
     return f"Already {what}{f' by {by}' if by else ''}."
 
 
+def charged_at_submit_text(*, charge: Decimal | None) -> str:
+    """The refusal for another amount on a request already charged at submit."""
+    return (
+        f"Charged {credits_text(charge or Decimal(0))} already. Keep that or decline to refund it."
+    )
+
+
 def settle_range_text(
     bounds: PriceBounds, *, counted: Decimal, available: Decimal | None, correction: bool = False
 ) -> str:
@@ -1069,6 +1076,7 @@ __all__ = [
     "SupportOption",
     "SupportPlace",
     "SupportError",
+    "charged_at_submit_text",
     "format_credits",
     "governing_limit",
     "parse_amount",

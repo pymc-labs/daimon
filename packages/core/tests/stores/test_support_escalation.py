@@ -6,6 +6,7 @@ test_support_ledger.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from daimon.core._models import SupportEscalation
@@ -95,26 +96,29 @@ async def test_account_scoped_delete_reaches_rows_written_before_the_account_exi
     assert await _rows(db_session) == 0
 
 
-async def test_list_requests_when_undelivered_then_only_pending_ones(
+async def test_list_requests_when_undelivered_then_the_ones_no_person_handled(
     db_session: AsyncSession,
 ) -> None:
-    """A request that settled or was declined needs nobody to settle it, delivered or not."""
+    """Pending and charged-at-submit rows wait for a person; a person-settled or declined one does not."""
     tenant = await make_tenant(db_session)
-    pending = await make_support_escalation(db_session, tenant_id=tenant.id, message_id="m1")
-    settled = await make_support_escalation(db_session, tenant_id=tenant.id, message_id="m2")
-    declined = await make_support_escalation(db_session, tenant_id=tenant.id, message_id="m3")
-    for row_id, status, charge in (
-        (pending, "pending", None),
-        (settled, "settled", Decimal(1)),
-        (declined, "declined", Decimal(0)),
+    rows = {
+        name: await make_support_escalation(db_session, tenant_id=tenant.id, message_id=name)
+        for name in ("pending", "charged", "settled", "declined")
+    }
+    handled = datetime.now(UTC)
+    for name, status, charge, settled_at in (
+        ("pending", "pending", None, None),
+        ("charged", "settled", Decimal(1), None),
+        ("settled", "settled", Decimal(1), handled),
+        ("declined", "declined", Decimal(0), handled),
     ):
-        orm = await db_session.get(SupportEscalation, row_id)
+        orm = await db_session.get(SupportEscalation, rows[name])
         assert orm is not None
-        orm.status, orm.charge = status, charge
+        orm.status, orm.charge, orm.settled_at = status, charge, settled_at
     await db_session.flush()
 
     lost = await store.list_requests(db_session, tenant_id=tenant.id, undelivered=True)
     every = await store.list_requests(db_session, tenant_id=tenant.id)
 
-    assert [r.id for r in lost] == [pending], "only the pending one is lost"
-    assert {r.id for r in every} == {pending, settled, declined}, "the plain list keeps all"
+    assert {r.id for r in lost} == {rows["pending"], rows["charged"]}, "only the unhandled ones"
+    assert {r.id for r in every} == set(rows.values()), "the plain list keeps all"

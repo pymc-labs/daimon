@@ -553,11 +553,12 @@ async def set_support_channel(
 
 
 def _request_json(row: SupportEscalationRow | None) -> JsonValue:
-    """A request's charge, never its person or words."""
+    """A request's charge, never its person or words; "charged" is one nobody handled yet."""
     if row is None:
         return None
     charge = None if row.charge is None else format_credits(row.charge)
-    return {"request": str(row.id), "status": row.status, "charge": charge}
+    status = "charged" if row.charged_at_submit else row.status
+    return {"request": str(row.id), "status": status, "charge": charge}
 
 
 async def _record_settle(
@@ -597,8 +598,9 @@ async def settle(
 ) -> ledger.SettleOutcome:
     """An admin settles (`charge`) or declines (None) a request of this tenant.
 
-    `expected` is the charge last read: None for a pending request, an amount to
-    correct or refund a settled one (down to 0). A mismatch raises
+    `expected` is the charge last read: None for a request nobody has handled (pending, or
+    charged at submit: `charge` equal to its charge keeps it, None refunds it), an amount to
+    correct or refund one a person settled (down to 0). A mismatch raises
     `StaleChannelValue`. Other refusals come back as the outcome's status.
     """
     _require_admin(actor)
@@ -608,7 +610,7 @@ async def settle(
         )
         if before is None:
             return ledger.SettleOutcome(status="not_found", row=None)
-        if expected is not None and expected.value is None and before.status != "pending":
+        if expected is not None and expected.value is None and not before.awaiting_person:
             raise StaleChannelValue(SETTLE_SETTING, _request_json(before))
         outcome = await ledger.settle_request(
             session,

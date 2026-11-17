@@ -400,7 +400,7 @@ async def test_submit_when_exempt_then_recorded_settled_and_charged_nowhere(
     spent = await ledger.default_spent(db_session, tenant_id=tenant.id, platform_user_id="U1")
     assert spent == 0, "an exempt row counts on no ledger"
     settle = await _settle(db_session, row.id, D(1))
-    assert settle.status == "invalid", "an exempt request has nothing to settle"
+    assert settle.status == "invalid", "an exempt request has no amount to set"
 
 
 async def test_settle_when_pending_then_charges_once_within_bounds_and_balance(
@@ -650,3 +650,155 @@ async def test_settle_when_the_person_row_capped_the_request_then_it_caps_the_ch
     assert thread.row and thread.row.charged_to == "limit", "a thread under C1"
     capped = await _settle(db_session, thread.row.id, D(3))
     assert (capped.status, capped.available) == ("over_balance", D(1)), "their row in C1"
+
+
+async def _handled(db_session: AsyncSession, tenant_id: uuid.UUID) -> dict[str, uuid.UUID]:
+    """One request per state, all undelivered: pending, charged at submit, person-settled, declined."""
+    await _menu(db_session, tenant_id)
+    await _limit(db_session, tenant_id, shared=D(10))
+    ids: dict[str, uuid.UUID] = {}
+    for name, key, message in (
+        ("pending", "review", "m1"),
+        ("charged", "quick", "m2"),
+        ("settled", "review", "m3"),
+        ("declined", "review", "m4"),
+    ):
+        row = (await _submit(db_session, tenant_id, _choice(key), message=message)).row
+        assert row, f"{name} recorded"
+        ids[name] = row.id
+    assert (await _settle(db_session, ids["settled"], D(2))).status == "settled"
+    assert (await _settle(db_session, ids["declined"], None)).status == "declined"
+    return ids
+
+
+async def test_list_requests_when_undelivered_then_pending_and_charged_at_submit_ones(
+    db_session: AsyncSession,
+) -> None:
+    """Nobody has handled a pending request or one charged at submit; a person did the others."""
+    tenant = await make_tenant(db_session, platform="slack")
+    ids = await _handled(db_session, tenant.id)
+    legacy = await make_support_escalation(db_session, tenant_id=tenant.id, message_id="old")
+    delivered = (await _submit(db_session, tenant.id, _choice("quick"), message="m5")).row
+    assert delivered, "recorded"
+    await ledger.mark_delivered(db_session, escalation_id=delivered.id, support_channel_id="S1")
+
+    lost = await ledger.list_requests(db_session, tenant_id=tenant.id, undelivered=True)
+    every = await ledger.list_requests(db_session, tenant_id=tenant.id)
+
+    assert {r.id for r in lost} == {ids["pending"], ids["charged"], legacy}, (
+        "pending, charged at submit and a legacy row nobody saw; not the handled or delivered"
+    )
+    charged = next(r for r in lost if r.id == ids["charged"])
+    assert (charged.status, charged.charged_at_submit, charged.settled_at) == (
+        "settled",
+        True,
+        None,
+    ), "an automatic settle stamps no settled_at"
+    assert len(every) == 6, "the plain list keeps all"
+
+
+async def test_settle_when_charged_at_submit_then_keeps_the_charge_and_leaves_the_list(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack")
+    ids = await _handled(db_session, tenant.id)
+    before = await ledger.default_spent(db_session, tenant_id=tenant.id, platform_user_id="U1")
+    assert before == D(0), "the limit ledger is used, not the default one"
+    assert (await _settle(db_session, ids["charged"], D(1))).status == "invalid", (
+        "another amount is refused: the charge was taken at submit"
+    )
+
+    kept = await _settle(db_session, ids["charged"], D("0.5"))
+
+    assert kept.status == "settled" and kept.row, "keeping settles"
+    assert (kept.row.charge, kept.row.settled_by) == (D("0.5"), "staff"), "same charge, settler set"
+    assert kept.row.settled_at is not None and not kept.row.awaiting_person, "now handled"
+    lost = await ledger.list_requests(db_session, tenant_id=tenant.id, undelivered=True)
+    assert {r.id for r in lost} == {ids["pending"]}, "it left the list"
+    again = await _settle(db_session, ids["charged"], D("0.5"))
+    assert again.status == "already_settled", "a person already handled it"
+    refund = await _settle(db_session, ids["charged"], None)
+    assert refund.status == "already_settled", "so is a decline now"
+
+
+async def test_settle_when_charged_at_submit_declined_then_refunds_the_charge(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack")
+    await _menu(db_session, tenant.id)
+    limit = await _limit(db_session, tenant.id, shared=D(10))
+    row = (await _submit(db_session, tenant.id, _choice("quick"))).row
+    assert row and row.status == "settled" and row.charge == D("0.5"), "charged at submit"
+    now = datetime.now(UTC)
+    shared, person = await ledger.limit_spent(
+        db_session, limit=limit, platform_user_id="U1", as_of=now
+    )
+    assert (shared, person) == (D("0.5"), D("0.5")), "the charge counts"
+
+    declined = await _settle(db_session, row.id, None)
+
+    assert declined.status == "declined" and declined.row, "declined"
+    assert (declined.row.charge, declined.row.settled_by) == (D(0), "staff"), (
+        "refunded, settler set"
+    )
+    shared, person = await ledger.limit_spent(
+        db_session, limit=limit, platform_user_id="U1", as_of=now
+    )
+    assert (shared, person) == (D(0), D(0)), "the refund frees the balance"
+    lost = await ledger.list_requests(db_session, tenant_id=tenant.id, undelivered=True)
+    assert lost == [], "it left the list"
+
+
+async def test_settle_when_legacy_default_row_declined_then_the_default_credit_is_back(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack")
+    await _legacy(db_session, tenant.id, "old")
+    row = (await ledger.list_requests(db_session, tenant_id=tenant.id, undelivered=True))[0]
+    assert row.charged_at_submit, "a row from before limits was charged 1 and nobody handled it"
+    assert await ledger.default_spent(db_session, tenant_id=tenant.id, platform_user_id="U1") == 1
+
+    assert (await _settle(db_session, row.id, D(1))).status == "settled", "keep: charge 1"
+    again = await make_support_escalation(db_session, tenant_id=tenant.id, message_id="old2")
+    declined = await _settle(db_session, again, None)
+
+    assert declined.status == "declined", "refunded"
+    spent = await ledger.default_spent(db_session, tenant_id=tenant.id, platform_user_id="U1")
+    assert spent == 1, "one credit left, the kept one; the declined one is back"
+
+
+async def test_settle_when_exempt_and_undelivered_then_keep_or_decline_only(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack")
+    first = (await _submit(db_session, tenant.id, exempt=True, message="m1")).row
+    second = (await _submit(db_session, tenant.id, exempt=True, message="m2")).row
+    assert first and second, "recorded"
+    lost = await ledger.list_requests(db_session, tenant_id=tenant.id, undelivered=True)
+    assert {r.id for r in lost} == {first.id, second.id}, "charged at submit (0)"
+
+    assert (await _settle(db_session, first.id, D(1))).status == "invalid", "no amount to set"
+    assert (await _settle(db_session, first.id, D(0))).status == "settled", "keep"
+    assert (await _settle(db_session, second.id, None)).status == "declined", "decline"
+    assert await ledger.list_requests(db_session, tenant_id=tenant.id, undelivered=True) == [], (
+        "both left the list"
+    )
+    assert (await _settle(db_session, first.id, D(0), expected=D(0))).status == "invalid", (
+        "an exempt request is never corrected"
+    )
+
+
+async def test_settle_when_pending_declined_then_person_stamps_leave_it_out_of_the_list(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack")
+    ids = await _handled(db_session, tenant.id)
+    done = await ledger.get_request(db_session, escalation_id=ids["settled"])
+    declined = await ledger.get_request(db_session, escalation_id=ids["declined"])
+    assert done and declined, "found"
+    assert (done.awaiting_person, declined.awaiting_person) == (False, False), (
+        "a person handled both"
+    )
+    assert (await _settle(db_session, ids["pending"], D(2))).status == "settled", "pending settles"
+    lost = await ledger.list_requests(db_session, tenant_id=tenant.id, undelivered=True)
+    assert {r.id for r in lost} == {ids["charged"]}, "only the charged-at-submit one remains"

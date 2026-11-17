@@ -121,6 +121,19 @@ class SupportEscalationRow(_Row):
     support_post_id: str | None = None
 
     @property
+    def awaiting_person(self) -> bool:
+        """No person has settled or declined it: `settled_at` is stamped only by a person's settle.
+
+        A fixed-price request settles at submit with `settled_at` unset, so it still waits.
+        """
+        return self.settled_at is None
+
+    @property
+    def charged_at_submit(self) -> bool:
+        """Charged when asked (fixed or steps price, or exempt) and no person has handled it."""
+        return self.status == "settled" and self.awaiting_person
+
+    @property
     def counted(self) -> Decimal:
         """What this row spends now: its charge once settled, its hold while pending."""
         return self.hold if self.charge is None else self.charge

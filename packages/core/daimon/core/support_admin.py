@@ -23,6 +23,7 @@ from daimon.core.support import (
     MenuSpec,
     SupportScope,
     already_settled_text,
+    charged_at_submit_text,
     credits_text,
     format_credits,
     instant_text,
@@ -243,6 +244,8 @@ def settle_outcome_text(outcome: ledger.SettleOutcome, *, correction: bool = Fal
         return settled_text(charge=None)
     if outcome.status == "already_settled":
         return already_settled_text(status=row.status, charge=row.charge, by=row.settled_by)
+    if outcome.status == "invalid" and row.charged_at_submit and not correction:
+        return charged_at_submit_text(charge=row.charge)
     if outcome.status in ("invalid", "over_balance"):
         return settle_range_text(
             row.bounds, counted=row.counted, available=outcome.available, correction=correction

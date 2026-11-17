@@ -794,15 +794,16 @@ async def list_requests(
     undelivered: bool = False,
     limit: int = 50,
 ) -> list[SupportEscalationRow]:
-    """Newest first; `undelivered` keeps the pending requests no support channel received.
+    """Newest first; `undelivered` keeps the requests no support channel received and no person
+    handled: pending ones, and ones charged at submit (`awaiting_person`).
 
-    A settled or declined one needs no settling, so it never counts as lost."""
+    A request a person settled or declined needs nobody, so it never counts as lost."""
     stmt = select(SupportEscalation).where(SupportEscalation.tenant_id == tenant_id)
     if status is not None:
         stmt = stmt.where(SupportEscalation.status == status)
     if undelivered:
         stmt = stmt.where(
-            SupportEscalation.delivered_at.is_(None), SupportEscalation.status == "pending"
+            SupportEscalation.delivered_at.is_(None), SupportEscalation.settled_at.is_(None)
         )
     if limit_id is not None:
         stmt = stmt.where(SupportEscalation.limit_id == limit_id)
@@ -916,6 +917,8 @@ async def settle_request(
 ) -> SettleOutcome:
     """Settle a pending request at `charge`, or decline it (`charge` None: charged 0).
 
+    A request charged at submit (`charged_at_submit`) takes `charge` equal to its
+    charge, which keeps it and records the settler, or None, which refunds it.
     `expected_charge` re-settles a settled or declined row instead (an admin's
     refund or correction, down to 0), and is "stale" unless the row still
     charges exactly that. Locks the row's limit, then the requester, so a
@@ -932,22 +935,27 @@ async def settle_request(
     row = await get_request(session, escalation_id=escalation_id, tenant_id=tenant_id)
     if row is None:
         return SettleOutcome(status="not_found", row=None)
-    if row.charged_to == "exempt":
-        return SettleOutcome(status="invalid", row=row)
     correction = expected_charge is not None
-    if not correction and row.status != "pending":
+    if not correction and not row.awaiting_person:
         return SettleOutcome(status="already_settled", row=row)
+    # An exempt request has no amount to set: a person may only keep it or decline it.
+    if row.charged_to == "exempt" and not (row.charged_at_submit and not correction):
+        return SettleOutcome(status="invalid", row=row)
     if correction and (row.status == "pending" or row.charge != expected_charge):
         return SettleOutcome(status="stale", row=row)
+    keeping = row.charged_at_submit and not correction and charge is not None
+    if keeping and charge != row.charge:
+        return SettleOutcome(status="invalid", row=row)
     if (
         row.charged_to == "limit"
         and row.limit_id is None
         and charge is not None
+        and not keeping
         and not (correction and charge <= (row.charge or Decimal(0)))
     ):
         return SettleOutcome(status="limit_gone", row=row)
     available = None
-    if charge is not None:
+    if charge is not None and not keeping:
         available = await _ledger_available(session, row=row, default_allowance=default_allowance)
         problem: SettleProblem | None = settle_problem(
             row.bounds,

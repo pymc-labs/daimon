@@ -22,6 +22,7 @@ from daimon.core.support import (
     parse_limit_spec,
     parse_menu,
 )
+from daimon.core.support_admin import settle_outcome_text
 from daimon.core.support_changes import (
     CHANNEL_SETTING,
     LIMIT_SETTING,
@@ -51,7 +52,12 @@ MENU = parse_menu(
     {
         "name": "Support",
         "options": [
-            {"key": "review", "label": "Review", "price": {"kind": "range", "min": "1", "max": "3"}}
+            {
+                "key": "review",
+                "label": "Review",
+                "price": {"kind": "range", "min": "1", "max": "3"},
+            },
+            {"key": "quick", "label": "Quick", "price": {"kind": "fixed", "amount": "2"}},
         ],
     }
 )
@@ -85,8 +91,15 @@ async def _menu(factory: Factory, actor: ChannelActor) -> None:
     )
 
 
-async def _pending(factory: Factory, tenant_id: uuid.UUID, message: str = "m1") -> uuid.UUID:
-    """A request in C1, posted to the support channel S1."""
+async def _pending(
+    factory: Factory,
+    tenant_id: uuid.UUID,
+    message: str = "m1",
+    *,
+    option: int = 0,
+    post: bool = True,
+) -> uuid.UUID:
+    """A request in C1, posted to the support channel S1 (`post` False: never delivered)."""
     async with factory.begin() as session:
         outcome = await ledger.submit_request(
             session,
@@ -98,11 +111,14 @@ async def _pending(factory: Factory, tenant_id: uuid.UUID, message: str = "m1") 
             message_id=message,
             ma_session_id=None,
             place=SupportPlace(channel_id="C1", agent_id=None),
-            choice=RequestChoice.of(MENU.options[0]),
+            choice=RequestChoice.of(MENU.options[option]),
             default_allowance=20,
         )
-        assert outcome.status == "recorded" and outcome.row, "a pending request"
-        await ledger.mark_delivered(session, escalation_id=outcome.row.id, support_channel_id="S1")
+        assert outcome.status == "recorded" and outcome.row, "a recorded request"
+        if post:
+            await ledger.mark_delivered(
+                session, escalation_id=outcome.row.id, support_channel_id="S1"
+            )
     return outcome.row.id
 
 
@@ -455,6 +471,107 @@ async def test_settle_when_admin_then_charges_and_audits_the_amount_only(
         {"request": str(request_id), "status": "settled", "charge": "0"},
         {"request": str(request_id), "status": "settled", "charge": "2"},
     ], "each settle records the charge, not the person or their words"
+
+
+async def test_settle_when_charged_at_submit_then_keep_or_refund_and_audit(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    tenant_id = await _tenant(db_session)
+    actor = _actor(tenant_id)
+    await _menu(db_session_factory, actor)
+    await set_limit(db_session_factory, actor, platform="slack", spec=LIMIT)
+    kept_id = await _pending(db_session_factory, tenant_id, "m1", option=1, post=False)
+    refunded_id = await _pending(db_session_factory, tenant_id, "m2", option=1, post=False)
+    async with db_session_factory() as session:
+        lost = await ledger.list_requests(session, tenant_id=tenant_id, undelivered=True)
+        assert {r.id for r in lost} == {kept_id, refunded_id}, "charged at submit, not seen"
+        assert all(r.status == "settled" and r.charge == D(2) for r in lost), "charged 2 each"
+
+    other = await settle(
+        db_session_factory,
+        actor,
+        escalation_id=kept_id,
+        charge=D(1),
+        default_allowance=20,
+        expected=Expected(None),
+    )
+    assert other.status == "invalid", "another amount is refused"
+    assert "keep" in settle_outcome_text(other).lower(), "and says to keep or decline"
+    kept = await settle(
+        db_session_factory,
+        actor,
+        escalation_id=kept_id,
+        charge=D(2),
+        default_allowance=20,
+        expected=Expected(None),
+    )
+    assert kept.status == "settled" and kept.row, "kept"
+    assert (kept.row.charge, kept.row.settled_by) == (D(2), "UADMIN"), "same charge, admin recorded"
+    refund = await settle(
+        db_session_factory,
+        actor,
+        escalation_id=refunded_id,
+        charge=None,
+        default_allowance=20,
+        expected=Expected(None),
+    )
+    assert refund.status == "declined" and refund.row, "declined"
+    assert (refund.row.charge, refund.row.settled_by) == (D(0), "UADMIN"), "refunded"
+    async with db_session_factory() as session:
+        lost = await ledger.list_requests(session, tenant_id=tenant_id, undelivered=True)
+    assert lost == [], "both left the list"
+    for request_id in (kept_id, refunded_id):
+        with pytest.raises(StaleChannelValue):
+            await settle(
+                db_session_factory,
+                actor,
+                escalation_id=request_id,
+                charge=None,
+                default_allowance=20,
+                expected=Expected(None),
+            )
+    changes = await list_changes(db_session, tenant_id=tenant_id, channel_id="C1")
+    after = [(c.before, c.after) for c in changes if c.setting == SETTLE_SETTING]
+    row = {"request": str(kept_id), "charge": "2"}
+    gone = {"request": str(refunded_id), "charge": "2"}
+    assert after == [
+        ({**gone, "status": "charged"}, {**gone, "status": "declined", "charge": "0"}),
+        ({**row, "status": "charged"}, {**row, "status": "settled"}),
+    ], "each settle is audited from charged (unhandled) to what it left"
+
+
+async def test_settle_when_a_person_already_handled_it_then_refused_as_stale(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    tenant_id = await _tenant(db_session)
+    actor = _actor(tenant_id)
+    await _menu(db_session_factory, actor)
+    pending_id = await _pending(db_session_factory, tenant_id, "m1", post=False)
+    charged_id = await _pending(db_session_factory, tenant_id, "m2", option=1, post=False)
+    first = await settle(
+        db_session_factory, actor, escalation_id=pending_id, charge=None, default_allowance=20
+    )
+    second = await settle(
+        db_session_factory, actor, escalation_id=charged_id, charge=D(2), default_allowance=20
+    )
+    assert (first.status, second.status) == ("declined", "settled"), "an admin handled both"
+    async with db_session_factory() as session:
+        lost = await ledger.list_requests(session, tenant_id=tenant_id, undelivered=True)
+    assert lost == [], "a person handled both"
+    for request_id in (pending_id, charged_id):
+        with pytest.raises(StaleChannelValue):
+            await settle(
+                db_session_factory,
+                actor,
+                escalation_id=request_id,
+                charge=None,
+                default_allowance=20,
+                expected=Expected(None),
+            )
+        again = await settle(
+            db_session_factory, actor, escalation_id=request_id, charge=None, default_allowance=20
+        )
+        assert again.status == "already_settled", "the CLI and MCP path says so too"
 
 
 async def test_settle_from_post_when_staff_click_then_recorded_as_the_panel(
