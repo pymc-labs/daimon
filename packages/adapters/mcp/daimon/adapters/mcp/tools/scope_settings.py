@@ -98,7 +98,9 @@ async def _get_settings_impl(
 ) -> SettingsResult:
     place = await _place(runtime, auth, origin_context_id, change=False)
     views = await read_features(runtime.session_factory, runtime.settings, place)
-    return SettingsResult([view_json(view, place.platform) for view in listed(views)])
+    return SettingsResult(
+        [view_json(view, place.platform) for view in listed(views, runtime.settings, place)]
+    )
 
 
 async def _change_setting_impl(

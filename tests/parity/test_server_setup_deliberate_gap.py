@@ -44,16 +44,25 @@ def _actor(tenant_id: uuid.UUID) -> FeatureActor:
 async def test_a_worker_panel_reads_not_set_up_where_its_sessions_keep_the_tools(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The session keeps the notebook tools; the panel reads Not set up and offers only what a
-    session still obeys: Off, its lock and Default."""
+    """The session keeps the notebook tools; the panel lists the feature on defaults, reads Not
+    set up and offers only what a session still obeys: Off, its lock and Default."""
     tenant = await make_tenant(db_session)
     await db_session.commit()
     place = FeaturePlace.of(tenant.id, "discord", "C1")
     spec = FEATURES["notebooks"]
     toolset = await place_toolset(db_session_factory, WORKER, place, ma_agent(tenant_id=tenant.id))
     assert "notebooks" not in toolset.off_capabilities, "the session kept the notebook tools"
-    op = panel.open_op(spec.category, spec.key)
-    screen = await panel.show(db_session_factory, WORKER, _actor(tenant.id), place, op)
+    actor = _actor(tenant.id)
+    root = await panel.open_panel(db_session_factory, WORKER, actor, place)
+    group = next(
+        (o.value for o in root.selects[0].options if o.value.endswith(spec.category)), None
+    )
+    assert group is not None, f"the root lists {spec.category}"
+    rows = await panel.show(db_session_factory, WORKER, actor, place, group)
+    assert rows is not None, f"{group} opens"
+    op = next((o.value for o in rows.selects[0].options if o.value.split(":")[2] == spec.key), None)
+    assert op is not None, f"{spec.category} lists {spec.key} on defaults"
+    screen = await panel.show(db_session_factory, WORKER, actor, place, op)
     assert screen is not None and "Not set up" in screen.lines[0], "the panel reads Not set up"
     offered = {
         (picked.value, picked.locked)

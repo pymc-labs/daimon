@@ -252,7 +252,8 @@ def _short(view: FeatureView, platform: str) -> str:
 
 async def _root(sessions: Sessions, settings: Settings, place: FeaturePlace) -> PanelScreen:
     specs = _on_platform(place)
-    views = listed(await read_features(sessions, settings, place, keys=[s.key for s in specs]))
+    views = await read_features(sessions, settings, place, keys=[s.key for s in specs])
+    views = listed(views, settings, place)
     groups = {view.spec.category for view in views}
     here = "this thread" if place.thread_id else "this channel"
     return PanelScreen(
@@ -280,7 +281,8 @@ async def _category(
     wanted: int,
 ) -> PanelScreen:
     specs = [spec for spec in _on_platform(place) if spec.category == category]
-    views = listed(await read_features(sessions, settings, place, keys=[s.key for s in specs]))
+    views = await read_features(sessions, settings, place, keys=[s.key for s in specs])
+    views = listed(views, settings, place)
     page, first, last = _page(len(views), wanted)
     shorts = [(view.spec, _short(view, place.platform)) for view in views[first:last]]
     return PanelScreen(
