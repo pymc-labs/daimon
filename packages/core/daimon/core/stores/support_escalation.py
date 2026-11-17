@@ -794,12 +794,16 @@ async def list_requests(
     undelivered: bool = False,
     limit: int = 50,
 ) -> list[SupportEscalationRow]:
-    """Newest first; `undelivered` keeps the requests no support channel received."""
+    """Newest first; `undelivered` keeps the pending requests no support channel received.
+
+    A settled or declined one needs no settling, so it never counts as lost."""
     stmt = select(SupportEscalation).where(SupportEscalation.tenant_id == tenant_id)
     if status is not None:
         stmt = stmt.where(SupportEscalation.status == status)
     if undelivered:
-        stmt = stmt.where(SupportEscalation.delivered_at.is_(None))
+        stmt = stmt.where(
+            SupportEscalation.delivered_at.is_(None), SupportEscalation.status == "pending"
+        )
     if limit_id is not None:
         stmt = stmt.where(SupportEscalation.limit_id == limit_id)
     stmt = stmt.order_by(SupportEscalation.created_at.desc()).limit(limit)

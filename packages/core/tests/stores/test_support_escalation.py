@@ -6,6 +6,8 @@ test_support_ledger.
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from daimon.core._models import SupportEscalation
 from daimon.core.stores import support_escalation as store
 from daimon.testing.factories import make_account, make_support_escalation, make_tenant
@@ -91,3 +93,28 @@ async def test_account_scoped_delete_reaches_rows_written_before_the_account_exi
         "lies about what erasure removes"
     )
     assert await _rows(db_session) == 0
+
+
+async def test_list_requests_when_undelivered_then_only_pending_ones(
+    db_session: AsyncSession,
+) -> None:
+    """A request that settled or was declined needs nobody to settle it, delivered or not."""
+    tenant = await make_tenant(db_session)
+    pending = await make_support_escalation(db_session, tenant_id=tenant.id, message_id="m1")
+    settled = await make_support_escalation(db_session, tenant_id=tenant.id, message_id="m2")
+    declined = await make_support_escalation(db_session, tenant_id=tenant.id, message_id="m3")
+    for row_id, status, charge in (
+        (pending, "pending", None),
+        (settled, "settled", Decimal(1)),
+        (declined, "declined", Decimal(0)),
+    ):
+        orm = await db_session.get(SupportEscalation, row_id)
+        assert orm is not None
+        orm.status, orm.charge = status, charge
+    await db_session.flush()
+
+    lost = await store.list_requests(db_session, tenant_id=tenant.id, undelivered=True)
+    every = await store.list_requests(db_session, tenant_id=tenant.id)
+
+    assert [r.id for r in lost] == [pending], "only the pending one is lost"
+    assert {r.id for r in every} == {pending, settled, declined}, "the plain list keeps all"
