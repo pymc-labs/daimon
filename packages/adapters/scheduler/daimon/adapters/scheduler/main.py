@@ -93,6 +93,7 @@ from daimon.core.ma_resolver import (
 from daimon.core.mcp_vault_janitor import archive_idle_relay_vaults
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
+from daimon.core.monitoring_sweep import sweep_monitored_events
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_session, retrieve_agent
 from daimon.core.observability import init_sentry
@@ -1190,6 +1191,28 @@ async def _sweep_github_issued_tokens(
         log.exception("scheduler.github_issued_token_sweep.failed")
 
 
+# Retention is counted in days, so an hourly run deletes a row at most an hour late.
+_MONITORING_PRUNE_INTERVAL = timedelta(hours=1)
+_last_monitoring_prune: dict[str, datetime] = {}
+
+
+@scheduler_step
+async def _sweep_monitored_events(
+    sm: async_sessionmaker[AsyncSession], *, retention_days: int, now: datetime | None = None
+) -> None:
+    """Delete monitored-agent rows past retention at most once per interval. Boundary
+    catch: a sweep failure must not kill the scheduler loop; a failed run waits too."""
+    current = now or datetime.now(UTC)
+    last = _last_monitoring_prune.get("started")
+    if last is not None and current - last < _MONITORING_PRUNE_INTERVAL:
+        return
+    _last_monitoring_prune["started"] = current
+    try:
+        await sweep_monitored_events(sm, now=current, retention_days=retention_days)
+    except SQLAlchemyError:
+        log.exception("scheduler.monitoring_sweep.failed")
+
+
 # Each run lists every vault, and live sessions once a relay vault is old enough.
 _RELAY_VAULT_ARCHIVE_INTERVAL = timedelta(minutes=10)
 _last_relay_vault_archive: dict[str, datetime] = {}
@@ -2047,6 +2070,7 @@ async def run(
             await _sweep_lead_intake(sm)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
+            await _sweep_monitored_events(sm, retention_days=settings.monitoring.retention_days)
             await _archive_idle_relay_vaults(client)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(
@@ -2086,6 +2110,7 @@ async def run(
             await _sweep_lead_intake(sm)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
+            await _sweep_monitored_events(sm, retention_days=settings.monitoring.retention_days)
             await _archive_idle_relay_vaults(client)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(
