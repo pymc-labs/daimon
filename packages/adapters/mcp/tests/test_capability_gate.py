@@ -40,7 +40,7 @@ from .test_tool_schema_snapshot import (
 )
 
 OFF = "is turned off here"
-UNSET = "isn't set up on this deployment"
+UNSET = "isn't set up here yet"
 
 
 def _set_up() -> Settings:

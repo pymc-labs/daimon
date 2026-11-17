@@ -56,8 +56,8 @@ def _refusal(tool: str, key: str) -> str:
 
 def _unset_refusal(tool: str, key: str) -> str:
     return (
-        f"{FEATURES[key].name} isn't set up on this deployment, so {tool} can't run. "
-        "Nothing was done."
+        f"{FEATURES[key].name} isn't set up here yet, so {tool} can't run. Nothing was done. "
+        "Ask whoever runs Daimon to set it up."
     )
 
 
