@@ -266,6 +266,8 @@ async def get_dm_agent_name(session: AsyncSession, *, tenant_id: uuid.UUID) -> s
 async def set_dm_agent_name(
     session: AsyncSession, *, tenant_id: uuid.UUID, agent_name: str | None
 ) -> None:
+    """Store the DM default agent: the one value cold DMs and `daimon dm default` read. Only
+    `dm_settings.set_default` calls this outside tests, so a change is checked and audited."""
     if agent_name is not None and not agent_name.strip():
         raise UserFacingError("The DM agent name must not be empty.")
     await session.execute(
@@ -296,8 +298,9 @@ async def set_dm_enabled(
     enabled: bool,
     account_id: uuid.UUID | None = None,
 ) -> None:
-    """Turn `direct_messages` on or off for a workspace, as a recorded feature value. For the
-    CLI and fixtures; the settings surfaces go through `workspace_settings`."""
+    """Turn `direct_messages` on or off for a workspace through the features writer, at the
+    workspace's own platform and with its change record. For the policy import and fixtures;
+    admins go through `workspace_settings.set_dms` or `daimon features set`."""
     # Imported here: the feature service reads these stores.
     from daimon.core.features.service import set_workspace_feature
 
