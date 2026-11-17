@@ -1524,12 +1524,14 @@ async def _keep_question(
     """Keep a person's direct message or web chat question when the answering agent is
     monitored (`daimon.core.monitoring`), under the message's own id when the platform
     gave one, so a re-run of the same message keeps one question."""
-    grant = prepared.admission.grant
-    direct = platform == "web" or (grant is not None and grant.is_dm)
-    if origin != "chat" or request_text is None or not direct:
+    if origin != "chat" or request_text is None:
         return None
     if platform not in ("discord", "slack", "teams", "web"):
         return None
+    if platform != "web":
+        grant = prepared.admission.grant
+        if grant is None or not grant.is_dm:
+            return None
     if not prepared.admission.feature_on("monitor_direct_messages"):
         return None  # Off in the turn's own snapshot: no read on the way to the agent.
     return await capture_question(
