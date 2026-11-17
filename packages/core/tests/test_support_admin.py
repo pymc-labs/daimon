@@ -22,6 +22,8 @@ from daimon.core.support import (
 from daimon.core.support_admin import (
     NO_REQUEST,
     LimitChange,
+    expected_menu_key,
+    expected_or_none,
     get_limit_usage,
     list_limit_usage,
     merge_limit,
@@ -261,3 +263,19 @@ def test_merge_limit_when_a_person_row_then_shared_credits_are_refused() -> None
             change=LimitChange(shared="5"),
             platform_user_id="U1",
         )
+
+
+def test_expected_or_none_when_none_in_any_case_then_expects_no_value() -> None:
+    assert expected_or_none(None, int) is None, "omitted: not checked"
+    for raw in ("none", "None", " NONE "):
+        assert expected_or_none(raw, int) == Expected(None), raw
+    assert expected_or_none("3", int) == Expected(3)
+    with pytest.raises(ValueError):
+        expected_or_none("x", int)
+
+
+def test_expected_menu_key_when_parsed_then_trimmed_and_bad_keys_refused() -> None:
+    assert expected_menu_key(" support ") == Expected("support")
+    assert expected_menu_key("NONE") == Expected(None)
+    with pytest.raises(SupportError):
+        expected_menu_key("Bad Key")

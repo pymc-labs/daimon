@@ -384,6 +384,7 @@ async def remove_menu(
 ) -> None:
     """Remove a menu no place uses; an unknown key is refused."""
     _require_admin(actor)
+    key = parse_menu_key(key)
     async with sessionmaker.begin() as session:
         before = await _locked_menu(session, actor, key=key, expected=expected)
         if before is None:
@@ -425,6 +426,7 @@ async def set_menu_use(
 ) -> str | None:
     """Pick the menu a place offers; `key` None drops the place's own pick. Returns the old key."""
     _require_admin(actor)
+    key = None if key is None else parse_menu_key(key)
     async with sessionmaker.begin() as session:
         await lock_access_policy(session, tenant_id=actor.tenant_id)
         before = await read_menu_use(

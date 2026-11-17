@@ -525,6 +525,66 @@ async def resolve_limit(
     )
 
 
+@dataclass(frozen=True)
+class PersonStanding:
+    """One person limit as it stands: what it spent and the requests on that ledger."""
+
+    balance: Balance
+    recent: list[SupportEscalationRow]
+
+
+async def person_standing(
+    session: AsyncSession,
+    *,
+    person: SupportLimitRow,
+    default_allowance: int,
+    now: datetime | None = None,
+    recent: int = 50,
+) -> PersonStanding:
+    """A person limit's balance and newest requests, as a request at its place would see them.
+
+    The place is the limit's own (everywhere, that agent or that channel). The person's
+    spend counts on the ledger that place charges (the governing limit's, or the default
+    one when it has no limit), through the same read `submit_request` charges by.
+    """
+    user = person.platform_user_id
+    assert user is not None, "a place limit has no person"
+    place = SupportPlace(
+        channel_id=person.scope_id if person.scope == "channel" else None,
+        agent_id=person.scope_id if person.scope == "agent" else None,
+    )
+    at = now or datetime.now(UTC)
+    governing = await _governing(
+        session, tenant_id=person.tenant_id, place=place, platform_user_id=user
+    )
+    balance = await _balance(
+        session,
+        tenant_id=person.tenant_id,
+        limit=governing.limit,
+        person=person,
+        platform_user_id=user,
+        default_allowance=default_allowance,
+        as_of=at,
+    )
+    on_ledger = (
+        SupportEscalation.limit_id == governing.limit.id
+        if governing.limit is not None
+        else SupportEscalation.charged_to == "default"
+    )
+    stmt = (
+        select(SupportEscalation)
+        .where(
+            SupportEscalation.tenant_id == person.tenant_id,
+            SupportEscalation.platform_user_id == user,
+            on_ledger,
+        )
+        .order_by(SupportEscalation.created_at.desc())
+        .limit(recent)
+    )
+    rows = [SupportEscalationRow.model_validate(o) for o in (await session.scalars(stmt)).all()]
+    return PersonStanding(balance=balance, recent=rows)
+
+
 SubmitStatus = Literal[
     "recorded", "duplicate", "out_of_credits", "stale", "refused", "limit_inactive"
 ]

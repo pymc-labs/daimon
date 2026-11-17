@@ -8,10 +8,12 @@ limit there. Read per call, never cached.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
+from daimon.core.channel_changes import Expected
 from daimon.core.stores import support as store
 from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores.support_rows import SupportLimitRow
@@ -26,6 +28,7 @@ from daimon.core.support import (
     instant_text,
     limit_state,
     parse_limit_spec,
+    parse_menu_key,
     price_text,
     settle_range_text,
     settled_text,
@@ -37,6 +40,26 @@ NO_REQUEST = "No such request."
 NOT_HERE = "Settle it from the channel it was posted to."
 CLEAR = "none"
 """What `limit set` takes to clear an amount or a date."""
+
+
+def expected_or_none[T](raw: str | None, parse: Callable[[str], T]) -> Expected[T | None] | None:
+    """An `expected` value as every surface takes it.
+
+    None: not checked. `none` in any case: expects no value. Else `parse(raw)`; a bad value
+    raises `SupportError` or `ValueError`.
+    """
+    if raw is None:
+        return None
+    if raw.strip().lower() == CLEAR:
+        return Expected(None)
+    return Expected(parse(raw))
+
+
+def expected_menu_key(raw: str | None) -> Expected[str | None] | None:
+    """`expected_or_none` for a menu key, which is parsed like any menu key."""
+    return expected_or_none(raw, parse_menu_key)
+
+
 _NO_PERSON = ""
 """`limit_spent` sums the shared credits for any id; no request is made under the empty one."""
 
@@ -233,6 +256,8 @@ def settle_outcome_text(outcome: ledger.SettleOutcome, *, correction: bool = Fal
 
 __all__ = [
     "CLEAR",
+    "expected_menu_key",
+    "expected_or_none",
     "NOT_HERE",
     "NO_REQUEST",
     "LimitChange",

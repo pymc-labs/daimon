@@ -511,6 +511,32 @@ async def test_limit_spent_when_monthly_then_last_months_rows_do_not_count(
     assert then == (D(1), D(1)), "the old month still holds its row"
 
 
+async def test_person_standing_when_no_place_limit_then_counts_the_default_ledger(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack")
+    alice = await _limit(db_session, tenant.id, person="U1", each=D(5))
+    for message in ("m1", "m2", "m3", "m4"):
+        await make_support_escalation(db_session, tenant_id=tenant.id, message_id=message)
+    await make_support_escalation(db_session, tenant_id=tenant.id, platform_user_id="U2")
+    standing = await ledger.person_standing(db_session, person=alice, default_allowance=20)
+    assert (standing.balance.person_used, standing.balance.person_left) == (D(4), D(1))
+    assert len(standing.recent) == 4, "only Alice's requests on the ledger that charged them"
+
+
+async def test_person_standing_when_place_limit_then_counts_that_limits_ledger(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack")
+    await _limit(db_session, tenant.id, shared=D(10))
+    alice = await _limit(db_session, tenant.id, person="U1", each=D(3))
+    await make_support_escalation(db_session, tenant_id=tenant.id, message_id="old")
+    assert (await _submit(db_session, tenant.id)).status == "recorded"
+    standing = await ledger.person_standing(db_session, person=alice, default_allowance=20)
+    assert (standing.balance.person_used, standing.balance.person_left) == (D(1), D(2))
+    assert [r.charged_to for r in standing.recent] == ["limit"], "a default-ledger row is not this"
+
+
 async def test_submit_when_now_is_given_then_the_row_is_created_at_that_time(
     db_session: AsyncSession,
 ) -> None:

@@ -15,7 +15,13 @@ from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
 from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.core.stores.tenants import get_tenant
-from daimon.core.support import RequestChoice, SupportPlace, parse_limit_spec, parse_menu
+from daimon.core.support import (
+    RequestChoice,
+    SupportError,
+    SupportPlace,
+    parse_limit_spec,
+    parse_menu,
+)
 from daimon.core.support_changes import (
     CHANNEL_SETTING,
     LIMIT_SETTING,
@@ -534,3 +540,31 @@ async def test_clear_limit_when_requests_pending_then_declined_and_audited(
             {"request": str(request_id), "status": "declined", "charge": "0"},
         )
     ], "the decline is audited like a settle"
+
+
+async def test_menu_keys_when_removed_or_picked_then_parsed_like_every_other_key(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    actor = _actor(await _tenant(db_session))
+    await set_menu(db_session_factory, actor, platform="slack", key="support", spec=MENU)
+    await set_menu_use(
+        db_session_factory,
+        actor,
+        platform="slack",
+        scope="workspace",
+        scope_id="",
+        key=" support ",
+    )
+    assert await read_menu_use(
+        db_session, tenant_id=actor.tenant_id, scope="workspace", scope_id=""
+    )
+    with pytest.raises(SupportError, match="menu key"):
+        await remove_menu(db_session_factory, actor, platform="slack", key="Bad Key")
+    with pytest.raises(SupportError, match="menu key"):
+        await set_menu_use(
+            db_session_factory, actor, platform="slack", scope="workspace", scope_id="", key="A B"
+        )
+    await set_menu_use(
+        db_session_factory, actor, platform="slack", scope="workspace", scope_id="", key=None
+    )
+    await remove_menu(db_session_factory, actor, platform="slack", key=" support ")
