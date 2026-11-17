@@ -105,7 +105,7 @@ from daimon.adapters.mcp.tools.server_skills import register_server_skill_tools
 from daimon.adapters.mcp.tools.setup_target import register_setup_target_tools
 from daimon.adapters.mcp.tools.skill_library_edits import register_skill_library_edit_tools
 from daimon.adapters.mcp.tools.skill_uploads import register_skill_upload_tools
-from daimon.adapters.mcp.tools.support_plans import register_support_plan_tools
+from daimon.adapters.mcp.tools.support import register_support_tools
 from daimon.adapters.mcp.tools.task_continuity import register_task_continuity_tools
 from daimon.adapters.mcp.tools.teams._client import build_teams_client
 from daimon.adapters.mcp.tools.tenant_summary import register_tenant_summary_tools
@@ -614,7 +614,7 @@ def create_mcp_app(
     register_credit_report_tools(mcp, runtime)  # own credits, overview, spend, feedback
     register_never_tag_tools(mcp, runtime)  # a person opts out of being tagged
     register_channel_budget_tools(mcp, runtime)  # per-channel spend budgets
-    register_support_plan_tools(mcp, runtime)  # support plans for Ask a person
+    register_support_tools(mcp, runtime)  # support limits for Ask a person
     register_channel_skill_tools(mcp, runtime)  # per-channel extra skills
     register_agent_tool_rule_tools(mcp, runtime)
     register_tenant_summary_tools(mcp, runtime)  # balance + channels in one read

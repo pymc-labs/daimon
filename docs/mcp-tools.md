@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 230 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 232 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -609,19 +609,21 @@ Skill tools: sync / list / get / delete.
 | `list_skills` | all callers | List visible custom skills. |
 | `sync_skills` | admin only | Install skills from a GitHub repo into the workspace's shared skill library. |
 
-## `support_plans`
+## `support`
 
-Support plans for Ask a person, for platform admins acting with personal user
+Support limits for Ask a person, for platform admins acting with personal user
 credentials.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `support_allowance_set` | admin only | Give one person their own cap under a plan, or clear it (``credits`` null). |
-| `support_catalog_get` | admin only | Show one support menu by key, or every menu with no key. |
-| `support_catalog_set` | admin only | Set, replace or remove (``catalog`` null) a support menu. |
-| `support_plan_clear` | admin only | Remove a support plan and the own caps under it. |
-| `support_plan_list` | admin only | List support plans for Ask a person, with credits used. |
-| `support_plan_set` | admin only | Set the support plan of the workspace, an agent or a channel. |
+| `support_channel_get` | admin only | Show where this workspace's support requests go. |
+| `support_channel_set` | admin only | Send this workspace's support requests to its own channel, or reset it. |
+| `support_limit_clear` | admin only | Remove a support limit, or one person's own cap at a place. |
+| `support_limit_list` | admin only | List the support limits for Ask a person, with credits used. |
+| `support_limit_set` | admin only | Set a support limit for the workspace, an agent or a channel. |
+| `support_menu_get` | admin only | Show one support menu by key, or every menu with no key. |
+| `support_menu_set` | admin only | Set, replace or remove (``body`` null) a support menu. |
+| `support_menu_use` | admin only | Pick the support menu a place offers. |
 | `support_requests_list` | admin only | List support requests, newest first; pending only by default. |
 | `support_requests_settle` | admin only | Settle a support request at ``charge`` credits, or decline it (null). |
 

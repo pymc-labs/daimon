@@ -10140,137 +10140,37 @@
         'type': 'object',
       }),
     }),
-    'support_allowance_set': dict({
+    'support_channel_get': dict({
       'description': '''
-        Give one person their own cap under a plan, or clear it (``credits`` null). Admin-only.
+        Show where this workspace's support requests go. Admin-only.
         <blank line>
-        ``platform_user_id`` is the person's id on the platform, or ``<@id>``.
-        No ``scope`` is the default allowance, where no plan applies; otherwise
-        the plan's place as for ``support_plan_set``. ``credits`` is a decimal
-        string. ``expected``: the cap last read, or ``"none"``; a mismatch saves nothing.
+        ``own_allowed`` is false when the deployment keeps its own request channel;
+        then ``destination`` is that channel and ``channel_id`` is ignored.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
-          'credits': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-          }),
-          'expected': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-          'platform_user_id': dict({
-            'type': 'string',
-          }),
-          'scope': dict({
-            'anyOf': list([
-              dict({
-                'enum': list([
-                  'workspace',
-                  'agent',
-                  'channel',
-                ]),
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-          'scope_id': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-        }),
-        'required': list([
-          'platform_user_id',
-          'credits',
-        ]),
-        'type': 'object',
-      }),
-    }),
-    'support_catalog_get': dict({
-      'description': 'Show one support menu by key, or every menu with no key. Admin-only.',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'key': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
         }),
         'type': 'object',
       }),
     }),
-    'support_catalog_set': dict({
+    'support_channel_set': dict({
       'description': '''
-        Set, replace or remove (``catalog`` null) a support menu. Admin-only.
+        Send this workspace's support requests to its own channel, or reset it. Admin-only.
         <blank line>
-        ``catalog``: a ``name`` and 1 to 10 ``options``, each with ``key``, ``label``,
-        an optional ``description``, a ``price`` and up to 4 ``fields``. Prices:
-        ``{"kind": "fixed", "amount"}``; ``{"kind": "steps", "label", "steps":
-        [{"label", "amount"}]}``; ``{"kind": "range", "min", "max"}``; ``{"kind":
-        "quoted"}`` with optional ``min`` and ``max``. Amounts are decimal strings.
-        A field has ``key``, ``label`` and ``kind``: ``text`` (``max_chars`` up to
-        200), ``paragraph`` (up to 3000) or ``choice`` (``choices``). Example::
-        <blank line>
-            {"name": "Support options", "options": [
-              {"key": "review_thread", "label": "Review this thread",
-               "price": {"kind": "fixed", "amount": "0.5"}},
-              {"key": "questions", "label": "Ask multiple questions",
-               "price": {"kind": "fixed", "amount": "1"},
-               "fields": [{"key": "questions", "kind": "paragraph",
-                           "label": "Your questions", "max_chars": 2000}]},
-              {"key": "coaching", "label": "Live coaching (1 hour)",
-               "price": {"kind": "fixed", "amount": "1"},
-               "fields": [{"key": "slots", "kind": "paragraph",
-                           "label": "Times that suit you (with time zone)",
-                           "max_chars": 500}]},
-              {"key": "hands_on", "label": "Hands-on support (1 hour)",
-               "price": {"kind": "fixed", "amount": "1"},
-               "fields": [{"key": "task", "kind": "paragraph",
-                           "label": "What should we do?", "max_chars": 2000}]}]}
-        <blank line>
-        ``expected_revision``: the revision last read, or 0 when you expect none;
-        a mismatch saves nothing. A menu a plan uses cannot be removed.
+        ``channel_id`` null goes back to the default channel. A thread id resolves to
+        its parent channel. On Teams, pass ``service_url``, the bot's service URL.
+        Requests already open stay where they were posted. A deployment that keeps
+        its own channel refuses. ``expected_revision``: the ``revision`` of
+        ``support_channel_get``, or 0 when none is set. Example: ``channel_id="222"``.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
-          'catalog': dict({
+          'channel_id': dict({
             'anyOf': list([
               dict({
-                'additionalProperties': True,
-                'type': 'object',
+                'type': 'string',
               }),
               dict({
                 'type': 'null',
@@ -10288,34 +10188,49 @@
             ]),
             'default': None,
           }),
-          'key': dict({
-            'type': 'string',
+          'service_url': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
         }),
         'required': list([
-          'key',
-          'catalog',
+          'channel_id',
         ]),
         'type': 'object',
       }),
     }),
-    'support_plan_clear': dict({
+    'support_limit_clear': dict({
       'description': '''
-        Remove a support plan and the own caps under it. Admin-only.
+        Remove a support limit, or one person's own cap at a place. Admin-only.
         <blank line>
-        Requests there fall back to the next plan up, or the default allowance.
+        Clearing a place's limit declines its pending requests at no charge.
+        Requests there then use the limit above it, or the default credits per
+        person. Example: ``scope="channel"``, ``scope_id="222"``.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
-          'expected': dict({
+          'expected_revision': dict({
             'anyOf': list([
               dict({
-                'additionalProperties': True,
-                'type': 'object',
+                'type': 'integer',
               }),
               dict({
-                'const': 'none',
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'person': dict({
+            'anyOf': list([
+              dict({
                 'type': 'string',
               }),
               dict({
@@ -10350,12 +10265,13 @@
         'type': 'object',
       }),
     }),
-    'support_plan_list': dict({
+    'support_limit_list': dict({
       'description': '''
-        List support plans for Ask a person, with credits used. Admin-only.
+        List the support limits for Ask a person, with credits used. Admin-only.
         <blank line>
-        Workspace first, then agents, then channels. Read ``summary`` back.
-        With no plan, requests use the default allowance per person.
+        ``limits`` are places, workspace first, then agents, then channels; ``people``
+        are each person's own limits. Read ``summary`` back. With no limit, requests
+        use the default credits per person.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -10364,25 +10280,28 @@
         'type': 'object',
       }),
     }),
-    'support_plan_set': dict({
+    'support_limit_set': dict({
       'description': '''
-        Set the support plan of the workspace, an agent or a channel. Admin-only.
+        Set a support limit for the workspace, an agent or a channel. Admin-only.
         <blank line>
         ``scope_id``: none for the workspace, an agent name or id, or a channel id
-        (a thread id resolves to its parent). The most specific plan governs a
-        request; plans never stack. Arguments left out keep the plan's values;
-        ``"none"`` clears ``pool``, ``per_person`` or a date. ``pool`` is credits
-        shared by everyone, ``per_person`` each person's cap, decimal strings such
-        as ``"0.5"``. ``catalog``: a menu key or ``"default"``. ``window``: ``total``
-        since ``starts_at``, ``monthly`` per UTC month, ``fixed`` from ``starts_at``
-        until ``ends_at`` (exclusive), set by hand. A plan outside its dates refuses
-        requests. ``expected``: the plan as ``support_plan_list`` gave it, or ``"none"``;
-        a mismatch saves nothing.
+        (a thread id resolves to its parent). The most specific place with a limit
+        governs a request; limits never stack. Arguments left out keep the limit's
+        values; ``"none"`` clears ``shared``, ``each_person`` or a date. ``shared``
+        is credits everyone there uses together, ``each_person`` each person's
+        cap, decimal strings such as ``"0.5"``. ``window``: ``total`` or
+        ``monthly`` (per UTC month). ``starts_at`` and ``ends_at`` (exclusive) are
+        set by hand; outside them, requests are refused. ``person`` is a
+        platform user id or ``<@id>``: it sets that person's own cap at the place
+        (``workspace`` means everywhere) with ``each_person`` only.
+        ``expected_revision``: the ``revision`` last read, or 0 when you expect no
+        limit; a mismatch saves nothing. Example: ``scope="channel"``,
+        ``scope_id="222"``, ``shared="5"``, ``each_person="1"``, ``window="monthly"``.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
-          'catalog': dict({
+          'each_person': dict({
             'anyOf': list([
               dict({
                 'type': 'string',
@@ -10404,15 +10323,10 @@
             ]),
             'default': None,
           }),
-          'expected': dict({
+          'expected_revision': dict({
             'anyOf': list([
               dict({
-                'additionalProperties': True,
-                'type': 'object',
-              }),
-              dict({
-                'const': 'none',
-                'type': 'string',
+                'type': 'integer',
               }),
               dict({
                 'type': 'null',
@@ -10420,18 +10334,7 @@
             ]),
             'default': None,
           }),
-          'per_person': dict({
-            'anyOf': list([
-              dict({
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-          'pool': dict({
+          'person': dict({
             'anyOf': list([
               dict({
                 'type': 'string',
@@ -10451,6 +10354,17 @@
             'type': 'string',
           }),
           'scope_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'shared': dict({
             'anyOf': list([
               dict({
                 'type': 'string',
@@ -10478,7 +10392,6 @@
                 'enum': list([
                   'total',
                   'monthly',
-                  'fixed',
                 ]),
                 'type': 'string',
               }),
@@ -10495,13 +10408,161 @@
         'type': 'object',
       }),
     }),
+    'support_menu_get': dict({
+      'description': '''
+        Show one support menu by key, or every menu with no key. Admin-only.
+        <blank line>
+        An unknown key is refused, naming the keys there are. Example: ``key="support"``.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'key': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
+    'support_menu_set': dict({
+      'description': '''
+        Set, replace or remove (``body`` null) a support menu. Admin-only.
+        <blank line>
+        ``key``: 1 to 32 lowercase letters, digits or dashes. ``body``: a ``name`` and
+        1 to 10 ``options``, each with ``key``, ``label``, an optional
+        ``description``, a ``price`` and up to 4 ``fields``. Prices:
+        ``{"kind": "fixed", "amount"}``; ``{"kind": "steps", "label", "steps":
+        [{"label", "amount"}]}``; ``{"kind": "range", "min", "max"}``; ``{"kind":
+        "quoted"}`` with optional ``min`` and ``max``. Amounts are decimal strings.
+        A field has ``key``, ``label`` and ``kind``: ``text`` (``max_chars`` up to
+        200), ``paragraph`` (up to 3000) or ``choice`` (``choices``). Example::
+        <blank line>
+            {"name": "Support options", "options": [
+              {"key": "review_thread", "label": "Review this thread",
+               "price": {"kind": "fixed", "amount": "0.5"}},
+              {"key": "questions", "label": "Ask multiple questions",
+               "price": {"kind": "fixed", "amount": "1"},
+               "fields": [{"key": "questions", "kind": "paragraph",
+                           "label": "Your questions", "max_chars": 2000}]},
+              {"key": "coaching", "label": "Live coaching (1 hour)",
+               "price": {"kind": "fixed", "amount": "1"},
+               "fields": [{"key": "slots", "kind": "paragraph",
+                           "label": "Times that suit you (with time zone)",
+                           "max_chars": 500}]},
+              {"key": "hands_on", "label": "Hands-on support (1 hour)",
+               "price": {"kind": "fixed", "amount": "1"},
+               "fields": [{"key": "task", "kind": "paragraph",
+                           "label": "What should we do?", "max_chars": 2000}]}]}
+        <blank line>
+        ``expected_revision``: the ``revision`` last read, or 0 when you expect no
+        menu; a mismatch saves nothing. A menu a place uses cannot be removed.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'body': dict({
+            'anyOf': list([
+              dict({
+                'additionalProperties': True,
+                'type': 'object',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+          }),
+          'expected_revision': dict({
+            'anyOf': list([
+              dict({
+                'type': 'integer',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'key': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'key',
+          'body',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'support_menu_use': dict({
+      'description': '''
+        Pick the support menu a place offers. Admin-only.
+        <blank line>
+        ``key`` is a menu key, or ``"default"`` to drop the place's own pick: the
+        menu above it, or the built-in one, applies. ``scope`` and ``scope_id`` as
+        for ``support_limit_set``. ``expected``: the menu key last read for the
+        place, or ``"none"``; a mismatch saves nothing. Example: ``key="support"``,
+        ``scope="channel"``, ``scope_id="222"``.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'expected': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'key': dict({
+            'type': 'string',
+          }),
+          'scope': dict({
+            'enum': list([
+              'workspace',
+              'agent',
+              'channel',
+            ]),
+            'type': 'string',
+          }),
+          'scope_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'key',
+          'scope',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'support_requests_list': dict({
       'description': '''
         List support requests, newest first; pending only by default. Admin-only.
         <blank line>
-        Pass ``scope`` and ``scope_id`` to list one plan's requests. ``undelivered``
+        Pass ``scope`` and ``scope_id`` to list one place's requests. ``undelivered``
         keeps the requests no support channel received (``delivered`` false); pass
-        ``pending=False`` with it to include settled ones.
+        ``pending=False`` with it to include settled ones. Example: ``pending=False``,
+        ``undelivered=True``.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -10556,6 +10617,7 @@
         A range or quoted option takes an amount within its bounds. To correct
         or refund a settled request, pass its current charge as
         ``expected_charge``. The person who asked is not told; read ``text`` back.
+        Example: ``request_id`` from ``support_requests_list``, ``charge="2.5"``.
       ''',
       'parameters': dict({
         'additionalProperties': False,
