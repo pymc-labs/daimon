@@ -54,11 +54,17 @@ beforeEach(() => {
 })
 
 describe("limits", () => {
+  it("names the last included day, one before the exclusive end", async () => {
+    view({ ...data, limits: [{ ...limit, ends_at: "2030-03-11T00:00:00Z" }] })
+    expect(await screen.findByRole("columnheader", { name: "Last day" })).toBeInTheDocument()
+    expect(screen.getByRole("cell", { name: "10 Mar 2030" })).toBeInTheDocument()
+  })
+
   it("lists the built-in row first, locked", async () => {
     view()
     const rows = await screen.findAllByRole("row")
     expect(rows[1]).toHaveTextContent("Everyone")
-    expect(rows[1]).toHaveTextContent("Locked")
+    expect(within(rows[1]!).getByRole("img", { name: "Locked" })).toBeInTheDocument()
     expect(rows[2]).toHaveTextContent("general")
   })
 
@@ -185,6 +191,12 @@ describe("requests go to", () => {
     await userEvent.click(await screen.findByRole("combobox", { name: "Channel" }))
     await userEvent.click(await screen.findByRole("option", { name: /help/ }))
     await waitFor(() => expect(api.put).toHaveBeenCalledWith("/api/support/channel", { channel_id: "c2", expected_revision: 2 }))
+  })
+
+  it("shows only the number of open requests", async () => {
+    view({ ...data, channel: { ...data.channel, open: { count: 3, where: "support" } } })
+    expect(await screen.findByText("3")).toBeInTheDocument()
+    expect(screen.queryByText(/in support/)).not.toBeInTheDocument()
   })
 
   it("says so when the channel changed meanwhile", async () => {

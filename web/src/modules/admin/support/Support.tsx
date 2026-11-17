@@ -91,7 +91,7 @@ export function Destination({ d }: { d: SupportPage }) {
               : <InheritedSelect bare label="Channel" value={c.value?.id ?? null} disabled={save.pending} inherited={{ value: "", label: c.default?.name ?? "None", from: "Built-in" }} options={options} onChange={(v) => void pick(v)} />,
           },
           { key: "state", label: "State", control: state },
-          { key: "open", label: "Open requests", control: <span className={c.open.count ? undefined : "text-muted-foreground"}>{c.open.count ? `${c.open.count} in ${c.open.where}` : "None"}</span> },
+          { key: "open", label: "Open requests", control: <span className={c.open.count ? undefined : "text-muted-foreground"}>{c.open.count || "None"}</span> },
         ]}
       /></Section>
       {error && <p role="alert" className="mt-2 text-xs text-destructive">{error}</p>}

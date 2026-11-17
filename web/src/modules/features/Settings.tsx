@@ -1,7 +1,7 @@
 import { Ban, Lock } from "lucide-react"
 import { useState } from "react"
 
-import { InheritedSegmented, InheritedSelect } from "@/components/inherited"
+import { InheritedSelect } from "@/components/inherited"
 import { PanelSection, SettingRow } from "@/components/panel"
 import { QueryState } from "@/components/QueryState"
 import { SettingsList, type SettingsRow } from "@/components/settings"
@@ -43,7 +43,7 @@ export function Unavailable({ reason }: { reason: string }) {
  * A person who may not change it, or a lock above, sees the value in effect instead, with the level
  * that locked it; so does a value another level overrides, next to its control.
  */
-function useGroups(place: FeaturePlace, tier: Tier, edit: boolean, report: (error: string | null) => void, width?: string, segmented = false, hide: string[] = []) {
+function useGroups(place: FeaturePlace, tier: Tier, edit: boolean, report: (error: string | null) => void, width?: string, hide: string[] = []) {
   const schema = useFeatureSchema()
   const doc = useFeatures(place)
   const save = useFeatureSave(place)
@@ -61,21 +61,14 @@ function useGroups(place: FeaturePlace, tier: Tier, edit: boolean, report: (erro
     if (!edit) return <span>{v.summary}</span>
     const overridden = ownValue !== null && v.source !== tier && v.value !== ownValue
     const lockable = s.lockable.includes(tier) && ownValue !== null ? own : undefined
-    const from = TIER_NAME[v.source] ?? "Built-in"
-    if (segmented) {
-      return (
-        <InheritedSegmented
-          bare label={s.name} value={ownValue === null ? null : ownValue === "on"} disabled={save.pending}
-          inherited={{ value: v.value === "on", from }}
-          onChange={(next) => void run(s, v, next === null ? DEFAULT : next ? "on" : "off", false)}
-        />
-      )
-    }
+    // What this tier falls back to: the nearest level above it with a value, else the built-in default.
+    const above = v.tiers.slice(0, Math.max(v.tiers.findIndex((t) => t.tier === tier), 0)).reverse().find((t) => t.value !== DEFAULT)
+    const base = own ? { value: above?.value ?? s.default, from: above ? (TIER_NAME[above.tier] ?? "Built-in") : "Built-in" } : { value: v.value, from: TIER_NAME[v.source] ?? "Built-in" }
     return (
       <>
         <InheritedSelect
           bare label={s.name} value={ownValue} disabled={save.pending} className={width}
-          inherited={{ value: v.value, label: ownValue === null ? labelOf(s, v.value) : "", from: TIER_NAME[v.source] ?? "Built-in" }}
+          inherited={{ value: base.value, label: labelOf(s, base.value), from: base.from }}
           options={s.values.map((o) => ({ value: o.value, label: o.label }))}
           onChange={(next) => void run(s, v, next ?? DEFAULT, false)}
         />
@@ -111,7 +104,7 @@ type Props = { place: FeaturePlace; tier: Tier; edit: boolean; /** Keys another 
 /** A panel's Settings: one section per category, rows as `SettingRow`s. */
 export function FeatureSettings({ place, tier, edit, hide }: Props) {
   const [error, setError] = useState<string | null>(null)
-  const { groups, schema, doc } = useGroups(place, tier, edit, setError, undefined, false, hide)
+  const { groups, schema, doc } = useGroups(place, tier, edit, setError, undefined, hide)
   return (
     <QueryState query={schema.data ? doc : schema} className="px-5 py-4">{() => (
       <>
@@ -131,7 +124,7 @@ export function FeatureSettings({ place, tier, edit, hide }: Props) {
 /** A page's Settings: one bordered list per category. */
 export function FeatureList({ place, tier, edit, hide }: Props) {
   const [error, setError] = useState<string | null>(null)
-  const { groups, schema, doc } = useGroups(place, tier, edit, setError, "w-60", false, hide)
+  const { groups, schema, doc } = useGroups(place, tier, edit, setError, "w-60", hide)
   return (
     <QueryState query={schema.data ? doc : schema} className="px-4 pt-6 lg:px-6">{() => (
       <div className="px-4 py-6 lg:px-6">
@@ -144,10 +137,10 @@ export function FeatureList({ place, tier, edit, hide }: Props) {
   )
 }
 
-/** One on/off feature as a segmented control: On, Off or what the level above gives. */
+/** One feature as the same select the settings lists use: the level above's value, On or Off. */
 export function FeatureToggle({ place, tier, name, edit = true }: { place: FeaturePlace; tier: Tier; name: string; edit?: boolean }) {
   const [error, setError] = useState<string | null>(null)
-  const { controls, schema, doc } = useGroups(place, tier, edit, setError, undefined, true)
+  const { controls, schema, doc } = useGroups(place, tier, edit, setError)
   if (!schema.data || !doc.data) return <span className="h-8" />
   return <div className="space-y-1"><div className="flex items-center gap-2">{controls.get(name)}</div>{error && <p role="alert" className="text-xs text-destructive">{error}</p>}</div>
 }

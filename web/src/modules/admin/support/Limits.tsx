@@ -1,4 +1,4 @@
-import { Bot, Building2, Hash, Lock, UserRound } from "lucide-react"
+import { Bot, Building2, Hash, Lock, Plus, UserRound } from "lucide-react"
 import { useState } from "react"
 import { toast } from "sonner"
 
@@ -19,7 +19,7 @@ import { SubjectPicker } from "@/modules/credits/Allowances"
 import type { Subject } from "@/modules/credits/types"
 import { usePlaces, useSupportSave, type Outcome } from "./api"
 import { emptyForm, formOf, limitErrors, toValue, type LimitErrors, type LimitForm } from "./limitForm"
-import { credits, keyOf, placeName } from "./lib"
+import { credits, keyOf, lastDay, placeName } from "./lib"
 import { Cards, Section } from "./parts"
 import type { Limit, Place, Scope, SupportPage, Window } from "./types"
 
@@ -36,7 +36,8 @@ const ordered = (list: Limit[]) =>
 const kindOf = (l: Limit) => (l.person_id ? "person" : l.scope)
 const each = (l: Limit) => (l.each_person == null ? "–" : `${credits(Number(l.each_person))}${l.window === "monthly" ? " / month" : " total"}`)
 const shared = (l: Limit) => (l.shared == null ? "–" : `${credits(Number(l.shared))}${l.window === "monthly" ? " / month" : " total"}`)
-const until = (l: Limit) => (l.ends_at ? shortDate(new Date(Date.parse(l.ends_at) - 1).toISOString()) : "Never")
+/** The last day included, as a UTC day like the form reads it. */
+const until = (l: Limit) => (l.ends_at ? shortDate(`${lastDay(l.ends_at)}T12:00:00`) : "Never")
 
 /** The credits a row is measured against: the shared part, or a person's own. */
 const cap = (l: Limit) => (l.person_id ? l.each_person : l.shared)
@@ -67,12 +68,12 @@ export function Limits({ d }: { d: SupportPage }) {
   const [add, setAdd] = useParam("add")
   const list = ordered(d.limits)
   return (
-    <Section title="Credits" add={<Button size="xs" variant="outline" onClick={() => setAdding(true)}>Add limit</Button>}>
+    <Section title="Credits" add={<Button size="xs" variant="outline" onClick={() => setAdding(true)}><Plus />Add limit</Button>}>
       <Table>
         <TableHeader>
           <TableRow className="hover:bg-transparent">
-            <TableHead>For</TableHead><TableHead className="text-right max-md:hidden">Shared</TableHead><TableHead className="text-right">Each person</TableHead>
-            <TableHead className="w-44 max-sm:hidden">Used</TableHead><TableHead className="max-lg:hidden">Until</TableHead>
+            <TableHead>For</TableHead><TableHead className="text-right max-md:hidden">Shared</TableHead><TableHead className="text-right"><span className="max-sm:hidden">Each person</span><span className="sm:hidden">Limit</span></TableHead>
+            <TableHead className="w-44 max-sm:hidden">Used</TableHead><TableHead className="max-lg:hidden">Last day</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -80,19 +81,21 @@ export function Limits({ d }: { d: SupportPage }) {
             <TableCell>
               <span className="flex items-center gap-2.5">
                 <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-accent"><UserRound className="size-3.5 text-muted-foreground" /></span>
-                <span className="font-medium">Everyone</span><span className="text-xs text-muted-foreground">Built in</span>
+                <span className="font-medium">Everyone</span><span className="text-xs text-muted-foreground">Built in</span><Lock role="img" aria-label="Locked" className="size-3.5 shrink-0 text-muted-foreground" />
               </span>
             </TableCell>
             <TableCell className="text-right text-muted-foreground max-md:hidden">–</TableCell>
             <TableCell className="text-right whitespace-nowrap tabular">{credits(Number(d.everyone.each_person))}<span className="text-muted-foreground"> total</span></TableCell>
-            <TableCell className="max-sm:hidden"><span className="inline-flex items-center gap-1.5 text-muted-foreground"><Lock className="size-3.5" />Locked</span></TableCell>
+            <TableCell className="text-muted-foreground max-sm:hidden">–</TableCell>
             <TableCell className="text-muted-foreground max-lg:hidden">Never</TableCell>
           </TableRow>
           {list.map((l) => (
             <TableRow key={keyOf(l)} {...rowProps(() => setOpen(keyOf(l)))}>
               <TableCell className="max-md:max-w-0"><Name l={l} /></TableCell>
               <TableCell className="text-right whitespace-nowrap tabular max-md:hidden">{shared(l)}</TableCell>
-              <TableCell className="text-right whitespace-nowrap tabular">{each(l)}</TableCell>
+              <TableCell className="text-right whitespace-nowrap tabular">
+                {l.shared == null ? each(l) : <><span className="max-sm:hidden">{each(l)}</span><span className="ml-auto block w-36 sm:hidden"><Used l={l} /></span></>}
+              </TableCell>
               <TableCell className="max-sm:hidden"><Used l={l} /></TableCell>
               <TableCell className="text-muted-foreground max-lg:hidden">{until(l)}</TableCell>
             </TableRow>

@@ -26,13 +26,15 @@ const own = new Map<string, string>([["//|workspace|support_escalation", "on"], 
 /** Set `?support=unmet` to see Ask a person without a request channel. */
 const flag = () => (typeof location === "undefined" ? "" : new URLSearchParams(location.search).get("support") ?? "")
 const place = (url: URL) => ["agent", "channel", "thread"].map((k) => url.searchParams.get(k) ?? "").join("/")
+/** The workspace tier is set once for the whole workspace; the others per place. */
+const at = (url: URL, tier: Tier) => (tier === "workspace" ? "//" : place(url))
 const tiersOf = (url: URL): Tier[] => ["workspace", ...(url.searchParams.get("agent") ? ["agent"] : []), ...(url.searchParams.get("channel") ? ["channel"] : []), ...(url.searchParams.get("thread") ? ["thread"] : [])] as Tier[]
 
 function viewOf(url: URL, s: FeatureSchema): FeatureView {
   const lock = locks.get(s.key)
   const tiers = tiersOf(url).filter((t) => s.tiers.includes(t)).map((tier) => {
     if (tier === "workspace" && lock) return { tier, value: lock, locked: true, text: `${lock}:locked` }
-    const text = own.get(`${place(url)}|${tier}|${s.key}`) ?? "default"
+    const text = own.get(`${at(url, tier)}|${tier}|${s.key}`) ?? "default"
     return { tier, value: text.split(":")[0]!, locked: text.endsWith(":locked"), text }
   })
   const locked = tiers.find((t) => t.locked)
@@ -68,7 +70,7 @@ export const featuresHandlers: HttpHandler[] = [
       if (b.locked) locks.set(b.key, b.value)
       else locks.delete(b.key)
     }
-    own.set(`${place(url)}|${b.tier}|${b.key}`, b.locked ? `${b.value}:locked` : b.value)
+    own.set(`${at(url, b.tier)}|${b.tier}|${b.key}`, b.locked ? `${b.value}:locked` : b.value)
     return HttpResponse.json(viewOf(url, s))
   }),
 ]

@@ -1,4 +1,4 @@
-import { ChevronRight, ListChecks } from "lucide-react"
+import { ChevronRight, ListChecks, Plus } from "lucide-react"
 import { useState } from "react"
 import { toast } from "sonner"
 
@@ -23,14 +23,14 @@ export function Menus({ d }: { d: SupportPage }) {
   const [, setOpen] = useParam("menu")
   return (
     <>
-      <Section title="Menus" add={<Button size="xs" variant="outline" onClick={() => setOpen("new")}>Add menu</Button>}>
+      <Section title="Menus" add={<Button size="xs" variant="outline" onClick={() => setOpen("new")}><Plus />Add menu</Button>}>
         <div className="divide-y rounded-lg border text-sm">
           {d.menus.map((m) => (
             <div key={m.key} {...rowProps(() => setOpen(m.key))} className="flex min-h-11 cursor-pointer items-center gap-3 px-4 py-1.5 hover:bg-accent/50 focus-visible:bg-accent/50 focus-visible:outline-none">
               <span className="min-w-0 truncate font-medium">{m.name}</span>
               <span className="shrink-0 text-xs text-muted-foreground tabular">{plural(m.options, "option")}</span>
               <span className="ml-auto min-w-0 truncate text-muted-foreground max-sm:hidden">{m.used_in.map((u) => u.name).join(", ")}</span>
-              <ChevronRight className="size-4 shrink-0 text-faint" />
+              <ChevronRight className="size-4 shrink-0 text-faint max-sm:ml-auto" />
             </div>
           ))}
           {!d.menus.length && <div className="px-4 py-3 text-muted-foreground">No menus</div>}
