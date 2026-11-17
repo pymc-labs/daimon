@@ -68,6 +68,157 @@ def support_modal() -> Any:
     )
 
 
+@entry("support_modal_exempt", "slack", "view")
+def support_modal_exempt() -> Any:
+    from daimon.adapters.slack.support_escalation import build_support_modal
+    from daimon.core.support_plans import EXEMPT_OFFER
+
+    return build_support_modal(
+        channel_id="C1",
+        message_ts="1.2",
+        thread_ts="1.0",
+        remaining=None,
+        sealed=False,
+        footer=EXEMPT_OFFER,
+    )
+
+
+_SUPPORT_MENU = {
+    "name": "Support",
+    "options": [
+        {"key": "quick", "label": "Quick question", "price": {"kind": "fixed", "amount": "0.5"}},
+        {"key": "review", "label": "Review", "price": {"kind": "range", "min": "1", "max": "3"}},
+        {
+            "key": "call",
+            "label": "Call",
+            "description": "A video call with the team.",
+            "price": {
+                "kind": "steps",
+                "label": "Length",
+                "steps": [
+                    {"label": "30 min", "amount": "0.5"},
+                    {"label": "1 hour", "amount": "1"},
+                ],
+            },
+            "fields": [
+                {"key": "topic", "kind": "text", "label": "Topic", "placeholder": "What about"},
+                {"key": "details", "kind": "paragraph", "label": "Details", "required": False},
+                {"key": "when", "kind": "choice", "label": "When", "choices": ["Today", "Later"]},
+            ],
+        },
+    ],
+}
+
+
+def _support_plan_view() -> Any:
+    from daimon.core.stores.support_rows import PlanView, SupportCatalogRow
+    from daimon.core.support_plans import Balance, parse_catalog
+
+    spec = parse_catalog(_SUPPORT_MENU)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    catalog = SupportCatalogRow(
+        id=uuid.UUID(int=1),
+        tenant_id=uuid.UUID(int=2),
+        key="support",
+        name=spec.name,
+        revision=3,
+        options=spec.options,
+        set_by_account_id=None,
+        created_at=now,
+        updated_at=now,
+    )
+    balance = Balance(pool=Decimal(10), pool_used=Decimal(2), cap=None, person_used=Decimal(0))
+    return PlanView(plan=None, catalog=catalog, balance=balance, state="active")
+
+
+def _support_pending_row() -> Any:
+    from daimon.core.stores.support_rows import SupportEscalationRow
+    from daimon.core.support_plans import OptionSnapshot, parse_catalog
+
+    review = parse_catalog(_SUPPORT_MENU).options[1]
+    return SupportEscalationRow(
+        id=uuid.UUID(int=3),
+        tenant_id=uuid.UUID(int=2),
+        account_id=None,
+        platform="slack",
+        platform_user_id="U1",
+        channel_id="C1",
+        message_id="1.2",
+        ma_session_id=None,
+        note="Please check the model.",
+        delivered_at=None,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        charged_to="plan",
+        option_key=review.key,
+        option=OptionSnapshot(key=review.key, label=review.label, price=review.price),
+        hold=Decimal(3),
+        charge=None,
+        status="pending",
+    )
+
+
+@entry("support_plan_menu", "slack", "view")
+def support_plan_menu() -> Any:
+    from daimon.adapters.slack.support_plan_form import build_plan_menu
+
+    return build_plan_menu(
+        channel_id="C1", message_ts="1.2", thread_ts="1.0", view=_support_plan_view(), sealed=True
+    )
+
+
+@entry("support_plan_option_form", "slack", "view")
+def support_plan_option_form() -> Any:
+    from daimon.adapters.slack.support_plan_form import build_plan_menu
+
+    return build_plan_menu(
+        channel_id="C1",
+        message_ts="1.2",
+        thread_ts="1.0",
+        view=_support_plan_view(),
+        sealed=False,
+        picked="call",
+    )
+
+
+@entry("support_settle_modal", "slack", "view")
+def support_settle_modal() -> Any:
+    from daimon.adapters.slack.support_settle import settle_modal
+
+    return settle_modal(_support_pending_row(), channel_id="C9", message_ts="9.1")
+
+
+def _support_pending_blocks() -> list[dict[str, Any]]:
+    from daimon.adapters.slack.support_post import pending_post_blocks, request_facts
+
+    row = _support_pending_row()
+    return pending_post_blocks(
+        head="*Support request* from <@U1>",
+        facts=request_facts(row, menu=True, balance="8 credits left this plan."),
+        rest=["<https://example.slack.com/archives/C1/p12|Open the thread>"],
+        note=row.note,
+        escalation_id=row.id,
+    )
+
+
+@entry("support_pending_post", "slack", "blocks")
+def support_pending_post() -> Any:
+    return _support_pending_blocks()
+
+
+@entry("support_settled_post", "slack", "blocks")
+def support_settled_post() -> Any:
+    from daimon.adapters.slack.support_post import closed_post, status_line
+
+    row = _support_pending_row()
+    settled = row.model_copy(update={"status": "settled", "charge": Decimal(2)})
+    _, blocks = closed_post(
+        {"text": "", "blocks": _support_pending_blocks()},
+        pending_line=status_line(row),
+        final_line=f"{status_line(settled)} by <@U9>",
+    )
+    return blocks
+
+
 def _credential_modal(kind: CredentialRequestKind) -> Any:
     from daimon.adapters.slack.credential_requests import build_credential_modal
     from daimon.core.credential_requests import ENV_FILE_TARGET, build_skill_repo_target
