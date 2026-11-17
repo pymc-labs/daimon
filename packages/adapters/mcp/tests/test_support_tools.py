@@ -39,6 +39,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import support as store
 from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores.domain import Role, TenantRow
+from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.core.support import (
     CLIENT_NOT_NOTIFIED,
     MAX_FIELDS,
@@ -125,6 +126,7 @@ def _auth(tenant: TenantRow, account_id: uuid.UUID, *, admin: bool = True) -> Au
         tenant_id=tenant.id,
         role=Role.ADMIN if admin else Role.USER,
         platform="discord",
+        external_id=tenant.external_id,
         platform_user_id="admin1",
         is_admin=admin,
         is_platform_admin=admin,
@@ -165,10 +167,12 @@ async def test_admin_sets_a_limit_on_a_threads_parent_and_round_trips_revision(
 async def test_an_agent_limit_is_stored_under_the_agents_id(
     committing_sessionmaker: Factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def find(client: object, *, tenant_id: uuid.UUID, name: str, records: object) -> object:
-        return SimpleNamespace(id="agent_helper1") if name == "helper" else None
+    async def find(
+        client: object, *, tenant_id: uuid.UUID, ref: str, records: object = None
+    ) -> str | None:
+        return {"helper": "agent_helper1", "agent_helper1": "agent_helper1"}.get(ref)
 
-    monkeypatch.setattr(tools, "find_agent_by_daimon_tag", find)
+    monkeypatch.setattr(tools, "agent_id_in_tenant", find)
     tenant, account_id = await _seed(committing_sessionmaker)
     runtime, auth = _runtime(committing_sessionmaker), _auth(tenant, account_id)
     limit = _limit(scope="agent", each_person="2", window="monthly")
@@ -177,8 +181,12 @@ async def test_an_agent_limit_is_stored_under_the_agents_id(
         "agent_helper1",
         "2 each, each month",
     ), "the agent's id"
-    with pytest.raises(ToolError, match="No agent named 'nobody'"):
+    with pytest.raises(ToolError, match="No agent 'nobody' here"):
         await _set_limit_impl(runtime, auth, **{**limit, "scope_id": "nobody"})
+    with pytest.raises(ToolError, match="No agent 'agent_nope' here"):
+        await _set_limit_impl(runtime, auth, **{**limit, "scope_id": "agent_nope"})
+    kept = await _set_limit_impl(runtime, auth, **{**limit, "scope_id": "agent_helper1"})
+    assert kept.scope_id == "agent_helper1", "an existing agent id is taken as it is"
 
 
 async def test_every_tool_is_admin_only(committing_sessionmaker: Factory) -> None:
@@ -339,7 +347,7 @@ async def test_menu_use_when_picked_then_default_then_stale_or_unknown(
     runtime, auth = _runtime(committing_sessionmaker), _auth(tenant, account_id)
     await _set_menu_impl(runtime, auth, key="support", body=_MENU, expected_revision=None)
     place = {"scope": "channel", "scope_id": _THREAD}
-    picked = await _use_menu_impl(runtime, auth, key="support", **place, expected="none")
+    picked = await _use_menu_impl(runtime, auth, key=" support ", **place, expected="None")
     assert (picked.scope_id, picked.menu) == (_PARENT, "support"), "the parent uses the menu"
     await _set_limit_impl(runtime, auth, **_limit(scope="channel", scope_id=_PARENT, shared="5"))
     (limit,) = (await _list_limits_impl(runtime, auth)).limits
@@ -350,6 +358,10 @@ async def test_menu_use_when_picked_then_default_then_stale_or_unknown(
         await _use_menu_impl(runtime, auth, key="nope", **place, expected=None)
     with pytest.raises(ToolError, match="Nothing was saved"):
         await _set_menu_impl(runtime, auth, key="support", body=None, expected_revision=None)
+    with pytest.raises(ToolError, match="A menu key is 1-32"):
+        await _set_menu_impl(runtime, auth, key="Bad Key", body=None, expected_revision=None)
+    with pytest.raises(ToolError, match="A menu key is 1-32"):
+        await _use_menu_impl(runtime, auth, key="support", **place, expected="Bad Key")
     dropped = await _use_menu_impl(runtime, auth, key="default", **place, expected="support")
     assert dropped.menu is None, "the place's own pick is dropped"
     async with committing_sessionmaker() as session:
@@ -400,6 +412,21 @@ async def test_channel_when_allowed_then_sets_on_the_parent_and_resets(
 
 
 @pytest.mark.usefixtures("own_channel")
+async def test_channel_when_the_workspace_is_not_the_tenants_then_refuses_and_saves_nothing(
+    committing_sessionmaker: Factory,
+) -> None:
+    tenant, account_id = await _seed(committing_sessionmaker)
+    runtime = _runtime(committing_sessionmaker)
+    auth = dataclasses.replace(_auth(tenant, account_id), external_id="another-guild")
+    with pytest.raises(ToolError, match="not in this workspace"):
+        await _set_channel_impl(
+            runtime, auth, channel_id=_PARENT, service_url=None, expected_revision=None
+        )
+    async with committing_sessionmaker() as session:
+        assert await store.get_support_channel(session, tenant_id=tenant.id) is None
+
+
+@pytest.mark.usefixtures("own_channel")
 async def test_channel_on_teams_when_no_service_url_then_refuses_and_with_one_saves_the_team(
     committing_sessionmaker: Factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -419,6 +446,18 @@ async def test_channel_on_teams_when_no_service_url_then_refuses_and_with_one_sa
     with pytest.raises(ToolError, match="Teams needs service_url"):
         await _set_channel_impl(
             runtime, auth, channel_id="19:c", service_url=None, expected_revision=None
+        )
+    with pytest.raises(ToolError, match="not in this workspace"):
+        await _set_channel_impl(
+            runtime,
+            auth,
+            channel_id="19:c",
+            service_url="https://smba.example/",
+            expected_revision=None,
+        )
+    async with committing_sessionmaker.begin() as session:
+        await record_teams_installation(
+            session, tenant_id=tenant.id, team_id="team-1", group_id="g1", name="Team"
         )
     await _set_channel_impl(
         runtime,

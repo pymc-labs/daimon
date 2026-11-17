@@ -28,7 +28,7 @@ from daimon.adapters.mcp.tools.slack._client import (
 from daimon.adapters.mcp.tools.teams._directory import locate_channel, require_client
 from daimon.core.authz import Action
 from daimon.core.channel_changes import ChannelActor, ChannelChangeRefused, Expected
-from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.defaults.ma_index import agent_id_in_tenant
 from daimon.core.errors import StaleChannelValue
 from daimon.core.security_audit import record_authz_denial, record_policy_decision
 from daimon.core.stores import support as store
@@ -47,6 +47,7 @@ from daimon.core.support import (
 from daimon.core.support_admin import (
     LimitChange,
     LimitUsage,
+    expected_menu_key,
     get_limit_usage,
     list_limit_usage,
     merge_limit_change,
@@ -72,7 +73,6 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 _PLATFORMS = ("discord", "slack", "teams")
-_NONE = "none"
 _ZERO = Decimal(0)
 
 
@@ -238,13 +238,13 @@ async def _place(
         place_scope, place_id = parse_scope(scope, scope_id.strip() if scope_id else None)
     except SupportError as exc:
         raise ToolError(str(exc)) from exc
-    if place_scope == "agent" and not place_id.startswith("agent_"):
-        agent = await find_agent_by_daimon_tag(
-            runtime.client, tenant_id=auth.tenant_id, name=place_id, records=runtime.session_factory
+    if place_scope == "agent":
+        agent_id = await agent_id_in_tenant(
+            runtime.client, tenant_id=auth.tenant_id, ref=place_id, records=runtime.session_factory
         )
-        if agent is None:
-            raise ToolError(f"No agent named {place_id!r} here.")
-        place_id = agent.id
+        if agent_id is None:
+            raise ToolError(f"No agent {place_id!r} here.")
+        place_id = agent_id
     if place_scope == "channel":
         place_id = (await resolve_channel(runtime, auth, place_id, lenient=lenient)).channel_id
     return place_scope, place_id
@@ -457,7 +457,7 @@ async def _set_menu_impl(
             await remove_menu(
                 runtime.session_factory, _actor(auth), platform=platform, key=key, expected=expected
             )
-            return SetSupportMenuResult(key=key, revision=0, summary="")
+            return SetSupportMenuResult(key=key.strip(), revision=0, summary="")
         row = await set_menu(
             runtime.session_factory,
             _actor(auth),
@@ -485,6 +485,7 @@ async def _use_menu_impl(
     place_scope, place_id = await _place(runtime, auth, scope, scope_id, lenient=key == "default")
     picked = None if key == "default" else key.strip()
     try:
+        expected_key = expected_menu_key(expected)
         await set_menu_use(
             runtime.session_factory,
             _actor(auth),
@@ -492,11 +493,9 @@ async def _use_menu_impl(
             scope=place_scope,
             scope_id=place_id,
             key=picked,
-            expected=None
-            if expected is None
-            else Expected(None if expected == _NONE else expected),
+            expected=expected_key,
         )
-    except (ChannelChangeRefused, StaleChannelValue) as exc:
+    except (SupportError, ChannelChangeRefused, StaleChannelValue) as exc:
         raise _refused(exc) from exc
     return SupportMenuUseResult(scope=place_scope, scope_id=place_id, menu=picked)
 
@@ -535,6 +534,7 @@ async def _set_channel_impl(
         pick = ChannelPick(
             platform=platform,
             channel_id=channel.channel_id,
+            discord_guild_id=auth.external_id if platform == "discord" else None,
             slack_team_id=_require_team_id(auth) if platform == "slack" else None,
             teams_team_id=await _teams_team(runtime, auth, channel.channel_id)
             if platform == "teams"
