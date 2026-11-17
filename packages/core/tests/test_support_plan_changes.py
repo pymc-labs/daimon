@@ -13,6 +13,7 @@ from daimon.core.channel_changes import ChannelActor, ChannelChangeRefused, Expe
 from daimon.core.errors import StaleChannelValue
 from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.support_plan_changes import (
     ALLOWANCE_SETTING,
     SETTLE_SETTING,
@@ -29,7 +30,7 @@ from daimon.core.support_plan_changes import (
     settle_from_post,
 )
 from daimon.core.support_plans import RequestChoice, SupportPlace, parse_catalog, parse_plan_spec
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_platform_principal, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 D = Decimal
@@ -61,7 +62,9 @@ async def _tenant(db_session: AsyncSession) -> uuid.UUID:
     return tenant.id
 
 
-async def _pending(factory: Factory, tenant_id: uuid.UUID, revision: int) -> uuid.UUID:
+async def _pending(
+    factory: Factory, tenant_id: uuid.UUID, revision: int, message: str = "m1"
+) -> uuid.UUID:
     async with factory.begin() as session:
         outcome = await ledger.submit_request(
             session,
@@ -70,7 +73,7 @@ async def _pending(factory: Factory, tenant_id: uuid.UUID, revision: int) -> uui
             platform="slack",
             platform_user_id="U1",
             channel_id="C1",
-            message_id="m1",
+            message_id=message,
             ma_session_id=None,
             place=SupportPlace(channel_id="C1", agent_id=None),
             choice=RequestChoice("review", revision),
@@ -320,3 +323,47 @@ async def test_settle_from_post_when_staff_click_then_recorded_as_the_panel(
     changes = await list_changes(db_session, tenant_id=tenant_id, channel_id="C1")
     surfaces = [c.surface for c in changes if c.setting == SETTLE_SETTING]
     assert surfaces == ["panel"], "one record, from the support post"
+
+
+async def test_settle_from_post_when_settler_is_another_tenant_then_audit_names_no_account(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    tenant_id = await _tenant(db_session)
+    actor = _actor(tenant_id)
+    menu = await set_catalog(db_session_factory, actor, platform="slack", key="support", spec=MENU)
+    await set_plan(db_session_factory, actor, platform="slack", spec=PLAN)
+    first = await _pending(db_session_factory, tenant_id, menu.revision, "m1")
+    second = await _pending(db_session_factory, tenant_id, menu.revision, "m2")
+    home = await make_tenant(db_session, platform="slack")
+    foreign = await make_platform_principal(
+        db_session, platform="slack", external_id="USTAFF", tenant=home
+    )
+    own = await get_tenant(db_session, tenant_id)
+    local = await make_platform_principal(
+        db_session, platform="slack", external_id="ULOCAL", tenant=own
+    )
+    await db_session.commit()
+    for request_id, user, account in (
+        (first, "USTAFF", foreign.account_id),
+        (second, "ULOCAL", local.account_id),
+    ):
+        await settle_from_post(
+            db_session_factory,
+            escalation_id=request_id,
+            charge=D(1),
+            settled_by=user,
+            settled_by_account_id=account,
+            default_allowance=20,
+        )
+    rows = [await ledger.get_request(db_session, escalation_id=i) for i in (first, second)]
+    assert [r and r.settled_by_account_id for r in rows] == [
+        foreign.account_id,
+        local.account_id,
+    ], "the request keeps both, and the purge clears them there"
+    changes = await list_changes(db_session, tenant_id=tenant_id, channel_id="C1")
+    actors = {
+        c.after["request"]: c.actor_account_id for c in changes if c.setting == SETTLE_SETTING
+    }
+    assert actors == {str(first): None, str(second): local.account_id}, (
+        "an account of another tenant never enters this tenant's audit"
+    )

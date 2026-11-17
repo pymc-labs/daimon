@@ -29,6 +29,7 @@ from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores import support_plans as store
 from daimon.core.stores.access_policy import lock_access_policy
 from daimon.core.stores.channel_changes import WORKSPACE_ID, record_change
+from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.support_rows import (
     SupportAllowanceRow,
     SupportCatalogRow,
@@ -562,12 +563,21 @@ async def settle_from_post(
 ) -> ledger.SettleOutcome:
     """Staff settle from the support post; the adapter checked `is_support_channel` (decision 4).
 
-    The post may sit in another tenant, so the request is found by id alone.
+    The post may sit in another tenant, so the request is found by id alone. The
+    settler's id and account stay on the request (`clear_settler` wipes them on
+    a purge). The audit row names an account only of the request's own tenant,
+    looked up here: the one passed may belong to the tenant the post sits in.
     """
     async with sessionmaker.begin() as session:
         before = await ledger.get_request(session, escalation_id=escalation_id)
         if before is None:
             return ledger.SettleOutcome(status="not_found", row=None)
+        principal = await find_platform_principal(
+            session,
+            tenant_id=before.tenant_id,
+            platform=before.platform,
+            external_id=settled_by,
+        )
         outcome = await ledger.settle_request(
             session,
             escalation_id=escalation_id,
@@ -580,7 +590,7 @@ async def settle_from_post(
             session,
             outcome=outcome,
             before=before,
-            actor_account_id=settled_by_account_id,
+            actor_account_id=None if principal is None else principal.account_id,
             actor=None,
         )
     return outcome
