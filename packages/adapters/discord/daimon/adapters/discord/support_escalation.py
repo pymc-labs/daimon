@@ -54,6 +54,7 @@ from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.support_post import (
     discord_channel,
+    discord_destination,
     post_to_support_channel,
     request_facts,
 )
@@ -126,7 +127,7 @@ MENU_TEMPLATE: Final = (
 
 @dataclass(frozen=True)
 class AnswerOrigin:
-    """The answer a request is about, and the place its plan and feature are read at."""
+    """The answer a request is about, and the place its limit and feature are read at."""
 
     guild_id: str
     channel_id: str
@@ -157,7 +158,7 @@ class AnswerOrigin:
         )
 
 
-async def _answer_place(
+async def answer_place(
     bot: commands.Bot,
     runtime: DiscordRuntime,
     *,
@@ -200,7 +201,7 @@ async def answer_origin(
 ) -> AnswerOrigin:
     """Read where the answer sits now: its channel, thread, agent and session."""
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
-    parent, thread = await _answer_place(
+    parent, thread = await answer_place(
         bot, runtime, tenant_id=tenant_id, channel_id=channel_id, fetch=fetch
     )
     async with runtime.sessionmaker() as session:
@@ -288,6 +289,22 @@ async def _refuse(interaction: discord.Interaction[Any], outcome: SubmitOutcome)
     await _notice(interaction, text, neutral=outcome.status == "duplicate")
 
 
+async def _offer_state(
+    runtime: DiscordRuntime, origin: AnswerOrigin, user_id: str, *, exempt: bool
+) -> tuple[LimitView, frozenset[str]]:
+    """The limit `user_id` asks under at `origin`, and the options they already asked with."""
+    async with runtime.sessionmaker() as session:
+        view = await resolve_limit(
+            session,
+            tenant_id=origin.tenant_id,
+            place=origin.support_place,
+            platform_user_id=user_id,
+            default_allowance=runtime.settings.support.credits_per_user,
+            exempt=exempt,
+        )
+        return view, await _asked(session, origin, user_id)
+
+
 async def _asked(session: AsyncSession, origin: AnswerOrigin, user_id: str) -> frozenset[str]:
     """The options `user_id` already asked with on this answer."""
     return await asked_options(
@@ -308,7 +325,7 @@ def _post_body(
     *,
     sealed: bool,
 ) -> str:
-    """Today's post for a default request; a plan's adds its terms, status and balance."""
+    """Today's post for a default request; a limit's adds its terms, status and balance."""
     head = f"**Human support requested** by {interaction.user.mention} ({interaction.user})"
     marker = [f"*{SEALED_POST_MARKER}*"] if sealed else []
     facts: list[str] = []
@@ -332,11 +349,16 @@ async def submit_answer_request(
     the request.
     """
     settings = runtime.settings
-    channel_id = discord_channel(settings.support)
     offered = await place_feature(
         runtime.sessionmaker, settings, origin.feature_place, "support_escalation"
     )
-    if channel_id is None or not offered.on:
+    destination = None
+    if offered.on:
+        async with runtime.sessionmaker() as session:
+            destination = await discord_destination(
+                session, tenant_id=origin.tenant_id, settings=settings
+            )
+    if destination is None:
         # Disabled between the offer and the submit. Nothing is spent.
         await _notice(interaction, UNAVAILABLE)
         return
@@ -374,7 +396,7 @@ async def submit_answer_request(
     sealed = await answer_is_sealed(runtime, origin)
     post = await post_to_support_channel(
         bot,
-        channel_id=channel_id,
+        channel_id=destination.channel_id,
         body=_post_body(interaction, origin, row, view, sealed=sealed),
         view=settle_view(row.id) if row.status == "pending" else None,
     )
@@ -590,7 +612,7 @@ class SupportMenuSelect(
 ):
     """The configured menu's picker; each option's value carries the terms it showed.
 
-    Picking re-reads the plan (decision 9): a changed menu answers "Options
+    Picking re-reads the limit (decision 9): a changed menu answers "Options
     changed", an unaffordable option "Not enough credits", before any form.
     """
 
@@ -653,16 +675,7 @@ class SupportMenuSelect(
         # No Discord request before the form: it must open inside the
         # interaction's three seconds. The submit decides who is an admin.
         exempt = requester_is_admin_cached(interaction, bot, guild_id=origin.guild_id)
-        async with runtime.sessionmaker() as session:
-            view = await resolve_limit(
-                session,
-                tenant_id=origin.tenant_id,
-                place=origin.support_place,
-                platform_user_id=user_id,
-                default_allowance=runtime.settings.support.credits_per_user,
-                exempt=exempt,
-            )
-            asked = await _asked(session, origin, user_id)
+        view, asked = await _offer_state(runtime, origin, user_id, exempt=exempt)
         values = self.item.values
         option = picked_option(view.spec, str(values[0])) if values else None
         if option is None:
@@ -745,24 +758,26 @@ class SupportEscalateButton(
             fetch=False,
         )
         user_id = str(interaction.user.id)
-        exempt = await requester_is_admin(bot, guild_id=origin.guild_id, user_id=user_id)
-        async with runtime.sessionmaker() as session:
-            view = await resolve_limit(
-                session,
-                tenant_id=origin.tenant_id,
-                place=origin.support_place,
-                platform_user_id=user_id,
-                default_allowance=runtime.settings.support.credits_per_user,
-                exempt=exempt,
-            )
-            asked = await _asked(session, origin, user_id)
+        # A modal must open within the interaction's three seconds, so only a
+        # refusal asks Discord whether an uncached admin clicked.
+        exempt = requester_is_admin_cached(interaction, bot, guild_id=origin.guild_id)
+        view, asked = await _offer_state(runtime, origin, user_id, exempt=exempt)
         if not view.active:
             await _report_failure(interaction, ended_text(view, now=datetime.now(UTC)))
             return
         # One check for every path, the default form included (`offer_refusal`).
-        if (refused := offer_refusal(view, asked=asked)) is not None:
-            neutral = refused.startswith(ALREADY_REQUESTED)
-            await _report_failure(interaction, refused, neutral=neutral)
+        refused = offer_refusal(view, asked=asked)
+        if (
+            refused is not None
+            and not exempt
+            and await requester_is_admin(bot, guild_id=origin.guild_id, user_id=user_id)
+        ):
+            view, asked = await _offer_state(runtime, origin, user_id, exempt=True)
+            refused = offer_refusal(view, asked=asked)
+        if refused is not None:
+            await _report_failure(
+                interaction, refused, neutral=refused.startswith(ALREADY_REQUESTED)
+            )
             return
         if view.menu is not None:
             await interaction.response.defer(ephemeral=True, thinking=True)
@@ -788,6 +803,7 @@ __all__ = [
     "SupportModal",
     "SupportOptionModal",
     "answer_origin",
+    "answer_place",
     "discord_channel",
     "menu_message",
     "post_to_support_channel",

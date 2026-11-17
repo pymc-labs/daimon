@@ -1,4 +1,4 @@
-"""The support channel post: delivery, and the plan lines a settle rewrites.
+"""The support channel post: delivery, and the limit lines a settle rewrites.
 
 Shared by Ask a person (`support_escalation`, `support_settle`) and the
 routed 👎 form (`feedback_modal`).
@@ -6,13 +6,22 @@ routed 👎 form (`feedback_modal`).
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
+from typing import Final
 
 import structlog
 from daimon.adapters.discord.split import split_for_discord_safe
-from daimon.core.config import SupportSettings
+from daimon.core.config import Settings, SupportSettings
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.stores.support_rows import SupportEscalationRow
 from daimon.core.support import CLIENT_NOT_NOTIFIED, option_text, post_status_text
+from daimon.core.support_routing import (
+    SupportDestination,
+    feedback_destination,
+    support_destination,
+)
+from sqlalchemy.ext.asyncio import AsyncSession
 
 import discord
 from discord.ext import commands
@@ -32,6 +41,53 @@ def discord_channel(support: SupportSettings) -> str | None:
     """
     channel = support.escalation_channel_id
     return None if channel is None or channel.startswith("19:") else channel
+
+
+def _discord_only(
+    destination: SupportDestination | None, support: SupportSettings
+) -> SupportDestination | None:
+    """Drops a Teams id (`19:…`) left in the shared deployment setting."""
+    if destination is not None and not destination.own and discord_channel(support) is None:
+        return None
+    return destination
+
+
+async def discord_destination(
+    session: AsyncSession, *, tenant_id: uuid.UUID, settings: Settings
+) -> SupportDestination | None:
+    """Where this workspace's requests go on Discord (`support_destination`)."""
+    destination = await support_destination(
+        session, tenant_id=tenant_id, platform="discord", settings=settings
+    )
+    return _discord_only(destination, settings.support)
+
+
+async def discord_feedback_destination(
+    session: AsyncSession, settings: Settings, place: FeaturePlace
+) -> SupportDestination | None:
+    """Where a 👎 form from `place` also goes on Discord, or None (`feedback_destination`)."""
+    destination = await feedback_destination(session, settings, place)
+    return _discord_only(destination, settings.support)
+
+
+CANNOT_SEE: Final = "Daimon can't see this channel. Add it to the channel."
+NOT_TEXT: Final = "Pick a text channel."
+NEEDS_PERMISSIONS: Final = (
+    "Daimon needs View Channel, Send Messages and Embed Links in this channel."
+)
+
+
+async def post_blocker(bot: commands.Bot, channel_id: str) -> str | None:
+    """Why Daimon can't post requests in `channel_id`, or None when it can."""
+    try:
+        channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+    except (discord.HTTPException, ValueError):
+        # Not found and forbidden read alike: the bot can't reach it.
+        return CANNOT_SEE
+    if not isinstance(channel, discord.TextChannel):
+        return NOT_TEXT
+    can = channel.permissions_for(channel.guild.me)
+    return None if can.view_channel and can.send_messages and can.embed_links else NEEDS_PERMISSIONS
 
 
 @dataclass(frozen=True)
@@ -98,6 +154,7 @@ async def post_to_support_channel(
             "support.channel_undeliverable",
             channel_id=channel_id,
             err_type=type(exc).__name__,
+            reason=await post_blocker(bot, channel_id),
         )
         return None
 
@@ -109,7 +166,7 @@ def status_line(row: SupportEscalationRow) -> str:
 
 
 def request_facts(row: SupportEscalationRow, *, menu: bool, balance: str | None) -> str:
-    """A plan request's lines: its terms on a configured menu, status, balance, and while
+    """A limit request's lines: its terms on a configured menu, status, balance, and while
     pending the decision-8 warning beside the settle buttons."""
     lines = [option_text(row.option)] if menu and row.option is not None else []
     lines.append(status_line(row))

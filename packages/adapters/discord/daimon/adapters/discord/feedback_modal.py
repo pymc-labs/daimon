@@ -19,7 +19,7 @@ Logging discipline: the submitted text is somebody's unsolicited criticism,
 not a secret, but it belongs in the database row. It never enters a log
 record, a `custom_id` or an embed. Every log line below carries the feedback
 row id only. The one other place it may go is the support channel, and only
-for a tenant that turned that on (`SupportSettings.feedback_to_support`):
+where `support_feedback` is on (`support_routing.feedback_destination`):
 the prompt that offered this form said so, and each submission is posted
 there once, beside the person, the agent and a link to the answer. This mirrors
 the hygiene guarantees `credential_modals.py` already documents for a
@@ -36,8 +36,12 @@ from typing import cast
 import structlog
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.adapters.discord.support_post import post_to_support_channel
-from daimon.core.config import SupportSettings
+from daimon.adapters.discord.support_escalation import answer_place
+from daimon.adapters.discord.support_post import (
+    discord_feedback_destination,
+    post_to_support_channel,
+)
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.stores.domain import MessageFeedbackRow
 from daimon.core.stores.message_feedback import attach_feedback_text
 from daimon.core.stores.tenants import get_tenant
@@ -93,11 +97,14 @@ class FeedbackModal(discord.ui.Modal, title="What went wrong?"):
             return
 
         _log.info("feedback_modal.submit", feedback_id=str(self._feedback_id))
-        channel_id = support_channel_for(self._runtime.settings.support, updated_row.tenant_id)
+        bot = cast(commands.Bot, interaction.client)
+        channel_id = await support_channel_for(
+            self._runtime, bot, tenant_id=updated_row.tenant_id, channel_id=updated_row.channel_id
+        )
         if channel_id is not None:
             # Best-effort: the text is already recorded, whatever the post does.
             post = await post_to_support_channel(
-                cast(commands.Bot, interaction.client),
+                bot,
                 channel_id=channel_id,
                 body=await self._support_post(interaction, updated_row),
                 allowed_mentions=discord.AllowedMentions.none(),
@@ -157,14 +164,18 @@ class FeedbackModal(discord.ui.Modal, title="What went wrong?"):
             )
 
 
-def support_channel_for(support: SupportSettings, tenant_id: uuid.UUID) -> str | None:
-    """The Discord channel this tenant's submitted forms also go to, or None (the default).
-
-    Ask a human's `escalation_channel_id`, unless it still holds a Teams
-    channel (`19:…`) from before Teams had its own setting. Anything but a configured
-    string channel and a literal True reads as off.
-    """
-    channel = cast(object, support.escalation_channel_id)
-    if not isinstance(channel, str) or not channel or channel.startswith("19:"):
-        return None
-    return channel if cast(object, support.routes_feedback(tenant_id)) is True else None
+async def support_channel_for(
+    runtime: DiscordRuntime, bot: commands.Bot, *, tenant_id: uuid.UUID, channel_id: str
+) -> str | None:
+    """The Discord channel a form on the answer in `channel_id` also goes to, or None."""
+    parent, thread = await answer_place(
+        bot, runtime, tenant_id=tenant_id, channel_id=channel_id, fetch=True
+    )
+    async with runtime.sessionmaker() as session:
+        row = await get_latest_thread_session(
+            session, tenant_id=tenant_id, platform="discord", thread_id=channel_id
+        )
+        agent_id = None if row is None else row.ma_agent_id
+        place = FeaturePlace.of(tenant_id, "discord", parent, thread, agent_id=agent_id)
+        destination = await discord_feedback_destination(session, runtime.settings, place)
+    return None if destination is None else destination.channel_id

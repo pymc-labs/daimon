@@ -18,7 +18,6 @@ from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.support_post import discord_channel, settled_content, status_line
-from daimon.core.config import SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.support_escalation import SettleOutcome, get_request
@@ -40,7 +39,7 @@ from daimon.core.support import (
     settled_text,
 )
 from daimon.core.support_changes import settle_from_post
-from daimon.core.support_routing import in_channel
+from daimon.core.support_routing import settle_channel_ok
 
 import discord
 from discord.ext import commands
@@ -72,14 +71,6 @@ def _parent_id(interaction: discord.Interaction[Any]) -> str | None:
     channel = interaction.channel
     parent = channel.parent_id if isinstance(channel, discord.Thread) else None
     return None if parent is None else str(parent)
-
-
-def _in_support_channel(interaction: discord.Interaction[Any], support: SupportSettings) -> bool:
-    return in_channel(
-        configured=discord_channel(support),
-        channel_id=str(interaction.channel_id),
-        parent_id=_parent_id(interaction),
-    )
 
 
 async def _notice(
@@ -119,6 +110,9 @@ async def _finish(
         return
     if outcome.status == "limit_gone":
         await _notice(interaction, LIMIT_GONE)
+        return
+    if outcome.status == "not_here":
+        await _notice(interaction, SETTLE_ELSEWHERE)
         return
     if outcome.status in ("invalid", "over_balance"):
         text = settle_range_text(after.bounds, counted=after.counted, available=outcome.available)
@@ -219,7 +213,7 @@ class SettleModal(discord.ui.Modal, title=SET_CHARGE):
 class SupportSettleButton(
     discord.ui.DynamicItem[discord.ui.Button[discord.ui.View]], template=CUSTOM_ID_TEMPLATE
 ):
-    """Set charge or Decline; checks the channel, then the request as it stands now."""
+    """Set charge or Decline; checks the request as it stands now, then its channel."""
 
     def __init__(self, *, escalation_id: uuid.UUID, action: SettleAction) -> None:
         button: discord.ui.Button[discord.ui.View] = discord.ui.Button(
@@ -247,16 +241,23 @@ class SupportSettleButton(
     ) -> None:
         try:
             runtime = cast(DaimonBot, interaction.client).runtime
-            if not _in_support_channel(interaction, runtime.settings.support):
-                await interaction.response.send_message(
-                    embed=build_notice_embed(SETTLE_ELSEWHERE), ephemeral=True
-                )
-                return
             async with runtime.sessionmaker() as session:
                 row = await get_request(session, escalation_id=self.escalation_id)
+                # The channel it was posted to, not today's: a change leaves open ones there.
+                here = row is not None and await settle_channel_ok(
+                    session,
+                    row=row,
+                    channel_id=str(interaction.channel_id),
+                    parent_id=_parent_id(interaction),
+                    default_channel_id=discord_channel(runtime.settings.support),
+                )
             if row is None:
                 await interaction.response.send_message(
                     embed=build_notice_embed(REQUEST_GONE), ephemeral=True
+                )
+            elif not here:
+                await interaction.response.send_message(
+                    embed=build_notice_embed(SETTLE_ELSEWHERE), ephemeral=True
                 )
             elif row.status != "pending":
                 await interaction.response.defer()

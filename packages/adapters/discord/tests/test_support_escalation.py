@@ -7,11 +7,18 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import pytest
 from daimon.adapters.discord.support_escalation import (
     SupportEscalateButton,
     SupportModal,
     discord_channel,
     post_to_support_channel,
+)
+from daimon.adapters.discord.support_post import (
+    CANNOT_SEE,
+    NEEDS_PERMISSIONS,
+    NOT_TEXT,
+    post_blocker,
 )
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.config import SupportSettings
@@ -19,6 +26,7 @@ from daimon.core.stores import accounts
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+from daimon.testing.settings_mock import mock_settings
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -106,6 +114,7 @@ async def _submit(
     interaction.followup.send = AsyncMock()
     runtime = MagicMock()
     runtime.sessionmaker = sessionmaker
+    runtime.settings = mock_settings()
     runtime.settings.support = SupportSettings(escalation_channel_id=escalation_channel)
     runtime.settings.direct_message_policies = {}
     modal = SupportModal(runtime=runtime, guild_id=_GUILD, channel_id=_THREAD, message_id="444")
@@ -165,6 +174,8 @@ async def test_the_form_warns_only_for_a_sealed_channel(
     thread.parent_id = int(_CHANNEL)
     runtime = MagicMock()
     runtime.sessionmaker = db_session_factory
+    runtime.settings = mock_settings()
+    runtime.settings.support = SupportSettings(escalation_channel_id=_ESCALATION)
     bot = MagicMock()
     bot.runtime = runtime
     bot.get_channel = MagicMock(side_effect=lambda cid: {333: thread}.get(cid))
@@ -205,3 +216,42 @@ def test_a_teams_escalation_channel_is_not_a_discord_one() -> None:
     assert discord_channel(SupportSettings(escalation_channel_id=_ESCALATION)) == _ESCALATION, (
         "a Discord channel id stays the destination"
     )
+
+
+def _channel_bot(channel: Any) -> Any:
+    bot = MagicMock()
+    bot.get_channel = MagicMock(return_value=channel)
+    return bot
+
+
+def _text_channel(**allowed: bool) -> Any:
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.permissions_for = MagicMock(return_value=discord.Permissions(**allowed))
+    return channel
+
+
+@pytest.mark.parametrize(
+    ("allowed", "expected"),
+    [
+        ({"view_channel": True, "send_messages": True, "embed_links": True}, None),
+        ({"view_channel": True, "send_messages": True}, NEEDS_PERMISSIONS),
+        ({"view_channel": True, "embed_links": True}, NEEDS_PERMISSIONS),
+    ],
+)
+async def test_post_blocker_when_permissions_vary_then_names_what_is_missing(
+    allowed: dict[str, bool], expected: str | None
+) -> None:
+    """View Channel, Send Messages and Embed Links are each required."""
+    got = await post_blocker(_channel_bot(_text_channel(**allowed)), "1")
+    assert got == expected, f"{allowed} reads as {expected}"
+
+
+async def test_post_blocker_when_not_a_text_channel_or_unreachable_then_says_so() -> None:
+    """A voice channel is not a text channel; a fetch Discord refuses is out of reach."""
+    voice = MagicMock(spec=discord.VoiceChannel)
+    assert await post_blocker(_channel_bot(voice), "1") == NOT_TEXT, "only text channels"
+    bot = _channel_bot(None)
+    forbidden = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "no")
+    bot.fetch_channel = AsyncMock(side_effect=forbidden)
+    assert await post_blocker(bot, "1") == CANNOT_SEE, "a refused fetch"
+    assert await post_blocker(bot, "not-a-number") == CANNOT_SEE, "a malformed id"

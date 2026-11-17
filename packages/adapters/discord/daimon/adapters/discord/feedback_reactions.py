@@ -49,7 +49,6 @@ from daimon.adapters.discord.support_escalation import (
     AnswerOrigin,
     SupportEscalateButton,
     answer_origin,
-    discord_channel,
     menu_message,
     requester_is_admin,
 )
@@ -77,7 +76,6 @@ from daimon.core.support import (
 )
 from daimon.core.support_escalation import (
     ALREADY_REQUESTED,
-    is_enabled,
     is_escalation_reaction,
 )
 from sqlalchemy.exc import SQLAlchemyError
@@ -426,23 +424,20 @@ class FeedbackReactionCog(commands.Cog):
     async def _offer_support(self, payload: discord.RawReactionActionEvent) -> None:
         """Bridge an escalate reaction into the private note form, or a configured menu.
 
-        Reacting spends NOTHING. This only reads the plan and balance where the
+        Reacting spends NOTHING. This only reads the limit and balance where the
         answer sits to decide which direct message to send, and the
         authoritative gate runs again inside the write transaction when the
         request is submitted -- someone can react, wait, and submit after
         spending their last credit elsewhere, and only the write decides.
 
-        An unset escalation channel disables the affordance rather than
-        recording requests nobody will read: an escalate path that reaches no
-        one is worse than none, because the person believes they have asked
-        for help.
+        A workspace with no request channel gets no offer (`support_escalation`
+        requires one) rather than recording requests nobody will read: an
+        escalate path that reaches no one is worse than none, because the
+        person believes they have asked for help.
         """
         runtime = self._bot.runtime
         settings = runtime.settings
         allowance = settings.support.credits_per_user
-        if not is_enabled(channel_id=discord_channel(settings.support), allowance=allowance):
-            log.info("support.disabled", message_id=str(payload.message_id))
-            return
         # guild_id is guaranteed non-None: is_escalation_reaction already
         # returned False for any reaction lacking a guild.
         origin = await answer_origin(
@@ -524,7 +519,13 @@ class FeedbackReactionCog(commands.Cog):
             if user is None:
                 user = await self._bot.fetch_user(payload.user_id)
             tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(payload.guild_id))
-            shared = support_channel_for(self._bot.runtime.settings.support, tenant_id) is not None
+            channel = await support_channel_for(
+                self._bot.runtime,
+                self._bot,
+                tenant_id=tenant_id,
+                channel_id=str(payload.channel_id),
+            )
+            shared = channel is not None
             await user.send(embed=feedback_prompt_embed(link, shared=shared), view=view)
         except discord.HTTPException as exc:
             # discord.Forbidden (closed DMs) is the common case -- there is no
