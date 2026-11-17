@@ -24,6 +24,7 @@ from daimon.adapters.discord.privacy_panel.panel import PrivacyPanelView
 from daimon.adapters.discord.privacy_panel.read import resolve_privacy_account
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.errors import DaimonError
+from daimon.core.monitoring import monitors_any
 from daimon.core.platform_words import DESCRIPTIONS
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -84,6 +85,9 @@ class PrivacyCog(commands.Cog):
                     tenant_id=tenant_id,
                     platform_user_id=str(interaction.user.id),
                 )
+                monitored = account_id is not None and await monitors_any(
+                    session, runtime.settings, tenant_id=tenant_id, platform="discord"
+                )
             if account_id is None:
                 # No principal → render deleted-state and return.
                 await interaction.followup.send(
@@ -99,6 +103,7 @@ class PrivacyCog(commands.Cog):
                 account_id=account_id,
                 allowed_user_id=interaction.user.id,
                 user_name=user_name,
+                monitored=monitored,
             )
             await interaction.followup.send(
                 view=view,
