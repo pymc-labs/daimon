@@ -4305,6 +4305,53 @@
         'type': 'object',
       }),
     }),
+    'get_monitored_conversation': dict({
+      'description': '''
+        Read one kept conversation (a ``conversation_id`` from list_monitored_activity)
+        in order: questions, answers and MCP tool calls with their outcome. Works only in a
+        direct message with the admin or the web chat; pass this active turn's
+        origin_context_id. The read is audited. Workspace admins only. ``next_page`` goes
+        back as ``after``.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'after': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'agent_id': dict({
+            'type': 'string',
+          }),
+          'conversation_id': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'agent_id',
+          'conversation_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'get_my_credits': dict({
       'description': '''
         The caller's own use in billed dollars over ``period`` (``30d``, ``this`` month or
@@ -5710,6 +5757,105 @@
         'additionalProperties': False,
         'properties': dict({
         }),
+        'type': 'object',
+      }),
+    }),
+    'list_monitored_activity': dict({
+      'description': '''
+        List the conversations kept for a monitored agent, most recent first, with
+        when each monitoring switch was turned on. ``where`` is ``direct_messages``,
+        ``web`` or ``mcp``; filter by web person and UTC days ``first`` to ``last``
+        (YYYY-MM-DD). A person's MCP tool calls make one row per day. Person names show only
+        in a direct message with the admin; elsewhere ``private_details`` is
+        ``direct_message`` and they read ``Person 1``, ``Person 2``. Pass this active turn's
+        origin_context_id. The read is audited. Workspace admins only. ``next_page`` goes
+        back as ``after``.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'after': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'agent_id': dict({
+            'type': 'string',
+          }),
+          'first': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'last': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'limit': dict({
+            'default': 50,
+            'type': 'integer',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'person_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'where': dict({
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'direct_messages',
+                  'web',
+                  'mcp',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'agent_id',
+        ]),
         'type': 'object',
       }),
     }),
