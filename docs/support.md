@@ -147,6 +147,6 @@ daimon support requests settle <request-id> 1.5
 daimon support requests list --undelivered
 ```
 
-`--undelivered` shows requests no support channel received, to settle or
-decline. The `support_*` tools in [MCP tools](mcp-tools.md) do the same from an
+`--undelivered` shows pending requests no support channel received, to settle
+or decline. The `support_*` tools in [MCP tools](mcp-tools.md) do the same from an
 MCP client.

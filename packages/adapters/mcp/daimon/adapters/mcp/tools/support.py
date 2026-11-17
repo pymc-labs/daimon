@@ -825,8 +825,8 @@ def register_support_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """List support requests, newest first; pending only by default. Admin-only.
 
         Pass ``scope`` and ``scope_id`` to list one place's requests. ``undelivered``
-        keeps the requests no support channel received (``delivered`` false); pass
-        ``pending=False`` with it to include settled ones. Example: ``pending=False``,
+        keeps the pending requests no support channel received (``delivered`` false);
+        settled and declined ones are never listed. Example: ``pending=True``,
         ``undelivered=True``.
         """
         return await _list_requests_impl(
