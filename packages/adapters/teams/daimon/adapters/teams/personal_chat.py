@@ -4,6 +4,7 @@ A chat is pinned by a hand-over binding on the chat itself, the one Switch to
 agent writes. A chat with none is routed on its first message
 (`daimon.core.dm_routing`): one agent starts at once, several get a card of
 buttons whose pick answers every message the burst held for it, and a refusal says why.
+In an unrouted workspace with no default, the chat's own agent answers unpinned.
 Each turn rechecks the pinned agent's grant with the cached team rosters
 (`daimon.core.direct_messages.require_dm_turn_grant`).
 """
@@ -185,6 +186,8 @@ async def route_personal_chat(
     )
     route = decision.route
     log.info("teams.dm.routed", route=type(route).__name__)
+    if isinstance(route, DmRefused) and route.reason == "unrouted":
+        return True  # the chat's own agent answers, as before DM routing
     if isinstance(route, DmStart):
         agent = next(a for a in agents if a.name == route.agent)
         await _pin(
@@ -253,8 +256,7 @@ class TeamsDmPick:
             runtime, tenant_id=actor.tenant_id, user_id=actor.user_id
         )
         route = decision.route
-        chosen = isinstance(route, DmStart) and route.agent == name
-        if not (chosen or decision.may_switch_to(name)):
+        if not decision.may_use(name):
             self._refuse(chat)
             refusal = UNCHECKED if isinstance(route, DmUnchecked) else DM_AGENT_REFUSED
             return replace_card(notice_adaptive_card(refusal))

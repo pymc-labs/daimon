@@ -60,11 +60,17 @@ def dm_agent(name: str, tenant_id: uuid.UUID) -> DmAgent:
     return DmAgent(name, record.id, AgentRef.of(name))
 
 
-async def seed(factory, *names: str):
+async def seed(factory, *names: str, routed: bool = False):
+    """A workspace with DMs on; `routed` adds a rule sending everyone to the default."""
     async with factory.begin() as session:
         tenant = await make_tenant(session, workspace_id="700000101")
         account = await make_account(session, tenant=tenant)
         await set_dm_enabled(session, tenant_id=tenant.id, enabled=True)
+        if routed:
+            await store.add_rule(
+                session, tenant_id=tenant.id, subject="everyone", subject_id=None,
+                agent_name=None, locked=False, set_by=None, now=NOW,
+            )  # fmt: skip
     return tenant, account, [dm_agent(n, tenant.id) for n in names]
 
 
@@ -107,16 +113,33 @@ async def test_dm_enabled_when_unset_then_the_workspace_platform_default_holds(
 
 async def test_decide_dm_with_one_open_agent_starts_it(db_session_factory):
     """A sole agent that admits the person is reached at once."""
-    tenant, _, agents = await seed(db_session_factory, "a")
+    tenant, _, agents = await seed(db_session_factory, "a", routed=True)
     decision = await decide(db_session_factory, tenant, agents)
     assert decision.route == DmStart("a", "only"), "one agent in play starts directly"
+
+
+async def test_decide_dm_when_unrouted_then_only_the_default_starts(db_session_factory):
+    """With no rule or narrower grant, a sole agent does not start, yet stays usable."""
+    tenant, _, agents = await seed(db_session_factory, "a")
+    decision = await decide(db_session_factory, tenant, agents)
+    async with db_session_factory() as session:
+        permitted = await permits_dm(
+            session, None, POLICY, tenant_id=tenant.id, platform="discord",
+            agent=agents[0], subject=ADA,
+        )  # fmt: skip
+    assert decision.route == DmRefused("unrouted"), "nothing new starts a DM"
+    assert permitted, "/dm-me still reaches an agent the person may use"
+    async with db_session_factory.begin() as session:
+        await set_dm_agent_name(session, tenant_id=tenant.id, agent_name="a")
+    decision = await decide(db_session_factory, tenant, agents)
+    assert decision.route == DmStart("a", "default"), "the default answers"
 
 
 async def test_decide_dm_when_the_env_policy_leaves_them_out_then_start_and_permit_refuse(
     db_session_factory,
 ):
     """The deprecated env allowlist holds with the stored access, as on delivery."""
-    tenant, _, agents = await seed(db_session_factory, "a")
+    tenant, _, agents = await seed(db_session_factory, "a", routed=True)
     for listed, admitted in ((["999"], True), (["7"], False)):
         settings = Settings(
             _env_file=None,  # pyright: ignore[reportCallIssue]
@@ -140,7 +163,7 @@ async def test_decide_dm_when_the_env_policy_leaves_them_out_then_start_and_perm
 
 async def test_decide_dm_with_agent_opted_out_drops_it(db_session_factory):
     """An agent that turned the feature off at its own tier is not offered."""
-    tenant, _, agents = await seed(db_session_factory, "a", "b")
+    tenant, _, agents = await seed(db_session_factory, "a", "b", routed=True)
     place = FeaturePlace(tenant.id, "discord", agent_id=agents[0].ma_agent_id)
 
     async def _admin(_: object) -> bool:
@@ -188,12 +211,12 @@ async def test_decide_dm_with_a_lock_ignores_the_pick(db_session_factory):
         )
     decision = await decide(db_session_factory, tenant, agents, account_id=account.id)
     assert decision.route == DmStart("a", "locked"), "the lock wins over the pick"
-    assert not decision.may_switch_to("b"), "a locked person cannot switch"
+    assert not decision.may_use("b"), "a locked person cannot switch"
 
 
 async def test_decide_dm_with_a_pick_starts_the_picked_agent(db_session_factory):
     """Without a lock the saved pick decides among several agents."""
-    tenant, account, agents = await seed(db_session_factory, "a", "b")
+    tenant, account, agents = await seed(db_session_factory, "a", "b", routed=True)
     async with db_session_factory.begin() as session:
         await store.set_pick(
             session, tenant_id=tenant.id, account_id=account.id, agent_name="b", now=NOW

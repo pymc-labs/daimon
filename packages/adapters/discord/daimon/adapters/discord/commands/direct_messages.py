@@ -60,7 +60,7 @@ from daimon.core.direct_messages import (
 )
 from daimon.core.dm_access import decide_dm, list_dm_agents
 from daimon.core.dm_debounce import DmBursts, debounce_seconds
-from daimon.core.dm_routing import DmChoose, DmRefused, DmStart, DmUnchecked
+from daimon.core.dm_routing import DmChoose, DmRefused, DmUnchecked
 from daimon.core.dm_settings import DmActor, set_default
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
@@ -331,14 +331,12 @@ class DirectMessageCog(commands.Cog):
                 return _Eligibility(unknown=True)
             if isinstance(route, DmRefused):
                 self._suppress(message, route.reason)
-                if route.reason == "locked_unavailable" and denied is not None:
+                named = route.reason in {"locked_unavailable", "default_unavailable"}
+                if named and denied is not None:  # an agent named for them refuses them
                     denied.add(tenant.id)
                 return _Eligibility()
             if agent is not None:
-                if not (
-                    (isinstance(route, DmStart) and route.agent == agent)
-                    or decision.may_switch_to(agent)
-                ):
+                if not decision.may_use(agent):
                     self._suppress(message, "agent_unavailable")
                     return _Eligibility()
                 name = agent

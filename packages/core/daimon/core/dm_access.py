@@ -29,7 +29,6 @@ from daimon.core.dm_routing import (
     DmGrant,
     DmRefused,
     DmRuleFact,
-    DmStart,
     Person,
     grant_admits,
     resolve,
@@ -255,8 +254,8 @@ async def decide_dm(
 
     A workspace with DMs off admits nobody, nor does one whose deprecated env policy
     (`env_admits`, which delivery applies too) leaves the person out. Pass every agent to
-    choose among them, or one to ask whether the person may use it: the decision is then
-    `DmStart` for that agent. `groups` are the ones `lookup_dm_groups` found; None takes
+    choose among them, or one to ask whether the person may use it (`DmDecision.may_use`).
+    `groups` are the ones `lookup_dm_groups` found; None takes
     them from `subject`.
     """
     if not await dm_enabled(session, tenant_id=tenant_id):
@@ -304,7 +303,9 @@ async def permits_dm(
     subject: Subject,
     groups: frozenset[str] | None = None,
 ) -> bool:
-    """Whether this person may DM this agent: on, runnable, granted, and no lock names another."""
+    """Whether this person may DM this agent: on, runnable, granted, and no lock names another.
+
+    Routing does not apply: an agent that is neither default nor picked may still be used."""
     decision = await decide_dm(
         session,
         settings,
@@ -316,7 +317,7 @@ async def permits_dm(
         account_id=None,
         groups=groups,
     )
-    return isinstance(decision.route, DmStart) and decision.route.agent == agent.name
+    return decision.may_use(agent.name)
 
 
 async def _sending_grant(

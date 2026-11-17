@@ -658,8 +658,10 @@ async def _refuse_cold(
     user_id: str,
     channel_id: str,
 ) -> None:
-    """Say why a DM with no conversation gets no agent: unknown access, a lock, or nothing."""
-    if isinstance(route, DmRefused) and route.reason == "no_agent":
+    """Say why a DM with no conversation gets no agent: unknown access, a lock, or nothing.
+
+    An unrouted workspace with no default gets the guidance Slack gave before DM routing."""
+    if isinstance(route, DmRefused) and route.reason in {"no_agent", "unrouted"}:
         await _explain_no_private_chat(
             client, team_id=team_id, user_id=user_id, channel_id=channel_id, dms_on=True
         )
@@ -758,9 +760,7 @@ async def handle_dm_agent_pick(runtime: SlackRuntime, payload: dict[str, Any]) -
             runtime, client, team_id=team_id, user_id=user_id, role=role
         )
         route = decision.route
-        if not (isinstance(route, DmStart) and route.agent == agent) and not (
-            decision.may_switch_to(agent)
-        ):
+        if not decision.may_use(agent):
             refusal = _UNCHECKED if isinstance(route, DmUnchecked) else DM_AGENT_REFUSED
             await client.chat_postMessage(channel=channel_id, **notice_fields(refusal))  # pyright: ignore[reportUnknownMemberType]
             runtime.dm_bursts.refuse((team_id, channel_id, user_id))

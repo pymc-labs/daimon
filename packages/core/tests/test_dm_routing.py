@@ -15,10 +15,13 @@ from daimon.core.dm_routing import (
     Person,
     grant_admits,
     resolve,
+    routed,
 )
 
 ADA = Person("ada", frozenset({"eng"}))
 BLIND = Person("ada", None)
+ROUTED = [DmRuleFact("everyone")]
+"""A rule sending everyone to the default: it routes the workspace and names no agent."""
 
 
 def cands(*names: str, off: tuple[str, ...] = (), blocked: tuple[str, ...] = ()) -> list[Candidate]:
@@ -81,7 +84,7 @@ def test_grant_admits_when_mode_and_subjects_given_then_decides(
 
 def test_resolve_when_one_agent_admits_then_starts_it_at_once() -> None:
     """A sole agent in A needs no dropdown."""
-    d = decide(candidates=cands("a"))
+    d = decide(candidates=cands("a"), rules=ROUTED)
 
     assert d.route == DmStart("a", "only"), "one agent starts without asking"
     assert d.allowed == ("a",), "allowed lists the agent"
@@ -89,7 +92,7 @@ def test_resolve_when_one_agent_admits_then_starts_it_at_once() -> None:
 
 def test_resolve_when_several_admit_and_nothing_chooses_then_offers_the_dropdown() -> None:
     """Several agents and no pick, rule or default: the person chooses."""
-    d = decide(candidates=cands("b", "a"))
+    d = decide(candidates=cands("b", "a"), rules=ROUTED)
 
     assert d.route == DmChoose(("a", "b")), "agents are offered sorted"
 
@@ -138,7 +141,8 @@ def test_resolve_when_rule_is_locked_then_pick_is_ignored() -> None:
 
     assert d.route == DmStart("b", "locked"), "lock beats pick"
     assert d.rule == rules[0], "matched rule is reported"
-    assert d.may_switch_to("a") is False, "a lock blocks switching"
+    assert d.may_use("a") is False, "a lock blocks switching"
+    assert d.may_use("b") is True, "the locked agent stays usable"
 
 
 @pytest.mark.parametrize("agent", ["z", None], ids=["agent-not-in-A", "no-agent"])
@@ -172,7 +176,7 @@ def test_resolve_when_first_matching_rule_is_reached_then_later_rules_are_ignore
     d = decide(rules=rules, candidates=cands("a", "b"))
 
     assert d.route == DmStart("b", "rule"), "group rule beats the later locked everyone rule"
-    assert d.may_switch_to("a") is True, "an unlocked rule leaves switching open"
+    assert d.may_use("a") is True, "an unlocked rule leaves switching open"
 
 
 def test_resolve_when_unlocked_rule_agent_is_not_in_a_then_default_applies() -> None:
@@ -211,7 +215,7 @@ def test_resolve_when_groups_unknown_and_a_grant_needs_them_then_fails_closed() 
 
 def test_resolve_when_groups_unknown_but_nothing_uses_groups_then_routes_normally() -> None:
     """No group-based grant or rule: unknown groups do not matter."""
-    d = decide(person=BLIND, candidates=cands("a"))
+    d = decide(person=BLIND, candidates=cands("a"), rules=ROUTED)
 
     assert d.route == DmStart("a", "only"), "groups unused"
 
@@ -227,9 +231,45 @@ def test_resolve_when_group_grant_is_on_an_agent_that_cannot_run_then_it_is_not_
     assert d.route == DmStart("b", "only"), "agent a is off, so its grant is moot"
 
 
-def test_may_switch_to_when_target_not_in_a_then_false() -> None:
-    """Switching needs the target in A."""
+def test_may_use_when_target_not_in_a_then_false() -> None:
+    """Using an agent needs it in A."""
     d = decide(candidates=cands("a"))
 
-    assert d.may_switch_to("a") is True, "target admits the person"
-    assert d.may_switch_to("b") is False, "unknown target does not"
+    assert d.may_use("a") is True, "target admits the person"
+    assert d.may_use("b") is False, "unknown target does not"
+
+
+@pytest.mark.parametrize(
+    ("grants", "rules", "expected"),
+    [
+        ({}, [], False),
+        ({"a": DmGrant()}, [], False),
+        ({"a": DmGrant("listed", frozenset({"ada"}))}, [], True),
+        ({"a": DmGrant("excluded")}, [], True),
+        ({}, ROUTED, True),
+    ],
+    ids=["nothing", "every-member-grant", "listed-grant", "excluded-grant", "a-rule"],
+)
+def test_routed_when_a_rule_or_a_narrower_grant_exists_then_true(
+    grants: dict[str, DmGrant], rules: list[DmRuleFact], expected: bool
+) -> None:
+    """A grant for every member is the same as none, so it routes nothing."""
+    assert routed(grants, rules) is expected, "routing set where a rule or grant says so"
+
+
+def test_resolve_when_unrouted_and_no_default_then_the_platform_rule_applies() -> None:
+    """No sole-agent start and no dropdown until the workspace sets a rule or a grant."""
+    for names in (("a",), ("a", "b")):
+        d = decide(candidates=cands(*names), pick="a")
+
+        assert d.route == DmRefused("unrouted"), "nothing starts, not even a pick"
+        assert d.allowed == names, "the agents that admit the person are still listed"
+        assert d.may_use("a") is True, "an agent the person reached another way stays usable"
+
+
+def test_resolve_when_unrouted_then_only_the_default_starts() -> None:
+    """The default answers alone, and a default the person cannot use refuses them."""
+    assert decide(default="b", pick="a").route == DmStart("b", "default"), "default, not pick"
+    blocked = decide(candidates=cands("a", "b", blocked=("b",)), default="b")
+    assert blocked.route == DmRefused("default_unavailable"), "no fallback to another"
+    assert decide(default="z").route == DmRefused("unrouted"), "a missing default is none"

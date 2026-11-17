@@ -1510,11 +1510,41 @@ def two_agents(cog, tenant):
     ]
 
 
+async def route_dms(factory, tenant):
+    """A rule, so the server routes DMs; without one only the default answers."""
+    async with factory.begin() as session:
+        await dm_access_store.add_rule(
+            session, tenant_id=tenant.id, subject="everyone", subject_id=None,
+            agent_name=None, locked=False, set_by=None, now=datetime.now(UTC),
+        )  # fmt: skip
+
+
+@pytest.mark.parametrize("default", ["private-0", None])
+async def test_cold_dm_when_unrouted_then_only_the_default_answers(
+    db_session_factory, monkeypatch, default
+):
+    """No rule or narrower grant: the default answers, else the guidance; never a dropdown."""
+    cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
+    two_agents(cog, tenants[0])
+    async with db_session_factory.begin() as session:
+        await set_dm_agent_name(session, tenant_id=tenants[0].id, agent_name=default)
+    msg = message()
+    await cog.on_message(msg)
+    if default is None:
+        assert_generic_guidance(msg, tenants)
+        assert await conversation(db_session_factory) is None, "nothing starts"
+    else:
+        assert "private-0" in sent_text(msg.channel.send.await_args_list[0]), "the default"
+        assert reply.await_count == 1, "it answers at once"
+    await cog.cog_unload()
+
+
 async def test_several_agents_offer_a_dropdown_and_remember_the_pick(
     db_session_factory, monkeypatch
 ):
     cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
     two_agents(cog, tenants[0])
+    await route_dms(db_session_factory, tenants[0])
     async with db_session_factory.begin() as session:
         await set_dm_agent_name(session, tenant_id=tenants[0].id, agent_name=None)
     msg = message()
@@ -1542,6 +1572,7 @@ async def test_new_command_offers_the_agents_when_the_person_must_choose(
     """With no default left, /new asks who to talk to rather than failing."""
     cog, tenants, fetch, reply = await setup(db_session_factory, monkeypatch)
     two_agents(cog, tenants[0])
+    await route_dms(db_session_factory, tenants[0])
     msg = message()
     await cog.on_message(msg)
     old = await conversation(db_session_factory)

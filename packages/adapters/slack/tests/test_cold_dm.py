@@ -122,6 +122,22 @@ async def test_cold_dm_with_private_chats_on_points_to_dm_me(
     client.chat_postMessage.assert_awaited_once_with(channel="D_COLD", **notice_fields(_ON))
 
 
+async def test_cold_dm_when_unrouted_and_no_default_then_the_guidance(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two agents admit the person, but no rule or narrower grant routes: no picker."""
+    await _dms_on(db_session_factory)
+    agents = [DmAgent(n, f"ag_{n}", AgentRef.of(n)) for n in ("ada", "bob")]
+    monkeypatch.setattr(dm_module, "list_dm_agents", AsyncMock(return_value=agents))
+    client = _client(monkeypatch)
+    start, _ = _starts(monkeypatch, uuid.uuid4())
+
+    await dm_module.handle_direct_message(_runtime(db_session_factory), _event(), team_id="T_ROUTE")
+
+    client.chat_postMessage.assert_awaited_once_with(channel="D_COLD", **notice_fields(_ON))
+    assert start.await_count == 0, "no conversation starts"
+
+
 async def test_dms_off_after_a_conversation_exists_gets_the_off_answer(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:

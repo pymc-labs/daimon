@@ -4,6 +4,11 @@ No I/O. The caller gathers the facts (grants, rules, the default, the person's
 pick, and per agent whether DMs are on and the person may run it) and gets one
 decision. Groups the platform could not confirm are `None`, never empty: any
 check that needs them fails closed as `DmUnchecked`.
+
+A workspace with no rule and no grant other than every member is unrouted
+(`routed`): only the default starts a DM, as before DM routing. With no default, or
+one naming no agent, each platform keeps its own rule (`DmRefused("unrouted")`):
+Discord and Slack refuse, and a Teams personal chat answers with the chat's own agent.
 """
 
 from __future__ import annotations
@@ -69,9 +74,10 @@ class DmChoose:
 
 @dataclass(frozen=True)
 class DmRefused:
-    """No agent can take this person: none admits them, or a lock names one that does not."""
+    """No agent routes this person: none admits them, a lock or an unrouted workspace's
+    default names one that does not, or the workspace is unrouted and has no default agent."""
 
-    reason: Literal["no_agent", "locked_unavailable"]
+    reason: Literal["no_agent", "locked_unavailable", "default_unavailable", "unrouted"]
 
 
 @dataclass(frozen=True)
@@ -90,10 +96,10 @@ class DmDecision:
     allowed: tuple[str, ...] = ()
     rule: DmRuleFact | None = None
 
-    def may_switch_to(self, agent: str) -> bool:
-        """A person may move to `agent` when it admits them and no lock applies."""
-        locked = self.rule is not None and self.rule.locked
-        return agent in self.allowed and not locked
+    def may_use(self, agent: str) -> bool:
+        """Whether the person may DM `agent`: it admits them and no lock names another."""
+        rule = self.rule
+        return agent in self.allowed and (rule is None or not rule.locked or rule.agent == agent)
 
 
 def grant_admits(grant: DmGrant, person: Person) -> bool | None:
@@ -131,6 +137,11 @@ def matching_rule(rules: Sequence[DmRuleFact], person: Person) -> tuple[bool, Dm
     return True, None
 
 
+def routed(grants: Mapping[str, DmGrant], rules: Sequence[DmRuleFact]) -> bool:
+    """Whether the workspace routes DMs: it has a rule, or a grant other than every member."""
+    return bool(rules) or any(grant != DmGrant() for grant in grants.values())
+
+
 def resolve(
     person: Person,
     candidates: Sequence[Candidate],
@@ -143,9 +154,10 @@ def resolve(
     """Choose the agent for a person's DM.
 
     Agents that admit the person (A) are those with DMs on, runnable by them in
-    a DM, and whose grant admits them. A locked matching rule decides alone;
-    otherwise the first of pick, rule agent and default that is in A wins, then
-    a sole agent in A, else the person chooses.
+    a DM, and whose grant admits them. In an unrouted workspace only the default
+    starts a DM. Otherwise a locked matching rule decides alone; else the first of
+    pick, rule agent and default that is in A wins, then a sole agent in A, else
+    the person chooses.
     """
     allowed: list[str] = []
     for c in candidates:
@@ -160,6 +172,12 @@ def resolve(
     if not known:
         return DmDecision(DmUnchecked())
     names = tuple(allowed)
+    if not routed(grants, rules):
+        if default not in {c.name for c in candidates}:  # none, or no such agent
+            return DmDecision(DmRefused("unrouted"), names)
+        if default in names:
+            return DmDecision(DmStart(default, "default"), names)
+        return DmDecision(DmRefused("default_unavailable"), names)
     if rule is not None and rule.locked:
         target = rule.agent
         if target in names:

@@ -27,7 +27,7 @@ from daimon.core.dm_access import DmAgent
 from daimon.core.dm_debounce import PICK_EXPIRED, DmBurst
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores import dm_access as dm_store
-from daimon.core.stores.direct_messages import set_dm_enabled
+from daimon.core.stores.direct_messages import set_dm_agent_name, set_dm_enabled
 from daimon.core.stores.thread_agent_bindings import get_binding
 from microsoft_teams.api import MessageActivityInput
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -43,6 +43,24 @@ from .conftest import (
 pytestmark = pytest.mark.usefixtures("provisioned_tenant")
 TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+@pytest.fixture
+async def routed(
+    db_session_factory: async_sessionmaker[AsyncSession], provisioned_tenant: None
+) -> None:
+    """A rule, so DMs route; an unrouted workspace answers with the chat's own agent."""
+    async with db_session_factory() as session, session.begin():
+        await dm_store.add_rule(
+            session,
+            tenant_id=TENANT,
+            subject="everyone",
+            subject_id=None,
+            agent_name=None,
+            locked=False,
+            set_by=None,
+            now=_NOW,
+        )
 
 
 def _agents(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
@@ -99,6 +117,7 @@ def _card(posted: list[MessageActivityInput]) -> dict[str, Any]:
     return content.model_dump(by_alias=True, exclude_none=True)
 
 
+@pytest.mark.usefixtures("routed")
 async def test_route_personal_chat_when_one_agent_then_pins_it_and_answers(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -108,6 +127,21 @@ async def test_route_personal_chat_when_one_agent_then_pins_it_and_answers(
     assert await _bound(db_session_factory) == "helper", "the chat is pinned to it"
 
 
+async def test_route_personal_chat_when_unrouted_then_the_chats_own_agent_answers(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No rule or narrower grant: no card, no pin, as before DM routing; a default answers."""
+    _agents(monkeypatch, "alpha", "beta")
+    answered, posted = await _route(db_session_factory)
+    assert answered and not posted, "the chat's own agent answers"
+    assert await _bound(db_session_factory) is None, "nothing pinned"
+    async with db_session_factory() as session, session.begin():
+        await set_dm_agent_name(session, tenant_id=TENANT, agent_name="beta")
+    assert (await _route(db_session_factory))[0], "the default answers"
+    assert await _bound(db_session_factory) == "beta", "and the chat is pinned to it"
+
+
+@pytest.mark.usefixtures("routed")
 async def test_route_personal_chat_when_bound_or_setup_then_answers_unrouted(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -123,6 +157,7 @@ async def test_route_personal_chat_when_bound_or_setup_then_answers_unrouted(
     assert (await _route(db_session_factory, setup))[0], "a setup chat is not routed"
 
 
+@pytest.mark.usefixtures("routed")
 async def test_route_personal_chat_when_several_agents_then_holds_under_a_button_each(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -219,6 +254,7 @@ async def _held(
     return routing, burst, marks
 
 
+@pytest.mark.usefixtures("routed")
 @pytest.mark.parametrize("here", [True, False], ids=["this process", "another process"])
 async def test_dm_pick_when_allowed_then_pins_and_answers_every_held_message(
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -246,6 +282,7 @@ async def test_dm_pick_when_allowed_then_pins_and_answers_every_held_message(
     assert "You chose beta." in str(reply.value), "the card says what was chosen"
 
 
+@pytest.mark.usefixtures("routed")
 async def test_dm_pick_when_not_made_in_time_then_told_and_a_late_click_refused(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -263,6 +300,7 @@ async def test_dm_pick_when_not_made_in_time_then_told_and_a_late_click_refused(
     assert not woken and await _bound(db_session_factory) is None, "nothing pinned"
 
 
+@pytest.mark.usefixtures("routed")
 async def test_dm_pick_when_the_process_stops_meanwhile_then_holds_nothing_unsaid(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -275,6 +313,7 @@ async def test_dm_pick_when_the_process_stops_meanwhile_then_holds_nothing_unsai
     assert (answered, len(posted)) == (False, 1), "only the card was posted"
 
 
+@pytest.mark.usefixtures("routed")
 async def test_dm_pick_when_a_lock_names_another_agent_then_refused_and_the_hold_ends(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -292,6 +331,7 @@ async def test_dm_pick_when_a_lock_names_another_agent_then_refused_and_the_hold
             locked=True,
             set_by=None,
             now=_NOW,
+            position=0,
         )
     woken: list[str] = []
     refused: list[str] = []
