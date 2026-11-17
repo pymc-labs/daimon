@@ -70,7 +70,7 @@ async def _tenant(factory: Factory, platform: str = "slack") -> tuple[uuid.UUID,
     return tenant.id, TenantSelector(tenant_id=str(tenant.id), guild_id=None)
 
 
-async def _pending(factory: Factory, tenant_id: uuid.UUID) -> uuid.UUID:
+async def _pending(factory: Factory, tenant_id: uuid.UUID, message_id: str = "m1") -> uuid.UUID:
     """A pending Review request on the tenant's `support` menu, as it stands."""
     async with factory.begin() as session:
         menu = await plans.get_catalog(session, tenant_id=tenant_id, key="support")
@@ -83,7 +83,7 @@ async def _pending(factory: Factory, tenant_id: uuid.UUID) -> uuid.UUID:
             platform="slack",
             platform_user_id="U1",
             channel_id="C1",
-            message_id="m1",
+            message_id=message_id,
             ma_session_id=None,
             place=SupportPlace(channel_id="C1", agent_id=None),
             choice=RequestChoice.of(review),
@@ -231,6 +231,31 @@ async def test_requests_when_settled_then_the_settler_is_told_the_client_is_not(
     assert f"Declined. No credits used. {CLIENT_NOT_NOTIFIED}" in out.getvalue(), "a refund"
     with pytest.raises(StoreError, match="No such request."):
         await requests_settle(**where, request_id=str(uuid.uuid4()), charge="1")
+
+
+async def test_requests_list_when_undelivered_then_only_requests_no_channel_received(
+    db_session_factory: Factory,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, settings=_settings())
+    tenant_id, selector = await _tenant(db_session_factory)
+    console, out = _console()
+    where = {"rt": rt, "console": console, "selector": selector}
+    await catalog_set(**where, key="support", text=MENU)
+    await plan_set(**where, scope="channel", scope_id="C1", pool="5", catalog="support")
+    lost = await _pending(db_session_factory, tenant_id)
+    posted = await _pending(db_session_factory, tenant_id, message_id="m2")
+    async with db_session_factory.begin() as session:
+        await ledger.mark_delivered(session, escalation_id=posted)
+    await requests_list(**where, undelivered=True, as_json=True)
+    listed = json.loads(out.getvalue().strip().splitlines()[-1])
+    assert [(r["id"], r["delivered"]) for r in listed] == [(str(lost), False)], "only the lost"
+    await requests_list(**where)
+    cells = {
+        line.split()[1]: line.split()[-2]
+        for line in out.getvalue().splitlines()
+        if "-" in line[2:12]
+    }
+    assert (cells[str(lost)], cells[str(posted)]) == ("no", "yes"), "a delivered column"
 
 
 def test_support_help_when_invoked_then_lists_each_group() -> None:

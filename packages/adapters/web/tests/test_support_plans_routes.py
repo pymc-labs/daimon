@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from daimon.core.platform_names import ChannelSighting
+from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores.platform_names import upsert_channel_names
+from daimon.core.support_plans import RequestChoice, SupportPlace
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .chat_support import shown_trail
@@ -113,6 +116,38 @@ async def test_admin_sets_a_menu_a_thread_plan_and_a_cap_then_reads_them_back(
         ("Changed support plan", "#general", "Own cap"),
         ("Changed support plan", "Workspace", "Own cap"),
     ], "each write audited, naming no person"
+
+
+async def test_page_when_a_request_reached_no_channel_then_lists_it_as_undelivered(
+    web_client: WebClientFactory, db_session_factory: Factory, tmp_path: Path
+) -> None:
+    async with _support(web_client, db_session_factory, tmp_path) as admin:
+        ids: list[uuid.UUID] = []
+        for message in ("m1", "m2"):
+            async with db_session_factory.begin() as db:
+                outcome = await ledger.submit_request(
+                    db,
+                    tenant_id=admin.ws.tenant_id,
+                    account_id=None,
+                    platform="discord",
+                    platform_user_id="1",
+                    channel_id="c1",
+                    message_id=message,
+                    ma_session_id=None,
+                    place=SupportPlace(channel_id="c1", agent_id=None),
+                    choice=RequestChoice.default("help"),
+                    default_allowance=20,
+                )
+            assert outcome.row is not None, "recorded"
+            ids.append(outcome.row.id)
+        async with db_session_factory.begin() as db:
+            await ledger.mark_delivered(db, escalation_id=ids[1])
+        page = await admin.client.get("/api/support-plans")
+
+    assert page.status_code == 200, page.text
+    assert [(r["id"], r["counted"]) for r in page.json()["undelivered"]] == [(str(ids[0]), "1")], (
+        "the request nobody received, with what it holds"
+    )
 
 
 async def test_a_stale_value_is_a_409_and_the_value_last_read_goes_through(

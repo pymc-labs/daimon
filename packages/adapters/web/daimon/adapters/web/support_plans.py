@@ -1,4 +1,4 @@
-"""`/api/support-plans`: support plans, menus and people's own caps, for admins.
+"""`/api/support-plans`: support plans, menus, own caps and undelivered requests, for admins.
 
 Every write goes through `daimon.core.support_plan_changes` under `SET_SUPPORT_PLAN`,
 the rule the CLI and MCP follow, sending the value last read: a value that moved since
@@ -20,6 +20,7 @@ from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.authz import Subject
 from daimon.core.channel_changes import ChannelActor, Expected
 from daimon.core.channel_directory import WEB_ROW_ID
+from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores import support_plans as store
 from daimon.core.stores.platform_names import get_channel_names, get_user_names
 from daimon.core.stores.support_rows import SupportAllowanceRow
@@ -59,6 +60,7 @@ _PICK_CHANNEL = "Pick a channel, not a thread."
 _PICK_AGENT = "Pick an agent from this workspace."
 _PLAN_ACTION = "Changed support plan"
 _MENU_ACTION = "Changed support menu"
+_UNDELIVERED_SHOWN = 50
 
 Window = Literal["monthly", "total", "fixed"]
 
@@ -99,6 +101,18 @@ class AgentChoiceJson(BaseModel):
     name: str
 
 
+class UndeliveredJson(BaseModel):
+    """A request no support channel received: recorded and held, seen by nobody."""
+
+    id: str
+    created_at: str
+    platform_user_id: str
+    name: str | None
+    option: str | None
+    status: str
+    counted: str
+
+
 class SupportPlansJson(BaseModel):
     platform: str
     default_credits: str
@@ -107,6 +121,8 @@ class SupportPlansJson(BaseModel):
     plans: list[PlanJson]
     catalogs: list[CatalogJson]
     agents: list[AgentChoiceJson]
+    undelivered: list[UndeliveredJson]
+    """Newest first, at most `_UNDELIVERED_SHOWN`."""
 
 
 class PlanFields(BaseModel):
@@ -226,8 +242,12 @@ def support_plans_router(runtime: WebRuntime) -> APIRouter:
             plans = await list_plan_usage(db, tenant_id=tenant_id, now=datetime.now(UTC))
             catalogs = await store.list_catalogs(db, tenant_id=tenant_id)
             defaults = tuple(await store.list_allowances(db, tenant_id=tenant_id, plan_id=None))
+            lost = await ledger.list_requests(
+                db, tenant_id=tenant_id, undelivered=True, limit=_UNDELIVERED_SHOWN
+            )
             user_ids = {a.platform_user_id for p in plans for a in p.allowances}
             user_ids.update(a.platform_user_id for a in defaults)
+            user_ids.update(r.platform_user_id for r in lost)
             known = await get_user_names(
                 db, tenant_id=tenant_id, platform=platform, user_ids=user_ids
             )
@@ -258,6 +278,18 @@ def support_plans_router(runtime: WebRuntime) -> APIRouter:
                 for c in catalogs
             ],
             agents=[AgentChoiceJson(id=k, name=v) for k, v in agents.items()],
+            undelivered=[
+                UndeliveredJson(
+                    id=str(r.id),
+                    created_at=r.created_at.isoformat(),
+                    platform_user_id=r.platform_user_id,
+                    name=people.get(r.platform_user_id),
+                    option=r.option.label if r.option else None,
+                    status=r.status,
+                    counted=format_credits(r.counted),
+                )
+                for r in lost
+            ],
         )
 
     async def channel_of(caller: WebCaller, channel_id: str) -> str:

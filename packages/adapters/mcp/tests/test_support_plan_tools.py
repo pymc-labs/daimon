@@ -243,6 +243,50 @@ async def test_catalog_set_checks_the_revision_and_removes_with_none(
     assert await _get_catalogs_impl(runtime, auth, None) == [], "no menus left"
 
 
+async def test_requests_list_when_undelivered_then_only_requests_no_channel_received(
+    committing_sessionmaker: Factory,
+) -> None:
+    tenant, account_id = await _seed(committing_sessionmaker)
+    runtime, auth = _runtime(committing_sessionmaker), _auth(tenant, account_id)
+    await _set_catalog_impl(runtime, auth, key="support", catalog=_MENU, expected_revision=None)
+    await _set_plan_impl(
+        runtime,
+        auth,
+        **{**_PLAN, "scope": "channel", "scope_id": _PARENT, "catalog": "support", "pool": "5"},
+    )
+    ids: list[uuid.UUID] = []
+    for message in ("m1", "m2"):
+        async with committing_sessionmaker.begin() as session:
+            outcome = await ledger.submit_request(
+                session,
+                tenant_id=tenant.id,
+                account_id=None,
+                platform="discord",
+                platform_user_id="1",
+                channel_id=_PARENT,
+                message_id=message,
+                ma_session_id=None,
+                place=SupportPlace(channel_id=_PARENT, agent_id=None),
+                choice=RequestChoice.of(parse_catalog(_MENU).options[0]),
+                default_allowance=20,
+            )
+        assert outcome.row is not None, "recorded"
+        ids.append(outcome.row.id)
+    async with committing_sessionmaker.begin() as session:
+        await ledger.mark_delivered(session, escalation_id=ids[1])
+    every = await _list_requests_impl(
+        runtime, auth, pending=False, scope=None, scope_id=None, limit=50
+    )
+    assert [(r.id, r.delivered) for r in every] == [
+        (str(ids[1]), True),
+        (str(ids[0]), False),
+    ], "each says whether a support channel received it"
+    lost = await _list_requests_impl(
+        runtime, auth, pending=False, scope=None, scope_id=None, limit=50, undelivered=True
+    )
+    assert [r.id for r in lost] == [str(ids[0])], "only the one nobody received"
+
+
 async def test_settle_tells_the_settler_the_client_is_not_told_and_corrects(
     committing_sessionmaker: Factory,
 ) -> None:

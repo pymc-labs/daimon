@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -40,6 +41,7 @@ from daimon.core.windows import WindowBounds
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 _GUILD = "111"
 _THREAD = "333"
@@ -225,6 +227,22 @@ async def test_pick_when_option_has_no_fields_then_confirms_its_terms_before_sen
     assert isinstance(terms, discord.ui.TextDisplay) and terms.content == "**Quick**: 0.5 credits"
     bot.support.send.assert_not_awaited()
     assert await _rows(db_session_factory) == [], "nothing recorded before Submit"
+
+
+async def test_confirm_when_the_post_fails_then_keeps_the_request_and_logs_an_error(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed(db_session_factory)
+    bot = _bot(db_session_factory)
+    lost = discord.HTTPException(SimpleNamespace(status=403, reason="Forbidden"), "lost access")
+    bot.support.send = AsyncMock(side_effect=lost)
+    with capture_logs() as logs:
+        await _confirmed(bot, "review")
+    [(_id, status, _hold, post)] = await _rows(db_session_factory)
+    assert (status, post) == ("pending", None), "recorded and held, with no post"
+    assert [e["log_level"] for e in logs if e["event"] == "support.request_undelivered"] == [
+        "error"
+    ], "the failure is an error an operator sees"
 
 
 async def test_confirm_when_option_has_no_fields_then_posts_pending_with_settle_buttons(

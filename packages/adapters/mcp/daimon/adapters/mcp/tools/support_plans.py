@@ -140,6 +140,8 @@ class SupportRequestResult:
     """What it spends: its charge once settled, its hold while pending."""
     charge: str | None
     charged_to: str
+    delivered: bool
+    """False when no support channel received it: nobody on the team has seen it."""
 
 
 @dataclass(frozen=True)
@@ -266,6 +268,7 @@ def _request_result(row: SupportEscalationRow) -> SupportRequestResult:
         counted=format_credits(row.counted),
         charge=None if row.charge is None else format_credits(row.charge),
         charged_to=row.charged_to,
+        delivered=row.delivered_at is not None,
     )
 
 
@@ -454,6 +457,7 @@ async def _list_requests_impl(
     scope: str | None,
     scope_id: str | None,
     limit: int,
+    undelivered: bool = False,
 ) -> list[SupportRequestResult]:
     _require_support_admin(auth)
     plan_id: uuid.UUID | None = None
@@ -472,6 +476,7 @@ async def _list_requests_impl(
             tenant_id=auth.tenant_id,
             status="pending" if pending else None,
             plan_id=plan_id,
+            undelivered=undelivered,
             limit=max(1, min(limit, 200)),
         )
     return [_request_result(r) for r in rows]
@@ -643,13 +648,22 @@ def register_support_plan_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         scope: Literal["workspace", "agent", "channel"] | None = None,
         scope_id: str | None = None,
         limit: int = 50,
+        undelivered: bool = False,
     ) -> list[SupportRequestResult]:
         """List support requests, newest first; pending only by default. Admin-only.
 
-        Pass ``scope`` and ``scope_id`` to list one plan's requests.
+        Pass ``scope`` and ``scope_id`` to list one plan's requests. ``undelivered``
+        keeps the requests no support channel received (``delivered`` false); pass
+        ``pending=False`` with it to include settled ones.
         """
         return await _list_requests_impl(
-            runtime, await _auth(ctx), pending=pending, scope=scope, scope_id=scope_id, limit=limit
+            runtime,
+            await _auth(ctx),
+            pending=pending,
+            scope=scope,
+            scope_id=scope_id,
+            limit=limit,
+            undelivered=undelivered,
         )
 
     @mcp.tool(tags={"admin"})

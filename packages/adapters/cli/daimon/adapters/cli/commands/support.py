@@ -560,6 +560,8 @@ class RequestListing(BaseModel):
     status: str
     counted: str
     charged_to: str
+    delivered: bool
+    """False when no support channel received it: nobody on the team has seen it."""
 
 
 def _listing(row: SupportEscalationRow) -> RequestListing:
@@ -571,6 +573,7 @@ def _listing(row: SupportEscalationRow) -> RequestListing:
         status=row.status,
         counted=format_credits(row.counted),
         charged_to=row.charged_to,
+        delivered=row.delivered_at is not None,
     )
 
 
@@ -580,6 +583,7 @@ async def requests_list(
     console: Console,
     selector: TenantSelector | None,
     pending: bool = False,
+    undelivered: bool = False,
     plan: str | None = None,
     limit: int = 50,
     as_json: bool = False,
@@ -603,6 +607,7 @@ async def requests_list(
             tenant_id=target.tenant_id,
             status="pending" if pending else None,
             plan_id=plan_id,
+            undelivered=undelivered,
             limit=limit,
         )
     listing = [_listing(r) for r in rows]
@@ -611,7 +616,7 @@ async def requests_list(
         return
     _table(
         console,
-        ("id", "created", "person", "option", "status", "credits"),
+        ("id", "created", "person", "option", "status", "credits", "delivered"),
         [
             (
                 i.id,
@@ -620,6 +625,7 @@ async def requests_list(
                 i.option,
                 i.status,
                 i.counted,
+                "yes" if i.delivered else "no",
             )
             for i in listing
         ],
@@ -856,6 +862,9 @@ def allowance_clear_command(
 def requests_list_command(
     ctx: typer.Context,
     pending: Annotated[bool, typer.Option("--pending", help="Only requests to settle.")] = False,
+    undelivered: Annotated[
+        bool, typer.Option("--undelivered", help="Only requests no support channel received.")
+    ] = False,
     plan: Annotated[
         str | None, typer.Option("--plan", help="workspace, agent:<name> or channel:<id>.")
     ] = None,
@@ -869,6 +878,7 @@ def requests_list_command(
             console=console,
             selector=ctx.obj,
             pending=pending,
+            undelivered=undelivered,
             plan=plan,
             limit=limit,
             as_json=as_json,

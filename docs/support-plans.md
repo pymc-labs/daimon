@@ -104,5 +104,6 @@ daimon support --guild 123 requests settle <request-id> 1.5
 ```
 
 Each `set` takes `--expected` with the value you last read, and refuses when it
-changed meanwhile. The `support_*` tools in [MCP tools](mcp-tools.md) do the
-same from an MCP client.
+changed meanwhile. `requests list --undelivered` shows requests the support
+channel never received, to settle or decline. The `support_*` tools in
+[MCP tools](mcp-tools.md) do the same from an MCP client.

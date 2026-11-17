@@ -130,6 +130,7 @@ from daimon.core.support_plans import (
     received_text,
     refusal_text,
 )
+from daimon.core.support_routing import log_undelivered
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -830,6 +831,8 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
             delivered=post is not None,
             error=error_name(err),
         )
+    if post is None:
+        log_undelivered(row)
     log.info(
         "support.escalation_recorded",
         escalation_id=str(row.id),

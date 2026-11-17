@@ -111,6 +111,7 @@ from daimon.core.support_plans import (
     received_text,
     refusal_text,
 )
+from daimon.core.support_routing import log_undelivered
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import discord
@@ -388,6 +389,8 @@ async def submit_answer_request(
                 support_channel_id=post.channel_id,
                 support_post_id=post.message_id,
             )
+    else:
+        log_undelivered(row)
     _log.info(
         "support.escalation_recorded",
         escalation_id=str(row.id),

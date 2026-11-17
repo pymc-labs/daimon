@@ -27,6 +27,7 @@ from daimon.core.stores.access_policy import set_access_policy
 from microsoft_teams.common.http.client import MiddlewareContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 from .conftest import (
     AAD_OBJECT_ID,
@@ -226,10 +227,14 @@ async def test_a_failed_post_keeps_the_request_undelivered(
 ) -> None:
     fake = _OpsFake(fail=True)
     fake.release.set()
-    async with _running(db_session_factory, fake) as svc:
-        card = await _form(svc, fake, make_message_activity(text="support"))
-        reply = await _send(svc, _token(card), "help")
+    with capture_logs() as logs:
+        async with _running(db_session_factory, fake) as svc:
+            card = await _form(svc, fake, make_message_activity(text="support"))
+            reply = await _send(svc, _token(card), "help")
     assert fake.posting.is_set(), "the post was tried, and failed"
+    assert [e["log_level"] for e in logs if e["event"] == "support.request_undelivered"] == [
+        "error"
+    ], "the reply says received, so the failure is an error an operator sees"
     assert support.RECEIVED.format(remaining=2) in reply, "recorded, whatever delivery does"
     [row] = await _rows(db_session_factory)
     assert row.delivered_at is None, "kept as undelivered"

@@ -849,12 +849,15 @@ async def list_requests(
     tenant_id: uuid.UUID,
     status: RequestStatus | None = None,
     plan_id: uuid.UUID | None = None,
+    undelivered: bool = False,
     limit: int = 50,
 ) -> list[SupportEscalationRow]:
-    """Newest first."""
+    """Newest first; `undelivered` keeps the requests no support channel received."""
     stmt = select(SupportEscalation).where(SupportEscalation.tenant_id == tenant_id)
     if status is not None:
         stmt = stmt.where(SupportEscalation.status == status)
+    if undelivered:
+        stmt = stmt.where(SupportEscalation.delivered_at.is_(None))
     if plan_id is not None:
         stmt = stmt.where(SupportEscalation.plan_id == plan_id)
     stmt = stmt.order_by(SupportEscalation.created_at.desc()).limit(limit)

@@ -10468,7 +10468,9 @@
       'description': '''
         List support requests, newest first; pending only by default. Admin-only.
         <blank line>
-        Pass ``scope`` and ``scope_id`` to list one plan's requests.
+        Pass ``scope`` and ``scope_id`` to list one plan's requests. ``undelivered``
+        keeps the requests no support channel received (``delivered`` false); pass
+        ``pending=False`` with it to include settled ones.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -10507,6 +10509,10 @@
               }),
             ]),
             'default': None,
+          }),
+          'undelivered': dict({
+            'default': False,
+            'type': 'boolean',
           }),
         }),
         'type': 'object',

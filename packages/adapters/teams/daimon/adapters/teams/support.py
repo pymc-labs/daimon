@@ -135,7 +135,7 @@ from daimon.core.support_plans import (
     received_text,
 )
 from daimon.core.support_plans import refusal_text as plan_refusal
-from daimon.core.support_routing import support_recipient_tiers
+from daimon.core.support_routing import log_undelivered, support_recipient_tiers
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
@@ -876,6 +876,8 @@ class SupportCommand:
                     escalation_id=str(row.id),
                     err_type=type(exc).__name__,
                 )
+        else:
+            log_undelivered(row)
         log.info("support.escalation_delivered", escalation_id=str(row.id), delivered=delivered)
 
     async def _chat_admins(self, tenant_id: uuid.UUID, asked: _Asked, body: str) -> bool:

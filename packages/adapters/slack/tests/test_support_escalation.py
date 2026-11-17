@@ -48,6 +48,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 from .conftest import shown_text
 from .harness import build_slack_runtime
@@ -470,12 +471,16 @@ async def test_protected_escalation_channel_keeps_the_row_undelivered(
     )
     runtime = _runtime(key, db_session_factory, _support())
 
-    await run_support_submission(runtime, evaluate_support_submission(_submit_payload("help")))
+    with capture_logs() as logs:
+        await run_support_submission(runtime, evaluate_support_submission(_submit_payload("help")))
 
     rows = await _rows(db_session_factory)
     assert len(rows) == 1 and rows[0]["delivered_at"] is None
     assert _posts(permalink) == []
     assert _ephemeral_texts(permalink) == [RECORDED_UNDELIVERED]
+    assert [e["log_level"] for e in logs if e["event"] == "support.request_undelivered"] == [
+        "error"
+    ], "the failure is an error an operator sees"
 
 
 async def test_escalation_workspace_without_daimon_keeps_the_row_undelivered(
