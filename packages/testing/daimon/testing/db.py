@@ -73,7 +73,7 @@ import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
 from daimon.core import platform_names
-from daimon.core._models import Base
+from daimon.core._models import SUPPORT_CATALOG_REVISION_SEQ, Base
 from daimon.core.features.snapshot import CACHE as FEATURE_CACHE
 from daimon.testing.watch_fixtures import install_poll_ports
 from sqlalchemy import event, text
@@ -395,7 +395,10 @@ def _wipe_sql(schema: str) -> str:
     deletes = " ".join(
         f'DELETE FROM "{schema}"."{table.name}";' for table in reversed(Base.metadata.sorted_tables)
     )
-    return f"DO $$ BEGIN {deletes} END $$"
+    # A rolled-back nextval() still advances a sequence; a private schema would
+    # have started every test at 1.
+    restart = f'ALTER SEQUENCE "{schema}"."{SUPPORT_CATALOG_REVISION_SEQ.name}" RESTART;'
+    return f"DO $$ BEGIN {deletes} {restart} END $$"
 
 
 def _is_lock_timeout(err: DBAPIError) -> bool:

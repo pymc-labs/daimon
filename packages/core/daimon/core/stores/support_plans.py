@@ -86,15 +86,19 @@ async def set_catalog(
     values = {
         "name": spec.name,
         "options": options,
-        "revision": SUPPORT_CATALOG_REVISION_SEQ.next_value(),
         "set_by_account_id": set_by_account_id,
     }
+    insert = pg_insert(SupportCatalog).values(
+        tenant_id=tenant_id,
+        key=key,
+        revision=SUPPORT_CATALOG_REVISION_SEQ.next_value(),
+        **values,
+    )
     stmt = (
-        pg_insert(SupportCatalog)
-        .values(tenant_id=tenant_id, key=key, **values)
-        .on_conflict_do_update(
+        insert.on_conflict_do_update(
             constraint="uq_support_catalogs_tenant_key",
-            set_={**values, "updated_at": func.now()},
+            # The number drawn for the insert, so one set takes one number.
+            set_={**values, "revision": insert.excluded.revision, "updated_at": func.now()},
         )
         .returning(SupportCatalog)
         .execution_options(populate_existing=True)
