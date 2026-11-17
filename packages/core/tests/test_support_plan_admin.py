@@ -57,7 +57,7 @@ async def _setup(db_session: AsyncSession, factory: Factory) -> tuple[uuid.UUID,
     tenant = await make_tenant(db_session, platform="slack")
     await db_session.commit()
     actor = _actor(tenant.id)
-    menu = await set_catalog(factory, actor, platform="slack", key="support", spec=MENU)
+    await set_catalog(factory, actor, platform="slack", key="support", spec=MENU)
     spec = parse_plan_spec(scope="channel", scope_id="C1", catalog="support", pool="5")
     await set_plan(factory, actor, platform="slack", spec=spec)
     await set_plan(
@@ -92,7 +92,7 @@ async def _setup(db_session: AsyncSession, factory: Factory) -> tuple[uuid.UUID,
             message_id="m1",
             ma_session_id=None,
             place=SupportPlace(channel_id="C1", agent_id=None),
-            choice=RequestChoice("review", menu.revision),
+            choice=RequestChoice.of(MENU.options[0]),
             default_allowance=20,
         )
     assert outcome.row is not None, "a pending request"

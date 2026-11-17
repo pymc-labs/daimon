@@ -23,6 +23,7 @@ from daimon.core.support_plans import (
     PriceBounds,
     QuotedPrice,
     RequestStatus,
+    SupportCatalogSpec,
     SupportPlace,
     SupportPlanError,
     balance_text,
@@ -34,10 +35,12 @@ from daimon.core.support_plans import (
     load_catalog,
     may_submit,
     option_text,
+    option_value,
     parse_amount,
     parse_catalog,
     parse_credits,
     parse_plan_spec,
+    picked_option,
     post_status_text,
     price_bounds,
     price_text,
@@ -399,6 +402,23 @@ def test_cheapest_bounds_when_steps_then_the_smallest_step() -> None:
     quick, call, *_ = spec.options
     assert cheapest_bounds(call.price) == PriceBounds(D("0.5"), D("0.5")), "smallest step"
     assert cheapest_bounds(quick.price) == price_bounds(quick.price), "others: their bounds"
+
+
+def test_picked_option_when_only_text_changed_then_kept_else_none() -> None:
+    spec = parse_catalog(CATALOG)
+    call = spec.options[1]
+    shown = option_value(call)
+    assert len(shown) <= 100, "fits a Discord select value"
+
+    def edited(**changes: object) -> SupportCatalogSpec:
+        return parse_catalog({"name": "S", "options": [call.model_dump(mode="json") | changes]})
+
+    kept = picked_option(edited(label="Phone call", description="We ring you"), shown)
+    assert kept is not None and kept.label == "Phone call", "label and description are free"
+    repriced = edited(price={"kind": "fixed", "amount": "1"})
+    assert picked_option(repriced, shown) is None, "a new price is a new pick"
+    assert picked_option(edited(fields=[]), shown) is None, "new fields are a new pick"
+    assert picked_option(spec, "call") is None, "a value without its terms never matches"
 
 
 def test_refusal_text_when_each_status_then_one_shared_line() -> None:

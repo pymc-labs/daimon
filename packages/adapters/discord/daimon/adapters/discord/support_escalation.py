@@ -103,6 +103,8 @@ from daimon.core.support_plans import (
     ended_text,
     governing_plan,
     inactive_text,
+    option_value,
+    picked_option,
     price_text,
     received_text,
     refusal_text,
@@ -117,7 +119,7 @@ _CALLBACK_FAILED = "That didn't work. Try again."
 _SUBMIT_FAILED = "That didn't work. Try again."
 MENU_TEMPLATE: Final = (
     r"spm:(?P<guild_id>[0-9]{1,20}):(?P<channel_id>[0-9]{1,20})"
-    r":(?P<message_id>[0-9]{1,20}):(?P<revision>[0-9]{1,10})"
+    r":(?P<message_id>[0-9]{1,20})"
 )
 
 
@@ -452,14 +454,12 @@ class SupportOptionModal(discord.ui.Modal, title=ASK_THE_TEAM):
         runtime: DiscordRuntime,
         origin: AnswerOrigin,
         option: SupportOption,
-        revision: int,
         sealed: bool = False,
     ) -> None:
         super().__init__()
         self._runtime = runtime
         self._origin = origin
         self._option = option
-        self._revision = revision
         terms = [f"**{option.label}**: {price_text(option.price)}"]
         if option.description:
             terms.append(option.description)
@@ -515,9 +515,8 @@ class SupportOptionModal(discord.ui.Modal, title=ASK_THE_TEAM):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
         picked = self.step_input.values if self.step_input is not None else []
-        choice = RequestChoice(
-            self._option.key,
-            self._revision,
+        choice = RequestChoice.of(
+            self._option,
             step=int(picked[0]) if picked else None,
             answers={key: _answer(item) for key, item in self.field_inputs.items()},
         )
@@ -555,10 +554,11 @@ def menu_message(origin: AnswerOrigin, view: PlanView) -> tuple[discord.Embed, d
             guild_id=origin.guild_id,
             channel_id=origin.channel_id,
             message_id=origin.message_id,
-            revision=view.revision,
             options=[
                 discord.SelectOption(
-                    label=option.label, value=option.key, description=price_text(option.price)
+                    label=option.label,
+                    value=option_value(option),
+                    description=price_text(option.price),
                 )
                 for option in options
             ],
@@ -570,7 +570,7 @@ def menu_message(origin: AnswerOrigin, view: PlanView) -> tuple[discord.Embed, d
 class SupportMenuSelect(
     discord.ui.DynamicItem[discord.ui.Select[discord.ui.View]], template=MENU_TEMPLATE
 ):
-    """The configured menu's picker; the custom id carries the revision it showed.
+    """The configured menu's picker; each option's value carries the terms it showed.
 
     Picking re-reads the plan (decision 9): a changed menu answers "Options
     changed", an unaffordable option "Not enough credits", before any form.
@@ -582,11 +582,10 @@ class SupportMenuSelect(
         guild_id: str,
         channel_id: str,
         message_id: str,
-        revision: int,
         options: Sequence[discord.SelectOption] = (),
     ) -> None:
         select: discord.ui.Select[discord.ui.View] = discord.ui.Select(
-            custom_id=f"spm:{guild_id}:{channel_id}:{message_id}:{revision}",
+            custom_id=f"spm:{guild_id}:{channel_id}:{message_id}",
             placeholder=CHOOSE_OPTION,
             # Rebuilt from a click, the options are not needed: the pick is in the payload.
             options=list(options) or [discord.SelectOption(label=CHOOSE_OPTION)],
@@ -595,7 +594,6 @@ class SupportMenuSelect(
         self.guild_id = guild_id
         self.channel_id = channel_id
         self.message_id = message_id
-        self.revision = revision
 
     @classmethod
     async def from_custom_id(  # type: ignore[override]  # discord.py's ClientT is a free TypeVar; this adapter only ever runs DaimonBot
@@ -609,7 +607,6 @@ class SupportMenuSelect(
             guild_id=match["guild_id"],
             channel_id=match["channel_id"],
             message_id=match["message_id"],
-            revision=int(match["revision"]),
         )
 
     async def callback(  # type: ignore[override]  # see from_custom_id
@@ -644,8 +641,8 @@ class SupportMenuSelect(
                 default_allowance=runtime.settings.support.credits_per_user,
             )
         values = self.item.values
-        option = view.spec.option(str(values[0])) if values else None
-        if option is None or view.revision != self.revision:
+        option = picked_option(view.spec, str(values[0])) if values else None
+        if option is None:
             await _report_failure(interaction, OPTIONS_CHANGED)
             return
         if not view.active:
@@ -660,14 +657,12 @@ class SupportMenuSelect(
             return
         if not option.fields and not isinstance(option.price, StepsPrice):
             await interaction.response.defer(ephemeral=True, thinking=True)
-            choice = RequestChoice(option.key, view.revision)
+            choice = RequestChoice.of(option)
             await submit_answer_request(interaction, runtime=runtime, origin=origin, choice=choice)
             return
         sealed = await answer_is_sealed(runtime, origin)
         await interaction.response.send_modal(
-            SupportOptionModal(
-                runtime=runtime, origin=origin, option=option, revision=view.revision, sealed=sealed
-            )
+            SupportOptionModal(runtime=runtime, origin=origin, option=option, sealed=sealed)
         )
 
 

@@ -27,6 +27,7 @@ from daimon.adapters.cli.tenant import TenantSelector
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.errors import StoreError
 from daimon.core.stores import support_escalation as ledger
+from daimon.core.stores import support_plans as plans
 from daimon.core.stores.security_audit import list_events
 from daimon.core.support_plans import CLIENT_NOT_NOTIFIED, RequestChoice, SupportPlace
 from daimon.testing.factories import make_tenant
@@ -69,8 +70,12 @@ async def _tenant(factory: Factory, platform: str = "slack") -> tuple[uuid.UUID,
     return tenant.id, TenantSelector(tenant_id=str(tenant.id), guild_id=None)
 
 
-async def _pending(factory: Factory, tenant_id: uuid.UUID, revision: int) -> uuid.UUID:
+async def _pending(factory: Factory, tenant_id: uuid.UUID) -> uuid.UUID:
+    """A pending Review request on the tenant's `support` menu, as it stands."""
     async with factory.begin() as session:
+        menu = await plans.get_catalog(session, tenant_id=tenant_id, key="support")
+        review = None if menu is None else menu.spec.option("review")
+        assert review is not None, "the menu has Review"
         outcome = await ledger.submit_request(
             session,
             tenant_id=tenant_id,
@@ -81,7 +86,7 @@ async def _pending(factory: Factory, tenant_id: uuid.UUID, revision: int) -> uui
             message_id="m1",
             ma_session_id=None,
             place=SupportPlace(channel_id="C1", agent_id=None),
-            choice=RequestChoice("review", revision),
+            choice=RequestChoice.of(review),
             default_allowance=20,
         )
     assert outcome.row is not None, "a pending request"
@@ -212,7 +217,7 @@ async def test_requests_when_settled_then_the_settler_is_told_the_client_is_not(
     where = {"rt": rt, "console": console, "selector": selector}
     await catalog_set(**where, key="support", text=MENU)
     await plan_set(**where, scope="channel", scope_id="C1", pool="5", catalog="support")
-    request_id = await _pending(db_session_factory, tenant_id, 1)
+    request_id = await _pending(db_session_factory, tenant_id)
     await requests_list(**where, pending=True, plan="channel:C1", as_json=True)
     (listed,) = json.loads(out.getvalue().strip().splitlines()[-1])
     assert (listed["status"], listed["counted"]) == ("pending", "1"), "holds its minimum"

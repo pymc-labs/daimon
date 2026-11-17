@@ -40,6 +40,13 @@ MENU = parse_catalog(
 )
 
 
+def _choice(key: str, spec: SupportCatalogSpec = MENU) -> RequestChoice:
+    """A pick of `key` as `spec` shows it."""
+    option = spec.option(key)
+    assert option is not None, f"{key} is on the menu"
+    return RequestChoice.of(option)
+
+
 async def _menu(session: AsyncSession, tenant_id: uuid.UUID) -> SupportCatalogRow:
     return await plans.set_catalog(
         session, tenant_id=tenant_id, key="support", spec=MENU, set_by_account_id=None
@@ -178,7 +185,7 @@ async def test_submit_when_pool_and_person_limits_then_the_stricter_binds(
     tenant = await make_tenant(db_session, platform="slack")
     menu = await _menu(db_session, tenant.id)
     await _plan(db_session, tenant.id, catalog=menu, pool=D("1.5"), per_person=D(1))
-    quick = RequestChoice("quick", menu.revision)
+    quick = _choice("quick")
     statuses = [
         (await _submit(db_session, tenant.id, quick, user=user, message=message)).status
         for user, message in (("U1", "m1"), ("U1", "m2"), ("U1", "m3"), ("U2", "m4"), ("U3", "m5"))
@@ -244,7 +251,7 @@ async def test_submit_when_range_option_then_holds_the_minimum_with_no_charge_ye
     tenant = await make_tenant(db_session, platform="slack")
     menu = await _menu(db_session, tenant.id)
     await _plan(db_session, tenant.id, catalog=menu, pool=D(2))
-    outcome = await _submit(db_session, tenant.id, RequestChoice("review", menu.revision))
+    outcome = await _submit(db_session, tenant.id, _choice("review"))
     assert outcome.status == "recorded" and outcome.row and outcome.view, "recorded"
     row = outcome.row
     assert (row.status, row.hold, row.charge, row.counted) == ("pending", D(1), None, D(1)), (
@@ -258,11 +265,11 @@ async def test_submit_when_menu_changed_then_stale(db_session: AsyncSession) -> 
     tenant = await make_tenant(db_session, platform="slack")
     menu = await _menu(db_session, tenant.id)
     await _plan(db_session, tenant.id, catalog=menu, pool=D(2))
-    old = await _submit(db_session, tenant.id, RequestChoice("quick", menu.revision - 1))
-    gone = await _submit(db_session, tenant.id, RequestChoice("nope", menu.revision))
+    old = await _submit(db_session, tenant.id, RequestChoice("quick", "older terms"))
+    gone = await _submit(db_session, tenant.id, RequestChoice("nope", _choice("quick").terms))
     default = await _submit(db_session, tenant.id)
     assert [old.status, gone.status, default.status] == ["stale", "stale", "stale"], (
-        "an old revision, a removed option or the default menu all read as changed"
+        "other terms, a removed option or the default menu all read as changed"
     )
 
 
@@ -272,9 +279,9 @@ async def test_submit_when_same_message_and_option_then_duplicate(
     tenant = await make_tenant(db_session, platform="slack")
     menu = await _menu(db_session, tenant.id)
     await _plan(db_session, tenant.id, catalog=menu, pool=D(5))
-    first = await _submit(db_session, tenant.id, RequestChoice("quick", menu.revision))
-    again = await _submit(db_session, tenant.id, RequestChoice("quick", menu.revision))
-    other = await _submit(db_session, tenant.id, RequestChoice("review", menu.revision))
+    first = await _submit(db_session, tenant.id, _choice("quick"))
+    again = await _submit(db_session, tenant.id, _choice("quick"))
+    other = await _submit(db_session, tenant.id, _choice("review"))
     assert again.status == "duplicate" and again.row == first.row, "the earlier row comes back"
     assert other.status == "recorded", "another option on the same message is a new request"
 
@@ -320,7 +327,7 @@ async def test_settle_when_pending_then_charges_once_within_bounds_and_balance(
     tenant = await make_tenant(db_session, platform="slack")
     menu = await _menu(db_session, tenant.id)
     await _plan(db_session, tenant.id, catalog=menu, pool=D(2))
-    row = (await _submit(db_session, tenant.id, RequestChoice("review", menu.revision))).row
+    row = (await _submit(db_session, tenant.id, _choice("review"))).row
     assert row, "recorded"
     assert (await _settle(db_session, row.id, D("0.5"))).status == "invalid", "below the min"
     over = await _settle(db_session, row.id, D(3))
@@ -340,7 +347,7 @@ async def test_settle_when_declined_then_charges_zero_and_frees_the_hold(
     tenant = await make_tenant(db_session, platform="slack")
     menu = await _menu(db_session, tenant.id)
     await _plan(db_session, tenant.id, catalog=menu, pool=D(2))
-    row = (await _submit(db_session, tenant.id, RequestChoice("custom", menu.revision))).row
+    row = (await _submit(db_session, tenant.id, _choice("custom"))).row
     assert row and row.hold == 0 and row.status == "pending", "a quote with min 0 holds 0"
     declined = await _settle(db_session, row.id, None)
     assert declined.status == "declined" and declined.row, "declined"
@@ -353,7 +360,7 @@ async def test_settle_when_correcting_then_needs_the_charge_it_was_read_at(
     tenant = await make_tenant(db_session, platform="slack")
     menu = await _menu(db_session, tenant.id)
     await _plan(db_session, tenant.id, catalog=menu, pool=D(5))
-    row = (await _submit(db_session, tenant.id, RequestChoice("review", menu.revision))).row
+    row = (await _submit(db_session, tenant.id, _choice("review"))).row
     assert row, "recorded"
     pending = await _settle(db_session, row.id, D(0), expected=D(1))
     assert pending.status == "stale", "a pending request is settled, not corrected"
@@ -370,7 +377,7 @@ async def test_settle_when_plan_was_cleared_then_a_charge_is_refused_and_a_decli
     tenant = await make_tenant(db_session, platform="slack")
     menu = await _menu(db_session, tenant.id)
     await _plan(db_session, tenant.id, catalog=menu, pool=D(1))
-    row = (await _submit(db_session, tenant.id, RequestChoice("review", menu.revision))).row
+    row = (await _submit(db_session, tenant.id, _choice("review"))).row
     assert row, "recorded"
     await plans.delete_plan(db_session, tenant_id=tenant.id, scope="workspace", scope_id="")
     orphan = await ledger.get_request(db_session, escalation_id=row.id)
@@ -391,7 +398,7 @@ async def test_settle_when_plan_was_cleared_then_a_correction_may_only_go_down(
     tenant = await make_tenant(db_session, platform="slack")
     menu = await _menu(db_session, tenant.id)
     await _plan(db_session, tenant.id, catalog=menu, pool=D(5))
-    row = (await _submit(db_session, tenant.id, RequestChoice("review", menu.revision))).row
+    row = (await _submit(db_session, tenant.id, _choice("review"))).row
     assert row, "recorded"
     assert (await _settle(db_session, row.id, D(2))).status == "settled", "charged 2"
     await plans.delete_plan(db_session, tenant_id=tenant.id, scope="workspace", scope_id="")
@@ -438,7 +445,7 @@ async def test_set_catalog_when_set_again_then_revision_rises_tenant_wide(
 async def test_set_catalog_when_deleted_and_recreated_then_an_open_menu_is_stale(
     db_session: AsyncSession,
 ) -> None:
-    """A removed menu's revision is never handed out again, so an old submit cannot pass."""
+    """A menu removed and re-added at another price never passes an old pick (ABA)."""
     tenant = await make_tenant(db_session, platform="slack")
 
     def menu(price: str) -> SupportCatalogSpec:
@@ -460,8 +467,58 @@ async def test_set_catalog_when_deleted_and_recreated_then_an_open_menu_is_stale
     await plans.delete_catalog(db_session, tenant_id=tenant.id, key="b")
     recreated = await put("c", "5")
     await _plan(db_session, tenant.id, catalog=recreated, pool=D(10))
-    assert recreated.revision not in {first.revision, shown.revision}, "a number is never reused"
-    outcome = await _submit(db_session, tenant.id, RequestChoice("x", shown.revision))
+    assert recreated.revision not in {first.revision, doomed.revision}, "a number is never reused"
+    outcome = await _submit(db_session, tenant.id, _choice("x", shown.spec))
     assert outcome.status == "stale", (
         f"accepted at {outcome.row and outcome.row.charge} after seeing price 1"
+    )
+
+
+async def test_submit_when_only_the_label_changed_then_recorded_on_the_current_terms(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack")
+    menu = await _menu(db_session, tenant.id)
+    await _plan(db_session, tenant.id, catalog=menu, pool=D(5))
+    relabelled = MENU.model_copy(
+        update={
+            "options": (MENU.options[0].model_copy(update={"label": "Fast"}), *MENU.options[1:])
+        }
+    )
+    await plans.set_catalog(
+        db_session, tenant_id=tenant.id, key="support", spec=relabelled, set_by_account_id=None
+    )
+    outcome = await _submit(db_session, tenant.id, _choice("quick"))
+    assert outcome.status == "recorded" and outcome.row, f"refused: {outcome.status}"
+    assert outcome.row.option and outcome.row.option.label == "Fast", "the label as it is now"
+
+
+async def test_submit_when_the_picked_price_or_fields_changed_then_stale(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack")
+    menu = await _menu(db_session, tenant.id)
+    await _plan(db_session, tenant.id, catalog=menu, pool=D(5))
+    quick, review, custom = MENU.options
+    field = {"key": "why", "kind": "text", "label": "Why"}
+    changed = MENU.model_copy(
+        update={
+            "options": (
+                quick.model_copy(update={"price": review.price}),
+                review,
+                SupportCatalogSpec.model_validate(
+                    {"name": "x", "options": [{**custom.model_dump(), "fields": [field]}]}
+                ).options[0],
+            )
+        }
+    )
+    await plans.set_catalog(
+        db_session, tenant_id=tenant.id, key="support", spec=changed, set_by_account_id=None
+    )
+    statuses = [
+        (await _submit(db_session, tenant.id, _choice(key), message=key)).status
+        for key in ("quick", "custom", "review")
+    ]
+    assert statuses == ["stale", "stale", "recorded"], (
+        "a new price or a new field is stale; an unchanged option still goes through"
     )

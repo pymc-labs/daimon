@@ -65,7 +65,7 @@ async def _person_with_plan_history(db_session: AsyncSession) -> tuple[uuid.UUID
         credits=D(4),
         set_by_account_id=None,
     )
-    choice = RequestChoice("review", menu.revision, answers={"note": "my private words"})
+    choice = RequestChoice.of(MENU.options[0], answers={"note": "my private words"})
     ids: dict[str, uuid.UUID] = {}
     for user, account_id in ((GONE, account.id), (STAY, None)):
         outcome = await ledger.submit_request(

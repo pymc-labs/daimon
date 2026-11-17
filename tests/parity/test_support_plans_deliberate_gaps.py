@@ -35,6 +35,7 @@ from daimon.core.support_plans import (
     MAX_PARAGRAPH_CHARS,
     Balance,
     OptionSnapshot,
+    option_value,
     parse_catalog,
 )
 from discord.ui import TextInput
@@ -83,7 +84,9 @@ def _picked(key: str) -> dict[str, Any]:
     menu = build_plan_menu(
         channel_id="C1", message_ts="1.2", thread_ts="1.0", view=_view(), sealed=False, picked=key
     )
-    pick = {OPTION_ACTION_ID: {"selected_option": {"value": key}}}
+    option = _MENU.option(key)
+    assert option is not None, f"{key} is on the menu"
+    pick = {OPTION_ACTION_ID: {"selected_option": {"value": option_value(option)}}}
     return {**menu, "state": {"values": {OPTION_BLOCK_ID: pick}}}
 
 
@@ -110,7 +113,6 @@ async def test_paragraph_field_when_built_then_every_platform_caps_at_the_core_l
         runtime=MagicMock(),
         origin=MagicMock(),
         option=_MENU.options[2],
-        revision=1,
     )
     (what,) = discord.field_inputs.values()
     assert isinstance(what, TextInput) and what.max_length == MAX_PARAGRAPH_CHARS

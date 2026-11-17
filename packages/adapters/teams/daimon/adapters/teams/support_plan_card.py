@@ -32,6 +32,7 @@ from daimon.core.support_plans import (
     TextField,
     balance_text,
     option_text,
+    option_value,
     post_status_text,
     price_bounds,
     price_text,
@@ -84,7 +85,8 @@ def menu_body(view: PlanView, *, sealed: bool, error: str | None = None) -> list
     hints = (footer(view), SEALED_NOTE_HINT if sealed else None)
     body += [subtle(text) for text in hints if text]
     choices = [
-        Choice(title=f"{o.label}: {price_text(o.price)}", value=o.key) for o in view.spec.options
+        Choice(title=f"{o.label}: {price_text(o.price)}", value=option_value(o))
+        for o in view.spec.options
     ]
     body.append(
         ChoiceSetInput(
@@ -149,7 +151,7 @@ def option_body(
     return body
 
 
-def read_choice(data: Mapping[str, object], option: SupportOption, revision: int) -> RequestChoice:
+def read_choice(data: Mapping[str, object], option: SupportOption) -> RequestChoice:
     """The choice a form sent; a missing step or a bad answer raises `SupportPlanError`.
 
     Checked here so the form comes back with the reason; `submit_request` checks again.
@@ -158,7 +160,7 @@ def read_choice(data: Mapping[str, object], option: SupportOption, revision: int
     step = int(raw) if raw.isdigit() else None
     price_bounds(option.price, step=step)
     answers = {f.key: str(data.get(field_input(f.key)) or "") for f in option.fields}
-    return RequestChoice(option.key, revision, step=step, answers=validate_answers(option, answers))
+    return RequestChoice.of(option, step=step, answers=validate_answers(option, answers))
 
 
 def status_line(row: SupportEscalationRow) -> str:

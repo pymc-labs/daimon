@@ -27,7 +27,12 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.platform_names import ChannelSighting, upsert_channel_names
 from daimon.core.stores.support_escalation import get_request
 from daimon.core.support_escalation import CUSTOM_ID_TEMPLATE as BUTTON_TEMPLATE
-from daimon.core.support_plans import CLIENT_NOT_NOTIFIED, NOT_ENOUGH_CREDITS, parse_catalog
+from daimon.core.support_plans import (
+    CLIENT_NOT_NOTIFIED,
+    NOT_ENOUGH_CREDITS,
+    option_value,
+    parse_catalog,
+)
 from daimon.core.windows import WindowBounds
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
@@ -82,8 +87,8 @@ async def _seed(
     menu: bool = True,
     per_person: Decimal | None = _TWO,
     ends_at: datetime | None = None,
-) -> int:
-    """A Discord tenant with a workspace plan; returns the menu's revision (0 without one)."""
+) -> None:
+    """A Discord tenant with a workspace plan, on MENU unless `menu` is False."""
     async with sessionmaker() as session, session.begin():
         tenant = await make_tenant(session, platform="discord", workspace_id=_GUILD)
         catalog = None
@@ -106,7 +111,6 @@ async def _seed(
             window=window,
             set_by_account_id=None,
         )
-    return 0 if catalog is None else catalog.revision
 
 
 def _bot(sessionmaker: async_sessionmaker[AsyncSession]) -> Any:
@@ -148,15 +152,20 @@ def _said(mock: AsyncMock) -> str:
     return str(embed.description)
 
 
-def _menu_select(revision: int) -> SupportMenuSelect:
-    return SupportMenuSelect(
-        guild_id=_GUILD, channel_id=_THREAD, message_id=_ANSWER, revision=revision
-    )
+def _menu_select() -> SupportMenuSelect:
+    return SupportMenuSelect(guild_id=_GUILD, channel_id=_THREAD, message_id=_ANSWER)
 
 
-async def _pick(bot: Any, key: str, revision: int, **kwargs: Any) -> Any:
-    select = _menu_select(revision)
-    select.item._values = [key]  # pyright: ignore[reportPrivateUsage]  # stands in for dispatch's _refresh_state
+def _value(key: str) -> str:
+    """The menu value MENU shows for `key`."""
+    option = MENU.option(key)
+    assert option is not None, f"{key} is on the menu"
+    return option_value(option)
+
+
+async def _pick(bot: Any, key: str, value: str | None = None, **kwargs: Any) -> Any:
+    select = _menu_select()
+    select.item._values = [value or _value(key)]  # pyright: ignore[reportPrivateUsage]  # stands in for dispatch's _refresh_state
     interaction = _interaction(bot, **kwargs)
     await select.callback(interaction)
     return interaction
@@ -173,7 +182,7 @@ async def _rows(sessionmaker: async_sessionmaker[AsyncSession]) -> list[Any]:
 async def test_button_when_plan_has_a_menu_then_shows_options_and_balance(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    revision = await _seed(db_session_factory)
+    await _seed(db_session_factory)
     bot = _bot(db_session_factory)
     interaction = _interaction(bot)
     await SupportEscalateButton(guild_id=_GUILD, channel_id=_THREAD, message_id=_ANSWER).callback(
@@ -185,18 +194,18 @@ async def test_button_when_plan_has_a_menu_then_shows_options_and_balance(
     assert "**Review**: 1-3 credits" in str(embed.description), "each option shows its price"
     assert embed.footer.text == "2 of 2 credits left", "the balance sits under the menu"
     (select,) = view.children
-    assert select.custom_id == f"spm:{_GUILD}:{_THREAD}:{_ANSWER}:{revision}", (
-        "the picker carries the revision it showed"
-    )
-    assert [o.value for o in select.item.options] == ["quick", "review", "call"]
+    assert select.custom_id == f"spm:{_GUILD}:{_THREAD}:{_ANSWER}", "the picker names the answer"
+    assert [o.value for o in select.item.options] == [
+        _value(k) for k in ("quick", "review", "call")
+    ], "each value carries its option's terms"
 
 
 async def test_pick_when_option_has_no_fields_then_posts_pending_with_settle_buttons(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    revision = await _seed(db_session_factory)
+    await _seed(db_session_factory)
     bot = _bot(db_session_factory)
-    interaction = await _pick(bot, "review", revision)
+    interaction = await _pick(bot, "review")
     interaction.response.send_modal.assert_not_awaited()
     send = bot.support.send.await_args
     body, view = send.args[0], send.kwargs["view"]
@@ -218,9 +227,9 @@ async def test_pick_when_option_has_no_fields_then_posts_pending_with_settle_but
 async def test_pick_when_option_has_steps_and_fields_then_its_form_submits_settled(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    revision = await _seed(db_session_factory)
+    await _seed(db_session_factory)
     bot = _bot(db_session_factory)
-    interaction = await _pick(bot, "call", revision)
+    interaction = await _pick(bot, "call")
     modal = interaction.response.send_modal.await_args.args[0]
     assert isinstance(modal, SupportOptionModal)
     assert len(modal.children) == 4, "terms, the step and two fields"
@@ -243,8 +252,8 @@ async def test_pick_when_option_has_steps_and_fields_then_its_form_submits_settl
 async def test_pick_when_the_menu_changed_then_options_changed(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    revision = await _seed(db_session_factory)
-    interaction = await _pick(_bot(db_session_factory), "quick", revision - 1)
+    await _seed(db_session_factory)
+    interaction = await _pick(_bot(db_session_factory), "quick", "quick:older")
     assert _said(interaction.response.send_message) == "Options changed. Open Ask a person again."
     assert await _rows(db_session_factory) == []
 
@@ -252,8 +261,8 @@ async def test_pick_when_the_menu_changed_then_options_changed(
 async def test_pick_when_balance_cannot_cover_it_then_not_enough_credits(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    revision = await _seed(db_session_factory, per_person=D("0.5"))
-    interaction = await _pick(_bot(db_session_factory), "review", revision)
+    await _seed(db_session_factory, per_person=D("0.5"))
+    interaction = await _pick(_bot(db_session_factory), "review")
     assert _said(interaction.response.send_message) == NOT_ENOUGH_CREDITS
     interaction.response.send_modal.assert_not_awaited()
 
@@ -274,9 +283,9 @@ def _cold_bot(sessionmaker: async_sessionmaker[AsyncSession]) -> Any:
 async def test_pick_when_nothing_is_cached_then_the_form_opens_without_a_discord_request(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    revision = await _seed(db_session_factory)
+    await _seed(db_session_factory)
     bot = _cold_bot(db_session_factory)
-    interaction = await _pick(bot, "call", revision)
+    interaction = await _pick(bot, "call")
     assert isinstance(interaction.response.send_modal.await_args.args[0], SupportOptionModal)
     bot.fetch_channel.assert_not_awaited()
     bot.get_guild.return_value.fetch_member.assert_not_awaited()
@@ -285,9 +294,9 @@ async def test_pick_when_nothing_is_cached_then_the_form_opens_without_a_discord
 async def test_pick_when_nothing_is_cached_then_a_poor_requester_is_refused_without_a_request(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    revision = await _seed(db_session_factory, per_person=D("0.5"))
+    await _seed(db_session_factory, per_person=D("0.5"))
     bot = _cold_bot(db_session_factory)
-    interaction = await _pick(bot, "review", revision)
+    interaction = await _pick(bot, "review")
     assert _said(interaction.response.send_message) == NOT_ENOUGH_CREDITS
     bot.get_guild.return_value.fetch_member.assert_not_awaited()
 
@@ -295,14 +304,14 @@ async def test_pick_when_nothing_is_cached_then_a_poor_requester_is_refused_with
 async def test_pick_when_the_clicker_is_a_cached_admin_then_an_unaffordable_form_opens(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    revision = await _seed(db_session_factory, per_person=D("0.1"))
+    await _seed(db_session_factory, per_person=D("0.1"))
     bot = _cold_bot(db_session_factory)
     admin = MagicMock(spec=discord.Member)
     admin.id = 7
     admin.guild_permissions = discord.Permissions(administrator=True)
     admin.guild = bot.get_guild.return_value
     bot.get_guild.return_value.get_member.return_value = admin
-    interaction = await _pick(bot, "call", revision)
+    interaction = await _pick(bot, "call")
     interaction.response.send_modal.assert_awaited_once()
 
 
@@ -391,12 +400,11 @@ async def test_default_note_when_no_plan_then_post_is_unchanged(
     assert send.kwargs == {}, "no buttons and no mention override on the default post"
 
 
-async def _pending(
-    sessionmaker: async_sessionmaker[AsyncSession], revision: int
-) -> tuple[Any, str]:
-    """A pending Review request; its settle view and the posted text."""
+async def _pending(sessionmaker: async_sessionmaker[AsyncSession]) -> tuple[Any, str]:
+    """A pending Review request on a fresh tenant; its settle view and the posted text."""
+    await _seed(sessionmaker)
     bot = _bot(sessionmaker)
-    await _pick(bot, "review", revision)
+    await _pick(bot, "review")
     send = bot.support.send.await_args
     return send.kwargs["view"], send.args[0]
 
@@ -410,7 +418,7 @@ def _on_post(bot: Any, content: str) -> Any:
 async def test_set_charge_when_in_range_then_charges_and_closes_the_post(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    view, content = await _pending(db_session_factory, await _seed(db_session_factory))
+    view, content = await _pending(db_session_factory)
     bot = _bot(db_session_factory)
     click = _on_post(bot, content)
     await view.children[0].callback(click)
@@ -433,7 +441,7 @@ async def test_set_charge_when_in_range_then_charges_and_closes_the_post(
 async def test_set_charge_when_out_of_range_then_names_the_range(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    view, content = await _pending(db_session_factory, await _seed(db_session_factory))
+    view, content = await _pending(db_session_factory)
     bot = _bot(db_session_factory)
     click = _on_post(bot, content)
     await view.children[0].callback(click)
@@ -450,7 +458,7 @@ async def test_set_charge_when_out_of_range_then_names_the_range(
 async def test_decline_when_pending_then_releases_the_hold(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    view, content = await _pending(db_session_factory, await _seed(db_session_factory))
+    view, content = await _pending(db_session_factory)
     click = _on_post(_bot(db_session_factory), content)
     await view.children[1].callback(click)
     assert _said(click.followup.send) == f"Declined. No credits used. {CLIENT_NOT_NOTIFIED}"
@@ -470,7 +478,7 @@ async def test_settle_button_when_outside_the_support_channel_then_refuses(
 
 
 def test_new_templates_when_matched_then_overlap_no_other() -> None:
-    menu = _menu_select(4).item.custom_id
+    menu = _menu_select().item.custom_id
     settle = f"sps:{uuid.uuid4().hex}:set"
     button = f"sup:{_GUILD}:{_THREAD}:{_ANSWER}"
     templates = {

@@ -56,6 +56,7 @@ from daimon.core.support_plans import (
     governing_plan,
     hold_for,
     may_submit,
+    offered_option,
     request_note,
     settle_problem,
     settles_at_submit,
@@ -727,8 +728,9 @@ async def submit_request(
 
     Locks the plan (unless `exempt`, which spends nothing), the person and the
     tenant, then re-reads everything under them, so the balance, the menu and
-    the duplicate check are atomic with the insert. "stale" means the plan or
-    the menu changed since it was shown (`OPTIONS_CHANGED`). A bad step or
+    the duplicate check are atomic with the insert. "stale" means the plan, or
+    the picked option's price or fields, changed since it was shown
+    (`OPTIONS_CHANGED`); a label-only change records the option as it is now. A bad step or
     answer raises `SupportPlanError`; adapters check them on the menu first.
     `source_allowed` is as in `record_escalation_once`.
     """
@@ -761,9 +763,9 @@ async def submit_request(
     )
     if existing is not None:
         return SubmitOutcome(status="duplicate", row=existing, view=view)
-    option = view.spec.option(choice.option_key)
+    option = offered_option(view.spec, choice.option_key, choice.terms)
     same_plan = (None if plan is None else plan.id) == (None if shown is None else shown.id)
-    if not same_plan or choice.revision != view.revision or option is None:
+    if not same_plan or option is None:
         return SubmitOutcome(status="stale", row=None, view=view)
     snapshot = snapshot_option(option, step=choice.step)
     answers = validate_answers(option, choice.answers)

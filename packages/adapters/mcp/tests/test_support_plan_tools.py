@@ -32,7 +32,12 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores import support_plans as store
 from daimon.core.stores.domain import Role, TenantRow
-from daimon.core.support_plans import CLIENT_NOT_NOTIFIED, RequestChoice, SupportPlace
+from daimon.core.support_plans import (
+    CLIENT_NOT_NOTIFIED,
+    RequestChoice,
+    SupportPlace,
+    parse_catalog,
+)
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
@@ -243,9 +248,7 @@ async def test_settle_tells_the_settler_the_client_is_not_told_and_corrects(
 ) -> None:
     tenant, account_id = await _seed(committing_sessionmaker)
     runtime, auth = _runtime(committing_sessionmaker), _auth(tenant, account_id)
-    menu = await _set_catalog_impl(
-        runtime, auth, key="support", catalog=_MENU, expected_revision=None
-    )
+    await _set_catalog_impl(runtime, auth, key="support", catalog=_MENU, expected_revision=None)
     await _set_plan_impl(
         runtime,
         auth,
@@ -262,7 +265,7 @@ async def test_settle_tells_the_settler_the_client_is_not_told_and_corrects(
             message_id="m1",
             ma_session_id=None,
             place=SupportPlace(channel_id=_PARENT, agent_id=None),
-            choice=RequestChoice("review", menu.revision),
+            choice=RequestChoice.of(parse_catalog(_MENU).options[0]),
             default_allowance=20,
         )
     assert outcome.row is not None, "a pending request"

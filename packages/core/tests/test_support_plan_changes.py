@@ -62,9 +62,7 @@ async def _tenant(db_session: AsyncSession) -> uuid.UUID:
     return tenant.id
 
 
-async def _pending(
-    factory: Factory, tenant_id: uuid.UUID, revision: int, message: str = "m1"
-) -> uuid.UUID:
+async def _pending(factory: Factory, tenant_id: uuid.UUID, message: str = "m1") -> uuid.UUID:
     async with factory.begin() as session:
         outcome = await ledger.submit_request(
             session,
@@ -76,7 +74,7 @@ async def _pending(
             message_id=message,
             ma_session_id=None,
             place=SupportPlace(channel_id="C1", agent_id=None),
-            choice=RequestChoice("review", revision),
+            choice=RequestChoice.of(MENU.options[0]),
             default_allowance=20,
         )
     assert outcome.status == "recorded" and outcome.row, "a pending request"
@@ -254,9 +252,9 @@ async def test_settle_when_admin_then_charges_and_audits_the_amount_only(
 ) -> None:
     tenant_id = await _tenant(db_session)
     actor = _actor(tenant_id)
-    menu = await set_catalog(db_session_factory, actor, platform="slack", key="support", spec=MENU)
+    await set_catalog(db_session_factory, actor, platform="slack", key="support", spec=MENU)
     await set_plan(db_session_factory, actor, platform="slack", spec=PLAN)
-    request_id = await _pending(db_session_factory, tenant_id, menu.revision)
+    request_id = await _pending(db_session_factory, tenant_id)
     done = await settle(
         db_session_factory,
         actor,
@@ -298,9 +296,9 @@ async def test_settle_from_post_when_staff_click_then_recorded_as_the_panel(
 ) -> None:
     tenant_id = await _tenant(db_session)
     actor = _actor(tenant_id)
-    menu = await set_catalog(db_session_factory, actor, platform="slack", key="support", spec=MENU)
+    await set_catalog(db_session_factory, actor, platform="slack", key="support", spec=MENU)
     await set_plan(db_session_factory, actor, platform="slack", spec=PLAN)
-    request_id = await _pending(db_session_factory, tenant_id, menu.revision)
+    request_id = await _pending(db_session_factory, tenant_id)
     declined = await settle_from_post(
         db_session_factory,
         escalation_id=request_id,
@@ -330,10 +328,10 @@ async def test_settle_from_post_when_settler_is_another_tenant_then_audit_names_
 ) -> None:
     tenant_id = await _tenant(db_session)
     actor = _actor(tenant_id)
-    menu = await set_catalog(db_session_factory, actor, platform="slack", key="support", spec=MENU)
+    await set_catalog(db_session_factory, actor, platform="slack", key="support", spec=MENU)
     await set_plan(db_session_factory, actor, platform="slack", spec=PLAN)
-    first = await _pending(db_session_factory, tenant_id, menu.revision, "m1")
-    second = await _pending(db_session_factory, tenant_id, menu.revision, "m2")
+    first = await _pending(db_session_factory, tenant_id, "m1")
+    second = await _pending(db_session_factory, tenant_id, "m2")
     home = await make_tenant(db_session, platform="slack")
     foreign = await make_platform_principal(
         db_session, platform="slack", external_id="USTAFF", tenant=home
@@ -374,9 +372,9 @@ async def test_clear_plan_when_requests_pending_then_declined_and_audited(
 ) -> None:
     tenant_id = await _tenant(db_session)
     actor = _actor(tenant_id)
-    menu = await set_catalog(db_session_factory, actor, platform="slack", key="support", spec=MENU)
+    await set_catalog(db_session_factory, actor, platform="slack", key="support", spec=MENU)
     await set_plan(db_session_factory, actor, platform="slack", spec=PLAN)
-    request_id = await _pending(db_session_factory, tenant_id, menu.revision)
+    request_id = await _pending(db_session_factory, tenant_id)
     await clear_plan(db_session_factory, actor, platform="slack", scope="channel", scope_id="C1")
     row = await ledger.get_request(db_session, escalation_id=request_id)
     assert row and (row.status, row.charge, row.plan_id) == ("declined", 0, None), (

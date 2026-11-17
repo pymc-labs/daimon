@@ -126,6 +126,7 @@ from daimon.core.support_plans import (
     cheapest_bounds,
     ended_text,
     out_of_credits_text,
+    picked_option,
     price_bounds,
     received_text,
     refusal_text,
@@ -621,8 +622,8 @@ async def _picked_menu(
             policy = await load_access_policy(session, tenant_id=origin.tenant_id)
         except AccessPolicyUnreadable:
             policy = None
-    option = view.spec.option(picked)
-    if option is None or view.catalog is None or view.revision != meta.get("revision"):
+    option = picked_option(view.spec, picked)
+    if option is None or view.catalog is None:
         return notice_modal(title=ASK_THE_TEAM, text=OPTIONS_CHANGED)
     if not view.active:
         return notice_modal(title=ASK_THE_TEAM, text=ended_text(view, now=datetime.now(UTC)))

@@ -34,6 +34,7 @@ from daimon.core.support_plans import (
     NOT_ENOUGH_CREDITS,
     OPTIONS_CHANGED,
     SETTLE_ELSEWHERE,
+    option_value,
     parse_catalog,
 )
 from daimon.core.windows import WindowBounds
@@ -106,8 +107,8 @@ async def _seed(
     menu: bool = True,
     per_person: Decimal = TWO,
     ends_at: datetime | None = None,
-) -> int:
-    """A workspace plan for the provisioned tenant; the menu's revision (0 without one)."""
+) -> None:
+    """A workspace plan for the provisioned tenant, on MENU unless `menu` is False."""
     async with factory() as session, session.begin():
         catalog = None
         if menu:
@@ -129,7 +130,13 @@ async def _seed(
             window=window,
             set_by_account_id=None,
         )
-    return 0 if catalog is None else catalog.revision
+
+
+def _value(key: str) -> str:
+    """The choice value MENU shows for `key`."""
+    option = MENU.option(key)
+    assert option is not None, f"{key} is on the menu"
+    return option_value(option)
 
 
 def _running(
@@ -183,7 +190,7 @@ def _posts(fake: TeamsApiFake, method: str = "POST") -> list[SentRequest]:
 
 async def _pending(service: TeamsHttpService, fake: TeamsApiFake) -> tuple[Any, dict[str, Any]]:
     """A pending Review request: what its sender was told and the support post's card."""
-    picked = await _click(service, _button(await _typed(service, fake)), option="review")
+    picked = await _click(service, _button(await _typed(service, fake)), option=_value("review"))
     sent = await _click(service, _button(picked["value"]))
     [post] = _posts(fake)
     assert_teams_accepts(post)
@@ -226,7 +233,7 @@ async def test_support_when_plan_has_a_menu_then_shows_options_and_balance(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
     """A typed `support` on a menu plan answers with the menu, its prices and the balance."""
-    revision = await _seed(db_session_factory)
+    await _seed(db_session_factory)
     async with _running(db_session_factory, teams_api_fake) as service:
         menu = await _typed(service, teams_api_fake)
 
@@ -235,7 +242,9 @@ async def test_support_when_plan_has_a_menu_then_shows_options_and_balance(
     titles = [c["title"] for c in choices["choices"]]
     assert titles == ["Quick: 0.5 credits", "Review: 1-3 credits", "Call: 0.5-1 credits"], titles
     assert "2 of 2 credits left" in _text(menu), "the balance sits under the menu"
-    assert _button(menu)["revision"] == revision, "Next carries the menu's revision"
+    assert [c["value"] for c in choices["choices"]] == [
+        _value(k) for k in ("quick", "review", "call")
+    ], "each value carries its option's terms"
 
 
 async def test_pick_when_option_has_steps_and_fields_then_its_form_shows_them(
@@ -245,24 +254,23 @@ async def test_pick_when_option_has_steps_and_fields_then_its_form_shows_them(
     await _seed(db_session_factory)
     async with _running(db_session_factory, teams_api_fake) as service:
         menu = await _typed(service, teams_api_fake)
-        picked = await _click(service, _button(menu), option="call")
+        picked = await _click(service, _button(menu), option=_value("call"))
 
     form = picked["value"]
     assert_card_renders(form)
     ids = [b["id"] for b in form["body"] if b["type"].startswith("Input.")]
     assert ids == ["step", "field_topic", "field_when"], f"the step and the fields: {ids}"
-    assert _button(form)["option"] == "call", "Send names the option"
+    assert _button(form)["option"] == _value("call"), "Send names the option and its terms"
 
 
 async def test_pick_when_the_menu_changed_then_options_changed(
     db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
 ) -> None:
-    """A menu from an older revision ends the form instead of sending stale terms."""
-    revision = await _seed(db_session_factory)
+    """A pick on older terms ends the form instead of sending them."""
+    await _seed(db_session_factory)
     async with _running(db_session_factory, teams_api_fake) as service:
         menu = await _typed(service, teams_api_fake)
-        stale = _button(menu) | {"revision": revision - 1}
-        picked = await _click(service, stale, option="call")
+        picked = await _click(service, _button(menu), option="call:older")
 
     shown = _text(picked["value"])
     assert OPTIONS_CHANGED in shown and "Input." not in shown, "no form to fill in"
@@ -275,7 +283,7 @@ async def test_pick_when_balance_cannot_cover_it_then_the_menu_says_why(
     await _seed(db_session_factory, per_person=D("0.5"))
     async with _running(db_session_factory, teams_api_fake) as service:
         menu = await _typed(service, teams_api_fake)
-        picked = await _click(service, _button(menu), option="review")
+        picked = await _click(service, _button(menu), option=_value("review"))
 
     assert NOT_ENOUGH_CREDITS in _text(picked["value"]), "the menu says why"
     assert _posts(teams_api_fake) == [], "nothing sent"
@@ -320,7 +328,7 @@ async def test_send_when_option_has_a_step_and_fields_then_charged_at_submit(
     await _seed(db_session_factory)
     async with _running(db_session_factory, teams_api_fake) as service:
         menu = await _typed(service, teams_api_fake)
-        form = (await _click(service, _button(menu), option="call"))["value"]
+        form = (await _click(service, _button(menu), option=_value("call")))["value"]
         sent = await _click(service, _button(form), step="1", field_topic="Billing export")
 
     assert "We will confirm" not in _text(sent["value"]), "nothing pending"
@@ -338,7 +346,7 @@ async def test_send_when_a_field_is_missing_then_the_form_comes_back(
     await _seed(db_session_factory)
     async with _running(db_session_factory, teams_api_fake) as service:
         menu = await _typed(service, teams_api_fake)
-        form = (await _click(service, _button(menu), option="call"))["value"]
+        form = (await _click(service, _button(menu), option=_value("call")))["value"]
         again = (await _click(service, _button(form), step="1"))["value"]
 
     [step] = [b for b in again["body"] if b.get("id") == "step"]
@@ -377,7 +385,9 @@ async def test_ask_a_person_when_plan_has_a_menu_then_the_dialog_continues_to_th
         opened = await post_activity(service, fetch)
         menu = opened["task"]["value"]["card"]["content"]
         [pick] = menu["actions"]
-        nexted = await post_activity(service, ask("task/submit", pick["data"] | {"option": "call"}))
+        nexted = await post_activity(
+            service, ask("task/submit", pick["data"] | {"option": _value("call")})
+        )
         form = nexted["task"]["value"]["card"]["content"]
         [send] = form["actions"]
         sent = await post_activity(

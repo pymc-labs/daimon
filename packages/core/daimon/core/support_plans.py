@@ -15,6 +15,8 @@ Prices bound the charge: `fixed` and `steps` settle at submit, `range` and
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -400,8 +402,7 @@ DEFAULT_CATALOG: Final = SupportCatalogSpec(
         ),
     ),
 )
-"""Implicit, never stored: today's one request at 1 credit. Its revision is 0."""
-DEFAULT_REVISION: Final = 0
+"""Implicit, never stored: today's one request at 1 credit."""
 
 # ---------- Pricing ----------
 
@@ -532,19 +533,64 @@ def request_note(option: SupportOption, answers: Mapping[str, str]) -> str:
     return request_summary(option, answers)
 
 
+def _normal(value: object) -> str:
+    if isinstance(value, Decimal):
+        return str(value.normalize())
+    raise TypeError(type(value).__name__)
+
+
+def option_terms(option: SupportOption) -> str:
+    """An option's price and fields, hashed: what a menu carries and a submit compares.
+
+    A label or description change keeps them. A removed menu re-added on other
+    terms does not, so a revision is never needed to tell them apart.
+    """
+    data = option.model_dump(include={"price", "fields"})
+    text = json.dumps(data, sort_keys=True, separators=(",", ":"), default=_normal)
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def option_value(option: SupportOption) -> str:
+    """A menu entry's value, `key:terms`: under Discord's 100 and Slack's 150 characters."""
+    return f"{option.key}:{option_terms(option)}"
+
+
+def offered_option(spec: SupportCatalogSpec, key: str, terms: str) -> SupportOption | None:
+    """`key`'s option if its price and fields are still `terms`, else None (`OPTIONS_CHANGED`)."""
+    option = spec.option(key)
+    return option if option is not None and option_terms(option) == terms else None
+
+
+def picked_option(spec: SupportCatalogSpec, value: str) -> SupportOption | None:
+    """The option an `option_value` names, as `offered_option` decides it."""
+    key, _, terms = value.partition(":")
+    return offered_option(spec, key, terms)
+
+
 @dataclass(frozen=True)
 class RequestChoice:
-    """What a person picked on a menu of `revision`: an option, its step and their answers."""
+    """What a person picked: an option on the `terms` they saw, its step and their answers."""
 
     option_key: str
-    revision: int
+    terms: str
     step: int | None = None
     answers: Mapping[str, str] = field(default_factory=lambda: dict[str, str]())
 
     @classmethod
+    def of(
+        cls,
+        option: SupportOption,
+        *,
+        step: int | None = None,
+        answers: Mapping[str, str] | None = None,
+    ) -> RequestChoice:
+        """A pick of `option` as shown."""
+        return cls(option.key, option_terms(option), step, dict(answers or {}))
+
+    @classmethod
     def default(cls, note: str) -> RequestChoice:
         """Today's request on the implicit default menu."""
-        return cls(DEFAULT_OPTION_KEY, DEFAULT_REVISION, answers={"note": note})
+        return cls.of(DEFAULT_CATALOG.options[0], answers={"note": note})
 
 
 # ---------- Precedence ----------
@@ -873,7 +919,6 @@ __all__ = [
     "CLIENT_NOT_NOTIFIED",
     "DEFAULT_CATALOG",
     "DEFAULT_OPTION_KEY",
-    "DEFAULT_REVISION",
     "Balance",
     "OptionSnapshot",
     "PlanSpec",

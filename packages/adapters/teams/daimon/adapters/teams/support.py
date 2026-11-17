@@ -129,7 +129,9 @@ from daimon.core.support_plans import (
     balance_text,
     cheapest_bounds,
     ended_text,
+    option_value,
     out_of_credits_text,
+    picked_option,
     price_bounds,
     received_text,
 )
@@ -381,12 +383,12 @@ def _unaffordable(view: PlanView) -> str | None:
 
 def _pick(view: PlanView, data: Mapping[str, object]) -> SupportOption | str:
     """The option a menu sent, or why not: OPTIONS_CHANGED ends the form, the rest re-ask."""
-    if view.catalog is None or str(data.get("revision")) != str(view.revision):
+    if view.catalog is None:
         return OPTIONS_CHANGED
-    key = str(data.get(OPTION_INPUT) or "")
-    if not key:
+    value = str(data.get(OPTION_INPUT) or "")
+    if not value:
         return CHOOSE_OPTION
-    option = next((o for o in view.spec.options if o.key == key), None)
+    option = picked_option(view.spec, value)
     if option is None:
         return OPTIONS_CHANGED
     if not view.affordable(cheapest_bounds(option.price)):
@@ -423,7 +425,7 @@ def menu_card(
     token: str, view: PlanView, *, sealed: bool, error: str | None = None
 ) -> AdaptiveCard:
     """A plan's menu in the chat; Next replaces it with the picked option's form."""
-    pick = button(VERB, NEXT, "pick", ask=token, revision=view.revision)
+    pick = button(VERB, NEXT, "pick", ask=token)
     return AdaptiveCard(
         body=[
             heading(TITLE),
@@ -437,13 +439,12 @@ def menu_card(
 def option_card(
     token: str,
     option: SupportOption,
-    revision: int,
     *,
     sealed: bool,
     error: str | None = None,
     values: Mapping[str, object] | None = None,
 ) -> AdaptiveCard:
-    send = button(VERB, SEND, "send", ask=token, option=option.key, revision=revision)
+    send = button(VERB, SEND, "send", ask=token, option=option_value(option))
     return AdaptiveCard(
         body=[
             heading(TITLE),
@@ -476,7 +477,7 @@ def _menu_dialog(
     message_id: str, view: PlanView, *, sealed: bool, error: str | None = None
 ) -> AdaptiveCard:
     """The menu as a dialog's first card; Next answers with the option's (`continue`)."""
-    data = {"message": message_id, "revision": view.revision, "stage": "pick"}
+    data = {"message": message_id, "stage": "pick"}
     pick = SubmitAction(title=NEXT, data=SubmitData(ASK_HUMAN_DIALOG, data))
     body = menu_body(view, sealed=sealed, error=error)
     return AdaptiveCard(body=body, actions=[pick], fallback_text=TITLE)
@@ -485,13 +486,12 @@ def _menu_dialog(
 def _option_dialog(
     message_id: str,
     option: SupportOption,
-    revision: int,
     *,
     sealed: bool,
     error: str | None = None,
     values: Mapping[str, object] | None = None,
 ) -> AdaptiveCard:
-    data = {"message": message_id, "revision": revision, "option": option.key, "stage": "send"}
+    data = {"message": message_id, "option": option_value(option), "stage": "send"}
     send = SubmitAction(title=SEND, data=SubmitData(ASK_HUMAN_DIALOG, data))
     body = [*option_body(option, error=error, values=values), *_hints(None, sealed)]
     return AdaptiveCard(body=body, actions=[send], fallback_text=TITLE)
@@ -649,13 +649,11 @@ class SupportCommand:
         if isinstance(picked, str):
             return replace_card(menu_card(token, view, sealed=sealed, error=picked))
         if not send:
-            return replace_card(option_card(token, picked, view.revision, sealed=sealed))
+            return replace_card(option_card(token, picked, sealed=sealed))
         try:
-            choice = read_choice(data, picked, view.revision)
+            choice = read_choice(data, picked)
         except SupportPlanError as err:
-            card = option_card(
-                token, picked, view.revision, sealed=sealed, error=str(err), values=data
-            )
+            card = option_card(token, picked, sealed=sealed, error=str(err), values=data)
             return replace_card(card)
         return await self._send(actor, token, asked, choice)
 
@@ -752,13 +750,11 @@ class SupportCommand:
         if isinstance(picked, str):
             return dialog(TITLE, _menu_dialog(message_id, view, sealed=sealed, error=picked))
         if not send:
-            return dialog(TITLE, _option_dialog(message_id, picked, view.revision, sealed=sealed))
+            return dialog(TITLE, _option_dialog(message_id, picked, sealed=sealed))
         try:
-            choice = read_choice(data, picked, view.revision)
+            choice = read_choice(data, picked)
         except SupportPlanError as err:
-            form = _option_dialog(
-                message_id, picked, view.revision, sealed=sealed, error=str(err), values=data
-            )
+            form = _option_dialog(message_id, picked, sealed=sealed, error=str(err), values=data)
             return dialog(TITLE, form)
         return dialog_message(await self._escalate(actor, asked, choice, not_allowed=NOT_ALLOWED))
 

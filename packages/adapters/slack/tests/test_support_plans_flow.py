@@ -51,6 +51,7 @@ from daimon.core.support_plans import (
     NOT_ENOUGH_CREDITS,
     OPTIONS_CHANGED,
     SETTLE_ELSEWHERE,
+    option_value,
     parse_catalog,
 )
 from daimon.core.windows import WindowBounds
@@ -125,8 +126,8 @@ async def _seed(
     *,
     menu: bool = True,
     per_person: Decimal = _ALLOWANCE,
-) -> tuple[str, int]:
-    """A Slack tenant with a workspace plan; its fernet key and the menu's revision."""
+) -> str:
+    """A Slack tenant with a workspace plan, on MENU unless `menu` is False; its fernet key."""
     fernet_key = Fernet.generate_key().decode()
     fernet = build_multifernet((fernet_key,))
     async with factory() as session, session.begin():
@@ -151,7 +152,7 @@ async def _seed(
             window=WindowBounds("total", None, None),
             set_by_account_id=None,
         )
-    return fernet_key, 0 if catalog is None else catalog.revision
+    return fernet_key
 
 
 def _runtime(fernet_key: str, factory: async_sessionmaker[AsyncSession], **support: Any) -> Any:
@@ -217,7 +218,16 @@ async def _menu(runtime: Any, fake: Any) -> dict[str, Any]:
     return _shown(fake)[-1]
 
 
-async def _pick(runtime: Any, fake: Any, view: dict[str, Any], key: str) -> dict[str, Any]:
+def _value(key: str) -> str:
+    """The radio value MENU shows for `key`."""
+    option = MENU.option(key)
+    assert option is not None, f"{key} is on the menu"
+    return option_value(option)
+
+
+async def _pick(
+    runtime: Any, fake: Any, view: dict[str, Any], key: str, value: str | None = None
+) -> dict[str, Any]:
     await handle_option_pick(
         runtime,
         {
@@ -225,14 +235,16 @@ async def _pick(runtime: Any, fake: Any, view: dict[str, Any], key: str) -> dict
             "team": {"id": _TEAM},
             "user": {"id": _USER, "team_id": _TEAM},
             "view": {"id": "V_TEST", "private_metadata": view["private_metadata"]},
-            "actions": [{"action_id": OPTION_ACTION_ID, "selected_option": {"value": key}}],
+            "actions": [
+                {"action_id": OPTION_ACTION_ID, "selected_option": {"value": value or _value(key)}}
+            ],
         },
     )
     return _shown(fake)[-1]
 
 
 def _picked(key: str) -> dict[str, Any]:
-    return {OPTION_ACTION_ID: {"selected_option": {"value": key}}}
+    return {OPTION_ACTION_ID: {"selected_option": {"value": _value(key)}}}
 
 
 def _send(view: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
@@ -286,45 +298,44 @@ def _charge(view: dict[str, Any], amount: str) -> dict[str, Any]:
 async def test_click_when_plan_has_a_menu_then_shows_options_and_balance(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
-    key, revision = await _seed(db_session_factory)
+    key = await _seed(db_session_factory)
     view = await _menu(_runtime(key, db_session_factory), fake)
     assert view["callback_id"] == PLAN_CALLBACK_ID
     radio = next(b for b in view["blocks"] if b.get("block_id") == OPTION_BLOCK_ID)["element"]
-    assert [o["value"] for o in radio["options"]] == ["quick", "review", "call"]
+    assert [o["value"] for o in radio["options"]] == [
+        _value(k) for k in ("quick", "review", "call")
+    ], "each value carries its option's terms"
     assert radio["options"][1]["description"]["text"] == "1-3 credits", "each option's price"
     assert "2 of 2 credits left" in json.dumps(view), "the balance sits under the menu"
-    assert json.loads(view["private_metadata"])["revision"] == revision
     assert await _rows(db_session_factory) == [], "opening the menu spends nothing"
 
 
 async def test_pick_when_option_has_steps_and_fields_then_its_form_shows_them(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
-    key, _revision = await _seed(db_session_factory)
+    key = await _seed(db_session_factory)
     runtime = _runtime(key, db_session_factory)
     view = await _pick(runtime, fake, await _menu(runtime, fake), "call")
     ids = [b.get("block_id") for b in view["blocks"] if b["type"] == "input"]
     assert ids == [OPTION_BLOCK_ID, "support_step:call", "support_field:call:topic"] + [
         "support_field:call:when"
     ], "the pick, its step and its two fields"
-    assert json.loads(view["private_metadata"])["option"] == "call"
+    assert json.loads(view["private_metadata"])["option"] == _value("call")
 
 
 async def test_pick_when_the_menu_changed_then_options_changed(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
-    key, revision = await _seed(db_session_factory)
+    key = await _seed(db_session_factory)
     runtime = _runtime(key, db_session_factory)
-    view = await _menu(runtime, fake)
-    stale = {**json.loads(view["private_metadata"]), "revision": revision - 1}
-    shown = await _pick(runtime, fake, {"private_metadata": json.dumps(stale)}, "call")
+    shown = await _pick(runtime, fake, await _menu(runtime, fake), "call", "call:older")
     assert "callback_id" not in shown and OPTIONS_CHANGED in json.dumps(shown)
 
 
 async def test_pick_when_balance_cannot_cover_it_then_send_is_refused(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
-    key, _revision = await _seed(db_session_factory, per_person=D("0.5"))
+    key = await _seed(db_session_factory, per_person=D("0.5"))
     runtime = _runtime(key, db_session_factory)
     view = await _pick(runtime, fake, await _menu(runtime, fake), "review")
     assert NOT_ENOUGH_CREDITS in json.dumps(view), "the menu says why"
@@ -339,7 +350,7 @@ async def test_pick_when_balance_cannot_cover_it_then_send_is_refused(
 async def test_send_when_option_has_no_fields_then_posts_pending_with_settle_buttons(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
-    key, _revision = await _seed(db_session_factory)
+    key = await _seed(db_session_factory)
     escalation_id, post = await _pending(_runtime(key, db_session_factory), fake)
     assert "Review: 1-3 credits\nPending: 1-3 credits\n1 of 2 credits left" in post["text"], (
         "a plan request's post names its terms, status and balance"
@@ -359,7 +370,7 @@ async def test_send_when_option_has_no_fields_then_posts_pending_with_settle_but
 async def test_decline_when_no_escalation_workspace_is_named_then_the_requests_own_workspace_settles(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
-    key, _revision = await _seed(db_session_factory)
+    key = await _seed(db_session_factory)
     runtime = _runtime(key, db_session_factory, slack_escalation_team_id=None)
     escalation_id, post = await _pending(runtime, fake)
     assert [b["action_id"] for b in post["blocks"][-1]["elements"]] == [
@@ -378,7 +389,7 @@ async def test_decline_when_no_escalation_workspace_is_named_then_the_requests_o
 async def test_settle_when_no_escalation_workspace_is_named_then_another_workspace_is_refused(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
-    key, _revision = await _seed(db_session_factory)
+    key = await _seed(db_session_factory)
     runtime = _runtime(key, db_session_factory, slack_escalation_team_id=None)
     escalation_id, post = await _pending(runtime, fake)
     async with db_session_factory() as session, session.begin():
@@ -400,7 +411,7 @@ async def test_settle_when_no_escalation_workspace_is_named_then_another_workspa
 async def test_click_when_another_option_was_asked_on_the_answer_then_the_menu_shows_again(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
-    key, _revision = await _seed(db_session_factory)
+    key = await _seed(db_session_factory)
     runtime = _runtime(key, db_session_factory)
     await _pending(runtime, fake)
     again = await _menu(runtime, fake)
@@ -411,7 +422,7 @@ async def test_click_when_another_option_was_asked_on_the_answer_then_the_menu_s
 async def test_send_when_option_has_steps_and_fields_then_charged_at_submit(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
-    key, _revision = await _seed(db_session_factory)
+    key = await _seed(db_session_factory)
     runtime = _runtime(key, db_session_factory)
     view = await _pick(runtime, fake, await _menu(runtime, fake), "call")
     values = {
@@ -434,7 +445,7 @@ async def test_default_note_when_requester_is_admin_then_uses_no_credits(
     fake: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    key, _revision = await _seed(db_session_factory, menu=False)
+    key = await _seed(db_session_factory, menu=False)
     runtime = _runtime(key, db_session_factory)
     monkeypatch.setattr(slack_support, "resolve_is_platform_admin", AsyncMock(return_value=True))
     view = await _menu(runtime, fake)
@@ -450,7 +461,7 @@ async def test_default_note_when_requester_is_admin_then_uses_no_credits(
 async def test_set_charge_when_in_range_then_charges_and_closes_the_post(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
-    key, _revision = await _seed(db_session_factory)
+    key = await _seed(db_session_factory)
     runtime = _runtime(key, db_session_factory)
     escalation_id, post = await _pending(runtime, fake)
     fake.mock.get(_HISTORY_PATTERN, payload={"ok": True, "messages": [post]}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
@@ -478,7 +489,7 @@ async def test_set_charge_when_in_range_then_charges_and_closes_the_post(
 async def test_set_charge_when_out_of_range_then_names_the_range(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
-    key, _revision = await _seed(db_session_factory)
+    key = await _seed(db_session_factory)
     runtime = _runtime(key, db_session_factory)
     escalation_id, post = await _pending(runtime, fake)
     await handle_settle_click(
@@ -506,7 +517,7 @@ async def test_set_charge_when_not_an_amount_then_the_form_says_so() -> None:
 async def test_decline_when_pending_then_releases_the_hold(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
-    key, _revision = await _seed(db_session_factory)
+    key = await _seed(db_session_factory)
     runtime = _runtime(key, db_session_factory)
     escalation_id, post = await _pending(runtime, fake)
     await handle_settle_click(
@@ -529,7 +540,7 @@ async def test_settle_click_when_outside_the_support_channel_then_refuses(
     channel: str,
     support: dict[str, str],
 ) -> None:
-    key, _revision = await _seed(db_session_factory)
+    key = await _seed(db_session_factory)
     runtime = _runtime(key, db_session_factory, **support)
     message = {"ts": _POST_TS}
     click = _settle_click(

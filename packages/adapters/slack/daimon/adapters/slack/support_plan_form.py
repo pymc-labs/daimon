@@ -3,8 +3,8 @@
 Pure: builds and reads views only. Picking an option (`dispatch_action`)
 re-renders the modal with that option's step and fields below; one Send
 submits. Block ids carry the option key, so switching options starts its
-fields empty. `private_metadata` carries routing handles and the menu
-revision only, never identity.
+fields empty. Each option's value, and `private_metadata`'s pick, carry the
+option's terms (`option_value`); `private_metadata` never carries identity.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from daimon.core.support_plans import (
     SupportOption,
     balance_text,
     credits_text,
+    option_value,
     price_text,
 )
 
@@ -131,7 +132,7 @@ def build_plan_menu(
     so the menu says why and a Send on it is refused the same way.
     """
     options = view.spec.options
-    choices = [_radio(o.label, o.key, price_text(o.price)) for o in options]
+    choices = [_radio(o.label, option_value(o), price_text(o.price)) for o in options]
     option = view.spec.option(picked) if picked else None
     radio: dict[str, Any] = {
         "type": "radio_buttons",
@@ -162,12 +163,11 @@ def build_plan_menu(
         "channel_id": channel_id,
         "message_ts": message_ts,
         "thread_ts": thread_ts,
-        "revision": view.revision,
     }
     if option is not None:
-        meta["option"] = option.key
-    if unaffordable:
-        meta["unaffordable"] = unaffordable
+        meta["option"] = option_value(option)
+    if unaffordable and (refused := view.spec.option(unaffordable)) is not None:
+        meta["unaffordable"] = option_value(refused)
     return finish_modal(
         title=ASK_THE_TEAM,
         blocks=blocks,
@@ -185,7 +185,6 @@ class PlanForm:
     channel_id: str
     message_ts: str
     thread_ts: str
-    revision: int
     choice: RequestChoice | None
     errors: dict[str, str] | None
 
@@ -211,12 +210,10 @@ def read_plan_form(view: dict[str, Any]) -> PlanForm:
     meta = form_meta(view)
     values = _dict(_dict(view.get("state")).get("values"))
     message_ts = str(meta.get("message_ts") or "")
-    revision = meta.get("revision")
     form = PlanForm(
         channel_id=str(meta.get("channel_id") or ""),
         message_ts=message_ts,
         thread_ts=str(meta.get("thread_ts") or "") or message_ts,
-        revision=revision if isinstance(revision, int) else -1,
         choice=None,
         errors=None,
     )
@@ -226,9 +223,10 @@ def read_plan_form(view: dict[str, Any]) -> PlanForm:
         return dataclasses.replace(form, errors={OPTION_BLOCK_ID: NOT_ENOUGH_CREDITS})
     if not rendered or picked != rendered:
         return dataclasses.replace(form, errors={OPTION_BLOCK_ID: FORM_LOADING})
-    step_raw = _selected(_dict(_dict(values.get(_step_block(rendered))).get(_STEP_ACTION_ID)))
+    key, _, terms = rendered.partition(":")
+    step_raw = _selected(_dict(_dict(values.get(_step_block(key))).get(_STEP_ACTION_ID)))
     answers: dict[str, str] = {}
-    prefix = _field_prefix(rendered)
+    prefix = _field_prefix(key)
     for block_id, block in values.items():
         if not block_id.startswith(prefix):
             continue
@@ -237,9 +235,8 @@ def read_plan_form(view: dict[str, Any]) -> PlanForm:
         answers[block_id.removeprefix(prefix)] = (
             str(value) if isinstance(value, str) else _selected(element)
         )
-    choice = RequestChoice(
-        rendered, form.revision, step=int(step_raw) if step_raw.isdigit() else None, answers=answers
-    )
+    step = int(step_raw) if step_raw.isdigit() else None
+    choice = RequestChoice(key, terms, step=step, answers=answers)
     return dataclasses.replace(form, choice=choice)
 
 

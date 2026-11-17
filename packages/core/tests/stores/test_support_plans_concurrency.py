@@ -32,7 +32,14 @@ MENU = parse_catalog(
 type Factory = async_sessionmaker[AsyncSession]
 
 
-async def _setup(session: AsyncSession, *, pool: Decimal) -> tuple[uuid.UUID, int]:
+def _choice(key: str) -> RequestChoice:
+    """A pick of `key` as MENU shows it."""
+    option = MENU.option(key)
+    assert option is not None, f"{key} is on the menu"
+    return RequestChoice.of(option)
+
+
+async def _setup(session: AsyncSession, *, pool: Decimal) -> uuid.UUID:
     tenant = await make_tenant(session, platform="slack", workspace_id="T_PLAN_RACE")
     menu = await plans.set_catalog(
         session, tenant_id=tenant.id, key="support", spec=MENU, set_by_account_id=None
@@ -50,7 +57,7 @@ async def _setup(session: AsyncSession, *, pool: Decimal) -> tuple[uuid.UUID, in
         set_by_account_id=None,
     )
     await session.commit()
-    return tenant.id, menu.revision
+    return tenant.id
 
 
 async def _submit(
@@ -92,8 +99,8 @@ async def test_submit_when_eight_people_race_for_a_pool_of_two_then_four_are_rec
     db_session: AsyncSession, db_committing_engine: AsyncEngine
 ) -> None:
     factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
-    tenant_id, revision = await _setup(db_session, pool=D(2))
-    quick = RequestChoice("quick", revision)
+    tenant_id = await _setup(db_session, pool=D(2))
+    quick = _choice("quick")
     results = await asyncio.gather(
         *(_submit(factory, tenant_id, quick, user=f"U{i}", message=f"m{i}") for i in range(8))
     )
@@ -107,10 +114,8 @@ async def test_settle_when_two_staff_click_at_once_then_one_wins(
     db_session: AsyncSession, db_committing_engine: AsyncEngine
 ) -> None:
     factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
-    tenant_id, revision = await _setup(db_session, pool=D(5))
-    outcome = await _submit(
-        factory, tenant_id, RequestChoice("review", revision), user="U1", message="m1"
-    )
+    tenant_id = await _setup(db_session, pool=D(5))
+    outcome = await _submit(factory, tenant_id, _choice("review"), user="U1", message="m1")
     assert outcome.row, "recorded"
     results = await asyncio.gather(
         _settle(factory, outcome.row.id, D(2)), _settle(factory, outcome.row.id, D(3))
@@ -122,8 +127,8 @@ async def test_submit_and_settle_when_concurrent_then_both_finish_without_deadlo
     db_session: AsyncSession, db_committing_engine: AsyncEngine
 ) -> None:
     factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
-    tenant_id, revision = await _setup(db_session, pool=D(3))
-    review = RequestChoice("review", revision)
+    tenant_id = await _setup(db_session, pool=D(3))
+    review = _choice("review")
     first = await _submit(factory, tenant_id, review, user="U1", message="m1")
     assert first.row, "recorded"
     submit, settle = await asyncio.wait_for(

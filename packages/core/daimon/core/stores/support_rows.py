@@ -9,7 +9,6 @@ from decimal import Decimal
 
 from daimon.core.support_plans import (
     DEFAULT_CATALOG,
-    DEFAULT_REVISION,
     Balance,
     ChargedTo,
     OptionSnapshot,
@@ -137,11 +136,6 @@ class PlanView:
     @property
     def spec(self) -> SupportCatalogSpec:
         return DEFAULT_CATALOG if self.catalog is None else self.catalog.spec
-
-    @property
-    def revision(self) -> int:
-        """What a menu carries and a submit compares; the default menu is 0."""
-        return DEFAULT_REVISION if self.catalog is None else self.catalog.revision
 
     @property
     def charged_to(self) -> ChargedTo:
