@@ -158,6 +158,32 @@ async def test_a_workspace_switch_monitors_every_agent_since_it_was_set(
     )
 
 
+async def test_back_on_at_the_workspace_starts_a_new_since(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    """Off at the workspace, then on again there: the agent row decides once more, but
+    `since` is the workspace's change, so people are told again."""
+    tenant = await make_tenant(db_session)
+    agent_row = await _switch(db_session, tenant.id, "monitor_direct_messages", agent="agt_a")
+
+    async def state() -> monitoring.MonitoringState:
+        async with db_session_factory() as session:
+            return await monitoring_state(
+                session,
+                None,
+                tenant_id=tenant.id,
+                agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agt_a"),
+                platform="discord",
+            )
+
+    assert (await state()).since == agent_row.set_at
+    await _switch(db_session, tenant.id, "monitor_direct_messages", "off")
+    assert not (await state()).on, "the workspace's off caps the agent's on"
+    back = await _switch(db_session, tenant.id, "monitor_direct_messages")
+    now = await state()
+    assert now.feature.tier == "agent" and now.since == back.set_at > agent_row.set_at, now
+
+
 async def test_a_conversation_begun_before_the_switch_is_kept_from_then_on(
     db_session: AsyncSession, db_session_factory: Sessions
 ) -> None:

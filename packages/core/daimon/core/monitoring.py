@@ -17,7 +17,7 @@ from datetime import datetime
 
 import structlog
 from daimon.core.config import Settings
-from daimon.core.features.registry import FEATURES, FeatureSpec
+from daimon.core.features.registry import FEATURES, TIERS, FeatureSpec
 from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.features.snapshot import FeaturePlace, resolve_one
 from daimon.core.ma_identity import derive_agent_uuid
@@ -165,8 +165,13 @@ def _state(
     ma_agent_id = next((row.agent_id for row in rows if row.tier == "agent"), None)
     place = FeaturePlace(tenant_id, platform, agent_id=ma_agent_id)
     feature = resolve_one(spec, settings, place, rows)
-    since = next((row.set_at for row in rows if row.tier == feature.tier), None)
-    return MonitoringState(feature, since if feature.on else None)
+    if not feature.on or feature.tier == "default":
+        return MonitoringState(feature, None)
+    # On since the newest change to a row that decides it now: the deciding row or a
+    # broader one, whose lock may just have lifted.
+    deciding = TIERS.index(feature.tier)
+    since = max((row.set_at for row in rows if TIERS.index(row.tier) <= deciding), default=None)
+    return MonitoringState(feature, since)
 
 
 async def capture_question(
