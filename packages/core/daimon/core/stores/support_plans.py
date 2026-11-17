@@ -12,7 +12,12 @@ from collections.abc import Sequence
 from decimal import Decimal
 from typing import Any, cast
 
-from daimon.core._models import SupportAllowance, SupportCatalog, SupportPlan
+from daimon.core._models import (
+    SUPPORT_CATALOG_REVISION_SEQ,
+    SupportAllowance,
+    SupportCatalog,
+    SupportPlan,
+)
 from daimon.core.stores.support_rows import SupportAllowanceRow, SupportCatalogRow, SupportPlanRow
 from daimon.core.support_plans import PlanScope, SupportCatalogSpec, SupportPlace, plan_scope_id
 from daimon.core.windows import WindowBounds
@@ -29,7 +34,6 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
 
 # ---------- Catalogs ----------
 
@@ -73,21 +77,16 @@ async def set_catalog(
 ) -> SupportCatalogRow:
     """Insert or replace the menu under a new `revision`, so open menus go stale.
 
-    Revisions count per tenant, not per menu: every set takes a number no menu
-    of the tenant had, so a plan moved to another menu turns open menus stale
-    too. Writers hold the tenant lock, which keeps the numbers distinct.
+    Every set takes the next number of one never-decreasing sequence, so no
+    revision comes back after a menu is deleted and recreated: an open menu
+    cannot pass the stale check at a new price. A plan moved to another menu
+    turns open menus stale too.
     """
     options = [o.model_dump(mode="json", exclude_none=True) for o in spec.options]
-    others = aliased(SupportCatalog)
-    revision = (
-        select(func.coalesce(func.max(others.revision), 0) + 1)
-        .where(others.tenant_id == tenant_id)
-        .scalar_subquery()
-    )
     values = {
         "name": spec.name,
         "options": options,
-        "revision": revision,
+        "revision": SUPPORT_CATALOG_REVISION_SEQ.next_value(),
         "set_by_account_id": set_by_account_id,
     }
     stmt = (

@@ -29,6 +29,7 @@ from sqlalchemy import (
     LargeBinary,
     Numeric,
     PrimaryKeyConstraint,
+    Sequence,
     SmallInteger,
     Text,
     UniqueConstraint,
@@ -2615,11 +2616,17 @@ class FileUpload(Base):
     )
 
 
+# One counter for every menu of every tenant; it never goes back, so deleting and
+# recreating a menu cannot hand out a revision an open menu already carries.
+SUPPORT_CATALOG_REVISION_SEQ = Sequence("support_catalog_revision_seq", metadata=Base.metadata)
+
+
 class SupportCatalog(Base):
     """A tenant's menu for Ask a person (`support_plans.SupportCatalogSpec`).
 
-    `revision` rises on every set: a menu carries it, and a submit against an
-    older one is refused as stale rather than charged on terms the person never saw.
+    `revision` takes the next number of a global sequence on every set: a menu
+    carries it, and a submit against an older one is refused as stale rather than
+    charged on terms the person never saw.
     """
 
     __tablename__ = "support_catalogs"
@@ -2637,7 +2644,9 @@ class SupportCatalog(Base):
     )
     key: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
-    revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=SUPPORT_CATALOG_REVISION_SEQ.next_value()
+    )
     # `SupportOption`s as JSON; the menu is `name` and these.
     options: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
     set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(

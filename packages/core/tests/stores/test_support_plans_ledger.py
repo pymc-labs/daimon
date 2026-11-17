@@ -12,6 +12,7 @@ from daimon.core.stores.support_rows import SupportCatalogRow, SupportPlanRow
 from daimon.core.support_plans import (
     PlanScope,
     RequestChoice,
+    SupportCatalogSpec,
     SupportPlace,
     parse_catalog,
 )
@@ -413,3 +414,35 @@ async def test_set_catalog_when_set_again_then_revision_rises_tenant_wide(
     again = await _menu(db_session, tenant.id)
     assert first.revision < other.revision < again.revision, "every set takes a new number"
     assert again.id == first.id and again.spec == MENU, "the same menu, updated in place"
+
+
+async def test_set_catalog_when_deleted_and_recreated_then_an_open_menu_is_stale(
+    db_session: AsyncSession,
+) -> None:
+    """A removed menu's revision is never handed out again, so an old submit cannot pass."""
+    tenant = await make_tenant(db_session, platform="slack")
+
+    def menu(price: str) -> SupportCatalogSpec:
+        option = {"key": "x", "label": "X", "price": {"kind": "fixed", "amount": price}}
+        return parse_catalog({"name": "M", "options": [option]})
+
+    async def put(key: str, price: str) -> SupportCatalogRow:
+        return await plans.set_catalog(
+            db_session, tenant_id=tenant.id, key=key, spec=menu(price), set_by_account_id=None
+        )
+
+    first = await put("a", "1")
+    doomed = await put("b", "1")
+    await _plan(db_session, tenant.id, catalog=doomed, pool=D(10))
+    shown = await ledger.resolve_plan(
+        db_session, tenant_id=tenant.id, place=PLACE, platform_user_id="U1", default_allowance=20
+    )
+    await _plan(db_session, tenant.id, catalog=first, pool=D(10))
+    await plans.delete_catalog(db_session, tenant_id=tenant.id, key="b")
+    recreated = await put("c", "5")
+    await _plan(db_session, tenant.id, catalog=recreated, pool=D(10))
+    assert recreated.revision not in {first.revision, shown.revision}, "a number is never reused"
+    outcome = await _submit(db_session, tenant.id, RequestChoice("x", shown.revision))
+    assert outcome.status == "stale", (
+        f"accepted at {outcome.row and outcome.row.charge} after seeing price 1"
+    )

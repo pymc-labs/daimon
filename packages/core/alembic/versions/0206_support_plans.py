@@ -67,12 +67,19 @@ def _audit_columns() -> list[sa.Column[uuid.UUID] | sa.Column[datetime]]:
 def upgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
     op.create_table(
+    # One counter for every menu, so a deleted and recreated menu never repeats a revision.
+    op.execute("CREATE SEQUENCE support_catalog_revision_seq")
         "support_catalogs",
         _id(),
         _tenant(),
         sa.Column("key", sa.Text(), nullable=False),
         sa.Column("name", sa.Text(), nullable=False),
-        sa.Column("revision", sa.Integer(), nullable=False, server_default=sa.text("1")),
+        sa.Column(
+            "revision",
+            sa.Integer(),
+            nullable=False,
+            server_default=sa.text("nextval('support_catalog_revision_seq')"),
+        ),
         sa.Column("options", JSONB(), nullable=False),
         *_audit_columns(),
         sa.UniqueConstraint("tenant_id", "key", name="uq_support_catalogs_tenant_key"),
@@ -225,3 +232,4 @@ def downgrade() -> None:
     op.drop_table("support_allowances")
     op.drop_table("support_plans")
     op.drop_table("support_catalogs")
+    op.execute("DROP SEQUENCE support_catalog_revision_seq")
