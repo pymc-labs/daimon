@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Admin > Support follows the order an admin sets Ask a person up.** Turn it
+  on for the workspace, choose where it shows, pick the request channel, then
+  set credit limits and menus in one list. The later steps stay open when it is
+  on but something is missing, and say what. Thumbs-down feedback has its
+  switch beside the request channel and in a channel's own settings. Adding a
+  limit for a person who already has one opens it. A menu in use says where it
+  is used. Requests no channel received open from **Not delivered**, where an
+  admin settles one with a charge within its price or declines it; the person
+  is not told.
 - **Admins manage credit limits, menus and the request channel for Ask a
   person.** A limit sets credits for the workspace, an agent or a channel, for
   everyone there, each person, or both. A request is charged at the most

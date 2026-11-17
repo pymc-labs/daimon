@@ -12,14 +12,16 @@ credits in total, and a request costs one.
 Admins set everything under **Admin** > **Support** in the web app. Every
 change is recorded in the audit log and applies to the next request.
 
-1. Turn Ask a person on where you want it, in the
-   [feature](features.md#ask-a-person) settings.
-2. Pick the channel that receives requests.
-3. Set limits for everyone, an agent, a channel or one person.
-4. Write menus of options, and pick which place offers which menu.
+1. Turn Ask a person on for the workspace.
+2. Choose where it shows, for an agent or a channel.
+3. Pick the channel that receives requests.
+4. Set credit limits for everyone, an agent, a channel or one person.
+5. Write menus of options, and pick which place offers which menu.
 
-Without step 2, requests go to the channel your deployment keeps. Without
-step 3, the default credits apply. Without step 4, a request costs one credit.
+The page's sections follow this order; the switches are also in
+[features](features.md#ask-a-person). Without step 3,
+requests go to the channel your deployment keeps. Without step 4, the default
+credits apply. Without step 5, a request costs one credit.
 
 ## Request channel
 
@@ -76,8 +78,10 @@ A request is charged to one place: the most specific one that has a limit.
 | workspace | everyone |
 | everyone | nothing; the default credits |
 
-Limits never stack. A request counts only at the place that is charged, and
-admins are never charged. A person's own limit sets one person's cap at a
+Limits never stack. A request counts only at the place that is charged. Admins
+are never charged, but like everyone they are refused outside a limit's dates.
+After a purge, a person's own count starts again; shared credits still bind.
+A person's own limit sets one person's cap at a
 place, or everywhere. It replaces the place's credits for each person for that
 person, and never adds credits to the place. A person's cap at a channel beats
 their cap everywhere.
