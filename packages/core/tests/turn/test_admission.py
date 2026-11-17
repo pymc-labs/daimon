@@ -18,18 +18,22 @@ import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsCustomSkill
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.billing import BillingConfig
+from daimon.core.capability_tools import CAPABILITY_TOOLS
 from daimon.core.channel_budget_notice import BudgetNotice, drain_budget_notices
-from daimon.core.config import McpSettings
+from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.direct_messages import start_dm
 from daimon.core.errors import DaimonError
 from daimon.core.features.registry import DEFAULT
 from daimon.core.features.service import set_workspace_feature
+from daimon.core.features.snapshot import CACHE
+from daimon.core.features.tool_gate import SESSION_KEPT_TOOLS
 from daimon.core.ma_resolver import MAResolverMissError, ResolverCache, new_resolver_cache
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
 from daimon.core.stores.accounts import set_role
-from daimon.core.stores.domain import FundingMode, Role, TenantRow
+from daimon.core.stores.domain import FeatureTarget, FundingMode, Role, TenantRow
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import set_funding_mode
@@ -52,7 +56,7 @@ from mux.testing.drivers.anthropic.ma import (
     list_response,
     skill_response,
 )
-from pydantic import SecretStr
+from pydantic import PostgresDsn, SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -1279,6 +1283,72 @@ def _admittable_router(tenant: TenantRow) -> MARouter:
         ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
         ma_environment(id="env_1", name="default", tenant_id=tenant.id),
     )
+
+
+async def test_admit_without_the_mcp_servers_setup_keeps_its_tools_until_turned_off(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A deployment where only the MCP server carries the notebook, report and cloud computer
+    settings: the worker admitting the turn leaves that setup to the MCP server and keeps the
+    tools, while an Off, locked or not, still hides them."""
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    worker = Settings.model_validate(
+        {
+            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
+            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
+        }
+    )
+    deps = replace(
+        _deps(
+            sessionmaker=db_session_factory,
+            defaults_root=tmp_path,
+            router=_admittable_router(tenant),
+        ),
+        settings=worker,
+    )
+
+    async def hidden() -> frozenset[str]:
+        CACHE.clear()
+        admission = await admit(
+            deps,
+            origin="chat",
+            tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
+            platform="discord",
+            external_user_id="user-1",
+            channel_id="chan-1",
+            now=_NOW,
+        )
+        return admission.toolset.hidden_daimon_tools
+
+    async def put(target: FeatureTarget, key: str, value: str, *, locked: bool = False) -> None:
+        await set_feature_value(
+            db_session,
+            tenant_id=tenant.id,
+            target=target,
+            key=key,
+            value=value,
+            locked=locked,
+            set_by=None,
+            surface="cli",
+        )
+        await db_session.commit()
+
+    tools = {
+        key: CAPABILITY_TOOLS[key] - SESSION_KEPT_TOOLS
+        for key in ("notebooks", "report_publish", "compute")
+    }
+    kept = await hidden()
+    for key, gated in tools.items():
+        assert gated and not gated & kept, f"{key} tools hidden: {gated & kept}"
+    await put(FeatureTarget("workspace"), "notebooks", "off")
+    await put(FeatureTarget("channel", channel_id="chan-1"), "compute", "off", locked=True)
+    off = await hidden()
+    assert tools["notebooks"] <= off, "a workspace Off hides the notebook tools"
+    assert tools["compute"] <= off, "a channel Off, locked, hides the compute tools"
+    assert not tools["report_publish"] & off, "report tools stay without an Off"
 
 
 @pytest.mark.parametrize(("read_on", "expected"), [(False, False), (True, True)])

@@ -49,6 +49,7 @@ from daimon.core.features.snapshot import (
     FeaturePlace,
     approvals_from_gate,
     env_map_values,
+    lacks_only_server_setup,
     resolve_one,
     support_setup,
     tier_values,
@@ -289,6 +290,19 @@ def backend_note(spec: FeatureSpec, backend: str | None) -> str:
     return f"{spec.name} can't be set here for {name} agents, so nothing was changed."
 
 
+def unseen_setup_allows(
+    spec: FeatureSpec,
+    value: str,
+    settings: Settings | None,
+    place: FeaturePlace,
+    support: SupportSetup | None = None,
+) -> bool:
+    """Whether a change to `value` goes through though `spec` reads as not set up here: only
+    setup the MCP server may carry is missing (`lacks_only_server_setup`), and the change turns
+    it Off or clears a tier, which still decides what a session gets. On waits for setup seen."""
+    return value in (spec.off, DEFAULT) and lacks_only_server_setup(spec, settings, place, support)
+
+
 def feature_refusal(
     key: str,
     tier: str,
@@ -308,6 +322,8 @@ def feature_refusal(
             "unknown_key",
         )
     reason = unavailable_reason(spec, settings, place, support)
+    if reason == "requires" and unseen_setup_allows(spec, value, settings, place, support):
+        reason = None
     for failed, message, code in (
         (
             value != DEFAULT and value not in spec.values,

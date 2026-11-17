@@ -30,13 +30,14 @@ from daimon.core.features.service import (
 )
 from daimon.core.features.snapshot import (
     CACHE,
+    SERVER_SETUP,
     FeaturePlace,
     FeatureSnapshot,
     place_feature,
     resolve_one,
 )
 from daimon.core.features.tool_gate import SESSION_KEPT_TOOLS
-from daimon.core.features.toolset import place_toolset
+from daimon.core.features.toolset import place_session, place_toolset
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
 from daimon.core.session_snapshot import desired_snapshot, session_mcp_servers, session_tools
 from daimon.core.stores.domain import FeatureTarget
@@ -275,15 +276,55 @@ def test_a_capability_without_setup_is_unavailable_with_a_reason() -> None:
     assert resolve_one(FEATURES["notebooks"], ready, place, []).on
 
 
-def test_a_capability_without_setup_hides_its_tools_and_only_those() -> None:
-    """Display and behaviour agree: unmet setup resolves Off and the tools are not offered."""
+@pytest.mark.parametrize("server_setup", [True, False])
+def test_capabilities_without_setup_hide_their_tools_only_where_the_setup_is_judged(
+    server_setup: bool,
+) -> None:
+    """The MCP server judges `SERVER_SETUP` and hides exactly those tools; a session's toolset
+    elsewhere leaves it to that server, so only a capability Off by default leaves."""
     place = FeaturePlace(uuid.uuid4(), "web", agent_id="agent_tools", backend="anthropic")
-    features = {key: resolve_one(spec, SETTINGS, place, []) for key, spec in FEATURES.items()}
+    features = {
+        key: resolve_one(spec, SETTINGS, place, [], server_setup=server_setup)
+        for key, spec in FEATURES.items()
+    }
     toolset = agent_toolset(FeatureSnapshot(place, 1, features), _agent())
     unset = {"notebooks", "report_publish", "media", "microsoft_365", "compute"}
-    assert toolset.off_capabilities == unset | {"long_jobs"}, "setup missing, or Off by default"
+    expected = (unset if server_setup else set()) | {"long_jobs"}
+    assert toolset.off_capabilities == expected, "setup missing where judged, or Off by default"
     for key in ("watches", "github", "routines", "lead_intake"):
         assert features[key].on, f"{key} has no setup condition its tools share"
+
+
+async def test_a_worker_without_the_mcp_servers_setup_keeps_its_tools_in_the_session(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Only the MCP server carries the notebook and report host settings: the worker's session
+    keeps their tools for the MCP server to judge, a session that server starts itself (agent
+    chat) judges its own settings, and an Off still hides them."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    CACHE.clear()
+    place = FeaturePlace(tenant.id, "web", agent_id="agent_tools")
+    toolset = await place_toolset(db_session_factory, SETTINGS, place, _agent())
+    server_set_up = {k for k, spec in FEATURES.items() if set(spec.requires) & SERVER_SETUP}
+    assert not toolset.off_capabilities & server_set_up, "the worker judged the server's setup"
+    kept = CAPABILITY_TOOLS["notebooks"] | CAPABILITY_TOOLS["report_publish"]
+    assert not kept & toolset.hidden_daimon_tools, "notebook or report tools left the session"
+    own, _ = await place_session(db_session_factory, SETTINGS, place, _agent(), server_setup=True)
+    assert kept <= own.hidden_daimon_tools, "the MCP server's own session kept unset tools"
+    await set_feature_value(
+        db_session,
+        tenant_id=tenant.id,
+        target=FeatureTarget("workspace"),
+        key="notebooks",
+        value="off",
+        set_by=None,
+        surface="web",
+    )
+    await db_session.commit()
+    CACHE.clear()
+    toolset = await place_toolset(db_session_factory, SETTINGS, place, _agent())
+    assert "notebooks" in toolset.off_capabilities, "a workspace Off still hides the tools"
 
 
 def test_long_jobs_tools_return_when_a_workspace_turns_them_on() -> None:

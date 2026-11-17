@@ -1990,6 +1990,7 @@ async def _admit_gates(
                 )
             ),
             agent_builtins=builtins_of(agent),
+            server_setup=False,
         ),
     )
     if follow_generation is not None:

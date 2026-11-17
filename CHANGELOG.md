@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Chat sessions keep notebook and report tools the MCP server is set up for.**
+  In a deployment where only the MCP server carries the notebook host, report host,
+  Gemini, cloud computer or Microsoft 365 settings, the worker running a chat turn no
+  longer drops those tools from the session. The MCP server judges that setup with
+  its own settings: without it, the tools leave every tool list it serves and a call
+  is refused as not set up yet. A capability turned Off still removes
+  its tools from the session. A settings panel on such a worker still lists the
+  feature as Not set up, but it can be turned Off, locked Off or reset to Default.
 - **Agents and threads can use GPT-6.2 Astra and GPT-6.2 Sol on OpenAI.** Pick
   `gpt-6.2-astra` or `gpt-6.2-sol` as an agent's or a thread's model; `gpt-6-luna`
   stays the default and `gpt-6-astra` stays available. GPT-6.2 Astra costs $8

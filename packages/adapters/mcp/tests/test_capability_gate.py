@@ -17,6 +17,8 @@ from daimon.adapters.mcp.middleware.capability_gate import CapabilityGateMiddlew
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.capability_tools import CAPABILITY_TOOLS
+from daimon.core.config import ComputeSettings, NotebookSettings, ReportHostSettings, Settings
+from daimon.core.features.registry import FEATURES
 from daimon.core.features.tool_gate import STOP_TOOLS, server_gate_key
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
@@ -30,6 +32,7 @@ from fastmcp.client.transports import FastMCPTransport
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import AccessToken
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .test_tool_schema_snapshot import (
@@ -37,11 +40,28 @@ from .test_tool_schema_snapshot import (
 )
 
 OFF = "is turned off here"
+UNSET = "isn't set up here yet"
 
 
-async def _app(sessionmaker: async_sessionmaker[AsyncSession]) -> FastMCP:
+def _set_up() -> Settings:
+    """Every capability's setup present, so only a feature Off refuses."""
+    return _fully_configured_settings().model_copy(
+        update={
+            "report_host": ReportHostSettings(
+                host_url=HttpUrl("http://report-host:8002"), admin_secret=SecretStr("r" * 32)
+            ),
+            "compute": ComputeSettings(
+                enabled=True, deployment_id="d", api_token=SecretStr("c" * 32), org_slug="o"
+            ),
+        }
+    )
+
+
+async def _app(
+    sessionmaker: async_sessionmaker[AsyncSession], settings: Settings | None = None
+) -> FastMCP:
     app = create_mcp_app(
-        settings=_fully_configured_settings(),
+        settings=settings or _set_up(),
         sessionmaker=sessionmaker,
         auth=StaticTokenVerifier(tokens={}),
     )
@@ -195,6 +215,25 @@ async def test_the_tool_list_for_a_chat_credential_is_left_whole(
     assert before == after, f"a chat credential's list changed: {before ^ after}"
 
 
+async def test_notebook_tools_when_the_server_lacks_a_host_leave_a_chat_credentials_list(
+    sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worker can't judge the notebook host, so the server drops the tools from a chat
+    credential's whole list too, and refuses a call as not set up rather than turned off."""
+    unset = _set_up().model_copy(update={"notebook": NotebookSettings()})
+    mcp = await _app(sessionmaker, unset)
+    tenant_id = await _tenant(sessionmaker)
+    notebooks = CAPABILITY_TOOLS["notebooks"]
+    _as(monkeypatch, tenant_id, platform="discord", chat_agent_id=str(uuid.uuid4()))
+    async with Client(mcp) as client:
+        listed = {t.name for t in await client.list_tools()}
+        message = await _error(client, "list_notebooks", {})
+    assert not listed & notebooks, f"notebook tools listed without a host: {listed & notebooks}"
+    assert "publish_report" in listed, "a tool that is set up stays listed"
+    assert f"{FEATURES['notebooks'].name} {UNSET}" in message, f"wrong refusal: {message!r}"
+    assert OFF not in message, f"a missing host is not a feature turned off: {message!r}"
+
+
 def test_server_gate_key_covers_every_gated_tool_but_the_stop_tools() -> None:
     for key, tools in {**CAPABILITY_TOOLS, "repo_memory": REPO_MEMORY_TOOLS}.items():
         for tool in tools:
@@ -261,7 +300,7 @@ async def _gate(
         McpRuntime(
             session_factory=sessionmaker,
             client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
-            settings=_fully_configured_settings(),
+            settings=_set_up(),
             deployment_default=DeploymentDefault(),
         )
     )
@@ -296,7 +335,7 @@ async def test_a_session_with_two_turns_in_one_place_reads_that_place(
     runtime = McpRuntime(
         session_factory=sessionmaker,
         client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
-        settings=_fully_configured_settings(),
+        settings=_set_up(),
         deployment_default=DeploymentDefault(),
     )
     places = await caller_places(runtime, auth, None)
