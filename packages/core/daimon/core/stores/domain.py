@@ -1981,11 +1981,11 @@ class WebMessageRow(BaseModel):
 
 
 MonitoredPlatform = Literal["discord", "slack", "teams", "web", "mcp"]
-MonitoredKind = Literal["question", "answer", "tool"]
+MonitoredKind = Literal["question", "answer", "tool", "notice"]
 
 
 class MonitoredEventRow(BaseModel):
-    """A kept question, answer or MCP tool call (`stores.monitoring`)."""
+    """A kept question, answer, MCP tool call or shown notice (`stores.monitoring`)."""
 
     model_config = ConfigDict(from_attributes=True, frozen=True)
 

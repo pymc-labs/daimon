@@ -18,6 +18,7 @@ const conversation: MonitoredConversation = {
   first_at: "2026-03-10T10:00:00Z", last_at: "2026-03-10T11:00:00Z",
 }
 const events: MonitoredEvent[] = [
+  { id: "e0", at: "2026-03-10T10:00:00Z", kind: "notice", content: "Admins can read what you say here.", tool: null, outcome: null },
   { id: "e1", at: "2026-03-10T10:00:00Z", kind: "question", content: "What did we charge Brightwave?", tool: null, outcome: null },
   { id: "e2", at: "2026-03-10T10:00:05Z", kind: "tool", content: null, tool: "hubspot_search_crm", outcome: "denied" },
   { id: "e3", at: "2026-03-10T10:00:09Z", kind: "answer", content: "Eighteen thousand dollars.", tool: null, outcome: null },
@@ -52,11 +53,13 @@ describe("Monitoring", () => {
     expect(new URL(path, "http://x").searchParams.toString()).toBe("person=p1&where=coding_tools&from=2026-03-01&to=2026-03-31")
   })
 
-  it("opens a conversation with its questions, answers and tool outcomes", async () => {
+  it("opens a conversation with its notice, questions, answers and tool outcomes", async () => {
     serve([conversation])
     view("/admin/monitoring?agent=ag1")
     await userEvent.click(await screen.findByText("Owen Brooks"))
     expect(await screen.findByText("What did we charge Brightwave?")).toBeInTheDocument()
+    expect(screen.getByText("Told about monitoring")).toBeInTheDocument()
+    expect(screen.queryByText("Admins can read what you say here.")).not.toBeInTheDocument()
     expect(screen.getByText("Eighteen thousand dollars.")).toBeInTheDocument()
     expect(screen.getByText("hubspot_search_crm")).toBeInTheDocument()
     expect(screen.getByText("Denied")).toBeInTheDocument()

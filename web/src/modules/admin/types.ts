@@ -92,11 +92,11 @@ export type MonitoredConversation = {
   first_at: string
   last_at: string
 }
-/** One kept line: a question, the answer, or a tool call with how it ended. */
+/** One kept line: a question, the answer, a tool call with how it ended, or when the person was told. */
 export type MonitoredEvent = {
   id: string
   at: string
-  kind: "question" | "answer" | "tool"
+  kind: "question" | "answer" | "tool" | "notice"
   content: string | null
   tool: string | null
   outcome: "completed" | "error" | "denied" | "cancelled" | null

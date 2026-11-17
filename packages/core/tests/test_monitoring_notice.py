@@ -27,6 +27,7 @@ from daimon.core.monitoring import (
     monitored_agents,
     monitors_any,
     must_tell,
+    record_notice,
 )
 from daimon.core.stores.domain import FeatureTarget
 from daimon.core.stores.feature_values import set_feature_value
@@ -204,11 +205,11 @@ async def test_tell_monitored_is_best_effort() -> None:
         async def on_monitoring_notice(self, notice: MonitoringNotice) -> None:
             raise RuntimeError("platform down")
 
-    await tell_monitored(cast(Any, Shows()), CHAT_NOTICE)
-    await tell_monitored(cast(Any, Fails()), CHAT_NOTICE)
-    await tell_monitored(cast(Any, object()), CHAT_NOTICE)
-    await _CollectReply(functools.partial(_append, shown)).on_monitoring_notice(MCP_NOTICE)
-    await _CollectReply().on_monitoring_notice(MCP_NOTICE)
+    assert await tell_monitored(cast(Any, Shows()), CHAT_NOTICE)
+    assert not await tell_monitored(cast(Any, Fails()), CHAT_NOTICE)
+    assert not await tell_monitored(cast(Any, object()), CHAT_NOTICE)
+    assert await tell_monitored(_CollectReply(functools.partial(_append, shown)), MCP_NOTICE)
+    assert not await tell_monitored(_CollectReply(), MCP_NOTICE)
     assert shown == [CHAT_NOTICE, MCP_NOTICE]
 
 
@@ -234,8 +235,9 @@ async def _switch(
 async def test_each_conversation_is_told_once_per_switch_on(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """The first kept question tells, later ones do not; a conversation begun before the
-    switch is told, and switching off and on again tells it again."""
+    """The first kept question tells until the notice is shown, later ones do not; a
+    conversation begun before the switch is told, and switching off and on again tells it
+    again."""
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
@@ -244,9 +246,12 @@ async def test_each_conversation_is_told_once_per_switch_on(
     await _switch(sm, tid, "monitor_direct_messages", "on")
 
     for platform, is_dm in (("discord", True), ("slack", True), ("teams", True), ("web", None)):
+        unshown = await _keep(sm, tid, aid, platform=platform, is_dm=is_dm, thread_id=platform)
         first = await _keep(sm, tid, aid, platform=platform, is_dm=is_dm, thread_id=platform)
+        assert unshown is not None and unshown.notice == CHAT_NOTICE, platform
+        assert first is not None and first.notice == CHAT_NOTICE, "an unshown notice tells again"
+        assert await record_notice(sm, first.subject, CHAT_NOTICE, turn_ref=first.turn_ref)
         again = await _keep(sm, tid, aid, platform=platform, is_dm=is_dm, thread_id=platform)
-        assert first is not None and first.notice == CHAT_NOTICE, platform
         assert again is not None and again.notice is None, platform
     begun = await _keep(sm, tid, aid, platform="slack", thread_id="before")
     assert begun is not None and begun.notice == CHAT_NOTICE
@@ -269,7 +274,7 @@ async def test_mcp_questions_carry_the_mcp_notice(
         assert not await monitors_any(session, None, tenant_id=tenant.id, platform="slack")
     await _switch(sm, tenant.id, "monitor_mcp", "on")
 
-    async def ask(turn_ref: str) -> MonitoringNotice | None:
+    async def ask(turn_ref: str, conversation: str = "session-1") -> MonitoringNotice | None:
         kept = await capture_question(
             sm,
             None,
@@ -277,15 +282,18 @@ async def test_mcp_questions_carry_the_mcp_notice(
             agent_id=_agent_uuid(tenant.id),
             platform="mcp",
             account_id=account.id,
-            conversation="session-1",
+            conversation=conversation,
             turn_ref=turn_ref,
             content="hello",
         )
         assert kept is not None
+        if kept.notice is not None:
+            assert await record_notice(sm, kept.subject, kept.notice, turn_ref=turn_ref)
         return kept.notice
 
     assert await ask("t1") == MCP_NOTICE
     assert await ask("t2") is None
+    assert await ask("t3", "session-2") is None, "over MCP the person is told once per agent"
     async with sm() as session:
         assert await monitors_any(session, None, tenant_id=tenant.id, platform="slack")
         monitored = await monitored_agents(

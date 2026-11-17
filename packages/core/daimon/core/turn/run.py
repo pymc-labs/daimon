@@ -48,7 +48,7 @@ from daimon.core.ma import replay_events
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_tool_annotations import agent_mcp_token_for, mcp_annotation_lookup
 from daimon.core.model_presets import model_choice_id
-from daimon.core.monitoring import KeptQuestion, capture_answer, capture_question
+from daimon.core.monitoring import KeptQuestion, capture_answer, capture_question, record_notice
 from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime, turn_backend
 from daimon.core.mux_compat import legacy_call
 from daimon.core.output_runtime import (
@@ -1317,8 +1317,12 @@ async def run_prepared_turn(
         request_text=request_text,
     )
     kept_question = kept.turn_ref if kept is not None else None
-    if kept is not None and kept.notice is not None:
-        await tell_monitored(lifecycle, kept.notice)
+    if (
+        kept is not None
+        and kept.notice is not None
+        and await tell_monitored(lifecycle, kept.notice)
+    ):
+        await record_notice(deps.sessionmaker, kept.subject, kept.notice, turn_ref=kept.turn_ref)
     observation.thread_id = thread_id
     observation.account_id = prepared.admission.account_id
     observation.agent_id = prepared.admission.agent.id

@@ -113,22 +113,25 @@ class TurnLifecycle(Protocol):
 Acknowledgment = Literal["accepted", "done"]
 
 
-async def tell_monitored(lifecycle: TurnLifecycle, notice: MonitoringNotice) -> None:
+async def tell_monitored(lifecycle: TurnLifecycle, notice: MonitoringNotice) -> bool:
     """Show `notice` on its own, apart from the reply (`daimon.core.monitoring.must_tell`).
+    True once it was shown.
 
-    Optional and best-effort like `acknowledge`: a missing hook does nothing, and a
-    failure is logged without failing or stalling the turn.
+    Optional and best-effort like `acknowledge`: a missing hook, or one returning False,
+    shows nothing, and a failure is logged without failing or stalling the turn.
     """
     hook = getattr(lifecycle, "on_monitoring_notice", None)
     if hook is None:
-        return
+        return False
     try:
         async with asyncio.timeout(3):
-            await cast("Callable[[MonitoringNotice], Awaitable[None]]", hook)(notice)
+            shown = await cast("Callable[[MonitoringNotice], Awaitable[bool | None]]", hook)(notice)
     except Exception as exc:
         structlog.get_logger(__name__).warning(
             "turn.monitoring_notice_failed", error_type=type(exc).__name__
         )
+        return False
+    return shown is not False
 
 
 def stop_rendering(lifecycle: TurnLifecycle) -> None:

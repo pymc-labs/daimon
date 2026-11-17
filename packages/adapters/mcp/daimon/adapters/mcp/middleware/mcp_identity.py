@@ -22,6 +22,8 @@ Tool handlers always read via `await ctx.get_state("auth")`.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import functools
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -48,7 +50,7 @@ from daimon.core.host_memory import HOST_MEMORY_TAG, HOST_MEMORY_TOOLS
 from daimon.core.host_web_fetch import HOST_WEB_FETCH_TAG
 from daimon.core.mcp_auth import HOST_BUILTINS_CLAIM
 from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
-from daimon.core.monitoring import capture_tool_call
+from daimon.core.monitoring import MCP_NOTICE, capture_tool_call, record_notice
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.operator_tokens import scope_tag
 from daimon.core.security_audit import capture_decision, record_denial
@@ -56,6 +58,7 @@ from daimon.core.session_seal import SEAL_CLAIM, parse_seal_claim
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.agent_daimon_tools import get_enabled_daimon_tools
 from daimon.core.stores.domain import McpTokenKind, Role
+from daimon.core.stores.monitoring import MonitoredSubject
 from daimon.core.stores.security_audit import SecurityAuditEntry, append_event
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn_hold import TurnHold
@@ -238,6 +241,15 @@ class IdentityMiddleware(Middleware):
                     "policy_allow",
                 }:
                     decision.reason = "tool_error"
+                elif (
+                    monitored_agent is not None
+                    and account_id is not None
+                    and tool_name in MONITORED_QUESTION_TOOLS
+                ):
+                    self._note_shown_notice(
+                        MonitoredSubject(tenant_id, monitored_agent, "mcp", account_id, None),
+                        result,
+                    )
                 return result
             except BaseException as exc:
                 if isinstance(exc, (AuthorizationError, NotFoundError)):
@@ -281,59 +293,69 @@ class IdentityMiddleware(Middleware):
                     )
                 )
                 if monitored_agent is not None and tool_name not in MONITORED_QUESTION_TOOLS:
+                    outcome = (
+                        "denied"
+                        if decision.denied
+                        else "cancelled"
+                        if decision.reason == "cancelled"
+                        else "error"
+                        if decision.reason in {"tool_error", "request_error"}
+                        else "completed"
+                    )
                     self._queue_monitoring(
-                        tenant_id=tenant_id,
-                        agent_id=monitored_agent,
-                        account_id=account_id,
-                        tool_name=tool_name,
-                        outcome=(
-                            "denied"
-                            if decision.denied
-                            else "cancelled"
-                            if decision.reason == "cancelled"
-                            else "error"
-                            if decision.reason in {"tool_error", "request_error"}
-                            else "completed"
+                        "tool",
+                        functools.partial(
+                            capture_tool_call,
+                            self._audit_sessionmaker,
+                            self._settings,
+                            tenant_id=tenant_id,
+                            agent_id=monitored_agent,
+                            account_id=account_id,
+                            tool_name=tool_name,
+                            outcome=outcome,
+                            at=started_at,
                         ),
-                        at=started_at,
                     )
 
-    def _queue_monitoring(
-        self,
-        *,
-        tenant_id: uuid.UUID,
-        agent_id: uuid.UUID,
-        account_id: uuid.UUID | None,
-        tool_name: str,
-        outcome: str,
-        at: datetime,
-    ) -> None:
-        """Keep the call for a monitored agent in the background, bounded like the audit."""
+    def _note_shown_notice(self, subject: MonitoredSubject, result: object) -> None:
+        """Note the notice an agent-chat result carries as `monitoring` (its handle and
+        turn place it), now that the person gets it."""
+        structured = getattr(result, "structured_content", None)
+        if not isinstance(structured, dict):
+            return
+        fields = cast("Mapping[str, object]", structured)
+        handle, turn = fields.get("handle"), fields.get("turn_event_id")
+        if not fields.get("monitoring") or not isinstance(handle, str):
+            return
+        self._queue_monitoring(
+            "notice",
+            functools.partial(
+                record_notice,
+                self._audit_sessionmaker,
+                dataclasses.replace(subject, conversation=handle),
+                MCP_NOTICE,
+                turn_ref=turn if isinstance(turn, str) else None,
+            ),
+        )
+
+    def _queue_monitoring(self, kind: str, write: Callable[[], Awaitable[object]]) -> None:
+        """Keep a monitored agent's row in the background, bounded like the audit."""
         if len(self._audit_tasks) >= self._audit_max_pending:
             structlog.get_logger(__name__).warning(
-                "monitoring.capture_failed", kind="tool", error_type="QueueFull"
+                "monitoring.capture_failed", kind=kind, error_type="QueueFull"
             )
             return
 
-        async def write() -> None:
+        async def bounded() -> None:
             try:
                 async with asyncio.timeout(self._audit_timeout), self._audit_slots:
-                    await capture_tool_call(
-                        self._audit_sessionmaker,
-                        self._settings,
-                        tenant_id=tenant_id,
-                        agent_id=agent_id,
-                        account_id=account_id,
-                        tool_name=tool_name,
-                        outcome=outcome,
-                        at=at,
-                    )
+                    await write()
             except TimeoutError:
                 structlog.get_logger(__name__).warning(
-                    "monitoring.capture_failed", kind="tool", error_type="TimeoutError"
+                    "monitoring.capture_failed", kind=kind, error_type="TimeoutError"
                 )
 
-        task = asyncio.create_task(write(), name="monitoring-tool-write")
+        task = asyncio.create_task(bounded(), name=f"monitoring-{kind}-write")
         self._audit_tasks.add(task)
         task.add_done_callback(self._audit_tasks.discard)
 

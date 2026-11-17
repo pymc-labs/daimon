@@ -5,7 +5,7 @@
 by name, time and outcome only. Both are keyed on the agent that answers and read when a
 question is asked, so a conversation begun earlier is kept from the switch on, never
 before it, and an answer is kept only when its question was. `must_tell` decides when the
-person is told, with the same words on every path.
+person is told, with the same words on every path, and `record_notice` notes it once shown.
 """
 
 from __future__ import annotations
@@ -71,12 +71,13 @@ class KeptQuestion:
 
     turn_ref: str
     notice: MonitoringNotice | None
+    subject: store.MonitoredSubject | None = None
 
 
 def must_tell(state: MonitoringState, told_at: datetime | None) -> bool:
-    """The one rule: tell the person when the turn is monitored and this conversation
-    was not told since monitoring was last switched on. `told_at` is the conversation's
-    newest kept question before this one: the first kept question after a switch tells."""
+    """The one rule: tell the person when the turn is monitored and they were not told
+    since monitoring was last switched on. `told_at` is their newest notice row: in the
+    conversation, or over MCP on any call to the agent (`stores.monitoring.last_notice_at`)."""
     if not state.on:
         return False
     return told_at is None or (state.since is not None and told_at < state.since)
@@ -197,8 +198,13 @@ async def capture_question(
             )
             if not state.on:
                 return None
-            told_at = await store.last_question_at(
-                session, tenant_id=tenant_id, agent_id=agent_id, conversation=conversation
+            told_at = await _told_at(
+                session,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                platform=platform,
+                account_id=account_id,
+                conversation=conversation,
             )
             subject = store.MonitoredSubject(
                 tenant_id, agent_id, platform, account_id, conversation
@@ -207,11 +213,52 @@ async def capture_question(
             if await store.record_events(session, subject, (entry,)) != 1:
                 return None
             tell = must_tell(state, told_at)
-            return KeptQuestion(turn_ref, notice_for(platform) if tell else None)
+            return KeptQuestion(turn_ref, notice_for(platform) if tell else None, subject)
     # Keeping a copy for admins never fails the person's turn; the gap is logged.
     except Exception:
         log.warning("monitoring.capture_failed", kind="question", platform=platform, exc_info=True)
         return None
+
+
+async def _told_at(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    platform: MonitoredPlatform,
+    account_id: uuid.UUID,
+    conversation: str | None,
+) -> datetime | None:
+    if platform == "mcp":
+        return await store.last_notice_at(
+            session, tenant_id=tenant_id, agent_id=agent_id, account_id=account_id
+        )
+    return await store.last_notice_at(
+        session, tenant_id=tenant_id, agent_id=agent_id, conversation=conversation
+    )
+
+
+async def record_notice(
+    sessions: async_sessionmaker[AsyncSession],
+    subject: store.MonitoredSubject | None,
+    notice: MonitoringNotice,
+    *,
+    turn_ref: str | None = None,
+) -> bool:
+    """Note that `subject`'s person was shown `notice`, once it reached them; `must_tell`
+    reads the newest. True when kept."""
+    if subject is None:
+        return False
+    try:
+        async with sessions() as session, session.begin():
+            entry = store.MonitoredEntry("notice", content=notice.text, turn_ref=turn_ref)
+            return await store.record_events(session, subject, (entry,)) == 1
+    # Unnoted, the person is simply told again next time; it never fails their turn.
+    except Exception:
+        log.warning(
+            "monitoring.capture_failed", kind="notice", platform=subject.platform, exc_info=True
+        )
+        return False
 
 
 async def monitored_notice(

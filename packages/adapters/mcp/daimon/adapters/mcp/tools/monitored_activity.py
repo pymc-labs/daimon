@@ -276,10 +276,10 @@ def register_monitored_activity_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         after: str | None = None,
     ) -> MonitoredTranscript:
         """Read one kept conversation (a ``conversation_id`` from list_monitored_activity)
-        in order: questions, answers and coding-tool calls with their outcome. Works only in a
-        direct message with the admin or the web chat; pass this active turn's
-        origin_context_id. The read is audited. Admins only. ``next_page`` goes
-        back as ``after``."""
+        in order: questions, answers, coding-tool calls with their outcome, and ``notice``
+        when the person was told. Works only in a direct message with the admin or the web
+        chat; pass this active turn's origin_context_id. The read is audited. Admins only.
+        ``next_page`` goes back as ``after``."""
         return await _transcript_impl(
             runtime,
             await _auth(ctx),

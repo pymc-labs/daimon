@@ -125,11 +125,22 @@ function ToolRow({ e }: { e: MonitoredEvent }) {
   )
 }
 
-/** A kept conversation in order, in the chat's own message components; tool calls are rows. */
+function NoticeRow({ e }: { e: MonitoredEvent }) {
+  return (
+    <div className="flex h-8 min-w-0 items-center gap-2 rounded-md border px-3 text-xs text-muted-foreground">
+      <Eye className="size-3.5 shrink-0" />
+      <span className="min-w-0 truncate">Told about monitoring</span>
+      <span className="ml-auto shrink-0 text-faint tabular">{clock(e.at)}</span>
+    </div>
+  )
+}
+
+/** A kept conversation in order, in the chat's own message components; tool calls and notices are rows. */
 function Thread({ events, agent }: { events: MonitoredEvent[]; agent: AgentRef }) {
   return (
     <div className="space-y-5">
       {events.map((e, i) => e.kind === "tool" ? <ToolRow key={e.id} e={e} />
+        : e.kind === "notice" ? <NoticeRow key={e.id} e={e} />
         : e.kind === "question" ? <UserMessage key={e.id} m={msg(e, "user")} />
           : <AssistantMessage key={e.id} m={msg(e, "assistant")} agent={agent} first={events[i - 1]?.kind !== "answer"} last={i === events.length - 1} busy={false} onAnswer={noop} />)}
     </div>

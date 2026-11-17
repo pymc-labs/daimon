@@ -101,7 +101,17 @@ def _server(
     async def start_turn(message: str) -> str:  # pyright: ignore[reportUnusedFunction]
         return message
 
+    @mcp.tool(tags={"agent-chat"})
+    async def continue_turn(handle: str) -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
+        return {"handle": handle, "turn_event_id": "t1", "monitoring": MCP_NOTICE.text}
+
     return mcp
+
+
+async def _drain(mcp: FastMCP) -> None:
+    for middleware in mcp.middleware:
+        if isinstance(middleware, IdentityMiddleware):
+            await middleware.drain_audit()
 
 
 async def _calls(
@@ -111,9 +121,7 @@ async def _calls(
     await call_mcp_tool(app, token=TOKEN, name="lookup", arguments={"secret": "ARG_SECRET"})
     await call_mcp_tool(app, token=TOKEN, name="broken", arguments={"secret": "ARG_SECRET"})
     await call_mcp_tool(app, token=TOKEN, name="start_turn", arguments={"message": "hi"})
-    for middleware in mcp.middleware:
-        if isinstance(middleware, IdentityMiddleware):
-            await middleware.drain_audit()
+    await _drain(mcp)
     async with sm() as session:
         return await store.list_events(session, tenant_id=tenant, agent_id=agent)
 
@@ -137,6 +145,24 @@ async def test_a_monitored_agents_tool_calls_keep_name_and_outcome_only(
     assert "ARG_SECRET" not in repr(rows) and "result" not in repr(rows), rows
 
 
+async def test_an_agent_chat_result_that_tells_notes_the_notice(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Noted once the result carrying it is returned, in its conversation and turn."""
+    sm = committing_sessionmaker
+    tenant, account, agent = await _seed(sm, monitored=True)
+    mcp = _server(sm, tenant, account, agent_id=str(agent))
+    app = mcp.http_app()
+    await call_mcp_tool(app, token=TOKEN, name="continue_turn", arguments={"handle": "s1"})
+    await call_mcp_tool(app, token=TOKEN, name="start_turn", arguments={"message": "hi"})
+    await _drain(mcp)
+    async with sm() as session:
+        rows = await store.list_events(session, tenant_id=tenant, agent_id=agent)
+    assert [(r.kind, r.conversation, r.turn_ref, r.account_id) for r in rows] == [
+        ("notice", "s1", "t1", account)
+    ], rows
+
+
 async def test_refused_calls_are_kept_as_denied_not_completed(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -149,9 +175,7 @@ async def test_refused_calls_are_kept_as_denied_not_completed(
 
     for name in ("refused_by_policy", "refused_by_authorization", "no_such_tool", "lookup"):
         await call_mcp_tool(app, token=TOKEN, name=name, arguments={"secret": "ARG_SECRET"})
-    for middleware in mcp.middleware:
-        if isinstance(middleware, IdentityMiddleware):
-            await middleware.drain_audit()
+    await _drain(mcp)
     async with sm() as session:
         rows = await store.list_events(session, tenant_id=tenant, agent_id=agent)
 

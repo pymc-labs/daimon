@@ -570,9 +570,11 @@ class _CollectReply(TurnLifecycle):
     def __init__(self, tell: TellMonitored | None = None) -> None:
         self._tell = tell
 
-    async def on_monitoring_notice(self, notice: MonitoringNotice) -> None:
-        if self._tell is not None:
-            await self._tell(notice)
+    async def on_monitoring_notice(self, notice: MonitoringNotice) -> bool:
+        if self._tell is None:
+            return False
+        await self._tell(notice)
+        return True
 
     async def on_render(self, state: TurnState) -> None:
         pass

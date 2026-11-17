@@ -1,6 +1,6 @@
 """monitored_events: what people ask a monitored agent and what it answers.
 
-One row per question, answer or MCP tool call, kept while the agent's
+One row per question, answer, MCP tool call or notice the person was shown, kept while the agent's
 `monitor_direct_messages` or `monitor_mcp` feature is on, deleted with the person's
 account, and pruned after `DAIMON_MONITORING__RETENTION_DAYS`. A trigger refuses a row
 for an erased account (`daimon.core._erasure_guards`). Downgrading drops every row.
@@ -79,7 +79,7 @@ def upgrade() -> None:
             name="ck_monitored_events_platform",
         ),
         sa.CheckConstraint(
-            "kind IN ('question', 'answer', 'tool')", name="ck_monitored_events_kind"
+            "kind IN ('question', 'answer', 'tool', 'notice')", name="ck_monitored_events_kind"
         ),
         sa.CheckConstraint(
             "(kind = 'tool') = (tool_name IS NOT NULL)", name="ck_monitored_events_tool_name"
@@ -92,6 +92,12 @@ def upgrade() -> None:
     )
     op.create_index("ix_monitored_events_created", "monitored_events", ["created_at"])
     op.create_index("ix_monitored_events_account", "monitored_events", ["account_id"])
+    op.create_index(
+        "ix_monitored_events_notice",
+        "monitored_events",
+        ["tenant_id", "agent_id", "created_at"],
+        postgresql_where=sa.text("kind = 'notice'"),
+    )
     op.create_index(
         "uq_monitored_events_turn",
         "monitored_events",

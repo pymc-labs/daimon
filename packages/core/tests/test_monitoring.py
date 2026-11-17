@@ -18,6 +18,7 @@ from daimon.core.monitoring import (
     capture_question,
     capture_tool_call,
     monitoring_state,
+    record_notice,
 )
 from daimon.core.monitoring_sweep import sweep_monitored_events
 from daimon.core.privacy import collect_purge_preview
@@ -67,6 +68,7 @@ async def _ask(
     platform: MonitoredPlatform = "discord",
     conversation: str = "dm-1",
     turn_ref: str = "t1",
+    told: bool = False,
 ) -> bool:
     kept = await capture_question(
         sessions,
@@ -79,6 +81,8 @@ async def _ask(
         turn_ref=turn_ref,
         content=f"question {turn_ref}",
     )
+    if told and kept is not None and kept.notice is not None:
+        assert await record_notice(sessions, kept.subject, kept.notice, turn_ref=turn_ref)
     return kept is not None
 
 
@@ -376,6 +380,26 @@ async def test_the_sweep_prunes_only_rows_past_retention(
     assert [row.content for row in rows] == ["1", "89"], rows
 
 
+async def test_a_notice_is_one_transcript_row_never_a_conversation_alone(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await _switch(db_session, tenant.id, "monitor_direct_messages", agent="agt_a")
+    assert await _ask(db_session_factory, tenant.id, account.id, told=True)
+    agent = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agt_a")
+    alone = store.MonitoredSubject(tenant.id, agent, "discord", account.id, "dm-2")
+    assert await record_notice(db_session_factory, alone, monitoring.CHAT_NOTICE)
+
+    async with db_session_factory() as session:
+        listed = await store.list_conversations(session, tenant_id=tenant.id, agent_id=agent)
+        thread = await store.list_events(
+            session, tenant_id=tenant.id, agent_id=agent, conversation="dm-1"
+        )
+    assert [(c.conversation, c.questions) for c in listed] == [("dm-1", 1)], listed
+    assert sorted(row.kind for row in thread) == ["notice", "question"], thread
+
+
 async def test_account_erasure_previews_and_deletes_the_persons_rows(
     db_session: AsyncSession, db_session_factory: Sessions
 ) -> None:
@@ -384,14 +408,14 @@ async def test_account_erasure_previews_and_deletes_the_persons_rows(
     first = await make_account(db_session, tenant=tenant)
     second = await make_account(db_session, tenant=tenant)
     await _switch(db_session, tenant.id, "monitor_direct_messages", agent="agt_a")
-    assert await _ask(db_session_factory, tenant.id, first.id, turn_ref="a")
+    assert await _ask(db_session_factory, tenant.id, first.id, turn_ref="a", told=True)
     assert await _answer(db_session_factory, tenant.id, "a")
     assert await _ask(db_session_factory, tenant.id, second.id, turn_ref="b")
 
     preview = await collect_purge_preview(sm=db_session_factory, account_id=first.id)
     report = await purge_account(sm=db_session_factory, account_id=first.id)
 
-    assert preview.monitored_events.count == 2, preview.monitored_events
-    assert report.db.monitored_events == 2, report.db
+    assert preview.monitored_events.count == 3, preview.monitored_events
+    assert report.db.monitored_events == 3, report.db
     rows = await _rows(db_session_factory, tenant.id)
     assert [row.account_id for row in rows] == [second.id], rows

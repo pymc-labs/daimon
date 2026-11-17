@@ -1,4 +1,4 @@
-"""Store for monitored agents: the questions, answers and MCP tool calls kept for admins.
+"""Store for monitored agents: the questions, answers, MCP tool calls and notices kept.
 
 Rows are written only through `daimon.core.monitoring`, which decides whether the
 answering agent is monitored. A person's rows go with their account (`delete_for_account`)
@@ -96,18 +96,26 @@ async def get_open_question(
     return MonitoredEventRow.model_validate(question)
 
 
-async def last_question_at(
-    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, conversation: str
+async def last_notice_at(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    conversation: str | None = None,
+    account_id: uuid.UUID | None = None,
 ) -> datetime | None:
-    """When this agent's newest kept question in the conversation was asked."""
-    return await session.scalar(
-        select(func.max(MonitoredEvent.created_at)).where(
-            MonitoredEvent.tenant_id == tenant_id,
-            MonitoredEvent.conversation == conversation,
-            MonitoredEvent.agent_id == agent_id,
-            MonitoredEvent.kind == "question",
-        )
+    """When the person was last told this agent is monitored: in `conversation`, or over
+    MCP on any of `account_id`'s calls to it."""
+    stmt = select(func.max(MonitoredEvent.created_at)).where(
+        MonitoredEvent.tenant_id == tenant_id,
+        MonitoredEvent.agent_id == agent_id,
+        MonitoredEvent.kind == "notice",
     )
+    if account_id is not None:
+        stmt = stmt.where(MonitoredEvent.platform == "mcp", MonitoredEvent.account_id == account_id)
+    else:
+        stmt = stmt.where(MonitoredEvent.conversation == conversation)
+    return await session.scalar(stmt)
 
 
 async def open_question_refs(
@@ -230,6 +238,8 @@ async def list_conversations(
         stmt = stmt.where(MonitoredEvent.platform.in_(platforms))
     if account_id is not None:
         stmt = stmt.where(MonitoredEvent.account_id == account_id)
+    # A notice alone, its tool call or question not kept, is no conversation.
+    stmt = stmt.having(func.count().filter(MonitoredEvent.kind != "notice") > 0)
     if before is not None:
         stmt = stmt.having(tuple_(last_at, cursor_id) < (before[0], str(before[1])))
     stmt = stmt.order_by(last_at.desc(), cursor_id.desc()).limit(limit)

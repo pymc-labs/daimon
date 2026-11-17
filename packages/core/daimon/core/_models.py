@@ -6284,11 +6284,12 @@ class PendingCarryOver(Base):
 
 
 class MonitoredEvent(Base):
-    """A question, answer or MCP tool call kept while the answering agent is monitored.
+    """A question, answer, MCP tool call or shown notice, kept while the agent is monitored.
 
     `agent_id` is the agent's local id (`ma_identity.derive_agent_uuid`). `conversation`
     is the DM, web chat or MCP session, and `turn_ref` pairs an answer with its question.
-    A tool row has its name and outcome only, never what the call sent or returned.
+    A tool row has its name and outcome only, never what the call sent or returned. A
+    notice row says when the person was told they are monitored.
     """
 
     __tablename__ = "monitored_events"
@@ -6296,7 +6297,14 @@ class MonitoredEvent(Base):
         Index("ix_monitored_events_agent_created", "tenant_id", "agent_id", "created_at"),
         Index("ix_monitored_events_created", "created_at"),
         Index("ix_monitored_events_account", "account_id"),
-        # One question and one answer per turn, so a retried capture is a no-op.
+        Index(
+            "ix_monitored_events_notice",
+            "tenant_id",
+            "agent_id",
+            "created_at",
+            postgresql_where=text("kind = 'notice'"),
+        ),
+        # One row of each kind per turn, so a retried capture is a no-op.
         Index(
             "uq_monitored_events_turn",
             "tenant_id",
@@ -6310,7 +6318,9 @@ class MonitoredEvent(Base):
             "platform IN ('discord', 'slack', 'teams', 'web', 'mcp')",
             name="ck_monitored_events_platform",
         ),
-        CheckConstraint("kind IN ('question', 'answer', 'tool')", name="ck_monitored_events_kind"),
+        CheckConstraint(
+            "kind IN ('question', 'answer', 'tool', 'notice')", name="ck_monitored_events_kind"
+        ),
         CheckConstraint(
             "(kind = 'tool') = (tool_name IS NOT NULL)", name="ck_monitored_events_tool_name"
         ),
