@@ -163,8 +163,8 @@ def test_pending_post_when_built_then_teams_settles_on_it_and_others_open_a_moda
     assert (charge["id"], charge["value"]) == (teams_card.CHARGE_INPUT, 1), "Teams: the hold"
     [buttons] = [e["actions"] for e in post["body"] if e["type"] == "ActionSet"]
     assert {b["type"] for b in buttons} == {"Action.Execute"}, "Teams: settled on the post"
-    # A bot cannot read a channel post back: the buttons carry its lines for closing it.
-    assert all(b["data"]["post"] == lines for b in buttons), "Teams: the lines ride along"
+    # The closed post is rebuilt from the stored request; a click's data is the sender's.
+    assert all("post" not in b["data"] for b in buttons), "Teams: no lines ride along"
     slack = slack_settle.settle_modal(_pending(), channel_id="C1", message_ts="1.2")
     assert slack["type"] == "modal", "Slack: Set charge opens a modal"
     assert issubclass(discord_settle.SettleModal, discord.ui.Modal), "Discord: a modal too"
