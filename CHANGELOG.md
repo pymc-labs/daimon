@@ -12,7 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or Teams team), and a server has a default agent and ordered rules that send a person,
   a group or everyone to an agent. A locked rule decides alone. When several agents
   admit a person, a picker lets them choose, answers the messages sent meanwhile in one
-  turn and remembers the choice. `/dm-me`, cold DMs (Slack too), Teams personal chats
+  turn and remembers the choice. A server with no rules or narrower grants keeps its
+  earlier DM behaviour: only the default agent answers, and a Teams personal chat
+  without one keeps its own agent. `/dm-me`, cold DMs (Slack too), Teams personal chats
   (DMs on by default there), hand-overs and agents that send DMs follow the same grants,
   and a failed group lookup refuses. Slack user groups need the `usergroups:read` scope
   and a reinstall. Manage it with `daimon dm default|access|rule|explain`, in the web

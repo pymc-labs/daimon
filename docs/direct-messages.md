@@ -18,13 +18,13 @@ set direct_messages on`) and a recipient policy that allows the person.
 ## Turn on cold DMs
 
 A cold DM is a first message sent straight to the bot, with no `/dm-me`. It needs
-the server's DMs on and an agent that has DMs on and admits the person. The
-default agent below is optional: without one, a sole admitting agent answers and
-several show a picker.
+the server's DMs on and an agent that has DMs on and admits the person, chosen
+as [below](#choose-who-may-dm-which-agent). Until the server has a rule or a
+narrower grant, only the default agent answers.
 
 ```bash
 daimon features --guild GUILD_ID set direct_messages on
-daimon dm --guild GUILD_ID default AGENT_NAME     # optional: who answers by default
+daimon dm --guild GUILD_ID default AGENT_NAME     # who answers by default
 daimon dm --guild GUILD_ID default                # show it; --clear unsets it
 ```
 
@@ -32,12 +32,13 @@ An admin can do the same in Discord with `/dm-me action:enable`, then
 `/dm-me action:agent agent_name:AGENT_NAME` (`clear-agent` unsets it). The
 default agent is one value for cold DMs, `/dm-me`, the picker and agent-sent
 notices. The CLI, Discord, the web app and MCP all set it through one writer
-that checks the name and audits the change. Clearing it does not stop cold DMs:
-turn DMs off, or limit who each agent admits, for that.
+that checks the name and audits the change. Once the server has rules or
+narrower grants, clearing it does not stop cold DMs: turn DMs off for that.
 
 A Slack or Teams DM belongs to one workspace, so a cold DM there starts at
 once with the agent chosen below. Teams personal chats have DMs on unless an
-admin turns them off.
+admin turns them off. With no default, rules or narrower grants, Slack sends the
+`/dm-me` guidance and a Teams personal chat is answered by the chat's own agent.
 
 Upgrade every Discord process before turning cold DMs on, since older ones do
 not recognise a conversation with no source channel. The bot token must be set
@@ -46,8 +47,10 @@ on the scheduler and MCP processes too, for the membership checks below.
 ## Choose who may DM which agent
 
 Each agent has a DM grant, and each server has a default agent, ordered rules
-and, per person, an optional pick. A person's private conversation starts
-with the first agent that has DMs on and admits them, chosen like this:
+and, per person, an optional pick. Until the server has a rule or a grant other
+than `members`, only the default agent starts a private conversation, if it
+admits the person. After that, it starts with the first agent that has DMs on
+and admits them, chosen like this:
 
 1. **Grants.** An agent admits `members` (the default: every member), only
    those `listed`, or everyone `excluded` (all but those listed). A grant
@@ -102,10 +105,10 @@ member, pass the invoker policy and have an agent that admits them.
 - **One server** starts a conversation and answers the message.
 - **Several servers** show a server picker only that person can use. It holds
   their messages for five minutes and checks access again on the pick.
-- **None** runs no turn. A member refused by the invoker policy, or locked out
-  by a locked rule, is told they may not DM Daimon. Anyone else (including a
-  person no agent's grant, role requirement or DM switch admits) gets the
-  `/dm-me` guidance, which names no server.
+- **None** runs no turn. A member refused by the invoker policy, a locked rule
+  or the default agent is told they may not DM Daimon. Anyone else gets the
+  `/dm-me` guidance, which names no server: for example a person no agent
+  admits, or a server with DMs off or no agent to route to.
 
 The opening message names the server and agent, and offers **Switch server**
 and **New conversation**. `/dm-settings` shows those buttons again, and `/new`
