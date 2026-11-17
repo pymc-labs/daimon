@@ -163,9 +163,9 @@ async def test_list_when_not_workspace_admin_is_refused_without_audit(harness: H
     """Whoever the core rule refuses, such as an agent's owner, reads nothing and is not audited."""
     harness.reads = False
 
-    with pytest.raises(ToolError, match="for workspace admins"):
+    with pytest.raises(ToolError, match="Only admins can read"):
         await harness.listed()
-    with pytest.raises(ToolError, match="for workspace admins"):
+    with pytest.raises(ToolError, match="Only admins can read"):
         await harness.opened()
 
     assert harness.audits == [], "a refused read is not audited"
@@ -195,7 +195,7 @@ async def test_list_when_an_agent_key_asks_is_refused_even_for_an_admin_account(
     """An agent's own key never inherits its owner's admin rights over what people said."""
     harness.auth = make_auth(agent_id=uuid.uuid4())
 
-    with pytest.raises(ToolError, match="for workspace admins"):
+    with pytest.raises(ToolError, match="Only admins can read"):
         await harness.listed()
 
     assert harness.asked == [], "the rule is not even asked for an agent key"
