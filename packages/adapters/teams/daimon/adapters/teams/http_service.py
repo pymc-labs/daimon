@@ -472,6 +472,8 @@ def create_teams_http_service(
         teams_app.on_card_action_execute(SUPPORT_VERB, support.on_action)
         teams_app.on_dialog_open(card.ASK_HUMAN_DIALOG, support.on_ask_open)
         teams_app.on_dialog_submit(card.ASK_HUMAN_DIALOG, support.on_ask_submit)
+    # Posts already in the channel stay settleable while asking is off (credits at 0).
+    if runtime.settings.support.teams_escalation_channel_id:
         settle = TeamsSupportSettle(runtime)
         teams_app.on_card_action_execute(SUPPORT_SETTLE_VERB, settle.on_action)
     teams_app.on_dialog_open(setup_card.CREATE_DIALOG, setup.on_create_open)

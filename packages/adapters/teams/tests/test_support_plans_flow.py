@@ -146,10 +146,16 @@ def _value(key: str) -> str:
 
 
 def _running(
-    factory: async_sessionmaker[AsyncSession], fake: TeamsApiFake, *, admins: tuple[str, ...] = ()
+    factory: async_sessionmaker[AsyncSession],
+    fake: TeamsApiFake,
+    *,
+    admins: tuple[str, ...] = (),
+    credits_per_user: int = 20,
 ) -> AbstractAsyncContextManager[TeamsHttpService]:
     runtime = build_teams_runtime(factory, admins=admins)
-    runtime.settings.support = SupportSettings(teams_escalation_channel_id=OPS)
+    runtime.settings.support = SupportSettings(
+        teams_escalation_channel_id=OPS, credits_per_user=credits_per_user
+    )
     return running_service(runtime, fake)
 
 
@@ -649,6 +655,22 @@ async def test_decline_when_pending_then_releases_the_hold(
     assert f"Declined by {USER_NAME}" in _text(edit.body), "the post says who declined"
     row = await _row(db_session_factory, post)
     assert (row.status, row.charge, row.settled_by) == ("declined", D(0), OTHER_AAD_OBJECT_ID)
+
+
+async def test_decline_when_asking_was_turned_off_since_then_the_post_still_settles(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """With the default credits at 0 a post already in the channel keeps working buttons."""
+    await _seed(db_session_factory)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        _sent, post = await _pending(service, teams_api_fake)
+    decline = _settle_buttons(post)["decline"]
+    async with _running(db_session_factory, teams_api_fake, credits_per_user=0) as service:
+        said = await post_activity(service, _settle(decline, post_id="m-2"))
+
+    assert said["value"] == f"Declined. No credits used. {CLIENT_NOT_NOTIFIED}", said
+    row = await _row(db_session_factory, post)
+    assert row.status == "declined", row
 
 
 @pytest.mark.parametrize("channel", ["19:elsewhere@thread.tacv2", None], ids=["channel", "chat"])

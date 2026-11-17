@@ -19,7 +19,9 @@ the first plan that exists for the place it was asked in:
 Plans never stack. A request is charged to one plan only, and plan requests
 never count toward the default allowance. A request from a workspace admin is
 sent but charged nowhere. To hide Ask a person in one place, turn its
-[feature](features.md#ask-a-person) off there.
+[feature](features.md#ask-a-person) off there. To offer it only where a plan
+applies, turn it off in the channels without one: zero credits per user turns
+it off everywhere, plans included.
 
 ## Credits and windows
 
