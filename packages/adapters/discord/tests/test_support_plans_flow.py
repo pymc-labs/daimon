@@ -17,11 +17,14 @@ from daimon.adapters.discord.support_escalation import (
     SupportMenuSelect,
     SupportModal,
     SupportOptionModal,
+    answer_origin,
 )
 from daimon.adapters.discord.support_settle import SettleModal, SupportSettleButton
 from daimon.core.config import SupportSettings
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores import support_plans as plans
 from daimon.core.stores.domain import Role
+from daimon.core.stores.platform_names import ChannelSighting, upsert_channel_names
 from daimon.core.stores.support_escalation import get_request
 from daimon.core.support_escalation import CUSTOM_ID_TEMPLATE as BUTTON_TEMPLATE
 from daimon.core.support_plans import CLIENT_NOT_NOTIFIED, parse_catalog
@@ -251,6 +254,87 @@ async def test_pick_when_balance_cannot_cover_it_then_not_enough_credits(
     interaction = await _pick(_bot(db_session_factory), "review", revision)
     assert _said(interaction.response.send_message) == "Not enough credits left."
     interaction.response.send_modal.assert_not_awaited()
+
+
+def _cold_bot(sessionmaker: async_sessionmaker[AsyncSession]) -> Any:
+    """A bot with nothing cached whose every Discord request fails the test."""
+    bot = _bot(sessionmaker)
+    bot.get_channel = MagicMock(return_value=None)
+    bot.fetch_channel = AsyncMock(side_effect=AssertionError("fetch_channel before the modal"))
+    guild = MagicMock(spec=discord.Guild)
+    guild.owner_id = 1
+    guild.get_member = MagicMock(return_value=None)
+    guild.fetch_member = AsyncMock(side_effect=AssertionError("fetch_member before the modal"))
+    bot.get_guild = MagicMock(return_value=guild)
+    return bot
+
+
+async def test_pick_when_nothing_is_cached_then_the_form_opens_without_a_discord_request(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    revision = await _seed(db_session_factory)
+    bot = _cold_bot(db_session_factory)
+    interaction = await _pick(bot, "call", revision)
+    assert isinstance(interaction.response.send_modal.await_args.args[0], SupportOptionModal)
+    bot.fetch_channel.assert_not_awaited()
+    bot.get_guild.return_value.fetch_member.assert_not_awaited()
+
+
+async def test_pick_when_nothing_is_cached_then_a_poor_requester_is_refused_without_a_request(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    revision = await _seed(db_session_factory, per_person=D("0.5"))
+    bot = _cold_bot(db_session_factory)
+    interaction = await _pick(bot, "review", revision)
+    assert _said(interaction.response.send_message) == "Not enough credits left."
+    bot.get_guild.return_value.fetch_member.assert_not_awaited()
+
+
+async def test_pick_when_the_clicker_is_a_cached_admin_then_an_unaffordable_form_opens(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    revision = await _seed(db_session_factory, per_person=D("0.1"))
+    bot = _cold_bot(db_session_factory)
+    admin = MagicMock(spec=discord.Member)
+    admin.id = 7
+    admin.guild_permissions = discord.Permissions(administrator=True)
+    admin.guild = bot.get_guild.return_value
+    bot.get_guild.return_value.get_member.return_value = admin
+    interaction = await _pick(bot, "call", revision)
+    interaction.response.send_modal.assert_awaited_once()
+
+
+async def test_button_when_no_menu_and_nothing_is_cached_then_the_note_form_opens_at_once(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed(db_session_factory, menu=False)
+    bot = _cold_bot(db_session_factory)
+    interaction = _interaction(bot)
+    await SupportEscalateButton(guild_id=_GUILD, channel_id=_THREAD, message_id=_ANSWER).callback(
+        interaction
+    )
+    assert isinstance(interaction.response.send_modal.await_args.args[0], SupportModal)
+    bot.fetch_channel.assert_not_awaited()
+
+
+async def test_answer_origin_when_uncached_then_a_recorded_thread_names_its_parent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed(db_session_factory)
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=_GUILD)
+    async with db_session_factory() as session, session.begin():
+        await upsert_channel_names(
+            session,
+            tenant_id=tenant_id,
+            platform="discord",
+            names={_THREAD: ChannelSighting("help", kind="thread", parent_id="222")},
+        )
+    bot = _cold_bot(db_session_factory)
+    origin = await answer_origin(
+        bot.runtime, bot, guild_id=_GUILD, channel_id=_THREAD, message_id=_ANSWER, fetch=False
+    )
+    assert (origin.parent_id, origin.thread_id) == ("222", _THREAD)
+    bot.fetch_channel.assert_not_awaited()
 
 
 async def test_button_when_the_plan_ended_then_says_so(

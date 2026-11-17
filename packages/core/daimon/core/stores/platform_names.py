@@ -338,6 +338,19 @@ async def list_channel_names(
     return [ChannelNameRow.model_validate(row) for row in rows]
 
 
+async def get_channel_row(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, channel_id: str
+) -> ChannelNameRow | None:
+    """What was last recorded of one channel, or None; one indexed read."""
+    stmt = select(PlatformChannelName).where(
+        PlatformChannelName.tenant_id == tenant_id,
+        PlatformChannelName.platform == platform,
+        PlatformChannelName.channel_id == channel_id,
+    )
+    row = await session.scalar(stmt)
+    return None if row is None else ChannelNameRow.model_validate(row)
+
+
 async def get_channel_statuses(
     session: AsyncSession,
     *,

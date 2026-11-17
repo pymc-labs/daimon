@@ -49,6 +49,7 @@ from typing import Any, Final, Self, cast
 
 import structlog
 from daimon.adapters.discord.bot import DaimonBot, requester_role
+from daimon.adapters.discord.checks import is_member_guild_admin
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.support_post import (
@@ -63,6 +64,7 @@ from daimon.core.permissions import readers_limited_at
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.stores.identity import find_platform_principal
+from daimon.core.stores.platform_names import get_channel_row
 from daimon.core.stores.support_escalation import (
     SubmitOutcome,
     mark_delivered,
@@ -152,11 +154,32 @@ class AnswerOrigin:
         )
 
 
-async def _answer_place(bot: commands.Bot, channel_id: str) -> tuple[str, str | None]:
-    """`(channel, thread)` for the answer's channel id: a thread names its parent."""
+async def _answer_place(
+    bot: commands.Bot,
+    runtime: DiscordRuntime,
+    *,
+    tenant_id: uuid.UUID,
+    channel_id: str,
+    fetch: bool,
+) -> tuple[str, str | None]:
+    """`(channel, thread)` for the answer's channel id: a thread names its parent.
+
+    `fetch=False` is for the click that must open a modal within three seconds:
+    the cache, then the channel as last recorded, and never a Discord request.
+    """
     try:
-        channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+        channel = bot.get_channel(int(channel_id))
+        if channel is None and fetch:
+            channel = await bot.fetch_channel(int(channel_id))
     except (discord.HTTPException, ValueError):
+        return channel_id, None
+    if channel is None:
+        async with runtime.sessionmaker() as session:
+            known = await get_channel_row(
+                session, tenant_id=tenant_id, platform="discord", channel_id=channel_id
+            )
+        if known is not None and known.kind == "thread" and known.parent_id:
+            return known.parent_id, channel_id
         return channel_id, None
     if isinstance(channel, discord.Thread) and channel.parent_id:
         return str(channel.parent_id), channel_id
@@ -164,11 +187,19 @@ async def _answer_place(bot: commands.Bot, channel_id: str) -> tuple[str, str | 
 
 
 async def answer_origin(
-    runtime: DiscordRuntime, bot: commands.Bot, *, guild_id: str, channel_id: str, message_id: str
+    runtime: DiscordRuntime,
+    bot: commands.Bot,
+    *,
+    guild_id: str,
+    channel_id: str,
+    message_id: str,
+    fetch: bool = True,
 ) -> AnswerOrigin:
     """Read where the answer sits now: its channel, thread, agent and session."""
     tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
-    parent, thread = await _answer_place(bot, channel_id)
+    parent, thread = await _answer_place(
+        bot, runtime, tenant_id=tenant_id, channel_id=channel_id, fetch=fetch
+    )
     async with runtime.sessionmaker() as session:
         row = await get_latest_thread_session(
             session, tenant_id=tenant_id, platform="discord", thread_id=channel_id
@@ -208,6 +239,22 @@ async def requester_is_admin(bot: commands.Bot, *, guild_id: str, user_id: str) 
         return False
     role, _roles = await requester_role(guild, user_id)
     return role == Role.ADMIN
+
+
+def requester_is_admin_cached(
+    interaction: discord.Interaction[Any], bot: commands.Bot, *, guild_id: str
+) -> bool:
+    """As `requester_is_admin`, from the interaction and the cache: no Discord request.
+
+    For the click that must open a modal within three seconds. A member neither
+    on the interaction nor cached charges; the submit decides for good.
+    """
+    guild = bot.get_guild(int(guild_id))
+    if not isinstance(guild, discord.Guild):
+        return False
+    user = interaction.user
+    member = user if isinstance(user, discord.Member) else guild.get_member(user.id)
+    return member is not None and is_member_guild_admin(member, guild_owner_id=guild.owner_id)
 
 
 def _sealed_hint() -> str:
@@ -585,6 +632,7 @@ class SupportMenuSelect(
             guild_id=self.guild_id,
             channel_id=self.channel_id,
             message_id=self.message_id,
+            fetch=False,
         )
         user_id = str(interaction.user.id)
         async with runtime.sessionmaker() as session:
@@ -603,10 +651,10 @@ class SupportMenuSelect(
         if not view.active:
             await _report_failure(interaction, ended_text(view, now=datetime.now(UTC)))
             return
-        # Only an option the balance cannot cover asks Discord who the requester
-        # is, so the form still opens inside the interaction's three seconds.
-        if not view.affordable(cheapest_bounds(option.price)) and not await requester_is_admin(
-            bot, guild_id=origin.guild_id, user_id=user_id
+        # No Discord request before the form: it must open inside the
+        # interaction's three seconds. The submit decides who is an admin.
+        if not view.affordable(cheapest_bounds(option.price)) and not requester_is_admin_cached(
+            interaction, bot, guild_id=origin.guild_id
         ):
             await _report_failure(interaction, NOT_ENOUGH_CREDITS)
             return
@@ -685,6 +733,7 @@ class SupportEscalateButton(
             guild_id=self.guild_id,
             channel_id=self.channel_id,
             message_id=self.message_id,
+            fetch=False,
         )
         async with runtime.sessionmaker() as session:
             plans = await plans_for_place(
