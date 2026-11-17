@@ -275,6 +275,10 @@ class ProviderBinding(Contract):
     legacy_account_id: str | None = None
 
 
+#: `Session.native` key set on a session as it is created; a replayed create omits it.
+SESSION_CREATED = "created"
+
+
 class Session(Contract):
     ref: ResourceRef
     binding: ProviderBinding
@@ -473,6 +477,7 @@ class AgentThread(Contract):
 
 
 __all__ = [
+    "SESSION_CREATED",
     "Agent",
     "AgentFilter",
     "AgentPatch",

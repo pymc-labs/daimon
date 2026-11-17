@@ -168,6 +168,7 @@ TAIL = (
     "0204_shared_agent_copies",
     "0205_web_search_usage",
     "0206_support_plans",
+    "0207_skill_manifest_bytes",
 )
 HEAD = TAIL[-1]
 

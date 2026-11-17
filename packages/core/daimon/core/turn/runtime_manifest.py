@@ -1004,6 +1004,7 @@ async def _capture_source_capabilities(
                         tenant_id=source.tenant_id,
                         carried=carried,
                         record=source.source,
+                        manifests=profile.skill_upload_limits is not None,
                     )
                 pins, sizes = measured
                 # Unmeasured or over the limits: that skill alone is a named loss.

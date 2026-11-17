@@ -172,6 +172,26 @@ class _ConfiguredTransport:
         async with self._client() as client:
             return await self._sdk(client).download_snapshot(environment_id)
 
+    async def create_environment(self, config: Mapping[str, JsonValue]) -> str:
+        async with self._client() as client:
+            return await self._sdk(client).create_environment(config)
+
+    async def upload_archive(
+        self, environment_id: str, path: str, archive: bytes, *, overwrite: bool
+    ) -> None:
+        async with self._client() as client:
+            await self._sdk(client).upload_archive(
+                environment_id, path, archive, overwrite=overwrite
+            )
+
+    async def list_files(self, environment_id: str, path: str) -> dict[str, int]:
+        async with self._client() as client:
+            return await self._sdk(client).list_files(environment_id, path)
+
+    async def delete_environment(self, environment_id: str) -> None:
+        async with self._client() as client:
+            await self._sdk(client).delete_environment(environment_id)
+
     async def open_stream(
         self,
         interaction_id: str,

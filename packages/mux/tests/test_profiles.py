@@ -51,7 +51,12 @@ def test_legacy_rendering_declarations_round_trip(profile: Profile) -> None:
     # The credential-carrier flag, effort map and skill limits are code-declared, never dumped.
     restored = Profile.model_validate_json(profile.model_dump_json())
     assert restored == profile.model_copy(
-        update={"carries_caller_resources": False, "effort_map": {}, "skill_limits": None}
+        update={
+            "carries_caller_resources": False,
+            "effort_map": {},
+            "skill_limits": None,
+            "skill_upload_limits": None,
+        }
     )
     assert pickle.loads(pickle.dumps(profile)) == profile
 

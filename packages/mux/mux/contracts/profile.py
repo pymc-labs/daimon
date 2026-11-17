@@ -159,6 +159,9 @@ class Profile(Contract):
     skill_limits: SkillLimits | None = Field(default=None, exclude=True)
     """The largest custom skill the profile attaches; None: no custom skills.
     Excluded from dumps, so profile digests hold."""
+    skill_upload_limits: SkillLimits | None = Field(default=None, exclude=True)
+    """A larger tier for a skill past `skill_limits`: its files are uploaded and only
+    its SKILL.md spends the inline budget. None: no such tier."""
     carries_caller_resources: bool = Field(default=False, exclude=True)
     """The host carries the caller's seals, Slack turn context and private DM on its
     per-turn credential, not as a native resource. Excluded from dumps: digests hold."""

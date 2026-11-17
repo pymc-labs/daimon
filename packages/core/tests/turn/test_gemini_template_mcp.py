@@ -11,8 +11,10 @@ replaced; the MCP catalogue is the real verifier and middleware.
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import os
+import tarfile
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -37,7 +39,7 @@ from mux.errors import ScopeViolation
 from ..test_agent_backend import owned as owned
 from .test_declared_drop_preparation import consent_request as consent_request
 from .test_gemini_codec import interaction
-from .test_gemini_full_source import PARAMS, default_skill_bundles, serve_source_skill
+from .test_gemini_full_source import CUSTOM, PARAMS, default_skill_bundles, serve_source_skill
 from .test_gemini_full_source import source_mcp as source_mcp
 from .test_gemini_runtime_transport import clients_for
 
@@ -87,17 +89,39 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
 
         monkeypatch.setattr(snapshot, "deployment_on", lambda _s, k, _p: k == "mcp_connector_relay")
     native, calls, posts = {}, [], []
+    made: list[str] = []  # environments made before a first interaction
+
+    def environments(call):
+        # Gemini's environment API, for the large skills a session uploads.
+        target = call.url.path.partition("/files/")[2].rstrip("/") + "/"
+        if call.method == "POST":
+            made.append(f"env-{len(calls)}")
+            return httpx.Response(200, json={"id": made[-1]})
+        if call.method == "GET":
+            files = [
+                {"path": p, "type": "FILE", "size_bytes": str(s)}
+                for p, s in _uploaded(calls).items()
+                if p.startswith(target)
+            ]
+            return httpx.Response(200, json={"files": files})
+        return httpx.Response(200, json={})
+
+    def ran(id_):
+        # An interaction runs in the environment made for its session, if any.
+        return interaction(id_) | ({"environment_id": made[-1]} if made else {})
 
     def handle(call):
         calls.append(call)
+        if "/environments" in call.url.path:
+            return environments(call)
         if call.url.path.startswith("/v1beta/agents"):
             if call.method == "POST":
                 native.update(json.loads(call.content))
             return httpx.Response(200, json=native)
         if call.method == "POST":
             posts.append(json.loads(call.content))
-            return httpx.Response(200, json=interaction(f"turn-{len(posts)}"))
-        return httpx.Response(200, json=interaction(call.url.path.rsplit("/", 1)[-1]))
+            return httpx.Response(200, json=ran(f"turn-{len(posts)}"))
+        return httpx.Response(200, json=ran(call.url.path.rsplit("/", 1)[-1]))
 
     async def catalogue(call):
         assert call.url.host == "mcp.invalid"
@@ -186,6 +210,17 @@ async def template(consent_request, source_mcp, monkeypatch, tmp_path, request):
     assert all(client.is_closed for client in clients)
 
 
+def _uploaded(calls) -> dict[str, int]:
+    """Each file the environment uploads placed, with its size."""
+    placed = {}
+    for call in calls:
+        if call.method == "PUT":
+            target = call.url.path.partition("/files/")[2]
+            with tarfile.open(fileobj=io.BytesIO(call.content), mode="r:gz") as tar:
+                placed.update({target + m.name: m.size for m in tar.getmembers() if m.isfile()})
+    return placed
+
+
 def _bound_capture(request, actor):
     """The preview's capture, bound to this turn's verified place and person."""
     from daimon.core.authz import Place
@@ -232,8 +267,8 @@ async def test_consent_keeps_daimon_tools_and_drops_only_what_gemini_lacks(templ
     _, quote, *_ = template
     assert "mcp" not in quote.declared_drops
     assert "memory" in quote.declared_drops
-    # Its custom skills attach per session; only one past Gemini's limits is a named loss.
-    assert "skills" not in quote.declared_drops, quote.declared_drops
+    # Its custom skills attach per session; the large one uploads, so none is a loss.
+    assert not any(d == "skills" or d.startswith("skill:") for d in quote.declared_drops)
     # J6b: its execution tools map to code_execution and web search to Google
     # Search; only web fetch is a named loss, never all of its tools.
     assert "tools" not in quote.declared_drops
@@ -473,12 +508,24 @@ async def test_a_real_turn_revokes_its_credential_however_it_ends(template, monk
             for body in sent
             for t in body.get("tools", [])
         ), "the credential travels only in the MCP server entry"
+        (made,) = [c for c in calls if c.method == "POST" and c.url.path.endswith("/environments")]
         mounted = {
             source["target"].split("/")[2]
-            for source in sent[0]["environment"].get("sources", [])
+            for source in json.loads(made.content).get("sources", [])
             if source["target"].startswith(".agents/skills/")
         }
-        assert mounted, "the template's custom skills mount in its first interaction"
+        assert len(mounted) == len(CUSTOM), "every custom skill is listed in its environment"
+        style = Path(__file__).parents[4] / "defaults/skills/pymc-artifact-style"
+        assets = {
+            p.relative_to(style).as_posix(): p.stat().st_size
+            for p in style.rglob("*")
+            if p.is_file() and p.name != "SKILL.md"
+        }
+        (uploaded,) = {p.split("/")[2] for p in _uploaded(calls)}
+        assert uploaded in mounted
+        prefix = f".agents/skills/{uploaded}/"
+        assert {p.removeprefix(prefix): s for p, s in _uploaded(calls).items()} == assets
+        assert sent[0]["environment"] == f"env-{calls.index(made) + 1}", sent[0]["environment"]
 
 
 GATED = (

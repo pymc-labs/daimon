@@ -328,7 +328,13 @@ async def test_source_environment_when_switched_to_gemini_then_its_turn_sets_it_
     (sent, *_) = [
         json.loads(c.content) for c in calls if c.method == "POST" and "interactions" in c.url.path
     ]
-    environment = sent["environment"]
+    # Large skills make the first interaction carry the id of an environment made beforehand.
+    (environment,) = [
+        json.loads(c.content)
+        for c in calls
+        if c.method == "POST" and c.url.path.endswith("/environments")
+    ]
+    assert isinstance(sent["environment"], str), "the interaction names the environment it uses"
     inline = {s["target"]: s["content"] for s in environment["sources"] if s["type"] == "inline"}
     if setup == "packages":
         assert {HOOKS_TARGET, SCRIPT_TARGET} <= set(inline), "the install hook is mounted"
