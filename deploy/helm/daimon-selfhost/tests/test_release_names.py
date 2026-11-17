@@ -129,11 +129,16 @@ args = sys.argv[1:]
 with open(os.environ['STUB_LOG'], 'a') as output:
     output.write(json.dumps([name, *args]) + '\\n')
 if name == 'az' and 'properties.model.name' in args:
-    print('gpt-5.4-mini')
+    print(os.environ.get('UNDERLYING_MODEL', 'gpt-5.4-mini'))
 elif name == 'az' and 'properties.endpoint' in args:
     print('https://localhost')
 elif name == 'az' and 'key1' in args:
     print('offline-placeholder')
+elif name == 'kubectl' and 'change-model' in args and '--apply' in args:
+    with open(os.environ['STUB_LOG'], 'a') as output:
+        output.write(json.dumps(['stdin', sys.stdin.read()]) + '\\n')
+elif name == 'kubectl' and 'change-model' in args:
+    print(json.dumps({'plan': args[args.index('--tenant-id') + 1]}))
 elif name == 'kubectl' and 'exec' in args and 'init' in args:
     print('agent-id environment-id')
 elif name == 'kubectl' and 'exec' in args and '-i' in args:
@@ -306,6 +311,70 @@ class TeamsReleaseScriptTests(unittest.TestCase):
             self.assertIn("deployment/daimon-teams-daimon-mcp", probe)
             self.assertIn("HARNESS_URL=https://daimon-teams-daimon-harness:8088", probe)
 
+    def test_change_model_keeps_each_tenants_plan_and_applies_only_that(self):
+        # The new deployment, backed by the new AOAI_MODEL, as register requires it.
+        models = {
+            "FROM_MODEL": "gpt-5.4-mini",
+            "AOAI_MODEL": "gpt-6.1-sol",
+            "SELFHOSTED_MODEL": "gpt-6.1-sol",
+            "UNDERLYING_MODEL": "gpt-6.1-sol",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            (state / "registration.json").write_text(
+                json.dumps({"tenant_id": "cli-tenant", "teams": {"tenant_id": "teams-tenant"}})
+            )
+            result, calls = self.run_script("aks.sh", ["change-model", "apply"], state, models)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("No plan for tenant cli-tenant", result.stderr)
+
+            result, calls = self.run_script("aks.sh", ["change-model"], state, models)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assert_only_release_names(calls)
+            changes = [c for c in calls if c[0] == "kubectl" and "change-model" in c]
+            self.assertEqual(
+                [c[c.index("--tenant-id") :] for c in changes],
+                [
+                    [
+                        "--tenant-id",
+                        tenant,
+                        "--from-model",
+                        "gpt-5.4-mini",
+                        "--model",
+                        "gpt-6.1-sol",
+                    ]
+                    for tenant in ("cli-tenant", "teams-tenant")
+                ],
+            )
+            self.assertTrue(all("deploy/daimon-teams-daimon-mcp" in c for c in changes))
+            self.assertIn('{"plan": "teams-tenant"}', result.stdout)
+
+            # A deployment register would refuse is refused first, with the plans kept.
+            for target, refusal in (
+                ({"UNDERLYING_MODEL": "gpt-5.4-mini"}, "must be backed by AOAI_MODEL=gpt-6.1-sol"),
+                ({"SELFHOSTED_MODEL": "gpt-5.4-mini"}, "to be AOAI_DEPLOYMENT (gpt-6.1-sol)"),
+            ):
+                result, calls = self.run_script(
+                    "aks.sh", ["change-model", "apply"], state, {**models, **target}
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(refusal, result.stderr)
+                self.assertFalse(any("change-model" in c for c in calls))
+
+            result, calls = self.run_script("aks.sh", ["change-model", "apply"], state, models)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            changes = [c for c in calls if c[0] == "kubectl" and "change-model" in c]
+            self.assertTrue(all(c[-2:] == ["--apply", "-"] and "-i" in c for c in changes))
+            self.assertEqual(
+                [c[1] for c in calls if c[0] == "stdin"],
+                [f'{{"plan": "{tenant}"}}\n' for tenant in ("cli-tenant", "teams-tenant")],
+            )
+
+            result, calls = self.run_script("aks.sh", ["change-model"], state, {"FROM_MODEL": ""})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("export FROM_MODEL", result.stderr)
+            self.assertFalse(any("change-model" in c for c in calls))
+
     def test_remove_needs_the_resource_group_name(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)
@@ -325,6 +394,7 @@ class TeamsReleaseScriptTests(unittest.TestCase):
         for script, command in (
             ("aks.sh", ["install"]),
             ("aks.sh", ["register"]),
+            ("aks.sh", ["change-model"]),
             ("aks.sh", ["reinstall"]),
             ("aks.sh", ["teardown"]),
             ("aks.sh", ["egress-start"]),

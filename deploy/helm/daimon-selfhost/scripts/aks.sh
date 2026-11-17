@@ -14,7 +14,7 @@ chart=${CHART_DIR:-deploy/helm/daimon-selfhost}
 source "$chart/scripts/release.sh"
 source "$chart/scripts/model.sh"
 case ${1:-} in
-install|register|reinstall|teardown|egress-start|egress-check) require_release_names "${1}" ;;
+install|register|change-model|reinstall|teardown|egress-start|egress-check) require_release_names "${1}" ;;
 esac
 # egress-start replaces kube-system/coredns-custom and restarts CoreDNS for every
 # release on the cluster, so it needs the cluster's name typed again.
@@ -67,7 +67,7 @@ if not valid:
 PYVERIFY
 }
 case ${1:-} in
-install|register|turn|egress-start|egress-check|teardown) bind_aks ;;
+install|register|change-model|turn|egress-start|egress-check|teardown) bind_aks ;;
 esac
 case ${1:-} in
 install|teardown) refuse_other_releases "${1}" ;;
@@ -196,6 +196,26 @@ PY
 register)
   bash "$chart/scripts/register.sh"
   ;;
+change-model)
+  # Prints and keeps each registered tenant's plan; `change-model apply` writes
+  # exactly the kept plans, and a tenant whose plan changed since is refused.
+  # The records move to SELFHOSTED_MODEL, checked as register checks it.
+  : "${FROM_MODEL:?export FROM_MODEL, the model the conversations are on now}"
+  verify_runtime_deployment change-model
+  tenants=$(python3 "$chart/scripts/runtime_grants.py" tenants "$AKS_STATE/registration.json")
+  for tenant in $tenants; do
+    plan="$AKS_STATE/model-change-$tenant.json"
+    change=(daimon selfhosted change-model --tenant-id "$tenant" --from-model "$FROM_MODEL" --model "$SELFHOSTED_MODEL")
+    if [[ ${2:-} == apply ]]; then
+      [[ -s $plan ]] || { echo "No plan for tenant $tenant: run aks.sh change-model first" >&2; exit 1; }
+      kubectl -n "$NAMESPACE" exec -i "deploy/$PREFIX-mcp" -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon \
+        "${change[@]}" --apply - < "$plan"
+    else
+      kubectl -n "$NAMESPACE" exec "deploy/$PREFIX-mcp" -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon \
+        "${change[@]}" </dev/null | tee "$plan"
+    fi
+  done
+  ;;
 turn)
   tenant=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tenant_id"])' "$AKS_STATE/registration.json")
   kubectl -n "$NAMESPACE" exec deployment/"$PREFIX-mcp" -- setpriv --reuid=1000 --regid=1000 --clear-groups --no-new-privs env HOME=/home/daimon daimon selfhosted turn \
@@ -289,5 +309,5 @@ remove)
   }
   az group delete -n "$RG" --yes -o none
   ;;
-*) echo 'Usage: aks.sh bootstrap|install|register|turn|probe|egress-start|egress-check|teardown|reinstall|remove' >&2; exit 2 ;;
+*) echo 'Usage: aks.sh bootstrap|install|register|change-model [apply]|turn|probe|egress-start|egress-check|teardown|reinstall|remove' >&2; exit 2 ;;
 esac

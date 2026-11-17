@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Move a selfhosted release to another model with `daimon selfhosted change-model`, or
+  `aks.sh change-model` on AKS with the new `AOAI_MODEL`, before running `register` with
+  it. A dry run prints the agents, conversations and threads on the old model; `--apply`
+  writes exactly that plan, or refuses if anything changed since. Like `register`, the AKS
+  command first refuses a deployment Azure does not report as backed by `AOAI_MODEL`.
+  Threads answered on the old model start a new session at their next message.
+
 - Choose the Azure OpenAI model for the AKS scripts with `AOAI_MODEL`. Unset, the model stays
   `gpt-5.4-mini` and the scripts produce the same values, grants and tariff mapping as before.
   Bootstrap, the probe and `register` refuse a deployment backed by any other model, Sol included

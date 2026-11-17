@@ -707,6 +707,58 @@ reconciliation. The direct `probe` helper is an optional paid C3 diagnostic and
 does not replace these two application turns. No real inference is performed by
 this lane's local tests. The recipe uses the `AOAI_MODEL` deployment for every model turn.
 
+## Changing the model
+
+Each conversation keeps the model it was set up with, and each grant names that
+model. So `register` with a new `AOAI_MODEL` stops with an error until the
+release's records are moved. The steps below also finish a `register` that stopped
+that way. Run them in a maintenance window, in this order:
+
+1. Create the new model's Azure OpenAI deployment in the `AOAI` account (`gpt-6.1-sol` below,
+   named after its model).
+2. Stop the hosts that start turns: the scheduler, and the Teams host if the release runs one.
+
+   ```sh
+   kubectl -n "$NAMESPACE" scale "deploy/$RELEASE-daimon-scheduler" "deploy/$RELEASE-daimon-teams" --replicas=0
+   kubectl -n "$NAMESPACE" wait --for=delete pod -l "app in ($RELEASE-daimon-scheduler,$RELEASE-daimon-teams)" --timeout=180s
+   ```
+
+3. Run the dry run. Like `register`, it first refuses unless `SELFHOSTED_MODEL` is
+   `AOAI_DEPLOYMENT` and Azure reports `AOAI_MODEL` as its model. For each registered
+   tenant it prints the agents, conversations and threads still on the old model,
+   and keeps that plan in `AKS_STATE`. It writes nothing.
+
+   ```sh
+   export FROM_MODEL=gpt-5.4-mini AOAI_MODEL=gpt-6.1-sol AOAI_DEPLOYMENT=gpt-6.1-sol
+   bash deploy/helm/daimon-selfhost/scripts/aks.sh change-model
+   ```
+
+4. Apply the kept plans. A tenant whose plan changed since the dry run is refused,
+   with nothing written; run the dry run again. Afterwards a dry run lists nothing.
+
+   ```sh
+   bash deploy/helm/daimon-selfhost/scripts/aks.sh change-model apply
+   ```
+
+5. Run `register` with the same `TEAMS_GRANTS`, and `SELFHOSTED_MODELS` holding the
+   tariff named after the new `AOAI_MODEL`. Then start the hosts again.
+
+   ```sh
+   bash deploy/helm/daimon-selfhost/scripts/aks.sh register
+   kubectl -n "$NAMESPACE" scale "deploy/$RELEASE-daimon-scheduler" "deploy/$RELEASE-daimon-teams" --replicas=1
+   ```
+
+6. Send a message in an existing thread and in a new conversation.
+
+The change moves the agents and gives each conversation a new revision on the new
+model; earlier revisions are kept. Each thread answered on the old model, 1:1 chats
+included, starts a new session at its next message, without its earlier history. The
+change leaves a conversation an admin cleared as it is. `register` sets every
+conversation in `TEAMS_GRANTS`, so leave a cleared one out of it.
+`daimon selfhosted change-model` does steps 3 and 4 for one tenant. Its
+`--conversation` names the conversations to move; while the agents move, it must
+name every one on the old model.
+
 ## Second release on a shared cluster
 
 Every chart resource is named `<release>-daimon-*`, and the cluster-wide
