@@ -54,7 +54,7 @@ from daimon.core.support import (
     settled_text,
 )
 from daimon.core.support_changes import settle_from_post
-from daimon.core.support_routing import settle_channel_ok
+from daimon.core.support_routing import deployment_channel, settle_channel_ok
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -99,7 +99,7 @@ async def _settles_here(
             row=row,
             channel_id=channel_id,
             parent_id=None,
-            default_channel_id=support.slack_escalation_channel_id,
+            default_channel_id=deployment_channel(support, "slack"),
         ):
             return False
     if derive_tenant_uuid(platform="slack", workspace_id=team_id) == row.tenant_id:
@@ -221,7 +221,7 @@ async def _settle(
         default_allowance=runtime.settings.support.credits_per_user,
         channel_id=post.channel_id,
         parent_id=None,
-        default_channel_id=runtime.settings.support.slack_escalation_channel_id,
+        default_channel_id=deployment_channel(runtime.settings.support, "slack"),
     )
     log.info("support.request_settled", escalation_id=str(row.id), status=outcome.status)
     await _finish(client, post, before=row, outcome=outcome, message=message)
