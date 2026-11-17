@@ -110,6 +110,11 @@ async def _lock_plan(session: AsyncSession, *, plan_id: uuid.UUID) -> None:
     await _advisory_lock(session, f"{_PLAN_LOCK_NAMESPACE}{plan_id}")
 
 
+async def lock_plan(session: AsyncSession, *, plan_id: uuid.UUID) -> None:
+    """Take a plan's charge lock. It comes before the tenant lock, as in `submit_request`."""
+    await _lock_plan(session, plan_id=plan_id)
+
+
 async def _lock_user_ledger(
     session: AsyncSession, *, tenant_id: uuid.UUID, platform_user_id: str
 ) -> None:
@@ -835,7 +840,14 @@ async def list_requests(
 
 
 SettleStatus = Literal[
-    "settled", "declined", "already_settled", "stale", "invalid", "over_balance", "not_found"
+    "settled",
+    "declined",
+    "already_settled",
+    "stale",
+    "invalid",
+    "over_balance",
+    "plan_gone",
+    "not_found",
 ]
 
 
@@ -845,7 +857,9 @@ class SettleOutcome:
 
     `available` is the balance left on the row's ledger with the row's current
     charge spent, None when unbounded or not read (a decline, an orphan).
-    "invalid" and "over_balance" pair with `settle_range_text`.
+    "invalid" and "over_balance" pair with `settle_range_text`. "plan_gone" is a
+    charge on a request whose plan was removed: it has no balance to check, so
+    only a decline (or a correction down) goes through.
     """
 
     status: SettleStatus
@@ -873,6 +887,37 @@ async def _ledger_available(
         as_of=row.created_at,
     )
     return balance.available
+
+
+async def decline_pending_for_plan(
+    session: AsyncSession,
+    *,
+    plan_id: uuid.UUID,
+    settled_by: str | None,
+    settled_by_account_id: uuid.UUID | None,
+) -> list[SupportEscalationRow]:
+    """Decline every pending request of a plan about to be removed, at no charge.
+
+    The caller holds the plan's lock (`lock_plan`), which keeps settles and new
+    requests off it. A request left pending would settle with no balance to
+    bound it once the plan row is gone.
+    """
+    stmt = (
+        update(SupportEscalation)
+        .where(SupportEscalation.plan_id == plan_id, SupportEscalation.status == "pending")
+        .values(
+            charge=Decimal(0),
+            status="declined",
+            settled_at=func.now(),
+            settled_by=settled_by,
+            settled_by_account_id=settled_by_account_id,
+        )
+        .returning(SupportEscalation)
+        .execution_options(populate_existing=True)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    await session.flush()
+    return [SupportEscalationRow.model_validate(o) for o in rows]
 
 
 async def settle_request(
@@ -911,6 +956,13 @@ async def settle_request(
         return SettleOutcome(status="already_settled", row=row)
     if correction and (row.status == "pending" or row.charge != expected_charge):
         return SettleOutcome(status="stale", row=row)
+    if (
+        row.charged_to == "plan"
+        and row.plan_id is None
+        and charge is not None
+        and not (correction and charge <= (row.charge or Decimal(0)))
+    ):
+        return SettleOutcome(status="plan_gone", row=row)
     available = None
     if charge is not None:
         available = await _ledger_available(session, row=row, default_allowance=default_allowance)

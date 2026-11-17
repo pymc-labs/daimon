@@ -241,11 +241,37 @@ async def clear_plan(
     scope_id: str,
     expected: Expected[PlanValue | None] | None = None,
 ) -> bool:
-    """Remove the plan; its allowances go with it and its requests stop counting anywhere."""
+    """Remove the plan; its allowances go with it, its pending requests are declined.
+
+    A request still pending would settle with no plan to bound it, so each is
+    declined at no charge and audited as a settle by the admin. Settled ones
+    keep their charges and count nowhere.
+    """
     _require_admin(actor)
     async with sessionmaker.begin() as session:
+        # The plan lock comes before the tenant lock, as in `submit_request`.
+        peek = await store.get_plan(
+            session, tenant_id=actor.tenant_id, scope=scope, scope_id=scope_id
+        )
+        if peek is not None:
+            await ledger.lock_plan(session, plan_id=peek.id)
         before = await _locked_plan(
             session, actor, scope=scope, scope_id=scope_id, expected=expected
+        )
+        current = await store.get_plan(
+            session, tenant_id=actor.tenant_id, scope=scope, scope_id=scope_id
+        )
+        if (None if current is None else current.id) != (None if peek is None else peek.id):
+            raise StaleChannelValue(PLAN_SETTING, _plan_json(before))
+        declined = (
+            []
+            if current is None
+            else await ledger.decline_pending_for_plan(
+                session,
+                plan_id=current.id,
+                settled_by=actor.subject.platform_user_id,
+                settled_by_account_id=actor.account_id,
+            )
         )
         removed = await store.delete_plan(
             session, tenant_id=actor.tenant_id, scope=scope, scope_id=scope_id
@@ -259,6 +285,18 @@ async def clear_plan(
             before=_plan_json(before),
             after=None,
         )
+        for row in declined:
+            await record_change(
+                session,
+                tenant_id=row.tenant_id,
+                platform=row.platform,
+                channel_id=row.channel_id,
+                setting=SETTLE_SETTING,
+                before={"request": str(row.id), "status": "pending", "charge": None},
+                after=_request_json(row),
+                actor_account_id=actor.account_id,
+                surface=actor.surface,
+            )
     return removed is not None
 
 

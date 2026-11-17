@@ -18,6 +18,7 @@ from daimon.core.stores import support_plans as store
 from daimon.core.stores.support_rows import SupportAllowanceRow, SupportPlanRow
 from daimon.core.support_plan_changes import PlanValue
 from daimon.core.support_plans import (
+    PLAN_GONE,
     PlanScope,
     SupportCatalogSpec,
     SupportPlanError,
@@ -184,6 +185,8 @@ def settle_outcome_text(outcome: ledger.SettleOutcome, *, correction: bool = Fal
         return settle_range_text(
             row.bounds, counted=row.counted, available=outcome.available, correction=correction
         )
+    if outcome.status == "plan_gone":
+        return PLAN_GONE
     return "Changed meanwhile. Check the request and try again."
 
 

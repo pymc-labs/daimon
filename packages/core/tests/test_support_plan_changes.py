@@ -367,3 +367,36 @@ async def test_settle_from_post_when_settler_is_another_tenant_then_audit_names_
     assert actors == {str(first): None, str(second): local.account_id}, (
         "an account of another tenant never enters this tenant's audit"
     )
+
+
+async def test_clear_plan_when_requests_pending_then_declined_and_audited(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    tenant_id = await _tenant(db_session)
+    actor = _actor(tenant_id)
+    menu = await set_catalog(db_session_factory, actor, platform="slack", key="support", spec=MENU)
+    await set_plan(db_session_factory, actor, platform="slack", spec=PLAN)
+    request_id = await _pending(db_session_factory, tenant_id, menu.revision)
+    await clear_plan(db_session_factory, actor, platform="slack", scope="channel", scope_id="C1")
+    row = await ledger.get_request(db_session, escalation_id=request_id)
+    assert row and (row.status, row.charge, row.plan_id) == ("declined", 0, None), (
+        "a request left pending would settle with no plan to bound it"
+    )
+    assert row.settled_by == "UADMIN", "the admin who cleared the plan declined it"
+    late = await settle_from_post(
+        db_session_factory,
+        escalation_id=request_id,
+        charge=D(3),
+        settled_by="Staff",
+        settled_by_account_id=None,
+        default_allowance=20,
+    )
+    assert late.status == "already_settled", "a click on the old post finds it declined"
+    changes = await list_changes(db_session, tenant_id=tenant_id, channel_id="C1")
+    settles = [(c.before, c.after) for c in changes if c.setting == SETTLE_SETTING]
+    assert settles == [
+        (
+            {"request": str(request_id), "status": "pending", "charge": None},
+            {"request": str(request_id), "status": "declined", "charge": "0"},
+        )
+    ], "the decline is audited like a settle"

@@ -709,6 +709,7 @@ SET_CHARGE: Final = "Set charge"
 DECLINE: Final = "Decline"
 CHARGE_FIELD: Final = "Credits"
 REQUEST_GONE: Final = "This request no longer exists."
+PLAN_GONE: Final = "This request's plan was removed. Decline it instead."
 SETTLE_ELSEWHERE: Final = "Set the charge in the support channel."
 
 

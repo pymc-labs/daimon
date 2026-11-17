@@ -364,7 +364,7 @@ async def test_settle_when_correcting_then_needs_the_charge_it_was_read_at(
     assert refund.status == "settled" and refund.row and refund.row.charge == 0, "refunded to 0"
 
 
-async def test_settle_when_plan_was_cleared_then_the_orphan_settles_unbounded(
+async def test_settle_when_plan_was_cleared_then_a_charge_is_refused_and_a_decline_goes_through(
     db_session: AsyncSession,
 ) -> None:
     tenant = await make_tenant(db_session, platform="slack")
@@ -375,11 +375,30 @@ async def test_settle_when_plan_was_cleared_then_the_orphan_settles_unbounded(
     await plans.delete_plan(db_session, tenant_id=tenant.id, scope="workspace", scope_id="")
     orphan = await ledger.get_request(db_session, escalation_id=row.id)
     assert orphan and orphan.plan_id is None and orphan.charged_to == "plan", "kept, unlinked"
-    done = await _settle(db_session, row.id, D(3))
-    assert (done.status, done.available) == ("settled", None), "an orphan counts nowhere"
+    refused = await _settle(db_session, row.id, D(3))
+    assert refused.status == "plan_gone", "no plan left to bound the charge"
+    assert refused.row and refused.row.status == "pending", "the request stays pending"
+    declined = await _settle(db_session, row.id, None)
+    assert declined.status == "declined", "a decline needs no balance"
     after = await _submit(db_session, tenant.id, message="m2")
     assert after.status == "recorded" and after.view, "the default plan governs again"
     assert after.view.charged_to == "default", "no plan, default ledger"
+
+
+async def test_settle_when_plan_was_cleared_then_a_correction_may_only_go_down(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack")
+    menu = await _menu(db_session, tenant.id)
+    await _plan(db_session, tenant.id, catalog=menu, pool=D(5))
+    row = (await _submit(db_session, tenant.id, RequestChoice("review", menu.revision))).row
+    assert row, "recorded"
+    assert (await _settle(db_session, row.id, D(2))).status == "settled", "charged 2"
+    await plans.delete_plan(db_session, tenant_id=tenant.id, scope="workspace", scope_id="")
+    up = await _settle(db_session, row.id, D(3), expected=D(2))
+    assert up.status == "plan_gone", "a raise has no balance to check against"
+    down = await _settle(db_session, row.id, D(1), expected=D(2))
+    assert down.status == "settled" and down.row and down.row.charge == 1, "a refund still works"
 
 
 async def test_plan_spent_when_monthly_then_last_months_rows_do_not_count(
