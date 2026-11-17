@@ -1,5 +1,5 @@
 """Monitored agents from chat: the conversations kept for an agent and one transcript.
-For workspace admins; each read is written to the audit trail, as in the web app."""
+For admins; each read is written to the audit trail, as in the web app."""
 
 from __future__ import annotations
 
@@ -91,13 +91,13 @@ async def _admin_of(runtime: McpRuntime, auth: AuthIdentity, agent_id: str) -> s
     """The agent's name, for a caller the core rule lets read monitored activity. An agent's
     own key, a held credential or a client is never that person."""
     if auth.is_external_agent or auth.hold is not None or auth.client:
-        raise ToolError("Monitored activity is for workspace admins.")
+        raise ToolError("Only admins can read monitored activity.")
     async with runtime.session_factory() as db:
         allowed = await view.may_read_monitored(
             db, tenant_id=auth.tenant_id, account_id=auth.account_id, chat_admin=auth.is_admin
         )
     if not allowed:
-        raise ToolError("Monitored activity is for workspace admins.")
+        raise ToolError("Only admins can read monitored activity.")
     name = (await agent_names(runtime, auth.tenant_id)).get(agent_id)
     if name is None:
         raise ToolError("That agent was not found.")
@@ -256,7 +256,7 @@ def register_monitored_activity_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         (YYYY-MM-DD). A person's coding-tool calls make one row per day. Person names show only
         in a direct message with the admin; elsewhere ``private_details`` is
         ``direct_message`` and they read ``Person 1``, ``Person 2``. Pass this active turn's
-        origin_context_id. The read is audited. Workspace admins only. ``next_page`` goes
+        origin_context_id. The read is audited. Admins only. ``next_page`` goes
         back as ``after``."""
         return await _list_impl(
             runtime,
@@ -282,7 +282,7 @@ def register_monitored_activity_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         """Read one kept conversation (a ``conversation_id`` from list_monitored_activity)
         in order: questions, answers, coding-tool calls with their outcome, and ``notice``
         when the person was told. Works only in a direct message with the admin or the web
-        chat; pass this active turn's origin_context_id. The read is audited. Workspace admins only.
+        chat; pass this active turn's origin_context_id. The read is audited. Admins only.
         ``next_page`` goes back as ``after``."""
         return await _transcript_impl(
             runtime,
