@@ -754,7 +754,7 @@ def option_text(option: OptionSnapshot) -> str:
     return f"{option.label}: {price_text(option.price)}"
 
 
-NOT_ENOUGH_CREDITS: Final = "Not enough credits left."
+NOT_ENOUGH_CREDITS: Final = "Not enough credits left. Ask an admin for more."
 OPTIONS_CHANGED: Final = "Options changed. Open Ask a person again."
 EXEMPT_OFFER: Final = "As an admin, your requests use no credits."
 EXEMPT_RECEIVED: Final = "This used no credits."

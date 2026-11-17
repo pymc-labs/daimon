@@ -27,7 +27,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.platform_names import ChannelSighting, upsert_channel_names
 from daimon.core.stores.support_escalation import get_request
 from daimon.core.support_escalation import CUSTOM_ID_TEMPLATE as BUTTON_TEMPLATE
-from daimon.core.support_plans import CLIENT_NOT_NOTIFIED, parse_catalog
+from daimon.core.support_plans import CLIENT_NOT_NOTIFIED, NOT_ENOUGH_CREDITS, parse_catalog
 from daimon.core.windows import WindowBounds
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
@@ -252,7 +252,7 @@ async def test_pick_when_balance_cannot_cover_it_then_not_enough_credits(
 ) -> None:
     revision = await _seed(db_session_factory, per_person=D("0.5"))
     interaction = await _pick(_bot(db_session_factory), "review", revision)
-    assert _said(interaction.response.send_message) == "Not enough credits left."
+    assert _said(interaction.response.send_message) == NOT_ENOUGH_CREDITS
     interaction.response.send_modal.assert_not_awaited()
 
 
@@ -286,7 +286,7 @@ async def test_pick_when_nothing_is_cached_then_a_poor_requester_is_refused_with
     revision = await _seed(db_session_factory, per_person=D("0.5"))
     bot = _cold_bot(db_session_factory)
     interaction = await _pick(bot, "review", revision)
-    assert _said(interaction.response.send_message) == "Not enough credits left."
+    assert _said(interaction.response.send_message) == NOT_ENOUGH_CREDITS
     bot.get_guild.return_value.fetch_member.assert_not_awaited()
 
 
