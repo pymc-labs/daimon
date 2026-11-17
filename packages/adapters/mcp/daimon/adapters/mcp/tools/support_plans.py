@@ -631,12 +631,33 @@ def register_support_plan_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> SetSupportCatalogResult:
         """Set, replace or remove (``catalog`` null) a support menu. Admin-only.
 
-        ``catalog``: ``{"name", "options": [{"key", "label", "description",
-        "price", "fields"}]}``. ``price`` is ``{"kind": "fixed", "credits"}``,
-        ``steps``, ``range`` (``min``, ``max``) or ``quoted`` (``min``), credits
-        as decimal strings. ``expected_revision``: the revision last read, or 0
-        when you expect none; a mismatch saves nothing. A menu a plan uses
-        cannot be removed.
+        ``catalog``: a ``name`` and 1 to 10 ``options``, each with ``key``, ``label``,
+        an optional ``description``, a ``price`` and up to 4 ``fields``. Prices:
+        ``{"kind": "fixed", "amount"}``; ``{"kind": "steps", "label", "steps":
+        [{"label", "amount"}]}``; ``{"kind": "range", "min", "max"}``; ``{"kind":
+        "quoted"}`` with optional ``min`` and ``max``. Amounts are decimal strings.
+        A field has ``key``, ``label`` and ``kind``: ``text`` (``max_chars`` up to
+        200), ``paragraph`` (up to 3000) or ``choice`` (``choices``). Example::
+
+            {"name": "Support options", "options": [
+              {"key": "review_thread", "label": "Review this thread",
+               "price": {"kind": "fixed", "amount": "0.5"}},
+              {"key": "questions", "label": "Ask multiple questions",
+               "price": {"kind": "fixed", "amount": "1"},
+               "fields": [{"key": "questions", "kind": "paragraph",
+                           "label": "Your questions", "max_chars": 2000}]},
+              {"key": "coaching", "label": "Live coaching (1 hour)",
+               "price": {"kind": "fixed", "amount": "1"},
+               "fields": [{"key": "slots", "kind": "paragraph",
+                           "label": "Times that suit you (with time zone)",
+                           "max_chars": 500}]},
+              {"key": "hands_on", "label": "Hands-on support (1 hour)",
+               "price": {"kind": "fixed", "amount": "1"},
+               "fields": [{"key": "task", "kind": "paragraph",
+                           "label": "What should we do?", "max_chars": 2000}]}]}
+
+        ``expected_revision``: the revision last read, or 0 when you expect none;
+        a mismatch saves nothing. A menu a plan uses cannot be removed.
         """
         return await _set_catalog_impl(
             runtime,

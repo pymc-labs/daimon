@@ -7,6 +7,7 @@ The Discord visibility lookup is patched on `_channel_target`, as in
 from __future__ import annotations
 
 import dataclasses
+import json
 import uuid
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -34,11 +35,16 @@ from daimon.core.stores import support_plans as store
 from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.support_plans import (
     CLIENT_NOT_NOTIFIED,
+    MAX_FIELDS,
+    MAX_OPTIONS,
+    MAX_PARAGRAPH_CHARS,
+    MAX_TEXT_CHARS,
     RequestChoice,
     SupportPlace,
     parse_catalog,
 )
 from daimon.testing.factories import make_account, make_tenant
+from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -350,3 +356,16 @@ async def test_set_plan_when_arguments_left_out_then_keeps_the_plans_values(
         "fixed",
     ), "the menu, pool and window are kept"
     assert changed.ends_at == "2026-11-24T09:00:00+00:00", "the dates are kept"
+
+
+async def test_catalog_set_docs_when_read_then_the_example_is_a_valid_menu() -> None:
+    mcp = FastMCP(name="t")
+    tools.register_support_plan_tools(mcp, MagicMock())
+    tool = next(t for t in await mcp.list_tools() if t.name == "support_catalog_set")
+    doc = tool.description or ""
+    example = doc.split("Example::")[1].split("\n\n")[1]
+    menu = parse_catalog(json.loads(example))
+    assert [o.price.kind for o in menu.options] == ["fixed"] * 4, "the 4-option fixed menu"
+    flat = " ".join(doc.split())
+    for limit in (MAX_OPTIONS, MAX_FIELDS, MAX_TEXT_CHARS, MAX_PARAGRAPH_CHARS):
+        assert f"to {limit}" in flat, f"the stated limit {limit} is the real one"
