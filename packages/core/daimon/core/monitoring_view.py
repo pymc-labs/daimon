@@ -2,7 +2,8 @@
 conversation's transcript, shaped once for the web app, chat tools and CLI.
 
 Every read by an admin is written to the audit trail by the caller (`AUDIT_LIST`,
-`AUDIT_OPEN`), so admins' viewing shows up in Audit.
+`AUDIT_OPEN`), so admins' viewing shows up in Audit. `may_read_monitored` is the one bar
+for who reads: the web routes, the chat tools and the agent page all ask it.
 """
 
 from __future__ import annotations
@@ -24,7 +25,22 @@ from daimon.core.stores.domain import (
     MonitoredEventRow,
     MonitoredPlatform,
 )
+from daimon.core.web_roles_rules import is_admin, role_of_account
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def may_read_monitored(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID, chat_admin: bool = False
+) -> bool:
+    """Whether the account may read what is kept for monitored agents: a workspace owner or
+    admin, as `WorkspaceAdmin` grants. An agent's owner who is not one may not, and neither
+    may a visitor or a suspended person. `chat_admin` is the caller's standing in chat, used
+    when the account has no web person yet."""
+    role = await role_of_account(
+        session, tenant_id=tenant_id, account_id=account_id, chat_admin=chat_admin
+    )
+    return role is not None and is_admin(role)
+
 
 AUDIT_LIST = "Viewed monitored activity"
 AUDIT_OPEN = "Opened monitored conversation"

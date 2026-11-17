@@ -448,6 +448,8 @@ _SETTINGS: Final = Authority(DelegatedAction.AGENT_SETTINGS)
 _SERVER_ADMIN: Final = Authority(None, agent_owner=False)
 _CHANNELS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "channel")
 _ADMIN: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS)
+# Monitoring keeps what people say: workspace admins switch it on, an agent's owner may not.
+_ADMIN_NOT_OWNER: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS, agent_owner=False)
 WEB_MODULES: Final[tuple[str, ...]] = (
     "chat", "agents", "channels", "routines", "credits", "integrations",
 )  # fmt: skip
@@ -719,14 +721,14 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
             binds="turn",
             doc=doc,
             platforms=EVERY_PLATFORM,
-            authority=_SERVER_ADMIN,
+            authority=_ADMIN_NOT_OWNER,
         )
         for key, name, doc in (
             (
                 "monitor_direct_messages",
                 "Monitor direct messages",
                 "Keeps what people ask this agent in direct messages and web chat, and what "
-                "it answers, for platform admins to read. People are told in the conversation. "
+                "it answers, for workspace admins to read. People are told in the conversation. "
                 "Kept from when it is turned on, for the retention period.",
             ),
             (

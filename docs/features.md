@@ -950,7 +950,7 @@ A routine the agent makes must name where its results go, or it is not made. Exi
 
 ## Monitor direct messages
 
-Keeps what people ask this agent in direct messages and web chat, and what it answers, for platform admins to read. People are told in the conversation. Kept from when it is turned on, for the retention period.
+Keeps what people ask this agent in direct messages and web chat, and what it answers, for workspace admins to read. People are told in the conversation. Kept from when it is turned on, for the retention period.
 
 | | |
 | --- | --- |

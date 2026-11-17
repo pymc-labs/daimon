@@ -13,6 +13,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from daimon.core import monitoring, monitoring_view
+from daimon.core.admin_actions import DelegatedAction, admin_for_action
+from daimon.core.features.registry import FEATURES
+from daimon.core.features.service import FeatureActor, may_change
 from daimon.core.features.snapshot import CACHE
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.monitoring import (
@@ -28,12 +31,15 @@ from daimon.core.monitoring import (
 from daimon.core.monitoring_sweep import sweep_monitored_events
 from daimon.core.privacy import collect_purge_preview
 from daimon.core.purge import purge_account
+from daimon.core.stores import agent_owners, web_roles
 from daimon.core.stores import monitoring as store
+from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import (
     FeatureTarget,
     FeatureValueRow,
     MonitoredEventRow,
     MonitoredPlatform,
+    Role,
 )
 from daimon.core.stores.feature_values import set_feature_value
 from daimon.testing.factories import make_account, make_tenant
@@ -476,3 +482,74 @@ async def test_account_erasure_previews_and_deletes_the_persons_rows(
     assert report.db.monitored_events == 3, report.db
     rows = await _rows(db_session_factory, tenant.id)
     assert [row.account_id for row in rows] == [second.id], rows
+
+
+async def test_workspace_admins_switch_monitoring_but_an_agent_owner_does_not() -> None:
+    """The switches use the workspace-admin authority and drop the owner path, as long jobs do."""
+
+    async def admin_for(action: DelegatedAction | None) -> bool:
+        return admin_for_action(platform_admin=False, daimon_admin=True, action=action)
+
+    async def owns(_: str) -> bool:
+        return True
+
+    admin = FeatureActor(uuid.uuid4(), None, "chat", None, admin_for)
+    owner = FeatureActor(uuid.uuid4(), None, "chat", None, _never, owns_agent=owns)
+    for key in ("monitor_direct_messages", "monitor_mcp"):
+        for tier in ("workspace", "agent"):
+            spec = FEATURES[key]
+            assert await may_change(admin, spec, tier, locked=False, agent_id="ag"), (
+                f"a workspace admin sets {key} at the {tier} tier"
+            )
+            assert not await may_change(owner, spec, tier, locked=False, agent_id="ag"), (
+                f"an agent's owner does not set {key} at the {tier} tier"
+            )
+
+
+async def _never(_action: object) -> bool:
+    return False
+
+
+async def test_may_read_monitored_is_a_workspace_owner_or_admin_only(
+    db_session: AsyncSession,
+) -> None:
+    """One rule for every read: grants and a platform admin pass; an agent's owner, a plain
+    member and a stranger from another workspace do not."""
+
+    tenant = await make_tenant(db_session)
+    other = await make_tenant(db_session)
+    owner, admin, platform, member, agent_owner, chat = [
+        await make_account(db_session, tenant=tenant) for _ in range(6)
+    ]
+    for account, role in ((owner, "owner"), (admin, "admin")):
+        await web_roles.set_workspace_role(
+            db_session,
+            tenant_id=tenant.id,
+            account_id=account.id,
+            role=role,  # pyright: ignore[reportArgumentType]
+            granted_by_account_id=None,
+        )
+    await set_role(db_session, platform.id, Role.ADMIN)
+    await agent_owners.set_owner(
+        db_session,
+        tenant_id=tenant.id,
+        agent_id=uuid.uuid4(),
+        owner_account_id=agent_owner.id,
+        source="created",
+    )
+
+    async def reads(account: uuid.UUID, tenant_id: uuid.UUID, **kw: bool) -> bool:
+        return await monitoring_view.may_read_monitored(
+            db_session, tenant_id=tenant_id, account_id=account, **kw
+        )
+
+    assert [await reads(a.id, tenant.id) for a in (owner, admin, platform)] == [True] * 3, (
+        "an owner grant, an admin grant and a platform admin read"
+    )
+    assert [await reads(a.id, tenant.id) for a in (member, agent_owner)] == [False] * 2, (
+        "a member and an agent's owner who holds no grant do not read"
+    )
+    assert await reads(chat.id, tenant.id, chat_admin=True), (
+        "a chat admin without a web person reads"
+    )
+    assert not await reads(owner.id, other.id), "a grant in one workspace is nothing in another"
