@@ -1,6 +1,6 @@
 # Direct messages
 
-How people talk to Daimon privately, and what an operator turns on for it.
+How people talk to Daimon in direct messages, and what an operator turns on for it.
 Read [isolation](isolation.md#direct-messages) for what a DM can see and
 [Slack](slack.md#use-private-conversations) for Slack's own setup.
 
@@ -50,7 +50,9 @@ member, pass the invoker policy and may use the DM agent.
 The opening message names the server and agent, and offers **Switch server**
 and **New conversation**. `/dm-settings` shows those buttons again, and `/new`
 starts an empty conversation with the same server and its current DM agent.
-Buttons expire after fifteen minutes, and only the latest set works.
+Buttons expire after fifteen minutes, and only the latest set works. When admins
+[monitor](features.md#monitor-direct-messages) the agent, a card tells the person
+once, at their first message after it starts.
 
 A cold conversation starts with no history and no channel access. Switching
 server or starting a new one never carries the old history across. An active

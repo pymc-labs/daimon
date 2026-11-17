@@ -145,8 +145,8 @@ receives the event answers.
 ### Use private conversations
 
 Workspace admins opt in with `/dm-me enable` and opt out with `/dm-me disable`.
-In a channel, `/dm-me` continues privately with its recent text and a link
-back. Later messages go straight to the app, and running `/dm-me` again resets
+In a channel, `/dm-me` continues in a direct message with its recent text and
+a link back. Later messages go straight to the app, and running `/dm-me` again resets
 the scope. It carries recent channel text, not thread replies or attachments,
 and it refuses in channels with limited readers.
 

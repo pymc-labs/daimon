@@ -33,13 +33,21 @@ organisation a Teams deployment serves), daimon stores:
 - **Security audit metadata** — names of tools called through Daimon's main
   tool service after sign-in, authorization outcomes, reason codes, timestamps
   and tenant/account/platform-user/agent identifiers.
-  Tool arguments, messages, credentials and response bodies are excluded. These
-  records have a default retention age of 90 days, enforced by the operator's
+  These records exclude tool arguments, messages, credentials and response
+  bodies; monitored conversations, below, are kept apart. Audit records have a
+  default retention age of 90 days, enforced by the operator's
   scheduled `daimon audit prune TENANT_UUID` command. A privacy deletion clears
   account and platform-user identifiers; tenant deletion removes its audit rows.
   Database deletion triggers enforce erasure even for older privacy workers.
   Separate hub OAuth tools are not included in this audit trail. Operators can
   configure a different age or explicitly select indefinite retention.
+- **Monitored conversations** — when an admin monitors an agent, Daimon keeps
+  what people ask it in direct messages, web chat and MCP, and its answers, for
+  workspace admins to read. Over MCP it also keeps the name, time and outcome of
+  each other tool a person calls on that agent, never what the call sent or
+  returned. People are told in the conversation, and the privacy panel says so.
+  Records are kept 90 days by default (`DAIMON_MONITORING__RETENTION_DAYS`);
+  account deletion removes them.
 - **Agent credentials** — any bound external credentials (e.g. a GitHub
   personal access token used by `get_cli_token`), encrypted at rest.
 
@@ -52,12 +60,13 @@ Their answers go into the message the agent receives, like a tool result.
 
 Conversation content lives in Anthropic's Managed Agents service. When an admin
 enables DM conversations, daimon also stores the selected workspace, an
-excerpt from the conversation (up to 12 messages / 16,000 characters), and the
-most recent 12 private user/agent messages (up to 16,000 characters). This
-supports private conversation recovery without mixing the history of different
-workspaces. Running `/dm-me` again replaces that local context. `/privacy` account
-deletion removes it along with the record linking your private chat to its
-workspace. Full JSON export remains unimplemented.
+excerpt from the channel conversation (up to 12 messages / 16,000 characters),
+and the most recent 12 user/agent messages of the direct message (up to 16,000
+characters). Daimon sends both to the agent with each message, so the direct
+message carries on without mixing the history of different workspaces. Running
+`/dm-me` again replaces that local context. `/privacy` account deletion removes
+it along with the record linking your direct message to its workspace. Full JSON
+export remains unimplemented.
 
 ## Your rights via `/privacy`
 
@@ -65,7 +74,8 @@ On Discord, run `/privacy` in a server where your account is linked. On Slack,
 run `/privacy` to open the privacy panel. On Teams, send `privacy`; the bot
 replies in your private chat. These controls let you:
 
-- **View** who stores what about you: Daimon or Anthropic.
+- **View** who stores what about you, Daimon or Anthropic, and whether admins
+  monitor agents in that workspace.
 - **Export** shows a summary on Slack and Teams. Export is not yet available on
   Discord.
 - **Delete** your account and its linked personal records ("delete me").
@@ -76,10 +86,11 @@ linked to your account from Anthropic. The shared agents and their memory stay.
 Chat transcript deletion at Anthropic can fail. If Daimon reports a failure,
 ask the person who runs it to check and help remove the remaining transcripts.
 
-Account deletion also removes Daimon's own copy of your private conversations
-(Daimon keeps these on its provider-neutral turn path, which runs agents on other
-providers, and on Claude when an operator turns that path on): the stored messages, tool results and conversation state, and the
-routing and retry records behind them. A conversation shared with other people in
+Account deletion also removes Daimon's own copies of your conversations: the
+records admins can read for a monitored agent, and what the provider-neutral turn
+path keeps. That path runs agents on other providers, and on Claude when an
+operator turns it on. It keeps the messages, tool results and conversation state,
+and the routing and retry records behind them. A conversation shared with other people in
 a thread, and the requests you made in it, stay for the people still using it, so
 messages you wrote there may remain. The privacy panel says how many shared
 conversations that is before you confirm. After deletion nothing can write to

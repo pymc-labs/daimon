@@ -8,13 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - **Workspace admins can monitor an agent.** Two features, Monitor direct
-  messages and Monitor MCP, are off by default and set per workspace or agent.
-  While one is on, Daimon keeps what people ask that agent and what it answers:
+  messages and Monitor coding tools (MCP), are off by default and set per
+  workspace or agent. While one is on, Daimon keeps what people ask that agent and what it answers:
   in Discord, Slack and Teams direct messages and web chat, or over MCP. Over MCP
   it also keeps the name, time and outcome of each other tool call, never what
   the call sent or returned. A conversation begun earlier is kept from the
   switch on, never before it. Rows are deleted with the person's account and
   after `DAIMON_MONITORING__RETENTION_DAYS` (default 90).
+- **People are told when admins monitor an agent.** At their first message after
+  monitoring starts, Discord, Slack and Teams direct messages show a neutral card:
+  "Admins can read what you and this agent say here." and "Ask an admin if you
+  have questions." Web chat shows it while the agent is monitored. Over MCP,
+  `describe_agent`, `list_daimons` and the first agent-chat result say so, and
+  name tool calls too. The privacy panel says when admins monitor agents and
+  which records they can read. `/dm-me` reads "Continue in a direct message"
+  instead of promising privacy.
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and
   the MCP tools. A run nobody started, such as a routine, never applies one at once.
