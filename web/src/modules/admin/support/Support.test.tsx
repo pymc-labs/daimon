@@ -42,7 +42,7 @@ const limit: Limit = {
   shared: "5", each_person: "2", window: "monthly", starts_at: null, ends_at: null,
   used: "1", state: "active", revision: 3, recent: [],
 }
-const lost = { id: "r1", at: "2026-01-01T00:00:00Z", person: "Priya", credits: "2", what: "Look", price: { kind: "range" as const, min: "1", max: "3" } }
+const lost = { id: "r1", at: "2026-01-01T00:00:00Z", person: "Priya", credits: "2", what: "Look", charged: false, price: { kind: "range" as const, min: "1", max: "3" } }
 const menu = { key: "support", name: "Support", revision: 3, summary: "", options: 1, used_in: [], body: { name: "Support", options: [{ key: "look", label: "Look", price: { kind: "fixed", amount: "1" } }] } }
 const data: SupportPage = {
   platform: "discord", everyone: { each_person: "20" }, undelivered: [],
@@ -57,10 +57,11 @@ const Page = () => {
   const { data: d } = useSupportPage()
   return d ? <><Limits d={d} /><Menus d={d} /><Destination d={d} /></> : null
 }
+const confirmed = vi.fn(async (..._args: unknown[]) => "action")
 const mount = (Body: () => React.ReactNode, url = "/") =>
   render(
     <QueryClientProvider client={new QueryClient()}>
-      <Ctx.Provider value={async () => "action"}><MemoryRouter initialEntries={[url]}><Body /></MemoryRouter></Ctx.Provider>
+      <Ctx.Provider value={confirmed as never}><MemoryRouter initialEntries={[url]}><Body /></MemoryRouter></Ctx.Provider>
     </QueryClientProvider>,
   )
 const view = (start: SupportPage = data, url = "/", Body: () => React.ReactNode = Page) => {
@@ -421,6 +422,25 @@ describe("not delivered", () => {
     const d = within(await screen.findByRole("dialog"))
     await userEvent.click((await d.findAllByRole("button", { name: "Decline" }))[1]!)
     await waitFor(() => expect(api.post).toHaveBeenCalledWith("/api/support/requests/r2/decline", {}))
+  })
+
+  const charged = { ...lost, charged: true, credits: "2", price: { kind: "fixed" as const, min: "2", max: null } }
+
+  it("keeps a charged request's charge on settle", async () => {
+    open([charged])
+    const d = within(await screen.findByRole("dialog"))
+    expect(await d.findByText("Charged")).toBeInTheDocument()
+    expect(d.queryByRole("textbox", { name: "Charge" })).toBeNull()
+    await userEvent.click(d.getByRole("button", { name: "Settle" }))
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith("/api/support/requests/r1/settle", { charge: "2" }))
+  })
+
+  it("asks to refund when declining a charged request", async () => {
+    open([charged])
+    const d = within(await screen.findByRole("dialog"))
+    await userEvent.click(await d.findByRole("button", { name: "Decline" }))
+    await waitFor(() => expect(confirmed).toHaveBeenLastCalledWith(expect.objectContaining({ title: "Decline and refund?" })))
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith("/api/support/requests/r1/decline", {}))
   })
 
   it("shows a refused charge under the input", async () => {

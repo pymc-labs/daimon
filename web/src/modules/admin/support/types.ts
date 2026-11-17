@@ -16,8 +16,8 @@ export type LimitValue = {
 
 export type Charge = { at: string; person: string; credits: string; what: string }
 
-/** A request no support channel received. `credits` are held; `price` bounds what settling may charge (a fixed price is `min`). */
-export type Undelivered = Charge & { id: string; price: { kind: "fixed" | "quoted" | "range"; min: string; max: string | null } }
+/** A request no support channel received and nobody handled. `credits` are held, or the charge when `charged` (taken at submit: settling keeps it, declining refunds it); `price` bounds what settling may charge (a fixed price is `min`). */
+export type Undelivered = Charge & { id: string; charged: boolean; price: { kind: "fixed" | "quoted" | "range"; min: string; max: string | null } }
 
 /** One row of the limits list. A row is its place and, for a person, who; `person_id` null is everyone there. */
 export type Limit = LimitValue & {

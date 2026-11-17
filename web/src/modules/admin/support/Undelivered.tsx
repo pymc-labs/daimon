@@ -20,7 +20,7 @@ export function UndeliveredCount({ n }: { n: number }) {
   return <Button variant="ghost" size="xs" className="text-destructive" onClick={() => open("all")}>{n}<ChevronRight /></Button>
 }
 
-/** Requests no support channel received: settle one with the credits to charge, or decline it. */
+/** Requests no support channel received and nobody handled: settle one with the credits to charge, or decline it. One charged at submit keeps its charge on Settle and is refunded on Decline. */
 export function UndeliveredDrawer({ d }: { d: SupportPage }) {
   return <Drawer param="undelivered" title="Not delivered">{() => <Requests list={d.undelivered} />}</Drawer>
 }
@@ -56,12 +56,15 @@ function Request({ r }: { r: Undelivered }) {
   const [error, setError] = useState<{ at: string | null; rest: string | null }>({ at: null, rest: null })
   const bound = chargeError(charge, r)
   const act = async (what: "settle" | "decline") => {
-    const out = await save.run(`requests/${encodeURIComponent(r.id)}/${what}`, what === "settle" ? { charge: charge.trim() } : {}, true)
+    const out = await save.run(`requests/${encodeURIComponent(r.id)}/${what}`, what === "settle" ? { charge: r.charged ? r.credits : charge.trim() } : {}, true)
     if (out.error) { setError({ at: out.problems.find((p) => p.loc[0] === "charge")?.msg ?? null, rest: out.problems.some((p) => p.loc[0] === "charge") ? null : out.error }); return }
     toast(what === "settle" ? "Request settled" : "Request declined")
   }
   const decline = async () => {
-    if (await confirm({ title: "Decline request?", body: `${r.person}: ${r.what}`, action: "Decline", destructive: true })) await act("decline")
+    const ask = r.charged
+      ? { title: "Decline and refund?", body: `${r.person}: ${r.what}. Refunds ${credits(Number(r.credits))}.` }
+      : { title: "Decline request?", body: `${r.person}: ${r.what}` }
+    if (await confirm({ ...ask, action: "Decline", destructive: true })) await act("decline")
   }
   return (
     <PanelSection>
@@ -71,18 +74,24 @@ function Request({ r }: { r: Undelivered }) {
       </div>
       <p className="mt-0.5 break-words text-sm text-muted-foreground">{r.what}</p>
       <div className="mt-3 space-y-3">
-        <SettingRow label="Held"><span className="tabular">{credits(Number(r.credits))}</span></SettingRow>
-        <SettingRow label="Charge">
-          <div className="space-y-1">
-            <Input aria-label="Charge" aria-invalid={!!(error.at ?? bound)} inputMode="decimal" className="h-8 w-28" disabled={fixed} value={charge} onChange={(e) => { setCharge(e.target.value.replace(/[^\d.]/g, "")); setError({ at: null, rest: null }) }} />
-            {(error.at ?? bound) && <p className="text-xs text-destructive">{error.at ?? bound}</p>}
-          </div>
-        </SettingRow>
+        {r.charged ? (
+          <SettingRow label="Charged"><span className="tabular">{credits(Number(r.credits))}</span></SettingRow>
+        ) : (
+          <>
+            <SettingRow label="Held"><span className="tabular">{credits(Number(r.credits))}</span></SettingRow>
+            <SettingRow label="Charge">
+              <div className="space-y-1">
+                <Input aria-label="Charge" aria-invalid={!!(error.at ?? bound)} inputMode="decimal" className="h-8 w-28" disabled={fixed} value={charge} onChange={(e) => { setCharge(e.target.value.replace(/[^\d.]/g, "")); setError({ at: null, rest: null }) }} />
+                {(error.at ?? bound) && <p className="text-xs text-destructive">{error.at ?? bound}</p>}
+              </div>
+            </SettingRow>
+          </>
+        )}
       </div>
       <div className="mt-4">
         <Actions>
           <Button variant="outline" disabled={save.pending} onClick={() => void decline()}>Decline</Button>
-          <Button disabled={save.pending || !charge.trim() || !!bound} onClick={() => void act("settle")}>Settle</Button>
+          <Button disabled={save.pending || (!r.charged && (!charge.trim() || !!bound))} onClick={() => void act("settle")}>Settle</Button>
         </Actions>
         <Failure>{error.rest}</Failure>
       </div>

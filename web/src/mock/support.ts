@@ -137,11 +137,11 @@ let limits: Limit[] = [
   row("channel", "c_clv", "1100000000000000012", { each_person: "3", ends_at: new Date(Date.now() + 21 * DAY).toISOString().slice(0, 10) + "T00:00:00Z" }, "1.5"),
   row("agent", "clv-desk", null, { shared: "15", window: "total", starts_at: new Date(Date.now() + 9 * DAY).toISOString().slice(0, 10) + "T00:00:00Z" }, "0"),
 ]
-/** `?support=undelivered` shows requests no channel received. */
+/** `?support=undelivered` shows requests no channel received and nobody handled; a charged one was paid at submit. */
 let lost: Undelivered[] = [
-  { id: "r_1", at: ago(0.2), person: "Priya Raman", credits: "2", what: "Live coaching, 1 hour", price: { kind: "fixed", min: "2", max: null } },
-  { id: "r_2", at: ago(2), person: "Aiko Tanaka", credits: "3", what: "Review this thread", price: { kind: "range", min: "1", max: "3" } },
-  { id: "r_3", at: ago(4), person: "Owen Brooks", credits: "20", what: "Build it", price: { kind: "quoted", min: "0", max: "20" } },
+  { id: "r_1", at: ago(0.2), person: "Priya Raman", credits: "2", what: "Live coaching, 1 hour", charged: true, price: { kind: "fixed", min: "2", max: null } },
+  { id: "r_2", at: ago(2), person: "Aiko Tanaka", credits: "3", what: "Review this thread", charged: false, price: { kind: "range", min: "1", max: "3" } },
+  { id: "r_3", at: ago(4), person: "Owen Brooks", credits: "20", what: "Build it", charged: false, price: { kind: "quoted", min: "0", max: "20" } },
 ]
 let channel = { id: "c_questions", name: "questions", revision: 2 as number | null }
 
