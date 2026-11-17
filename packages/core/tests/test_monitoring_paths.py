@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import uuid
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,7 +21,12 @@ from daimon.core import usage_sweep
 from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
 from daimon.core.features.snapshot import CACHE
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.monitoring import KeptQuestion, capture_answer, capture_question
+from daimon.core.monitoring import (
+    KeptQuestion,
+    capture_answer,
+    capture_question,
+    continued_question,
+)
 from daimon.core.stores import monitoring as store
 from daimon.core.stores import session_settle_state
 from daimon.core.stores.domain import FeatureTarget
@@ -37,11 +43,11 @@ NO_QUESTION: dict[tuple[str, str], str] = {
     (
         "packages/adapters/discord/daimon/adapters/discord/bot.py",
         "_run_continuation_turn_observed",
-    ): "a watch or job wake resumes the agent; nobody asked anything",
+    ): "queued work: its seed is no question; the answer goes with the one it carries on",
     (
         "packages/adapters/slack/daimon/adapters/slack/app.py",
         "_run_continuation_turn_observed",
-    ): "a watch or job wake resumes the agent; nobody asked anything",
+    ): "queued work: its seed is no question; the answer goes with the one it carries on",
     (
         "packages/adapters/discord/daimon/adapters/discord/wizard_submit.py",
         "run_wizard_submit_turn_observed",
@@ -100,6 +106,45 @@ def test_every_turn_caller_passes_the_question_or_says_why_not() -> None:
         or any(kw.arg == "request_text" for call in sites[site] for kw in call.keywords)
     )
     assert not stale, f"NO_QUESTION entries that no longer apply: {stale}"
+
+
+def _names(node: ast.AST) -> set[str]:
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+
+def _continuation_callers() -> list[tuple[str, str, ast.Call]]:
+    """`run_prepared_turn` calls in functions that take a queued continuation row."""
+    found: list[tuple[str, str, ast.Call]] = []
+    for path in sorted([*ROOT.glob("packages/**/*.py"), *ROOT.glob("apps/**/*.py")]):
+        rel = path.relative_to(ROOT).as_posix()
+        if "/tests/" in rel or ".venv" in rel or "run_prepared_turn" not in path.read_text():
+            continue
+        for fn in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            rows = [
+                a
+                for a in (*fn.args.args, *fn.args.kwonlyargs)
+                if a.annotation is not None and "TaskContinuationRow" in ast.unparse(a.annotation)
+            ]
+            if rows:
+                found += [(rel, fn.name, call) for call in _calls(fn, "run_prepared_turn")]
+    return found
+
+
+def test_queued_work_carries_its_row_and_never_asks_its_seed() -> None:
+    """A continuation's seed is the queued work, not the person's words: a caller with a
+    row passes it as `continues=`, and any `request_text` depends on that row."""
+    callers = _continuation_callers()
+    assert len(callers) >= 4, f"the scan found too few continuation callers: {callers}"
+    wrong: list[tuple[str, str]] = []
+    for rel, name, call in callers:
+        kws = {kw.arg: kw.value for kw in call.keywords}
+        carried = kws.get("continues")
+        asked = kws.get("request_text")
+        if carried is None or (asked is not None and not _names(carried) & _names(asked)):
+            wrong.append((rel, name))
+    assert not wrong, f"pass continues=<row> and no question without it: {wrong}"
 
 
 def test_run_prepared_turn_keeps_the_question_and_both_endings() -> None:
@@ -226,6 +271,64 @@ async def test_a_message_run_twice_keeps_one_question_under_its_platform_id(
             agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agt_a"),
         )
     assert sorted((row.kind, row.turn_ref) for row in rows) == [("answer", ref), ("question", ref)]
+
+
+async def test_queued_work_keeps_its_answer_with_the_question_it_carries_on(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Work queued while a kept question waits keeps its answer with that question; work
+    queued after the answer, or for someone else, keeps nothing."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    other = await make_account(db_session, tenant=tenant)
+    await _switch_on(db_session, tenant.id, "monitor_direct_messages")
+    sm = db_session_factory
+    assert await _keep(sm, tenant.id, account.id, platform="teams", request_ref="m1")
+
+    async def carried(account_id: uuid.UUID) -> str | None:
+        return await continued_question(
+            sm,
+            None,
+            tenant_id=tenant.id,
+            platform="teams",
+            conversation="thread-1",
+            account_id=account_id,
+            queued_at=datetime.now(UTC),
+        )
+
+    assert await carried(account.id) == "m1"
+    assert await carried(other.id) is None, "carried someone else's question"
+    assert await capture_answer(
+        sm,
+        tenant_id=tenant.id,
+        conversation="thread-1",
+        turn_ref="m1",
+        content="on it",
+        outcome="ok",
+    )
+    assert await carried(account.id) is None, "carried a question answered before it queued"
+    work = "w1"  # The continuation row's id.
+    assert await capture_answer(
+        sm,
+        tenant_id=tenant.id,
+        conversation="thread-1",
+        turn_ref=work,
+        content="done",
+        outcome="ok",
+        question_ref="m1",
+    )
+    async with sm() as session:
+        rows = await store.list_events(
+            session,
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agt_a"),
+        )
+    kept = sorted((row.kind, row.turn_ref, row.content) for row in rows)
+    assert kept == [
+        ("answer", "m1", "on it"),
+        ("answer", work, "done"),
+        ("question", "m1", "hello"),
+    ]
 
 
 def _event(kind: str, event_id: str = "", text: str = "", stop: str = "end_turn") -> Any:

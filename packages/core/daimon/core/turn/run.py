@@ -48,7 +48,13 @@ from daimon.core.ma import replay_events
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_tool_annotations import agent_mcp_token_for, mcp_annotation_lookup
 from daimon.core.model_presets import model_choice_id
-from daimon.core.monitoring import KeptQuestion, capture_answer, capture_question, record_notice
+from daimon.core.monitoring import (
+    KeptQuestion,
+    capture_answer,
+    capture_question,
+    continued_question,
+    record_notice,
+)
 from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime, turn_backend
 from daimon.core.mux_compat import legacy_call
 from daimon.core.output_runtime import (
@@ -1266,6 +1272,7 @@ async def run_prepared_turn(
     job_row: TaskContinuationRow | None = None,
     request_text: str | None = None,
     request_ref: str | None = None,
+    continues: TaskContinuationRow | None = None,
 ) -> RunOutcome:
     """Drive an admitted turn, including unattended wakes.
 
@@ -1273,7 +1280,8 @@ async def run_prepared_turn(
     message and confirmation batch. Runtimes without a session read refuse
     unattended confirmations with a plain reason, including with safety off.
     `request_ref` is the platform's id for the person's message, kept with it
-    when the agent is monitored.
+    when the agent is monitored. `continues` is the queued work this turn carries
+    on: its answer is kept with the question that was open when it was queued.
     """
     # Imported here: `daimon.core.helpers` runs helper turns through this module.
     from daimon.core.helpers import serve_helpers
@@ -1321,6 +1329,18 @@ async def run_prepared_turn(
         request_ref=request_ref,
     )
     kept_question = kept.turn_ref if kept is not None else None
+    continued_from = None
+    if kept is None and continues is not None:
+        continued_from = await continued_question(
+            deps.sessionmaker,
+            deps.settings,
+            tenant_id=tenant_id,
+            platform=platform,
+            conversation=thread_id,
+            account_id=continues.requester_account_id,
+            queued_at=continues.created_at,
+        )
+        kept_question = str(continues.id) if continued_from is not None else None
     if (
         kept is not None
         and kept.notice is not None
@@ -1409,6 +1429,7 @@ async def run_prepared_turn(
                 turn_ref=kept_question,
                 content=None,
                 outcome=str(termination_reason(exc)),
+                question_ref=continued_from,
             )
         if seeded is not None and not sent:
             await _restore_handoff_summary(
@@ -1453,6 +1474,7 @@ async def run_prepared_turn(
             turn_ref=kept_question,
             content=extract_final_response(result.state.content),
             outcome=str(result.termination),
+            question_ref=continued_from,
         )
     if seeded is not None and not sent and result.state.error is not None:
         await _restore_handoff_summary(

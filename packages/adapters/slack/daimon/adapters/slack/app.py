@@ -3788,6 +3788,7 @@ class SlackApp:
                     thread_id=thread_id,
                     external_user_id=row.requester_external_user_id,
                     watch_row=row if row.reason == "watch_fired" else None,
+                    continues=row,
                     origin="handoff" if handoff_notice is not None else "chat",
                     attended=False if row.reason == "watch_fired" else continuation_attended(row),
                     user_message=(

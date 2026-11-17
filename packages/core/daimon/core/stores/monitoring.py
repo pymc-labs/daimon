@@ -96,6 +96,58 @@ async def get_open_question(
     return MonitoredEventRow.model_validate(question)
 
 
+async def get_question(
+    session: AsyncSession, *, tenant_id: uuid.UUID, conversation: str, turn_ref: str
+) -> MonitoredEventRow | None:
+    """The turn's kept question, answered or not."""
+    row = await session.scalar(
+        select(MonitoredEvent).where(
+            MonitoredEvent.tenant_id == tenant_id,
+            MonitoredEvent.conversation == conversation,
+            MonitoredEvent.turn_ref == turn_ref,
+            MonitoredEvent.kind == "question",
+        )
+    )
+    return None if row is None else MonitoredEventRow.model_validate(row)
+
+
+async def question_open_at(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    conversation: str,
+    account_id: uuid.UUID,
+    at: datetime,
+) -> str | None:
+    """The ref of the person's newest kept question in `conversation` asked by `at`, when
+    it had no kept answer yet at `at`."""
+    ref = await session.scalar(
+        select(MonitoredEvent.turn_ref)
+        .where(
+            MonitoredEvent.tenant_id == tenant_id,
+            MonitoredEvent.conversation == conversation,
+            MonitoredEvent.account_id == account_id,
+            MonitoredEvent.kind == "question",
+            MonitoredEvent.turn_ref.is_not(None),
+            MonitoredEvent.created_at <= at,
+        )
+        .order_by(MonitoredEvent.created_at.desc())
+        .limit(1)
+    )
+    if ref is None:
+        return None
+    answered = await session.scalar(
+        select(MonitoredEvent.id).where(
+            MonitoredEvent.tenant_id == tenant_id,
+            MonitoredEvent.conversation == conversation,
+            MonitoredEvent.turn_ref == ref,
+            MonitoredEvent.kind == "answer",
+            MonitoredEvent.created_at <= at,
+        )
+    )
+    return ref if answered is None else None
+
+
 async def last_notice_at(
     session: AsyncSession,
     *,

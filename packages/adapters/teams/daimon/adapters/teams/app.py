@@ -1675,7 +1675,7 @@ class TeamsApp:
                         handoff=handoff,
                         reraise=reraise,
                         attended=continuation is None or continuation_attended(continuation),
-                        continued=continuation is not None,
+                        continuation=continuation,
                     )
             except asyncio.CancelledError:
                 raise
@@ -1752,7 +1752,7 @@ class TeamsApp:
         handoff: HandoffFactory | None,
         reraise: bool,
         attended: bool,
-        continued: bool = False,
+        continuation: TaskContinuationRow | None = None,
     ) -> None:
         deps = self.runtime.turn_deps
         lifecycle = holder[-1]
@@ -1834,6 +1834,8 @@ class TeamsApp:
             history_images=history.image_urls if history else (),
         )
         config = admission.config
+        # A queued turn's id names its row, not a message the person sent.
+        message_ref = None if inbound.from_form or continuation is not None else inbound.activity_id
         async with turn_origin(
             self.runtime.sessionmaker,
             attended=attended,
@@ -1851,8 +1853,7 @@ class TeamsApp:
             sender_foreign=inbound.is_foreign,
             shared_channel=admission.shared_channel,
             platform_channel_id=inbound.conversation_id,
-            # A queued turn's id names its row, not a message the person sent.
-            platform_message_id=None if inbound.from_form or continued else inbound.activity_id,
+            platform_message_id=message_ref,
         ) as origin:
             notice = handoff(prepared.continuity) if handoff is not None else None
             quiet = notice is not None or prepared.continuity.state == "continued"
@@ -1899,8 +1900,12 @@ class TeamsApp:
                 watch_row=watch_row,
                 origin="handoff" if notice is not None else "chat",
                 user_message=message,
-                request_text=None if inbound.unprompted else inbound.text,
-                request_ref=inbound.activity_id,
+                # Queued work carries on a question kept when it was asked, if any.
+                request_text=(
+                    None if inbound.unprompted or continuation is not None else inbound.text
+                ),
+                request_ref=message_ref,
+                continues=continuation,
                 lifecycle=lifecycle,
                 cancel=cancel,
                 reseed_user_message=reseed,

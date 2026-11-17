@@ -336,14 +336,21 @@ async def capture_answer(
     turn_ref: str,
     content: str | None,
     outcome: str,
+    question_ref: str | None = None,
 ) -> bool:
     """Keep the agent's answer when its question was kept: a turn is monitored or not as
-    a whole, decided when it was asked. True when kept."""
+    a whole, decided when it was asked. A continuation passes the `question_ref` it carries
+    on and its own `turn_ref`. True when kept."""
     try:
         async with sessions() as session, session.begin():
-            question = await store.get_open_question(
-                session, tenant_id=tenant_id, conversation=conversation, turn_ref=turn_ref
-            )
+            if question_ref is None:
+                question = await store.get_open_question(
+                    session, tenant_id=tenant_id, conversation=conversation, turn_ref=turn_ref
+                )
+            else:
+                question = await store.get_question(
+                    session, tenant_id=tenant_id, conversation=conversation, turn_ref=question_ref
+                )
             if question is None:
                 return False
             subject = store.MonitoredSubject(
@@ -357,6 +364,37 @@ async def capture_answer(
     except Exception:
         log.warning("monitoring.capture_failed", kind="answer", exc_info=True)
         return False
+
+
+async def continued_question(
+    sessions: async_sessionmaker[AsyncSession],
+    settings: Settings | None,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    conversation: str,
+    account_id: uuid.UUID,
+    queued_at: datetime,
+) -> str | None:
+    """The ref of the kept question a continuation carries on: the person's question in
+    `conversation` that was still waiting for its answer when the work was queued."""
+    if platform not in ("discord", "slack", "teams", "web"):
+        return None
+    try:
+        if not await may_monitor(sessions, settings, tenant_id=tenant_id, platform=platform):
+            return None
+        async with sessions() as session:
+            return await store.question_open_at(
+                session,
+                tenant_id=tenant_id,
+                conversation=conversation,
+                account_id=account_id,
+                at=queued_at,
+            )
+    # As for the question: the queued work runs on; only the kept copy is missing.
+    except Exception:
+        log.warning("monitoring.capture_failed", kind="continuation", exc_info=True)
+        return None
 
 
 async def open_questions(

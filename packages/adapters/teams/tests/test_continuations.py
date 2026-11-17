@@ -664,3 +664,57 @@ async def test_job_completion_fails_closed_without_output(db_session_factory):
             await teams._run_continuation(row, "read job", TENANT, SERVICE_URL)
         bind.assert_not_awaited()
     assert not sender.sent
+
+
+async def test_queued_work_never_keeps_its_seed_as_the_persons_question(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A message asks under its activity id; queued work asks nothing and carries its row,
+    so its answer goes with the question it was queued under, never its seed."""
+    from daimon.core.turn.admission import Admission
+    from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
+    from daimon.core.turn.run import RunOutcome
+    from daimon.core.turn.state import TurnState
+
+    async def _record_noop(*, event: Any) -> None:
+        return None
+
+    async def _bind(deps: Any, admission: Admission, **_kw: Any) -> PreparedTurn:
+        return PreparedTurn(
+            admission=admission,
+            ma_session_id="sess_teams_seed",
+            mapping_id=None,
+            watermark=None,
+            reused=True,
+            session_account_id=admission.account_id,
+            _record=_record_noop,
+            continuity=ContinuityOutcome(),
+        )
+
+    teams, account_id = await _app(db_session_factory, FakeSender())
+    key = await _hand_off(db_session_factory, account_id)
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=key)
+    assert row is not None
+    row = row.model_copy(update={"target_ma_agent_id": "agent_test_id"})
+    done = RunOutcome(
+        state=TurnState(), ma_session_id="sess_teams_seed", mapping_id=None, recovered=False
+    )
+    run = AsyncMock(return_value=done)
+    asked = make_inbound("is the deploy green?")
+    with (
+        patched_admission(),
+        patch.object(app_module, "bind_session", AsyncMock(side_effect=_bind)),
+        patch.object(app_module, "run_prepared_turn", run),
+    ):
+        await teams._run_turn(asked, TENANT, reraise=True)  # pyright: ignore[reportPrivateUsage]
+        await teams._run_turn(  # pyright: ignore[reportPrivateUsage]
+            make_inbound("finish the writeup"), TENANT, continuation=row, reraise=True
+        )
+    ask, work = (call.kwargs for call in run.await_args_list)
+    assert (ask["request_text"], ask["request_ref"], ask["continues"]) == (
+        "is the deploy green?",
+        asked.activity_id,
+        None,
+    )
+    assert (work["request_text"], work["request_ref"], work["continues"]) == (None, None, row)
