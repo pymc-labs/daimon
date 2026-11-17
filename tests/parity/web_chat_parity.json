@@ -270,6 +270,12 @@
   "POST /api/routines/{routine_id}/run": {
    "tool": "run_routine"
   },
+  "POST /api/support/requests/{request_id}/decline": {
+   "tool": "support_requests_settle"
+  },
+  "POST /api/support/requests/{request_id}/settle": {
+   "tool": "support_requests_settle"
+  },
   "POST /api/workspaces/switch": {
    "exempt": "web workspace switch"
   },
