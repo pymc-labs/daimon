@@ -7,6 +7,7 @@ import type {
   ToolRuleChange, WorkspaceAgentChange, Writers,
 } from "@/modules/channels/types"
 import { roster } from "./agents"
+import { supportHandlers } from "./channel-support"
 import { forbidden, notFound, wait } from "./util"
 import { me } from "./world"
 
@@ -337,4 +338,5 @@ export const channelsHandlers: HttpHandler[] = [
     } else return notFound()
     return HttpResponse.json(defaults)
   }),
+  ...supportHandlers,
 ]

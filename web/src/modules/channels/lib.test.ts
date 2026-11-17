@@ -185,6 +185,13 @@ describe("describeChange", () => {
   it("reads budgets", () => {
     expect(describeChange(entry("budget", null, { limit_usd: "25.00", window: "monthly" }), labels)).toEqual({ what: "Budget", from: ["None"], to: ["$25.00 monthly"] })
   })
+  it("reads support plans, caps and requests", () => {
+    const plan = { scope: "channel", scope_id: "c1", catalog: null, pool: "5", per_person: "2", window: "monthly", starts_at: null, ends_at: null }
+    expect(describeChange(entry("support_plan", null, plan), labels)).toEqual({ what: "Support plan", from: ["None"], to: ["5 credits, 2 per person, each month"] })
+    expect(describeChange(entry("support_plan", { ...plan, pool: null, per_person: null, window: "total" }, null), labels).from).toEqual(["Default credits"])
+    expect(describeChange(entry("support_allowance", { plan: "default", credits: "1" }, null), labels)).toEqual({ what: "Own support cap", from: ["1 credit"], to: ["None"] })
+    expect(describeChange(entry("support_settle", null, { request: "r", status: "settled", charge: "2" }), labels)).toEqual({ what: "Support request", from: ["None"], to: ["Done, 2 credits"] })
+  })
 })
 
 describe("leaving its own agents", () => {

@@ -118,6 +118,7 @@ export type ChannelSetting =
   | "default_agent" | "kept_agents" | "access" | "budget" | "participation" | "progress_plans" | "environment"
   | "skills" | "provider_pin" | "channel_copy" | "thread_participation" | "thread_progress_plans" | "thread_rule"
   | "thread_handoff" | "tool_rule" | "approvals" | "thread_approvals" | "cost_footer"
+  | "support_plan" | "support_allowance" | "support_settle"
 
 export type SwitchMode = "on" | "off" | "disabled"
 /** Following threads or progress plans. `own` is this tier's own mode (null: inherits); `value` and `source` are what applies. */
@@ -194,3 +195,41 @@ export type ChannelDefaults = {
 }
 /** PUT /api/channel-defaults/agent. */
 export type WorkspaceAgentChange = { agent: string | null; expected: string | null }
+
+export type PlanScope = "workspace" | "agent" | "channel"
+export type PlanWindow = "total" | "monthly" | "fixed"
+/** One person's own cap; credits are decimal strings. */
+export type PersonCap = { platform_user_id: string; name: string | null; credits: string }
+/** A plan's value as PUT /api/support-plans/plan takes it back as `expected`. */
+export type PlanValue = {
+  scope: PlanScope; scope_id: string; catalog: string | null; pool: string | null; per_person: string | null
+  window: PlanWindow; starts_at: string | null; ends_at: string | null
+}
+export type SupportPlan = PlanValue & {
+  /** The channel's or agent's name; null for the workspace. */
+  name: string | null
+  pool_used: string
+  state: "active" | "not_started" | "ended"
+  summary: string
+  allowances: PersonCap[]
+}
+export type SupportMenu = { key: string; name: string; revision: number; summary: string; catalog: Record<string, unknown> }
+/** GET /api/support-plans; every PUT under it answers with this too. */
+export type SupportPlans = {
+  platform: string
+  default_credits: string
+  default_allowances: PersonCap[]
+  plans: SupportPlan[]
+  catalogs: SupportMenu[]
+  agents: { id: string; name: string }[]
+}
+/** PUT /api/support-plans/plan; `plan` null clears it. */
+export type PlanChange = {
+  scope: PlanScope; scope_id: string
+  plan: Pick<PlanValue, "catalog" | "pool" | "per_person" | "window" | "starts_at" | "ends_at"> | null
+  expected: PlanValue | null
+}
+/** PUT /api/support-plans/catalogs/:key; `catalog` null removes it. */
+export type MenuChange = { catalog: Record<string, unknown> | null; expected_revision: number | null }
+/** PUT /api/support-plans/allowances; no `scope` is the default allowance. */
+export type CapChange = { platform_user_id: string; credits: string | null; scope?: PlanScope; scope_id?: string; expected: string | null }

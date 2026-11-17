@@ -20,6 +20,7 @@ import { ACCESS_FILTERS, agentOf, agentsOf, channelTree, filterChannels, type Fi
 import { ThreadSettings } from "@/modules/features/Thread"
 import { ChannelPanel } from "./Panel"
 import { PlatformIcon } from "./shared"
+import { SupportTab } from "./Support"
 import type { AgentRefs, Channel } from "./types"
 
 function BudgetCell({ c }: { c: Channel }) {
@@ -149,10 +150,11 @@ export function Channels() {
   const manage = can("channels.manage")
   const inThread = /^\/channels\/[^/]+\/threads\//.test(useLocation().pathname)
   return (
-    <Page crumbs={[{ label: "Channels" }]} tabs={manage ? [{ label: "Channels", to: "/channels", end: true, active: inThread || undefined }, { label: "Defaults", to: "/channels/defaults" }] : undefined} flush>
+    <Page crumbs={[{ label: "Channels" }]} tabs={manage ? [{ label: "Channels", to: "/channels", end: true, active: inThread || undefined }, { label: "Defaults", to: "/channels/defaults" }, { label: "Support", to: "/channels/support" }] : undefined} flush>
       <Routes>
         <Route index element={<ChannelsTab />} />
         <Route path="defaults" element={manage ? <DefaultsTab /> : <Navigate to="/channels" replace />} />
+        <Route path="support" element={manage ? <SupportTab /> : <Navigate to="/channels" replace />} />
         <Route path=":channel/threads/:thread" element={<ThreadSettings />} />
         <Route path="*" element={<Navigate to="/channels" replace />} />
       </Routes>

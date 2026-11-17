@@ -1,5 +1,5 @@
 // Pure helpers for the channels module: grouping, filters, confirm triggers and history text.
-import { type ChannelKind, channelLabel, ENTITY_FALLBACK, modelLabel, toolLabel } from "@/lib/format"
+import { type ChannelKind, channelLabel, ENTITY_FALLBACK, modelLabel, plural, toolLabel } from "@/lib/format"
 import type { EntityRef } from "@/lib/types"
 import { fromCron, WEEKDAYS } from "@/modules/routines/cron"
 import type { TreeRow } from "@/components/tree-state"
@@ -203,11 +203,32 @@ export function describeChange(e: ChannelHistoryEntry, labels: { readers: Choice
       const v = (x: unknown): Part[] => { const o = obj(x); const k = o?.value ?? o?.agent ?? x; return typeof k === "string" ? agents([k]) : none }
       return { what: OTHER.thread_handoff!, from: v(e.before), to: v(e.after) }
     }
+    case "support_plan": return { what: "Support plan", from: supportPlan(obj(e.before)), to: supportPlan(obj(e.after)) }
+    case "support_allowance": {
+      const cap = (v: unknown): Part[] => { const o = obj(v); return o?.credits ? [plural(Number(o.credits), "credit")] : none }
+      return { what: "Own support cap", from: cap(e.before), to: cap(e.after) }
+    }
+    case "support_settle": {
+      const req = (v: unknown): Part[] => {
+        const o = obj(v)
+        return o ? [[SETTLED[String(o.status)] ?? String(o.status), o.charge != null && plural(Number(o.charge), "credit")].filter(Boolean).join(", ")] : none
+      }
+      return { what: "Support request", from: req(e.before), to: req(e.after) }
+    }
     default: {
       const thread = (v: unknown): Part[] => (obj(v) ? text(obj(v)!.mode ?? obj(v)!.value) : text(v))
       return { what: OTHER[e.setting] ?? e.setting.replaceAll("_", " "), from: thread(e.before), to: thread(e.after) }
     }
   }
+}
+
+const SETTLED: Record<string, string> = { pending: "Waiting", settled: "Done", declined: "Declined" }
+/** A support plan in words, e.g. "5 credits, 2 per person, each month". */
+function supportPlan(p: Record<string, unknown> | null): Part[] {
+  if (!p) return none
+  const when = p.window === "monthly" ? "each month" : p.window === "fixed" ? `${String(p.starts_at).slice(0, 10)} until ${String(p.ends_at).slice(0, 10)}` : p.starts_at ? `since ${String(p.starts_at).slice(0, 10)}` : ""
+  const parts = [p.pool && plural(Number(p.pool), "credit"), p.per_person && `${String(p.per_person)} per person`, when].filter(Boolean)
+  return [parts.length ? parts.join(", ") : "Default credits"]
 }
 
 const list = (v: unknown): Part[] => (Array.isArray(v) && v.length ? [v.join(", ")] : none)
