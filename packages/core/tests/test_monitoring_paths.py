@@ -20,7 +20,7 @@ from daimon.core import usage_sweep
 from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
 from daimon.core.features.snapshot import CACHE
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.monitoring import KeptQuestion, capture_question
+from daimon.core.monitoring import KeptQuestion, capture_answer, capture_question
 from daimon.core.stores import monitoring as store
 from daimon.core.stores import session_settle_state
 from daimon.core.stores.domain import FeatureTarget
@@ -142,6 +142,7 @@ async def _keep(
     is_dm: bool | None = True,
     origin: str = "chat",
     request_text: str | None = "hello",
+    request_ref: str | None = None,
     thread_id: str = "thread-1",
 ) -> KeptQuestion | None:
     deps = cast(Any, SimpleNamespace(sessionmaker=sessions, settings=None))
@@ -153,6 +154,7 @@ async def _keep(
         thread_id=thread_id,
         origin=cast(Any, origin),
         request_text=request_text,
+        request_ref=request_ref,
     )
 
 
@@ -200,6 +202,30 @@ async def test_every_direct_message_platform_and_web_chat_keeps_the_question(
             agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agt_a"),
         )
     assert sorted(row.platform for row in rows) == ["discord", "slack", "teams", "web"], rows
+
+
+async def test_a_message_run_twice_keeps_one_question_under_its_platform_id(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A re-run of the same message keeps its first question and gets its answer once."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await _switch_on(db_session, tenant.id, "monitor_direct_messages")
+    sm, ref = db_session_factory, "1700000000.000100"
+    for _ in range(2):
+        kept = await _keep(sm, tenant.id, account.id, platform="slack", request_ref=ref)
+        assert kept is not None and kept.turn_ref == ref, kept
+    assert await capture_answer(
+        sm, tenant_id=tenant.id, conversation="thread-1", turn_ref=ref, content="hi", outcome="ok"
+    )
+    assert await _keep(sm, tenant.id, account.id, platform="slack", request_ref=ref) is None
+    async with sm() as session:
+        rows = await store.list_events(
+            session,
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agt_a"),
+        )
+    assert sorted((row.kind, row.turn_ref) for row in rows) == [("answer", ref), ("question", ref)]
 
 
 def _event(kind: str, event_id: str = "", text: str = "", stop: str = "end_turn") -> Any:

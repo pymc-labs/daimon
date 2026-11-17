@@ -636,6 +636,7 @@ async def _run_admitted_dm_turn(
     confirm_write: ConfirmationHook | None = None,
     card_for: DmTurnCard | None = None,
     request_text: str | None = None,
+    request_ref: str | None = None,
     platform_channel_id: str | None = None,
     platform_message_id: str | None = None,
     tell: TellMonitored | None = None,
@@ -649,8 +650,9 @@ async def _run_admitted_dm_turn(
     with it, the adapter's lifecycle shows progress and may deliver the answer
     itself. A recovery after a dead session renders nothing either way. Without
     `confirm_write` a write that needs approval is refused, as on any surface with
-    no card. `request_text` is the person's own words, for the turn's MCP context;
-    `platform_channel_id` and `platform_message_id` are recorded on the turn's origin.
+    no card. `request_text` is the person's own words, for the turn's MCP context, and
+    `request_ref` their message's id; `platform_channel_id` and `platform_message_id`
+    are recorded on the turn's origin.
     """
     async with (
         destination if destination is not None else nullcontext(),
@@ -696,6 +698,7 @@ async def _run_admitted_dm_turn(
                 external_user_id=external_user_id,
                 user_message=user_message,
                 request_text=request_text,
+                request_ref=request_ref,
                 lifecycle=lifecycle,
                 cancel=cancel,
                 reseed_user_message=reseed,
@@ -919,6 +922,7 @@ async def reply_to_dm_result(
                 card_for=card_for,
                 tell=tell,
                 request_text=text,
+                request_ref=message_id,
                 platform_channel_id=platform_channel_id,
                 platform_message_id=message_id if platform_channel_id is not None else None,
             )

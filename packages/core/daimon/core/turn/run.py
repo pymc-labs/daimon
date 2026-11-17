@@ -1265,12 +1265,15 @@ async def run_prepared_turn(
     watch_row: TaskContinuationRow | None = None,
     job_row: TaskContinuationRow | None = None,
     request_text: str | None = None,
+    request_ref: str | None = None,
 ) -> RunOutcome:
     """Drive an admitted turn, including unattended wakes.
 
     Unattended Managed Agents sends re-gate the current session before each
     message and confirmation batch. Runtimes without a session read refuse
     unattended confirmations with a plain reason, including with safety off.
+    `request_ref` is the platform's id for the person's message, kept with it
+    when the agent is monitored.
     """
     # Imported here: `daimon.core.helpers` runs helper turns through this module.
     from daimon.core.helpers import serve_helpers
@@ -1315,6 +1318,7 @@ async def run_prepared_turn(
         thread_id=thread_id,
         origin=origin,
         request_text=request_text,
+        request_ref=request_ref,
     )
     kept_question = kept.turn_ref if kept is not None else None
     if (
@@ -1488,9 +1492,11 @@ async def _keep_question(
     thread_id: str,
     origin: TurnContext,
     request_text: str | None,
+    request_ref: str | None,
 ) -> KeptQuestion | None:
     """Keep a person's direct message or web chat question when the answering agent is
-    monitored (`daimon.core.monitoring`), with the turn's ref for its answer."""
+    monitored (`daimon.core.monitoring`), under the message's own id when the platform
+    gave one, so a re-run of the same message keeps one question."""
     grant = prepared.admission.grant
     direct = platform == "web" or (grant is not None and grant.is_dm)
     if origin != "chat" or request_text is None or not direct:
@@ -1507,7 +1513,7 @@ async def _keep_question(
         platform=platform,
         account_id=prepared.admission.account_id,
         conversation=thread_id,
-        turn_ref=str(uuid.uuid4()),
+        turn_ref=request_ref or str(uuid.uuid4()),
         content=request_text,
     )
 

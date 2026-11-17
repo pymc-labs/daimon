@@ -1900,6 +1900,7 @@ class TeamsApp:
                 origin="handoff" if notice is not None else "chat",
                 user_message=message,
                 request_text=None if inbound.unprompted else inbound.text,
+                request_ref=inbound.activity_id,
                 lifecycle=lifecycle,
                 cancel=cancel,
                 reseed_user_message=reseed,

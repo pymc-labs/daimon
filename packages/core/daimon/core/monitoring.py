@@ -251,7 +251,14 @@ async def capture_question(
                 tenant_id, agent_id, platform, account_id, conversation
             )
             entry = store.MonitoredEntry("question", content=content, turn_ref=turn_ref)
-            if await store.record_events(session, subject, (entry,)) != 1:
+            kept = await store.record_events(session, subject, (entry,)) == 1
+            # A re-run of the same message keeps its first question and the answer it gets.
+            if not kept and (
+                await store.get_open_question(
+                    session, tenant_id=tenant_id, conversation=conversation, turn_ref=turn_ref
+                )
+                is None
+            ):
                 return None
             tell = must_tell(state, told_at)
             return KeptQuestion(turn_ref, notice_for(platform) if tell else None, subject)
