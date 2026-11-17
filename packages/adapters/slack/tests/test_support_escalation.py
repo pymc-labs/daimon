@@ -685,3 +685,23 @@ def test_ask_the_team_button_shows_the_raised_hand_beside_the_words_and_stays_un
     button = slack_support.build_ask_human_button()
     assert button["text"] == {"type": "plain_text", "text": "🙋 Ask a person", "emoji": True}
     assert "style" not in button, "a styled button would tell the channel who asked"
+
+
+async def test_click_opens_the_modal_before_any_database_read(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    _tenant, key = await _seed(db_session)
+    runtime = _runtime(key, db_session_factory, _support())
+    opened_first: list[bool] = []
+    real = slack_support.answer_origin
+
+    async def watching(*args: Any, **kwargs: Any) -> Any:
+        opened_first.append(_VIEWS_OPEN in fake_slack_web_client.mock.requests)
+        return await real(*args, **kwargs)
+
+    with patch.object(slack_support, "answer_origin", new=watching):
+        await handle_ask_human_click(runtime, _click())
+
+    assert opened_first == [True], "the trigger_id lives 3 seconds; reads come after the modal"

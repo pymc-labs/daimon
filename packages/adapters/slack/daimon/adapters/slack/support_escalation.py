@@ -516,11 +516,7 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
     if client is None:
         return
 
-    support = runtime.settings.support
-    origin = await answer_origin(
-        runtime, team_id=team_id, channel_id=channel_id, thread_ts=thread_ts
-    )
-    if not slack_support_enabled(support) or not await _escalation_offered(runtime, origin):
+    if not slack_support_enabled(runtime.settings.support):
         log.info("support.disabled", platform="slack")
         await post_ephemeral(
             client,
@@ -555,6 +551,13 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
         )
 
     try:
+        origin = await answer_origin(
+            runtime, team_id=team_id, channel_id=channel_id, thread_ts=thread_ts
+        )
+        if not await _escalation_offered(runtime, origin):
+            log.info("support.disabled", platform="slack")
+            await reply(UNAVAILABLE)
+            return
         decided = await _decide_click(
             runtime,
             client,
