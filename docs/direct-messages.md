@@ -12,32 +12,36 @@ There are three ways into a DM:
 | A cold DM to the bot | Discord, Slack, Teams | an empty conversation with the agent chosen below |
 | A routine or watch that reports by DM | Discord | a fresh private turn per run |
 
-All three need the server's DMs turned on (`/dm-me enable`) and a recipient
-policy that allows the person.
+All three need the server's DMs turned on (`/dm-me enable`, or `daimon features
+set direct_messages on`) and a recipient policy that allows the person.
 
 ## Turn on cold DMs
 
-A cold DM is a first message sent straight to the bot, with no `/dm-me`.
-Cold DMs stay off until a server names its DM agent. The agent must already
-exist in that server; Daimon never falls back to the default agent.
+A cold DM is a first message sent straight to the bot, with no `/dm-me`. It needs
+the server's DMs on and an agent that has DMs on and admits the person. The
+default agent below is optional: without one, a sole admitting agent answers and
+several show a picker.
 
 ```bash
-daimon tenants dm-policy discord GUILD_ID --agent AGENT_NAME --enabled
-daimon tenants dm-policy discord GUILD_ID --json
-daimon tenants dm-policy discord GUILD_ID --clear-agent
+daimon features --guild GUILD_ID set direct_messages on
+daimon dm --guild GUILD_ID default AGENT_NAME     # optional: who answers by default
+daimon dm --guild GUILD_ID default                # show it; --clear unsets it
 ```
 
 An admin can do the same in Discord with `/dm-me action:enable`, then
-`/dm-me action:agent agent_name:AGENT_NAME`. Clearing the agent stops cold DMs
-without closing existing conversations or `/dm-me` moves.
+`/dm-me action:agent agent_name:AGENT_NAME` (`clear-agent` unsets it). The
+default agent is one value for cold DMs, `/dm-me`, the picker and agent-sent
+notices. The CLI, Discord, the web app and MCP all set it through one writer
+that checks the name and audits the change. Clearing it does not stop cold DMs:
+turn DMs off, or limit who each agent admits, for that.
 
 A Slack or Teams DM belongs to one workspace, so a cold DM there starts at
 once with the agent chosen below. Teams personal chats have DMs on unless an
 admin turns them off.
 
-Upgrade every Discord process before naming an agent, since older ones do not
-recognise a conversation with no source channel. The bot token must be set on
-the scheduler and MCP processes too, for the membership checks below.
+Upgrade every Discord process before turning cold DMs on, since older ones do
+not recognise a conversation with no source channel. The bot token must be set
+on the scheduler and MCP processes too, for the membership checks below.
 
 ## Choose who may DM which agent
 
@@ -93,18 +97,19 @@ default agent before removing an allowlist.
 ## What a person sees
 
 When someone DMs the bot, Daimon looks for servers where they are a current
-member, pass the invoker policy and may use the DM agent.
+member, pass the invoker policy and have an agent that admits them.
 
 - **One server** starts a conversation and answers the message.
 - **Several servers** show a server picker only that person can use. It holds
   their messages for five minutes and checks access again on the pick.
-- **None** runs no turn. A member refused by the invoker policy or the agent's
-  role requirement is told they may not DM Daimon. Anyone else gets the
+- **None** runs no turn. A member refused by the invoker policy, or locked out
+  by a locked rule, is told they may not DM Daimon. Anyone else (including a
+  person no agent's grant, role requirement or DM switch admits) gets the
   `/dm-me` guidance, which names no server.
 
 The opening message names the server and agent, and offers **Switch server**
 and **New conversation**. `/dm-settings` shows those buttons again, and `/new`
-starts an empty conversation with the same server and its current DM agent.
+starts an empty conversation with the same server and the agent routing picks.
 Buttons expire after fifteen minutes, and only the latest set works.
 
 A cold conversation starts with no history and no channel access. Switching

@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a reinstall. Manage it with `daimon dm default|access|rule|explain`, in the web
   app (Admin > Agent access and Admin > Workspace, with a "Check a person" box that
   reads the person's groups from the platform) or from chat, each change checked and
-  audited; `daimon features set direct_messages on|off` turns DMs on or off.
+  audited; `daimon features set direct_messages on|off` turns DMs on or off
+  (`daimon tenants dm-policy` is gone: `dm default` and `features set` replace it).
   `daimon dm import-policies` moves `DAIMON_DIRECT_MESSAGE_POLICIES` into stored
   access; until it is removed the env setting applies with it on every path, `dm
   explain` included. Erasing a person removes their pick, rules and grant entries.
