@@ -45,11 +45,12 @@ export function platformUserId(platform: string, text: string): string | null {
   return ID_SHAPE[platform]?.test(id) ? (platform === "teams" ? id.toLowerCase() : id) : null
 }
 
-/** Whether an admin turned Ask a person on: the nearest workspace or deployment value, not the resolved one, which reads off while a requirement is unmet. */
+/** Whether Ask a person is on for the workspace: the nearest workspace or deployment value, else the feature's default (on); not the resolved value, which reads off while a requirement is unmet. */
 export function askedOn(view: FeatureView | undefined): boolean {
-  const own = (view?.tiers ?? []).filter((t) => t.tier === "workspace" || t.tier === "deployment")
+  if (!view) return false
+  const own = view.tiers.filter((t) => t.tier === "workspace" || t.tier === "deployment")
   const set = own.find((t) => t.locked) ?? [...own].reverse().find((t) => t.value !== "default")
-  return set?.value === "on"
+  return set ? set.value === "on" : true
 }
 
 /** The distinct channels open requests sit in; none when they have no channel yet. */

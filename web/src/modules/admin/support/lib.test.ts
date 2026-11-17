@@ -10,7 +10,8 @@ describe("askedOn", () => {
   it("reads what the admin set, not the resolved value", () => {
     expect(askedOn(view(tier("workspace", "on")))).toBe(true)
     expect(askedOn(view(tier("workspace", "off")))).toBe(false)
-    expect(askedOn(view(tier("workspace", "default")))).toBe(false)
+    expect(askedOn(view(tier("workspace", "default")))).toBe(true)
+    expect(askedOn(view())).toBe(true)
     expect(askedOn(undefined)).toBe(false)
   })
 
