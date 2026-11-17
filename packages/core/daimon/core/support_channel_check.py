@@ -63,8 +63,8 @@ def discord_not_text(label: str) -> ChannelCheck:
 
 
 def discord_missing(label: str) -> ChannelCheck:
-    """The channel is gone, or Daimon is not in its server."""
-    return _blocked(f"Daimon can't find {label}. Pick another channel.")
+    """The channel is gone, or Daimon has no View Channel there."""
+    return _blocked(f"Daimon can't see {label}. Give it View Channel.")
 
 
 def slack_check(

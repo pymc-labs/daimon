@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 
 import httpx
 import pytest
@@ -64,7 +64,7 @@ async def _check(
 def _discord(
     *,
     everyone: int = _ALL,
-    overwrites: list[dict[str, object]] | None = None,
+    overwrites: Sequence[Mapping[str, object]] | None = None,
     channel: dict[str, object] | None = None,
     channel_status: int = 200,
     guild_status: int = 200,
@@ -116,24 +116,23 @@ async def test_discord_names_every_missing_permission(monkeypatch: pytest.Monkey
     )
 
 
-async def test_discord_channel_daimon_cannot_see_is_blocked_with_all_three(
+async def test_discord_channel_daimon_cannot_see_is_blocked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     found = await _check(_discord(channel_status=403), _DISCORD_DEST, monkeypatch)
-    assert found == ChannelCheck(
-        "blocked", "Give Daimon View Channel, Send Messages and Embed Links in #ask."
-    ), found
+    assert found == ChannelCheck("blocked", "Daimon can't see #ask. Give it View Channel."), found
 
 
 async def test_discord_missing_channel_is_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
     found = await _check(_discord(channel_status=404), _DISCORD_DEST, monkeypatch)
-    assert found == ChannelCheck("blocked", "Daimon can't find #ask. Pick another channel."), found
+    assert found == ChannelCheck("blocked", "Daimon can't see #ask. Give it View Channel."), found
 
 
-async def test_discord_voice_channel_is_not_a_text_channel(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("kind", [2, 5, 11])
+async def test_discord_voice_announcement_and_thread_are_not_a_text_channel(
+    kind: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    found = await _check(_discord(channel={"type": 2}), _DISCORD_DEST, monkeypatch)
+    found = await _check(_discord(channel={"type": kind}), _DISCORD_DEST, monkeypatch)
     assert found == ChannelCheck("blocked", "#ask isn't a text channel."), found
 
 

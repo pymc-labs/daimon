@@ -9,8 +9,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
-from daimon.core.config import Settings, SupportSettings, TurnSettings
+from daimon.adapters.web.channel_visibility import forget_visibility
+from daimon.core.config import DiscordSettings, Settings, SupportSettings, TurnSettings
 from daimon.core.platform_names import ChannelSighting
 from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores import workspace_members as members_store
@@ -23,10 +25,11 @@ from daimon.core.stores.tenants import get_tenant
 from daimon.core.support import MenuSpec, RequestChoice, SupportPlace
 from daimon.testing.factories import make_platform_principal
 from httpx import Response
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .chat_support import shown_trail
-from .conftest import WebClientFactory
+from .conftest import FakeUpstream, WebClientFactory
 from .test_admin_routes import Admin, signed_in_admin
 
 type Factory = async_sessionmaker[AsyncSession]
@@ -75,6 +78,34 @@ _ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
 ]
 
 
+_VIEW, _SEND, _EMBED = 1 << 10, 1 << 11, 1 << 14
+
+
+class _Bot:
+    """Discord as Daimon's bot sees it: every channel is a text channel in guild G1 where the bot
+    holds `everyone`'s permissions; any `status` other than 200 fails every call. Both can change
+    mid-test."""
+
+    def __init__(self, *, everyone: int = _VIEW | _SEND | _EMBED, status: int = 200) -> None:
+        self.everyone = everyone
+        self.status = status
+        self.upstream = FakeUpstream(self._answer)
+
+    def _answer(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if self.status != 200:
+            return httpx.Response(self.status)
+        if path.endswith("/users/@me"):
+            return httpx.Response(200, json={"id": "B1"})
+        if "/channels/" in path:
+            channel: dict[str, object] = {"type": 0, "guild_id": "G1", "permission_overwrites": []}
+            return httpx.Response(200, json={"id": path.rsplit("/", 1)[1], **channel})
+        if path.endswith("/members/B1"):
+            return httpx.Response(200, json={"roles": []})
+        roles = [{"id": "G1", "permissions": str(self.everyone)}]
+        return httpx.Response(200, json={"owner_id": "other", "roles": roles})
+
+
 @asynccontextmanager
 async def _support(
     web_client: WebClientFactory,
@@ -82,9 +113,18 @@ async def _support(
     tmp_path: Path,
     *,
     settings: Settings = _SETTINGS,
+    bot: _Bot | None = None,
 ) -> AsyncIterator[Admin]:
-    """The admin fixture with channel `c1` named general, `c9` requests and thread `t9`."""
-    async with signed_in_admin(web_client, factory, tmp_path, settings=settings) as admin:
+    """The admin fixture with channel `c1` named general, `c9` requests and thread `t9`.
+
+    Daimon's bot can post everywhere unless `bot` says otherwise.
+    """
+    forget_visibility()
+    settings = settings.model_copy(update={"discord": DiscordSettings(bot_token=SecretStr("t"))})
+    provider = (bot or _Bot()).upstream
+    async with signed_in_admin(
+        web_client, factory, tmp_path, settings=settings, provider=provider
+    ) as admin:
         async with factory.begin() as db:
             await upsert_channel_names(
                 db,
@@ -621,6 +661,70 @@ async def test_the_request_channel_can_be_set_replaced_and_cleared_when_allowed(
         ("Changed support channel", "#general", "Request channel"),
         ("Changed support channel", "Default", "Request channel"),
     ], "set and cleared, audited"
+
+
+async def test_a_channel_daimon_cannot_post_in_is_refused_with_the_fix_and_not_saved(
+    web_client: WebClientFactory, db_session_factory: Factory, tmp_path: Path
+) -> None:
+    """A definite `blocked` is a 422 on `channel_id`; the page keeps its old value."""
+    bot = _Bot(everyone=_VIEW)
+    async with _support(
+        web_client, db_session_factory, tmp_path, settings=_UNSET, bot=bot
+    ) as admin:
+        refused = await admin.client.put(
+            "/api/support/channel", json={"channel_id": "c1", "expected_revision": None}
+        )
+        page = (await admin.client.get("/api/support")).json()["channel"]
+
+    assert refused.status_code == 422, refused.text
+    assert _locs(refused) == [["channel_id"]], "on the field"
+    assert "Give Daimon Send Messages and Embed Links in #general." in refused.text, refused.text
+    assert page["value"] is None, "nothing was saved"
+
+
+async def test_a_check_that_cannot_run_is_unverified_and_the_pick_saves(
+    web_client: WebClientFactory, db_session_factory: Factory, tmp_path: Path
+) -> None:
+    """A platform error is not a refusal: the pick saves and the page says it is unverified."""
+    bot = _Bot(status=500)
+    async with _support(
+        web_client, db_session_factory, tmp_path, settings=_UNSET, bot=bot
+    ) as admin:
+        saved = await admin.client.put(
+            "/api/support/channel", json={"channel_id": "c1", "expected_revision": None}
+        )
+        page = (await admin.client.get("/api/support")).json()["channel"]
+
+    assert saved.status_code == 200, saved.text
+    assert page["value"] == {"id": "c1", "name": "general"}, "saved"
+    assert (page["state"], page["detail"]) == ("unverified", "Couldn't check. Try again."), page
+
+
+async def test_a_saved_channel_that_loses_permissions_reads_blocked_and_can_still_be_cleared(
+    web_client: WebClientFactory, db_session_factory: Factory, tmp_path: Path
+) -> None:
+    """The page names the fix; clearing a pick needs no check."""
+    bot = _Bot()
+    async with _support(
+        web_client, db_session_factory, tmp_path, settings=_UNSET, bot=bot
+    ) as admin:
+        picked = await admin.client.put(
+            "/api/support/channel", json={"channel_id": "c1", "expected_revision": None}
+        )
+        bot.everyone = _VIEW | _EMBED
+        forget_visibility()
+        page = (await admin.client.get("/api/support")).json()["channel"]
+        cleared = await admin.client.put(
+            "/api/support/channel",
+            json={"channel_id": None, "expected_revision": picked.json()["channel"]["revision"]},
+        )
+
+    assert (page["state"], page["detail"]) == (
+        "blocked",
+        "Give Daimon Send Messages in #general.",
+    ), page
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["channel"]["value"] is None, "cleared while blocked"
 
 
 async def test_a_thread_cannot_be_the_request_channel(

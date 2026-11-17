@@ -53,6 +53,8 @@ _SLACK_API = "https://slack.com/api"
 _SLACK_PAGES = 20
 _DISCORD_TEXT_TYPES = frozenset({0, 5})
 """Text and announcement channels: the types chat accepts as a routine destination."""
+_DISCORD_TEXT = 0
+"""The one type Daimon posts requests in; announcement channels are refused as at post time."""
 _CACHE_SIZE = 2048
 
 
@@ -359,14 +361,12 @@ async def _discord_post_check(runtime: WebRuntime, channel_id: str, label: str) 
     get = runtime.http_client.get
     bot = _dict(_json(await get(f"{_DISCORD_API}/users/@me", headers=headers)))
     response = await get(f"{_DISCORD_API}/channels/{channel_id}", headers=headers)
-    if response.status_code == 404:
+    if response.status_code in (403, 404):
+        # Unknown, or Missing Access: either way Daimon cannot see it.
         return discord_missing(label)
-    if response.status_code == 403:
-        # Missing Access: Daimon cannot see the channel, so it can do nothing in it.
-        return discord_check(bits=0, label=label)
     channel = _dict(_json(response))
     guild_id = channel.get("guild_id")
-    if channel.get("type") not in _DISCORD_TEXT_TYPES or not isinstance(guild_id, str):
+    if channel.get("type") != _DISCORD_TEXT or not isinstance(guild_id, str):
         return discord_not_text(label)
     member, role_permissions = await _discord_standing(runtime, guild_id, str(bot.get("id")))
     bits = discord_channel_permissions(
