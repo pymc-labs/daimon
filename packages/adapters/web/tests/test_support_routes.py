@@ -6,6 +6,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -808,6 +809,9 @@ async def test_requests_show_as_recent_used_open_and_undelivered(
     assert [(c["credits"], c["what"]) for c in page["undelivered"]] == [("1", "Ask a person")], (
         "the request nobody received"
     )
+    assert page["undelivered"][0]["price"] == {"kind": "fixed", "min": "1", "max": "1"}, (
+        "the default option's price"
+    )
 
 
 async def test_a_range_priced_request_counts_as_open_until_settled(
@@ -827,3 +831,105 @@ async def test_a_range_priced_request_counts_as_open_until_settled(
         page = (await admin.client.get("/api/support")).json()
 
     assert page["channel"]["open"]["count"] == 1, page["channel"]
+
+
+async def test_a_person_row_counts_what_a_request_would_charge_without_a_place_limit(
+    web_client: WebClientFactory, db_session_factory: Factory, tmp_path: Path
+) -> None:
+    """Everywhere 5 total for Alice, no limit on the place: 4 spent shows 4 used and the 4 asks."""
+    alice = "100000000000000002"
+    async with _support(web_client, db_session_factory, tmp_path) as admin:
+        put = await admin.client.put(
+            "/api/support/limits",
+            json=_limit(limit={"each_person": "5"}, person_id=f"<@{alice}>"),
+        )
+        assert put.status_code == 200, put.text
+        for n in range(4):
+            await _submit(db_session_factory, admin, f"m{n}", user=alice)
+        await _submit(db_session_factory, admin, "other", user="999")
+        page = (await admin.client.get("/api/support")).json()
+
+    row = _one(page["limits"], person_id=alice)
+    assert (row["each_person"], row["used"]) == ("5", "4"), "4 of 5 used, so 1 left"
+    assert len(row["recent"]) == 4, "only Alice's asks, on the ledger that charged them"
+
+
+async def test_open_requests_name_each_channel_they_sit_in_once(
+    web_client: WebClientFactory, db_session_factory: Factory, tmp_path: Path
+) -> None:
+    """`channel.open.where` is a list of distinct channel names, empty with none open."""
+    async with _support(web_client, db_session_factory, tmp_path) as admin:
+        none = (await admin.client.get("/api/support")).json()["channel"]["open"]
+        await admin.client.put(
+            "/api/support/menus/support", json={"menu": _MENU, "expected_revision": None}
+        )
+        await admin.client.put(
+            "/api/support/menus/use",
+            json={"scope": "workspace", "menu": "support", "expected": None},
+        )
+        option = MenuSpec.model_validate(_MENU).options[0]
+        ids = [
+            await _submit(db_session_factory, admin, m, choice=RequestChoice.of(option))
+            for m in ("m1", "m2")
+        ]
+        async with db_session_factory.begin() as db:
+            for escalation_id, channel in zip(ids, ("c1", "c9"), strict=True):
+                await ledger.mark_delivered(
+                    db, escalation_id=escalation_id, support_channel_id=channel, support_post_id="p"
+                )
+        shown = (await admin.client.get("/api/support")).json()["channel"]["open"]
+
+    assert none == {"count": 0, "where": []}, "nothing open"
+    assert shown["count"] == 2 and sorted(shown["where"]) == ["general", "requests"], shown
+
+
+async def test_an_undelivered_request_is_settled_or_declined_from_the_page(
+    web_client: WebClientFactory, db_session_factory: Factory, tmp_path: Path
+) -> None:
+    """Settle and decline answer with the page; refusals are 404, 409 and 422 on `charge`."""
+    async with _support(web_client, db_session_factory, tmp_path) as admin:
+        await admin.client.put(
+            "/api/support/menus/support", json={"menu": _MENU, "expected_revision": None}
+        )
+        await admin.client.put(
+            "/api/support/menus/use",
+            json={"scope": "workspace", "menu": "support", "expected": None},
+        )
+        option = MenuSpec.model_validate(_MENU).options[0]
+        first = await _submit(db_session_factory, admin, "m1", choice=RequestChoice.of(option))
+        second = await _submit(db_session_factory, admin, "m2", choice=RequestChoice.of(option))
+        page = (await admin.client.get("/api/support")).json()
+        items = {i["id"]: i for i in page["undelivered"]}
+        post = admin.client.post
+        base = "/api/support/requests"
+        unknown = await post(f"{base}/{uuid.uuid4()}/settle", json={"charge": "1"})
+        malformed = await post(f"{base}/not-an-id/decline")
+        bad = await post(f"{base}/{first}/settle", json={"charge": "abc"})
+        over = await post(f"{base}/{first}/settle", json={"charge": "9"})
+        settled = await post(f"{base}/{first}/settle", json={"charge": "2.5"})
+        again = await post(f"{base}/{first}/settle", json={"charge": "2"})
+        declined = await post(f"{base}/{second}/decline")
+        declined_again = await post(f"{base}/{second}/decline")
+        admin.as_member()
+        refused = await post(f"{base}/{first}/decline")
+        async with db_session_factory() as db:
+            tenant_id = admin.ws.tenant_id
+            row_one = await ledger.get_request(db, escalation_id=first, tenant_id=tenant_id)
+            row_two = await ledger.get_request(db, escalation_id=second, tenant_id=tenant_id)
+        trail = await shown_trail(db_session_factory, admin.ws.tenant_id)
+
+    assert set(items) == {str(first), str(second)}, "both are listed by id"
+    assert items[str(first)]["price"] == {"kind": "range", "min": "1", "max": "3"}, "its terms"
+    assert items[str(first)]["credits"] == "1", "what it holds now: the lowest price"
+    assert unknown.status_code == 404 and malformed.status_code == 404, "no such request"
+    assert bad.status_code == 422 and _locs(bad) == [["charge"]], bad.text
+    assert over.status_code == 422 and _locs(over) == [["charge"]], over.text
+    assert settled.status_code == 200, settled.text
+    assert "limits" in settled.json() and "undelivered" in settled.json(), "the whole page"
+    assert again.status_code == 409 and declined_again.status_code == 409, "no longer pending"
+    assert declined.status_code == 200, declined.text
+    assert refused.status_code == 403, "admins only"
+    assert row_one is not None and (row_one.status, row_one.charge) == ("settled", Decimal("2.5"))
+    assert row_two is not None and (row_two.status, row_two.charge) == ("declined", Decimal(0))
+    actions = [a for a, _, _ in trail if "support request" in a]
+    assert actions == ["Settled support request", "Declined support request"], "audited once each"

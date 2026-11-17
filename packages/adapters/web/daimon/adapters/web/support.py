@@ -44,14 +44,20 @@ from daimon.core.support import (
     SupportError,
     SupportScope,
     format_credits,
-    limit_period,
     limit_state,
+    parse_credits,
     parse_limit_spec,
     parse_menu_key,
     parse_person_id,
     parse_scope,
 )
-from daimon.core.support_admin import LimitUsage, list_limit_usage, options_text
+from daimon.core.support_admin import (
+    LimitUsage,
+    expected_menu_key,
+    list_limit_usage,
+    options_text,
+    settle_outcome_text,
+)
 from daimon.core.support_changes import (
     MENU_IN_USE,
     NO_MENU,
@@ -63,6 +69,7 @@ from daimon.core.support_changes import (
     set_menu,
     set_menu_use,
     set_support_channel,
+    settle,
 )
 from daimon.core.support_routing import (
     SupportDestination,
@@ -80,9 +87,13 @@ _UNAVAILABLE = "Ask a person needs a Discord, Slack or Teams workspace."
 _NO_PLACE = "No such place."
 _NO_CHANNEL = "No such channel."
 _NO_PERSON = "No such person."
+_NO_REQUEST = "No such request."
+_NOT_PENDING = "That request is no longer pending."
 _LIMIT_ACTION = "Changed support limit"
 _MENU_ACTION = "Changed support menu"
 _CHANNEL_ACTION = "Changed support channel"
+_SETTLE_ACTION = "Settled support request"
+_DECLINE_ACTION = "Declined support request"
 _RECENT = 5
 _OPEN_SHOWN = 500
 _UNDELIVERED_SHOWN = 50
@@ -146,6 +157,28 @@ class ChargeJson(BaseModel):
     what: str
 
 
+class PriceJson(BaseModel):
+    kind: Literal["fixed", "quoted", "range"]
+    """A steps price is `fixed` at the step picked."""
+    min: str
+    max: str | None
+    """None: up to the balance left."""
+
+
+class UndeliveredJson(BaseModel):
+    id: str
+    at: str
+    person: str
+    credits: str
+    """What the request holds now."""
+    what: str
+    price: PriceJson
+
+
+class SettleBody(BaseModel):
+    charge: str
+
+
 class LimitJson(BaseModel):
     scope: SupportScope
     scope_id: str
@@ -205,7 +238,8 @@ class DefaultJson(BaseModel):
 
 class OpenJson(BaseModel):
     count: int
-    where: str | None
+    where: list[str]
+    """The distinct channels the open requests sit in, by name; empty when there are none."""
 
 
 class RequestChannelJson(BaseModel):
@@ -238,7 +272,7 @@ class SupportPageJson(BaseModel):
     places: list[PlaceJson]
     agents: list[AgentJson]
     channel: RequestChannelJson
-    undelivered: list[ChargeJson]
+    undelivered: list[UndeliveredJson]
     """Requests no support channel received, newest first."""
 
 
@@ -468,12 +502,21 @@ def support_router(runtime: WebRuntime) -> APIRouter:
             lost = await ledger.list_requests(
                 db, tenant_id=tenant_id, undelivered=True, limit=_UNDELIVERED_SHOWN
             )
-            by_place = {(u.limit.scope, u.limit.scope_id): u for u in usage}
 
             recent: dict[uuid.UUID, list[SupportEscalationRow]] = {}
             for u in usage:
                 recent[u.limit.id] = await ledger.list_requests(
                     db, tenant_id=tenant_id, limit_id=u.limit.id, limit=50
+                )
+
+            standing: dict[uuid.UUID, ledger.PersonStanding] = {}
+            for p in person_rows:
+                standing[p.id] = await ledger.person_standing(
+                    db,
+                    person=p,
+                    default_allowance=runtime.settings.support.credits_per_user,
+                    now=now,
+                    recent=_RECENT,
                 )
 
             user_ids = {r.platform_user_id for rows in recent.values() for r in rows}
@@ -494,18 +537,6 @@ def support_router(runtime: WebRuntime) -> APIRouter:
                     else (uid, label)
                 )
 
-            person_used: dict[tuple[uuid.UUID, str], Decimal] = {}
-            for p in person_rows:
-                place = by_place.get((p.scope, p.scope_id))
-                if place is not None and p.platform_user_id is not None:
-                    _, person_used[(p.id, p.platform_user_id)] = await ledger.limit_spent(
-                        db,
-                        limit=place.limit,
-                        platform_user_id=p.platform_user_id,
-                        as_of=now,
-                        person_period=limit_period(p, as_of=now),
-                    )
-
         channels = {
             r.channel_id: (r.name.name if r.name is not None else r.channel_id)
             for r in directory.rows
@@ -516,9 +547,12 @@ def support_router(runtime: WebRuntime) -> APIRouter:
         } - channels.keys()
         if extra:
             channels |= await channel_names(caller, platform, extra)
+        open_channels = list(
+            dict.fromkeys(r.support_channel_id for r in open_now if r.support_channel_id)
+        )
         extra_destination = {
             c for c in (own.channel_id if own else None, _default_channel(platform)) if c
-        }
+        } | set(open_channels)
         names = channels | {
             k: v
             for k, v in (
@@ -545,6 +579,23 @@ def support_router(runtime: WebRuntime) -> APIRouter:
                 what=row.option.label if row.option else "Request",
             )
 
+        def undelivered(row: SupportEscalationRow) -> UndeliveredJson:
+            shown = charge(row)
+            bounds = row.bounds
+            kind = row.option.price.kind if row.option else "fixed"
+            return UndeliveredJson(
+                id=str(row.id),
+                at=shown.at,
+                person=shown.person,
+                credits=format_credits(row.hold),
+                what=shown.what,
+                price=PriceJson(
+                    kind="fixed" if kind == "steps" else kind,
+                    min=format_credits(bounds.lower),
+                    max=credits_or_none(bounds.upper),
+                ),
+            )
+
         limits: list[LimitJson] = []
         for u in usage:
             limits.append(_place_limit(u, name=place_name(u.limit.scope, u.limit.scope_id)))
@@ -552,20 +603,15 @@ def support_router(runtime: WebRuntime) -> APIRouter:
         for p in person_rows:
             assert p.platform_user_id is not None
             person_id, person_name = people.get(p.platform_user_id, (p.platform_user_id, None))
-            place = by_place.get((p.scope, p.scope_id))
-            mine = (
-                [r for r in recent[place.limit.id] if r.platform_user_id == p.platform_user_id]
-                if place is not None
-                else []
-            )
+            mine = standing[p.id]
             limits.append(
                 _limit_json(
                     p,
                     name=place_name(p.scope, p.scope_id),
-                    used=person_used.get((p.id, p.platform_user_id), Decimal(0)),
+                    used=mine.balance.person_used,
                     person=(person_id, person_name),
                     now=now,
-                    recent=[charge(r) for r in mine[:_RECENT]],
+                    recent=[charge(r) for r in mine.recent[:_RECENT]],
                 )
             )
 
@@ -585,7 +631,6 @@ def support_router(runtime: WebRuntime) -> APIRouter:
             own_allowed=own_allowed,
             label=channel_label(names, shown),
         )
-        placed = next((r.support_channel_id for r in open_now if r.support_channel_id), None)
         return SupportPageJson(
             platform=platform,
             everyone=EveryoneJson(
@@ -645,12 +690,10 @@ def support_router(runtime: WebRuntime) -> APIRouter:
                 ),
                 state=state,
                 detail=detail,
-                open=OpenJson(
-                    count=len(open_now), where=names.get(placed, placed) if placed else None
-                ),
+                open=OpenJson(count=len(open_now), where=[names.get(c, c) for c in open_channels]),
                 revision=mine_channel.revision if own_allowed and mine_channel else None,
             ),
-            undelivered=[charge(r) for r in lost],
+            undelivered=[undelivered(r) for r in lost],
         )
 
     def _default_channel(platform: str) -> str | None:
@@ -821,7 +864,7 @@ def support_router(runtime: WebRuntime) -> APIRouter:
                 scope=scope,
                 scope_id=scope_id,
                 key=body.menu,
-                expected=Expected(body.expected),
+                expected=expected_menu_key(body.expected) or Expected(None),
             )
         return await page(caller)
 
@@ -894,6 +937,9 @@ def support_router(runtime: WebRuntime) -> APIRouter:
                 pick = ChannelPick(
                     platform=platform,
                     channel_id=row.channel_id,
+                    discord_guild_id=tenant.external_id
+                    if tenant and platform == "discord"
+                    else None,
                     slack_team_id=tenant.external_id if tenant and platform == "slack" else None,
                     teams_team_id=team if platform == "teams" else None,
                     teams_service_url=sub.service_url if sub else None,
@@ -925,5 +971,54 @@ def support_router(runtime: WebRuntime) -> APIRouter:
                 expected=Expected(body.expected_revision),
             )
         return await page(caller)
+
+    async def settle_request(
+        caller: WebCaller, request_id: str, charge: str | None
+    ) -> SupportPageJson:
+        """Settle (`charge`) or decline (None) a pending request; the client is not told."""
+        try:
+            escalation_id = uuid.UUID(request_id)
+        except ValueError as exc:
+            raise HTTPException(404, _NO_REQUEST) from exc
+        amount: Decimal | None = None
+        if charge is not None:
+            with located(fallback=["charge"]):
+                amount = parse_credits(charge, name="charge")
+        declining = amount is None
+        with support_refusals():
+            outcome = await settle(
+                runtime.sessionmaker,
+                _actor(
+                    caller,
+                    action=_DECLINE_ACTION if declining else _SETTLE_ACTION,
+                    target="Request",
+                    detail="No charge" if amount is None else f"{format_credits(amount)} credits",
+                ),
+                escalation_id=escalation_id,
+                charge=amount,
+                default_allowance=runtime.settings.support.credits_per_user,
+                expected=Expected(None),
+            )
+        if outcome.status == "not_found":
+            raise HTTPException(404, _NO_REQUEST)
+        if outcome.status in ("already_settled", "stale"):
+            raise HTTPException(409, _NOT_PENDING)
+        if outcome.status not in ("settled", "declined"):
+            raise problem(["charge"], settle_outcome_text(outcome))
+        return await page(caller)
+
+    @router.post("/requests/{request_id}/settle")
+    async def post_settle(  # pyright: ignore[reportUnusedFunction]
+        caller: WorkspaceAdmin,
+        request_id: str,
+        body: Annotated[SettleBody, Depends(body_of(SettleBody))],
+    ) -> SupportPageJson:
+        return await settle_request(caller, request_id, body.charge)
+
+    @router.post("/requests/{request_id}/decline")
+    async def post_decline(  # pyright: ignore[reportUnusedFunction]
+        caller: WorkspaceAdmin, request_id: str
+    ) -> SupportPageJson:
+        return await settle_request(caller, request_id, None)
 
     return router
