@@ -1,12 +1,14 @@
-import { ArrowDown, ArrowUp, X } from "lucide-react"
+import { ArrowDown, ArrowUp, ChevronDown, X } from "lucide-react"
+import { useState } from "react"
 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
+import { cn } from "@/lib/utils"
 import { Field } from "@/modules/admin/shared"
 import {
-  cleanKey, FIELDS, LIMITS, move, newField, newOption, newStep, PRICES, used,
+  FIELDS, LIMITS, move, newField, newOption, newStep, PRICES, used,
   type FieldDraft, type FieldKind, type MenuDraft, type MenuErrors, type OptionDraft, type PriceKind, type StepDraft,
 } from "./menuDraft"
 
@@ -54,6 +56,11 @@ const drop = <T,>(list: T[], i: number) => list.filter((_, j) => j !== i)
 /** The menu as rows: its name, then each option with its price and fields. `errors` name the input they belong to. */
 export function MenuEditor({ draft, errors, onChange }: { draft: MenuDraft; errors: MenuErrors; onChange: (d: MenuDraft) => void }) {
   const e = errors.at
+  const [open, setOpen] = useState<string | null>(draft.options.length === 1 ? draft.options[0].id : null)
+  // A refusal opens the option it names.
+  const bad = draft.options.find((_, i) => Object.keys(e).some((k) => k === `options.${i}` || k.startsWith(`options.${i}.`)))?.id
+  const [seen, setSeen] = useState(bad)
+  if (bad !== seen) { setSeen(bad); if (bad) setOpen(bad) }
   const setOption = (i: number, f: (o: OptionDraft) => OptionDraft) => onChange({ ...draft, options: swap(draft.options, i, f) })
   return (
     <div className="space-y-4">
@@ -61,13 +68,13 @@ export function MenuEditor({ draft, errors, onChange }: { draft: MenuDraft; erro
       <div className="space-y-1">
         <div className="flex h-8 items-center justify-between gap-3">
           <span className="text-sm font-medium">Options</span>
-          <Button type="button" size="xs" variant="outline" disabled={draft.options.length >= LIMITS.options} onClick={() => onChange({ ...draft, options: [...draft.options, newOption()] })}>Add option</Button>
+          <Button type="button" size="xs" variant="outline" disabled={draft.options.length >= LIMITS.options} onClick={() => { const o = newOption(); onChange({ ...draft, options: [...draft.options, o] }); setOpen(o.id) }}>Add option</Button>
         </div>
         <Err>{e.options}</Err>
         <div className="divide-y">
           {draft.options.map((o, i) => (
             <OptionRow
-              key={o.id} o={o} i={i} n={draft.options.length} at={e}
+              key={o.id} o={o} i={i} n={draft.options.length} at={e} open={open === o.id} onToggle={() => setOpen(open === o.id ? null : o.id)}
               onChange={(f) => setOption(i, f)}
               onMove={(by) => onChange({ ...draft, options: move(draft.options, i, by) })}
               onRemove={() => onChange({ ...draft, options: drop(draft.options, i) })}
@@ -81,25 +88,45 @@ export function MenuEditor({ draft, errors, onChange }: { draft: MenuDraft; erro
 
 type At = Record<string, string>
 
-function OptionRow({ o, i, n, at, onChange, onMove, onRemove }: {
-  o: OptionDraft; i: number; n: number; at: At
+const credit = (v: string) => `${v || "?"} ${v === "1" ? "credit" : "credits"}`
+/** An option's price in a few words, for its collapsed row. */
+function priceText(p: OptionDraft["price"]): string {
+  if (p.kind === "fixed") return credit(p.amount.trim())
+  if (p.kind === "range") return `${p.min.trim() || "?"}-${p.max.trim() || "?"} credits`
+  if (p.kind === "quoted") return "Quoted later"
+  return `${p.steps.length} prices`
+}
+
+/** One option: a row that opens to its label, price and fields; only one is open at a time. */
+function OptionRow({ o, i, n, at, open, onToggle, onChange, onMove, onRemove }: {
+  o: OptionDraft; i: number; n: number; at: At; open: boolean; onToggle: () => void
   onChange: (f: (o: OptionDraft) => OptionDraft) => void; onMove: (by: number) => void; onRemove: () => void
 }) {
   const p = `options.${i}`
   const name = `option ${i + 1}`
+  const failed = Object.keys(at).some((k) => k === p || k.startsWith(`${p}.`))
   return (
-    <div className="space-y-3 py-4">
-      <div className="flex h-6 items-center justify-between gap-3">
-        <span className="text-xs font-medium text-muted-foreground">Option {i + 1}</span>
+    <div className="py-1">
+      <div className="flex min-h-11 items-center gap-2">
+        <button
+          type="button" aria-expanded={open} aria-label={`${open ? "Close" : "Open"} ${name}`} onClick={onToggle}
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-md py-1.5 text-left text-sm hover:text-foreground"
+        >
+          <ChevronDown className={cn("size-4 shrink-0 text-muted-foreground transition-transform", !open && "-rotate-90")} />
+          <span className={cn("min-w-0 truncate font-medium", !o.label && "text-muted-foreground")}>{o.label || `Option ${i + 1}`}</span>
+          <span className="ml-auto shrink-0 text-xs text-muted-foreground tabular">{priceText(o.price)}</span>
+          {failed && !open && <span className="size-1.5 shrink-0 rounded-full bg-destructive" role="img" aria-label="Has an error" />}
+        </button>
         <Tools what={name} i={i} n={n} onMove={onMove} onRemove={onRemove} canRemove={n > 1} />
       </div>
-      <div className="grid grid-cols-[10rem_1fr] gap-3 max-sm:grid-cols-1">
-        <Labeled label="Key" aria={`Key of ${name}`} value={o.key} error={at[`${p}.key`]} placeholder="review" onChange={(v) => onChange((x) => ({ ...x, key: cleanKey(v) }))} />
-        <Labeled label="Label" aria={`Label of ${name}`} maxLength={LIMITS.label} value={o.label} error={at[`${p}.label`]} placeholder="Review this thread" onChange={(v) => onChange((x) => ({ ...x, label: v }))} />
-      </div>
-      <PriceEditor o={o} name={name} p={p} at={at} onChange={onChange} />
-      <FieldsEditor o={o} name={name} p={p} at={at} onChange={onChange} />
-      <Err>{at[p]}</Err>
+      {open && (
+        <div className="space-y-3 pb-3 pl-6">
+          <Labeled label="Label" aria={`Label of ${name}`} maxLength={LIMITS.label} value={o.label} error={at[`${p}.label`]} placeholder="Review this thread" onChange={(v) => onChange((x) => ({ ...x, label: v }))} />
+          <PriceEditor o={o} name={name} p={p} at={at} onChange={onChange} />
+          <FieldsEditor o={o} name={name} p={p} at={at} onChange={onChange} />
+          <Err>{at[p]}</Err>
+        </div>
+      )}
     </div>
   )
 }
@@ -118,7 +145,7 @@ function PriceEditor({ o, name, p, at, onChange }: { o: OptionDraft; name: strin
         {price.kind === "fixed" && money("Credits", "amount", "1")}
         {price.kind === "range" && <>{money("Min", "min", "1")}{money("Max", "max", "3")}</>}
         {price.kind === "quoted" && <>{money("Min", "min", "0")}{money("Max", "max", "No limit")}</>}
-        {price.kind === "steps" && <div className="col-span-2"><Labeled label="Question" aria={`Question of ${name}`} maxLength={LIMITS.fieldLabel} value={price.label} error={at[`${p}.price.label`]} placeholder="Length" onChange={(label) => set({ label })} /></div>}
+        {price.kind === "steps" && <div className="col-span-2"><Labeled label="What to pick" aria={`What to pick in ${name}`} maxLength={LIMITS.fieldLabel} value={price.label} error={at[`${p}.price.label`]} placeholder="Length" onChange={(label) => set({ label })} /></div>}
       </div>
       {price.kind === "steps" && (
         <div className="space-y-2">

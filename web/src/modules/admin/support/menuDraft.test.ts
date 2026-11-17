@@ -47,10 +47,20 @@ describe("menu draft", () => {
     expect(move(same, 0, -1)).toBe(same)
   })
 
+  it("makes option keys different when labels repeat", () => {
+    const m = toDraft({ name: "M", options: [] })
+    m.options = [{ ...newOption(), label: "Review" }, { ...newOption(), label: "Review" }, { ...newOption(), label: "" }]
+    expect((toCatalog(m).options as { key: string }[]).map((o) => o.key)).toEqual(["review", "review_2", "option"])
+  })
+
   it("places server errors on their inputs, dropping the kind tags", () => {
     const m = toDraft(menu)
-    const bad = "Catalog not valid: options.0.price.fixed.amount: amount must be more than 0 and at most 1000; options.1.price.steps.steps.1.amount: amount must be more than 0 and at most 1000; options.2.fields.0.choice.choices: Tuple should have at least 2 items after validation, not 1"
-    expect(menuErrors(bad, m)).toEqual({
+    const problems = [
+      { loc: ["menu", "options", 0, "price", "fixed", "amount"], msg: "amount must be more than 0 and at most 1000" },
+      { loc: ["menu", "options", 1, "price", "steps", "steps", 1, "amount"], msg: "amount must be more than 0 and at most 1000" },
+      { loc: ["menu", "options", 2, "fields", 0, "choice", "choices"], msg: "Tuple should have at least 2 items after validation, not 1" },
+    ]
+    expect(menuErrors("x", problems, m)).toEqual({
       at: {
         "options.0.price.amount": "amount must be more than 0 and at most 1000",
         "options.1.price.steps.1.amount": "amount must be more than 0 and at most 1000",
@@ -62,11 +72,13 @@ describe("menu draft", () => {
 
   it("puts an error on its option, or on the page when it names no input", () => {
     const m = toDraft(menu)
-    expect(menuErrors("Catalog not valid: options.2.price.range: a range needs min below max; option keys must be different", m)).toEqual({
-      at: { "options.2.price": "a range needs min below max" },
-      rest: "Catalog not valid: option keys must be different",
-    })
-    expect(menuErrors("an option takes at most 4 fields", m)).toEqual({ at: {}, rest: "an option takes at most 4 fields" })
-    expect(menuErrors("Catalog not valid: options.3: field keys must be different", m).at).toEqual({ "options.3": "field keys must be different" })
+    const out = menuErrors(null, [
+      { loc: ["menu", "options", 2, "price", "range"], msg: "a range needs min below max" },
+      { loc: ["menu"], msg: "option keys must be different" },
+      { loc: ["menu", "options", 0, "key"], msg: "String should match pattern" },
+    ], m)
+    expect(out).toEqual({ at: { "options.2.price": "a range needs min below max", "options.0.label": "String should match pattern" }, rest: "option keys must be different" })
+    expect(menuErrors("Couldn't save", [], m)).toEqual({ at: {}, rest: "Couldn't save" })
+    expect(menuErrors(null, [{ loc: ["menu", "options", 3], msg: "field keys must be different" }], m).at).toEqual({ "options.3": "field keys must be different" })
   })
 })

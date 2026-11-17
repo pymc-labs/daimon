@@ -1,8 +1,9 @@
 // A menu for Ask a person as the editor holds it: strings and stable row ids, turned into and out of the API's catalog.
 // Limits and key rules follow `daimon.core.support_plans`.
+import type { Problem } from "@/lib/api"
 
 export const LIMITS = { options: 10, fields: 4, steps: 10, name: 75, label: 75, fieldLabel: 45, text: 200, paragraph: 3000 }
-export const PRICES = { fixed: "Fixed", steps: "Steps", range: "Range", quoted: "Quoted" } as const
+export const PRICES = { fixed: "Fixed", steps: "Pick a price", range: "Range", quoted: "Quoted later" } as const
 export const FIELDS = { text: "Text", paragraph: "Paragraph", choice: "Choice" } as const
 export type PriceKind = keyof typeof PRICES
 export type FieldKind = keyof typeof FIELDS
@@ -90,12 +91,21 @@ function fieldsOf(o: OptionDraft): Bag[] {
   })
 }
 
-/** The API's catalog; a blank key is made from the label. */
+/** The API's catalog; a blank key is made from the label, and made different from the others. */
 export function toCatalog(m: MenuDraft): Bag {
+  const taken = new Set(m.options.map((o) => o.key).filter(Boolean))
+  const keyOf = (o: OptionDraft) => {
+    if (o.key) return o.key
+    const base = slug(o.label) || "option"
+    let key = base
+    for (let n = 2; taken.has(key); n++) key = `${base.slice(0, 29)}_${n}`
+    taken.add(key)
+    return key
+  }
   return {
     name: m.name.trim(),
     options: m.options.map((o) => ({
-      ...o.rest, key: o.key || slug(o.label), label: o.label.trim(), price: priceOf(o),
+      ...o.rest, key: keyOf(o), label: o.label.trim(), price: priceOf(o),
       ...(o.fields.length && { fields: fieldsOf(o) }),
     })),
   }
@@ -115,36 +125,34 @@ function inputs(m: MenuDraft): Set<string> {
   return paths
 }
 
-/** A location from the server as an input path: the kind tags are dropped and a choice's index folds into `choices`. */
-function pathOf(loc: string): string {
-  const t = loc.split(".")
+/** A `loc` from the server as an input path: the body key and kind tags are dropped, a choice's index folds into `choices`, and an option key shows at its label. */
+function pathOf(loc: (string | number)[]): string {
+  const t = loc.map(String)
+  if (t[0] === "menu") t.shift()
   if (t[2] === "price" && TAGS.has(t[3])) t.splice(3, 1)
   else if (t[2] === "fields" && TAGS.has(t[4])) t.splice(4, 1)
   const at = t.indexOf("choices")
   if (t[2] === "fields" && at > 0) t.length = at + 1
   if (t[2] === "fields" && t[4] === "key") t[4] = "label"
+  if (t[0] === "options" && t[2] === "key") t[2] = "label"
   return t.join(".")
 }
 
 export type MenuErrors = { at: Record<string, string>; rest: string | null }
 
-/** Splits "Catalog not valid: options.0.label: ...; ..." into the message for each input, and what names none. */
-export function menuErrors(message: string | null, m: MenuDraft): MenuErrors {
+/** Splits a refusal into the message for each input and what names none. `error` is its text when it has no `problems`. */
+export function menuErrors(error: string | null, problems: Problem[], m: MenuDraft): MenuErrors {
   const at: Record<string, string> = {}
-  if (!message) return { at, rest: null }
-  const head = "Catalog not valid: "
-  if (!message.startsWith(head)) return { at, rest: message }
+  if (!problems.length) return { at, rest: error }
   const known = inputs(m)
   const rest: string[] = []
-  for (const part of message.slice(head.length).split("; ")) {
-    const hit = /^([a-z0-9_.]+): (.+)$/.exec(part)
-    let path = hit ? pathOf(hit[1]) : ""
-    const text = hit ? hit[2] : part
+  for (const { loc, msg } of problems) {
+    let path = pathOf(loc)
     if (!known.has(path)) path = /^options\.\d+/.exec(path)?.[0] ?? ""
-    if (!path) rest.push(part)
-    else at[path] = at[path] ? `${at[path]}. ${text}` : text
+    if (!path) rest.push(msg)
+    else at[path] = at[path] ? `${at[path]}. ${msg}` : msg
   }
-  return { at, rest: rest.length ? `${head}${rest.join("; ")}` : null }
+  return { at, rest: rest.length ? rest.join(". ") : null }
 }
 
 /** Moves a row `by` places; out of range leaves the list alone. */

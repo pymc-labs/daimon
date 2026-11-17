@@ -6,12 +6,14 @@ import { wait } from "./util"
 
 const ON_OFF = [{ value: "on", label: "On" }, { value: "off", label: "Off" }]
 const ALL: Tier[] = ["deployment", "workspace", "agent", "channel", "thread"]
-const schema = (key: string, name: string, tiers: Tier[] = ALL): FeatureSchema => ({
-  key, name, category: "chat", categoryName: "Chat", values: ON_OFF, default: "on", tiers, lockable: tiers.filter((t) => t === "workspace" || t === "channel"),
+const schema = (key: string, name: string, tiers: Tier[] = ALL, fallback = "on"): FeatureSchema => ({
+  key, name, category: "chat", categoryName: "Chat", values: ON_OFF, default: fallback, tiers, lockable: tiers.filter((t) => t === "workspace" || t === "channel"),
   platforms: ["discord", "slack", "teams"], threadAnyone: false, native: false, doc: "",
 })
 const SCHEMA = [
   schema("progress_plans", "Progress plans"), schema("participation", "Thread participation"),
+  schema("support_escalation", "Ask a person", ["deployment", "workspace", "agent", "channel"], "off"), schema("support_feedback", "After a thumbs down", ["deployment", "workspace", "agent", "channel"], "off"),
+  schema("support_own_channel", "Own request channel", ["deployment"]),
   schema("guidance", "Setup guidance", ["deployment", "workspace", "agent"]), schema("tool.bash", "Built-in tool: bash"), schema("cost_footer", "Cost footer"),
 ]
 /** Locked at the workspace, so every level below reads it as locked; `value` is what the lock holds. */
@@ -20,7 +22,9 @@ const locks = new Map<string, string>([["cost_footer", "off"]])
 const NO_SANDBOX = "c_general"
 const REASON = "Needs a sandbox. Ask an admin."
 /** `place|tier|key` to the value set there. */
-const own = new Map<string, string>([[`/${NO_SANDBOX}/|channel|tool.bash`, "off"], [`/${NO_SANDBOX}/t_launch|thread|tool.bash`, "off"]])
+const own = new Map<string, string>([["//|workspace|support_escalation", "on"], [`/${NO_SANDBOX}/|channel|tool.bash`, "off"], [`/${NO_SANDBOX}/t_launch|thread|tool.bash`, "off"]])
+/** Set `?support=unmet` to see Ask a person without a request channel. */
+const flag = () => (typeof location === "undefined" ? "" : new URLSearchParams(location.search).get("support") ?? "")
 const place = (url: URL) => ["agent", "channel", "thread"].map((k) => url.searchParams.get(k) ?? "").join("/")
 const tiersOf = (url: URL): Tier[] => ["workspace", ...(url.searchParams.get("agent") ? ["agent"] : []), ...(url.searchParams.get("channel") ? ["channel"] : []), ...(url.searchParams.get("thread") ? ["thread"] : [])] as Tier[]
 
@@ -34,9 +38,18 @@ function viewOf(url: URL, s: FeatureSchema): FeatureView {
   const locked = tiers.find((t) => t.locked)
   const set = locked ?? [...tiers].reverse().find((t) => t.value !== "default")
   const value = set?.value ?? s.default
-  const unavailable = s.key === "tool.bash" && url.searchParams.get("channel") === NO_SANDBOX ? REASON : null
+  const unavailable = s.key === "tool.bash" && url.searchParams.get("channel") === NO_SANDBOX ? REASON : s.key === "support_escalation" && flag() === "unmet" ? "Pick a support channel." : null
   return { key: s.key, tiers, value, source: set?.tier ?? "default", locked: !!locked, unavailable, summary: ON_OFF.find((o) => o.value === value)?.label ?? value }
 }
+
+/** The agents and channels that have a value of their own for `key`, as `{ scope, id }`. */
+export const overridden = (key: string) => [...own].flatMap(([k, v]) => {
+  const [at, tier, name] = k.split("|")
+  const [agent, channel] = at!.split("/")
+  return name === key && v !== "default" && (tier === "agent" || tier === "channel") ? [{ scope: tier, id: (tier === "agent" ? agent : channel)! }] : []
+})
+/** What `?support=` asks the mock to show: `locked` (the deployment keeps its own request channel) or `unmet`. */
+export const supportFlag = flag
 
 export const featuresHandlers: HttpHandler[] = [
   http.get("/api/features/schema", async () => { await wait(); return HttpResponse.json(SCHEMA) }),
