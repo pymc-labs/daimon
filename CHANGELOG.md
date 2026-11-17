@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Agents and threads can use GPT-6.2 Astra and GPT-6.2 Sol on OpenAI.** Pick
+  `gpt-6.2-astra` or `gpt-6.2-sol` as an agent's or a thread's model; `gpt-6-luna`
+  stays the default and `gpt-6-astra` stays available. GPT-6.2 Astra costs $8
+  input, $40 output, $0.40 cached input and $10 cache writes per million tokens;
+  GPT-6.2 Sol costs $2, $10, $0.10 and $2.50. Like GPT-6 Astra, a request above
+  272k input tokens is priced wholly at twice the input and cache rates and 1.5x
+  the output rate, an upper bound, and each model has its own daily cap. "astra"
+  names GPT-6.2 Astra and "gpt 6 astra" GPT-6 Astra; "sol" names GPT-6.2 Sol.
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and
   the MCP tools. A run nobody started, such as a routine, never applies one at once.
