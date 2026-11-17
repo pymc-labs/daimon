@@ -584,7 +584,7 @@ async def _list_requests_impl(
         rows = await ledger.list_requests(
             session,
             tenant_id=auth.tenant_id,
-            status="pending" if pending else None,
+            status="pending" if pending and not undelivered else None,
             limit_id=limit_id,
             undelivered=undelivered,
             limit=max(1, min(limit, 200)),
@@ -825,9 +825,10 @@ def register_support_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """List support requests, newest first; pending only by default. Admin-only.
 
         Pass ``scope`` and ``scope_id`` to list one place's requests. ``undelivered``
-        keeps the pending requests no support channel received (``delivered`` false);
-        settled and declined ones are never listed. Example: ``pending=True``,
-        ``undelivered=True``.
+        keeps the requests no support channel received and no person handled
+        (``delivered`` false): pending ones, and ones already charged at submit.
+        Ones a person settled or declined are never listed, and ``pending`` is
+        ignored then. Example: ``pending=False``, ``undelivered=True``.
         """
         return await _list_requests_impl(
             runtime,
@@ -845,8 +846,10 @@ def register_support_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> SettleSupportRequestResult:
         """Settle a support request at ``charge`` credits, or decline it (null). Admin-only.
 
-        A range or quoted option takes an amount within its bounds. To correct
-        or refund a settled request, pass its current charge as
+        A range or quoted option takes an amount within its bounds. A request
+        already charged at submit (``charge`` shown, not pending) keeps that
+        charge when ``charge`` equals it, or is refunded when null. To correct
+        or refund one a person settled, pass its current charge as
         ``expected_charge``. The person who asked is not told; read ``text`` back.
         Example: ``request_id`` from ``support_requests_list``, ``charge="2.5"``.
         """

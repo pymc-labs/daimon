@@ -88,7 +88,7 @@ _NO_PLACE = "No such place."
 _NO_CHANNEL = "No such channel."
 _NO_PERSON = "No such person."
 _NO_REQUEST = "No such request."
-_NOT_PENDING = "That request is no longer pending."
+_NOT_PENDING = "That request was handled already."
 _LIMIT_ACTION = "Changed support limit"
 _MENU_ACTION = "Changed support menu"
 _CHANNEL_ACTION = "Changed support channel"
@@ -170,9 +170,11 @@ class UndeliveredJson(BaseModel):
     at: str
     person: str
     credits: str
-    """What the request holds now."""
+    """What the request holds, or its charge once `charged`."""
     what: str
     price: PriceJson
+    charged: bool
+    """Charged at submit: settling keeps the charge, declining refunds it."""
 
 
 class SettleBody(BaseModel):
@@ -587,13 +589,14 @@ def support_router(runtime: WebRuntime) -> APIRouter:
                 id=str(row.id),
                 at=shown.at,
                 person=shown.person,
-                credits=format_credits(row.hold),
+                credits=format_credits(row.counted),
                 what=shown.what,
                 price=PriceJson(
                     kind="fixed" if kind == "steps" else kind,
                     min=format_credits(bounds.lower),
                     max=credits_or_none(bounds.upper),
                 ),
+                charged=row.status == "settled",
             )
 
         limits: list[LimitJson] = []
@@ -975,7 +978,10 @@ def support_router(runtime: WebRuntime) -> APIRouter:
     async def settle_request(
         caller: WebCaller, request_id: str, charge: str | None
     ) -> SupportPageJson:
-        """Settle (`charge`) or decline (None) a pending request; the client is not told."""
+        """Settle (`charge`) or decline (None) a request no person has handled.
+
+        A request charged at submit keeps its charge on settle and is refunded on decline.
+        The client is not told."""
         try:
             escalation_id = uuid.UUID(request_id)
         except ValueError as exc:

@@ -723,7 +723,7 @@ async def requests_list(
         rows = await ledger.list_requests(
             session,
             tenant_id=target.tenant_id,
-            status="pending" if pending else None,
+            status="pending" if pending and not undelivered else None,
             limit_id=limit_id,
             undelivered=undelivered,
             limit=limit,
@@ -996,7 +996,7 @@ def requests_list_command(
     pending: Annotated[bool, typer.Option("--pending", help="Only requests to settle.")] = False,
     undelivered: Annotated[
         bool,
-        typer.Option("--undelivered", help="Only pending requests no support channel received."),
+        typer.Option("--undelivered", help="Only requests no channel received and nobody handled."),
     ] = False,
     place: Annotated[
         str | None, typer.Option("--place", help="workspace, agent:<name> or channel:<id>.")
@@ -1028,7 +1028,9 @@ _EXPECTED_CHARGE = typer.Option(
 def requests_settle_command(
     ctx: typer.Context,
     request_id: str,
-    credits: Annotated[str, typer.Argument(help="The final charge in credits.")],
+    credits: Annotated[
+        str, typer.Argument(help="The final charge in credits; a charged request keeps its own.")
+    ],
     expected: Annotated[str | None, _EXPECTED_CHARGE] = None,
 ) -> None:
     """Charge a request. The client is not notified."""
@@ -1050,7 +1052,7 @@ def requests_decline_command(
     request_id: str,
     expected: Annotated[str | None, _EXPECTED_CHARGE] = None,
 ) -> None:
-    """Decline a request and refund its hold. The client is not notified."""
+    """Decline a request and refund its hold or charge. The client is not notified."""
     _run(
         lambda rt, console: requests_settle(
             rt=rt,

@@ -66,6 +66,10 @@ _MENU: dict[str, object] = {
         {"key": "review", "label": "Review", "price": {"kind": "range", "min": "1", "max": "3"}}
     ],
 }
+_FIXED_MENU: dict[str, object] = {
+    "name": "Support",
+    "options": [{"key": "quick", "label": "Quick", "price": {"kind": "fixed", "amount": "2"}}],
+}
 _PERSON = "100000000000000001"
 _LIMIT = {
     "scope_id": None,
@@ -530,6 +534,35 @@ async def test_requests_list_when_undelivered_then_only_requests_no_channel_rece
         await _list_requests_impl(
             runtime, auth, pending=True, scope="channel", scope_id="404", limit=50
         )
+
+
+async def test_settle_when_charged_at_submit_then_kept_or_refunded_and_leaves_the_list(
+    committing_sessionmaker: Factory,
+) -> None:
+    tenant, account_id = await _seed(committing_sessionmaker)
+    runtime, auth = _runtime(committing_sessionmaker), _auth(tenant, account_id)
+    await _set_menu_impl(runtime, auth, key="support", body=_FIXED_MENU, expected_revision=None)
+    await _set_limit_impl(runtime, auth, **_limit(scope="channel", scope_id=_PARENT, shared="5"))
+    await _use_menu_impl(
+        runtime, auth, key="support", scope="channel", scope_id=_PARENT, expected=None
+    )
+    ids = [
+        str(await _submit(committing_sessionmaker, tenant, message=m, menu=_FIXED_MENU))
+        for m in ("m1", "m2")
+    ]
+    kwargs = {"pending": True, "scope": None, "scope_id": None, "limit": 50, "undelivered": True}
+    lost = await _list_requests_impl(runtime, auth, **kwargs)
+    assert {(r.status, r.counted) for r in lost} == {("settled", "2")}, "charged, still listed"
+    settle = {"expected_charge": None}
+    with pytest.raises(ToolError, match="Keep that or decline to refund it"):
+        await _settle_request_impl(runtime, auth, request_id=ids[0], charge="1", **settle)
+    kept = await _settle_request_impl(runtime, auth, request_id=ids[0], charge="2", **settle)
+    assert kept.text == f"Charged 2 credits. {CLIENT_NOT_NOTIFIED}", "kept as is"
+    refund = await _settle_request_impl(runtime, auth, request_id=ids[1], charge=None, **settle)
+    assert (refund.status, refund.charge) == ("declined", "0"), "refunded"
+    assert await _list_requests_impl(runtime, auth, **kwargs) == [], "both left the list"
+    with pytest.raises(ToolError, match="Already"):
+        await _settle_request_impl(runtime, auth, request_id=ids[0], charge=None, **settle)
 
 
 async def test_settle_tells_the_settler_the_client_is_not_told_and_corrects(

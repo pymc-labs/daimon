@@ -10560,9 +10560,10 @@
         List support requests, newest first; pending only by default. Admin-only.
         <blank line>
         Pass ``scope`` and ``scope_id`` to list one place's requests. ``undelivered``
-        keeps the pending requests no support channel received (``delivered`` false);
-        settled and declined ones are never listed. Example: ``pending=True``,
-        ``undelivered=True``.
+        keeps the requests no support channel received and no person handled
+        (``delivered`` false): pending ones, and ones already charged at submit.
+        Ones a person settled or declined are never listed, and ``pending`` is
+        ignored then. Example: ``pending=False``, ``undelivered=True``.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -10614,8 +10615,10 @@
       'description': '''
         Settle a support request at ``charge`` credits, or decline it (null). Admin-only.
         <blank line>
-        A range or quoted option takes an amount within its bounds. To correct
-        or refund a settled request, pass its current charge as
+        A range or quoted option takes an amount within its bounds. A request
+        already charged at submit (``charge`` shown, not pending) keeps that
+        charge when ``charge`` equals it, or is refunded when null. To correct
+        or refund one a person settled, pass its current charge as
         ``expected_charge``. The person who asked is not told; read ``text`` back.
         Example: ``request_id`` from ``support_requests_list``, ``charge="2.5"``.
       ''',

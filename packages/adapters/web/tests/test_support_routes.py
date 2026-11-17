@@ -806,7 +806,9 @@ async def test_requests_show_as_recent_used_open_and_undelivered(
         ("1", "Ask a person", "1"),
     ], "newest first, by option and person"
     assert page["channel"]["open"]["count"] == 0, "fixed-price requests settle at once"
-    assert page["undelivered"] == [], "a request that settled at submit has nothing to settle"
+    assert [(u["credits"], u["charged"]) for u in page["undelivered"]] == [("1", True)], (
+        "the undelivered one settled at submit: listed with its charge until a person handles it"
+    )
 
 
 async def test_a_range_priced_request_counts_as_open_until_settled(
@@ -876,6 +878,54 @@ async def test_open_requests_name_each_channel_they_sit_in_once(
 
     assert none == {"count": 0, "where": []}, "nothing open"
     assert shown["count"] == 2 and sorted(shown["where"]) == ["general", "requests"], shown
+
+
+async def test_a_charged_at_submit_request_is_kept_or_refunded_from_the_page(
+    web_client: WebClientFactory, db_session_factory: Factory, tmp_path: Path
+) -> None:
+    """Keep leaves the charge, decline refunds it; a handled one is 409; a different amount 422."""
+    fixed = _option_fixed()
+    async with _support(web_client, db_session_factory, tmp_path) as admin:
+        await admin.client.put(
+            "/api/support/menus/support", json={"menu": fixed, "expected_revision": None}
+        )
+        await admin.client.put(
+            "/api/support/menus/use",
+            json={"scope": "workspace", "menu": "support", "expected": None},
+        )
+        await admin.client.put(
+            "/api/support/limits", json=_limit("channel", "c1", limit={"shared": "5"})
+        )
+        choice = RequestChoice.of(MenuSpec.model_validate(fixed).options[0])
+        kept = await _submit(db_session_factory, admin, "m1", choice=choice)
+        refunded = await _submit(db_session_factory, admin, "m2", choice=choice)
+        post = admin.client.post
+        base = "/api/support/requests"
+        listed = (await admin.client.get("/api/support")).json()
+        other = await post(f"{base}/{kept}/settle", json={"charge": "1"})
+        keep = await post(f"{base}/{kept}/settle", json={"charge": "2"})
+        decline = await post(f"{base}/{refunded}/decline")
+        again = await post(f"{base}/{kept}/decline")
+        again_settle = await post(f"{base}/{refunded}/settle", json={"charge": "2"})
+        trail = await shown_trail(db_session_factory, admin.ws.tenant_id)
+
+    rows = {i["id"]: i for i in listed["undelivered"]}
+    assert {(r["credits"], r["charged"]) for r in rows.values()} == {("2", True)}, rows
+    assert set(rows) == {str(kept), str(refunded)}, "both are listed"
+    assert other.status_code == 422 and _locs(other) == [["charge"]], other.text
+    assert keep.status_code == 200 and decline.status_code == 200, "kept and refunded"
+    assert decline.json()["undelivered"] == [], "both left the list"
+    limit = _one(decline.json()["limits"], scope="channel", scope_id="c1")
+    assert limit["used"] == "2", "only the kept charge is left on the limit"
+    assert again.status_code == 409 and again_settle.status_code == 409, "already handled"
+    actions = [a for a, _, _ in trail if "support request" in a]
+    assert actions == ["Settled support request", "Declined support request"], "audited once each"
+
+
+def _option_fixed() -> dict[str, object]:
+    """A menu of one fixed-price option (2 credits)."""
+    option = {"key": "quick", "label": "Quick", "price": {"kind": "fixed", "amount": "2"}}
+    return {"name": "Support", "options": [option]}
 
 
 async def test_an_undelivered_request_is_settled_or_declined_from_the_page(
