@@ -268,15 +268,9 @@ CHAIN = [
 TOP = (PREVIEW_HEAD, *TAIL)
 
 
-# Heads with the routine sandbox columns and history, which 0206 folds into features.
-SANDBOX_HEADS = (
-    SANDBOX_HEAD,
-    RECRUITMENT_HEAD,
-    REMOVAL_HEAD,
-    LONG_JOBS_HEAD,
-    ADMINS_HEAD,
-    *TOP[:-1],
-)
+# Heads with the routine sandbox columns and history; from 0206 on they are unmapped, kept
+# for the release still running during a deploy.
+SANDBOX_HEADS = (SANDBOX_HEAD, RECRUITMENT_HEAD, REMOVAL_HEAD, LONG_JOBS_HEAD, ADMINS_HEAD, *TOP)
 
 
 SANDBOX_COLUMNS = {
@@ -513,7 +507,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             and expected != HEAD
         ):
             return False
-        # Never modelled at HEAD; checked below instead.
+        # Unmapped at HEAD; checked below instead.
         if kind == "column" and name in SANDBOX_COLUMNS:
             return False
         return kind != "table" or name in compared_tables
@@ -526,9 +520,6 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
     constraints = {c["name"] for c in inspector.get_check_constraints("routines")}
     assert {"ck_routines_destination_kind", "ck_routines_dm_owner"} <= constraints
     routine_columns = {c["name"] for c in inspector.get_columns("routines")}
-    if expected == HEAD:
-        assert not routine_columns & SANDBOX_COLUMNS, "0206 drops the routine sandbox columns"
-        assert not inspector.has_table("routine_sandbox_history"), "0206 folds the history"
     if expected in SANDBOX_HEADS:
         assert routine_columns >= SANDBOX_COLUMNS, f"{expected} keeps the routine sandbox columns"
         # compare_metadata does not compare CHECK constraints.

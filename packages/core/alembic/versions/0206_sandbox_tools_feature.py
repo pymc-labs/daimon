@@ -7,10 +7,11 @@ environment revision at the routine tier. Each routine opt-in moves to a routine
 with its pin, and its history to `channel_changes`; DM routines never ran built-ins, so
 theirs are dropped. A routine row's `channel_id` holds its routine id, so
 `uq_feature_values_place` keeps the predicate older releases upsert against. The routine
-columns and `routine_sandbox_history` go. `system` joins both surface checks for changes
-Daimon makes itself. A `routine_sandbox_tools` On must carry its pin. Downgrading restores
-routine opt-ins and their history and drops agent opt-ins, routine Offs and every change
-Daimon made itself (`system`).
+columns and `routine_sandbox_history` stay, unmapped and with setters erased, for the release
+still running during a deploy; a later release drops them. `system` joins both surface checks
+for changes Daimon makes itself. A `routine_sandbox_tools` On must carry its pin.
+Downgrading restores routine opt-ins and their history and drops agent opt-ins, routine Offs
+and every change Daimon made itself (`system`).
 
 downgrade: destructive
 """
@@ -108,17 +109,11 @@ def upgrade() -> None:
         " CASE h.via WHEN 'cli' THEN 'cli' WHEN 'mcp' THEN 'chat' ELSE 'system' END, h.set_at"
         " FROM routine_sandbox_history h JOIN tenants t ON t.id = h.tenant_id"
     )
-    op.drop_table("routine_sandbox_history")
-    for column in (
-        "sandbox_tools_enabled",
-        "sandbox_tools_set_by",
-        "sandbox_tools_set_at",
-        "sandbox_agent_id",
-        "sandbox_agent_version",
-        "sandbox_environment_id",
-        "sandbox_environment_updated_at",
-    ):
-        op.drop_column("routines", column)
+    # Account erasure no longer reaches the kept columns, so their setters go now.
+    op.execute(
+        "UPDATE routines SET sandbox_tools_set_by = 'erased' WHERE sandbox_tools_set_by IS NOT NULL"
+    )
+    op.execute("UPDATE routine_sandbox_history SET set_by = 'erased'")
 
 
 def downgrade() -> None:
@@ -126,17 +121,33 @@ def downgrade() -> None:
     op.add_column(
         "routines",
         sa.Column("sandbox_tools_enabled", sa.Boolean(), nullable=False, server_default=sa.false()),
+        if_not_exists=True,
     )
-    op.add_column("routines", sa.Column("sandbox_tools_set_by", sa.Text(), nullable=True))
     op.add_column(
-        "routines", sa.Column("sandbox_tools_set_at", sa.DateTime(timezone=True), nullable=True)
+        "routines", sa.Column("sandbox_tools_set_by", sa.Text(), nullable=True), if_not_exists=True
     )
-    op.add_column("routines", sa.Column("sandbox_agent_id", sa.Text(), nullable=True))
-    op.add_column("routines", sa.Column("sandbox_agent_version", sa.Integer(), nullable=True))
-    op.add_column("routines", sa.Column("sandbox_environment_id", sa.Text(), nullable=True))
+    op.add_column(
+        "routines",
+        sa.Column("sandbox_tools_set_at", sa.DateTime(timezone=True), nullable=True),
+        if_not_exists=True,
+    )
+    op.add_column(
+        "routines", sa.Column("sandbox_agent_id", sa.Text(), nullable=True), if_not_exists=True
+    )
+    op.add_column(
+        "routines",
+        sa.Column("sandbox_agent_version", sa.Integer(), nullable=True),
+        if_not_exists=True,
+    )
+    op.add_column(
+        "routines",
+        sa.Column("sandbox_environment_id", sa.Text(), nullable=True),
+        if_not_exists=True,
+    )
     op.add_column(
         "routines",
         sa.Column("sandbox_environment_updated_at", sa.DateTime(timezone=True), nullable=True),
+        if_not_exists=True,
     )
     op.create_table(
         "routine_sandbox_history",
@@ -154,12 +165,24 @@ def downgrade() -> None:
         sa.Column("environment_updated_at", sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
         sa.CheckConstraint("via IN ('mcp', 'cli', 'edit')", name="ck_routine_sandbox_history_via"),
+        if_not_exists=True,
     )
     op.create_index(
         "ix_routine_sandbox_history_routine",
         "routine_sandbox_history",
         ["tenant_id", "routine_id", "set_at"],
+        if_not_exists=True,
     )
+    # The routine tier is the record now; what the older release wrote meanwhile is stale.
+    op.execute(
+        "UPDATE routines SET sandbox_tools_enabled = false, sandbox_tools_set_by = NULL,"
+        " sandbox_tools_set_at = NULL, sandbox_agent_id = NULL, sandbox_agent_version = NULL,"
+        " sandbox_environment_id = NULL, sandbox_environment_updated_at = NULL"
+        " WHERE sandbox_tools_enabled OR num_nonnulls(sandbox_tools_set_by, sandbox_tools_set_at,"
+        " sandbox_agent_id, sandbox_agent_version, sandbox_environment_id,"
+        " sandbox_environment_updated_at) > 0"
+    )
+    op.execute("DELETE FROM routine_sandbox_history")
     op.execute(
         "UPDATE routines r SET sandbox_tools_enabled = true,"
         " sandbox_tools_set_by = coalesce(f.set_by::text, f.surface),"

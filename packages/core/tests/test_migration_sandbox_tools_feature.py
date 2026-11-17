@@ -10,19 +10,14 @@ import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from daimon.core._models import Base
+from daimon.core._models import Base, Routine
 from daimon.core.stores.domain import FeatureValueRow, SandboxPin, stored_pin
 from daimon.core.stores.routines import create_routine
 from daimon.testing.factories import make_tenant
-from sqlalchemy import Connection, inspect, text
+from sqlalchemy import Connection, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _TABLES = ("feature_values", "channel_changes", "routines")
-# public is on the test search_path and may hold stale tables, so look in ours only.
-_HISTORY_TABLE = (
-    "SELECT count(*) FROM information_schema.tables"
-    " WHERE table_schema = current_schema() AND table_name = 'routine_sandbox_history'"
-)
 
 
 def migration() -> ModuleType:
@@ -41,6 +36,12 @@ def test_the_migration_follows_web_search_usage() -> None:
 
 def _rows(sync: Connection, sql: str) -> list[tuple[object, ...]]:
     return [tuple(row) for row in sync.execute(text(sql))]
+
+
+def _mapped_by_this_release(
+    _obj: object, name: str | None, kind: str, _reflected: bool, _compare_to: object
+) -> bool:
+    return not (kind == "column" and name in _OLD_SANDBOX_COLUMNS)
 
 
 @pytest.mark.fresh_schema
@@ -108,10 +109,16 @@ async def test_opt_ins_and_history_move_to_the_routine_tier_and_back(
                 ("system", "on", None),
                 ("cli", None, "3"),
             ], "the history moves with its surfaces and pins"
-            columns = {c["name"] for c in inspect(sync).get_columns("routines")}
-            assert not {c for c in columns if c.startswith("sandbox_")}, "the columns go"
-            assert _rows(sync, _HISTORY_TABLE) == [(0,)], "the history goes"
-            differences = compare_metadata(MigrationContext.configure(sync), Base.metadata)
+            assert _rows(
+                sync, "SELECT sandbox_tools_set_by FROM routines ORDER BY trigger_message"
+            ) == [("erased",), (None,)], "the columns stay for the older release, setters erased"
+            assert _rows(sync, "SELECT DISTINCT set_by FROM routine_sandbox_history") == [
+                ("erased",)
+            ], "and so does the history"
+            context = MigrationContext.configure(
+                sync, opts={"include_object": _mapped_by_this_release}
+            )
+            differences = compare_metadata(context, Base.metadata)
             assert not [d for d in differences if any(t in str(d) for t in _TABLES)], differences
 
             sync.execute(text(
@@ -273,6 +280,113 @@ async def test_the_downgrade_drops_what_has_no_older_form(db_session: AsyncSessi
             assert _rows(
                 sync, "SELECT id::text FROM routines WHERE sandbox_tools_enabled"
             ) == [(str(routine.id),)], "only the routine's pinned On comes back"  # fmt: skip
+            module.upgrade()
+
+    await connection.run_sync(cycle)
+
+
+# What a release before 0206 maps and writes, still running for minutes after a deploy
+# migrates: `Routine` with these columns, `RoutineSandboxHistoryRecord`, and the upsert
+# `set_feature_value` names its index with.
+_OLD_SANDBOX_COLUMNS = (
+    "sandbox_tools_enabled",
+    "sandbox_tools_set_by",
+    "sandbox_tools_set_at",
+    "sandbox_agent_id",
+    "sandbox_agent_version",
+    "sandbox_environment_id",
+    "sandbox_environment_updated_at",
+)
+_OLD_HISTORY_COLUMNS = (
+    "id, tenant_id, routine_id, before_enabled, after_enabled, set_by, set_at, via, agent_id,"
+    " agent_version, environment_id, environment_updated_at"
+)
+_OLD_OPT_OUT = (
+    "UPDATE routines SET sandbox_tools_enabled = false, sandbox_tools_set_by = 'b',"
+    " sandbox_tools_set_at = now(), sandbox_agent_id = NULL, sandbox_agent_version = NULL,"
+    " sandbox_environment_id = NULL, sandbox_environment_updated_at = NULL WHERE id = :id",
+    "INSERT INTO routine_sandbox_history (tenant_id, routine_id, before_enabled, after_enabled,"
+    " set_by, set_at, via) VALUES (:t, :id, true, false, 'b', now(), 'mcp')",
+)
+_OLD_UPSERT = (
+    "INSERT INTO feature_values (tenant_id, tier, agent_id, channel_id, thread_key, key, value,"
+    " locked, set_by, surface, set_at) VALUES (:t, :tier, :agent, :channel, '', 'web_search',"
+    " :value, false, NULL, 'web', now())"
+    " ON CONFLICT (tenant_id, tier, agent_id, channel_id, key) WHERE tier <> 'thread'"
+    " DO UPDATE SET value = excluded.value, locked = excluded.locked, set_by = excluded.set_by,"
+    " surface = excluded.surface, set_at = now(), revision = feature_values.revision + 1"
+    " RETURNING revision"
+)
+
+
+@pytest.mark.fresh_schema
+async def test_a_release_before_the_migration_still_reads_and_writes_the_migrated_schema(
+    db_session: AsyncSession,
+) -> None:
+    """The previous release's routine select, sandbox opt-out and feature upsert all run on
+    the migrated schema, next to two routines' routine-tier rows."""
+    tenant = await make_tenant(db_session)
+    routines = [
+        await create_routine(
+            db_session,
+            tenant_id=tenant.id,
+            created_by_user_id="owner-1",
+            agent_id="agent_a",
+            agent_name="daimon",
+            cron_expr="0 9 * * *",
+            timezone_="UTC",
+            trigger_message=name,
+        )  # fmt: skip
+        for name in ("first", "second")
+    ]
+    old_routine = ", ".join([*(c.name for c in Routine.__table__.columns), *_OLD_SANDBOX_COLUMNS])
+    connection = await db_session.connection()
+    module = migration()
+
+    def cycle(sync: Connection) -> None:
+        with Operations.context(MigrationContext.configure(sync)):
+            module.downgrade()
+            for row in routines:
+                sync.execute(text(_OPTED_IN), {"id": str(row.id)})
+            sync.execute(text(
+                "INSERT INTO routine_sandbox_history (tenant_id, routine_id, before_enabled,"
+                " after_enabled, set_by, set_at, via) VALUES (:t, :r, false, true, 'a', now(), 'cli')"
+            ), {"t": tenant.id, "r": routines[0].id})  # fmt: skip
+            module.upgrade()
+            assert _rows(sync, "SELECT count(*) FROM feature_values WHERE tier = 'routine'") == [
+                (2,)
+            ], "both routines' opt-ins move"
+            selected = _rows(
+                sync, f"SELECT sandbox_tools_enabled, sandbox_tools_set_by FROM"
+                f" (SELECT {old_routine} FROM routines) old",
+            )  # fmt: skip
+            assert selected == [(True, "erased")] * 2, "the old select reads the kept opt-ins"
+            for statement in _OLD_OPT_OUT:
+                sync.execute(text(statement), {"t": tenant.id, "id": routines[0].id})
+            history = _rows(
+                sync, f"SELECT {_OLD_HISTORY_COLUMNS} FROM routine_sandbox_history ORDER BY id"
+            )
+            assert [row[5] for row in history] == ["erased", "b"], (
+                "the old history reads and writes"
+            )
+            for tier, agent, channel in (
+                ("workspace", "", ""), ("agent", "agent_a", ""), ("channel", "", "C1"),
+            ):  # fmt: skip
+                revisions = [
+                    sync.execute(
+                        text(_OLD_UPSERT),
+                        {
+                            "t": tenant.id,
+                            "tier": tier,
+                            "agent": agent,
+                            "channel": channel,
+                            "value": value,
+                        },
+                    ).scalar_one()  # fmt: skip
+                    for value in ("on", "off")
+                ]
+                assert revisions == [1, 2], f"the old upsert still finds its {tier} index"
+            module.downgrade()
             module.upgrade()
 
     await connection.run_sync(cycle)

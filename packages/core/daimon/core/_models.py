@@ -544,6 +544,8 @@ class Routine(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # 0206 leaves the old `sandbox_*` columns and `routine_sandbox_history` unmapped for the
+    # release still running during a deploy; a later release drops them.
 
 
 class ThreadSession(Base):
