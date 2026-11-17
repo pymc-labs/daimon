@@ -20,8 +20,10 @@ import structlog
 from daimon.adapters.slack.click_replies import (
     CLICK_REPLY_ERRORS,
     error_name,
+    notice_modal,
     open_modal,
     post_ephemeral,
+    update_modal,
 )
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.adapters.slack.interactions import resolve_web_client
@@ -109,7 +111,19 @@ async def _settles_here(
     return own is not None and own.platform == "slack" and own.slack_team_id == team_id
 
 
-async def _notice(client: AsyncWebClient, post: _Post, text: str, *, error: bool) -> None:
+async def _notice(
+    client: AsyncWebClient,
+    post: _Post,
+    text: str,
+    *,
+    error: bool,
+    view_id: str | None = None,
+) -> None:
+    """Say `text` in the modal a Set charge click opened, else as an ephemeral."""
+    if view_id is not None and await update_modal(
+        client, view_id=view_id, view=notice_modal(title=SET_CHARGE, text=text)
+    ):
+        return
     await post_ephemeral(
         client,
         channel_id=post.channel_id,
@@ -170,20 +184,21 @@ async def _finish(
     before: SupportEscalationRow,
     outcome: SettleOutcome,
     message: dict[str, Any] | None = None,
+    view_id: str | None = None,
 ) -> None:
     after = outcome.row
     if after is None:
-        await _notice(client, post, REQUEST_GONE, error=True)
+        await _notice(client, post, REQUEST_GONE, error=True, view_id=view_id)
         return
     if outcome.status == "limit_gone":
-        await _notice(client, post, LIMIT_GONE, error=True)
+        await _notice(client, post, LIMIT_GONE, error=True, view_id=view_id)
         return
     if outcome.status == "not_here":
-        await _notice(client, post, SETTLE_ELSEWHERE, error=True)
+        await _notice(client, post, SETTLE_ELSEWHERE, error=True, view_id=view_id)
         return
     if outcome.status in ("invalid", "over_balance"):
         text = settle_range_text(after.bounds, counted=after.counted, available=outcome.available)
-        await _notice(client, post, text, error=True)
+        await _notice(client, post, text, error=True, view_id=view_id)
         return
     if after.status != "pending":
         await _close_post(client, post, before=before, after=after, message=message)
@@ -194,7 +209,7 @@ async def _finish(
     else:
         by = _settler(after.settled_by)
         text = already_settled_text(status=after.status, charge=after.charge, by=by)
-    await _notice(client, post, text, error=False)
+    await _notice(client, post, text, error=False, view_id=view_id)
 
 
 async def _settle(
@@ -294,6 +309,16 @@ async def handle_settle_click(runtime: SlackRuntime, payload: dict[str, Any]) ->
     client = await resolve_web_client(runtime, team_id=post.team_id)
     if client is None:
         return
+    # Set charge opens its form, and the checks below (a request read and a team
+    # lookup) could outlive the click's 3-second trigger_id, so a loading modal
+    # opens first and is updated, as on the escalate click.
+    view_id = None
+    if action.get("action_id") != SETTLE_DECLINE_ACTION_ID:
+        view_id = await open_modal(
+            client,
+            trigger_id=trigger_id,
+            view=notice_modal(title=SET_CHARGE, text="Checking\N{HORIZONTAL ELLIPSIS}"),
+        )
     try:
         escalation_id = _escalation_id(action.get("value"))
         row = None
@@ -301,24 +326,26 @@ async def handle_settle_click(runtime: SlackRuntime, payload: dict[str, Any]) ->
             async with runtime.sessionmaker() as session:
                 row = await get_request(session, escalation_id=escalation_id)
         if row is None:
-            await _notice(client, post, REQUEST_GONE, error=True)
+            await _notice(client, post, REQUEST_GONE, error=True, view_id=view_id)
         elif not await _settles_here(
             runtime, team_id=post.team_id, channel_id=post.channel_id, row=row
         ):
-            await _notice(client, post, SETTLE_ELSEWHERE, error=True)
+            await _notice(client, post, SETTLE_ELSEWHERE, error=True, view_id=view_id)
         elif row.status != "pending":
             outcome = SettleOutcome(status="already_settled", row=row)
-            await _finish(client, post, before=row, outcome=outcome, message=message)
+            await _finish(
+                client, post, before=row, outcome=outcome, message=message, view_id=view_id
+            )
         elif action.get("action_id") == SETTLE_DECLINE_ACTION_ID:
             await _settle(runtime, client, post, row=row, charge=None, message=message)
         else:
             view = settle_modal(row, channel_id=post.channel_id, message_ts=post.ts)
-            if await open_modal(client, trigger_id=trigger_id, view=view) is None:
+            if view_id is None or not await update_modal(client, view_id=view_id, view=view):
                 await _notice(client, post, _FAILED, error=True)
     except (SQLAlchemyError, OSError, *CLICK_REPLY_ERRORS) as err:
         # OSError: asyncpg raises a refused connection raw, outside SQLAlchemy's.
         log.warning("support.settle_failed", error=error_name(err))
-        await _notice(client, post, _FAILED, error=True)
+        await _notice(client, post, _FAILED, error=True, view_id=view_id)
 
 
 @dataclasses.dataclass(frozen=True)

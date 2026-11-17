@@ -131,8 +131,9 @@ async def _seed(
     *,
     menu: bool = True,
     per_person: Decimal = _ALLOWANCE,
+    limit: bool = True,
 ) -> str:
-    """A Slack tenant with a workspace limit, on MENU unless `menu` is False; its fernet key."""
+    """A Slack tenant with a workspace limit (unless `limit` is False), on MENU unless `menu` is; its key."""
     fernet_key = Fernet.generate_key().decode()
     fernet = build_multifernet((fernet_key,))
     async with factory() as session, session.begin():
@@ -152,19 +153,20 @@ async def _seed(
                 menu_id=row.id,
                 set_by_account_id=None,
             )
-        await store.set_limit(
-            session,
-            tenant_id=tenant.id,
-            scope="workspace",
-            scope_id="",
-            platform_user_id=None,
-            shared=None,
-            each_person=per_person,
-            window="total",
-            starts_at=None,
-            ends_at=None,
-            set_by_account_id=None,
-        )
+        if limit:
+            await store.set_limit(
+                session,
+                tenant_id=tenant.id,
+                scope="workspace",
+                scope_id="",
+                platform_user_id=None,
+                shared=None,
+                each_person=per_person,
+                window="total",
+                starts_at=None,
+                ends_at=None,
+                set_by_account_id=None,
+            )
     return fernet_key
 
 
@@ -193,8 +195,13 @@ def _shown(fake: Any) -> list[dict[str, Any]]:
 
 
 def _opened(fake: Any) -> dict[str, Any]:
-    """The last view opened: the Set charge form."""
+    """The last view opened: the loading modal a settle click shows first."""
     return _sent(fake, _VIEWS_OPEN)[-1]["view"]
+
+
+def _form(fake: Any) -> dict[str, Any]:
+    """The last view updated in place: the Set charge form."""
+    return _sent(fake, _VIEWS_UPDATE)[-1]["view"]
 
 
 def _said(fake: Any) -> str:
@@ -441,6 +448,20 @@ async def test_send_when_option_has_no_fields_then_posts_pending_with_settle_but
     assert (status, hold, post_id) == ("pending", D(1), _POST_TS), "holds its minimum; post id"
 
 
+async def test_send_when_charged_to_the_default_then_post_shows_facts_and_settle_buttons(
+    db_session_factory: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    """A range option with no limit: facts and settle controls, and no balance."""
+    key = await _seed(db_session_factory, limit=False)
+    escalation_id, post = await _pending(_runtime(key, db_session_factory), fake)
+    assert "Review: 1-3 credits\nPending: 1-3 credits" in post["text"], "option and pending price"
+    assert "credits left" not in post["text"], "no limit, so no balance"
+    assert NOT_NOTIFIED_LINE in post["text"], "the settler is told the client is not notified"
+    buttons = post["blocks"][-1]["elements"]
+    assert [b["action_id"] for b in buttons] == [SETTLE_SET_ACTION_ID, SETTLE_DECLINE_ACTION_ID]
+    assert {b["value"] for b in buttons} == {escalation_id}, "both act on the request"
+
+
 async def test_decline_when_no_escalation_workspace_is_named_then_the_requests_own_workspace_settles(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
@@ -542,7 +563,8 @@ async def test_set_charge_when_in_range_then_charges_and_closes_the_post(
     await handle_settle_click(
         runtime, _settle_click(SETTLE_SET_ACTION_ID, escalation_id, message=post)
     )
-    form = _opened(fake)
+    assert "Checking" in json.dumps(_opened(fake)), "a loading modal opens before the slow work"
+    form = _form(fake)
     assert form["callback_id"] == SETTLE_CALLBACK_ID
     assert form["blocks"][-1]["element"]["initial_value"] == "1", "prefilled with the hold"
     assert CLIENT_NOT_NOTIFIED in json.dumps(form)
@@ -569,7 +591,7 @@ async def test_set_charge_when_out_of_range_then_names_the_range(
     await handle_settle_click(
         runtime, _settle_click(SETTLE_SET_ACTION_ID, escalation_id, message=post)
     )
-    await run_settle_submission(runtime, evaluate_settle_submission(_charge(_opened(fake), "5")))
+    await run_settle_submission(runtime, evaluate_settle_submission(_charge(_form(fake), "5")))
     assert _said(fake) == "Enter an amount from 1 to 2.", "capped by the balance"
     assert _sent(fake, _UPDATE) == [], "the post stays pending"
     ((_id, status, *_rest),) = await _rows(db_session_factory)
@@ -601,6 +623,18 @@ async def test_decline_when_pending_then_releases_the_hold(
     assert "Declined by <@U0STAFF>" in _sent(fake, _UPDATE)[-1]["text"]
     ((_id, status, _hold, charge, _post, _answers, by),) = await _rows(db_session_factory)
     assert (status, charge, by) == ("declined", D(0), _STAFF)
+
+
+async def test_set_charge_click_when_outside_the_support_channel_then_the_modal_says_so(
+    db_session_factory: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    key = await _seed(db_session_factory)
+    runtime = _runtime(key, db_session_factory)
+    escalation_id, post = await _pending(runtime, fake)
+    click = _settle_click(SETTLE_SET_ACTION_ID, escalation_id, message=post, channel="C_OTHER")
+    await handle_settle_click(runtime, click)
+    assert "Checking" in json.dumps(_opened(fake)), "the loading modal opened first"
+    assert SETTLE_ELSEWHERE in json.dumps(_form(fake)), "the refusal replaces it in the modal"
 
 
 async def test_settle_click_when_outside_the_support_channel_then_refuses(

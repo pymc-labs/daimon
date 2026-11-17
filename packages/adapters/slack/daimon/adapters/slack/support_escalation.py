@@ -886,7 +886,9 @@ async def _post_to_escalation_channel(
     # The default form's note as typed, as before; a menu's answers as recorded.
     note = s.note if s.choice is None else row.note
     facts: str | None = None
-    if row.charged_to != "default":
+    # A plain default request posts as before; a default-charged pick on a menu, or
+    # one still to be priced, names its option and status like a limit's.
+    if row.charged_to != "default" or view.menu is not None or row.status == "pending":
         balance = balance_text(view.balance, view.period) if row.charged_to == "limit" else None
         facts = request_facts(row, menu=view.menu is not None, balance=balance)
     blocks: Callable[[str | None], list[dict[str, Any]]] | None = None
