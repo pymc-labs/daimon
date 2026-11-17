@@ -15,6 +15,7 @@ import structlog
 from daimon.core.config import Settings, SupportSettings
 from daimon.core.features.deployment import deployment_value
 from daimon.core.features.registry import FEATURES
+from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.native_admins import GroupMembers, ServerAdminIds
 from daimon.core.stores.support import get_support_channel
 from daimon.core.stores.support_rows import SupportEscalationRow
@@ -65,9 +66,7 @@ def deployment_channel(support: SupportSettings, platform: str) -> str | None:
 
 def own_channel_allowed(settings: Settings | None) -> bool:
     """The `support_own_channel` feature: may a workspace pick its own request channel."""
-    spec = FEATURES.get("support_own_channel")
-    if spec is None:
-        return False  # until the feature is registered, the deployment keeps the channel
+    spec = FEATURES["support_own_channel"]
     value = deployment_value(settings, spec)
     return (spec.default if value is None else value.value) == "on"
 
@@ -92,6 +91,18 @@ async def support_destination(
         return None
     team = settings.support.slack_escalation_team_id if platform == "slack" else None
     return SupportDestination(platform=platform, channel_id=channel, own=False, slack_team_id=team)
+
+
+async def feedback_destination(
+    session: AsyncSession, settings: Settings, place: FeaturePlace
+) -> SupportDestination | None:
+    """Where a submitted thumbs-down form also goes: the request channel, while
+    `support_feedback` is on at `place`; None keeps it in the database only."""
+    if not (await feature_in(session, settings, place, "support_feedback")).on:
+        return None
+    return await support_destination(
+        session, tenant_id=place.tenant_id, platform=place.platform, settings=settings
+    )
 
 
 def in_channel(*, configured: str | None, channel_id: str, parent_id: str | None) -> bool:
@@ -140,6 +151,7 @@ __all__ = [
     "MAX_RECIPIENTS",
     "SupportDestination",
     "deployment_channel",
+    "feedback_destination",
     "in_channel",
     "log_undelivered",
     "own_channel_allowed",

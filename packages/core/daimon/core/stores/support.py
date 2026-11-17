@@ -26,6 +26,7 @@ from daimon.core.stores.support_rows import (
     SupportLimitRow,
     SupportMenuPlaceRow,
     SupportMenuRow,
+    SupportSetup,
 )
 from daimon.core.support import (
     SUPPORT_SCOPES,
@@ -35,7 +36,16 @@ from daimon.core.support import (
     SupportWindow,
     place_scope_id,
 )
-from sqlalchemy import ColumnElement, CursorResult, delete, func, select, tuple_, update
+from sqlalchemy import (
+    ColumnElement,
+    CursorResult,
+    delete,
+    exists,
+    func,
+    select,
+    tuple_,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -391,6 +401,16 @@ async def get_support_channel(
     return None if orm is None else SupportChannelRow.model_validate(orm)
 
 
+async def get_support_setup(session: AsyncSession, *, tenant_id: uuid.UUID) -> SupportSetup:
+    """The workspace's own channel platform and whether a place has a limit, in one read."""
+    own = select(SupportChannel.platform).where(SupportChannel.tenant_id == tenant_id)
+    limits = exists().where(
+        SupportLimit.tenant_id == tenant_id, SupportLimit.platform_user_id.is_(None)
+    )
+    row = (await session.execute(select(own.scalar_subquery(), limits))).one()
+    return SupportSetup(own_platform=row[0], place_limits=bool(row[1]))
+
+
 async def set_support_channel(
     session: AsyncSession,
     *,
@@ -452,6 +472,7 @@ __all__ = [
     "get_menu_by_id",
     "get_menu_use",
     "get_support_channel",
+    "get_support_setup",
     "limits_for_place",
     "list_limits",
     "list_menu_uses",

@@ -34,6 +34,8 @@ from daimon.core.features.resolver import (
 )
 from daimon.core.stores.domain import FeatureValueRow
 from daimon.core.stores.feature_values import feature_revision, place_values
+from daimon.core.stores.support import get_support_setup
+from daimon.core.stores.support_rows import SupportSetup
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 Sessions = async_sessionmaker[AsyncSession]
@@ -107,32 +109,50 @@ offered them, so a check here must never be stricter than the tools. Watches and
 their tools work (and list or remove what exists) without the operator gate or the App."""
 
 
-def support_channel_set(settings: Settings, platform: str) -> bool:
-    """Whether `platform` has an escalation channel it can post in and credits to spend."""
+_SUPPORT: Final = frozenset({"support_channel", "support_credits"})
+
+
+def _deployment_channel_set(settings: Settings, platform: str) -> bool:
     support = settings.support
     channel = {
         "discord": support.escalation_channel_id,
         "slack": support.slack_escalation_channel_id,
         "teams": support.teams_escalation_channel_id,
     }.get(platform)
-    return (
-        bool(channel)
-        and not (platform == "discord" and (channel or "").startswith("19:"))
-        and (support.credits_per_user > 0)
-    )
+    return bool(channel) and not (platform == "discord" and (channel or "").startswith("19:"))
+
+
+def support_met(
+    need: Requirement, settings: Settings, platform: str, setup: SupportSetup | None
+) -> bool:
+    """Whether a support requirement holds on `platform`. `setup` is the workspace's own;
+    None checks the deployment alone."""
+    if need == "support_channel":
+        return _deployment_channel_set(settings, platform) or (
+            setup is not None
+            and setup.own_platform == platform
+            and deployment_on(settings, "support_own_channel", platform)
+        )
+    return settings.support.credits_per_user > 0 or (setup is not None and setup.place_limits)
 
 
 def unavailable_reason(
-    spec: FeatureSpec, settings: Settings | None, place: FeaturePlace
+    spec: FeatureSpec,
+    settings: Settings | None,
+    place: FeaturePlace,
+    support: SupportSetup | None = None,
 ) -> Unavailable | None:
     """Why `spec` cannot apply at `place`, or None. `depends_on` is checked by the caller;
-    without `settings` (a reader of a feature with no deployment tier) `requires` is too."""
+    without `settings` (a reader of a feature with no deployment tier) `requires` is too.
+    `support` is the workspace's own setup (`support_setup`), for the support requirements."""
     if not spec.on_platform(place.platform):
         return "platform"
     if settings is not None and (
         ("platform_adapter" in spec.requires and not _adapter_set_up(settings, place.platform))
-        or (
-            "support_channel" in spec.requires and not support_channel_set(settings, place.platform)
+        or not all(
+            support_met(need, settings, place.platform, support)
+            for need in spec.requires
+            if need in _SUPPORT
         )
         or not all(_SETUP[need](settings) for need in spec.requires if need in _SETUP)
     ):
@@ -142,9 +162,37 @@ def unavailable_reason(
     return None
 
 
+async def support_setup(
+    session: AsyncSession,
+    settings: Settings | None,
+    place: FeaturePlace,
+    specs: Iterable[FeatureSpec],
+) -> SupportSetup | None:
+    """The workspace's own support setup, read only when the deployment alone leaves a
+    support requirement of `specs` unmet at `place`. Not cached: a change elsewhere shows
+    on the next read."""
+    if settings is None or not place.platform:
+        return None
+    short = any(
+        not support_met(need, settings, place.platform, None)
+        for spec in specs
+        for need in spec.requires
+        if need in _SUPPORT
+    )
+    return await get_support_setup(session, tenant_id=place.tenant_id) if short else None
+
+
 @cache
 def _warn_deprecated(env: str, key: str) -> None:
     log.warning("features.legacy_env_deprecated", env=env, feature=key)
+
+
+def env_map_values(settings: Settings, path: str) -> Mapping[uuid.UUID, bool]:
+    """A deprecated env map by its `FeatureSpec.env_map` path (dotted for a nested block)."""
+    found: object = settings
+    for name in path.split("."):
+        found = getattr(found, name)
+    return cast(Mapping[uuid.UUID, bool], found)
 
 
 def _env_map_value(
@@ -156,7 +204,7 @@ def _env_map_value(
     """A deprecated per-workspace env map as the workspace tier; a stored row beats it."""
     if spec.env_map is None or settings is None:
         return None
-    raw = cast(Mapping[uuid.UUID, bool], getattr(settings, spec.env_map)).get(place.tenant_id)
+    raw = env_map_values(settings, spec.env_map).get(place.tenant_id)
     if raw is None:
         return None
     _warn_deprecated(spec.legacy_env[0], spec.key)
@@ -200,9 +248,11 @@ def resolve_one(
     rows: Iterable[FeatureValueRow],
     resolved: Mapping[str, ResolvedFeature] | None = None,
     agent_builtins: Mapping[str, bool | None] | None = None,
+    support: SupportSetup | None = None,
 ) -> ResolvedFeature:
-    """Pure: one feature at one place from its rows; `resolved` answers `depends_on`."""
-    reason = unavailable_reason(spec, settings, place)
+    """Pure: one feature at one place from its rows; `resolved` answers `depends_on`,
+    `support` the workspace's own support setup."""
+    reason = unavailable_reason(spec, settings, place, support)
     if reason is None and any(
         resolved is not None and dep in resolved and not resolved[dep].on for dep in spec.depends_on
     ):
@@ -333,8 +383,10 @@ async def resolve_features(
 
     wanted = [key for key in FEATURES if keys is None or key in keys]
     resolved: dict[str, ResolvedFeature] = {}
+    order = resolution_order(wanted)
     async with sessions() as session:
         revision, rows = await _place_rows(session, place, cache)
+        support = await support_setup(session, settings, place, order)
         if "approvals" in wanted:
             policy = await load_access_policy(session, tenant_id=place.tenant_id)
             gate = resolve_approval_gate(
@@ -345,9 +397,11 @@ async def resolve_features(
             )
             resolved["approvals"] = approvals_from_gate(gate.value, gate.scope)
     # A feature's dependencies resolve first, even ones the caller did not ask for.
-    for spec in resolution_order(wanted):
+    for spec in order:
         if spec.key != "approvals":
-            resolved[spec.key] = resolve_one(spec, settings, place, rows, resolved, agent_builtins)
+            resolved[spec.key] = resolve_one(
+                spec, settings, place, rows, resolved, agent_builtins, support
+            )
     return FeatureSnapshot(place, revision, {key: resolved[key] for key in wanted})
 
 
@@ -456,7 +510,9 @@ async def feature_in(
         thread_key=place.thread_key,
         keys=(key,),
     )
-    return resolve_one(FEATURES[key], settings, place, rows)
+    spec = FEATURES[key]
+    support = await support_setup(session, settings, place, (spec,))
+    return resolve_one(spec, settings, place, rows, support=support)
 
 
 async def feature_in_or_none(

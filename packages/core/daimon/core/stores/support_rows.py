@@ -134,6 +134,15 @@ class SupportEscalationRow(_Row):
 
 
 @dataclass(frozen=True)
+class SupportSetup:
+    """What a workspace set up for Ask a person, as the support requirements read it:
+    the platform of its own channel, and whether any place has a limit."""
+
+    own_platform: str | None = None
+    place_limits: bool = False
+
+
+@dataclass(frozen=True)
 class LimitView:
     """The ledger, menu and balance one person asks under in one place (never cached).
 
@@ -187,4 +196,5 @@ __all__ = [
     "SupportLimitRow",
     "SupportMenuPlaceRow",
     "SupportMenuRow",
+    "SupportSetup",
 ]

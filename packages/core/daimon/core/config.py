@@ -1946,21 +1946,14 @@ class SupportSettings(BaseModel):
     feedback_to_support: dict[uuid.UUID, bool] = Field(
         default_factory=dict[uuid.UUID, bool],
         description=(
-            "Per-tenant switch, keyed by tenant UUID: true also posts every submitted "
-            '\N{THUMBS DOWN SIGN} "What went wrong?" form (the reasons, the text, the '
-            "person, the agent and a link to the answer) to the channel Ask a human "
-            "posts to: DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID for Slack, "
-            "DAIMON_SUPPORT__ESCALATION_CHANNEL_ID for Discord and "
-            "DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID for Teams. "
-            "Missing/false (the default) keeps the form in the database only. The form "
-            "tells the person their answers are shared when it is on. Spends no "
-            "support credit. Configure DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT as a JSON object."
+            "Deprecated: the support_feedback feature replaces it, and "
+            "`daimon features import-env` stores this map as workspace settings. Per-tenant "
+            "switch, keyed by tenant UUID: true also posts every submitted "
+            '\N{THUMBS DOWN SIGN} "What went wrong?" form to where Ask a person requests go. '
+            "A workspace setting beats it. "
+            "Configure DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT as a JSON object."
         ),
     )
-
-    def routes_feedback(self, tenant_id: uuid.UUID) -> bool:
-        """Whether this tenant's submitted 👎 forms also go to the support channel."""
-        return self.feedback_to_support.get(tenant_id) is True
 
 
 class TurnSettings(BaseModel):
