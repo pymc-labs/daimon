@@ -112,9 +112,16 @@ async def _delivered(service: TeamsHttpService) -> None:
 
 
 async def _send(
-    service: TeamsHttpService, token: str, note: str, *, user: str = AAD_OBJECT_ID
+    service: TeamsHttpService,
+    token: str,
+    note: str,
+    *,
+    user: str = AAD_OBJECT_ID,
+    card: str | None = None,
 ) -> str:
     click = make_card_action("support", "send", user=user, ask=token, note=note)
+    if card is not None:
+        click["replyToId"] = card
     reply = json.dumps(await post_activity(service, click), ensure_ascii=False)
     await _delivered(service)
     return reply
@@ -196,7 +203,7 @@ async def test_requests_stop_when_the_credits_run_out(
     async with _running(db_session_factory, teams_api_fake, credits=1) as service:
         card = await _form(service, teams_api_fake, make_message_activity(text="support"))
         await _send(service, _token(card), "one")
-        stale = await _send(service, _token(card), "two")
+        stale = await _send(service, _token(card), "two", card="m-8")
         again = await _form(
             service, teams_api_fake, make_message_activity(text="support", activity_id="a-2")
         )

@@ -481,6 +481,23 @@ async def test_send_after_a_restart_when_sent_twice_from_one_card_then_it_record
     assert len(_posts(teams_api_fake)) == 1, "the support team hears it once"
 
 
+async def test_send_when_straddling_a_restart_then_one_request_for_the_card(
+    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+) -> None:
+    """A Send from the live form and a Send from the same card after a restart agree."""
+    await _seed(db_session_factory, menu=False)
+    async with _running(db_session_factory, teams_api_fake) as service:
+        data = _button(await _typed(service, teams_api_fake))
+        await _click(service, data, **{NOTE_INPUT: "help"})
+    async with _running(db_session_factory, teams_api_fake) as restarted:
+        await _click(restarted, data, **{NOTE_INPUT: "help"})
+
+    async with db_session_factory() as session:
+        count = await session.scalar(text("SELECT count(*) FROM support_escalations"))
+    assert count == 1, "one request, one hold"
+    assert len(_posts(teams_api_fake)) == 1, "the support team hears it once"
+
+
 async def _known(factory: async_sessionmaker[AsyncSession]) -> bool:
     """Whether the settler's name is stored, as every click stores it."""
     async with factory() as session:

@@ -614,12 +614,14 @@ class SupportCommand:
         data = submitted_fields(activity.value.action.data)
         op, token = str(data.get("op") or ""), str(data.get("ask") or "")
         asked = self._asked.get(token)
+        # The card the click came from names the request, so a second Send on it
+        # finds the first one, before or after a restart.
+        card_id = activity.reply_to_id or activity.id
         if asked is None or asked.user_id != actor.user_id:
             chat = actor.conversation_id
-            # After a restart the form's token is gone. The card the click came from
-            # names the request: a second Send on it must find the first one.
-            card_id = activity.reply_to_id or activity.id
             asked = _Asked(actor.user_id, activity.from_.name, chat, chat, card_id, _DM_LINK)
+        else:
+            asked = replace(asked, message_id=card_id)
         if op == "pick" or (op == "send" and data.get(OPTION_INPUT)):
             return await self._act_plan(actor, token, asked, data, send=op == "send")
         note = str(data.get(NOTE_INPUT) or "").strip()[:MAX_NOTE_CHARS]
@@ -660,7 +662,7 @@ class SupportCommand:
     async def _send(
         self, actor: Actor, token: str, asked: _Asked, choice: RequestChoice
     ) -> AdaptiveCardInvokeResponse:
-        if asked is self._asked.get(token):
+        if (kept := self._asked.get(token)) is not None and kept.user_id == asked.user_id:
             del self._asked[token]
         # Access is decided again in `_escalate`: the policy may have changed while
         # the form sat in the chat.
