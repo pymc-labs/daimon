@@ -18,13 +18,14 @@ from daimon.adapters.mcp.middleware.mcp_identity import (
 from daimon.adapters.mcp.tools import agent_chat
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.monitoring import MCP_NOTICE, KeptQuestion
+from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores import monitoring as store
 from daimon.core.stores.domain import FeatureTarget, MonitoredEventRow
 from daimon.core.stores.feature_values import set_feature_value
 from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp import FastMCP
-from fastmcp.exceptions import ToolError
+from fastmcp.exceptions import AuthorizationError, ToolError
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -88,6 +89,15 @@ def _server(
         raise ToolError(f"failed {secret}")
 
     @mcp.tool(tags={"agent-chat"})
+    async def refused_by_policy(secret: str) -> str:  # pyright: ignore[reportUnusedFunction]
+        record_authz_denial("post", "own_agents_only")
+        raise ToolError(f"not yours {secret}")
+
+    @mcp.tool(tags={"agent-chat"})
+    async def refused_by_authorization(secret: str) -> str:  # pyright: ignore[reportUnusedFunction]
+        raise AuthorizationError(f"not allowed {secret}")
+
+    @mcp.tool(tags={"agent-chat"})
     async def start_turn(message: str) -> str:  # pyright: ignore[reportUnusedFunction]
         return message
 
@@ -125,6 +135,33 @@ async def test_a_monitored_agents_tool_calls_keep_name_and_outcome_only(
     ], rows
     assert all(row.kind == "tool" and row.account_id == account for row in rows), rows
     assert "ARG_SECRET" not in repr(rows) and "result" not in repr(rows), rows
+
+
+async def test_refused_calls_are_kept_as_denied_not_completed(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A call the tool refused (a policy denial, an authorization error) or that names a
+    tool the key cannot see is kept as denied; only a call that ran reads completed."""
+    sm = committing_sessionmaker
+    tenant, account, agent = await _seed(sm, monitored=True)
+    mcp = _server(sm, tenant, account, agent_id=str(agent))
+    app = mcp.http_app()
+
+    for name in ("refused_by_policy", "refused_by_authorization", "no_such_tool", "lookup"):
+        await call_mcp_tool(app, token=TOKEN, name=name, arguments={"secret": "ARG_SECRET"})
+    for middleware in mcp.middleware:
+        if isinstance(middleware, IdentityMiddleware):
+            await middleware.drain_audit()
+    async with sm() as session:
+        rows = await store.list_events(session, tenant_id=tenant, agent_id=agent)
+
+    assert sorted((row.tool_name, row.outcome) for row in rows) == [
+        ("lookup", "completed"),
+        ("no_such_tool", "denied"),
+        ("refused_by_authorization", "denied"),
+        ("refused_by_policy", "denied"),
+    ], rows
+    assert "ARG_SECRET" not in repr(rows), "a refused call kept its arguments"
 
 
 @pytest.mark.parametrize(
