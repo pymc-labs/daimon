@@ -61,6 +61,7 @@ from daimon.core.direct_messages import (
 from daimon.core.dm_access import decide_dm, list_dm_agents
 from daimon.core.dm_debounce import DmBursts, debounce_seconds
 from daimon.core.dm_routing import DmChoose, DmRefused, DmStart, DmUnchecked
+from daimon.core.dm_settings import DmActor, set_default
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -74,10 +75,9 @@ from daimon.core.stores.direct_messages import (
     dm_enabled,
     get_conversation,
     get_dm_agent_name,
-    set_dm_agent_name,
 )
 from daimon.core.stores.domain import Role, TenantRow
-from daimon.core.stores.identity import find_platform_principal
+from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from daimon.core.stores.tenants import get_tenant, list_tenants_by_platform
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
@@ -800,25 +800,42 @@ class DirectMessageCog(commands.Cog):
                         ephemeral=True,
                     )
                     return
-                if action in {"agent", "clear-agent"}:
-                    if action == "agent" and not agent_name:
-                        raise DaimonError("Choose a tenant-owned agent name.")
-                    async with runtime.sessionmaker.begin() as session:
-                        await set_dm_agent_name(
-                            session,
-                            tenant_id=tenant_id,
-                            agent_name=agent_name if action == "agent" else None,
-                        )
-                    await interaction.followup.send("Cold DM agent updated.", ephemeral=True)
-                    return
+                if action == "agent" and not agent_name:
+                    raise DaimonError("Choose a tenant-owned agent name.")
                 async with runtime.sessionmaker.begin() as session:
-                    await set_dms(
+                    principal = await get_or_create_platform_principal(
                         session,
                         tenant_id=tenant_id,
-                        subject=Subject(is_admin=True, platform_user_id=str(member.id)),
                         platform="discord",
-                        enabled=action == "enable",
+                        external_id=str(member.id),
                     )
+                    if action in {"agent", "clear-agent"}:
+                        agents = await list_dm_agents(
+                            session,
+                            tenant_id=tenant_id,
+                            anthropic=runtime.turn_deps.anthropic,
+                            records=runtime.turn_deps.sessionmaker,
+                        )
+                        # The one writer `daimon dm default` and the web app use: the
+                        # name is checked against the server's agents and audited.
+                        await set_default(
+                            session,
+                            DmActor(tenant_id, principal.account_id, datetime.now(UTC)),
+                            agents,
+                            agent_name if action == "agent" else None,
+                        )
+                    else:
+                        await set_dms(
+                            session,
+                            tenant_id=tenant_id,
+                            subject=Subject(is_admin=True, platform_user_id=str(member.id)),
+                            platform="discord",
+                            enabled=action == "enable",
+                            account_id=principal.account_id,
+                        )
+                if action in {"agent", "clear-agent"}:
+                    await interaction.followup.send("DM default agent updated.", ephemeral=True)
+                    return
                 await interaction.followup.send(
                     embed=build_notice_embed(
                         "Daimon DMs are on for this server."
