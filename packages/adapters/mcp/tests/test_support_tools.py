@@ -357,8 +357,10 @@ async def test_menu_use_when_picked_then_default_then_stale_or_unknown(
 
 
 async def test_channel_when_the_deployment_keeps_it_then_refuses(
-    committing_sessionmaker: Factory,
+    committing_sessionmaker: Factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(tools, "own_channel_allowed", lambda settings: False)
+    monkeypatch.setattr(support_routing, "own_channel_allowed", lambda settings: False)
     tenant, account_id = await _seed(committing_sessionmaker)
     runtime, auth = _runtime(committing_sessionmaker), _auth(tenant, account_id)
     shown = await _get_channel_impl(runtime, auth)

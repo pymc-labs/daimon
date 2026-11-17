@@ -79,10 +79,10 @@ def _settings(*, discord: bool = False) -> object:
     )
 
 
-def _allow_own_channel(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The `support_own_channel` feature on, for the CLI and the routing it shares."""
-    monkeypatch.setattr(support_cli, "own_channel_allowed", lambda settings: True)
-    monkeypatch.setattr(support_routing, "own_channel_allowed", lambda settings: True)
+def _allow_own_channel(monkeypatch: pytest.MonkeyPatch, allowed: bool = True) -> None:
+    """The `support_own_channel` feature on or off, for the CLI and the routing it shares."""
+    monkeypatch.setattr(support_cli, "own_channel_allowed", lambda settings: allowed)
+    monkeypatch.setattr(support_routing, "own_channel_allowed", lambda settings: allowed)
 
 
 def _console() -> tuple[Console, StringIO]:
@@ -334,6 +334,7 @@ async def test_channel_when_the_deployment_keeps_it_then_refused_else_set_shown_
     _, selector = await _tenant(db_session_factory)
     console, out = _console()
     where = {"rt": rt, "console": console, "selector": selector}
+    _allow_own_channel(monkeypatch, allowed=False)
     with pytest.raises(ChannelChangeRefused, match="keeps its own request channel"):
         await channel_set(**where, channel_id="C9")
     _allow_own_channel(monkeypatch)
