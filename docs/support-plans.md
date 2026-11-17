@@ -37,6 +37,7 @@ A plan counts the credits used in its window:
 | `monthly` | the current UTC calendar month |
 | `fixed` | from its start date until its end date |
 
+An admin sets the dates by hand; a plan never starts on its first request.
 Before its start or after its end, a plan blocks requests. It never falls back
 to the default allowance. Clear the plan to restore the default.
 
