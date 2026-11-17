@@ -146,7 +146,9 @@ def unavailable_reason(
     `support` is the workspace's own setup (`support_setup`), for the support requirements."""
     if not spec.on_platform(place.platform):
         return "platform"
-    judged = [need for need in spec.requires if server_setup or need not in SERVER_SETUP]
+    judged: list[Requirement] = [
+        need for need in spec.requires if server_setup or need not in SERVER_SETUP
+    ]
     if settings is not None and (
         ("platform_adapter" in judged and not _adapter_set_up(settings, place.platform))
         or not all(
