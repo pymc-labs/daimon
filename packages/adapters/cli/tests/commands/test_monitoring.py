@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -21,6 +22,11 @@ from typer.testing import CliRunner
 _AT = datetime(2030, 1, 15, 12, tzinfo=UTC)
 
 
+def _plain(output: str) -> str:
+    """Rich colours and wraps usage errors on CI; compare the words only."""
+    return " ".join(re.sub(r"\x1b\[[0-9;]*m", "", output).split())
+
+
 def test_monitoring_list_rejects_a_bad_day_before_runtime() -> None:
     """A malformed date is refused before any database is opened."""
     result = CliRunner().invoke(
@@ -28,7 +34,7 @@ def test_monitoring_list_rejects_a_bad_day_before_runtime() -> None:
     )
 
     assert result.exit_code != 0, result.output
-    assert "--first" in result.output, result.output
+    assert "--first" in _plain(result.output), result.output
 
 
 async def test_monitoring_list_gives_counts_without_content_and_audits(
