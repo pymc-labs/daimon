@@ -15,6 +15,8 @@ from typing import Annotated, Any, Literal, cast
 
 from anthropic.types.beta import BetaManagedAgentsSystemContentBlockParam
 from daimon.core.session_snapshot import SessionSnapshot
+from daimon.core.stores.support_rows import SupportEscalationRow as SupportEscalationRow
+from daimon.core.windows import BudgetWindow as BudgetWindow
 from mux.contracts.config import CapabilityRequirement, ThreadMode
 from mux.contracts.ids import PROVIDERS, Provider, Scope, SkillRef
 from mux.contracts.profile import Capability, Effort
@@ -638,9 +640,6 @@ class UsageEventRow(BaseModel):
     observation_revision: int | None = None
     channel_id: str | None = None
     agent_id: str | None = None
-
-
-BudgetWindow = Literal["monthly", "total", "fixed"]
 
 
 class ChannelBudgetRow(BaseModel):
@@ -1267,24 +1266,6 @@ class FileUploadRow(BaseModel):
     display_filename: str
     content_type: str
     content: bytes | None
-    created_at: datetime
-
-
-class SupportEscalationRow(BaseModel):
-    """Pydantic row for SupportEscalation — one human-support request."""
-
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    id: uuid.UUID
-    tenant_id: uuid.UUID
-    account_id: uuid.UUID | None
-    platform: str
-    platform_user_id: str
-    channel_id: str
-    message_id: str
-    ma_session_id: str | None
-    note: str
-    delivered_at: datetime | None
     created_at: datetime
 
 

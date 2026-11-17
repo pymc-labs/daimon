@@ -33,6 +33,7 @@ from daimon.core.features.snapshot import (
     SERVER_SETUP,
     FeaturePlace,
     FeatureSnapshot,
+    place_feature,
     resolve_one,
 )
 from daimon.core.features.tool_gate import SESSION_KEPT_TOOLS
@@ -334,6 +335,60 @@ def test_support_escalation_needs_the_platforms_own_channel() -> None:
     teams = resolve_one(FEATURES["support_escalation"], ready, FeaturePlace(tenant, "teams"), [])
     assert slack.on, "Slack has its channel"
     assert (teams.on, teams.unavailable) == (False, "requires"), "Teams has none"
+
+
+async def test_support_escalation_when_off_at_an_agent_or_channel_then_off_only_there(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Ask a person is set where a support plan applies; a workspace lock binds them all."""
+    support = SETTINGS.support.model_copy(
+        update={"slack_escalation_channel_id": "C123", "credits_per_user": 5}
+    )
+    ready = SETTINGS.model_copy(update={"support": support})
+    tenant = await make_tenant(db_session)
+    off = (FeatureTarget("agent", agent_id="a1"), FeatureTarget("channel", channel_id="C1"))
+    for target in off:
+        await set_feature_value(
+            db_session,
+            tenant_id=tenant.id,
+            target=target,
+            key="support_escalation",
+            value="off",
+            set_by=None,
+            surface="web",
+        )
+    await db_session.commit()
+    CACHE.clear()
+
+    async def on(channel: str, agent: str) -> bool:
+        place = FeaturePlace(tenant.id, "slack", channel_id=channel, agent_id=agent)
+        return (await place_feature(db_session_factory, ready, place, "support_escalation")).on
+
+    assert not await on("C1", "a2"), "off in its channel"
+    assert not await on("C2", "a1"), "off for its agent"
+    assert await on("C2", "a2"), "on everywhere else"
+    await set_feature_value(
+        db_session,
+        tenant_id=tenant.id,
+        target=FeatureTarget("channel", channel_id="C2"),
+        key="support_escalation",
+        value="on",
+        set_by=None,
+        surface="web",
+    )
+    await set_feature_value(
+        db_session,
+        tenant_id=tenant.id,
+        target=FeatureTarget("workspace"),
+        key="support_escalation",
+        value="off",
+        locked=True,
+        set_by=None,
+        surface="web",
+    )
+    await db_session.commit()
+    CACHE.clear()
+    assert not await on("C2", "a2"), "a workspace lock beats the channel's On"
 
 
 def test_the_old_enabled_variables_are_the_deployment_tier() -> None:

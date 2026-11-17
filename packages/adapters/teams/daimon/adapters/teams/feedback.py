@@ -27,8 +27,8 @@ The principal lookup never creates one; the session is an attribution hint.
 Hygiene contract (Slack's): the submitted text is somebody's unsolicited
 criticism and belongs in the database row. It never enters a log record or
 a message anyone else sees. The one other place it may go is the support
-channel, and only for a tenant that turned that on
-(`SupportSettings.feedback_to_support`): then the form says so before it is
+channel, and only where `support_feedback` is on
+(`support_routing.feedback_destination`): then the form says so before it is
 sent, and each changed submission is posted there once, beside the person,
 the agent and a link to the answer (`support.post_to_support_channel`, the
 Ask a human path), marked when the answer's channel is read only from inside.
@@ -69,9 +69,9 @@ from daimon.adapters.teams.support import (
     SEALED_LINE,
     post_to_support_channel,
     requester,
-    routes_feedback,
     support_post,
 )
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.message_feedback import FEEDBACK_REASONS, Vote, known_feedback_reasons
 from daimon.core.stores.access_policy import (
     AccessPolicyUnreadable,
@@ -85,6 +85,7 @@ from daimon.core.stores.message_feedback import (
     record_vote,
 )
 from daimon.core.stores.thread_sessions import get_latest_thread_session
+from daimon.core.support_routing import SupportDestination, feedback_destination
 from microsoft_teams.api import (
     MessageFetchTaskInvokeActivity,
     MessageSubmitActionInvokeActivity,
@@ -285,8 +286,22 @@ class TeamsFeedback:
         """Daimon's form sent this way, or an older answer's built-in form: vote and text."""
         await guarded(self._builtin(ctx.activity), None, "teams.feedback.failed")
 
-    def _shared(self, tenant_id: uuid.UUID) -> bool:
-        return routes_feedback(self._runtime.settings, tenant_id)
+    async def _destination(
+        self, tenant_id: uuid.UUID, place: AnswerPlace
+    ) -> SupportDestination | None:
+        """Where this answer's sent forms also go, or None (kept in the database only)."""
+        async with self._runtime.sessionmaker() as session:
+            thread = await get_latest_thread_session(
+                session, tenant_id=tenant_id, platform="teams", thread_id=place.conversation_id
+            )
+            at = FeaturePlace.of(
+                tenant_id,
+                "teams",
+                place.channel_id if place.is_channel else None,
+                place.conversation_id,
+                agent_id=None if thread is None else thread.ma_agent_id,
+            )
+            return await feedback_destination(session, self._runtime.settings, at)
 
     async def _vote(
         self, activity: TaskFetchInvokeActivity | MessageFetchTaskInvokeActivity, vote: Vote
@@ -296,12 +311,14 @@ class TeamsFeedback:
         message_id = activity.reply_to_id
         if actor is None or not message_id:
             return dialog_notice(VOTE_TITLE, DENIED)
-        recorded = await self._record(actor, AnswerPlace.of(activity, message_id), vote)
+        place = AnswerPlace.of(activity, message_id)
+        recorded = await self._record(actor, place, vote)
         if recorded.outcome != "recorded":
             return dialog_notice(VOTE_TITLE, refusal_text(recorded.outcome))
         if vote == "up":
             return dialog_notice(VOTE_TITLE, THANKS_VOTE)
-        return dialog(TITLE, feedback_form(message_id, shared=self._shared(actor.tenant_id)))
+        shared = await self._destination(actor.tenant_id, place) is not None
+        return dialog(TITLE, feedback_form(message_id, shared=shared))
 
     async def _submit(self, activity: TaskSubmitInvokeActivity) -> TaskModuleResponse:
         """Submitting the form is a down-vote in its own right: upserted with the form."""
@@ -312,12 +329,11 @@ class TeamsFeedback:
             form = replace(form, message_id=activity.reply_to_id)
         if actor is None or not form.message_id:
             return dialog_message(DENIED)
+        place = AnswerPlace.of(activity, form.message_id)
         if not form.text and not form.reasons:
-            shared = self._shared(actor.tenant_id)
+            shared = await self._destination(actor.tenant_id, place) is not None
             return dialog(TITLE, feedback_form(form.message_id, shared=shared, error=NEEDS_ONE))
-        recorded = await self._take_form(
-            actor, AnswerPlace.of(activity, form.message_id), form, activity.from_.name
-        )
+        recorded = await self._take_form(actor, place, form, activity.from_.name)
         if recorded.outcome != "recorded":
             return dialog_message(refusal_text(recorded.outcome))
         return dialog_message(THANKS_TEXT)
@@ -356,7 +372,8 @@ class TeamsFeedback:
             feedback_id=str(recorded.row_id),
             reasons=list(form.reasons),
         )
-        if self._shared(actor.tenant_id) and recorded.details_changed:
+        destination = await self._destination(actor.tenant_id, place)
+        if destination is not None and recorded.details_changed:
             teams = self._runtime.settings.teams
             post = feedback_post(
                 user_id=actor.user_id,
@@ -365,12 +382,16 @@ class TeamsFeedback:
                 form=form,
                 recorded=recorded,
             )
-            self._spawn(self._route(post, recorded.row_id), name="teams.feedback.route")
+            self._spawn(
+                self._route(destination, post, recorded.row_id), name="teams.feedback.route"
+            )
         return recorded
 
-    async def _route(self, post: str, feedback_id: uuid.UUID) -> None:
+    async def _route(
+        self, destination: SupportDestination, post: str, feedback_id: uuid.UUID
+    ) -> None:
         """Best effort: the form is already recorded, whatever the post does."""
-        delivered = await post_to_support_channel(self._runtime, self._direct, post)
+        delivered = await post_to_support_channel(self._runtime, self._direct, destination, post)
         log.info("feedback.routed_to_support", feedback_id=str(feedback_id), delivered=delivered)
 
     async def _record(

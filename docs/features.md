@@ -68,7 +68,9 @@ Where each feature can be set, and its default.
 | Report publishing | `report_publish` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Video transcripts | `media` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
 | Microsoft 365 | `microsoft_365` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ | Needs setup by whoever runs Daimon |
-| Ask a person | `support_escalation` | Capability | On | ✓ | ✓ |  |  |  | Needs setup by whoever runs Daimon |
+| Ask a person | `support_escalation` | Capability | On | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
+| Feedback to support | `support_feedback` | Capability | Off | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
+| Own support channel | `support_own_channel` | Capability | On | ✓ |  |  |  |  |  |
 | GitHub access | `github` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Lead intake | `lead_intake` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
@@ -735,14 +737,39 @@ Anyone who can change a conversation's model may pick an OpenAI or Gemini model 
 
 ## Ask a person
 
-Answers offer a way to ask the Daimon team for help, which posts the request in the support channel. Off removes the button and the form. Whoever runs Daimon sets the channel and each person's credits.
+Answers offer a way to ask a person for help, which posts the request in the support channel. Off removes the button and the form. Whoever runs Daimon sets the default channel and credits; an admin can set limits, a menu and their own channel.
 
 | | |
 | --- | --- |
 | Key | `support_escalation` |
 | Values | `on` (On), `off` (Off) |
 | Default | `on` |
-| Levels | Deployment, Workspace |
+| Levels | Deployment, Workspace, Agent, Channel |
+| Combines | Off above is a ceiling |
+
+## Feedback to support
+
+A submitted thumbs-down form (the reasons, the text, the person, the agent and a link to the answer) is also posted where Ask a person requests go, and the form says so first. It spends no credits. Off keeps the form in the database only.
+
+| | |
+| --- | --- |
+| Key | `support_feedback` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace, Agent, Channel |
+| Combines | Off above is a ceiling |
+| Deprecated | `DAIMON_SUPPORT__FEEDBACK_TO_SUPPORT` |
+
+## Own support channel
+
+An admin may send Ask a person requests to a channel of their own instead of the default one; whoever runs Daimon then no longer sees them. Off sends every request to the default channel.
+
+| | |
+| --- | --- |
+| Key | `support_own_channel` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Deployment |
 | Combines | Off above is a ceiling |
 
 ## GitHub access

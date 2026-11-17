@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from functools import partial
-from typing import Literal, get_args
+from typing import Literal
 
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
@@ -27,13 +27,22 @@ from daimon.core.errors import DaimonError
 from daimon.core.stores.channel_budgets import get_channel_budget, list_channel_budgets
 from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
 from daimon.core.stores.tenant_ledger import get_channel_spend, get_prepaid_balance
+from daimon.core.windows import (
+    WINDOWS,
+    WindowError,
+    WindowPeriod,
+    is_window_active,
+    parse_window,
+    window_label,
+    window_period,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 type UsageState = Literal["none", "pending", "settled"]
 
 log = structlog.get_logger()
 
-BUDGET_WINDOWS: tuple[BudgetWindow, ...] = get_args(BudgetWindow)
+BUDGET_WINDOWS: tuple[BudgetWindow, ...] = WINDOWS
 _MAX_LIMIT_USD = Decimal("9999999999.99")  # Numeric(12, 2)
 
 
@@ -51,12 +60,7 @@ class BudgetSpec:
     ends_at: datetime | None
 
 
-@dataclass(frozen=True)
-class BudgetPeriod:
-    """The half-open range `[since, until)` of debits a budget counts; None is unbounded."""
-
-    since: datetime | None
-    until: datetime | None
+BudgetPeriod = WindowPeriod
 
 
 @dataclass(frozen=True)
@@ -95,19 +99,6 @@ def _parse_usd(value: str) -> Decimal:
     return amount
 
 
-def _parse_instant(value: str | None, *, name: str) -> datetime | None:
-    """ISO 8601; a value without an offset is read as UTC."""
-    if value is None or not value.strip():
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.strip())
-    except ValueError as exc:
-        raise ChannelBudgetError(f"{name} must be an ISO 8601 date or time, got {value!r}") from exc
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
-
-
 def parse_budget_spec(
     *, limit_usd: str, window: str, starts_at: str | None = None, ends_at: str | None = None
 ) -> BudgetSpec:
@@ -115,57 +106,18 @@ def parse_budget_spec(
     if window not in BUDGET_WINDOWS:
         raise ChannelBudgetError(f"window must be one of {', '.join(BUDGET_WINDOWS)}")
     amount = _parse_usd(limit_usd)
-    start = _parse_instant(starts_at, name="starts_at")
-    end = _parse_instant(ends_at, name="ends_at")
-    if window == "fixed":
-        if start is None or end is None:
-            raise ChannelBudgetError("a fixed window needs both starts_at and ends_at")
-        if start >= end:
-            raise ChannelBudgetError("starts_at must be before ends_at")
-    elif window == "total" and end is not None:
-        raise ChannelBudgetError("ends_at is only for a fixed window")
-    elif window == "monthly" and (start is not None or end is not None):
-        raise ChannelBudgetError("a monthly window takes no starts_at or ends_at")
-    return BudgetSpec(limit_usd=amount, window=window, starts_at=start, ends_at=end)
+    try:
+        bounds = parse_window(window, starts_at=starts_at, ends_at=ends_at)
+    except WindowError as exc:
+        raise ChannelBudgetError(str(exc)) from exc
+    return BudgetSpec(
+        limit_usd=amount, window=bounds.window, starts_at=bounds.starts_at, ends_at=bounds.ends_at
+    )
 
 
-def budget_period(budget: ChannelBudgetRow, *, now: datetime) -> BudgetPeriod:
-    """`monthly`: this UTC month. `total`: since `starts_at`, or ever. `fixed`: its range."""
-    if budget.window == "monthly":
-        return BudgetPeriod(since=datetime(now.year, now.month, 1, tzinfo=UTC), until=None)
-    if budget.window == "total":
-        return BudgetPeriod(since=budget.starts_at, until=None)
-    return BudgetPeriod(since=budget.starts_at, until=budget.ends_at)
-
-
-def is_budget_active(budget: ChannelBudgetRow, *, now: datetime) -> bool:
-    """A budget gates from `starts_at`, if set, and a fixed one until `ends_at`, exclusive."""
-    if budget.window == "monthly":
-        return True
-    if budget.starts_at is not None and now < budget.starts_at:
-        return False
-    return budget.ends_at is None or now < budget.ends_at
-
-
-def _instant_label(value: datetime) -> str:
-    if value.hour == value.minute == value.second == 0:
-        return f"{value:%Y-%m-%d}"
-    return f"{value:%Y-%m-%d %H:%M} UTC"
-
-
-def window_label(budget: ChannelBudgetRow, *, started: bool = True) -> str:
-    """The window in words, e.g. `monthly`, `since 2026-07-01`, `2026-07-01 until 2026-07-03`.
-
-    A total window that has not `started` reads `from 2026-07-01`. A fixed
-    window's end is exclusive, hence "until".
-    """
-    if budget.window == "monthly":
-        return "monthly"
-    if budget.starts_at is None:
-        return "total"
-    if budget.window == "total" or budget.ends_at is None:
-        return f"{'since' if started else 'from'} {_instant_label(budget.starts_at)}"
-    return f"{_instant_label(budget.starts_at)} until {_instant_label(budget.ends_at)}"
+# The window rules live in `daimon.core.windows`, shared with support plans.
+budget_period = window_period
+is_budget_active = is_window_active
 
 
 def describe_budget(status: ChannelBudgetStatus) -> str:

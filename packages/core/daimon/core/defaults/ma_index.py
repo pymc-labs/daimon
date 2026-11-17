@@ -244,6 +244,21 @@ async def list_agents_by_tenant(
     return results
 
 
+async def agent_id_in_tenant(
+    client: AsyncAnthropic | None,
+    *,
+    tenant_id: uuid.UUID,
+    ref: str,
+    records: async_sessionmaker[AsyncSession] | None = None,
+) -> str | None:
+    """The id of the tenant's agent `ref` names (its id or its name), or None when it has none."""
+    if ref.startswith("agent_"):
+        known = await list_agents_by_tenant(client, tenant_id=tenant_id, records=records)
+        return ref if any(a.id == ref for a in known) else None
+    agent = await find_agent_by_daimon_tag(client, tenant_id=tenant_id, name=ref, records=records)
+    return None if agent is None else agent.id
+
+
 async def list_agents_for_privacy_deletion(
     client: AsyncAnthropic, *, tenant_id: uuid.UUID
 ) -> list[BetaManagedAgentsAgent]:
