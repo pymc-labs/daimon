@@ -6,16 +6,16 @@ import asyncio
 import uuid
 from decimal import Decimal
 
+from daimon.core.stores import support as plans
 from daimon.core.stores import support_escalation as ledger
-from daimon.core.stores import support_plans as plans
-from daimon.core.support_plans import RequestChoice, SupportPlace, parse_catalog
+from daimon.core.support import RequestChoice, SupportPlace, parse_menu
 from daimon.core.windows import WindowBounds
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 D = Decimal
 PLACE = SupportPlace(channel_id="C1", agent_id=None)
-MENU = parse_catalog(
+MENU = parse_menu(
     {
         "name": "Support",
         "options": [
@@ -143,7 +143,7 @@ async def test_submit_and_settle_when_concurrent_then_both_finish_without_deadlo
     async with factory() as session:
         plan = await plans.get_plan(session, tenant_id=tenant_id, scope="workspace", scope_id="")
         assert plan, "the plan is there"
-        spent, _ = await ledger.plan_spent(
+        spent, _ = await ledger.limit_spent(
             session, plan=plan, platform_user_id="U1", as_of=first.row.created_at
         )
     assert spent <= D(3), "the pool is never overspent whichever ran first"

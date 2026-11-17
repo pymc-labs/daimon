@@ -65,20 +65,20 @@ from daimon.core.message_feedback import (
 from daimon.core.stores.agent_posts import get_post
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.message_feedback import record_vote
-from daimon.core.stores.support_escalation import asked_options, resolve_plan
-from daimon.core.stores.support_rows import PlanView
+from daimon.core.stores.support_escalation import asked_options, resolve_limit
+from daimon.core.stores.support_rows import LimitView
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import get_latest_thread_session
-from daimon.core.support_escalation import (
-    ALREADY_REQUESTED,
-    is_enabled,
-    is_escalation_reaction,
-)
-from daimon.core.support_plans import (
+from daimon.core.support import (
     EXEMPT_OFFER,
     balance_text,
     ended_text,
     offer_refusal,
+)
+from daimon.core.support_escalation import (
+    ALREADY_REQUESTED,
+    is_enabled,
+    is_escalation_reaction,
 )
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -120,20 +120,20 @@ def support_prompt_embed(link: str, *, remaining: int) -> discord.Embed:
 
 
 def support_offer(
-    origin: AnswerOrigin, view: PlanView, *, asked: AbstractSet[str] = frozenset()
+    origin: AnswerOrigin, view: LimitView, *, asked: AbstractSet[str] = frozenset()
 ) -> tuple[discord.Embed, discord.ui.View] | str:
     """The direct message an escalate reaction sends: a menu, the note button, or why not."""
     if not view.active:
         return ended_text(view, now=datetime.now(UTC))
     if (refused := offer_refusal(view, asked=asked)) is not None:
         return refused
-    if view.catalog is not None:
+    if view.menu is not None:
         return menu_message(origin, view)
     available = view.available
     if view.charged_to == "default" and available is not None:
         embed = support_prompt_embed(origin.link, remaining=int(available))
     else:
-        footer = EXEMPT_OFFER if view.exempt else balance_text(view.balance, view.plan)
+        footer = EXEMPT_OFFER if view.exempt else balance_text(view.balance, view.period)
         embed = _prompt_embed(origin.link, footer)
     button: discord.ui.View = discord.ui.View(timeout=None)
     button.add_item(
@@ -461,7 +461,7 @@ class FeedbackReactionCog(commands.Cog):
         user_id = str(payload.user_id)
         exempt = await requester_is_admin(self._bot, guild_id=origin.guild_id, user_id=user_id)
         async with runtime.sessionmaker() as session:
-            view = await resolve_plan(
+            view = await resolve_limit(
                 session,
                 tenant_id=origin.tenant_id,
                 place=origin.support_place,

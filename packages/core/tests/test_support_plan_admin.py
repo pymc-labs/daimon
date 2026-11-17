@@ -12,8 +12,16 @@ import pytest
 from daimon.core.authz import Subject
 from daimon.core.channel_changes import ChannelActor, Expected
 from daimon.core.stores import support_escalation as ledger
-from daimon.core.stores.support_rows import SupportPlanRow
-from daimon.core.support_plan_admin import (
+from daimon.core.stores.support_rows import SupportLimitRow
+from daimon.core.support import (
+    CLIENT_NOT_NOTIFIED,
+    RequestChoice,
+    SupportError,
+    SupportPlace,
+    parse_limit_spec,
+    parse_menu,
+)
+from daimon.core.support_admin import (
     NO_REQUEST,
     PlanChange,
     get_plan_usage,
@@ -23,27 +31,19 @@ from daimon.core.support_plan_admin import (
     settle_outcome_text,
     usage_text,
 )
-from daimon.core.support_plan_changes import (
+from daimon.core.support_changes import (
     PlanValue,
     set_allowance,
     set_catalog,
     set_plan,
     settle,
 )
-from daimon.core.support_plans import (
-    CLIENT_NOT_NOTIFIED,
-    RequestChoice,
-    SupportPlace,
-    SupportPlanError,
-    parse_catalog,
-    parse_plan_spec,
-)
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 D = Decimal
 NOW = datetime(2026, 11, 17, tzinfo=UTC)
-MENU = parse_catalog(
+MENU = parse_menu(
     {
         "name": "Support",
         "options": [
@@ -66,13 +66,13 @@ async def _setup(db_session: AsyncSession, factory: Factory) -> tuple[uuid.UUID,
     await db_session.commit()
     actor = _actor(tenant.id)
     await set_catalog(factory, actor, platform="slack", key="support", spec=MENU)
-    spec = parse_plan_spec(scope="channel", scope_id="C1", catalog="support", pool="5")
+    spec = parse_limit_spec(scope="channel", scope_id="C1", catalog="support", pool="5")
     await set_plan(factory, actor, platform="slack", spec=spec)
     await set_plan(
         factory,
         actor,
         platform="slack",
-        spec=parse_plan_spec(
+        spec=parse_limit_spec(
             scope="workspace",
             per_person="2",
             window="fixed",
@@ -157,7 +157,7 @@ async def test_parse_plan_value_when_round_tripped_then_expected_matches(
     ],
 )
 def test_parse_plan_value_when_malformed_then_refused(data: dict[str, object]) -> None:
-    with pytest.raises(SupportPlanError):
+    with pytest.raises(SupportError):
         parse_plan_value(data)
 
 
@@ -201,7 +201,7 @@ def test_usage_text_when_window_spans_years_then_exact_times_in_utc() -> None:
         starts_at=datetime(2026, 11, 24, 9, tzinfo=UTC),
         ends_at=datetime(2027, 1, 1, tzinfo=UTC),
     )
-    text = usage_text(cast("SupportPlanRow", plan), pool_used=D(1), now=NOW)
+    text = usage_text(cast("SupportLimitRow", plan), pool_used=D(1), now=NOW)
     assert (
         text == "Not started: 1 of 10 credits used, 24 Nov 09:00 UTC until 1 Jan 2027 00:00 UTC"
     ), text
@@ -247,5 +247,5 @@ def test_merge_plan_when_none_or_a_new_window_then_clears_what_it_cannot_hold() 
     )
     monthly = merge_plan(FIXED, scope="channel", scope_id="C1", change=PlanChange(window="monthly"))
     assert monthly.window.starts_at is None, "a monthly window holds no dates"
-    with pytest.raises(SupportPlanError, match="needs both starts_at and ends_at"):
+    with pytest.raises(SupportError, match="needs both starts_at and ends_at"):
         merge_plan(FIXED, scope="channel", scope_id="C1", change=PlanChange(ends_at="none"))

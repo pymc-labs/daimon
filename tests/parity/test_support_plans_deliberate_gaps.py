@@ -36,21 +36,21 @@ from daimon.adapters.teams.support import SupportCommand
 from daimon.adapters.teams.support_settle import TeamsSupportSettle
 from daimon.adapters.web.channels import channel_refusals
 from daimon.core.errors import StaleChannelValue
-from daimon.core.stores.support_rows import PlanView, SupportCatalogRow, SupportEscalationRow
-from daimon.core.support_plan_changes import CATALOG_SETTING
-from daimon.core.support_plans import (
+from daimon.core.stores.support_rows import LimitView, SupportEscalationRow, SupportMenuRow
+from daimon.core.support import (
     MAX_PARAGRAPH_CHARS,
     Balance,
     OptionSnapshot,
     option_value,
-    parse_catalog,
+    parse_menu,
 )
+from daimon.core.support_changes import CATALOG_SETTING
 from discord.ui import TextDisplay, TextInput
 from fastapi import HTTPException
 from microsoft_teams.cards import ChoiceSetInput, TextBlock
 from microsoft_teams.cards import TextInput as TeamsTextInput
 
-_MENU = parse_catalog(
+_MENU = parse_menu(
     {
         "name": "Support",
         "options": [
@@ -71,9 +71,9 @@ _MENU = parse_catalog(
 )
 
 
-def _view() -> PlanView:
+def _view() -> LimitView:
     now = datetime(2026, 1, 1, tzinfo=UTC)
-    catalog = SupportCatalogRow(
+    catalog = SupportMenuRow(
         id=uuid.uuid4(),
         tenant_id=uuid.uuid4(),
         key="support",
@@ -85,7 +85,7 @@ def _view() -> PlanView:
         updated_at=now,
     )
     balance = Balance(pool=None, pool_used=Decimal(0), cap=None, person_used=Decimal(0))
-    return PlanView(plan=None, catalog=catalog, balance=balance, state="active")
+    return LimitView(plan=None, catalog=catalog, balance=balance, state="active")
 
 
 def _picked(key: str) -> dict[str, Any]:
@@ -148,7 +148,7 @@ def _pending() -> SupportEscalationRow:
         note="Please look",
         delivered_at=None,
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
-        charged_to="plan",
+        charged_to="limit",
         option=OptionSnapshot(key=review.key, label=review.label, price=review.price),
         hold=Decimal(1),
         charge=None,

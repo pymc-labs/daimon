@@ -32,18 +32,18 @@ async def test_downgrade_when_plan_and_unsettled_rows_then_only_default_credits_
         "declined": ("plan", plan, "declined", 0),
         "pending": ("plan", plan, "pending", None),
     }
-    for message, (charged_to, plan_id, status, charge) in rows.items():
+    for message, (charged_to, limit_id, status, charge) in rows.items():
         await db_session.execute(
             text(
                 "INSERT INTO support_escalations (tenant_id, platform, platform_user_id,"
-                " channel_id, message_id, note, charged_to, plan_id, status, charge, hold)"
+                " channel_id, message_id, note, charged_to, limit_id, status, charge, hold)"
                 " VALUES (:t, 'slack', 'U1', 'C1', :m, 'n', :c, :p, :s, :ch, 0)"
             ),
             {
                 "t": tenant.id,
                 "m": message,
                 "c": charged_to,
-                "p": plan_id,
+                "p": limit_id,
                 "s": status,
                 "ch": charge,
             },

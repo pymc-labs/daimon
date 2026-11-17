@@ -6,16 +6,16 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from daimon.core.stores import support as plans
 from daimon.core.stores import support_escalation as ledger
-from daimon.core.stores import support_plans as plans
-from daimon.core.stores.support_rows import SupportCatalogRow, SupportPlanRow
-from daimon.core.support_plans import (
+from daimon.core.stores.support_rows import SupportLimitRow, SupportMenuRow
+from daimon.core.support import (
     DEFAULT_OPTION_KEY,
-    PlanScope,
+    MenuSpec,
     RequestChoice,
-    SupportCatalogSpec,
     SupportPlace,
-    parse_catalog,
+    SupportScope,
+    parse_menu,
 )
 from daimon.core.windows import WindowBounds
 from daimon.testing.factories import make_tenant
@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 D = Decimal
 PLACE = SupportPlace(channel_id="C1", agent_id="a1")
 TOTAL = WindowBounds("total", None, None)
-MENU = parse_catalog(
+MENU = parse_menu(
     {
         "name": "Support",
         "options": [
@@ -41,14 +41,14 @@ MENU = parse_catalog(
 )
 
 
-def _choice(key: str, spec: SupportCatalogSpec = MENU) -> RequestChoice:
+def _choice(key: str, spec: MenuSpec = MENU) -> RequestChoice:
     """A pick of `key` as `spec` shows it."""
     option = spec.option(key)
     assert option is not None, f"{key} is on the menu"
     return RequestChoice.of(option)
 
 
-async def _menu(session: AsyncSession, tenant_id: uuid.UUID) -> SupportCatalogRow:
+async def _menu(session: AsyncSession, tenant_id: uuid.UUID) -> SupportMenuRow:
     return await plans.set_catalog(
         session, tenant_id=tenant_id, key="support", spec=MENU, set_by_account_id=None
     )
@@ -58,13 +58,13 @@ async def _plan(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     *,
-    catalog: SupportCatalogRow | None = None,
-    scope: PlanScope = "workspace",
+    catalog: SupportMenuRow | None = None,
+    scope: SupportScope = "workspace",
     scope_id: str = "",
     pool: Decimal | None = None,
     per_person: Decimal | None = None,
     window: WindowBounds = TOTAL,
-) -> SupportPlanRow:
+) -> SupportLimitRow:
     return await plans.set_plan(
         session,
         tenant_id=tenant_id,
@@ -170,7 +170,7 @@ async def test_submit_when_default_allowance_spent_then_out_of_credits_unless_ra
     await plans.set_allowance(
         db_session,
         tenant_id=tenant.id,
-        plan_id=None,
+        limit_id=None,
         platform_user_id="U1",
         credits=D(3),
         set_by_account_id=None,
@@ -194,7 +194,7 @@ async def test_submit_when_pool_and_person_limits_then_the_stricter_binds(
     assert statuses == ["recorded", "recorded", "out_of_credits", "recorded", "out_of_credits"], (
         "U1 stops at their 1 credit, U3 at the 1.5 pool"
     )
-    view = await ledger.resolve_plan(
+    view = await ledger.resolve_limit(
         db_session, tenant_id=tenant.id, place=PLACE, platform_user_id="U3", default_allowance=20
     )
     assert (view.balance.axis, view.available) == ("pool", D(0)), "the pool is the stricter axis"
@@ -208,16 +208,16 @@ async def test_submit_when_person_has_an_allowance_then_it_replaces_the_cap(
     await plans.set_allowance(
         db_session,
         tenant_id=tenant.id,
-        plan_id=plan.id,
+        limit_id=plan.id,
         platform_user_id="U1",
         credits=D("2.5"),
         set_by_account_id=None,
     )
-    view = await ledger.resolve_plan(
+    view = await ledger.resolve_limit(
         db_session, tenant_id=tenant.id, place=PLACE, platform_user_id="U1", default_allowance=20
     )
     assert view.available == D("2.5"), "the allowance, not the plan's per-person cap"
-    other = await ledger.resolve_plan(
+    other = await ledger.resolve_limit(
         db_session, tenant_id=tenant.id, place=PLACE, platform_user_id="U2", default_allowance=20
     )
     assert other.available == D(1), "everyone else keeps the plan's cap"
@@ -230,13 +230,13 @@ async def test_resolve_plan_when_several_scopes_then_the_channel_plan_governs(
     await _plan(db_session, tenant.id, pool=D(5))
     await _plan(db_session, tenant.id, scope="agent", scope_id="a1", pool=D(4))
     channel = await _plan(db_session, tenant.id, scope="channel", scope_id="C1", pool=D(3))
-    view = await ledger.resolve_plan(
+    view = await ledger.resolve_limit(
         db_session, tenant_id=tenant.id, place=PLACE, platform_user_id="U1", default_allowance=20
     )
-    assert view.plan == channel and view.charged_to == "plan", "channel beats agent and workspace"
+    assert view.plan == channel and view.charged_to == "limit", "channel beats agent and workspace"
     assert view.available == D(3), "no stacking across scopes"
     elsewhere = SupportPlace(channel_id="C9", agent_id="a9")
-    workspace = await ledger.resolve_plan(
+    workspace = await ledger.resolve_limit(
         db_session,
         tenant_id=tenant.id,
         place=elsewhere,
@@ -326,7 +326,7 @@ async def test_submit_when_window_ended_then_plan_inactive_even_for_an_admin(
     member = await _submit(db_session, tenant.id, now=late)
     admin = await _submit(db_session, tenant.id, now=late, exempt=True)
     early = await _submit(db_session, tenant.id, now=datetime(2025, 12, 1, tzinfo=UTC))
-    assert [member.status, admin.status, early.status] == ["plan_inactive"] * 3, (
+    assert [member.status, admin.status, early.status] == ["limit_inactive"] * 3, (
         "outside the window nobody asks, and there is no fallback to the default plan"
     )
     assert member.view and member.view.available == 0, "an inactive plan has 0 available"
@@ -409,9 +409,9 @@ async def test_settle_when_plan_was_cleared_then_a_charge_is_refused_and_a_decli
     assert row, "recorded"
     await plans.delete_plan(db_session, tenant_id=tenant.id, scope="workspace", scope_id="")
     orphan = await ledger.get_request(db_session, escalation_id=row.id)
-    assert orphan and orphan.plan_id is None and orphan.charged_to == "plan", "kept, unlinked"
+    assert orphan and orphan.limit_id is None and orphan.charged_to == "limit", "kept, unlinked"
     refused = await _settle(db_session, row.id, D(3))
-    assert refused.status == "plan_gone", "no plan left to bound the charge"
+    assert refused.status == "limit_gone", "no plan left to bound the charge"
     assert refused.row and refused.row.status == "pending", "the request stays pending"
     declined = await _settle(db_session, row.id, None)
     assert declined.status == "declined", "a decline needs no balance"
@@ -431,7 +431,7 @@ async def test_settle_when_plan_was_cleared_then_a_correction_may_only_go_down(
     assert (await _settle(db_session, row.id, D(2))).status == "settled", "charged 2"
     await plans.delete_plan(db_session, tenant_id=tenant.id, scope="workspace", scope_id="")
     up = await _settle(db_session, row.id, D(3), expected=D(2))
-    assert up.status == "plan_gone", "a raise has no balance to check against"
+    assert up.status == "limit_gone", "a raise has no balance to check against"
     down = await _settle(db_session, row.id, D(1), expected=D(2))
     assert down.status == "settled" and down.row and down.row.charge == 1, "a refund still works"
 
@@ -449,11 +449,11 @@ async def test_plan_spent_when_monthly_then_last_months_rows_do_not_count(
         {"at": old, "id": row.id},
     )
     now = datetime.now(UTC)
-    assert await ledger.plan_spent(db_session, plan=plan, platform_user_id="U1", as_of=now) == (
+    assert await ledger.limit_spent(db_session, plan=plan, platform_user_id="U1", as_of=now) == (
         D(0),
         D(0),
     ), "a new month starts empty"
-    then = await ledger.plan_spent(db_session, plan=plan, platform_user_id="U1", as_of=old)
+    then = await ledger.limit_spent(db_session, plan=plan, platform_user_id="U1", as_of=old)
     assert then == (D(1), D(1)), "the old month still holds its row"
 
 
@@ -476,11 +476,11 @@ async def test_set_catalog_when_deleted_and_recreated_then_an_open_menu_is_stale
     """A menu removed and re-added at another price never passes an old pick (ABA)."""
     tenant = await make_tenant(db_session, platform="slack")
 
-    def menu(price: str) -> SupportCatalogSpec:
+    def menu(price: str) -> MenuSpec:
         option = {"key": "x", "label": "X", "price": {"kind": "fixed", "amount": price}}
-        return parse_catalog({"name": "M", "options": [option]})
+        return parse_menu({"name": "M", "options": [option]})
 
-    async def put(key: str, price: str) -> SupportCatalogRow:
+    async def put(key: str, price: str) -> SupportMenuRow:
         return await plans.set_catalog(
             db_session, tenant_id=tenant.id, key=key, spec=menu(price), set_by_account_id=None
         )
@@ -488,7 +488,7 @@ async def test_set_catalog_when_deleted_and_recreated_then_an_open_menu_is_stale
     first = await put("a", "1")
     doomed = await put("b", "1")
     await _plan(db_session, tenant.id, catalog=doomed, pool=D(10))
-    shown = await ledger.resolve_plan(
+    shown = await ledger.resolve_limit(
         db_session, tenant_id=tenant.id, place=PLACE, platform_user_id="U1", default_allowance=20
     )
     await _plan(db_session, tenant.id, catalog=first, pool=D(10))
@@ -534,7 +534,7 @@ async def test_submit_when_the_picked_price_or_fields_changed_then_stale(
             "options": (
                 quick.model_copy(update={"price": review.price}),
                 review,
-                SupportCatalogSpec.model_validate(
+                MenuSpec.model_validate(
                     {"name": "x", "options": [{**custom.model_dump(), "fields": [field]}]}
                 ).options[0],
             )

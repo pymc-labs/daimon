@@ -23,16 +23,15 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.support_escalation import SettleOutcome, get_request
 from daimon.core.stores.support_rows import SupportEscalationRow
-from daimon.core.support_plan_changes import is_support_channel, settle_from_post
-from daimon.core.support_plans import (
+from daimon.core.support import (
     CHARGE_FIELD,
     CLIENT_NOT_NOTIFIED,
     DECLINE,
-    PLAN_GONE,
+    LIMIT_GONE,
     REQUEST_GONE,
     SET_CHARGE,
     SETTLE_ELSEWHERE,
-    SupportPlanError,
+    SupportError,
     already_settled_text,
     format_credits,
     option_text,
@@ -40,6 +39,8 @@ from daimon.core.support_plans import (
     settle_range_text,
     settled_text,
 )
+from daimon.core.support_changes import settle_from_post
+from daimon.core.support_routing import in_channel
 
 import discord
 from discord.ext import commands
@@ -67,13 +68,17 @@ def _settler(by: str | None) -> str | None:
     return f"<@{by}>" if by and by.isdigit() else by
 
 
-def _in_support_channel(interaction: discord.Interaction[Any], support: SupportSettings) -> bool:
+def _parent_id(interaction: discord.Interaction[Any]) -> str | None:
     channel = interaction.channel
     parent = channel.parent_id if isinstance(channel, discord.Thread) else None
-    return is_support_channel(
+    return None if parent is None else str(parent)
+
+
+def _in_support_channel(interaction: discord.Interaction[Any], support: SupportSettings) -> bool:
+    return in_channel(
         configured=discord_channel(support),
         channel_id=str(interaction.channel_id),
-        parent_id=None if parent is None else str(parent),
+        parent_id=_parent_id(interaction),
     )
 
 
@@ -112,8 +117,8 @@ async def _finish(
     if after is None:
         await _notice(interaction, REQUEST_GONE)
         return
-    if outcome.status == "plan_gone":
-        await _notice(interaction, PLAN_GONE)
+    if outcome.status == "limit_gone":
+        await _notice(interaction, LIMIT_GONE)
         return
     if outcome.status in ("invalid", "over_balance"):
         text = settle_range_text(after.bounds, counted=after.counted, available=outcome.available)
@@ -155,6 +160,9 @@ async def _settle(
         settled_by=settler,
         settled_by_account_id=account_id,
         default_allowance=runtime.settings.support.credits_per_user,
+        channel_id=str(interaction.channel_id),
+        parent_id=_parent_id(interaction),
+        default_channel_id=discord_channel(runtime.settings.support),
     )
     _log.info("support.request_settled", escalation_id=str(row.id), status=outcome.status)
     await _finish(interaction, before=row, outcome=outcome)
@@ -197,7 +205,7 @@ class SettleModal(discord.ui.Modal, title=SET_CHARGE):
             charge = parse_amount(
                 str(self.amount_input.value or ""), name=CHARGE_FIELD.lower(), allow_zero=True
             )
-        except SupportPlanError as err:
+        except SupportError as err:
             await _notice(interaction, str(err))
             return
         await _settle(interaction, runtime=self._runtime, row=self._row, charge=charge)

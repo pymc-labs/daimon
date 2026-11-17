@@ -23,24 +23,24 @@ from daimon.adapters.teams.support_plan_card import CHARGE_INPUT, SETTLE_VERB
 from daimon.core import platform_names
 from daimon.core.config import SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.stores import support_plans as plans
+from daimon.core.stores import support as plans
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.platform_names import get_user_names
 from daimon.core.stores.support_escalation import get_request, submit_request
 from daimon.core.stores.support_rows import SupportEscalationRow
-from daimon.core.support_escalation import ALREADY_REQUESTED
-from daimon.core.support_plans import (
+from daimon.core.support import (
     CLIENT_NOT_NOTIFIED,
     EXEMPT_OFFER,
     NOT_ENOUGH_CREDITS,
     OPTIONS_CHANGED,
     SETTLE_ELSEWHERE,
+    MenuSpec,
     RequestChoice,
-    SupportCatalogSpec,
     SupportPlace,
     option_value,
-    parse_catalog,
+    parse_menu,
 )
+from daimon.core.support_escalation import ALREADY_REQUESTED
 from daimon.core.windows import WindowBounds
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -69,7 +69,7 @@ TENANT = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
 D = Decimal
 TWO = D(2)
 
-MENU = parse_catalog(
+MENU = parse_menu(
     {
         "name": "Support",
         "options": [
@@ -110,7 +110,7 @@ async def _seed(
     factory: async_sessionmaker[AsyncSession],
     *,
     menu: bool = True,
-    spec: SupportCatalogSpec = MENU,
+    spec: MenuSpec = MENU,
     per_person: Decimal = TWO,
     ends_at: datetime | None = None,
 ) -> None:
@@ -406,7 +406,7 @@ async def test_send_when_every_field_is_full_then_the_post_shows_each_unclipped(
     """Four full paragraph fields reach the support post whole, each on its own block."""
     fields = [{"key": f"part{n}", "kind": "paragraph", "label": f"Part {n}"} for n in range(1, 5)]
     price = {"kind": "range", "min": "1", "max": "2"}
-    spec = parse_catalog(
+    spec = parse_menu(
         {
             "name": "Support",
             "options": [{"key": "brief", "label": "Brief", "price": price, "fields": fields}],

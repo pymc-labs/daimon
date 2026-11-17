@@ -27,17 +27,17 @@ from daimon.adapters.cli.main import app
 from daimon.adapters.cli.tenant import TenantSelector
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.errors import StoreError
+from daimon.core.stores import support as plans
 from daimon.core.stores import support_escalation as ledger
-from daimon.core.stores import support_plans as plans
 from daimon.core.stores.security_audit import list_events
-from daimon.core.support_plan_admin import window_text
-from daimon.core.support_plan_changes import PlanValue
-from daimon.core.support_plans import (
+from daimon.core.support import (
     CLIENT_NOT_NOTIFIED,
     RequestChoice,
+    SupportError,
     SupportPlace,
-    SupportPlanError,
 )
+from daimon.core.support_admin import window_text
+from daimon.core.support_changes import PlanValue
 from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from rich.console import Console
@@ -262,11 +262,11 @@ async def test_allowance_when_a_mention_or_a_malformed_id_or_plan_then_unwraps_o
     _, selector = await _tenant(db_session_factory)
     console, out = _console()
     where = {"rt": rt, "console": console, "selector": selector}
-    with pytest.raises(SupportPlanError, match="alice is not a Slack user id"):
+    with pytest.raises(SupportError, match="alice is not a Slack user id"):
         await allowance_set(**where, platform_user_id="alice", credits="4")
-    with pytest.raises(SupportPlanError, match="Use workspace, agent:<name> or channel:C1."):
+    with pytest.raises(SupportError, match="Use workspace, agent:<name> or channel:C1."):
         await allowance_set(**where, platform_user_id="U1", credits="4", plan="C1")
-    with pytest.raises(SupportPlanError, match="or a channel, not team."):
+    with pytest.raises(SupportError, match="or a channel, not team."):
         await allowance_set(**where, platform_user_id="U1", credits="4", plan="team:C1")
     await allowance_set(**where, platform_user_id="<@U1|alice>", credits="4")
     assert "U1 under the default plan: cap 4" in out.getvalue(), f"unwrapped: {out.getvalue()}"

@@ -1,6 +1,6 @@
 """`/api/support-plans`: support plans, menus, own caps and undelivered requests, for admins.
 
-Every write goes through `daimon.core.support_plan_changes` under `SET_SUPPORT_PLAN`,
+Every write goes through `daimon.core.support_changes` under `SET_SUPPORT`,
 the rule the CLI and MCP follow, sending the value last read: a value that moved since
 is a 409. Each answer is the whole page, read fresh: plans and menus are never cached.
 """
@@ -20,18 +20,28 @@ from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.authz import Subject
 from daimon.core.channel_changes import ChannelActor, Expected
 from daimon.core.channel_directory import WEB_ROW_ID
+from daimon.core.stores import support as store
 from daimon.core.stores import support_escalation as ledger
-from daimon.core.stores import support_plans as store
 from daimon.core.stores.platform_names import get_channel_names, get_user_names
 from daimon.core.stores.support_rows import SupportAllowanceRow
 from daimon.core.stores.tenants import get_tenant
-from daimon.core.support_plan_admin import (
+from daimon.core.support import (
+    SupportScope,
+    format_credits,
+    parse_credits,
+    parse_limit_spec,
+    parse_menu,
+    parse_menu_key,
+    parse_person_id,
+    parse_scope,
+)
+from daimon.core.support_admin import (
     PlanUsage,
     list_plan_usage,
     options_text,
     parse_plan_value,
 )
-from daimon.core.support_plan_changes import (
+from daimon.core.support_changes import (
     PlanValue,
     clear_allowance,
     clear_plan,
@@ -39,16 +49,6 @@ from daimon.core.support_plan_changes import (
     set_allowance,
     set_catalog,
     set_plan,
-)
-from daimon.core.support_plans import (
-    PlanScope,
-    format_credits,
-    parse_catalog,
-    parse_catalog_key,
-    parse_credits,
-    parse_person_id,
-    parse_plan_spec,
-    parse_scope,
 )
 from daimon.core.windows import WindowState
 from fastapi import APIRouter, HTTPException
@@ -73,7 +73,7 @@ class PersonCapJson(BaseModel):
 
 
 class PlanJson(BaseModel):
-    scope: PlanScope
+    scope: SupportScope
     scope_id: str
     name: str | None
     """The channel's or agent's name; None for the workspace or a name not known."""
@@ -136,7 +136,7 @@ class PlanFields(BaseModel):
 
 
 class PlanChange(BaseModel):
-    scope: PlanScope
+    scope: SupportScope
     scope_id: str = ""
     plan: PlanFields | None
     """None clears the plan."""
@@ -155,7 +155,7 @@ class AllowanceChange(BaseModel):
     platform_user_id: str
     credits: str | None
     """None clears the person's own cap."""
-    scope: PlanScope | None = None
+    scope: SupportScope | None = None
     """None is the default, where no plan applies."""
     scope_id: str = ""
     expected: str | None
@@ -242,7 +242,7 @@ def support_plans_router(runtime: WebRuntime) -> APIRouter:
         async with runtime.sessionmaker() as db:
             plans = await list_plan_usage(db, tenant_id=tenant_id, now=datetime.now(UTC))
             catalogs = await store.list_catalogs(db, tenant_id=tenant_id)
-            defaults = tuple(await store.list_allowances(db, tenant_id=tenant_id, plan_id=None))
+            defaults = tuple(await store.list_allowances(db, tenant_id=tenant_id, limit_id=None))
             lost = await ledger.list_requests(
                 db, tenant_id=tenant_id, undelivered=True, limit=_UNDELIVERED_SHOWN
             )
@@ -311,7 +311,7 @@ def support_plans_router(runtime: WebRuntime) -> APIRouter:
             raise HTTPException(422, _PICK_AGENT)
 
     async def place_label(
-        caller: WebCaller, platform: str, scope: PlanScope | None, scope_id: str
+        caller: WebCaller, platform: str, scope: SupportScope | None, scope_id: str
     ) -> str:
         """The audit target: the channel or agent by name, never a person."""
         if scope is None or scope == "workspace":
@@ -353,7 +353,7 @@ def support_plans_router(runtime: WebRuntime) -> APIRouter:
                 )
             else:
                 fields = body.plan
-                spec = parse_plan_spec(
+                spec = parse_limit_spec(
                     scope=scope,
                     scope_id=scope_id or None,
                     catalog=fields.catalog,
@@ -375,7 +375,7 @@ def support_plans_router(runtime: WebRuntime) -> APIRouter:
         platform = await platform_of(caller)
         expected = Expected(body.expected_revision or None)
         with channel_refusals():
-            key = parse_catalog_key(key)
+            key = parse_menu_key(key)
             actor = _actor(caller, action=_MENU_ACTION, target=key, detail="Menu")
             if body.catalog is None:
                 await remove_catalog(
@@ -387,7 +387,7 @@ def support_plans_router(runtime: WebRuntime) -> APIRouter:
                     actor,
                     platform=platform,
                     key=key,
-                    spec=parse_catalog(body.catalog),
+                    spec=parse_menu(body.catalog),
                     expected=expected,
                 )
         return await page(caller)

@@ -34,18 +34,19 @@ from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.platform_names import get_user_names
 from daimon.core.stores.support_escalation import SettleOutcome, get_request
 from daimon.core.stores.support_rows import SupportEscalationRow
-from daimon.core.support_plan_changes import is_support_channel, settle_from_post
-from daimon.core.support_plans import (
+from daimon.core.support import (
     CHARGE_FIELD,
-    PLAN_GONE,
+    LIMIT_GONE,
     REQUEST_GONE,
     SETTLE_ELSEWHERE,
-    SupportPlanError,
+    SupportError,
     already_settled_text,
     parse_amount,
     settle_range_text,
     settled_text,
 )
+from daimon.core.support_changes import settle_from_post
+from daimon.core.support_routing import in_channel
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
@@ -80,7 +81,7 @@ class TeamsSupportSettle:
         conversation = activity.conversation
         if conversation.conversation_type != "channel":
             return False
-        return is_support_channel(
+        return in_channel(
             configured=self._runtime.settings.support.teams_escalation_channel_id,
             channel_id=conversation.id.split(";", 1)[0],
             parent_id=None,
@@ -126,7 +127,7 @@ class TeamsSupportSettle:
                 charge = parse_amount(
                     "" if value is None else str(value), name=CHARGE_FIELD.lower(), allow_zero=True
                 )
-            except SupportPlanError as err:
+            except SupportError as err:
                 return toast(str(err))
         return await self._settle(ctx, actor, data, row=row, charge=charge)
 
@@ -151,6 +152,9 @@ class TeamsSupportSettle:
             settled_by=actor.user_id,
             settled_by_account_id=None if principal is None else principal.account_id,
             default_allowance=self._runtime.settings.support.credits_per_user,
+            channel_id=ctx.activity.conversation.id.split(";", 1)[0],
+            parent_id=None,
+            default_channel_id=self._runtime.settings.support.teams_escalation_channel_id,
         )
         log.info("support.request_settled", escalation_id=str(row.id), status=outcome.status)
         return await self._finish(ctx, actor, data, before=row, outcome=outcome)
@@ -167,8 +171,8 @@ class TeamsSupportSettle:
         after = outcome.row
         if after is None:
             return toast(REQUEST_GONE)
-        if outcome.status == "plan_gone":
-            return toast(PLAN_GONE)
+        if outcome.status == "limit_gone":
+            return toast(LIMIT_GONE)
         if outcome.status in ("invalid", "over_balance"):
             return toast(
                 settle_range_text(after.bounds, counted=after.counted, available=outcome.available)

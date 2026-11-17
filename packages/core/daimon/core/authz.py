@@ -107,7 +107,7 @@ class Action(StrEnum):
     # Set, clear or raise the budget of one channel (`Place.channel_id`).
     SET_CHANNEL_BUDGET = "set_channel_budget"
     # Set support plans, catalogs and allowances, or settle a request by hand.
-    SET_SUPPORT_PLAN = "set_support_plan"
+    SET_SUPPORT = "set_support"
     # Add or remove the extra skills one channel's turns run with (`Place.channel_id`).
     SET_CHANNEL_SKILLS = "set_channel_skills"
     # Set or clear an agent's third-party MCP tool rule: current human admins only.
@@ -375,7 +375,7 @@ _CLIENT_REFUSED_ACTIONS = frozenset(
         Action.MANAGE_INTEGRATIONS,
         Action.MANAGE_AGENTS,
         Action.SET_CHANNEL_BUDGET,
-        Action.SET_SUPPORT_PLAN,
+        Action.SET_SUPPORT,
         Action.SET_CHANNEL_SKILLS,
         Action.SET_AGENT_TOOL_RULE,
         Action.SET_CHANNEL_AGENT_TOOL_RULE,
@@ -698,7 +698,7 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
 
     if req.action in (
         Action.SET_CHANNEL_BUDGET,
-        Action.SET_SUPPORT_PLAN,
+        Action.SET_SUPPORT,
         Action.SET_CHANNEL_SKILLS,
     ):
         # Money, and what a shared agent may do, stay with server admins; an

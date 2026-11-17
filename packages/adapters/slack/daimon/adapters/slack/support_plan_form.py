@@ -15,9 +15,8 @@ from typing import Any, Final, cast
 
 from daimon.adapters.slack.modal_limits import MAX_PLAIN_TEXT_INPUT_CHARS, finish_modal
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
-from daimon.core.stores.support_rows import PlanView
-from daimon.core.support_escalation import ASK_THE_TEAM, SEALED_NOTE_HINT, offer_text
-from daimon.core.support_plans import (
+from daimon.core.stores.support_rows import LimitView
+from daimon.core.support import (
     CHOOSE_OPTION,
     EXEMPT_OFFER,
     NOT_ENOUGH_CREDITS,
@@ -31,6 +30,7 @@ from daimon.core.support_plans import (
     option_value,
     price_text,
 )
+from daimon.core.support_escalation import ASK_THE_TEAM, SEALED_NOTE_HINT, offer_text
 
 PLAN_CALLBACK_ID: Final = "support_plan_request"
 OPTION_ACTION_ID: Final = "support_option_pick"
@@ -121,7 +121,7 @@ def build_plan_menu(
     channel_id: str,
     message_ts: str,
     thread_ts: str,
-    view: PlanView,
+    view: LimitView,
     sealed: bool,
     picked: str | None = None,
     refused: tuple[str, str] | None = None,
@@ -145,7 +145,7 @@ def build_plan_menu(
     blocks: list[dict[str, Any]] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": OFFER_PROMPT}}
     ]
-    footer = EXEMPT_OFFER if view.exempt else balance_text(view.balance, view.plan)
+    footer = EXEMPT_OFFER if view.exempt else balance_text(view.balance, view.period)
     problem = refused[1] if refused else None
     hints = (footer, SEALED_NOTE_HINT if sealed else None, problem)
     blocks.extend(_context(text) for text in hints if text)

@@ -10,7 +10,7 @@ from pathlib import Path
 from daimon.core.platform_names import ChannelSighting
 from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores.platform_names import upsert_channel_names
-from daimon.core.support_plans import RequestChoice, SupportPlace
+from daimon.core.support import RequestChoice, SupportPlace
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .chat_support import shown_trail

@@ -31,10 +31,10 @@ from daimon.adapters.mcp.tools.support_plans import (
 )
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.scope import DeploymentDefault
+from daimon.core.stores import support as store
 from daimon.core.stores import support_escalation as ledger
-from daimon.core.stores import support_plans as store
 from daimon.core.stores.domain import Role, TenantRow
-from daimon.core.support_plans import (
+from daimon.core.support import (
     CLIENT_NOT_NOTIFIED,
     MAX_FIELDS,
     MAX_OPTIONS,
@@ -42,7 +42,7 @@ from daimon.core.support_plans import (
     MAX_TEXT_CHARS,
     RequestChoice,
     SupportPlace,
-    parse_catalog,
+    parse_menu,
 )
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp import FastMCP
@@ -247,7 +247,7 @@ async def test_cap_when_id_is_a_mention_or_not_a_discord_id_then_unwraps_or_refu
     with pytest.raises(ToolError, match="u1 is not a Discord user id"):
         await cap("u1")
     async with committing_sessionmaker() as session:
-        caps = await store.list_allowances(session, tenant_id=tenant.id, plan_id=None)
+        caps = await store.list_allowances(session, tenant_id=tenant.id, limit_id=None)
     assert [c.platform_user_id for c in caps] == [_PERSON], "only the valid id saved"
 
 
@@ -302,7 +302,7 @@ async def test_requests_list_when_undelivered_then_only_requests_no_channel_rece
                 message_id=message,
                 ma_session_id=None,
                 place=SupportPlace(channel_id=_PARENT, agent_id=None),
-                choice=RequestChoice.of(parse_catalog(_MENU).options[0]),
+                choice=RequestChoice.of(parse_menu(_MENU).options[0]),
                 default_allowance=20,
             )
         assert outcome.row is not None, "recorded"
@@ -344,7 +344,7 @@ async def test_settle_tells_the_settler_the_client_is_not_told_and_corrects(
             message_id="m1",
             ma_session_id=None,
             place=SupportPlace(channel_id=_PARENT, agent_id=None),
-            choice=RequestChoice.of(parse_catalog(_MENU).options[0]),
+            choice=RequestChoice.of(parse_menu(_MENU).options[0]),
             default_allowance=20,
         )
     assert outcome.row is not None, "a pending request"
@@ -393,7 +393,7 @@ async def test_catalog_set_docs_when_read_then_the_example_is_a_valid_menu() -> 
     tool = next(t for t in await mcp.list_tools() if t.name == "support_catalog_set")
     doc = tool.description or ""
     example = doc.split("Example::")[1].split("\n\n")[1]
-    menu = parse_catalog(json.loads(example))
+    menu = parse_menu(json.loads(example))
     assert [o.price.kind for o in menu.options] == ["fixed"] * 4, "the 4-option fixed menu"
     flat = " ".join(doc.split())
     for limit in (MAX_OPTIONS, MAX_FIELDS, MAX_TEXT_CHARS, MAX_PARAGRAPH_CHARS):

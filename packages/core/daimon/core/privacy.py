@@ -47,8 +47,8 @@ from daimon.core.stores import routines as routines_store
 from daimon.core.stores import selfhosted_resources as selfhosted_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
+from daimon.core.stores import support as support_store
 from daimon.core.stores import support_escalation as support_escalation_store
-from daimon.core.stores import support_plans as support_plans_store
 from daimon.core.stores import tag_opt_outs as tag_opt_outs_store
 from daimon.core.stores import teams_message_admissions as teams_admissions_store
 from daimon.core.stores import tenants as tenants_store
@@ -458,14 +458,14 @@ async def collect_purge_preview(
             )
         )
         support_escalations = PurgePreviewRow(count=support_escalations_count, example=None)
-        # Plan rows are anonymized, not deleted, so the preview names them apart; the
-        # allowances and the settled-by rows match purge's principal and account passes.
-        support_anonymized_count = await support_escalation_store.count_plan_requests_for_account(
+        # Limit rows are anonymized, not deleted, so the preview names them apart; the
+        # own limits and the settled-by rows match purge's principal and account passes.
+        support_anonymized_count = await support_escalation_store.count_limit_requests_for_account(
             session,
             account_id=account_id,
             platform_user_keys=message_feedback_platform_user_keys,
         )
-        support_allowances_count = await support_plans_store.count_allowances_for_people(
+        support_allowances_count = await support_store.count_person_limits_for_people(
             session, platform_user_keys=message_feedback_platform_user_keys
         )
         support_settlers_count = await support_escalation_store.count_settled_by(

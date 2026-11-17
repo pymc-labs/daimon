@@ -1,14 +1,16 @@
-"""support_plans: credit plans, option catalogs and a settled ledger for Ask a person.
+"""support_plans: limits, menus, a request channel and a settled ledger for Ask a person.
 
-`support_catalogs` holds each tenant's option menus, `support_plans` a pool or
-per-person cap on a workspace, agent or channel, and `support_allowances` one
-person's own cap. `support_escalations` gains the ledger columns: which ledger
-a row is charged to, its plan, the option snapshot and answers, the hold and
-charge, the settle status and the support post. Server defaults make existing
-rows, and rows written by older pods, default-ledger rows charged 1, so the
-default sum equals the old count. Downgrading drops the tables and columns,
-losing every plan, catalog, allowance and settlement, and deletes the requests
-that did not count as default credits (plan, exempt, declined or pending).
+`support_limits` holds credits for a workspace, an agent or a channel, and a
+person's own limit at one of them (scope workspace: everywhere).
+`support_menus` holds each tenant's option menus and `support_menu_places`
+which menu a place uses. `support_channels` is a workspace's own request
+channel. `support_escalations` gains the ledger columns: which ledger a row is
+charged to, its limit, the option snapshot and answers, the hold and charge,
+the settle status and the support post. Server defaults make existing rows,
+and rows written by older pods, default-ledger rows charged 1, so the default
+sum equals the old count. Downgrading drops the tables and columns, losing
+every limit, menu, channel and settlement, and deletes the requests that did
+not count as default credits (limit, exempt, declined or pending).
 
 downgrade: destructive
 """
@@ -25,12 +27,8 @@ down_revision: str | None = "0205_web_search_usage"
 branch_labels: str | None = None
 depends_on: str | None = None
 
-_WINDOW_BOUNDS = (
-    "(\"window\" = 'fixed' AND starts_at IS NOT NULL AND ends_at IS NOT NULL "
-    "AND starts_at < ends_at) "
-    "OR (\"window\" = 'total' AND ends_at IS NULL) "
-    "OR (\"window\" = 'monthly' AND starts_at IS NULL AND ends_at IS NULL)"
-)
+_SCOPES = "scope IN ('workspace', 'agent', 'channel')"
+_SCOPE_ID = "(scope = 'workspace') = (scope_id = '')"
 
 
 def _id() -> sa.Column[uuid.UUID]:
@@ -39,23 +37,36 @@ def _id() -> sa.Column[uuid.UUID]:
     )
 
 
-def _tenant() -> sa.Column[uuid.UUID]:
+def _tenant(*, primary_key: bool = False) -> sa.Column[uuid.UUID]:
     return sa.Column(
         "tenant_id",
         UUID(as_uuid=True),
         sa.ForeignKey("tenants.id", ondelete="CASCADE"),
         nullable=False,
+        primary_key=primary_key,
     )
 
 
-def _audit_columns() -> list[sa.Column[uuid.UUID] | sa.Column[datetime]]:
+def _revision() -> sa.Column[int]:
+    return sa.Column(
+        "revision",
+        sa.Integer(),
+        nullable=False,
+        server_default=sa.text("nextval('support_revision_seq')"),
+    )
+
+
+def _set_by() -> sa.Column[uuid.UUID]:
+    return sa.Column(
+        "set_by_account_id",
+        UUID(as_uuid=True),
+        sa.ForeignKey("accounts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+
+def _times() -> list[sa.Column[datetime]]:
     return [
-        sa.Column(
-            "set_by_account_id",
-            UUID(as_uuid=True),
-            sa.ForeignKey("accounts.id", ondelete="SET NULL"),
-            nullable=True,
-        ),
         sa.Column(
             "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
         ),
@@ -67,89 +78,92 @@ def _audit_columns() -> list[sa.Column[uuid.UUID] | sa.Column[datetime]]:
 
 def upgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
-    # One counter for every menu, so a deleted and recreated menu never repeats a revision.
-    op.execute("CREATE SEQUENCE support_catalog_revision_seq")
+    # One counter for menus, limits and channels: a deleted and recreated row never
+    # repeats a revision an open form still carries.
+    op.execute("CREATE SEQUENCE support_revision_seq")
     op.create_table(
-        "support_catalogs",
+        "support_menus",
         _id(),
         _tenant(),
         sa.Column("key", sa.Text(), nullable=False),
         sa.Column("name", sa.Text(), nullable=False),
-        sa.Column(
-            "revision",
-            sa.Integer(),
-            nullable=False,
-            server_default=sa.text("nextval('support_catalog_revision_seq')"),
-        ),
+        _revision(),
         sa.Column("options", JSONB(), nullable=False),
-        *_audit_columns(),
-        sa.UniqueConstraint("tenant_id", "key", name="uq_support_catalogs_tenant_key"),
-        sa.CheckConstraint("key ~ '^[a-z0-9-]{1,32}$'", name="ck_support_catalogs_key"),
-        sa.CheckConstraint("revision >= 1", name="ck_support_catalogs_revision"),
+        _set_by(),
+        *_times(),
+        sa.UniqueConstraint("tenant_id", "key", name="uq_support_menus_tenant_key"),
+        sa.CheckConstraint("key ~ '^[a-z0-9-]{1,32}$'", name="ck_support_menus_key"),
     )
     op.create_table(
-        "support_plans",
+        "support_menu_places",
+        _tenant(primary_key=True),
+        sa.Column("scope", sa.Text(), primary_key=True),
+        sa.Column("scope_id", sa.Text(), primary_key=True),
+        sa.Column(
+            "menu_id",
+            UUID(as_uuid=True),
+            sa.ForeignKey("support_menus.id", ondelete="RESTRICT"),
+            nullable=False,
+        ),
+        _set_by(),
+        *_times(),
+        sa.CheckConstraint(_SCOPES, name="ck_support_menu_places_scope"),
+        sa.CheckConstraint(_SCOPE_ID, name="ck_support_menu_places_scope_id"),
+    )
+    op.create_table(
+        "support_limits",
         _id(),
         _tenant(),
-        sa.Column("platform", sa.Text(), nullable=False),
         sa.Column("scope", sa.Text(), nullable=False),
         sa.Column("scope_id", sa.Text(), nullable=False),
-        sa.Column(
-            "catalog_id",
-            UUID(as_uuid=True),
-            sa.ForeignKey("support_catalogs.id", ondelete="RESTRICT"),
-            nullable=True,
-        ),
-        sa.Column("pool", sa.Numeric(10, 2), nullable=True),
-        sa.Column("per_person", sa.Numeric(10, 2), nullable=True),
+        sa.Column("platform_user_id", sa.Text(), nullable=True),
+        sa.Column("shared", sa.Numeric(10, 2), nullable=True),
+        sa.Column("each_person", sa.Numeric(10, 2), nullable=True),
         sa.Column("window", sa.Text(), nullable=False),
         sa.Column("starts_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("ends_at", sa.DateTime(timezone=True), nullable=True),
-        *_audit_columns(),
-        sa.UniqueConstraint("tenant_id", "scope", "scope_id", name="uq_support_plans_scope"),
+        _revision(),
+        _set_by(),
+        *_times(),
+        sa.CheckConstraint(_SCOPES, name="ck_support_limits_scope"),
+        sa.CheckConstraint(_SCOPE_ID, name="ck_support_limits_scope_id"),
         sa.CheckConstraint(
-            "scope IN ('workspace', 'agent', 'channel')", name="ck_support_plans_scope"
+            "(platform_user_id IS NULL AND (shared IS NOT NULL OR each_person IS NOT NULL)) "
+            "OR (platform_user_id IS NOT NULL AND shared IS NULL AND each_person IS NOT NULL)",
+            name="ck_support_limits_amounts",
         ),
+        sa.CheckConstraint("shared >= 0 AND each_person >= 0", name="ck_support_limits_positive"),
+        sa.CheckConstraint("\"window\" IN ('total', 'monthly')", name="ck_support_limits_window"),
         sa.CheckConstraint(
-            "(scope = 'workspace') = (scope_id = '')", name="ck_support_plans_scope_id"
+            "starts_at IS NULL OR ends_at IS NULL OR starts_at < ends_at",
+            name="ck_support_limits_dates",
         ),
-        sa.CheckConstraint(
-            "(pool IS NOT NULL OR per_person IS NOT NULL) AND pool >= 0 AND per_person >= 0",
-            name="ck_support_plans_limits",
-        ),
-        sa.CheckConstraint(
-            "\"window\" IN ('monthly', 'total', 'fixed')", name="ck_support_plans_window"
-        ),
-        sa.CheckConstraint(_WINDOW_BOUNDS, name="ck_support_plans_bounds"),
+    )
+    op.create_index(
+        "uq_support_limits_place",
+        "support_limits",
+        ["tenant_id", "scope", "scope_id"],
+        unique=True,
+        postgresql_where=sa.text("platform_user_id IS NULL"),
+    )
+    op.create_index(
+        "uq_support_limits_person",
+        "support_limits",
+        ["tenant_id", "scope", "scope_id", "platform_user_id"],
+        unique=True,
+        postgresql_where=sa.text("platform_user_id IS NOT NULL"),
     )
     op.create_table(
-        "support_allowances",
-        _id(),
-        _tenant(),
-        sa.Column(
-            "plan_id",
-            UUID(as_uuid=True),
-            sa.ForeignKey("support_plans.id", ondelete="CASCADE"),
-            nullable=True,
-        ),
-        sa.Column("platform_user_id", sa.Text(), nullable=False),
-        sa.Column("credits", sa.Numeric(10, 2), nullable=False),
-        *_audit_columns(),
-        sa.CheckConstraint("credits >= 0", name="ck_support_allowances_credits"),
-    )
-    op.create_index(
-        "uq_support_allowances_plan_user",
-        "support_allowances",
-        ["tenant_id", "plan_id", "platform_user_id"],
-        unique=True,
-        postgresql_where=sa.text("plan_id IS NOT NULL"),
-    )
-    op.create_index(
-        "uq_support_allowances_default_user",
-        "support_allowances",
-        ["tenant_id", "platform_user_id"],
-        unique=True,
-        postgresql_where=sa.text("plan_id IS NULL"),
+        "support_channels",
+        _tenant(primary_key=True),
+        sa.Column("platform", sa.Text(), nullable=False),
+        sa.Column("channel_id", sa.Text(), nullable=False),
+        sa.Column("slack_team_id", sa.Text(), nullable=True),
+        sa.Column("teams_team_id", sa.Text(), nullable=True),
+        sa.Column("teams_service_url", sa.Text(), nullable=True),
+        _revision(),
+        _set_by(),
+        *_times(),
     )
     _upgrade_escalations()
 
@@ -159,9 +173,9 @@ def _upgrade_escalations() -> None:
     columns = [
         sa.Column("charged_to", sa.Text(), nullable=False, server_default="default"),
         sa.Column(
-            "plan_id",
+            "limit_id",
             UUID(as_uuid=True),
-            sa.ForeignKey("support_plans.id", ondelete="SET NULL"),
+            sa.ForeignKey("support_limits.id", ondelete="SET NULL"),
             nullable=True,
         ),
         sa.Column("option_key", sa.Text(), nullable=True),
@@ -184,15 +198,15 @@ def _upgrade_escalations() -> None:
     for column in columns:
         op.add_column(table, column)
     checks = {
-        "ck_support_escalations_charged_to": "charged_to IN ('default', 'plan', 'exempt')",
-        "ck_support_escalations_default": "charged_to <> 'default' OR plan_id IS NULL",
+        "ck_support_escalations_charged_to": "charged_to IN ('default', 'limit', 'exempt')",
+        "ck_support_escalations_default": "charged_to <> 'default' OR limit_id IS NULL",
         "ck_support_escalations_status": "status IN ('pending', 'settled', 'declined')",
         "ck_support_escalations_pending": "(status = 'pending') = (charge IS NULL)",
         "ck_support_escalations_amounts": "hold >= 0 AND (charge IS NULL OR charge >= 0)",
     }
     for name, condition in checks.items():
         op.create_check_constraint(name, table, condition)
-    op.create_index("support_escalations_plan_idx", table, ["tenant_id", "plan_id", "created_at"])
+    op.create_index("support_escalations_limit_idx", table, ["tenant_id", "limit_id", "created_at"])
     op.create_index(
         "support_escalations_pending_idx",
         table,
@@ -204,11 +218,11 @@ def _upgrade_escalations() -> None:
 def downgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
     table = "support_escalations"
-    # The old ledger counts every row as one default credit. Plan, exempt, declined
+    # The old ledger counts every row as one default credit. Limit, exempt, declined
     # and pending rows would be charged to the person's default allowance.
     op.execute(f"DELETE FROM {table} WHERE charged_to <> 'default' OR status <> 'settled'")
     op.drop_index("support_escalations_pending_idx", table_name=table)
-    op.drop_index("support_escalations_plan_idx", table_name=table)
+    op.drop_index("support_escalations_limit_idx", table_name=table)
     for name in (
         "ck_support_escalations_amounts",
         "ck_support_escalations_pending",
@@ -229,11 +243,12 @@ def downgrade() -> None:
         "answers",
         "option",
         "option_key",
-        "plan_id",
+        "limit_id",
         "charged_to",
     ):
         op.drop_column(table, column)
-    op.drop_table("support_allowances")
-    op.drop_table("support_plans")
-    op.drop_table("support_catalogs")
-    op.execute("DROP SEQUENCE support_catalog_revision_seq")
+    op.drop_table("support_channels")
+    op.drop_table("support_limits")
+    op.drop_table("support_menu_places")
+    op.drop_table("support_menus")
+    op.execute("DROP SEQUENCE support_revision_seq")

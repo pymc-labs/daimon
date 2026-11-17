@@ -13,9 +13,8 @@ from collections.abc import Mapping, Sequence
 from typing import Final
 
 from daimon.adapters.teams.card_actions import error_text, text_lines
-from daimon.core.stores.support_rows import PlanView, SupportEscalationRow
-from daimon.core.support_escalation import SEALED_NOTE_HINT
-from daimon.core.support_plans import (
+from daimon.core.stores.support_rows import LimitView, SupportEscalationRow
+from daimon.core.support import (
     CHARGE_FIELD,
     CHOOSE_OPTION,
     CLIENT_NOT_NOTIFIED,
@@ -39,6 +38,7 @@ from daimon.core.support_plans import (
     step_text,
     validate_answers,
 )
+from daimon.core.support_escalation import SEALED_NOTE_HINT
 from microsoft_teams.cards import (
     Action,
     ActionSet,
@@ -73,12 +73,12 @@ def subtle(text: str) -> TextBlock:
     return TextBlock(text=text, is_subtle=True, size="Small", wrap=True, spacing="Medium")
 
 
-def footer(view: PlanView) -> str | None:
+def footer(view: LimitView) -> str | None:
     """What a request uses here, when it is not the default plan's request count."""
-    return EXEMPT_OFFER if view.exempt else balance_text(view.balance, view.plan)
+    return EXEMPT_OFFER if view.exempt else balance_text(view.balance, view.period)
 
 
-def menu_body(view: PlanView, *, sealed: bool, error: str | None = None) -> list[CardElement]:
+def menu_body(view: LimitView, *, sealed: bool, error: str | None = None) -> list[CardElement]:
     """The menu: each option with its price, the balance, and one pick."""
     body: list[CardElement] = [error_text(error)] if error else []
     body += text_lines(MENU_PROMPT)
@@ -152,7 +152,7 @@ def option_body(
 
 
 def read_choice(data: Mapping[str, object], option: SupportOption) -> RequestChoice:
-    """The choice a form sent; a missing step or a bad answer raises `SupportPlanError`.
+    """The choice a form sent; a missing step or a bad answer raises `SupportError`.
 
     Checked here so the form comes back with the reason; `submit_request` checks again.
     """

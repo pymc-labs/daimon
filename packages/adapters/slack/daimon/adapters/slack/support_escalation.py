@@ -99,12 +99,26 @@ from daimon.core.stores.support_escalation import (
     SubmitOutcome,
     asked_options,
     mark_delivered,
-    resolve_plan,
+    resolve_limit,
     submit_request,
 )
-from daimon.core.stores.support_rows import PlanView, SupportEscalationRow
+from daimon.core.stores.support_rows import LimitView, SupportEscalationRow
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import get_latest_thread_session
+from daimon.core.support import (
+    EXEMPT_OFFER,
+    OPTIONS_CHANGED,
+    RequestChoice,
+    SupportError,
+    SupportPlace,
+    balance_text,
+    ended_text,
+    offer_refusal,
+    pick_refusal,
+    picked_option,
+    received_text,
+    refusal_text,
+)
 from daimon.core.support_escalation import (
     ALREADY_REQUESTED,
     ASK_THE_TEAM,
@@ -115,20 +129,6 @@ from daimon.core.support_escalation import (
     UNAVAILABLE,
     is_enabled,
     offer_text,
-)
-from daimon.core.support_plans import (
-    EXEMPT_OFFER,
-    OPTIONS_CHANGED,
-    RequestChoice,
-    SupportPlace,
-    SupportPlanError,
-    balance_text,
-    ended_text,
-    offer_refusal,
-    pick_refusal,
-    picked_option,
-    received_text,
-    refusal_text,
 )
 from daimon.core.support_routing import log_undelivered
 from slack_sdk.web.async_client import AsyncWebClient
@@ -447,7 +447,7 @@ async def _decide_click(
     # Decision 5: a workspace admin's requests use no credits.
     exempt = await resolve_is_platform_admin(client, user_id=user_id, host_team_id=team_id)
     async with runtime.sessionmaker() as session:
-        view = await resolve_plan(
+        view = await resolve_limit(
             session,
             tenant_id=tenant_id,
             place=origin.support_place,
@@ -459,12 +459,12 @@ async def _decide_click(
 
     if not view.active:
         return ended_text(view, now=datetime.now(UTC))
-    if view.plan is None and asked:
+    if view.period is None and asked:
         return ALREADY_REQUESTED
     if (refused := offer_refusal(view, asked=asked)) is not None:
         return refused
     sealed = readers_limited_at(access.policy, channel_id=channel_id, thread_id=thread_ts)
-    if view.catalog is not None:
+    if view.menu is not None:
         # A menu asks once per option: `submit_request` dedups, so another
         # option on the same answer stays open.
         return build_plan_menu(
@@ -481,7 +481,7 @@ async def _decide_click(
         thread_ts=thread_ts,
         remaining=None if left is None else int(max(left, 0)),
         sealed=sealed,
-        footer=EXEMPT_OFFER if view.exempt else balance_text(view.balance, view.plan),
+        footer=EXEMPT_OFFER if view.exempt else balance_text(view.balance, view.period),
     )
 
 
@@ -617,7 +617,7 @@ async def _picked_menu(
     )
     exempt = await resolve_is_platform_admin(client, user_id=user_id, host_team_id=team_id)
     async with runtime.sessionmaker() as session:
-        view = await resolve_plan(
+        view = await resolve_limit(
             session,
             tenant_id=origin.tenant_id,
             place=origin.support_place,
@@ -631,7 +631,7 @@ async def _picked_menu(
         except AccessPolicyUnreadable:
             policy = None
     option = picked_option(view.spec, picked)
-    if option is None or view.catalog is None:
+    if option is None or view.menu is None:
         return notice_modal(title=ASK_THE_TEAM, text=OPTIONS_CHANGED)
     if not view.active:
         return notice_modal(title=ASK_THE_TEAM, text=ended_text(view, now=datetime.now(UTC)))
@@ -785,7 +785,7 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
                 exempt=exempt,
                 source_allowed=source_allowed,
             )
-    except SupportPlanError as err:
+    except SupportError as err:
         # A missing step or a bad answer: nothing was recorded.
         await reply(str(err))
         return
@@ -899,7 +899,7 @@ async def _post_to_escalation_channel(
     dest_channel: str,
     sealed: bool,
     row: SupportEscalationRow,
-    view: PlanView,
+    view: LimitView,
 ) -> SupportPost | None:
     """Post the request; a pending one carries Set charge and Decline. None unless it landed."""
     s = submission
@@ -907,8 +907,8 @@ async def _post_to_escalation_channel(
     note = s.note if s.choice is None else row.note
     facts: str | None = None
     if row.charged_to != "default":
-        balance = balance_text(view.balance, view.plan) if row.charged_to == "plan" else None
-        facts = request_facts(row, menu=view.catalog is not None, balance=balance)
+        balance = balance_text(view.balance, view.period) if row.charged_to == "limit" else None
+        facts = request_facts(row, menu=view.menu is not None, balance=balance)
     blocks: Callable[[str | None], list[dict[str, Any]]] | None = None
     text_facts = facts
     # `support_settle` accepts a settle in the named escalation workspace, or from

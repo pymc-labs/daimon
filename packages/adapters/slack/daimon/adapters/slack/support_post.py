@@ -14,7 +14,7 @@ from typing import Any, Final, cast
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.core.stores.support_rows import SupportEscalationRow
-from daimon.core.support_plans import (
+from daimon.core.support import (
     CLIENT_NOT_NOTIFIED,
     DECLINE,
     SET_CHARGE,

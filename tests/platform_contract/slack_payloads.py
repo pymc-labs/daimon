@@ -71,7 +71,7 @@ def support_modal() -> Any:
 @entry("support_modal_exempt", "slack", "view")
 def support_modal_exempt() -> Any:
     from daimon.adapters.slack.support_escalation import build_support_modal
-    from daimon.core.support_plans import EXEMPT_OFFER
+    from daimon.core.support import EXEMPT_OFFER
 
     return build_support_modal(
         channel_id="C1",
@@ -111,12 +111,12 @@ _SUPPORT_MENU = {
 
 
 def _support_plan_view() -> Any:
-    from daimon.core.stores.support_rows import PlanView, SupportCatalogRow
-    from daimon.core.support_plans import Balance, parse_catalog
+    from daimon.core.stores.support_rows import LimitView, SupportMenuRow
+    from daimon.core.support import Balance, parse_menu
 
-    spec = parse_catalog(_SUPPORT_MENU)
+    spec = parse_menu(_SUPPORT_MENU)
     now = datetime(2026, 1, 1, tzinfo=UTC)
-    catalog = SupportCatalogRow(
+    catalog = SupportMenuRow(
         id=uuid.UUID(int=1),
         tenant_id=uuid.UUID(int=2),
         key="support",
@@ -128,14 +128,14 @@ def _support_plan_view() -> Any:
         updated_at=now,
     )
     balance = Balance(pool=Decimal(10), pool_used=Decimal(2), cap=None, person_used=Decimal(0))
-    return PlanView(plan=None, catalog=catalog, balance=balance, state="active")
+    return LimitView(plan=None, catalog=catalog, balance=balance, state="active")
 
 
 def _support_pending_row() -> Any:
     from daimon.core.stores.support_rows import SupportEscalationRow
-    from daimon.core.support_plans import OptionSnapshot, parse_catalog
+    from daimon.core.support import OptionSnapshot, parse_menu
 
-    review = parse_catalog(_SUPPORT_MENU).options[1]
+    review = parse_menu(_SUPPORT_MENU).options[1]
     return SupportEscalationRow(
         id=uuid.UUID(int=3),
         tenant_id=uuid.UUID(int=2),
@@ -148,7 +148,7 @@ def _support_pending_row() -> Any:
         note="Please check the model.",
         delivered_at=None,
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
-        charged_to="plan",
+        charged_to="limit",
         option_key=review.key,
         option=OptionSnapshot(key=review.key, label=review.label, price=review.price),
         hold=Decimal(3),

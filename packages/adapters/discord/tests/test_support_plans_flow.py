@@ -23,20 +23,20 @@ from daimon.adapters.discord.support_escalation import (
 from daimon.adapters.discord.support_settle import SettleModal, SupportSettleButton
 from daimon.core.config import SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.stores import support_plans as plans
+from daimon.core.stores import support as plans
 from daimon.core.stores.domain import Role
 from daimon.core.stores.platform_names import ChannelSighting, upsert_channel_names
 from daimon.core.stores.support_escalation import get_request, submit_request
-from daimon.core.support_escalation import ALREADY_REQUESTED
-from daimon.core.support_escalation import CUSTOM_ID_TEMPLATE as BUTTON_TEMPLATE
-from daimon.core.support_plans import (
+from daimon.core.support import (
     CLIENT_NOT_NOTIFIED,
     NOT_ENOUGH_CREDITS,
     RequestChoice,
     SupportPlace,
     option_value,
-    parse_catalog,
+    parse_menu,
 )
+from daimon.core.support_escalation import ALREADY_REQUESTED
+from daimon.core.support_escalation import CUSTOM_ID_TEMPLATE as BUTTON_TEMPLATE
 from daimon.core.windows import WindowBounds
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
@@ -49,7 +49,7 @@ _ANSWER = "444"
 _SUPPORT = "999"
 D = Decimal
 _TWO = D(2)
-MENU = parse_catalog(
+MENU = parse_menu(
     {
         "name": "Support",
         "options": [

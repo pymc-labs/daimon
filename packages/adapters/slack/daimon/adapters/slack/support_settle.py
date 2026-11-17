@@ -38,15 +38,14 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.support_escalation import SettleOutcome, get_request
 from daimon.core.stores.support_rows import SupportEscalationRow
-from daimon.core.support_plan_changes import is_support_channel, settle_from_post
-from daimon.core.support_plans import (
+from daimon.core.support import (
     CHARGE_FIELD,
     CLIENT_NOT_NOTIFIED,
-    PLAN_GONE,
+    LIMIT_GONE,
     REQUEST_GONE,
     SET_CHARGE,
     SETTLE_ELSEWHERE,
-    SupportPlanError,
+    SupportError,
     already_settled_text,
     format_credits,
     option_text,
@@ -54,6 +53,8 @@ from daimon.core.support_plans import (
     settle_range_text,
     settled_text,
 )
+from daimon.core.support_changes import settle_from_post
+from daimon.core.support_routing import in_channel
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -89,7 +90,7 @@ def _in_support_channel(support: SupportSettings, *, team_id: str, channel_id: s
     """
     if support.slack_escalation_team_id not in (None, team_id):
         return False
-    return is_support_channel(
+    return in_channel(
         configured=support.slack_escalation_channel_id, channel_id=channel_id, parent_id=None
     )
 
@@ -167,8 +168,8 @@ async def _finish(
     if after is None:
         await _notice(client, post, REQUEST_GONE, error=True)
         return
-    if outcome.status == "plan_gone":
-        await _notice(client, post, PLAN_GONE, error=True)
+    if outcome.status == "limit_gone":
+        await _notice(client, post, LIMIT_GONE, error=True)
         return
     if outcome.status in ("invalid", "over_balance"):
         text = settle_range_text(after.bounds, counted=after.counted, available=outcome.available)
@@ -208,6 +209,9 @@ async def _settle(
         settled_by=post.user_id,
         settled_by_account_id=None if principal is None else principal.account_id,
         default_allowance=runtime.settings.support.credits_per_user,
+        channel_id=post.channel_id,
+        parent_id=None,
+        default_channel_id=runtime.settings.support.slack_escalation_channel_id,
     )
     log.info("support.request_settled", escalation_id=str(row.id), status=outcome.status)
     await _finish(client, post, before=row, outcome=outcome, message=message)
@@ -358,7 +362,7 @@ def evaluate_settle_submission(payload: dict[str, Any]) -> SettleSubmission:
         charge = parse_amount(
             str(element.get("value") or ""), name=CHARGE_FIELD.lower(), allow_zero=True
         )
-    except SupportPlanError as err:
+    except SupportError as err:
         errors = {_CHARGE_BLOCK_ID: str(err)}
         return dataclasses.replace(
             base, response_payload={"response_action": "errors", "errors": errors}

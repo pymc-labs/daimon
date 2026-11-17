@@ -172,8 +172,8 @@ from daimon.core.stores import security_audit as security_audit_store
 from daimon.core.stores import selfhosted_resources as selfhosted_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
+from daimon.core.stores import support as support_store
 from daimon.core.stores import support_escalation as support_escalation_store
-from daimon.core.stores import support_plans as support_plans_store
 from daimon.core.stores import tag_opt_outs as tag_opt_outs_store
 from daimon.core.stores import teams_message_admissions as teams_admissions_store
 from daimon.core.stores import tenants as tenants_store
@@ -382,15 +382,15 @@ async def _purge_principal_in_session(
                 platform_user_id=principal.external_id,
             )
         )
-        # A plan row is the pool's ledger too: the person leaves it, the charge stays.
+        # A limit row is the shared ledger too: the person leaves it, the charge stays.
         support_anonymized_count = (
-            await support_escalation_store.anonymize_plan_requests_for_platform_user(
+            await support_escalation_store.anonymize_limit_requests_for_platform_user(
                 session,
                 tenant_id=principal.tenant_id,
                 platform_user_id=principal.external_id,
             )
         )
-        support_allowances_count = await support_plans_store.delete_allowances_for_people(
+        support_allowances_count = await support_store.delete_person_limits_for_people(
             session, platform_user_keys=[(principal.tenant_id, principal.external_id)]
         )
         # A support post may sit in another tenant, so a settler matches in any.
@@ -707,7 +707,7 @@ async def _purge_account_transaction(
             session, account_id=account_id, platform_user_keys=platform_user_keys
         )
     )
-    support_anonymized_count = await support_escalation_store.anonymize_plan_requests_for_account(
+    support_anonymized_count = await support_escalation_store.anonymize_limit_requests_for_account(
         session, account_id=account_id, platform_user_keys=platform_user_keys
     )
     support_settlers_count = await support_escalation_store.clear_settler(

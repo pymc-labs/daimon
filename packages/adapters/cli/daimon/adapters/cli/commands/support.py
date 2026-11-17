@@ -1,6 +1,6 @@
 """`daimon support catalog | plan | allowance | requests`: support plans for Ask a person.
 
-The operator acts as an admin over the audited change service (`SET_SUPPORT_PLAN`),
+The operator acts as an admin over the audited change service (`SET_SUPPORT`),
 the same rule the MCP tools and the web follow. Each write appends a security event
 in the change's own transaction. Plans and menus are read per command, never cached.
 """
@@ -29,13 +29,22 @@ from daimon.core.channel_changes import ChannelActor, Expected
 from daimon.core.config import load_settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import StaleChannelValue, StoreError
+from daimon.core.stores import support as store
 from daimon.core.stores import support_escalation as ledger
-from daimon.core.stores import support_plans as store
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.support_rows import SupportEscalationRow
 from daimon.core.stores.tenants import get_tenant
-from daimon.core.support_plan_admin import (
+from daimon.core.support import (
+    SupportError,
+    SupportScope,
+    format_credits,
+    load_menu,
+    parse_credits,
+    parse_person_id,
+    parse_scope,
+)
+from daimon.core.support_admin import (
     PlanChange,
     PlanUsage,
     get_plan_usage,
@@ -45,26 +54,17 @@ from daimon.core.support_plan_admin import (
     parse_plan_value,
     settle_outcome_text,
 )
-from daimon.core.support_plan_changes import (
+from daimon.core.support_changes import (
     PlanValue,
     clear_allowance,
     clear_plan,
-    missing_catalog,
+    missing_menu,
     remove_catalog,
     set_allowance,
     set_catalog,
     set_plan,
     settle,
     stale_text,
-)
-from daimon.core.support_plans import (
-    PlanScope,
-    SupportPlanError,
-    format_credits,
-    load_catalog,
-    parse_credits,
-    parse_person_id,
-    parse_scope,
 )
 from pydantic import BaseModel
 from rich.console import Console
@@ -137,7 +137,7 @@ def _actor(target: _Target, *, command: str, reason: str) -> ChannelActor:
             platform=target.platform,
             platform_user_id=None,
             tool_name=f"cli/support {command}",
-            operation=Action.SET_SUPPORT_PLAN,
+            operation=Action.SET_SUPPORT,
             outcome="allowed",
             reason=reason,
         )
@@ -159,7 +159,7 @@ async def _scope_id(
     *,
     transport: Transport,
     missing_ok: bool = False,
-) -> tuple[PlanScope, str]:
+) -> tuple[SupportScope, str]:
     """An agent name becomes its id; a thread becomes its parent channel."""
     plan_scope, scope_id = parse_scope(scope, raw_id)
     if plan_scope == "agent" and not scope_id.startswith("agent_"):
@@ -183,19 +183,19 @@ async def _scope_id(
 
 async def _plan_ref(
     rt: CliRuntime, target: _Target, ref: str | None, *, transport: Transport
-) -> tuple[PlanScope | None, str]:
+) -> tuple[SupportScope | None, str]:
     """`--plan workspace|agent:<name>|channel:<id>`; None is the default plan."""
     if ref is None:
         return None, ""
     scope, colon, raw_id = ref.partition(":")
     if not colon and scope.strip() != "workspace":
-        raise SupportPlanError(
+        raise SupportError(
             f"--plan {ref} names no plan. Use workspace, agent:<name> or channel:{ref.strip()}."
         )
     return await _scope_id(rt, target, scope, raw_id or None, transport=transport, missing_ok=True)
 
 
-def _label(scope: PlanScope | None, scope_id: str) -> str:
+def _label(scope: SupportScope | None, scope_id: str) -> str:
     if scope is None:
         return "default plan"
     return f"{scope} {scope_id}" if scope_id else scope
@@ -208,14 +208,14 @@ def _expected_none_or[T](raw: str | None, parse: Callable[[str], T]) -> Expected
         return Expected(None)
     try:
         return Expected(parse(raw))
-    except (ValueError, SupportPlanError) as exc:
+    except (ValueError, SupportError) as exc:
         raise typer.BadParameter(f"--expected: {exc}") from exc
 
 
 def _plan_json(raw: str) -> PlanValue:
     data: object = json.loads(raw)
     if not isinstance(data, dict):
-        raise SupportPlanError("pass the JSON object `plan show --json` printed")
+        raise SupportError("pass the JSON object `plan show --json` printed")
     return parse_plan_value(cast("dict[str, object]", data))
 
 
@@ -255,7 +255,7 @@ async def catalog_set(
     expected: str | None = None,
 ) -> None:
     target = await _target(rt, selector)
-    spec = load_catalog(text)
+    spec = load_menu(text)
     try:
         row = await set_catalog(
             rt.sessionmaker,
@@ -279,7 +279,7 @@ async def catalog_show(
     async with rt.sessionmaker() as session:
         row = await store.get_catalog(session, tenant_id=target.tenant_id, key=key)
         if row is None:
-            raise await missing_catalog(session, tenant_id=target.tenant_id, key=key)
+            raise await missing_menu(session, tenant_id=target.tenant_id, key=key)
     spec = row.spec.model_dump(mode="json", exclude_none=True)
     if as_json:
         _print_json(console, {"key": row.key, "revision": row.revision, "catalog": spec})
@@ -382,16 +382,16 @@ async def plan_set(
 ) -> None:
     """Options left out keep the plan's values; `none` clears a limit or a date."""
     target = await _target(rt, selector)
-    plan_scope, plan_id = await _scope_id(rt, target, scope, scope_id, transport=discord_transport)
+    plan_scope, limit_id = await _scope_id(rt, target, scope, scope_id, transport=discord_transport)
     change = PlanChange(catalog, pool, per_person, window, starts_at, ends_at)
     async with rt.sessionmaker() as session:
         spec, before = await merge_plan_change(
-            session, tenant_id=target.tenant_id, scope=plan_scope, scope_id=plan_id, change=change
+            session, tenant_id=target.tenant_id, scope=plan_scope, scope_id=limit_id, change=change
         )
     try:
         await set_plan(
             rt.sessionmaker,
-            _actor(target, command="plan set", reason=f"plan:{plan_scope}:{plan_id}"),
+            _actor(target, command="plan set", reason=f"plan:{plan_scope}:{limit_id}"),
             platform=target.platform,
             spec=spec,
             expected=_expected_none_or(expected, _plan_json) or Expected(before),
@@ -403,7 +403,7 @@ async def plan_set(
             session,
             tenant_id=target.tenant_id,
             scope=plan_scope,
-            scope_id=plan_id,
+            scope_id=limit_id,
             now=datetime.now(UTC),
         )
     assert usage is not None, "the plan just set"
@@ -421,21 +421,21 @@ async def plan_clear(
     discord_transport: Transport = None,
 ) -> None:
     target = await _target(rt, selector)
-    plan_scope, plan_id = await _scope_id(
+    plan_scope, limit_id = await _scope_id(
         rt, target, scope, scope_id, transport=discord_transport, missing_ok=True
     )
     try:
         cleared = await clear_plan(
             rt.sessionmaker,
-            _actor(target, command="plan clear", reason=f"plan:{plan_scope}:{plan_id}"),
+            _actor(target, command="plan clear", reason=f"plan:{plan_scope}:{limit_id}"),
             platform=target.platform,
             scope=plan_scope,
-            scope_id=plan_id,
+            scope_id=limit_id,
             expected=_expected_none_or(expected, _plan_json),
         )
     except StaleChannelValue as exc:
         raise _stale(exc) from exc
-    label = _label(plan_scope, plan_id)
+    label = _label(plan_scope, limit_id)
     console.print(f"{label}: {'plan cleared' if cleared else 'had no plan'}", markup=False)
 
 
@@ -450,7 +450,7 @@ async def plan_show(
     discord_transport: Transport = None,
 ) -> None:
     target = await _target(rt, selector)
-    plan_scope, plan_id = await _scope_id(
+    plan_scope, limit_id = await _scope_id(
         rt, target, scope, scope_id, transport=discord_transport, missing_ok=True
     )
     async with rt.sessionmaker() as session:
@@ -458,11 +458,11 @@ async def plan_show(
             session,
             tenant_id=target.tenant_id,
             scope=plan_scope,
-            scope_id=plan_id,
+            scope_id=limit_id,
             now=datetime.now(UTC),
         )
     if usage is None:
-        raise StoreError(f"{_label(plan_scope, plan_id)} has no plan")
+        raise StoreError(f"{_label(plan_scope, limit_id)} has no plan")
     if as_json:
         _print_json(console, _plan_payload(usage))
         return
@@ -595,7 +595,7 @@ async def requests_list(
     discord_transport: Transport = None,
 ) -> None:
     target = await _target(rt, selector)
-    plan_id: uuid.UUID | None = None
+    limit_id: uuid.UUID | None = None
     async with rt.sessionmaker() as session:
         if plan is not None:
             scope, scope_id = await _plan_ref(rt, target, plan, transport=discord_transport)
@@ -606,12 +606,12 @@ async def requests_list(
             )
             if row is None:
                 raise StoreError(f"{_label(scope, scope_id)} has no plan")
-            plan_id = row.id
+            limit_id = row.id
         rows = await ledger.list_requests(
             session,
             tenant_id=target.tenant_id,
             status="pending" if pending else None,
-            plan_id=plan_id,
+            limit_id=limit_id,
             undelivered=undelivered,
             limit=limit,
         )

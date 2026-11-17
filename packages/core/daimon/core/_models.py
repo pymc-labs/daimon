@@ -2616,24 +2616,26 @@ class FileUpload(Base):
     )
 
 
-# One counter for every menu of every tenant; it never goes back, so deleting and
-# recreating a menu cannot hand out a revision an open menu already carries.
-SUPPORT_CATALOG_REVISION_SEQ = Sequence("support_catalog_revision_seq", metadata=Base.metadata)
+# One counter for the menus, limits and channels of every tenant; it never goes back,
+# so deleting and recreating a row cannot repeat a revision an open form carries.
+SUPPORT_REVISION_SEQ = Sequence("support_revision_seq", metadata=Base.metadata)
+
+_SUPPORT_SCOPES = "scope IN ('workspace', 'agent', 'channel')"
+_SUPPORT_SCOPE_ID = "(scope = 'workspace') = (scope_id = '')"
 
 
-class SupportCatalog(Base):
-    """A tenant's menu for Ask a person (`support_plans.SupportCatalogSpec`).
+class SupportMenu(Base):
+    """A tenant's menu for Ask a person (`support.MenuSpec`).
 
     `revision` takes the next number of a global sequence on every set: a menu
     carries it, and a submit against an older one is refused as stale rather than
     charged on terms the person never saw.
     """
 
-    __tablename__ = "support_catalogs"
+    __tablename__ = "support_menus"
     __table_args__ = (
-        UniqueConstraint("tenant_id", "key", name="uq_support_catalogs_tenant_key"),
-        CheckConstraint("key ~ '^[a-z0-9-]{1,32}$'", name="ck_support_catalogs_key"),
-        CheckConstraint("revision >= 1", name="ck_support_catalogs_revision"),
+        UniqueConstraint("tenant_id", "key", name="uq_support_menus_tenant_key"),
+        CheckConstraint("key ~ '^[a-z0-9-]{1,32}$'", name="ck_support_menus_key"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -2645,7 +2647,7 @@ class SupportCatalog(Base):
     key: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     revision: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=SUPPORT_CATALOG_REVISION_SEQ.next_value()
+        Integer, nullable=False, server_default=SUPPORT_REVISION_SEQ.next_value()
     )
     # `SupportOption`s as JSON; the menu is `name` and these.
     options: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
@@ -2660,58 +2662,23 @@ class SupportCatalog(Base):
     )
 
 
-class SupportPlan(Base):
-    """Support credits for a workspace, an agent or a channel. No row = the default plan.
+class SupportMenuPlace(Base):
+    """Which menu a place uses. No row: the next wider place, then the built-in menu."""
 
-    The most specific plan governs and plans never stack. `pool` is shared by
-    everyone under the plan and `per_person` caps each person; either may be
-    unset, not both. The window works as on `ChannelBudget`, except that a plan
-    outside its window still governs, with nothing available. `catalog_id` NULL
-    is the implicit default catalog.
-    """
-
-    __tablename__ = "support_plans"
+    __tablename__ = "support_menu_places"
     __table_args__ = (
-        UniqueConstraint("tenant_id", "scope", "scope_id", name="uq_support_plans_scope"),
-        CheckConstraint(
-            "scope IN ('workspace', 'agent', 'channel')", name="ck_support_plans_scope"
-        ),
-        CheckConstraint(
-            "(scope = 'workspace') = (scope_id = '')", name="ck_support_plans_scope_id"
-        ),
-        CheckConstraint(
-            "(pool IS NOT NULL OR per_person IS NOT NULL) AND pool >= 0 AND per_person >= 0",
-            name="ck_support_plans_limits",
-        ),
-        CheckConstraint(
-            "\"window\" IN ('monthly', 'total', 'fixed')", name="ck_support_plans_window"
-        ),
-        CheckConstraint(
-            "(\"window\" = 'fixed' AND starts_at IS NOT NULL AND ends_at IS NOT NULL "
-            "AND starts_at < ends_at) "
-            "OR (\"window\" = 'total' AND ends_at IS NULL) "
-            "OR (\"window\" = 'monthly' AND starts_at IS NULL AND ends_at IS NULL)",
-            name="ck_support_plans_bounds",
-        ),
+        CheckConstraint(_SUPPORT_SCOPES, name="ck_support_menu_places_scope"),
+        CheckConstraint(_SUPPORT_SCOPE_ID, name="ck_support_menu_places_scope_id"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
     tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
     )
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    scope: Mapped[str] = mapped_column(Text, nullable=False)
-    scope_id: Mapped[str] = mapped_column(Text, nullable=False)
-    catalog_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("support_catalogs.id", ondelete="RESTRICT"), nullable=True
+    scope: Mapped[str] = mapped_column(Text, primary_key=True)
+    scope_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    menu_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("support_menus.id", ondelete="RESTRICT"), nullable=False
     )
-    pool: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
-    per_person: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
-    window: Mapped[str] = mapped_column(Text, nullable=False)
-    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
     )
@@ -2723,27 +2690,48 @@ class SupportPlan(Base):
     )
 
 
-class SupportAllowance(Base):
-    """One person's own cap under a plan, or under the default plan when `plan_id` is NULL."""
+class SupportLimit(Base):
+    """Support credits at a workspace, an agent or a channel, or one person's own limit there.
 
-    __tablename__ = "support_allowances"
+    A place row (`platform_user_id` NULL) is a ledger: `shared` is spent by
+    everyone under it and `each_person` caps each person; the most specific one
+    governs and limits never stack. A person row only replaces `each_person`
+    for that person (scope workspace: everywhere). Outside its dates a row
+    still governs, with nothing available. No place row: the default ledger.
+    """
+
+    __tablename__ = "support_limits"
     __table_args__ = (
         Index(
-            "uq_support_allowances_plan_user",
+            "uq_support_limits_place",
             "tenant_id",
-            "plan_id",
-            "platform_user_id",
+            "scope",
+            "scope_id",
             unique=True,
-            postgresql_where=text("plan_id IS NOT NULL"),
+            postgresql_where=text("platform_user_id IS NULL"),
         ),
         Index(
-            "uq_support_allowances_default_user",
+            "uq_support_limits_person",
             "tenant_id",
+            "scope",
+            "scope_id",
             "platform_user_id",
             unique=True,
-            postgresql_where=text("plan_id IS NULL"),
+            postgresql_where=text("platform_user_id IS NOT NULL"),
         ),
-        CheckConstraint("credits >= 0", name="ck_support_allowances_credits"),
+        CheckConstraint(_SUPPORT_SCOPES, name="ck_support_limits_scope"),
+        CheckConstraint(_SUPPORT_SCOPE_ID, name="ck_support_limits_scope_id"),
+        CheckConstraint(
+            "(platform_user_id IS NULL AND (shared IS NOT NULL OR each_person IS NOT NULL)) "
+            "OR (platform_user_id IS NOT NULL AND shared IS NULL AND each_person IS NOT NULL)",
+            name="ck_support_limits_amounts",
+        ),
+        CheckConstraint("shared >= 0 AND each_person >= 0", name="ck_support_limits_positive"),
+        CheckConstraint("\"window\" IN ('total', 'monthly')", name="ck_support_limits_window"),
+        CheckConstraint(
+            "starts_at IS NULL OR ends_at IS NULL OR starts_at < ends_at",
+            name="ck_support_limits_dates",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -2752,11 +2740,44 @@ class SupportAllowance(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
     )
-    plan_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("support_plans.id", ondelete="CASCADE"), nullable=True
+    scope: Mapped[str] = mapped_column(Text, nullable=False)
+    scope_id: Mapped[str] = mapped_column(Text, nullable=False)
+    platform_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    shared: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    each_person: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    window: Mapped[str] = mapped_column(Text, nullable=False)
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=SUPPORT_REVISION_SEQ.next_value()
     )
-    platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
-    credits: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class SupportChannel(Base):
+    """A workspace's own channel for requests, used when `support_own_channel` is on."""
+
+    __tablename__ = "support_channels"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    slack_team_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    teams_team_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    teams_service_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=SUPPORT_REVISION_SEQ.next_value()
+    )
     set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
     )
@@ -2773,9 +2794,9 @@ class SupportEscalation(Base):
 
     There is no counter column and no `credits_remaining`: spent credit is
     `SUM(COALESCE(charge, hold))` over the rows of one ledger (`charged_to`: the
-    default plan per (tenant, platform_user_id), or one support plan; `exempt`
+    default ledger per (tenant, platform_user_id), or one support limit; `exempt`
     rows count nowhere). A counter would be a second source of truth that can
-    drift from the rows it summarises. Rows from before plans are charged 1, so
+    drift from the rows it summarises. Rows from before limits are charged 1, so
     the default sum equals the old row count.
 
     `platform_user_id` is the identity key for the same reason it is on
@@ -2802,7 +2823,7 @@ class SupportEscalation(Base):
             "tenant_id",
             "platform_user_id",
         ),
-        Index("support_escalations_plan_idx", "tenant_id", "plan_id", "created_at"),
+        Index("support_escalations_limit_idx", "tenant_id", "limit_id", "created_at"),
         Index(
             "support_escalations_pending_idx",
             "tenant_id",
@@ -2810,11 +2831,11 @@ class SupportEscalation(Base):
             postgresql_where=text("status = 'pending'"),
         ),
         CheckConstraint(
-            "charged_to IN ('default', 'plan', 'exempt')",
+            "charged_to IN ('default', 'limit', 'exempt')",
             name="ck_support_escalations_charged_to",
         ),
         CheckConstraint(
-            "charged_to <> 'default' OR plan_id IS NULL", name="ck_support_escalations_default"
+            "charged_to <> 'default' OR limit_id IS NULL", name="ck_support_escalations_default"
         ),
         CheckConstraint(
             "status IN ('pending', 'settled', 'declined')", name="ck_support_escalations_status"
@@ -2852,15 +2873,15 @@ class SupportEscalation(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    # Support plans (0206). The server defaults are a default-ledger row charged
-    # 1, which is what a writer that predates plans means.
+    # Support limits (0206). The server defaults are a default-ledger row charged
+    # 1, which is what a writer that predates limits means.
     charged_to: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
-    # SET NULL: a cleared plan's rows count nowhere, never in the default ledger.
-    plan_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("support_plans.id", ondelete="SET NULL"), nullable=True
+    # SET NULL: a cleared limit's rows count nowhere, never in the default ledger.
+    limit_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("support_limits.id", ondelete="SET NULL"), nullable=True
     )
     option_key: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # The terms requested on (`support_plans.OptionSnapshot`); settling reads these.
+    # The terms requested on (`support.OptionSnapshot`); settling reads these.
     option: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     answers: Mapped[dict[str, str] | None] = mapped_column(JSONB, nullable=True)
     hold: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, server_default="1")

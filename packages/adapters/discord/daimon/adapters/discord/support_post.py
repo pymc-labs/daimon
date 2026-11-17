@@ -12,7 +12,7 @@ import structlog
 from daimon.adapters.discord.split import split_for_discord_safe
 from daimon.core.config import SupportSettings
 from daimon.core.stores.support_rows import SupportEscalationRow
-from daimon.core.support_plans import CLIENT_NOT_NOTIFIED, option_text, post_status_text
+from daimon.core.support import CLIENT_NOT_NOTIFIED, option_text, post_status_text
 
 import discord
 from discord.ext import commands

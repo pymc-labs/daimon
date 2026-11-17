@@ -44,11 +44,10 @@ from daimon.adapters.slack.support_settle import (
 from daimon.core.config import SupportSettings
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.stores import support_plans as plans
+from daimon.core.stores import support as plans
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.support_escalation import submit_request
-from daimon.core.support_escalation import ALREADY_REQUESTED
-from daimon.core.support_plans import (
+from daimon.core.support import (
     CLIENT_NOT_NOTIFIED,
     EXEMPT_OFFER,
     NOT_ENOUGH_CREDITS,
@@ -57,8 +56,9 @@ from daimon.core.support_plans import (
     RequestChoice,
     SupportPlace,
     option_value,
-    parse_catalog,
+    parse_menu,
 )
+from daimon.core.support_escalation import ALREADY_REQUESTED
 from daimon.core.windows import WindowBounds
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
@@ -89,7 +89,7 @@ _VIEWS_UPDATE = ("POST", yarl.URL("https://slack.com/api/views.update"))
 _PERMALINK_PATTERN = re.compile(r"https://slack\.com/api/chat\.getPermalink.*")
 _HISTORY_PATTERN = re.compile(r"https://slack\.com/api/conversations\.history.*")
 
-MENU = parse_catalog(
+MENU = parse_menu(
     {
         "name": "Support",
         "options": [

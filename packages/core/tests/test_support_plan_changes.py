@@ -15,7 +15,8 @@ from daimon.core.errors import StaleChannelValue
 from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
 from daimon.core.stores.tenants import get_tenant
-from daimon.core.support_plan_changes import (
+from daimon.core.support import RequestChoice, SupportPlace, parse_limit_spec, parse_menu
+from daimon.core.support_changes import (
     ALLOWANCE_SETTING,
     CATALOG_SETTING,
     PLAN_SETTING,
@@ -24,7 +25,7 @@ from daimon.core.support_plan_changes import (
     clear_allowance,
     clear_plan,
     is_support_channel,
-    may_set_support_plan,
+    may_set_support,
     read_plan,
     remove_catalog,
     set_allowance,
@@ -34,12 +35,11 @@ from daimon.core.support_plan_changes import (
     settle_from_post,
     stale_text,
 )
-from daimon.core.support_plans import RequestChoice, SupportPlace, parse_catalog, parse_plan_spec
 from daimon.testing.factories import make_platform_principal, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 D = Decimal
-MENU = parse_catalog(
+MENU = parse_menu(
     {
         "name": "Support",
         "options": [
@@ -47,7 +47,7 @@ MENU = parse_catalog(
         ],
     }
 )
-PLAN = parse_plan_spec(scope="channel", scope_id="C1", catalog="support", pool="5")
+PLAN = parse_limit_spec(scope="channel", scope_id="C1", catalog="support", pool="5")
 
 type Factory = async_sessionmaker[AsyncSession]
 
@@ -98,9 +98,9 @@ def test_may_set_support_plan_when_any_subject_then_matches_channel_budgets() ->
         budget = authorize(
             TenantAccessPolicy(), subject=subject, action=Action.SET_CHANNEL_BUDGET, place=Place()
         )
-        assert may_set_support_plan(subject) == budget, f"{subject} differs from budgets"
-    assert may_set_support_plan(Subject(is_admin=True)), "a native admin may"
-    assert not may_set_support_plan(Subject()), "a member may not"
+        assert may_set_support(subject) == budget, f"{subject} differs from budgets"
+    assert may_set_support(Subject(is_admin=True)), "a native admin may"
+    assert not may_set_support(Subject()), "a member may not"
 
 
 def test_is_support_channel_when_post_or_its_thread_then_true() -> None:
@@ -418,7 +418,7 @@ async def test_clear_plan_when_requests_pending_then_declined_and_audited(
     request_id = await _pending(db_session_factory, tenant_id)
     await clear_plan(db_session_factory, actor, platform="slack", scope="channel", scope_id="C1")
     row = await ledger.get_request(db_session, escalation_id=request_id)
-    assert row and (row.status, row.charge, row.plan_id) == ("declined", 0, None), (
+    assert row and (row.status, row.charge, row.limit_id) == ("declined", 0, None), (
         "a request left pending would settle with no plan to bound it"
     )
     assert row.settled_by == "UADMIN", "the admin who cleared the plan declined it"

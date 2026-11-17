@@ -1,7 +1,7 @@
 """Support plans for Ask a person, for platform admins acting with personal user credentials.
 
 Plans, menus and requests go through the audited change service under
-`SET_SUPPORT_PLAN`, the rule the CLI and the web follow. Credits cross this
+`SET_SUPPORT`, the rule the CLI and the web follow. Credits cross this
 boundary as decimal strings. Plans and menus are read per call, never cached.
 """
 
@@ -28,10 +28,19 @@ from daimon.core.channel_changes import ChannelActor, ChannelChangeRefused, Expe
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.errors import StaleChannelValue
 from daimon.core.security_audit import record_authz_denial, record_policy_decision
+from daimon.core.stores import support as store
 from daimon.core.stores import support_escalation as ledger
-from daimon.core.stores import support_plans as store
-from daimon.core.stores.support_rows import SupportCatalogRow, SupportEscalationRow
-from daimon.core.support_plan_admin import (
+from daimon.core.stores.support_rows import SupportEscalationRow, SupportMenuRow
+from daimon.core.support import (
+    SupportError,
+    SupportScope,
+    format_credits,
+    parse_credits,
+    parse_menu,
+    parse_person_id,
+    parse_scope,
+)
+from daimon.core.support_admin import (
     PlanChange,
     PlanUsage,
     get_plan_usage,
@@ -41,26 +50,17 @@ from daimon.core.support_plan_admin import (
     parse_plan_value,
     settle_outcome_text,
 )
-from daimon.core.support_plan_changes import (
+from daimon.core.support_changes import (
     PlanValue,
     clear_allowance,
     clear_plan,
-    may_set_support_plan,
+    may_set_support,
     remove_catalog,
     set_allowance,
     set_catalog,
     set_plan,
     settle,
     stale_text,
-)
-from daimon.core.support_plans import (
-    PlanScope,
-    SupportPlanError,
-    format_credits,
-    parse_catalog,
-    parse_credits,
-    parse_person_id,
-    parse_scope,
 )
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -167,11 +167,11 @@ def _require_support_admin(auth: AuthIdentity) -> str:
     _require_platform_admin(auth)
     if auth.platform not in _PLATFORMS:
         raise ToolError("support plans aren't available here")
-    decision = may_set_support_plan(mcp_subject(auth, is_admin=auth.is_platform_admin))
+    decision = may_set_support(mcp_subject(auth, is_admin=auth.is_platform_admin))
     if not decision:
-        record_authz_denial(Action.SET_SUPPORT_PLAN, decision.reason)
+        record_authz_denial(Action.SET_SUPPORT, decision.reason)
         raise ToolError(_needs_support_admin(auth))
-    record_policy_decision(Action.SET_SUPPORT_PLAN, "allow")
+    record_policy_decision(Action.SET_SUPPORT, "allow")
     return cast(str, auth.platform)
 
 
@@ -197,11 +197,11 @@ async def _place(
     scope_id: str | None,
     *,
     lenient: bool = False,
-) -> tuple[PlanScope, str]:
+) -> tuple[SupportScope, str]:
     """An agent name becomes its id; a thread becomes its parent channel."""
     try:
         plan_scope, place_id = parse_scope(scope, scope_id.strip() if scope_id else None)
-    except SupportPlanError as exc:
+    except SupportError as exc:
         raise ToolError(str(exc)) from exc
     if plan_scope == "agent" and not place_id.startswith("agent_"):
         agent = await find_agent_by_daimon_tag(
@@ -224,7 +224,7 @@ def _expected_plan(
         return Expected(None)
     try:
         return Expected(parse_plan_value(raw))
-    except SupportPlanError as exc:
+    except SupportError as exc:
         raise ToolError(f"expected: {exc}") from exc
 
 
@@ -250,7 +250,7 @@ def _plan_result(usage: PlanUsage) -> SupportPlanResult:
     )
 
 
-def _catalog_result(row: SupportCatalogRow) -> SupportCatalogResult:
+def _catalog_result(row: SupportMenuRow) -> SupportCatalogResult:
     return SupportCatalogResult(
         key=row.key,
         revision=row.revision,
@@ -318,7 +318,7 @@ async def _set_plan_impl(
             spec=spec,
             expected=_expected_plan(expected) or Expected(before),
         )
-    except (SupportPlanError, ChannelChangeRefused, StaleChannelValue) as exc:
+    except (SupportError, ChannelChangeRefused, StaleChannelValue) as exc:
         raise _refused(exc) from exc
     async with runtime.session_factory() as session:
         usage = await get_plan_usage(
@@ -369,9 +369,9 @@ async def _set_allowance_impl(
     platform = _require_support_admin(auth)
     try:
         user_id = parse_person_id(platform, platform_user_id)
-    except SupportPlanError as exc:
+    except SupportError as exc:
         raise _refused(exc) from exc
-    plan_scope: PlanScope | None = None
+    plan_scope: SupportScope | None = None
     place_id = ""
     if scope is not None:
         plan_scope, place_id = await _place(runtime, auth, scope, scope_id, lenient=credits is None)
@@ -403,7 +403,7 @@ async def _set_allowance_impl(
                 expected=last,
             )
             cap = format_credits(row.credits)
-    except (SupportPlanError, ChannelChangeRefused, StaleChannelValue) as exc:
+    except (SupportError, ChannelChangeRefused, StaleChannelValue) as exc:
         raise _refused(exc) from exc
     return SupportAllowanceResult(
         platform_user_id=user_id, scope=plan_scope, scope_id=place_id, credits=cap
@@ -444,10 +444,10 @@ async def _set_catalog_impl(
             _actor(auth),
             platform=platform,
             key=key,
-            spec=parse_catalog(catalog),
+            spec=parse_menu(catalog),
             expected=expected,
         )
-    except (SupportPlanError, ChannelChangeRefused, StaleChannelValue) as exc:
+    except (SupportError, ChannelChangeRefused, StaleChannelValue) as exc:
         raise _refused(exc) from exc
     return SetSupportCatalogResult(
         key=row.key, revision=row.revision, summary=options_text(row.spec)
@@ -465,7 +465,7 @@ async def _list_requests_impl(
     undelivered: bool = False,
 ) -> list[SupportRequestResult]:
     _require_support_admin(auth)
-    plan_id: uuid.UUID | None = None
+    limit_id: uuid.UUID | None = None
     if scope is not None:
         plan_scope, place_id = await _place(runtime, auth, scope, scope_id, lenient=True)
         async with runtime.session_factory() as session:
@@ -474,13 +474,13 @@ async def _list_requests_impl(
             )
         if plan is None:
             raise ToolError("There is no plan there.")
-        plan_id = plan.id
+        limit_id = plan.id
     async with runtime.session_factory() as session:
         rows = await ledger.list_requests(
             session,
             tenant_id=auth.tenant_id,
             status="pending" if pending else None,
-            plan_id=plan_id,
+            limit_id=limit_id,
             undelivered=undelivered,
             limit=max(1, min(limit, 200)),
         )
@@ -502,7 +502,7 @@ async def _settle_request_impl(
         correction: Decimal | None = None
         if expected_charge is not None:
             correction = parse_credits(expected_charge, name="expected_charge")
-    except (ValueError, SupportPlanError) as exc:
+    except (ValueError, SupportError) as exc:
         raise ToolError(f"{exc}. Nothing was saved.") from exc
     try:
         outcome = await settle(

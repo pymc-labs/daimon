@@ -69,12 +69,34 @@ from daimon.core.stores.support_escalation import (
     SubmitOutcome,
     asked_options,
     mark_delivered,
-    resolve_plan,
+    resolve_limit,
     submit_request,
 )
-from daimon.core.stores.support_plans import plans_for_place
-from daimon.core.stores.support_rows import PlanView, SupportEscalationRow
+from daimon.core.stores.support_rows import LimitView, SupportEscalationRow
 from daimon.core.stores.thread_sessions import get_latest_thread_session
+from daimon.core.support import (
+    CHOOSE_OPTION,
+    EXEMPT_OFFER,
+    MAX_PARAGRAPH_CHARS,
+    OPTIONS_CHANGED,
+    ChoiceField,
+    RequestChoice,
+    StepsPrice,
+    SupportError,
+    SupportOption,
+    SupportPlace,
+    TextField,
+    balance_text,
+    credits_text,
+    ended_text,
+    offer_refusal,
+    option_value,
+    pick_refusal,
+    picked_option,
+    price_text,
+    received_text,
+    refusal_text,
+)
 from daimon.core.support_escalation import (
     ALREADY_REQUESTED,
     ASK_THE_TEAM,
@@ -85,31 +107,6 @@ from daimon.core.support_escalation import (
     SEALED_POST_MARKER,
     UNAVAILABLE,
     build_custom_id,
-)
-from daimon.core.support_plans import (
-    CHOOSE_OPTION,
-    EXEMPT_OFFER,
-    MAX_PARAGRAPH_CHARS,
-    OPTIONS_CHANGED,
-    ChoiceField,
-    RequestChoice,
-    StepsPrice,
-    SupportOption,
-    SupportPlace,
-    SupportPlanError,
-    TextField,
-    balance_text,
-    credits_text,
-    ended_text,
-    governing_plan,
-    inactive_text,
-    offer_refusal,
-    option_value,
-    pick_refusal,
-    picked_option,
-    price_text,
-    received_text,
-    refusal_text,
 )
 from daimon.core.support_routing import log_undelivered
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -307,7 +304,7 @@ def _post_body(
     interaction: discord.Interaction[Any],
     origin: AnswerOrigin,
     row: SupportEscalationRow,
-    view: PlanView,
+    view: LimitView,
     *,
     sealed: bool,
 ) -> str:
@@ -316,8 +313,8 @@ def _post_body(
     marker = [f"*{SEALED_POST_MARKER}*"] if sealed else []
     facts: list[str] = []
     if row.charged_to != "default":
-        balance = balance_text(view.balance, view.plan) if row.charged_to == "plan" else None
-        facts.append(request_facts(row, menu=view.catalog is not None, balance=balance))
+        balance = balance_text(view.balance, view.period) if row.charged_to == "limit" else None
+        facts.append(request_facts(row, menu=view.menu is not None, balance=balance))
     return "\n\n".join(part for part in (head, *facts, origin.link, *marker, row.note) if part)
 
 
@@ -365,7 +362,7 @@ async def submit_answer_request(
                 default_allowance=settings.support.credits_per_user,
                 exempt=exempt,
             )
-    except SupportPlanError as err:
+    except SupportError as err:
         await _notice(interaction, str(err))
         return
     row, view = outcome.row, outcome.view
@@ -556,7 +553,7 @@ def _menu_lines(option: SupportOption) -> str:
     return f"{line}\n{option.description}" if option.description else line
 
 
-def menu_message(origin: AnswerOrigin, view: PlanView) -> tuple[discord.Embed, discord.ui.View]:
+def menu_message(origin: AnswerOrigin, view: LimitView) -> tuple[discord.Embed, discord.ui.View]:
     """A configured menu: each option and its price, the balance, and a picker."""
     options = view.spec.options
     embed = discord.Embed(
@@ -566,7 +563,7 @@ def menu_message(origin: AnswerOrigin, view: PlanView) -> tuple[discord.Embed, d
         ),
         colour=discord.Colour.blurple(),
     )
-    footer = EXEMPT_OFFER if view.exempt else balance_text(view.balance, view.plan)
+    footer = EXEMPT_OFFER if view.exempt else balance_text(view.balance, view.period)
     if footer:
         embed.set_footer(text=footer)
     menu = discord.ui.View(timeout=None)
@@ -657,7 +654,7 @@ class SupportMenuSelect(
         # interaction's three seconds. The submit decides who is an admin.
         exempt = requester_is_admin_cached(interaction, bot, guild_id=origin.guild_id)
         async with runtime.sessionmaker() as session:
-            view = await resolve_plan(
+            view = await resolve_limit(
                 session,
                 tenant_id=origin.tenant_id,
                 place=origin.support_place,
@@ -747,32 +744,28 @@ class SupportEscalateButton(
             message_id=self.message_id,
             fetch=False,
         )
+        user_id = str(interaction.user.id)
+        exempt = await requester_is_admin(bot, guild_id=origin.guild_id, user_id=user_id)
         async with runtime.sessionmaker() as session:
-            plans = await plans_for_place(
-                session, tenant_id=origin.tenant_id, place=origin.support_place
+            view = await resolve_limit(
+                session,
+                tenant_id=origin.tenant_id,
+                place=origin.support_place,
+                platform_user_id=user_id,
+                default_allowance=runtime.settings.support.credits_per_user,
+                exempt=exempt,
             )
-        plan = governing_plan(plans, origin.support_place)
-        if plan is not None and (ended := inactive_text(plan, now=datetime.now(UTC))):
-            await _report_failure(interaction, ended)
+            asked = await _asked(session, origin, user_id)
+        if not view.active:
+            await _report_failure(interaction, ended_text(view, now=datetime.now(UTC)))
             return
-        if plan is not None and plan.catalog_id is not None:
-            # A menu configured after this button was sent: show it now.
+        # One check for every path, the default form included (`offer_refusal`).
+        if (refused := offer_refusal(view, asked=asked)) is not None:
+            neutral = refused.startswith(ALREADY_REQUESTED)
+            await _report_failure(interaction, refused, neutral=neutral)
+            return
+        if view.menu is not None:
             await interaction.response.defer(ephemeral=True, thinking=True)
-            user_id = str(interaction.user.id)
-            exempt = await requester_is_admin(bot, guild_id=origin.guild_id, user_id=user_id)
-            async with runtime.sessionmaker() as session:
-                view = await resolve_plan(
-                    session,
-                    tenant_id=origin.tenant_id,
-                    place=origin.support_place,
-                    platform_user_id=user_id,
-                    default_allowance=runtime.settings.support.credits_per_user,
-                    exempt=exempt,
-                )
-                asked = await _asked(session, origin, user_id)
-            if (refused := offer_refusal(view, asked=asked)) is not None:
-                await _notice(interaction, refused, neutral=refused.startswith(ALREADY_REQUESTED))
-                return
             embed, menu = menu_message(origin, view)
             await interaction.followup.send(embed=embed, view=menu, ephemeral=True)
             return

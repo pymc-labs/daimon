@@ -2,7 +2,7 @@
 
 Discord asks with a reaction on an answer; here `support` posts a form in the
 1:1 chat, answered there like every command, and sending it spends from the
-plan (`daimon.core.support_plans`). With no plan, a request spends one of
+plan (`daimon.core.support`). With no plan, a request spends one of
 `credits_per_user`; a plan with a menu first offers its options, then the
 picked option's form, on a card the chat replaces (a dialog's `continue` for
 Ask a human). An admin of the deployment asks for free. It is a bare word, so
@@ -105,11 +105,27 @@ from daimon.core.stores.support_escalation import (
     SubmitOutcome,
     asked_options,
     mark_delivered,
-    resolve_plan,
+    resolve_limit,
     submit_request,
 )
-from daimon.core.stores.support_rows import PlanView, SupportEscalationRow
+from daimon.core.stores.support_rows import LimitView, SupportEscalationRow
 from daimon.core.stores.thread_sessions import get_latest_thread_session
+from daimon.core.support import (
+    CHOOSE_OPTION,
+    OPTIONS_CHANGED,
+    RequestChoice,
+    SupportError,
+    SupportOption,
+    SupportPlace,
+    balance_text,
+    ended_text,
+    offer_refusal,
+    option_value,
+    pick_refusal,
+    picked_option,
+    received_text,
+)
+from daimon.core.support import refusal_text as plan_refusal
 from daimon.core.support_escalation import (
     ALREADY_REQUESTED,
     ESCALATE,
@@ -119,22 +135,6 @@ from daimon.core.support_escalation import (
     SEALED_POST_MARKER,
     UNAVAILABLE,
 )
-from daimon.core.support_plans import (
-    CHOOSE_OPTION,
-    OPTIONS_CHANGED,
-    RequestChoice,
-    SupportOption,
-    SupportPlace,
-    SupportPlanError,
-    balance_text,
-    ended_text,
-    offer_refusal,
-    option_value,
-    pick_refusal,
-    picked_option,
-    received_text,
-)
-from daimon.core.support_plans import refusal_text as plan_refusal
 from daimon.core.support_routing import log_undelivered, support_recipient_tiers
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
@@ -352,7 +352,7 @@ class _Decided:
     """Who may ask here, on which plan, and whether the note leaves a sealed channel."""
 
     origin: _Origin
-    view: PlanView
+    view: LimitView
     sealed: bool
     repeats: frozenset[str]
     """The options this person already asked with on this message (`asked_options`)."""
@@ -371,7 +371,7 @@ def form_text(remaining: int | None) -> str:
     )
 
 
-def _form_hints(view: PlanView) -> tuple[int | None, str | None]:
+def _form_hints(view: LimitView) -> tuple[int | None, str | None]:
     """The default plan counts requests; any other plan shows its balance or the exemption."""
     left = view.available if view.charged_to == "default" else None
     if left is not None:
@@ -382,7 +382,7 @@ def _form_hints(view: PlanView) -> tuple[int | None, str | None]:
 def _pick(decided: _Decided, data: Mapping[str, object]) -> SupportOption | str:
     """The option a menu sent, or why not: OPTIONS_CHANGED ends the form, the rest re-ask."""
     view = decided.view
-    if view.catalog is None:
+    if view.menu is None:
         return OPTIONS_CHANGED
     value = str(data.get(OPTION_INPUT) or "")
     if not value:
@@ -420,7 +420,7 @@ def form_card(
 
 
 def menu_card(
-    token: str, view: PlanView, *, sealed: bool, error: str | None = None
+    token: str, view: LimitView, *, sealed: bool, error: str | None = None
 ) -> AdaptiveCard:
     """A plan's menu in the chat; Next replaces it with the picked option's form."""
     pick = button(VERB, NEXT, "pick", ask=token)
@@ -472,7 +472,7 @@ def ask_form(
 
 
 def _menu_dialog(
-    message_id: str, view: PlanView, *, sealed: bool, error: str | None = None
+    message_id: str, view: LimitView, *, sealed: bool, error: str | None = None
 ) -> AdaptiveCard:
     """The menu as a dialog's first card; Next answers with the option's (`continue`)."""
     data = {"message": message_id, "stage": "pick"}
@@ -495,12 +495,12 @@ def _option_dialog(
     return AdaptiveCard(body=body, actions=[send], fallback_text=TITLE)
 
 
-def _facts(row: SupportEscalationRow, view: PlanView) -> list[str]:
+def _facts(row: SupportEscalationRow, view: LimitView) -> list[str]:
     """A plan request's lines for the post; the default plan's post is unchanged."""
     if row.charged_to == "default":
         return []
-    balance = balance_text(view.balance, view.plan) if row.charged_to == "plan" else None
-    return request_facts(row, menu=view.catalog is not None, balance=balance)
+    balance = balance_text(view.balance, view.period) if row.charged_to == "limit" else None
+    return request_facts(row, menu=view.menu is not None, balance=balance)
 
 
 def _log_not_recorded(outcome: SubmitOutcome, tenant_id: uuid.UUID) -> None:
@@ -555,7 +555,7 @@ class SupportCommand:
                 return refuse(access)
             sealed = access.sealed
         async with self._runtime.sessionmaker() as session:
-            view = await resolve_plan(
+            view = await resolve_limit(
                 session,
                 tenant_id=actor.tenant_id,
                 place=origin.support_place,
@@ -601,7 +601,7 @@ class SupportCommand:
         if (refused := decided.refusal()) is not None:
             await context.send(notice_card(refused))
             return
-        if view.catalog is not None:
+        if view.menu is not None:
             await context.send_card(menu_card(self._remember(asked), view, sealed=asked.sealed))
             return
         remaining, hint = _form_hints(view)
@@ -658,7 +658,7 @@ class SupportCommand:
             return replace_card(option_card(token, picked, sealed=sealed))
         try:
             choice = read_choice(data, picked)
-        except SupportPlanError as err:
+        except SupportError as err:
             card = option_card(token, picked, sealed=sealed, error=str(err), values=data)
             return replace_card(card)
         return await self._send(actor, token, asked, choice)
@@ -708,7 +708,7 @@ class SupportCommand:
         view, sealed = decided.view, decided.sealed
         if (refused := decided.refusal()) is not None:
             return dialog_notice(TITLE, refused)
-        if view.catalog is not None:
+        if view.menu is not None:
             return dialog(TITLE, _menu_dialog(place.message_id, view, sealed=sealed))
         remaining, hint = _form_hints(view)
         return dialog(TITLE, ask_form(place.message_id, remaining, sealed=sealed, footer=hint))
@@ -759,7 +759,7 @@ class SupportCommand:
             return dialog(TITLE, _option_dialog(message_id, picked, sealed=sealed))
         try:
             choice = read_choice(data, picked)
-        except SupportPlanError as err:
+        except SupportError as err:
             form = _option_dialog(message_id, picked, sealed=sealed, error=str(err), values=data)
             return dialog(TITLE, form)
         return dialog_message(await self._escalate(actor, asked, choice, not_allowed=NOT_ALLOWED))
@@ -816,7 +816,7 @@ class SupportCommand:
                     exempt=actor.is_platform_admin,
                     source_allowed=source_allowed,
                 )
-        except SupportPlanError as err:
+        except SupportError as err:
             # A missing step or a bad answer: nothing was recorded.
             return str(err)
         if outcome.status == "refused":
@@ -832,7 +832,7 @@ class SupportCommand:
         return received_text(row, view)
 
     async def _deliver(
-        self, tenant_id: uuid.UUID, asked: _Asked, row: SupportEscalationRow, view: PlanView
+        self, tenant_id: uuid.UUID, asked: _Asked, row: SupportEscalationRow, view: LimitView
     ) -> None:
         """Best effort: the row is committed, and stays undelivered unless a post lands.
 

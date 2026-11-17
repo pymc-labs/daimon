@@ -8,9 +8,9 @@ from decimal import Decimal
 from daimon.core._models import SupportAllowance, SupportEscalation
 from daimon.core.privacy import collect_purge_preview
 from daimon.core.purge import purge_account, purge_principal
+from daimon.core.stores import support as plans
 from daimon.core.stores import support_escalation as ledger
-from daimon.core.stores import support_plans as plans
-from daimon.core.support_plans import RequestChoice, SupportPlace, parse_catalog
+from daimon.core.support import RequestChoice, SupportPlace, parse_menu
 from daimon.core.windows import WindowBounds
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from sqlalchemy import select
@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 D = Decimal
 GONE, STAY = "U_GONE", "U_STAY"
-MENU = parse_catalog(
+MENU = parse_menu(
     {
         "name": "Support",
         "options": [
@@ -60,7 +60,7 @@ async def _person_with_plan_history(db_session: AsyncSession) -> tuple[uuid.UUID
     await plans.set_allowance(
         db_session,
         tenant_id=tenant.id,
-        plan_id=plan.id,
+        limit_id=plan.id,
         platform_user_id=GONE,
         credits=D(4),
         set_by_account_id=None,
