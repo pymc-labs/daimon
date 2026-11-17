@@ -15,6 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the channel that receives requests, are set under **Admin** > **Support**
   in the web app, with `daimon support` and with the `support_*` MCP tools. See
   [Ask a person](docs/support.md).
+- **A thumbs-down form can also be posted where Ask a person requests go.**
+  The `support_feedback` feature, off by default, posts a submitted form with
+  its reasons, text, person, agent and a link to the answer to the support
+  channel, and the form says so first. It spends no credits. See
+  [Ask a person](docs/support.md).
+- **A workspace can send Ask a person requests to its own channel.** The
+  `support_own_channel` feature, on by default, lets an admin pick the channel
+  instead of the deployment's one; off sends every request to the default
+  channel and locks the choice. See [Ask a person](docs/support.md).
 - **Ask a person offers a menu in Discord, Slack and Teams.** A
   person picks an option, fills in its fields and sees what it costs and what is
   left. A request priced by staff holds its minimum until someone in the support

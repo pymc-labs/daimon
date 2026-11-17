@@ -203,10 +203,18 @@ export function describeChange(e: ChannelHistoryEntry, labels: { readers: Choice
       const v = (x: unknown): Part[] => { const o = obj(x); const k = o?.value ?? o?.agent ?? x; return typeof k === "string" ? agents([k]) : none }
       return { what: OTHER.thread_handoff!, from: v(e.before), to: v(e.after) }
     }
-    case "support_plan": return { what: "Support limit", from: supportLimit(obj(e.before)), to: supportLimit(obj(e.after)) }
-    case "support_allowance": {
-      const cap = (v: unknown): Part[] => { const o = obj(v); return o?.credits ? [plural(Number(o.credits), "credit")] : none }
-      return { what: "Support credits", from: cap(e.before), to: cap(e.after) }
+    case "support_limit": return { what: "Support limit", from: supportLimit(obj(e.before)), to: supportLimit(obj(e.after)) }
+    case "support_menu": {
+      const menu = (v: unknown): Part[] => { const o = obj(v); return o ? text(o.name ?? o.key) : none }
+      return { what: "Support menu", from: menu(e.before), to: menu(e.after) }
+    }
+    case "support_menu_use": {
+      const menuKey = (v: unknown): Part[] => text(obj(v)?.menu)
+      return { what: "Support menu in use", from: menuKey(e.before), to: menuKey(e.after) }
+    }
+    case "support_channel": {
+      const where = (v: unknown): Part[] => text(obj(v)?.channel_id)
+      return { what: "Support requests go to", from: where(e.before), to: where(e.after) }
     }
     case "support_settle": {
       const req = (v: unknown): Part[] => {
@@ -227,7 +235,7 @@ const SETTLED: Record<string, string> = { pending: "Waiting", settled: "Done", d
 function supportLimit(p: Record<string, unknown> | null): Part[] {
   if (!p) return none
   const when = p.window === "monthly" ? "each month" : p.window === "fixed" ? `${String(p.starts_at).slice(0, 10)} until ${String(p.ends_at).slice(0, 10)}` : p.starts_at ? `since ${String(p.starts_at).slice(0, 10)}` : ""
-  const parts = [p.pool && plural(Number(p.pool), "credit"), p.per_person && `${String(p.per_person)} per person`, when].filter(Boolean)
+  const parts = [p.shared && plural(Number(p.shared), "credit"), p.each_person && `${String(p.each_person)} per person`, when].filter(Boolean)
   return [parts.length ? parts.join(", ") : "Default credits"]
 }
 

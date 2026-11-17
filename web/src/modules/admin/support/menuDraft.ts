@@ -1,5 +1,5 @@
 // A menu for Ask a person as the editor holds it: strings and stable row ids, turned into and out of the API's menu body.
-// Limits and key rules follow `daimon.core.support_plans`.
+// Limits and key rules follow `daimon.core.support`.
 import type { Problem } from "@/lib/api"
 
 export const LIMITS = { options: 10, fields: 4, steps: 10, name: 75, label: 75, fieldLabel: 45, text: 200, paragraph: 3000 }

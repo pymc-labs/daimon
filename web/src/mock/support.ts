@@ -42,7 +42,7 @@ const dup = (list: unknown[]) => new Set(list).size !== list.length
 const bag = (v: unknown): Record<string, unknown> => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {})
 const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : [])
 
-/** The menu rules of `daimon.core.support_plans`, answered as the server's pydantic errors read. */
+/** The menu rules of `daimon.core.support`, answered as the server's pydantic errors read. */
 function menuProblems(c: Record<string, unknown>): Problem[] {
   const out: Problem[] = []
   const add = (loc: (string | number)[], msg: string | null) => msg && out.push({ loc: ["menu", ...loc], msg })
