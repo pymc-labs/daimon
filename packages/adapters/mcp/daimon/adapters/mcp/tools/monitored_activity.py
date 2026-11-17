@@ -1,5 +1,5 @@
 """Monitored agents from chat: the conversations kept for an agent and one transcript.
-Admin-only; each read is written to the audit trail, as in the web app."""
+For workspace admins; each read is written to the audit trail, as in the web app."""
 
 from __future__ import annotations
 
@@ -15,15 +15,12 @@ from daimon.adapters.mcp.tools._web_admin import (
     agent_names,
     audit_to,
     private_details,
-    web_admin_of,
 )
 from daimon.core import monitoring_view as view
 from daimon.core.cursor import decode_cursor, encode_cursor
 from daimon.core.monitoring_view import Where
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores.domain import MonitoredConversationRow
-from daimon.core.web_admin import WebAdmin
-from daimon.core.web_roles_rules import is_admin
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -90,14 +87,21 @@ def _page(after: str | None) -> tuple[datetime, uuid.UUID] | None:
         raise ToolError("next_page is not a page this tool gave.") from err
 
 
-async def _admin_of(runtime: McpRuntime, auth: AuthIdentity, agent_id: str) -> tuple[WebAdmin, str]:
-    actor = await web_admin_of(runtime, auth)
-    if not is_admin(actor.role):
-        raise ToolError("Monitored activity is for admins.")
-    name = (await agent_names(runtime, actor.tenant_id)).get(agent_id)
+async def _admin_of(runtime: McpRuntime, auth: AuthIdentity, agent_id: str) -> str:
+    """The agent's name, for a caller the core rule lets read monitored activity. An agent's
+    own key, a held credential or a client is never that person."""
+    if auth.is_external_agent or auth.hold is not None or auth.client:
+        raise ToolError("Monitored activity is for workspace admins.")
+    async with runtime.session_factory() as db:
+        allowed = await view.may_read_monitored(
+            db, tenant_id=auth.tenant_id, account_id=auth.account_id, chat_admin=auth.is_admin
+        )
+    if not allowed:
+        raise ToolError("Monitored activity is for workspace admins.")
+    name = (await agent_names(runtime, auth.tenant_id)).get(agent_id)
     if name is None:
         raise ToolError("That agent was not found.")
-    return actor, name
+    return name
 
 
 async def _audited(
@@ -139,10 +143,10 @@ async def _list_impl(
     limit: int,
     origin_context_id: str | None,
 ) -> MonitoredActivity:
-    actor, agent = await _admin_of(runtime, auth, agent_id)
+    agent = await _admin_of(runtime, auth, agent_id)
     details = await private_details(runtime, auth, origin_context_id)
     async with runtime.session_factory() as db:
-        people = await people_store.list_people(db, tenant_id=actor.tenant_id)
+        people = await people_store.list_people(db, tenant_id=auth.tenant_id)
     by_account = {p.account_id: (p.id, p.display_name) for p in people}
     account: uuid.UUID | None = None
     if person_id:
@@ -159,11 +163,11 @@ async def _list_impl(
     size = max(1, min(limit, _LIMIT))
     async with runtime.session_factory() as db:
         state = await view.agent_monitoring(
-            db, runtime.settings, tenant_id=actor.tenant_id, ma_agent_id=agent_id
+            db, runtime.settings, tenant_id=auth.tenant_id, ma_agent_id=agent_id
         )
         found = await view.list_conversations(
             db,
-            tenant_id=actor.tenant_id,
+            tenant_id=auth.tenant_id,
             ma_agent_id=agent_id,
             where=where,
             account_id=account,
@@ -196,7 +200,7 @@ async def _transcript_impl(
     after: str | None,
     origin_context_id: str | None,
 ) -> MonitoredTranscript:
-    actor, agent = await _admin_of(runtime, auth, agent_id)
+    agent = await _admin_of(runtime, auth, agent_id)
     # What people said is shown only where no one else can read it.
     if await private_details(runtime, auth, origin_context_id) != "shown":
         raise ToolError(
@@ -209,13 +213,13 @@ async def _transcript_impl(
     cursor = _page(after)
     if cursor is None:
         async with runtime.session_factory() as db:
-            people = await people_store.list_people(db, tenant_id=actor.tenant_id)
+            people = await people_store.list_people(db, tenant_id=auth.tenant_id)
         who = next((p.display_name for p in people if p.account_id == parsed[0]), None)
         await _audited(runtime, auth, view.AUDIT_OPEN, agent, who)
     async with runtime.session_factory() as db:
         found = await view.get_transcript(
             db,
-            tenant_id=actor.tenant_id,
+            tenant_id=auth.tenant_id,
             ma_agent_id=agent_id,
             conversation=conversation_id,
             after=cursor,
@@ -252,7 +256,7 @@ def register_monitored_activity_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         (YYYY-MM-DD). A person's coding-tool calls make one row per day. Person names show only
         in a direct message with the admin; elsewhere ``private_details`` is
         ``direct_message`` and they read ``Person 1``, ``Person 2``. Pass this active turn's
-        origin_context_id. The read is audited. Admins only. ``next_page`` goes
+        origin_context_id. The read is audited. Workspace admins only. ``next_page`` goes
         back as ``after``."""
         return await _list_impl(
             runtime,
@@ -278,7 +282,7 @@ def register_monitored_activity_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         """Read one kept conversation (a ``conversation_id`` from list_monitored_activity)
         in order: questions, answers, coding-tool calls with their outcome, and ``notice``
         when the person was told. Works only in a direct message with the admin or the web
-        chat; pass this active turn's origin_context_id. The read is audited. Admins only.
+        chat; pass this active turn's origin_context_id. The read is audited. Workspace admins only.
         ``next_page`` goes back as ``after``."""
         return await _transcript_impl(
             runtime,

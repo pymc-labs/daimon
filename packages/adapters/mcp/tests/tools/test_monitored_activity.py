@@ -1,4 +1,4 @@
-"""Monitored activity tools: the admin gate, private-only transcripts, and the audit row."""
+"""Monitored activity tools: the workspace-admin gate, private-only transcripts, and the audit row."""
 
 from __future__ import annotations
 
@@ -12,8 +12,6 @@ from daimon.adapters.mcp.tools import monitored_activity as tool
 from daimon.core import monitoring_view as view
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores.domain import MonitoredConversationRow, MonitoredEventRow
-from daimon.core.web_admin import WebAdmin
-from daimon.core.web_roles_rules import Role
 from fastmcp.exceptions import ToolError
 
 from .parity_fakes import fake_runtime, make_auth
@@ -24,7 +22,8 @@ PERSON = SimpleNamespace(id=uuid.uuid4(), account_id=uuid.uuid4(), display_name=
 
 class Harness:
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self.role: Role = "admin"
+        self.reads = True
+        self.asked: list[dict[str, Any]] = []
         self.private = "shown"
         self.audits: list[tuple[str, str, str | None]] = []
         self.agents = {"agt_1": "Ada"}
@@ -44,8 +43,9 @@ class Harness:
             )
         )
 
-        async def admin_of(_rt: Any, auth: Any) -> WebAdmin:
-            return WebAdmin(tenant_id=auth.tenant_id, account_id=auth.account_id, role=self.role)
+        async def may_read(_db: Any, **asked: Any) -> bool:
+            self.asked.append(asked)
+            return self.reads
 
         async def names(*_a: Any, **_k: Any) -> dict[str, str]:
             return self.agents
@@ -101,7 +101,7 @@ class Harness:
 
             return record
 
-        monkeypatch.setattr(tool, "web_admin_of", admin_of)
+        monkeypatch.setattr(view, "may_read_monitored", may_read)
         monkeypatch.setattr(tool, "agent_names", names)
         monkeypatch.setattr(tool, "private_details", details)
         monkeypatch.setattr(people_store, "list_people", people)
@@ -159,14 +159,46 @@ async def test_list_when_shared_place_hides_names(harness: Harness) -> None:
     assert result.private_details == "direct_message", result
 
 
-async def test_list_when_not_admin_is_refused_without_audit(harness: Harness) -> None:
-    """A role without workspace management reads nothing and leaves no audit row."""
-    harness.role = "member"
+async def test_list_when_not_workspace_admin_is_refused_without_audit(harness: Harness) -> None:
+    """Whoever the core rule refuses, such as an agent's owner, reads nothing and is not audited."""
+    harness.reads = False
 
-    with pytest.raises(ToolError, match="for admins"):
+    with pytest.raises(ToolError, match="for workspace admins"):
         await harness.listed()
+    with pytest.raises(ToolError, match="for workspace admins"):
+        await harness.opened()
 
     assert harness.audits == [], "a refused read is not audited"
+
+
+async def test_list_when_workspace_admin_only_is_not_a_chat_admin_still_reads(
+    harness: Harness,
+) -> None:
+    """The bar is the core rule's, not chat's own admin check: the caller's tenant, account
+    and chat standing go to it, and nothing else gates the read."""
+    harness.auth = make_auth(admin=False)
+
+    await harness.listed()
+
+    assert harness.asked == [
+        {
+            "tenant_id": harness.auth.tenant_id,
+            "account_id": harness.auth.account_id,
+            "chat_admin": False,
+        }
+    ], harness.asked
+
+
+async def test_list_when_an_agent_key_asks_is_refused_even_for_an_admin_account(
+    harness: Harness,
+) -> None:
+    """An agent's own key never inherits its owner's admin rights over what people said."""
+    harness.auth = make_auth(agent_id=uuid.uuid4())
+
+    with pytest.raises(ToolError, match="for workspace admins"):
+        await harness.listed()
+
+    assert harness.asked == [], "the rule is not even asked for an agent key"
 
 
 async def test_list_when_agent_unknown_is_refused(harness: Harness) -> None:
