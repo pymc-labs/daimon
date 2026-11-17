@@ -31,7 +31,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import make_account, make_dm_conversation, make_tenant
 from slack_sdk.errors import SlackApiError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 _OFF = (
     "Private chats with Daimon are off here.\n"
@@ -41,6 +41,19 @@ _ON = (
     "I answer in channels first.\n"
     "Mention me in a channel, or run `/dm-me` in one to continue privately here."
 )
+
+
+@pytest.fixture
+def db_session_factory(
+    db_clean: None, db_committing_engine: AsyncEngine
+) -> async_sessionmaker[AsyncSession]:
+    """One connection per session, as in production.
+
+    A held burst polls for its pick while the pick writes. On the shared test
+    connection one session's close rolled back the other's uncommitted rows.
+    """
+    del db_clean
+    return async_sessionmaker(db_committing_engine, expire_on_commit=False)
 
 
 @pytest.fixture(autouse=True)
