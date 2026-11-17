@@ -25,6 +25,7 @@ from daimon.core.support_plans import (
     inactive_text,
     load_catalog,
     may_submit,
+    option_text,
     parse_amount,
     parse_catalog,
     parse_credits,
@@ -323,3 +324,18 @@ def test_price_text_when_each_kind_then_reads_plainly() -> None:
     assert texts == ["0.5 credits", "0.5-1 credits", "1-3 credits", "Quoted"], texts
     capped = QuotedPrice(kind="quoted", max=D(2))
     assert price_text(capped) == "Quoted, up to 2 credits", "a capped quote names its max"
+
+
+def test_option_text_when_each_kind_then_names_the_terms_asked_on() -> None:
+    spec = parse_catalog(CATALOG)
+    quick, call, review, _custom = spec.options
+    texts = [
+        option_text(snapshot_option(quick, step=None)),
+        option_text(snapshot_option(call, step=1)),
+        option_text(snapshot_option(review, step=None)),
+    ]
+    assert texts == [
+        "Quick question: 0.5 credits",
+        "Call, 1 hour: 1 credit",
+        "Review: 1-3 credits",
+    ], texts

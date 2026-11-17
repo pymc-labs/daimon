@@ -676,6 +676,13 @@ def step_text(step: Step) -> str:
     return f"{step.label}: {credits_text(step.amount)}"
 
 
+def option_text(option: OptionSnapshot) -> str:
+    """A request's terms on its support post: `Review: 0.5-1 credits`, `Call, 30 min: 1 credit`."""
+    if (step := option.step_label) is not None:
+        return f"{option.label}, {step}: {credits_text(option.bounds.lower)}"
+    return f"{option.label}: {price_text(option.price)}"
+
+
 NOT_ENOUGH_CREDITS: Final = "Not enough credits left."
 OPTIONS_CHANGED: Final = "Options changed. Open Ask a person again."
 EXEMPT_OFFER: Final = "As an admin, your requests use no credits."
@@ -684,6 +691,12 @@ PENDING_RECEIVED: Final = "We will confirm the charge."
 RECEIVED: Final = "Request sent. Someone will reply."
 CLIENT_NOT_NOTIFIED: Final = "The client is not notified. Tell them the charge yourself."
 """Decision 8: on every settle control and every settler's confirmation."""
+CHOOSE_OPTION: Final = "Choose an option"
+SET_CHARGE: Final = "Set charge"
+DECLINE: Final = "Decline"
+CHARGE_FIELD: Final = "Credits"
+REQUEST_GONE: Final = "This request no longer exists."
+SETTLE_ELSEWHERE: Final = "Set the charge in the support channel."
 
 
 def received_text(*, status: RequestStatus, charged_to: ChargedTo) -> str:
