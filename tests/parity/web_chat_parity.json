@@ -344,6 +344,15 @@
     "teams": "daimon.adapters.teams.settings"
    }
   },
+  "PUT /api/support-plans/allowances": {
+   "tool": "support_allowance_set"
+  },
+  "PUT /api/support-plans/catalogs/{key}": {
+   "tool": "support_catalog_set"
+  },
+  "PUT /api/support-plans/plan": {
+   "tool": "support_plan_set"
+  },
   "PUT /{path:path}": {
    "exempt": "serves the web app's own pages"
   }
