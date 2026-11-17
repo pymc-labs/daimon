@@ -29,10 +29,18 @@ async def place_session(
     settings: Settings | None,
     place: FeaturePlace,
     agent: BetaManagedAgentsAgent,
+    *,
+    server_setup: bool = False,
 ) -> tuple[SessionToolset, SessionIdentity]:
-    """The toolset and identity features a new session of `agent` at `place` gets."""
+    """The toolset and identity features a new session of `agent` at `place` gets. Only the
+    MCP server's own process passes `server_setup`: the setup is that server's (`SERVER_SETUP`)."""
     keys = tuple(dict.fromkeys((*TOOLSET_KEYS, *IDENTITY_RESOLVE_KEYS)))
     features = await resolve_features(
-        sessions, settings, place, keys=keys, agent_builtins=builtins_of(agent), server_setup=False
+        sessions,
+        settings,
+        place,
+        keys=keys,
+        agent_builtins=builtins_of(agent),
+        server_setup=server_setup,
     )
     return agent_toolset(features, agent), SessionIdentity.of(features)

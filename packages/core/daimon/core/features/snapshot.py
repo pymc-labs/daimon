@@ -164,6 +164,11 @@ def unavailable_reason(
     return None
 
 
+def server_setup_met(spec: FeatureSpec, settings: Settings) -> bool:
+    """Whether `settings` carry every `SERVER_SETUP` requirement of `spec`."""
+    return all(_SETUP[need](settings) for need in spec.requires if need in SERVER_SETUP)
+
+
 async def support_setup(
     session: AsyncSession,
     settings: Settings | None,

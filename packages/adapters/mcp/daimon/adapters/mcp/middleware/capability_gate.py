@@ -7,6 +7,10 @@ external MCP clients and agent keys reach the server directly, so the server ref
 tools/list is filtered for every caller except a chat-execution credential: the native turn
 checks its live catalogue against its allowlist (`turn/runtime_manifest.py`), and Claude
 sessions already hide the tools in their session config. Such a caller is refused at call time.
+
+A tool whose setup this server lacks (`SERVER_SETUP`) leaves every list, that credential's too,
+and its call is refused as not set up: a worker can't judge that setup, and the server's
+settings, so that catalogue, stay fixed while it runs.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, list_running_origins
 from daimon.core.features.registry import FEATURES
-from daimon.core.features.snapshot import FeaturePlace, resolve_features
+from daimon.core.features.snapshot import FeaturePlace, resolve_features, server_setup_met
 from daimon.core.features.tool_gate import (
     GATED_KEYS,
     gated_tools,
@@ -39,12 +43,21 @@ log = structlog.get_logger(__name__)
 
 #: Audit reason for a call refused because its capability is Off.
 DENIAL_REASON: Final = "capability_off"
+#: Audit reason for a call refused because this deployment lacks its capability's setup.
+UNSET_REASON: Final = "capability_unset"
 
 
 def _refusal(tool: str, key: str) -> str:
     return (
         f"{FEATURES[key].name} is turned off here, so {tool} can't run. Nothing was done. "
         "Ask an admin or an owner to turn it on."
+    )
+
+
+def _unset_refusal(tool: str, key: str) -> str:
+    return (
+        f"{FEATURES[key].name} isn't set up on this deployment, so {tool} can't run. "
+        "Nothing was done."
     )
 
 
@@ -95,7 +108,7 @@ def _lists_everything(auth: AuthIdentity) -> bool:
 
 
 class CapabilityGateMiddleware(Middleware):
-    """Refuses a call to a tool whose capability is Off at the caller's place."""
+    """Refuses a call to a tool whose capability is Off at the caller's place or not set up."""
 
     def __init__(self, runtime: McpRuntime) -> None:
         self._runtime = runtime
@@ -111,6 +124,9 @@ class CapabilityGateMiddleware(Middleware):
         auth = await ctx.get_state("auth") if key is not None and ctx is not None else None
         if key is None or not isinstance(auth, AuthIdentity):
             return await call_next(context)
+        if not server_setup_met(FEATURES[key], self._runtime.settings):
+            record_denial(UNSET_REASON)
+            raise ToolError(_unset_refusal(tool, key))
         try:
             places = await caller_places(
                 self._runtime, auth, (context.message.arguments or {}).get("origin_context_id")
@@ -140,7 +156,12 @@ class CapabilityGateMiddleware(Middleware):
         tools = await call_next(context)
         ctx = context.fastmcp_context
         auth = await ctx.get_state("auth") if ctx is not None else None
-        if not isinstance(auth, AuthIdentity) or _lists_everything(auth):
+        if not isinstance(auth, AuthIdentity):
+            return tools
+        settings = self._runtime.settings
+        unset = gated_tools(k for k in GATED_KEYS if not server_setup_met(FEATURES[k], settings))
+        tools = [t for t in tools if t.name not in unset or server_gate_key(t.name) is None]
+        if _lists_everything(auth):
             return tools
         try:
             places = await caller_places(self._runtime, auth, None)
