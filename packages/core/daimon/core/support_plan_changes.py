@@ -14,6 +14,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from typing import cast
 
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Decision, Place, Subject, authorize
@@ -40,6 +41,7 @@ from daimon.core.support_plans import (
     PlanScope,
     PlanSpec,
     SupportCatalogSpec,
+    credits_text,
     format_credits,
     parse_catalog_key,
     parse_credits,
@@ -54,7 +56,6 @@ CATALOG_SETTING = "support_catalog"
 ALLOWANCE_SETTING = "support_allowance"
 SETTLE_SETTING = "support_settle"
 CATALOG_IN_USE = "A plan still uses this menu. Change that plan first."
-NO_CATALOG = "No menu has that key."
 NO_PLAN = "There is no plan there."
 
 
@@ -101,6 +102,48 @@ async def _record(
         surface=actor.surface,
     )
     await after_write(session, actor, before != after)
+
+
+_NOTHING = {
+    PLAN_SETTING: "no plan",
+    CATALOG_SETTING: "no menu",
+    ALLOWANCE_SETTING: "no own cap",
+    SETTLE_SETTING: "no request",
+}
+
+
+def stale_text(exc: StaleChannelValue) -> str:
+    """The stale refusal with what is there now, in brief: `... Now: revision 3.`"""
+    now = exc.current
+    if now is None:
+        brief = _NOTHING.get(exc.setting, "nothing")
+    elif isinstance(now, str):
+        brief = credits_text(Decimal(now))
+    else:
+        value = cast("dict[str, JsonValue]", now)
+        if exc.setting == CATALOG_SETTING:
+            brief = f"revision {value['revision']}"
+        elif exc.setting == SETTLE_SETTING:
+            charge = value["charge"]
+            spent = "" if charge is None else f", {credits_text(Decimal(str(charge)))}"
+            brief = f"{value['status']}{spent}"
+        else:
+            parts = [f"menu {value['catalog'] or 'default'}"]
+            if value["pool"] is not None:
+                parts.append(f"pool {value['pool']}")
+            if value["per_person"] is not None:
+                parts.append(f"{value['per_person']} per person")
+            brief = ", ".join([*parts, str(value["window"])])
+    return f"{exc} Now: {brief}."
+
+
+async def missing_catalog(
+    session: AsyncSession, *, tenant_id: uuid.UUID, key: str
+) -> ChannelChangeRefused:
+    """The refusal for an unknown menu key, naming the keys there are."""
+    keys = [c.key for c in await store.list_catalogs(session, tenant_id=tenant_id)]
+    there = f"Menus: {', '.join(keys)}." if keys else "There are no menus yet."
+    return ChannelChangeRefused(f"No menu has the key {key}. {there}", kind="not_found")
 
 
 def _stale_check[T](
@@ -207,7 +250,7 @@ async def set_plan(
         if spec.catalog is not None:
             catalog = await store.get_catalog(session, tenant_id=actor.tenant_id, key=spec.catalog)
             if catalog is None:
-                raise ChannelChangeRefused(NO_CATALOG, kind="not_found")
+                raise await missing_catalog(session, tenant_id=actor.tenant_id, key=spec.catalog)
             catalog_id = catalog.id
         row = await store.set_plan(
             session,
@@ -361,13 +404,13 @@ async def remove_catalog(
     platform: str,
     key: str,
     expected: Expected[int | None] | None = None,
-) -> bool:
-    """Remove a menu no plan uses; False when there was none."""
+) -> None:
+    """Remove a menu no plan uses; an unknown key is refused."""
     _require_admin(actor)
     async with sessionmaker.begin() as session:
         before = await _locked_catalog(session, actor, key=key, expected=expected)
         if before is None:
-            return False
+            raise await missing_catalog(session, tenant_id=actor.tenant_id, key=key)
         if await store.plans_using(session, tenant_id=actor.tenant_id, catalog_id=before.id):
             raise ChannelChangeRefused(CATALOG_IN_USE, kind="invalid")
         await store.delete_catalog(session, tenant_id=actor.tenant_id, key=key)
@@ -380,7 +423,6 @@ async def remove_catalog(
             before=_catalog_json(before),
             after=None,
         )
-    return True
 
 
 # ---------- Allowances ----------
@@ -647,6 +689,7 @@ __all__ = [
     "clear_plan",
     "is_support_channel",
     "may_set_support_plan",
+    "missing_catalog",
     "read_plan",
     "remove_catalog",
     "set_allowance",
@@ -654,4 +697,5 @@ __all__ = [
     "set_plan",
     "settle",
     "settle_from_post",
+    "stale_text",
 ]

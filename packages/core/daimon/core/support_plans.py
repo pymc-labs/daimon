@@ -645,7 +645,8 @@ def parse_scope(scope: str, scope_id: str | None) -> tuple[PlanScope, str]:
             raise SupportPlanError("A workspace plan takes no id.")
         return "workspace", ""
     if scope not in ("agent", "channel"):
-        raise SupportPlanError("A plan is for a workspace, an agent or a channel.")
+        given = f", not {scope.strip()}" if scope.strip() else ""
+        raise SupportPlanError(f"A plan is for a workspace, an agent or a channel{given}.")
     if not scope_id or not scope_id.strip():
         raise SupportPlanError(f"Name the {scope} for this plan.")
     return ("agent" if scope == "agent" else "channel"), scope_id.strip()

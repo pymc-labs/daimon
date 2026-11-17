@@ -49,11 +49,13 @@ from daimon.core.support_plan_changes import (
     PlanValue,
     clear_allowance,
     clear_plan,
+    missing_catalog,
     remove_catalog,
     set_allowance,
     set_catalog,
     set_plan,
     settle,
+    stale_text,
 )
 from daimon.core.support_plans import (
     PlanScope,
@@ -185,7 +187,11 @@ async def _plan_ref(
     """`--plan workspace|agent:<name>|channel:<id>`; None is the default plan."""
     if ref is None:
         return None, ""
-    scope, _, raw_id = ref.partition(":")
+    scope, colon, raw_id = ref.partition(":")
+    if not colon and scope.strip() != "workspace":
+        raise SupportPlanError(
+            f"--plan {ref} names no plan. Use workspace, agent:<name> or channel:{ref.strip()}."
+        )
     return await _scope_id(rt, target, scope, raw_id or None, transport=transport, missing_ok=True)
 
 
@@ -214,7 +220,7 @@ def _plan_json(raw: str) -> PlanValue:
 
 
 def _stale(exc: StaleChannelValue) -> StoreError:
-    return StoreError(f"{exc} Now: {json.dumps(exc.current)}")
+    return StoreError(stale_text(exc))
 
 
 def _print_json(console: Console, payload: object) -> None:
@@ -272,8 +278,8 @@ async def catalog_show(
     target = await _target(rt, selector)
     async with rt.sessionmaker() as session:
         row = await store.get_catalog(session, tenant_id=target.tenant_id, key=key)
-    if row is None:
-        raise StoreError(f"no menu {key!r}")
+        if row is None:
+            raise await missing_catalog(session, tenant_id=target.tenant_id, key=key)
     spec = row.spec.model_dump(mode="json", exclude_none=True)
     if as_json:
         _print_json(console, {"key": row.key, "revision": row.revision, "catalog": spec})
@@ -324,7 +330,7 @@ async def catalog_rm(
 ) -> None:
     target = await _target(rt, selector)
     try:
-        removed = await remove_catalog(
+        await remove_catalog(
             rt.sessionmaker,
             _actor(target, command="catalog rm", reason=f"catalog:{key}"),
             platform=target.platform,
@@ -333,7 +339,7 @@ async def catalog_rm(
         )
     except StaleChannelValue as exc:
         raise _stale(exc) from exc
-    console.print(f"menu {key}: {'removed' if removed else 'there was none'}")
+    console.print(f"menu {key}: removed", markup=False)
 
 
 # ---------- plan ----------

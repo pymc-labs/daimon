@@ -251,14 +251,14 @@ async def test_cap_when_id_is_a_mention_or_not_a_discord_id_then_unwraps_or_refu
     assert [c.platform_user_id for c in caps] == [_PERSON], "only the valid id saved"
 
 
-async def test_catalog_set_checks_the_revision_and_removes_with_none(
+async def test_catalog_set_when_stale_or_removed_twice_then_says_what_is_there(
     committing_sessionmaker: Factory,
 ) -> None:
     tenant, account_id = await _seed(committing_sessionmaker)
     runtime, auth = _runtime(committing_sessionmaker), _auth(tenant, account_id)
     made = await _set_catalog_impl(runtime, auth, key="support", catalog=_MENU, expected_revision=0)
     assert (made.revision, made.summary) == (1, "Review (1-3 credits)"), "a menu in one line"
-    with pytest.raises(ToolError, match='"revision": 1'):
+    with pytest.raises(ToolError, match=r"Now: revision 1\. Nothing was saved\.$"):
         await _set_catalog_impl(runtime, auth, key="support", catalog=_MENU, expected_revision=0)
     (shown,) = await _get_catalogs_impl(runtime, auth, "support")
     again = await _set_catalog_impl(
@@ -274,6 +274,8 @@ async def test_catalog_set_checks_the_revision_and_removes_with_none(
     )
     assert removed.revision == 0, "removed"
     assert await _get_catalogs_impl(runtime, auth, None) == [], "no menus left"
+    with pytest.raises(ToolError, match="key support. There are no menus yet. Nothing was saved"):
+        await _set_catalog_impl(runtime, auth, key="support", catalog=None, expected_revision=None)
 
 
 async def test_requests_list_when_undelivered_then_only_requests_no_channel_received(

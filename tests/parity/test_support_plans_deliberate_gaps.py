@@ -5,7 +5,8 @@ modal, which for an option with no step and no fields holds only its terms and
 Discord's own Submit. A Slack modal keeps the option picked until Send. Teams
 shows the option's card (a dialog's `continue`, or the typed form's Next).
 Teams settles on the post itself and names the settler by name. Every other
-rule (prices, fields, each field's character cap) is shared core.
+rule (prices, fields, each field's character cap) is shared core. A stale admin
+change names what is there now on the CLI and MCP; the web page reloads it instead.
 """
 
 from __future__ import annotations
@@ -18,8 +19,11 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import discord
+import pytest
+from daimon.adapters.cli.commands.support import _stale  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.discord import support_settle as discord_settle
 from daimon.adapters.discord.support_escalation import SupportOptionModal
+from daimon.adapters.mcp.tools.support_plans import _refused  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.slack import support_settle as slack_settle
 from daimon.adapters.slack.support_plan_form import (
     OPTION_ACTION_ID,
@@ -30,7 +34,10 @@ from daimon.adapters.slack.support_plan_form import (
 from daimon.adapters.teams import support_plan_card as teams_card
 from daimon.adapters.teams.support import SupportCommand
 from daimon.adapters.teams.support_settle import TeamsSupportSettle
+from daimon.adapters.web.channels import channel_refusals
+from daimon.core.errors import StaleChannelValue
 from daimon.core.stores.support_rows import PlanView, SupportCatalogRow, SupportEscalationRow
+from daimon.core.support_plan_changes import CATALOG_SETTING
 from daimon.core.support_plans import (
     MAX_PARAGRAPH_CHARS,
     Balance,
@@ -39,6 +46,7 @@ from daimon.core.support_plans import (
     parse_catalog,
 )
 from discord.ui import TextDisplay, TextInput
+from fastapi import HTTPException
 from microsoft_teams.cards import ChoiceSetInput, TextBlock
 from microsoft_teams.cards import TextInput as TeamsTextInput
 
@@ -197,3 +205,13 @@ def test_pending_request_when_admins_were_messaged_then_teams_still_posts_it() -
     deliver = inspect.getsource(SupportCommand._deliver)  # pyright: ignore[reportPrivateUsage]
     pending = deliver.index('if row.status == "pending":')
     assert pending < deliver.index("elif not delivered:"), "Teams: posted whatever the chats did"
+
+
+def test_stale_admin_change_when_refused_then_cli_and_mcp_say_what_is_there_now() -> None:
+    """The web answers 409 with the plain refusal: its page reloads the current value."""
+    stale = StaleChannelValue(CATALOG_SETTING, {"revision": 2})
+    assert str(_stale(stale)).endswith("Now: revision 2."), "CLI: the revision now"
+    assert "Now: revision 2." in str(_refused(stale)), "MCP: the revision now"
+    with pytest.raises(HTTPException) as web, channel_refusals():
+        raise stale
+    assert (web.value.status_code, web.value.detail) == (409, str(stale)), "web: plain 409"

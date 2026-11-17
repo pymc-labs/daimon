@@ -7,7 +7,6 @@ boundary as decimal strings. Plans and menus are read per call, never cached.
 
 from __future__ import annotations
 
-import json
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -52,6 +51,7 @@ from daimon.core.support_plan_changes import (
     set_catalog,
     set_plan,
     settle,
+    stale_text,
 )
 from daimon.core.support_plans import (
     PlanScope,
@@ -125,7 +125,7 @@ class SupportCatalogResult:
 class SetSupportCatalogResult:
     key: str
     revision: int
-    """0 when the menu was removed or there was none."""
+    """0 when the menu was removed."""
     summary: str
 
 
@@ -186,7 +186,7 @@ def _actor(auth: AuthIdentity) -> ChannelActor:
 
 def _refused(exc: Exception) -> ToolError:
     if isinstance(exc, StaleChannelValue):
-        return ToolError(f"{exc} Now: {json.dumps(exc.current)}. Nothing was saved.")
+        return ToolError(f"{stale_text(exc)} Nothing was saved.")
     return ToolError(f"{exc} Nothing was saved.")
 
 

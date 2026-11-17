@@ -180,12 +180,16 @@ async def test_a_stale_value_is_a_409_and_the_value_last_read_goes_through(
         removed = await put(
             "/api/support-plans/catalogs/support", json={"catalog": None, "expected_revision": 1}
         )
+        unknown = await put(
+            "/api/support-plans/catalogs/support", json={"catalog": None, "expected_revision": None}
+        )
 
     assert again.status_code == 409, "a plan set since it was read"
     assert changed.status_code == 200, changed.text
     assert stale_menu.status_code == 409, "a menu set since it was read"
     assert cleared.status_code == 200 and cleared.json()["plans"] == [], cleared.text
     assert removed.status_code == 200 and removed.json()["catalogs"] == [], removed.text
+    assert unknown.status_code == 404 and "no menus yet" in unknown.text, unknown.text
 
 
 async def test_values_that_cannot_be_used_are_refused_and_nothing_is_saved(

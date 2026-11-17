@@ -113,16 +113,18 @@ async def test_catalog_when_shown_and_set_back_then_round_trips_and_audits(
     shown = out.getvalue().split("\n", 1)[1]
     assert shown.startswith("# support, revision 1"), "the revision heads the YAML"
     await catalog_set(**where, key="support", text=shown, expected="1")
-    with pytest.raises(StoreError, match='"revision": 2'):
+    with pytest.raises(StoreError, match=r"Now: revision 2\.$"):
         await catalog_set(**where, key="support", text=MENU, expected="1")
     await catalog_list(**where, as_json=True)
     listed = json.loads(out.getvalue().strip().splitlines()[-1])
     assert listed == [
         {"key": "support", "name": "Support", "revision": 2, "options": "Review (1-3 credits)"}
     ], "the shown YAML set back unchanged"
+    with pytest.raises(ChannelChangeRefused, match="key suport. Menus: support."):
+        await catalog_show(**where, key="suport", as_json=False)
     await catalog_rm(**where, key="support", expected="2")
-    await catalog_rm(**where, key="support")
-    assert "menu support: there was none" in out.getvalue(), "removing nothing says so"
+    with pytest.raises(ChannelChangeRefused, match="key support. There are no menus yet."):
+        await catalog_rm(**where, key="support")
     async with db_session_factory() as session:
         events = await list_events(session, tenant_id=tenant_id)
     assert sorted(e.tool_name for e in events) == [
@@ -253,7 +255,7 @@ async def test_allowance_when_set_then_listed_and_cleared_under_its_plan(
     assert "U1 under the channel C1: cap cleared" in out.getvalue(), "cleared"
 
 
-async def test_allowance_when_id_is_a_mention_or_not_a_slack_id_then_unwraps_or_refuses(
+async def test_allowance_when_a_mention_or_a_malformed_id_or_plan_then_unwraps_or_hints(
     db_session_factory: Factory,
 ) -> None:
     rt = build_cli_runtime(db_session_factory, settings=_settings())
@@ -262,6 +264,10 @@ async def test_allowance_when_id_is_a_mention_or_not_a_slack_id_then_unwraps_or_
     where = {"rt": rt, "console": console, "selector": selector}
     with pytest.raises(SupportPlanError, match="alice is not a Slack user id"):
         await allowance_set(**where, platform_user_id="alice", credits="4")
+    with pytest.raises(SupportPlanError, match="Use workspace, agent:<name> or channel:C1."):
+        await allowance_set(**where, platform_user_id="U1", credits="4", plan="C1")
+    with pytest.raises(SupportPlanError, match="or a channel, not team."):
+        await allowance_set(**where, platform_user_id="U1", credits="4", plan="team:C1")
     await allowance_set(**where, platform_user_id="<@U1|alice>", credits="4")
     assert "U1 under the default plan: cap 4" in out.getvalue(), f"unwrapped: {out.getvalue()}"
 

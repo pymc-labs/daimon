@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import uuid
 from decimal import Decimal
@@ -16,7 +17,10 @@ from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.support_plan_changes import (
     ALLOWANCE_SETTING,
+    CATALOG_SETTING,
+    PLAN_SETTING,
     SETTLE_SETTING,
+    PlanValue,
     clear_allowance,
     clear_plan,
     is_support_channel,
@@ -28,6 +32,7 @@ from daimon.core.support_plan_changes import (
     set_plan,
     settle,
     settle_from_post,
+    stale_text,
 )
 from daimon.core.support_plans import RequestChoice, SupportPlace, parse_catalog, parse_plan_spec
 from daimon.testing.factories import make_platform_principal, make_tenant
@@ -192,11 +197,47 @@ async def test_remove_catalog_when_a_plan_uses_it_then_refused_until_cleared(
         await remove_catalog(db_session_factory, actor, platform="slack", key="support")
     assert in_use.value.kind == "invalid", "a menu in use stays"
     await clear_plan(db_session_factory, actor, platform="slack", scope="channel", scope_id="C1")
-    removed = await remove_catalog(
+    await remove_catalog(
         db_session_factory, actor, platform="slack", key="support", expected=Expected(menu.revision)
     )
-    again = await remove_catalog(db_session_factory, actor, platform="slack", key="support")
-    assert (removed, again) == (True, False), "removed once, then there is none"
+    with pytest.raises(ChannelChangeRefused, match="key support. There are no menus yet") as gone:
+        await remove_catalog(db_session_factory, actor, platform="slack", key="support")
+    assert gone.value.kind == "not_found", "removing a menu twice is refused"
+
+
+async def test_set_plan_when_the_menu_key_is_unknown_then_names_the_keys_there_are(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    actor = _actor(await _tenant(db_session))
+    await set_catalog(db_session_factory, actor, platform="slack", key="support", spec=MENU)
+    await set_catalog(db_session_factory, actor, platform="slack", key="calls", spec=MENU)
+    spec = dataclasses.replace(PLAN, catalog="suport")
+    with pytest.raises(ChannelChangeRefused, match="key suport. Menus: calls, support.$"):
+        await set_plan(db_session_factory, actor, platform="slack", spec=spec)
+
+
+@pytest.mark.parametrize(
+    ("setting", "current", "now"),
+    [
+        (CATALOG_SETTING, {"key": "support", "revision": 3, "options": []}, "revision 3"),
+        (CATALOG_SETTING, None, "no menu"),
+        (ALLOWANCE_SETTING, "1.5", "1.5 credits"),
+        (ALLOWANCE_SETTING, None, "no own cap"),
+        (SETTLE_SETTING, {"request": "r", "status": "settled", "charge": "1"}, "settled, 1 credit"),
+        (SETTLE_SETTING, {"request": "r", "status": "declined", "charge": None}, "declined"),
+        (PLAN_SETTING, None, "no plan"),
+    ],
+)
+def test_stale_text_when_each_setting_then_says_what_is_there_in_brief(
+    setting: str, current: object, now: str
+) -> None:
+    assert stale_text(StaleChannelValue(setting, current)).endswith(f" Now: {now}."), setting
+
+
+def test_stale_text_when_a_plan_then_its_terms_not_its_json() -> None:
+    value = PlanValue("channel", "C1", "support", D(5), D(2), "monthly").as_json()
+    text = stale_text(StaleChannelValue(PLAN_SETTING, value))
+    assert text.endswith("Now: menu support, pool 5, 2 per person, monthly."), text
 
 
 async def test_set_allowance_when_recorded_then_the_audit_names_no_person(
