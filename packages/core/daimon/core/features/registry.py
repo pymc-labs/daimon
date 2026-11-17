@@ -862,12 +862,12 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         effect="capability",
         values=_ON_OFF,
         default="on",
-        tiers=("deployment", "workspace"),
+        tiers=("deployment", "workspace", "agent", "channel"),
         binds="turn",
         doc=(
             "Answers offer a way to ask the Daimon team for help, which posts the request in the "
             "support channel. Off removes the button and the form. Whoever runs Daimon sets the "
-            "channel and each person's credits."
+            "channel; a support plan sets the credits and the menu."
         ),
         requires=("support_channel",),
         authority=_SETTINGS,
