@@ -2843,7 +2843,7 @@ class SupportEscalation(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    # Support plans (0208). The server defaults are a default-ledger row charged
+    # Support plans (0206). The server defaults are a default-ledger row charged
     # 1, which is what a writer that predates plans means.
     charged_to: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
     # SET NULL: a cleared plan's rows count nowhere, never in the default ledger.
