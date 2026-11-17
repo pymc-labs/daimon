@@ -379,6 +379,7 @@ source_modules = [
     "daimon.core.support_escalation",
     "daimon.core.support_admin",
     "daimon.core.support_changes",
+    "daimon.core.support_channel_check",
     "daimon.core.support",
     "daimon.core.support_routing",
     "daimon.core.switch_card",

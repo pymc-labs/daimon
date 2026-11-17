@@ -76,7 +76,8 @@ async def test_long_support_note_reaches_channel_in_order() -> None:
 
 
 async def test_a_later_chunk_failing_still_returns_the_first_and_logs_it() -> None:
-    first = MagicMock(spec=discord.Message, id=77)
+    first = MagicMock(spec=discord.Message)
+    first.id = 77
     channel = MagicMock(spec=discord.TextChannel)
     channel.send = AsyncMock(
         side_effect=[

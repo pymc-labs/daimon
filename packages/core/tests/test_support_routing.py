@@ -28,10 +28,9 @@ async def test_support_request_has_no_direct_message_recipients() -> None:
 def test_deployment_channel_when_another_platforms_id_then_unset(
     platform: str, expected: str | None
 ) -> None:
-    support = SupportSettings.model_construct(
+    support = SupportSettings(
         escalation_channel_id="123",
         slack_escalation_channel_id="C1",
-        teams_escalation_channel_id="C2",
     )
     assert deployment_channel(support, platform) == expected, "a Slack id never serves Teams"
     teams = SupportSettings(

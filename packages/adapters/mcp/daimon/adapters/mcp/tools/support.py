@@ -800,7 +800,7 @@ def register_support_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Send this workspace's support requests to its own channel, or reset it. Admin-only.
 
         ``channel_id`` null goes back to the default channel. A thread id resolves to
-        its parent channel. On Teams, pass ``service_url``, the Teams service URL.
+        its parent channel. ``service_url``: the chat service URL, where the platform needs one.
         Requests already open stay where they were posted. A deployment that keeps
         its own channel refuses. ``expected_revision``: the ``revision`` of
         ``support_channel_get``, or 0 when none is set. Example: ``channel_id="222"``.
