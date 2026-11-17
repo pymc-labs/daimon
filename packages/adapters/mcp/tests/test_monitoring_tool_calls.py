@@ -4,6 +4,7 @@ outcome; the agent's own turns, routines and agent-chat turns are not tool calls
 from __future__ import annotations
 
 import ast
+import datetime as dt
 import uuid
 from pathlib import Path
 
@@ -14,7 +15,9 @@ from daimon.adapters.mcp.middleware.mcp_identity import (
     MONITORED_QUESTION_TOOLS,
     IdentityMiddleware,
 )
+from daimon.adapters.mcp.tools import agent_chat
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.monitoring import MCP_NOTICE, KeptQuestion
 from daimon.core.stores import monitoring as store
 from daimon.core.stores.domain import FeatureTarget, MonitoredEventRow
 from daimon.core.stores.feature_values import set_feature_value
@@ -214,3 +217,14 @@ def test_every_agent_chat_send_keeps_the_question() -> None:
         and not fn.name.startswith("_")
     }
     assert turn_tools and turn_tools <= MONITORED_QUESTION_TOOLS, turn_tools
+
+
+def test_agent_chat_results_lead_with_the_monitoring_notice() -> None:
+    """A told turn's handle and `ask` result carry the notice; later turns do not."""
+    now = dt.datetime.now(dt.UTC)
+    told = agent_chat._turn_handle("h", "t1", now, KeptQuestion("t1", MCP_NOTICE))  # pyright: ignore[reportPrivateUsage]
+    quiet = agent_chat._turn_handle("h", "t2", now, KeptQuestion("t2", None))  # pyright: ignore[reportPrivateUsage]
+    assert told["monitoring"] == MCP_NOTICE.text and "monitoring" not in quiet
+    answer = agent_chat.AskResult(handle="h", message="hi", monitoring=told["monitoring"])
+    result = agent_chat._ask_tool_result(answer)  # pyright: ignore[reportPrivateUsage]
+    assert [getattr(c, "text", None) for c in result.content] == [MCP_NOTICE.text, "hi"]
