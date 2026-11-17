@@ -417,7 +417,7 @@ Monitored agents from chat: the conversations kept for an agent and one transcri
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `get_monitored_conversation` | admin only | Read one kept conversation (a ``conversation_id`` from list_monitored_activity) in order: questions, answers and MCP tool calls with their outcome. |
+| `get_monitored_conversation` | admin only | Read one kept conversation (a ``conversation_id`` from list_monitored_activity) in order: questions, answers and coding-tool calls with their outcome. |
 | `list_monitored_activity` | admin only | List the conversations kept for a monitored agent, most recent first, with when each monitoring switch was turned on. |
 
 ## `my_data`

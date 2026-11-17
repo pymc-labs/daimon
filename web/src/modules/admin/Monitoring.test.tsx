@@ -14,7 +14,7 @@ vi.mock("@/lib/api", async (importOriginal) => ({
 }))
 
 const conversation: MonitoredConversation = {
-  id: "mc1", person: { id: "p1", name: "Owen Brooks" }, where: "mcp", questions: 2, tools: 1,
+  id: "mc1", person: { id: "p1", name: "Owen Brooks" }, where: "coding_tools", questions: 2, tools: 1,
   first_at: "2026-03-10T10:00:00Z", last_at: "2026-03-10T11:00:00Z",
 }
 const events: MonitoredEvent[] = [
@@ -22,7 +22,7 @@ const events: MonitoredEvent[] = [
   { id: "e2", at: "2026-03-10T10:00:05Z", kind: "tool", content: null, tool: "hubspot_search_crm", outcome: "denied" },
   { id: "e3", at: "2026-03-10T10:00:09Z", kind: "answer", content: "Eighteen thousand dollars.", tool: null, outcome: null },
 ]
-const state = (on: boolean): AgentMonitoring => ({ id: "ag1", name: "Pricing", direct_messages: { on, since: null }, mcp: { on, since: null } })
+const state = (on: boolean): AgentMonitoring => ({ id: "ag1", name: "Pricing", direct_messages: { on, since: null }, coding_tools: { on, since: null } })
 
 function serve(rows: MonitoredConversation[], on = true) {
   vi.mocked(api.get).mockImplementation(async (path: string) =>
@@ -45,11 +45,11 @@ beforeEach(() => {
 describe("Monitoring", () => {
   it("asks for the filters in the address and nothing else", async () => {
     serve([conversation])
-    view("/admin/monitoring?agent=ag1&person=p1&where=mcp&from=2026-03-01&to=2026-03-31")
+    view("/admin/monitoring?agent=ag1&person=p1&where=coding_tools&from=2026-03-01&to=2026-03-31")
     await screen.findByText("Owen Brooks")
     const path = pageCalls().find((p) => p.includes("/conversations"))!
     expect(path.startsWith("/api/admin/monitoring/agents/ag1/conversations?")).toBe(true)
-    expect(new URL(path, "http://x").searchParams.toString()).toBe("person=p1&where=mcp&from=2026-03-01&to=2026-03-31")
+    expect(new URL(path, "http://x").searchParams.toString()).toBe("person=p1&where=coding_tools&from=2026-03-01&to=2026-03-31")
   })
 
   it("opens a conversation with its questions, answers and tool outcomes", async () => {

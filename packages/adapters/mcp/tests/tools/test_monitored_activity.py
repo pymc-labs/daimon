@@ -59,7 +59,7 @@ class Harness:
         async def state(*_a: Any, **_k: Any) -> view.AgentMonitoring:
             return view.AgentMonitoring(
                 direct_messages=cast(Any, SimpleNamespace(on=True, since=NOW)),
-                mcp=cast(Any, SimpleNamespace(on=False, since=None)),
+                coding_tools=cast(Any, SimpleNamespace(on=False, since=None)),
             )
 
         async def conversations(*_a: Any, **_k: Any) -> list[MonitoredConversationRow]:
@@ -145,7 +145,7 @@ async def test_list_when_admin_names_the_person_and_audits_the_read(harness: Har
     assert [(c.person, c.where, c.questions, c.tool_calls) for c in result.conversations] == [
         ("Pat Doe", "web", 2, 1)
     ], result
-    assert (result.direct_messages_on_since, result.mcp_on_since) == (NOW, None), result
+    assert (result.direct_messages_on_since, result.coding_tools_on_since) == (NOW, None), result
     assert harness.audits == [(view.AUDIT_LIST, "Ada", None)], "one audit row per list read"
 
 
@@ -163,15 +163,15 @@ async def test_list_when_not_admin_is_refused_without_audit(harness: Harness) ->
     """A role without workspace management reads nothing and leaves no audit row."""
     harness.role = "member"
 
-    with pytest.raises(ToolError, match="workspace admins"):
+    with pytest.raises(ToolError, match="for admins"):
         await harness.listed()
 
     assert harness.audits == [], "a refused read is not audited"
 
 
 async def test_list_when_agent_unknown_is_refused(harness: Harness) -> None:
-    """An agent outside the workspace is not found."""
-    with pytest.raises(ToolError, match="not in the workspace"):
+    """An agent that is not here is not found."""
+    with pytest.raises(ToolError, match="agent was not found"):
         await harness.listed(agent_id="agt_other")
 
     assert harness.audits == [], "no audit row for an unknown agent"

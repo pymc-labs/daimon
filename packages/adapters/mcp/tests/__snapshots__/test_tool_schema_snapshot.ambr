@@ -86,7 +86,11 @@
         }),
       }),
       'describe_daimon': dict({
-        'description': 'Describe one Daimon: role, skills, repo, environment, platform and workspace.',
+        'description': '''
+          Describe one Daimon: role, skills, repo, environment, platform and workspace.
+          <blank line>
+          ``monitoring``, when set, is a notice to show the person before they ask anything.
+        ''',
         'parameters': dict({
           'additionalProperties': False,
           'properties': dict({
@@ -131,7 +135,8 @@
           <blank line>
           Call this first. ``id`` is what every other tool takes as ``daimon_id``;
           ``workspace`` tells you which workspace the Daimon lives in. Two Daimons may
-          share a ``name`` in different workspaces.
+          share a ``name`` in different workspaces. ``monitoring``, when set, is a notice
+          to show the person before they ask that Daimon anything.
         ''',
         'parameters': dict({
           'additionalProperties': False,
@@ -228,7 +233,8 @@
         'description': '''
           Start a turn without waiting.
           <blank line>
-          Returns ``{"handle": ...}`` for polling with ``get_session``.
+          Returns ``{"handle": ...}`` for polling with ``get_session``; show the person
+          ``monitoring`` when it is set.
         ''',
         'parameters': dict({
           'additionalProperties': False,
@@ -720,7 +726,8 @@
         membership and invoker-policy access before reply delivery where required. Chart
         images are embedded by default; short-lived download links are added when private
         artifact storage is configured. Pass ``handle`` from a previous result to
-        continue that conversation instead of starting a new one.
+        continue that conversation instead of starting a new one. Show the person
+        ``monitoring`` when it is set; the text result leads with it.
         Use a handle opened through agent chat. Platform conversations and
         older sessions without headless creation provenance cannot be driven here.
       ''',
@@ -1284,6 +1291,7 @@
         the session's earlier turns. Poll ``list_events`` with
         ``created_at_gte=turn_started_at`` and discard events up to and
         including ``turn_event_id`` to read only this turn's transcript.
+        ``monitoring``, when present, is a notice to show the person.
         <blank line>
         When ``get_my_session`` reports ``status`` ``paused`` with the hint
         to call ``continue_turn``, a turn this tool started is waiting on tool
@@ -3329,7 +3337,8 @@
         <blank line>
         Returns the agent's name, system-prompt summary, skill identifiers,
         and configured environment. No parameters — agent identity is read
-        from the token claim (confused-deputy mitigation).
+        from the token claim (confused-deputy mitigation). ``monitoring``, when
+        set, is a notice to show the person before they ask anything.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4308,9 +4317,9 @@
     'get_monitored_conversation': dict({
       'description': '''
         Read one kept conversation (a ``conversation_id`` from list_monitored_activity)
-        in order: questions, answers and MCP tool calls with their outcome. Works only in a
+        in order: questions, answers and coding-tool calls with their outcome. Works only in a
         direct message with the admin or the web chat; pass this active turn's
-        origin_context_id. The read is audited. Workspace admins only. ``next_page`` goes
+        origin_context_id. The read is audited. Admins only. ``next_page`` goes
         back as ``after``.
       ''',
       'parameters': dict({
@@ -5764,11 +5773,11 @@
       'description': '''
         List the conversations kept for a monitored agent, most recent first, with
         when each monitoring switch was turned on. ``where`` is ``direct_messages``,
-        ``web`` or ``mcp``; filter by web person and UTC days ``first`` to ``last``
-        (YYYY-MM-DD). A person's MCP tool calls make one row per day. Person names show only
+        ``web`` or ``coding_tools``; filter by web person and UTC days ``first`` to ``last``
+        (YYYY-MM-DD). A person's coding-tool calls make one row per day. Person names show only
         in a direct message with the admin; elsewhere ``private_details`` is
         ``direct_message`` and they read ``Person 1``, ``Person 2``. Pass this active turn's
-        origin_context_id. The read is audited. Workspace admins only. ``next_page`` goes
+        origin_context_id. The read is audited. Admins only. ``next_page`` goes
         back as ``after``.
       ''',
       'parameters': dict({
@@ -5842,7 +5851,7 @@
                 'enum': list([
                   'direct_messages',
                   'web',
-                  'mcp',
+                  'coding_tools',
                 ]),
                 'type': 'string',
               }),
@@ -10250,6 +10259,7 @@
         this turn's first event: poll ``list_events`` with
         ``created_at_gte=turn_started_at`` and discard everything up to and
         including ``turn_event_id`` to read only this turn's transcript.
+        ``monitoring``, when present, is a notice to show the person.
         <blank line>
         ``bundle`` is an opaque handle returned by the bundle upload route.
         Passing it mounts that archive read-only in the session's uploads

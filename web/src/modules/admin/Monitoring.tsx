@@ -19,7 +19,7 @@ import type { Msg } from "../chat/types"
 import { useAgents } from "../agents/api"
 import type { AdminPerson, AgentMonitoring, MonitoredConversation, MonitoredEvent, MonitoredWhere } from "./types"
 
-const WHERE: Record<MonitoredWhere, string> = { direct_messages: "Direct messages", web: "Web chat", mcp: "MCP" }
+const WHERE: Record<MonitoredWhere, string> = { direct_messages: "Direct messages", web: "Web chat", coding_tools: "Coding tools" }
 const dateInput = "h-7 rounded-md border bg-background px-2 text-xs outline-none focus:border-border-strong"
 const OUTCOME: Record<string, string> = { error: "Failed", denied: "Denied", cancelled: "Cancelled" }
 
@@ -61,7 +61,7 @@ export function Monitoring() {
 function Conversations({ agent, filters }: { agent: string; filters: Record<string, string> }) {
   const q = usePaged<MonitoredConversation>(["admin", "monitoring", agent, filters], `${base(agent)}/conversations${query(filters)}`)
   const state = useQuery({ queryKey: ["admin", "monitoring", agent, "state"], queryFn: () => api.get<AgentMonitoring>(base(agent)) })
-  const off = state.data && !state.data.direct_messages.on && !state.data.mcp.on
+  const off = state.data && !state.data.direct_messages.on && !state.data.coding_tools.on
   return (
     <>
       <QueryState query={q} empty={off ? <Off agent={agent} /> : "Nothing kept"}>

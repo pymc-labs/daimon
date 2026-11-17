@@ -24,9 +24,9 @@ const view = (key: string, over: object = {}) => ({
 
 function serve(features: object[]) {
   vi.mocked(api.get).mockImplementation(async (path: string) => {
-    if (path === "/api/features/schema") return [schema("monitor_direct_messages", "Monitor direct messages"), schema("monitor_mcp", "Monitor MCP")]
+    if (path === "/api/features/schema") return [schema("monitor_direct_messages", "Monitor direct messages"), schema("monitor_mcp", "Monitor coding tools")]
     if (path.startsWith("/api/features")) return { platform: "discord", features }
-    return { id: "ag_w", name: "W", direct_messages: { on: false, since: null }, mcp: { on: false, since: null } }
+    return { id: "ag_w", name: "W", direct_messages: { on: false, since: null }, coding_tools: { on: false, since: null } }
   })
 }
 const show = () => render(

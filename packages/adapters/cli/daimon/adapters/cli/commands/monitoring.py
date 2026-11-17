@@ -42,7 +42,9 @@ def _day(value: str | None, flag: str) -> date | None:
 def monitoring_list_command(
     tenant: uuid.UUID,
     agent: Annotated[str, typer.Option(help="The agent's id.")],
-    where: Annotated[Where | None, typer.Option(help="direct_messages, web or mcp.")] = None,
+    where: Annotated[
+        Where | None, typer.Option(help="direct_messages, web or coding_tools.")
+    ] = None,
     account: Annotated[uuid.UUID | None, typer.Option(help="Only this person's account.")] = None,
     first: Annotated[str | None, typer.Option(help="First UTC day, YYYY-MM-DD.")] = None,
     last: Annotated[str | None, typer.Option(help="Last UTC day, YYYY-MM-DD.")] = None,

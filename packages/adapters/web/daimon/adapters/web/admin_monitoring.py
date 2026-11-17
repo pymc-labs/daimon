@@ -99,7 +99,7 @@ def monitoring_router(runtime: WebRuntime) -> APIRouter:
             "id": agent.id,
             "name": agent.name,
             "direct_messages": _switch(state.direct_messages),
-            "mcp": _switch(state.mcp),
+            "coding_tools": _switch(state.coding_tools),
         }
 
     @router.get("/agents/{agent_id}/conversations")

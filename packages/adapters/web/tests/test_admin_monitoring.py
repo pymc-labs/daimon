@@ -84,7 +84,7 @@ async def test_conversations_are_listed_newest_first_with_who_and_where(
         ).json()
 
     assert [(r["where"], r["questions"], r["tools"]) for r in listed] == [
-        ("mcp", 0, 2),
+        ("coding_tools", 0, 2),
         ("direct_messages", 1, 0),
         ("web", 1, 0),
     ], "most recent first; a person's tool calls make one row"
@@ -145,7 +145,7 @@ async def test_a_transcript_reads_in_order_and_a_tool_day_shows_its_calls(
             r["where"]: r["id"] for r in (await admin.client.get(f"{_BASE}/conversations")).json()
         }
         web = (await admin.client.get(f"{_BASE}/conversations/{rows['web']}")).json()
-        tools = (await admin.client.get(f"{_BASE}/conversations/{rows['mcp']}")).json()
+        tools = (await admin.client.get(f"{_BASE}/conversations/{rows['coding_tools']}")).json()
 
     assert [(e["kind"], e["content"]) for e in web] == [
         ("question", "question t1"),
@@ -195,7 +195,9 @@ async def test_the_switches_say_since_when_each_is_on(
         state = (await admin.client.get(_BASE)).json()
 
     assert state["direct_messages"] == {"on": False, "since": None}, "off by default"
-    assert state["mcp"]["on"] is True and state["mcp"]["since"], "on, with when it was turned on"
+    assert state["coding_tools"]["on"] is True and state["coding_tools"]["since"], (
+        "on, with when it was turned on"
+    )
 
 
 async def test_an_unknown_agent_or_a_bad_handle_is_not_found(

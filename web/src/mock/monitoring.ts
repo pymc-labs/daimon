@@ -20,10 +20,10 @@ type Row = { id: string; agent: string; person: MonitoredConversation["person"];
 const ROWS: Row[] = [
   { id: "mc_1", agent: "ag_pricing", person: { id: "p_owen", name: "Owen Brooks" }, where: "direct_messages", turns: PRICING.slice(0, 4), at: 2, span: 1.5 },
   { id: "mc_2", agent: "ag_pricing", person: { id: "p_ines", name: "Inês Duarte" }, where: "web", turns: PRICING.slice(0, 2), at: 26, span: 0.4 },
-  { id: "mc_3", agent: "ag_pricing", person: { id: "p_priya", name: "Priya Raman" }, where: "mcp", turns: PRICING.slice(1, 2), at: 31, span: 2 },
+  { id: "mc_3", agent: "ag_pricing", person: { id: "p_priya", name: "Priya Raman" }, where: "coding_tools", turns: PRICING.slice(1, 2), at: 31, span: 2 },
   { id: "mc_4", agent: "ag_pricing", person: { id: "p_jordan", name: "Jordan Ellis" }, where: "web", turns: PRICING.slice(2, 4), at: 52, span: 0.3 },
   { id: "mc_5", agent: "ag_pricing", person: { id: null, name: "Sam Ortiz" }, where: "direct_messages", turns: PRICING.slice(0, 1), at: 75, span: 0.1 },
-  { id: "mc_6", agent: "ag_pricing", person: { id: "p_owen", name: "Owen Brooks" }, where: "mcp", turns: PRICING.slice(0, 3), at: 120, span: 5 },
+  { id: "mc_6", agent: "ag_pricing", person: { id: "p_owen", name: "Owen Brooks" }, where: "coding_tools", turns: PRICING.slice(0, 3), at: 120, span: 5 },
   { id: "mc_7", agent: "ag_mmm", person: { id: "p_aiko", name: "Aiko Tanaka" }, where: "direct_messages", turns: MMM, at: 5, span: 1 },
   { id: "mc_8", agent: "ag_mmm", person: { id: "p_tomas", name: "Tomás Okafor" }, where: "direct_messages", turns: MMM.slice(0, 2), at: 29, span: 0.6 },
   { id: "mc_9", agent: "ag_mmm", person: { id: "p_rafael", name: "Rafael Costa" }, where: "web", turns: MMM.slice(1, 3), at: 99, span: 0.8 },

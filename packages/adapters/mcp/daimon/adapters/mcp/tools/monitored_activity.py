@@ -48,7 +48,8 @@ class MonitoredActivity:
     agent: str
     direct_messages_on_since: datetime | None
     """When monitoring of direct messages and web chat was turned on; null while off."""
-    mcp_on_since: datetime | None
+    coding_tools_on_since: datetime | None
+    """Same for coding tools."""
     conversations: list[MonitoredConversation]
     next_page: str | None
     private_details: PrivateDetails
@@ -92,10 +93,10 @@ def _page(after: str | None) -> tuple[datetime, uuid.UUID] | None:
 async def _admin_of(runtime: McpRuntime, auth: AuthIdentity, agent_id: str) -> tuple[WebAdmin, str]:
     actor = await web_admin_of(runtime, auth)
     if not is_admin(actor.role):
-        raise ToolError("Monitored activity is for workspace admins.")
+        raise ToolError("Monitored activity is for admins.")
     name = (await agent_names(runtime, actor.tenant_id)).get(agent_id)
     if name is None:
-        raise ToolError("That agent is not in the workspace.")
+        raise ToolError("That agent was not found.")
     return actor, name
 
 
@@ -151,7 +152,7 @@ async def _list_impl(
             raise ToolError("person_id is not valid.") from err
         account = next((p.account_id for p in people if p.id == wanted), None)
         if account is None:
-            raise ToolError("That person is not in the workspace.")
+            raise ToolError("That person was not found.")
     cursor = _page(after)
     if cursor is None:
         await _audited(runtime, auth, view.AUDIT_LIST, agent, None)
@@ -175,7 +176,7 @@ async def _list_impl(
     return MonitoredActivity(
         agent=agent,
         direct_messages_on_since=state.direct_messages.since,
-        mcp_on_since=state.mcp.since,
+        coding_tools_on_since=state.coding_tools.since,
         conversations=[
             _line(r, by_account, details == "shown", n) for n, r in enumerate(rows, start=1)
         ],
@@ -247,11 +248,11 @@ def register_monitored_activity_tools(mcp: FastMCP, runtime: McpRuntime) -> None
     ) -> MonitoredActivity:
         """List the conversations kept for a monitored agent, most recent first, with
         when each monitoring switch was turned on. ``where`` is ``direct_messages``,
-        ``web`` or ``mcp``; filter by web person and UTC days ``first`` to ``last``
-        (YYYY-MM-DD). A person's MCP tool calls make one row per day. Person names show only
+        ``web`` or ``coding_tools``; filter by web person and UTC days ``first`` to ``last``
+        (YYYY-MM-DD). A person's coding-tool calls make one row per day. Person names show only
         in a direct message with the admin; elsewhere ``private_details`` is
         ``direct_message`` and they read ``Person 1``, ``Person 2``. Pass this active turn's
-        origin_context_id. The read is audited. Workspace admins only. ``next_page`` goes
+        origin_context_id. The read is audited. Admins only. ``next_page`` goes
         back as ``after``."""
         return await _list_impl(
             runtime,
@@ -275,9 +276,9 @@ def register_monitored_activity_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         after: str | None = None,
     ) -> MonitoredTranscript:
         """Read one kept conversation (a ``conversation_id`` from list_monitored_activity)
-        in order: questions, answers and MCP tool calls with their outcome. Works only in a
+        in order: questions, answers and coding-tool calls with their outcome. Works only in a
         direct message with the admin or the web chat; pass this active turn's
-        origin_context_id. The read is audited. Workspace admins only. ``next_page`` goes
+        origin_context_id. The read is audited. Admins only. ``next_page`` goes
         back as ``after``."""
         return await _transcript_impl(
             runtime,

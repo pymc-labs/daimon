@@ -82,7 +82,7 @@ export type AgentFeedback = { id: string | null; name: string; up: number | null
 export type Feedback = { days: number; agents: AgentFeedback[] }
 
 // Monitoring: what an admin may read of a monitored agent's conversations.
-export type MonitoredWhere = "direct_messages" | "web" | "mcp"
+export type MonitoredWhere = "direct_messages" | "web" | "coding_tools"
 export type MonitoredConversation = {
   id: string
   person: { id: string | null; name: string }
@@ -105,5 +105,5 @@ export type AgentMonitoring = {
   id: string
   name: string
   direct_messages: { on: boolean; since: string | null }
-  mcp: { on: boolean; since: string | null }
+  coding_tools: { on: boolean; since: string | null }
 }

@@ -29,14 +29,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 AUDIT_LIST = "Viewed monitored activity"
 AUDIT_OPEN = "Opened monitored conversation"
 
-#: Where a conversation happened: direct messages (Discord, Slack, Teams), web chat, MCP.
-Where = Literal["direct_messages", "web", "mcp"]
+#: Where a conversation happened: direct messages, web chat or coding tools (platform `mcp`).
+Where = Literal["direct_messages", "web", "coding_tools"]
 WHERES: tuple[Where, ...] = get_args(Where)
 
 _PLATFORMS: dict[Where, tuple[MonitoredPlatform, ...]] = {
     "direct_messages": ("discord", "slack", "teams"),
     "web": ("web",),
-    "mcp": ("mcp",),
+    "coding_tools": ("mcp",),
 }
 _TOOLS_PREFIX = "tools:"
 
@@ -135,7 +135,7 @@ class AgentMonitoring:
     """Both switches of one agent, each with when it was turned on."""
 
     direct_messages: MonitoringState
-    mcp: MonitoringState
+    coding_tools: MonitoringState
 
 
 async def agent_monitoring(
@@ -147,7 +147,7 @@ async def agent_monitoring(
         direct_messages=await monitoring_state(
             session, settings, tenant_id=tenant_id, agent_id=agent, platform="web"
         ),
-        mcp=await monitoring_state(
+        coding_tools=await monitoring_state(
             session, settings, tenant_id=tenant_id, agent_id=agent, platform="mcp"
         ),
     )

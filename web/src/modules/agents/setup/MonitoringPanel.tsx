@@ -16,7 +16,7 @@ const DEFAULT = "default"
 const FROM: Record<string, string> = { deployment: "Built-in", default: "Built-in", workspace: "Workspace" }
 const SWITCHES = [
   { key: "monitor_direct_messages", label: "Direct messages", state: "direct_messages" },
-  { key: "monitor_mcp", label: "MCP", state: "mcp" },
+  { key: "monitor_mcp", label: "Coding tools", state: "coding_tools" },
 ] as const
 
 /** The two monitoring switches of one agent, and the way to the activity they keep. For workspace admins. */

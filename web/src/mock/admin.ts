@@ -204,7 +204,7 @@ export const adminHandlers: HttpHandler[] = [
     if (!a) return notFound()
     const since = (on: boolean) => ({ on, since: on ? ago(24 * 9) : null })
     return HttpResponse.json<AgentMonitoring>({
-      id: a.id, name: a.name, direct_messages: since(monitoringOn(a.id, "monitor_direct_messages")), mcp: since(monitoringOn(a.id, "monitor_mcp")),
+      id: a.id, name: a.name, direct_messages: since(monitoringOn(a.id, "monitor_direct_messages")), coding_tools: since(monitoringOn(a.id, "monitor_mcp")),
     })
   }),
   http.get("/api/admin/monitoring/agents/:agent/conversations", ({ params, request }) => {
