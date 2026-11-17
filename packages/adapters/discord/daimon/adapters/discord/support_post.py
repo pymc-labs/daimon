@@ -75,11 +75,13 @@ async def post_to_support_channel(
     allowed_mentions: discord.AllowedMentions | None = None,
     view: discord.ui.View | None = None,
 ) -> SupportPost | None:
-    """Post ``body`` into the support channel; None unless every part landed.
+    """Post ``body`` into the support channel; None unless its first part landed.
 
     Resolves through the cache first and falls back to one fetch, because the
     escalation channel lives in the operators' own guild and may not be in a
-    freshly-started bot's cache. `view` rides the first message only.
+    freshly-started bot's cache. `view` rides the first message only. Once
+    that first part (the one with the buttons) is up the post exists: a later
+    part that fails is logged, and the first is still returned to be stamped.
     """
     try:
         channel = bot.get_channel(int(channel_id))
@@ -88,13 +90,26 @@ async def post_to_support_channel(
         if not isinstance(channel, discord.abc.Messageable):
             _log.warning("support.channel_not_messageable", channel_id=channel_id)
             return None
-        sent = [
-            await _send(
-                channel, chunk, view=view if index == 0 else None, mentions=allowed_mentions
-            )
-            for index, chunk in enumerate(split_for_discord_safe(body))
-        ]
-        first = sent[0] if sent else None
+        chunks = split_for_discord_safe(body)
+        first: discord.Message | None = None
+        for index, chunk in enumerate(chunks):
+            try:
+                sent = await _send(
+                    channel, chunk, view=view if index == 0 else None, mentions=allowed_mentions
+                )
+            except (discord.HTTPException, ValueError) as exc:
+                if index == 0:
+                    raise
+                _log.warning(
+                    "support.post_partial",
+                    channel_id=channel_id,
+                    sent=index,
+                    parts=len(chunks),
+                    err_type=type(exc).__name__,
+                )
+                break
+            if index == 0:
+                first = sent
         # A test double may return anything; only a real message has an id worth keeping.
         message_id = str(first.id) if isinstance(first, discord.Message) else None
         return SupportPost(channel_id=channel_id, message_id=message_id)

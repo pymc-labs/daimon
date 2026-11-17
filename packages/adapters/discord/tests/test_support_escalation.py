@@ -28,6 +28,7 @@ from daimon.testing.factories import make_account, make_platform_principal, make
 from daimon.testing.settings_mock import mock_settings
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 _GUILD = "111"
 _CHANNEL = "222"
@@ -74,19 +75,38 @@ async def test_long_support_note_reaches_channel_in_order() -> None:
     assert "".join(sent).endswith(note)
 
 
-async def test_partial_support_channel_post_is_undelivered() -> None:
+async def test_a_later_chunk_failing_still_returns_the_first_and_logs_it() -> None:
+    first = MagicMock(spec=discord.Message, id=77)
     channel = MagicMock(spec=discord.TextChannel)
     channel.send = AsyncMock(
         side_effect=[
-            None,
+            first,
             discord.HTTPException(SimpleNamespace(status=403, reason="Forbidden"), "lost access"),
         ]
     )
     bot = MagicMock()
     bot.get_channel.return_value = channel
 
-    assert not await post_to_support_channel(bot, channel_id=_ESCALATION, body="x" * 4000)
+    with capture_logs() as logs:
+        post = await post_to_support_channel(bot, channel_id=_ESCALATION, body="x" * 4000)
+
+    assert post is not None and post.message_id == "77", "the part with the buttons landed"
     assert channel.send.await_count == 2
+    assert [e["event"] for e in logs if e["event"] == "support.post_partial"] == [
+        "support.post_partial"
+    ], "the lost part is logged"
+
+
+async def test_the_first_chunk_failing_is_undelivered() -> None:
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.send = AsyncMock(
+        side_effect=discord.HTTPException(SimpleNamespace(status=403, reason="Forbidden"), "no")
+    )
+    bot = MagicMock()
+    bot.get_channel.return_value = channel
+
+    assert await post_to_support_channel(bot, channel_id=_ESCALATION, body="x" * 4000) is None
+    assert channel.send.await_count == 1, "no later part is tried"
 
 
 async def _submit(

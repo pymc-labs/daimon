@@ -22,6 +22,7 @@ from daimon.adapters.discord.support_escalation import (
 )
 from daimon.adapters.discord.support_settle import SettleModal, SupportSettleButton
 from daimon.core.config import SupportSettings
+from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores import support as store
 from daimon.core.stores.domain import Role
@@ -36,7 +37,7 @@ from daimon.core.support import (
     option_value,
     parse_menu,
 )
-from daimon.core.support_escalation import ALREADY_REQUESTED
+from daimon.core.support_escalation import ALREADY_REQUESTED, UNAVAILABLE
 from daimon.core.support_escalation import CUSTOM_ID_TEMPLATE as BUTTON_TEMPLATE
 from daimon.testing.factories import make_tenant
 from daimon.testing.settings_mock import mock_settings
@@ -93,8 +94,9 @@ async def _seed(
     menu: bool = True,
     per_person: Decimal | None = _TWO,
     ends_at: datetime | None = None,
+    limit: bool = True,
 ) -> uuid.UUID:
-    """A Discord tenant with a workspace limit, on MENU unless `menu` is False; its id."""
+    """A Discord tenant with a workspace limit (unless `limit` is False), on MENU unless `menu` is; its id."""
     async with sessionmaker() as session, session.begin():
         tenant = await make_tenant(session, platform="discord", workspace_id=_GUILD)
         if menu:
@@ -109,19 +111,20 @@ async def _seed(
                 menu_id=row.id,
                 set_by_account_id=None,
             )
-        await store.set_limit(
-            session,
-            tenant_id=tenant.id,
-            scope="workspace",
-            scope_id="",
-            platform_user_id=None,
-            shared=None,
-            each_person=per_person,
-            window="total",
-            starts_at=None if ends_at is None else ends_at - timedelta(days=30),
-            ends_at=ends_at,
-            set_by_account_id=None,
-        )
+        if limit:
+            await store.set_limit(
+                session,
+                tenant_id=tenant.id,
+                scope="workspace",
+                scope_id="",
+                platform_user_id=None,
+                shared=None,
+                each_person=per_person,
+                window="total",
+                starts_at=None if ends_at is None else ends_at - timedelta(days=30),
+                ends_at=ends_at,
+                set_by_account_id=None,
+            )
     return tenant.id
 
 
@@ -275,6 +278,23 @@ async def test_confirm_when_option_has_no_fields_then_posts_pending_with_settle_
     assert (status, hold, post_id) == ("pending", D(1), "555"), (
         "holds its minimum; the post id is stored"
     )
+
+
+async def test_confirm_when_charged_to_the_default_then_post_shows_facts_and_settle_buttons(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A range option with no limit: facts and settle controls, and no balance."""
+    await _seed(db_session_factory, limit=False)
+    bot = _bot(db_session_factory)
+    await _confirmed(bot, "review")
+    send = bot.support.send.await_args
+    body, view = send.args[0], send.kwargs["view"]
+    assert "Review: 1-3 credits\nPending: 1-3 credits" in body, "option, terms and pending price"
+    assert "credits left" not in body, "no limit, so no balance"
+    assert f"-# {CLIENT_NOT_NOTIFIED}" in body, "the settler is told the client is not notified"
+    assert [b.item.label for b in view.children] == ["Set charge", "Decline"]
+    ((_id, status, _hold, post_id),) = await _rows(db_session_factory)
+    assert (status, post_id) == ("pending", "555"), "held and posted"
 
 
 async def test_pick_when_option_has_steps_and_fields_then_its_form_submits_settled(
@@ -478,6 +498,21 @@ async def test_button_when_the_limit_ended_then_says_so(
         interaction
     )
     assert _said(interaction.response.send_message) == "Support ended on 17 Jan."
+
+
+async def test_button_when_the_feature_is_off_then_says_so_before_any_form(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An old button must not open a form that can only fail at Send."""
+    await _seed(db_session_factory, menu=False)
+    off = ResolvedFeature("support_escalation", "off", "default")
+    monkeypatch.setattr(support_escalation, "place_feature", AsyncMock(return_value=off))
+    interaction = _interaction(_bot(db_session_factory))
+    await SupportEscalateButton(guild_id=_GUILD, channel_id=_THREAD, message_id=_ANSWER).callback(
+        interaction
+    )
+    assert _said(interaction.response.send_message) == UNAVAILABLE
+    interaction.response.send_modal.assert_not_awaited()
 
 
 async def test_default_note_when_requester_is_admin_then_uses_no_credits(

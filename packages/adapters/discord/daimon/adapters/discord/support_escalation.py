@@ -99,6 +99,7 @@ from daimon.core.support_escalation import (
     CUSTOM_ID_TEMPLATE,
     EMPTY_NOTE,
     ESCALATE,
+    RECORDED_UNDELIVERED,
     SEALED_NOTE_HINT,
     SEALED_POST_MARKER,
     UNAVAILABLE,
@@ -320,11 +321,15 @@ def _post_body(
     *,
     sealed: bool,
 ) -> str:
-    """Today's post for a default request; a limit's adds its terms, status and balance."""
+    """Today's post for a plain default request; any other adds its option, status and balance.
+
+    A default-charged pick on a menu, or one still to be priced, reads like a
+    limit's: staff need its option and price range to settle it.
+    """
     head = f"**Human support requested** by {interaction.user.mention} ({interaction.user})"
     marker = [f"*{SEALED_POST_MARKER}*"] if sealed else []
     facts: list[str] = []
-    if row.charged_to != "default":
+    if row.charged_to != "default" or view.menu is not None or row.status == "pending":
         balance = balance_text(view.balance, view.period) if row.charged_to == "limit" else None
         facts.append(request_facts(row, menu=view.menu is not None, balance=balance))
     return "\n\n".join(part for part in (head, *facts, origin.link, *marker, row.note) if part)
@@ -411,8 +416,10 @@ async def submit_answer_request(
         tenant_id=str(origin.tenant_id),
         delivered=post is not None,
     )
-    text = received_text(row, view)
-    await _notice(interaction, text, neutral=post is not None)
+    # A failed post tells the person the same as on Slack and Teams: sent, with no
+    # used/left line, since staff have not seen it yet.
+    text = received_text(row, view) if post is not None else RECORDED_UNDELIVERED
+    await _notice(interaction, text, neutral=True)
 
 
 class SupportModal(discord.ui.Modal, title=ASK_THE_TEAM):
@@ -752,6 +759,14 @@ class SupportEscalateButton(
             message_id=self.message_id,
             fetch=False,
         )
+        # Slack and Teams refuse at the click too: an old button must not open a
+        # form that can only fail at Send.
+        offered = await place_feature(
+            runtime.sessionmaker, runtime.settings, origin.feature_place, "support_escalation"
+        )
+        if not offered.on:
+            await _report_failure(interaction, UNAVAILABLE)
+            return
         user_id = str(interaction.user.id)
         # A modal must open within the interaction's three seconds, so only a
         # refusal asks Discord whether an uncached admin clicked.
