@@ -8,7 +8,9 @@ its reason. The MCP middleware and agent-chat paths are checked in the MCP packa
 from __future__ import annotations
 
 import ast
+import asyncio
 import uuid
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -272,3 +274,51 @@ async def test_the_settle_keeps_mcp_replies_once_their_turn_ends(
         )
 
     assert answers == {"0": ["first answer"], "1": ["first answer", "second answer"]}, answers
+
+
+class _Db:
+    async def __aenter__(self) -> _Db:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+    def begin(self) -> _Db:
+        return self
+
+
+@pytest.mark.parametrize("settle_s", [0.0, 1.0], ids=["in_budget", "out_of_budget"])
+async def test_the_kept_replies_wait_for_the_settle_and_have_their_own_budget(
+    monkeypatch: pytest.MonkeyPatch, settle_s: float
+) -> None:
+    """Keeping replies never eats the billing settle's budget: it runs after, even when the
+    settle ran out of time."""
+    order: list[str] = []
+    request = SimpleNamespace(turn_event_id="evt_u1")
+
+    async def settle_request(*_args: object, **_kwargs: object) -> object:
+        return request
+
+    async def clear(*_args: object, **_kwargs: object) -> None:
+        order.append("clear")
+
+    async def settle(*_args: object, **_kwargs: object) -> object:
+        await asyncio.sleep(settle_s)
+        order.append("settle")
+        return SimpleNamespace(complete=True)
+
+    async def keep(*_args: object, **_kwargs: object) -> None:
+        order.append("keep")
+
+    state = usage_sweep.session_settle_state
+    monkeypatch.setattr(state, "settle_request", settle_request)
+    monkeypatch.setattr(state, "clear_settle_request", clear)
+    monkeypatch.setattr(usage_sweep, "settle_stamped_session", settle)
+    monkeypatch.setattr(usage_sweep, "_keep_monitored_replies", keep)
+    session = cast(Any, SimpleNamespace(id="sesn_1", status="terminated", metadata={}))
+
+    await usage_sweep.settle_finished_turn(
+        cast(Any, None), cast(Any, _Db), session, markup=Decimal(1), budget_s=0.2
+    )
+
+    assert order == (["settle", "clear", "keep"] if settle_s == 0 else ["keep"]), order
