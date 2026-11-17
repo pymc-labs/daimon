@@ -27,7 +27,7 @@ from daimon.adapters.cli.tenant import TenantSelector, discover_tenant, resolve_
 from daimon.core.authz import Action, Subject
 from daimon.core.channel_changes import ChannelActor, Expected
 from daimon.core.config import load_settings
-from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.defaults.ma_index import agent_id_in_tenant
 from daimon.core.errors import StaleChannelValue, StoreError
 from daimon.core.stores import support as store
 from daimon.core.stores import support_escalation as ledger
@@ -41,12 +41,14 @@ from daimon.core.support import (
     format_credits,
     load_menu,
     parse_credits,
+    parse_menu_key,
     parse_person_id,
     parse_scope,
 )
 from daimon.core.support_admin import (
     LimitChange,
     LimitUsage,
+    expected_or_none,
     get_limit_usage,
     list_limit_usage,
     merge_limit_change,
@@ -160,13 +162,13 @@ async def _scope_id(
 ) -> tuple[SupportScope, str]:
     """An agent name becomes its id; a thread becomes its parent channel."""
     place_scope, scope_id = parse_scope(scope, raw_id)
-    if place_scope == "agent" and not scope_id.startswith("agent_"):
-        agent = await find_agent_by_daimon_tag(
-            rt.anthropic, tenant_id=target.tenant_id, name=scope_id, records=rt.sessionmaker
+    if place_scope == "agent":
+        agent_id = await agent_id_in_tenant(
+            rt.anthropic, tenant_id=target.tenant_id, ref=scope_id, records=rt.sessionmaker
         )
-        if agent is None:
-            raise StoreError(f"no agent named {scope_id!r} in this workspace")
-        scope_id = agent.id
+        if agent_id is None:
+            raise StoreError(f"no agent {scope_id!r} in this workspace")
+        scope_id = agent_id
     if place_scope == "channel":
         scope_id = await parent_channel(
             rt,
@@ -197,12 +199,8 @@ def _label(scope: SupportScope, scope_id: str, person: str | None = None) -> str
 
 
 def _expected_none_or[T](raw: str | None, parse: Callable[[str], T]) -> Expected[T | None] | None:
-    if raw is None:
-        return None
-    if raw.strip().lower() == "none":
-        return Expected(None)
     try:
-        return Expected(parse(raw))
+        return expected_or_none(raw, parse)
     except (ValueError, SupportError) as exc:
         raise typer.BadParameter(f"--expected: {exc}") from exc
 
@@ -366,7 +364,7 @@ async def menu_use(
             scope=place_scope,
             scope_id=limit_id,
             key=None if key == "default" else key,
-            expected=_expected_none_or(expected, str),
+            expected=_expected_none_or(expected, parse_menu_key),
         )
     except StaleChannelValue as exc:
         raise _stale(exc) from exc
@@ -591,6 +589,7 @@ async def channel_set(
     pick = ChannelPick(
         platform=target.platform,
         channel_id=channel,
+        discord_guild_id=target.workspace_id if target.platform == "discord" else None,
         slack_team_id=target.workspace_id if target.platform == "slack" else None,
         teams_team_id=team if target.platform == "teams" else None,
         teams_service_url=service_url if target.platform == "teams" else None,

@@ -38,6 +38,7 @@ from daimon.core.errors import StoreError
 from daimon.core.stores import support as store
 from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores.security_audit import list_events
+from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.core.support import (
     CLIENT_NOT_NOTIFIED,
     RequestChoice,
@@ -171,13 +172,19 @@ async def test_menu_use_when_picked_then_listed_under_the_place_and_unknown_keys
     await menu_set(**where, key="support", text=MENU)
     with pytest.raises(ChannelChangeRefused, match="No menu has that key. Menus: support."):
         await menu_use(**where, key="suport", scope="channel", scope_id="C1")
-    await menu_use(**where, key="support", scope="channel", scope_id="C1", expected="none")
+    await menu_use(**where, key="support", scope="channel", scope_id="C1", expected="None")
     assert "channel C1: uses menu support" in out.getvalue(), "picked"
     await menu_list(**where, as_json=True)
     (listed,) = json.loads(out.getvalue().strip().splitlines()[-1])
     assert listed["used_by"] == ["channel C1"], "listed under its place"
     with pytest.raises(StoreError, match="Now: menu support."):
         await menu_use(**where, key="default", scope="channel", scope_id="C1", expected="none")
+    with pytest.raises(typer.BadParameter, match="--expected: A menu key"):
+        await menu_use(**where, key="default", scope="channel", scope_id="C1", expected="A B")
+    with pytest.raises(SupportError, match="A menu key"):
+        await menu_use(**where, key="Bad Key", scope="channel", scope_id="C1")
+    with pytest.raises(SupportError, match="A menu key"):
+        await menu_rm(**where, key="Bad Key")
     await menu_use(**where, key="default", scope="channel", scope_id="C1", expected="support")
     assert "channel C1: uses the default menu" in out.getvalue(), "dropped"
 
@@ -202,8 +209,12 @@ async def test_limit_when_set_for_an_agent_name_then_stored_under_its_id(
         "10",
         None,
     ), "the agent's id, the shared credits and the default menu"
-    with pytest.raises(StoreError, match="no agent named"):
+    with pytest.raises(StoreError, match="no agent 'nobody'"):
         await limit_set(**where, scope="agent", scope_id="nobody", shared="1")
+    with pytest.raises(StoreError, match="no agent 'agent_nope'"):
+        await limit_set(**where, scope="agent", scope_id="agent_nope", shared="1")
+    await limit_set(**where, scope="agent", scope_id="agent_helper1", shared="2")
+    assert "agent_helper1" in out.getvalue(), "an existing agent id is taken as it is"
 
 
 async def test_limit_set_when_expected_is_a_revision_then_accepted_else_stale(
@@ -361,6 +372,19 @@ async def test_channel_set_when_teams_then_needs_the_team_and_service_url(
     with pytest.raises(typer.BadParameter, match="--team and --service-url"):
         await channel_set(
             rt=rt, console=console, selector=selector, channel_id="19:abc@thread.tacv2"
+        )
+    with pytest.raises(ChannelChangeRefused, match="not in this workspace"):
+        await channel_set(
+            rt=rt,
+            console=console,
+            selector=selector,
+            channel_id="19:abc@thread.tacv2",
+            team="T1",
+            service_url="https://smba.example/",
+        )
+    async with db_session_factory.begin() as session:
+        await record_teams_installation(
+            session, tenant_id=tenant_id, team_id="T1", group_id="G1", name="Team"
         )
     await channel_set(
         rt=rt,
