@@ -50,7 +50,7 @@ export const overridden = (key: string) => [...own].flatMap(([k, v]) => {
   const [agent, channel] = at!.split("/")
   return name === key && v !== "default" && (tier === "agent" || tier === "channel") ? [{ scope: tier, id: (tier === "agent" ? agent : channel)! }] : []
 })
-/** What `?support=` asks the mock to show: `locked` (the deployment keeps its own request channel) or `unmet`. */
+/** What `?support=` asks the mock to show: `locked` (the deployment keeps its own request channel), `unmet`, `blocked` (Daimon can't post in the channel) or `unverified` (the check failed). */
 export const supportFlag = flag
 
 export const featuresHandlers: HttpHandler[] = [

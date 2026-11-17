@@ -1,5 +1,5 @@
-import { Check, X } from "lucide-react"
-import { useState } from "react"
+import { Check, TriangleAlert, X } from "lucide-react"
+import { type ReactNode, useState } from "react"
 
 import { InheritedSelect } from "@/components/inherited"
 import { QueryState } from "@/components/QueryState"
@@ -70,13 +70,17 @@ export function Destination({ d }: { d: SupportPage }) {
   const [error, setError] = useState<string | null>(null)
   const pick = async (id: string | null) => {
     if (c.open.count && !(await confirm({ title: "Change where requests go?", body: `${plural(c.open.count, "open request")} stay in ${c.open.where}. New ones go to the new channel.`, action: "Change" }))) return
-    setError((await save.run("channel", { channel_id: id, expected_revision: c.revision })).error)
+    const out = await save.run("channel", { channel_id: id, expected_revision: c.revision })
+    setError(out.problems.find((p) => p.loc[0] === "channel_id")?.msg ?? out.error)
   }
+  const problem = (icon: ReactNode, label: string) => <span className="flex flex-wrap items-center gap-x-2"><span className="inline-flex items-center gap-1.5">{icon}{label}</span><span className="text-xs text-muted-foreground">{c.detail}</span></span>
   const state = c.state === "ready"
     ? <span className="inline-flex items-center gap-1.5"><Check className="size-3.5 text-success" />Ready</span>
     : c.state === "blocked"
-      ? <span className="flex flex-wrap items-center gap-x-2"><span className="inline-flex items-center gap-1.5"><X className="size-3.5 text-destructive" />Can't post</span><span className="text-xs text-muted-foreground">{c.detail}</span></span>
-      : <Unavailable reason={c.detail ?? "Pick a support channel."} />
+      ? problem(<X className="size-3.5 text-destructive" />, "Can't post")
+      : c.state === "unverified"
+        ? problem(<TriangleAlert className="size-3.5 text-warning" />, "Unverified")
+        : <Unavailable reason={c.detail ?? "Pick a support channel."} />
   const options = places.map((p) => ({ value: p.id, label: p.name }))
   if (c.value && !options.some((o) => o.value === c.value!.id)) options.unshift({ value: c.value.id, label: c.value.name })
   return (

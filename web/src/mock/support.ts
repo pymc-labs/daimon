@@ -139,6 +139,11 @@ let limits: Limit[] = [
 ]
 let channel = { id: "c_questions", name: "questions", revision: 2 as number | null }
 
+const posting = () => {
+  const flag = supportFlag()
+  return flag === "blocked" ? { state: "blocked" as const, detail: "Give Daimon Send Messages and Embed Links in #questions." } : flag === "unverified" ? { state: "unverified" as const, detail: "Couldn't check. Try again." } : { state: "ready" as const, detail: null }
+}
+
 const page = (): SupportPage => {
   const own = supportFlag() !== "locked"
   const none = supportFlag() === "unmet"
@@ -155,7 +160,7 @@ const page = (): SupportPage => {
     agents: AGENTS,
     channel: {
       own_allowed: own, value: picked && { id: picked.id, name: picked.name }, default: { name: "general" },
-      state: none ? "none" : "ready", detail: none ? "Pick a support channel." : null,
+      ...(none ? { state: "none" as const, detail: "Pick a support channel." } : posting()),
       open: { count: none ? 0 : 3, where: none ? null : (picked ?? { name: "general" }).name }, revision: picked?.revision ?? null,
     },
   }
@@ -227,6 +232,8 @@ export const supportHandlers: HttpHandler[] = [
     if (!same(channel.revision, b.expected_revision)) return stale()
     const found = CHANNELS.find((c) => c.id === b.channel_id)
     if (b.channel_id && !found) return missing("No such channel.")
+    const now = posting()
+    if (b.channel_id && now.state === "blocked") return refuse([{ loc: ["channel_id"], msg: now.detail }])
     channel = found ? { ...found, revision: (channel.revision ?? 0) + 1 } : { id: "", name: "", revision: null }
     return ok()
   }),

@@ -233,6 +233,24 @@ describe("requests go to", () => {
     await waitFor(() => expect(api.put).toHaveBeenCalledWith("/api/support/channel", { channel_id: "c2", expected_revision: 2 }))
   })
 
+  it.each([
+    ["blocked", "Can't post", "Give Daimon Send Messages and Embed Links in #support."],
+    ["unverified", "Unverified", "Couldn't check. Try again."],
+  ] as const)("says why a %s channel is not ready", async (state, label, detail) => {
+    view({ ...data, channel: { ...data.channel, state, detail } })
+    expect(await screen.findByText(label)).toBeInTheDocument()
+    expect(screen.getByText(detail)).toBeInTheDocument()
+    expect(screen.queryByText("Ready")).not.toBeInTheDocument()
+  })
+
+  it("shows a refused pick's fix under the section", async () => {
+    view(data)
+    vi.mocked(api.put).mockRejectedValueOnce(new ApiError(422, "invalid", [{ loc: ["channel_id"], msg: "Give Daimon Send Messages in #help." }]))
+    await userEvent.click(await screen.findByRole("combobox", { name: "Channel" }))
+    await userEvent.click(await screen.findByRole("option", { name: /help/ }))
+    expect(await screen.findByRole("alert")).toHaveTextContent("Give Daimon Send Messages in #help.")
+  })
+
   it("lists requests no channel received only when there are some", async () => {
     view({ ...data, undelivered: [{ at: "2026-01-01T00:00:00Z", person: "Priya", credits: "1", what: "Look" }] })
     expect(await screen.findByText("Not delivered")).toBeInTheDocument()

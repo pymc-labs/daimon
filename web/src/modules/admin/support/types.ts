@@ -52,7 +52,7 @@ export type RequestChannel = {
   value: { id: string; name: string } | null
   /** What applies when there is no pick of its own. */
   default: { name: string } | null
-  state: "ready" | "blocked" | "none"
+  state: "ready" | "blocked" | "none" | "unverified"
   /** Why `state` is not ready; null when it is. */
   detail: string | null
   open: { count: number; where: string | null }
