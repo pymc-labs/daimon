@@ -56,7 +56,7 @@ CHANNEL_SETTING = "support_channel"
 SETTLE_SETTING = "support_settle"
 MENU_IN_USE = "A place still uses this menu. Change that place first"
 NO_MENU = "No menu has that key."
-OWN_CHANNEL_LOCKED = "The deployment keeps its own request channel."
+OWN_CHANNEL_LOCKED = "Requests go to the default channel. Ask whoever runs Daimon."
 
 
 def may_set_support(subject: Subject) -> Decision:

@@ -737,7 +737,7 @@ Anyone who can change a conversation's model may pick an OpenAI or Gemini model 
 
 ## Ask a person
 
-Answers offer a way to ask a person for help, which posts the request in the support channel. Off removes the button and the form. Whoever runs Daimon sets the default channel and credits; a workspace admin can set limits, a menu and its own channel.
+Answers offer a way to ask a person for help, which posts the request in the support channel. Off removes the button and the form. Whoever runs Daimon sets the default channel and credits; an admin can set limits, a menu and their own channel.
 
 | | |
 | --- | --- |
@@ -762,7 +762,7 @@ A submitted thumbs-down form (the reasons, the text, the person, the agent and a
 
 ## Own support channel
 
-A workspace admin may send the workspace's Ask a person requests to a channel of their own instead of the default one; whoever runs Daimon then no longer sees them. Off sends every request to the default channel.
+An admin may send Ask a person requests to a channel of their own instead of the default one; whoever runs Daimon then no longer sees them. Off sends every request to the default channel.
 
 | | |
 | --- | --- |

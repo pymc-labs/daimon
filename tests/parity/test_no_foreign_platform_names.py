@@ -205,6 +205,8 @@ _MAY_NAME: dict[str, frozenset[str]] = {
     "packages/core/daimon/core/native_admins.py": frozenset({"discord"}),
     "packages/core/daimon/core/routine_delivery.py": frozenset(_APPS),
     "packages/core/daimon/core/skills/add.py": frozenset({"teams"}),
+    # A person id is checked, and its refusal worded, by the caller's platform.
+    "packages/core/daimon/core/support.py": frozenset(_APPS),
 }
 #: Other efforts' open work: their strings are listed in the W11 report, not guarded yet.
 _PENDING = (

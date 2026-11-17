@@ -870,8 +870,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         doc=(
             "Answers offer a way to ask a person for help, which posts the request in the "
             "support channel. Off removes the button and the form. Whoever runs Daimon sets the "
-            "default channel and credits; a workspace admin can set limits, a menu and its own "
-            "channel."
+            "default channel and credits; an admin can set limits, a menu and their own channel."
         ),
         requires=("support_channel", "support_credits"),
         authority=_SETTINGS,
@@ -905,9 +904,9 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment",),
         binds="turn",
         doc=(
-            "A workspace admin may send the workspace's Ask a person requests to a channel of "
-            "their own instead of the default one; whoever runs Daimon then no longer sees "
-            "them. Off sends every request to the default channel."
+            "An admin may send Ask a person requests to a channel of their own instead of the "
+            "default one; whoever runs Daimon then no longer sees them. Off sends every request "
+            "to the default channel."
         ),
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,

@@ -1,4 +1,4 @@
-"""Executable record of where Ask a person's plan menu differs between platforms.
+"""Executable record of where Ask a person's menu differs between platforms.
 
 Every platform confirms a picked option before sending it. Discord opens a
 modal, which for an option with no step and no fields holds only its terms and
@@ -44,7 +44,7 @@ from daimon.core.support import (
     option_value,
     parse_menu,
 )
-from daimon.core.support_changes import CATALOG_SETTING
+from daimon.core.support_changes import MENU_SETTING
 from discord.ui import TextDisplay, TextInput
 from fastapi import HTTPException
 from microsoft_teams.cards import ChoiceSetInput, TextBlock
@@ -73,7 +73,7 @@ _MENU = parse_menu(
 
 def _view() -> LimitView:
     now = datetime(2026, 1, 1, tzinfo=UTC)
-    catalog = SupportMenuRow(
+    menu = SupportMenuRow(
         id=uuid.uuid4(),
         tenant_id=uuid.uuid4(),
         key="support",
@@ -84,8 +84,8 @@ def _view() -> LimitView:
         created_at=now,
         updated_at=now,
     )
-    balance = Balance(pool=None, pool_used=Decimal(0), cap=None, person_used=Decimal(0))
-    return LimitView(plan=None, catalog=catalog, balance=balance, state="active")
+    balance = Balance(shared=None, shared_used=Decimal(0), cap=None, person_used=Decimal(0))
+    return LimitView(limit=None, person=None, menu=menu, balance=balance, state="active")
 
 
 def _picked(key: str) -> dict[str, Any]:
@@ -209,7 +209,7 @@ def test_pending_request_when_admins_were_messaged_then_teams_still_posts_it() -
 
 def test_stale_admin_change_when_refused_then_cli_and_mcp_say_what_is_there_now() -> None:
     """The web answers 409 with the plain refusal: its page reloads the current value."""
-    stale = StaleChannelValue(CATALOG_SETTING, {"revision": 2})
+    stale = StaleChannelValue(MENU_SETTING, {"revision": 2})
     assert str(_stale(stale)).endswith("Now: revision 2."), "CLI: the revision now"
     assert "Now: revision 2." in str(_refused(stale)), "MCP: the revision now"
     with pytest.raises(HTTPException) as web, channel_refusals():
