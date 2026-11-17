@@ -17,6 +17,7 @@ from daimon.adapters.mcp.middleware.capability_gate import CapabilityGateMiddlew
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.capability_tools import CAPABILITY_TOOLS
+from daimon.core.config import NotebookSettings, Settings
 from daimon.core.features.tool_gate import STOP_TOOLS, server_gate_key
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
@@ -39,9 +40,11 @@ from .test_tool_schema_snapshot import (
 OFF = "is turned off here"
 
 
-async def _app(sessionmaker: async_sessionmaker[AsyncSession]) -> FastMCP:
+async def _app(
+    sessionmaker: async_sessionmaker[AsyncSession], settings: Settings | None = None
+) -> FastMCP:
     app = create_mcp_app(
-        settings=_fully_configured_settings(),
+        settings=settings or _fully_configured_settings(),
         sessionmaker=sessionmaker,
         auth=StaticTokenVerifier(tokens={}),
     )
@@ -193,6 +196,22 @@ async def test_the_tool_list_for_a_chat_credential_is_left_whole(
         await _set(sessionmaker, tenant_id, "routines", "off")
         after = {t.name for t in await client.list_tools()}
     assert before == after, f"a chat credential's list changed: {before ^ after}"
+
+
+async def test_notebook_tools_when_the_mcp_server_lacks_the_host_settings_are_refused(
+    sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worker leaves setup to the MCP server, so the server's own settings must refuse."""
+    unset = _fully_configured_settings().model_copy(update={"notebook": NotebookSettings()})
+    mcp = await _app(sessionmaker, unset)
+    tenant_id = await _tenant(sessionmaker)
+    notebooks = CAPABILITY_TOOLS["notebooks"]
+    _as(monkeypatch, tenant_id, platform="discord", agent_id=str(uuid.uuid4()))
+    async with Client(mcp) as client:
+        listed = {t.name for t in await client.list_tools()}
+        message = await _error(client, "list_notebooks", {})
+    assert not listed & notebooks, f"notebook tools listed without a host: {listed & notebooks}"
+    assert OFF in message, f"list_notebooks ran without a notebook host: {message!r}"
 
 
 def test_server_gate_key_covers_every_gated_tool_but_the_stop_tools() -> None:
