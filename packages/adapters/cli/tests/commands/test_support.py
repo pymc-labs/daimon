@@ -1,33 +1,38 @@
-"""`daimon support catalog | plan | allowance | requests` over the audited change service."""
+"""`daimon support limit | menu | channel | requests` over the audited change service."""
 
 from __future__ import annotations
 
 import json
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from io import StringIO
 from types import SimpleNamespace
 
 import httpx
 import pytest
+import typer
+from daimon.adapters.cli.commands import support as support_cli
 from daimon.adapters.cli.commands.support import (
-    allowance_set,
-    catalog_list,
-    catalog_rm,
-    catalog_set,
-    catalog_show,
-    plan_clear,
-    plan_list,
-    plan_set,
-    plan_show,
+    channel_reset,
+    channel_set,
+    channel_show,
+    limit_clear,
+    limit_list,
+    limit_set,
+    menu_list,
+    menu_rm,
+    menu_set,
+    menu_show,
+    menu_use,
     requests_list,
     requests_settle,
 )
 from daimon.adapters.cli.main import app
 from daimon.adapters.cli.tenant import TenantSelector
+from daimon.core import support_routing
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.errors import StoreError
-from daimon.core.stores import support as plans
+from daimon.core.stores import support as store
 from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores.security_audit import list_events
 from daimon.core.support import (
@@ -36,8 +41,6 @@ from daimon.core.support import (
     SupportError,
     SupportPlace,
 )
-from daimon.core.support_admin import window_text
-from daimon.core.support_changes import PlanValue
 from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from rich.console import Console
@@ -63,8 +66,20 @@ def _settings(*, discord: bool = False) -> object:
     return SimpleNamespace(
         cli=FakeCliSettings.cli,
         discord=bot if discord else None,
-        support=SimpleNamespace(credits_per_user=20),
+        support=SimpleNamespace(
+            credits_per_user=20,
+            escalation_channel_id=None,
+            slack_escalation_channel_id=None,
+            slack_escalation_team_id=None,
+            teams_escalation_channel_id=None,
+        ),
     )
+
+
+def _allow_own_channel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The `support_own_channel` feature on, for the CLI and the routing it shares."""
+    monkeypatch.setattr(support_cli, "own_channel_allowed", lambda settings: True)
+    monkeypatch.setattr(support_routing, "own_channel_allowed", lambda settings: True)
 
 
 def _console() -> tuple[Console, StringIO]:
@@ -81,7 +96,7 @@ async def _tenant(factory: Factory, platform: str = "slack") -> tuple[uuid.UUID,
 async def _pending(factory: Factory, tenant_id: uuid.UUID, message_id: str = "m1") -> uuid.UUID:
     """A pending Review request on the tenant's `support` menu, as it stands."""
     async with factory.begin() as session:
-        menu = await plans.get_catalog(session, tenant_id=tenant_id, key="support")
+        menu = await store.get_menu(session, tenant_id=tenant_id, key="support")
         review = None if menu is None else menu.spec.option("review")
         assert review is not None, "the menu has Review"
         outcome = await ledger.submit_request(
@@ -101,40 +116,69 @@ async def _pending(factory: Factory, tenant_id: uuid.UUID, message_id: str = "m1
     return outcome.row.id
 
 
-async def test_catalog_when_shown_and_set_back_then_round_trips_and_audits(
+async def test_menu_when_shown_and_set_back_then_round_trips_and_audits(
     db_session_factory: Factory,
 ) -> None:
     rt = build_cli_runtime(db_session_factory, settings=_settings())
     tenant_id, selector = await _tenant(db_session_factory)
     console, out = _console()
     where = {"rt": rt, "console": console, "selector": selector}
-    await catalog_set(**where, key="support", text=MENU, expected="none")
-    await catalog_show(**where, key="support", as_json=False)
+    await menu_set(**where, key="support", text=MENU, expected="none")
+    await menu_show(**where, key="support", as_json=False)
     shown = out.getvalue().split("\n", 1)[1]
     assert shown.startswith("# support, revision 1"), "the revision heads the YAML"
-    await catalog_set(**where, key="support", text=shown, expected="1")
+    await menu_set(**where, key="support", text=shown, expected="1")
     with pytest.raises(StoreError, match=r"Now: revision 2\.$"):
-        await catalog_set(**where, key="support", text=MENU, expected="1")
-    await catalog_list(**where, as_json=True)
+        await menu_set(**where, key="support", text=MENU, expected="1")
+    await menu_list(**where, as_json=True)
     listed = json.loads(out.getvalue().strip().splitlines()[-1])
     assert listed == [
-        {"key": "support", "name": "Support", "revision": 2, "options": "Review (1-3 credits)"}
+        {
+            "key": "support",
+            "name": "Support",
+            "revision": 2,
+            "options": "Review (1-3 credits)",
+            "used_by": [],
+        }
     ], "the shown YAML set back unchanged"
-    with pytest.raises(ChannelChangeRefused, match="key suport. Menus: support."):
-        await catalog_show(**where, key="suport", as_json=False)
-    await catalog_rm(**where, key="support", expected="2")
-    with pytest.raises(ChannelChangeRefused, match="key support. There are no menus yet."):
-        await catalog_rm(**where, key="support")
+    await menu_show(**where, key="support", as_json=True)
+    assert "body" in json.loads(out.getvalue().strip().splitlines()[-1]), "the JSON key is body"
+    with pytest.raises(ChannelChangeRefused, match="No menu has that key. Menus: support."):
+        await menu_show(**where, key="suport", as_json=False)
+    await menu_rm(**where, key="support", expected="2")
+    with pytest.raises(ChannelChangeRefused, match="No menu has that key. There are no menus yet."):
+        await menu_rm(**where, key="support")
     async with db_session_factory() as session:
         events = await list_events(session, tenant_id=tenant_id)
     assert sorted(e.tool_name for e in events) == [
-        "cli/support catalog rm",
-        "cli/support catalog set",
-        "cli/support catalog set",
+        "cli/support menu rm",
+        "cli/support menu set",
+        "cli/support menu set",
     ], "each write audited once; the refused and empty ones are not"
 
 
-async def test_plan_when_set_for_an_agent_name_then_stored_under_its_id(
+async def test_menu_use_when_picked_then_listed_under_the_place_and_unknown_keys_refused(
+    db_session_factory: Factory,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, settings=_settings())
+    _, selector = await _tenant(db_session_factory)
+    console, out = _console()
+    where = {"rt": rt, "console": console, "selector": selector}
+    await menu_set(**where, key="support", text=MENU)
+    with pytest.raises(ChannelChangeRefused, match="No menu has that key. Menus: support."):
+        await menu_use(**where, key="suport", scope="channel", scope_id="C1")
+    await menu_use(**where, key="support", scope="channel", scope_id="C1", expected="none")
+    assert "channel C1: uses menu support" in out.getvalue(), "picked"
+    await menu_list(**where, as_json=True)
+    (listed,) = json.loads(out.getvalue().strip().splitlines()[-1])
+    assert listed["used_by"] == ["channel C1"], "listed under its place"
+    with pytest.raises(StoreError, match="Now: menu support."):
+        await menu_use(**where, key="default", scope="channel", scope_id="C1", expected="none")
+    await menu_use(**where, key="default", scope="channel", scope_id="C1", expected="support")
+    assert "channel C1: uses the default menu" in out.getvalue(), "dropped"
+
+
+async def test_limit_when_set_for_an_agent_name_then_stored_under_its_id(
     db_session_factory: Factory,
 ) -> None:
     tenant_id, selector = await _tenant(db_session_factory)
@@ -144,42 +188,41 @@ async def test_plan_when_set_for_an_agent_name_then_stored_under_its_id(
     rt = build_cli_runtime(db_session_factory, router=router, settings=_settings())
     console, out = _console()
     where = {"rt": rt, "console": console, "selector": selector}
-    await plan_set(**where, scope="agent", scope_id="helper", pool="10", window="monthly")
+    await limit_set(**where, scope="agent", scope_id="helper", shared="10", window="monthly")
     assert "agent_helper1" in out.getvalue(), "the agent's id"
-    assert "0 of 10 credits used, this month" in out.getvalue(), "summary"
-    await plan_list(**where, as_json=True)
-    (listed,) = json.loads(out.getvalue().strip().splitlines()[-1])
-    assert (listed["scope_id"], listed["pool"], listed["catalog"]) == (
+    assert "0 of 10 credits used, each month" in out.getvalue(), "summary"
+    await limit_list(**where, as_json=True)
+    (listed,) = json.loads(out.getvalue().strip().splitlines()[-1])["limits"]
+    assert (listed["scope_id"], listed["shared"], listed["menu"]) == (
         "agent_helper1",
         "10",
         None,
-    ), "the agent's id, the pool and the default menu"
+    ), "the agent's id, the shared credits and the default menu"
     with pytest.raises(StoreError, match="no agent named"):
-        await plan_set(**where, scope="agent", scope_id="nobody", pool="1")
+        await limit_set(**where, scope="agent", scope_id="nobody", shared="1")
 
 
-async def test_plan_set_when_expected_is_what_show_printed_then_accepted_else_stale(
+async def test_limit_set_when_expected_is_a_revision_then_accepted_else_stale(
     db_session_factory: Factory,
 ) -> None:
     rt = build_cli_runtime(db_session_factory, settings=_settings())
     _, selector = await _tenant(db_session_factory)
     console, out = _console()
     where = {"rt": rt, "console": console, "selector": selector}
-    await plan_set(**where, scope="channel", scope_id="C1", pool="5", expected="none")
-    await plan_show(**where, scope="channel", scope_id="C1", as_json=True)
-    shown = out.getvalue().strip().splitlines()[-1]
-    await plan_set(**where, scope="channel", scope_id="C1", pool="6", expected=shown)
+    await limit_set(**where, scope="channel", scope_id="C1", shared="5", expected="none")
+    assert "0 of 5 credits used, all time" in out.getvalue(), "no dates reads as all time"
+    await limit_set(**where, scope="channel", scope_id="C1", shared="6", expected="1")
+    with pytest.raises(StoreError, match=r"changed since you opened it.*Now: revision 2\."):
+        await limit_set(**where, scope="channel", scope_id="C1", shared="7", expected="1")
     with pytest.raises(StoreError, match="changed since you opened it"):
-        await plan_set(**where, scope="channel", scope_id="C1", pool="7", expected=shown)
-    with pytest.raises(StoreError, match="changed since you opened it"):
-        await plan_clear(**where, scope="channel", scope_id="C1", expected="none")
-    await plan_clear(**where, scope="channel", scope_id="C1")
-    await plan_clear(**where, scope="channel", scope_id="C1")
-    assert "channel C1: plan cleared" in out.getvalue(), "cleared"
-    assert "channel C1: had no plan" in out.getvalue(), "clearing nothing says so"
+        await limit_clear(**where, scope="channel", scope_id="C1", expected="none")
+    await limit_clear(**where, scope="channel", scope_id="C1")
+    await limit_clear(**where, scope="channel", scope_id="C1")
+    assert "channel C1: limit cleared" in out.getvalue(), "cleared"
+    assert "channel C1: had no limit" in out.getvalue(), "clearing nothing says so"
 
 
-async def test_plan_set_when_a_discord_thread_then_its_parent_channel(
+async def test_limit_set_when_a_discord_thread_then_its_parent_channel(
     db_session_factory: Factory,
 ) -> None:
     rt = build_cli_runtime(db_session_factory, settings=_settings(discord=True))
@@ -187,75 +230,82 @@ async def test_plan_set_when_a_discord_thread_then_its_parent_channel(
     thread = {"id": "901", "type": 11, "guild_id": "g1", "parent_id": "900"}
     transport = httpx.MockTransport(lambda request: httpx.Response(200, json=thread))
     console, out = _console()
-    await plan_set(
+    await limit_set(
         rt=rt,
         console=console,
         selector=selector,
         scope="channel",
         scope_id="901",
-        per_person="2",
+        each_person="2",
         discord_transport=transport,
     )
     assert "900" in out.getvalue() and "901" not in out.getvalue(), "the thread's parent"
 
 
-async def test_plan_set_when_rerun_with_one_option_then_keeps_menu_and_dates(
+async def test_limit_set_when_rerun_with_one_option_then_keeps_the_other_values(
     db_session_factory: Factory,
 ) -> None:
     rt = build_cli_runtime(db_session_factory, settings=_settings())
-    _, selector = await _tenant(db_session_factory)
+    tenant_id, selector = await _tenant(db_session_factory)
     console, out = _console()
     where = {"rt": rt, "console": console, "selector": selector}
-    await catalog_set(**where, key="support", text=MENU)
-    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(days=1)
-    dates = {"starts_at": start.isoformat(), "ends_at": (start + timedelta(days=6)).isoformat()}
-    await plan_set(
+    await menu_set(**where, key="support", text=MENU)
+    await menu_use(**where, key="support", scope="channel", scope_id="C1")
+    start = datetime(2030, 5, 1, tzinfo=UTC)
+    await limit_set(
         **where,
         scope="channel",
         scope_id="C1",
-        pool="5",
-        catalog="support",
-        window="fixed",
-        **dates,
+        shared="5",
+        starts_at="2030-05-01T00:00:00",
+        ends_at="2030-06-01T00:00:00",
     )
-    await plan_set(**where, scope="channel", scope_id="C1", pool="8")
+    await limit_set(**where, scope="channel", scope_id="C1", shared="8")
 
     def last_row() -> str:
         return [line for line in out.getvalue().splitlines() if "C1" in line][-1]
 
-    window = window_text(
-        PlanValue("channel", "C1", None, None, None, "fixed", start, start + timedelta(days=6)),
-        now=datetime.now(UTC),
-    )
     assert "support" in last_row(), f"the menu is kept: {last_row()}"
-    assert f"0 of 8 credits used, {window}" in last_row(), f"dates kept, in full: {last_row()}"
-    await plan_set(
-        **where, scope="channel", scope_id="C1", window="total", pool="none", per_person="1"
+    assert (
+        "Not started: 0 of 8 credits used, from 1 May 2030 00:00 UTC to 1 Jun 2030 00:00 UTC"
+        in " ".join(last_row().split())
+    ), f"dates kept, in full: {last_row()}"
+    await limit_set(
+        **where, scope="channel", scope_id="C1", shared="none", each_person="1", ends_at="none"
     )
-    assert "1 per person, since" in last_row(), f"pool and end cleared: {last_row()}"
+    assert "1 each, since" in last_row(), f"shared credits and end cleared: {last_row()}"
+    async with rt.sessionmaker() as session:
+        row = await store.get_limit(session, tenant_id=tenant_id, scope="channel", scope_id="C1")
+    assert row is not None and row.starts_at == start, "the start date kept"
 
 
-async def test_allowance_when_set_then_listed_and_cleared_under_its_plan(
+async def test_limit_person_when_set_then_listed_and_cleared_at_its_place(
     db_session_factory: Factory,
 ) -> None:
     rt = build_cli_runtime(db_session_factory, settings=_settings())
     _, selector = await _tenant(db_session_factory)
     console, out = _console()
     where = {"rt": rt, "console": console, "selector": selector}
-    with pytest.raises(ChannelChangeRefused, match="no plan there"):
-        await allowance_set(**where, platform_user_id="U1", credits="4", plan="channel:C1")
-    await plan_set(**where, scope="channel", scope_id="C1", pool="5", per_person="1")
-    await allowance_set(**where, platform_user_id="U1", credits="4", plan="channel:C1")
-    await plan_show(**where, scope="channel", scope_id="C1", as_json=True)
-    shown = json.loads(out.getvalue().strip().splitlines()[-1])
-    assert shown["allowances"] == {"U1": "4"}, "the person's own cap"
-    await allowance_set(
-        **where, platform_user_id="U1", credits=None, plan="channel:C1", expected="4"
-    )
-    assert "U1 under the channel C1: cap cleared" in out.getvalue(), "cleared"
+    await limit_set(**where, scope="channel", scope_id="C1", shared="5", each_person="1")
+    await limit_set(**where, scope="channel", scope_id="C1", each_person="4", person="U1")
+    await limit_set(**where, scope="workspace", scope_id=None, each_person="9", person="U1")
+    await limit_list(**where, as_json=True)
+    listed = json.loads(out.getvalue().strip().splitlines()[-1])
+    assert [(p["scope"], p["person"], p["each_person"]) for p in listed["people"]] == [
+        ("channel", "U1", "4"),
+        ("workspace", "U1", "9"),
+    ], "each person row at its own place, Everywhere as workspace"
+    assert listed["limits"][0]["people"] == {"U1": "4"}, "listed under their place"
+    own = listed["people"][0]["revision"]
+    with pytest.raises(StoreError, match="changed since you opened it"):
+        await limit_clear(
+            **where, scope="channel", scope_id="C1", person="U1", expected=str(own + 100)
+        )
+    await limit_clear(**where, scope="channel", scope_id="C1", person="U1", expected=str(own))
+    assert "U1 at channel C1: limit cleared" in out.getvalue(), "cleared"
 
 
-async def test_allowance_when_a_mention_or_a_malformed_id_or_plan_then_unwraps_or_hints(
+async def test_limit_person_when_a_mention_or_a_malformed_id_or_place_then_unwraps_or_refuses(
     db_session_factory: Factory,
 ) -> None:
     rt = build_cli_runtime(db_session_factory, settings=_settings())
@@ -263,13 +313,64 @@ async def test_allowance_when_a_mention_or_a_malformed_id_or_plan_then_unwraps_o
     console, out = _console()
     where = {"rt": rt, "console": console, "selector": selector}
     with pytest.raises(SupportError, match="alice is not a Slack user id"):
-        await allowance_set(**where, platform_user_id="alice", credits="4")
-    with pytest.raises(SupportError, match="Use workspace, agent:<name> or channel:C1."):
-        await allowance_set(**where, platform_user_id="U1", credits="4", plan="C1")
+        await limit_set(**where, scope="workspace", scope_id=None, each_person="4", person="alice")
+    with pytest.raises(SupportError, match="Everywhere takes no id"):
+        await limit_set(**where, scope="workspace", scope_id="C1", each_person="4")
     with pytest.raises(SupportError, match="or a channel, not team."):
-        await allowance_set(**where, platform_user_id="U1", credits="4", plan="team:C1")
-    await allowance_set(**where, platform_user_id="<@U1|alice>", credits="4")
-    assert "U1 under the default plan: cap 4" in out.getvalue(), f"unwrapped: {out.getvalue()}"
+        await limit_set(**where, scope="team", scope_id="C1", each_person="4")
+    await limit_set(
+        **where, scope="workspace", scope_id=None, each_person="4", person="<@U1|alice>"
+    )
+    assert "U1 at everywhere: 4 credits" in out.getvalue(), f"unwrapped: {out.getvalue()}"
+
+
+async def test_channel_when_the_deployment_keeps_it_then_refused_else_set_shown_and_reset(
+    db_session_factory: Factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rt = build_cli_runtime(db_session_factory, settings=_settings())
+    _, selector = await _tenant(db_session_factory)
+    console, out = _console()
+    where = {"rt": rt, "console": console, "selector": selector}
+    with pytest.raises(ChannelChangeRefused, match="keeps its own request channel"):
+        await channel_set(**where, channel_id="C9")
+    _allow_own_channel(monkeypatch)
+    await channel_set(**where, channel_id="C9", expected="none")
+    await channel_show(**where, as_json=True)
+    shown = json.loads(out.getvalue().strip().splitlines()[-1])
+    assert shown["destination"] == {"channel_id": "C9", "own": True}, "the own channel"
+    assert shown["own"]["revision"] == 1, "its revision"
+    with pytest.raises(StoreError, match=r"Now: revision 1\."):
+        await channel_reset(**where, expected="none")
+    await channel_reset(**where, expected="1")
+    await channel_show(**where, as_json=False)
+    assert "Requests go nowhere" in out.getvalue(), "no default channel is set in the test"
+
+
+async def test_channel_set_when_teams_then_needs_the_team_and_service_url(
+    db_session_factory: Factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rt = build_cli_runtime(db_session_factory, settings=_settings())
+    tenant_id, selector = await _tenant(db_session_factory, platform="teams")
+    console, _ = _console()
+    _allow_own_channel(monkeypatch)
+    with pytest.raises(typer.BadParameter, match="--team and --service-url"):
+        await channel_set(
+            rt=rt, console=console, selector=selector, channel_id="19:abc@thread.tacv2"
+        )
+    await channel_set(
+        rt=rt,
+        console=console,
+        selector=selector,
+        channel_id="19:abc@thread.tacv2",
+        team="T1",
+        service_url="https://smba.example/",
+    )
+    async with rt.sessionmaker() as session:
+        row = await store.get_support_channel(session, tenant_id=tenant_id)
+    assert row is not None and (row.teams_team_id, row.teams_service_url) == (
+        "T1",
+        "https://smba.example/",
+    ), "the Teams details are stored"
 
 
 async def test_requests_when_settled_then_the_settler_is_told_the_client_is_not(
@@ -279,10 +380,11 @@ async def test_requests_when_settled_then_the_settler_is_told_the_client_is_not(
     tenant_id, selector = await _tenant(db_session_factory)
     console, out = _console()
     where = {"rt": rt, "console": console, "selector": selector}
-    await catalog_set(**where, key="support", text=MENU)
-    await plan_set(**where, scope="channel", scope_id="C1", pool="5", catalog="support")
+    await menu_set(**where, key="support", text=MENU)
+    await menu_use(**where, key="support", scope="channel", scope_id="C1")
+    await limit_set(**where, scope="channel", scope_id="C1", shared="5")
     request_id = await _pending(db_session_factory, tenant_id)
-    await requests_list(**where, pending=True, plan="channel:C1", as_json=True)
+    await requests_list(**where, pending=True, place="channel:C1", as_json=True)
     (listed,) = json.loads(out.getvalue().strip().splitlines()[-1])
     assert (listed["status"], listed["counted"]) == ("pending", "1"), "holds its minimum"
     with pytest.raises(StoreError, match="Enter an amount from 1 to 3."):
@@ -304,8 +406,9 @@ async def test_requests_list_when_undelivered_then_only_requests_no_channel_rece
     tenant_id, selector = await _tenant(db_session_factory)
     console, out = _console()
     where = {"rt": rt, "console": console, "selector": selector}
-    await catalog_set(**where, key="support", text=MENU)
-    await plan_set(**where, scope="channel", scope_id="C1", pool="5", catalog="support")
+    await menu_set(**where, key="support", text=MENU)
+    await menu_use(**where, key="support", scope="channel", scope_id="C1")
+    await limit_set(**where, scope="channel", scope_id="C1", shared="5")
     lost = await _pending(db_session_factory, tenant_id)
     posted = await _pending(db_session_factory, tenant_id, message_id="m2")
     async with db_session_factory.begin() as session:
@@ -325,19 +428,19 @@ async def test_requests_list_when_undelivered_then_only_requests_no_channel_rece
 def test_support_help_when_invoked_then_lists_each_group() -> None:
     result = CliRunner().invoke(app, ["support", "--help"])
     assert result.exit_code == 0, result.stdout
-    for group in ("catalog", "plan", "allowance", "requests"):
+    for group in ("limit", "menu", "channel", "requests"):
         assert group in result.stdout, f"{group} listed"
 
 
-async def test_catalog_when_expected_zero_then_it_means_none_as_in_the_mcp_tool(
+async def test_menu_when_expected_zero_then_it_means_none_as_in_the_mcp_tool(
     db_session_factory: Factory,
 ) -> None:
     rt = build_cli_runtime(db_session_factory, settings=_settings())
     _, selector = await _tenant(db_session_factory)
     console, out = _console()
     where = {"rt": rt, "console": console, "selector": selector}
-    await catalog_set(**where, key="support", text=MENU, expected="0")
+    await menu_set(**where, key="support", text=MENU, expected="0")
     with pytest.raises(StoreError):
-        await catalog_set(**where, key="support", text=MENU, expected="0")
+        await menu_set(**where, key="support", text=MENU, expected="0")
     with pytest.raises(StoreError):
-        await catalog_rm(**where, key="support", expected="0")
+        await menu_rm(**where, key="support", expected="0")

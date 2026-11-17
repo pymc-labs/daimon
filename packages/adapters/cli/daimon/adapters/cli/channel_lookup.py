@@ -1,6 +1,6 @@
 """The parent channel a channel or thread id names, for settings stored per channel.
 
-Budgets and support plans both count against parent channels, so a value saved on
+Budgets and support limits both count against parent channels, so a value saved on
 a thread id would never apply. One lookup for every command that stores one.
 """
 

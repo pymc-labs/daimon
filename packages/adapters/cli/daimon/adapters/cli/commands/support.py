@@ -1,8 +1,8 @@
-"""`daimon support catalog | plan | allowance | requests`: support plans for Ask a person.
+"""`daimon support limit | menu | channel | requests`: Ask a person's credits, menus and channel.
 
 The operator acts as an admin over the audited change service (`SET_SUPPORT`),
 the same rule the MCP tools and the web follow. Each write appends a security event
-in the change's own transaction. Plans and menus are read per command, never cached.
+in the change's own transaction. Limits and menus are read per command, never cached.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, Any
 
 import httpx
 import typer
@@ -33,7 +33,7 @@ from daimon.core.stores import support as store
 from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.security_audit import append_event
-from daimon.core.stores.support_rows import SupportEscalationRow
+from daimon.core.stores.support_rows import SupportEscalationRow, SupportLimitRow
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.support import (
     SupportError,
@@ -45,50 +45,48 @@ from daimon.core.support import (
     parse_scope,
 )
 from daimon.core.support_admin import (
-    PlanChange,
-    PlanUsage,
-    get_plan_usage,
-    list_plan_usage,
-    merge_plan_change,
+    LimitChange,
+    LimitUsage,
+    get_limit_usage,
+    list_limit_usage,
+    merge_limit_change,
     options_text,
-    parse_plan_value,
     settle_outcome_text,
+    window_text,
 )
 from daimon.core.support_changes import (
-    PlanValue,
-    clear_allowance,
-    clear_plan,
+    ChannelPick,
+    clear_limit,
     missing_menu,
-    remove_catalog,
-    set_allowance,
-    set_catalog,
-    set_plan,
+    remove_menu,
+    set_limit,
+    set_menu,
+    set_menu_use,
+    set_support_channel,
     settle,
     stale_text,
 )
+from daimon.core.support_routing import own_channel_allowed, support_destination
 from pydantic import BaseModel
 from rich.console import Console
 from rich.table import Table
 from sqlalchemy.ext.asyncio import AsyncSession
 
-support_app = typer.Typer(help="Support plans for Ask a person: menus, plans, caps and requests.")
-catalog_app = typer.Typer(help="Menus of support options.")
-plan_app = typer.Typer(help="Credit plans for a workspace, an agent or a channel.")
-allowance_app = typer.Typer(help="One person's own credit cap under a plan.")
+support_app = typer.Typer(help="Ask a person: credit limits, menus, the request channel, requests.")
+limit_app = typer.Typer(help="Credit limits for everywhere, an agent or a channel.")
+menu_app = typer.Typer(help="Menus of support options, and which place uses which.")
+channel_app = typer.Typer(help="The workspace's own channel for support requests.")
 requests_app = typer.Typer(help="Support requests: list, settle and decline.")
-support_app.add_typer(catalog_app, name="catalog")
-support_app.add_typer(plan_app, name="plan")
-support_app.add_typer(allowance_app, name="allowance")
+support_app.add_typer(limit_app, name="limit")
+support_app.add_typer(menu_app, name="menu")
+support_app.add_typer(channel_app, name="channel")
 support_app.add_typer(requests_app, name="requests")
 
-_SCOPE_HELP = "workspace, agent or channel."
+_SCOPE_HELP = "workspace (everywhere), agent or channel."
 _ID_HELP = "Agent name or id, or channel or thread id; none for workspace."
-_PLAN = typer.Option(
-    "--plan", help="The plan: workspace, agent:<name> or channel:<id>. Default: the default plan."
-)
-_EXPECTED_PLAN = typer.Option(
-    "--expected", help="The plan you last read: `none`, or the JSON `plan show --json` printed."
-)
+_EXPECTED_LIMIT = typer.Option("--expected", help="Revision you last read, or `none`.")
+
+ZERO = Decimal(0)
 
 type Transport = httpx.AsyncBaseTransport | None
 
@@ -161,15 +159,15 @@ async def _scope_id(
     missing_ok: bool = False,
 ) -> tuple[SupportScope, str]:
     """An agent name becomes its id; a thread becomes its parent channel."""
-    plan_scope, scope_id = parse_scope(scope, raw_id)
-    if plan_scope == "agent" and not scope_id.startswith("agent_"):
+    place_scope, scope_id = parse_scope(scope, raw_id)
+    if place_scope == "agent" and not scope_id.startswith("agent_"):
         agent = await find_agent_by_daimon_tag(
             rt.anthropic, tenant_id=target.tenant_id, name=scope_id, records=rt.sessionmaker
         )
         if agent is None:
             raise StoreError(f"no agent named {scope_id!r} in this workspace")
         scope_id = agent.id
-    if plan_scope == "channel":
+    if place_scope == "channel":
         scope_id = await parent_channel(
             rt,
             platform=target.platform,
@@ -178,27 +176,24 @@ async def _scope_id(
             transport=transport,
             missing_ok=missing_ok,
         )
-    return plan_scope, scope_id
+    return place_scope, scope_id
 
 
-async def _plan_ref(
-    rt: CliRuntime, target: _Target, ref: str | None, *, transport: Transport
-) -> tuple[SupportScope | None, str]:
-    """`--plan workspace|agent:<name>|channel:<id>`; None is the default plan."""
-    if ref is None:
-        return None, ""
+async def _place_ref(
+    rt: CliRuntime, target: _Target, ref: str, *, transport: Transport
+) -> tuple[SupportScope, str]:
+    """`workspace`, `agent:<name>` or `channel:<id>`."""
     scope, colon, raw_id = ref.partition(":")
     if not colon and scope.strip() != "workspace":
         raise SupportError(
-            f"--plan {ref} names no plan. Use workspace, agent:<name> or channel:{ref.strip()}."
+            f"--place {ref} names no place. Use workspace, agent:<name> or channel:{ref.strip()}."
         )
     return await _scope_id(rt, target, scope, raw_id or None, transport=transport, missing_ok=True)
 
 
-def _label(scope: SupportScope | None, scope_id: str) -> str:
-    if scope is None:
-        return "default plan"
-    return f"{scope} {scope_id}" if scope_id else scope
+def _label(scope: SupportScope, scope_id: str, person: str | None = None) -> str:
+    place = f"{scope} {scope_id}" if scope_id else "everywhere"
+    return place if person is None else f"{person} at {place}"
 
 
 def _expected_none_or[T](raw: str | None, parse: Callable[[str], T]) -> Expected[T | None] | None:
@@ -210,13 +205,6 @@ def _expected_none_or[T](raw: str | None, parse: Callable[[str], T]) -> Expected
         return Expected(parse(raw))
     except (ValueError, SupportError) as exc:
         raise typer.BadParameter(f"--expected: {exc}") from exc
-
-
-def _plan_json(raw: str) -> PlanValue:
-    data: object = json.loads(raw)
-    if not isinstance(data, dict):
-        raise SupportError("pass the JSON object `plan show --json` printed")
-    return parse_plan_value(cast("dict[str, object]", data))
 
 
 def _stale(exc: StaleChannelValue) -> StoreError:
@@ -238,14 +226,23 @@ def _run(impl: Callable[[CliRuntime, Console], Awaitable[None]]) -> None:
 
 
 def _revision(raw: str) -> int | None:
-    """A menu revision; 0 means none, as in the MCP tool and the web page."""
+    """A revision; 0 means none, as in the MCP tool and the web page."""
     return int(raw) or None
 
 
-# ---------- catalog ----------
+def _table(console: Console, columns: tuple[str, ...], rows: list[tuple[Any, ...]]) -> None:
+    table = Table(show_header=True, header_style="bold")
+    for column in columns:
+        table.add_column(column)
+    for row in rows:
+        table.add_row(*(str(cell) for cell in row))
+    console.print(table)
 
 
-async def catalog_set(
+# ---------- menus ----------
+
+
+async def menu_set(
     *,
     rt: CliRuntime,
     console: Console,
@@ -257,9 +254,9 @@ async def catalog_set(
     target = await _target(rt, selector)
     spec = load_menu(text)
     try:
-        row = await set_catalog(
+        row = await set_menu(
             rt.sessionmaker,
-            _actor(target, command="catalog set", reason=f"catalog:{key}"),
+            _actor(target, command="menu set", reason=f"menu:{key}"),
             platform=target.platform,
             key=key,
             spec=spec,
@@ -272,41 +269,44 @@ async def catalog_set(
     )
 
 
-async def catalog_show(
+async def menu_show(
     *, rt: CliRuntime, console: Console, selector: TenantSelector | None, key: str, as_json: bool
 ) -> None:
     target = await _target(rt, selector)
     async with rt.sessionmaker() as session:
-        row = await store.get_catalog(session, tenant_id=target.tenant_id, key=key)
+        row = await store.get_menu(session, tenant_id=target.tenant_id, key=key)
         if row is None:
             raise await missing_menu(session, tenant_id=target.tenant_id, key=key)
-    spec = row.spec.model_dump(mode="json", exclude_none=True)
+    body = row.spec.model_dump(mode="json", exclude_none=True)
     if as_json:
-        _print_json(console, {"key": row.key, "revision": row.revision, "catalog": spec})
+        _print_json(console, {"key": row.key, "revision": row.revision, "body": body})
         return
     console.print(f"# {row.key}, revision {row.revision}", markup=False)
-    console.print(yaml.safe_dump(spec, sort_keys=False, allow_unicode=True), markup=False)
+    console.print(yaml.safe_dump(body, sort_keys=False, allow_unicode=True), markup=False)
 
 
-class CatalogListing(BaseModel):
+class MenuListing(BaseModel):
     key: str
     name: str
     revision: int
     options: str
+    used_by: list[str]
 
 
-async def catalog_list(
+async def menu_list(
     *, rt: CliRuntime, console: Console, selector: TenantSelector | None, as_json: bool
 ) -> None:
     target = await _target(rt, selector)
     async with rt.sessionmaker() as session:
-        rows = await store.list_catalogs(session, tenant_id=target.tenant_id)
+        rows = await store.list_menus(session, tenant_id=target.tenant_id)
+        uses = await store.list_menu_uses(session, tenant_id=target.tenant_id)
     listing = [
-        CatalogListing(
+        MenuListing(
             key=r.key,
             name=r.name,
             revision=r.revision,
             options=options_text(r.spec),
+            used_by=[_label(u.scope, u.scope_id) for u in uses if u.menu_id == r.id],
         )
         for r in rows
     ]
@@ -315,12 +315,12 @@ async def catalog_list(
         return
     _table(
         console,
-        ("key", "name", "revision", "options"),
-        [tuple(i.model_dump().values()) for i in listing],
+        ("key", "name", "revision", "options", "used by"),
+        [(i.key, i.name, i.revision, i.options, ", ".join(i.used_by) or "-") for i in listing],
     )
 
 
-async def catalog_rm(
+async def menu_rm(
     *,
     rt: CliRuntime,
     console: Console,
@@ -330,9 +330,9 @@ async def catalog_rm(
 ) -> None:
     target = await _target(rt, selector)
     try:
-        await remove_catalog(
+        await remove_menu(
             rt.sessionmaker,
-            _actor(target, command="catalog rm", reason=f"catalog:{key}"),
+            _actor(target, command="menu rm", reason=f"menu:{key}"),
             platform=target.platform,
             key=key,
             expected=_expected_none_or(expected, _revision),
@@ -342,216 +342,332 @@ async def catalog_rm(
     console.print(f"menu {key}: removed", markup=False)
 
 
-# ---------- plan ----------
+async def menu_use(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    selector: TenantSelector | None,
+    key: str,
+    scope: str,
+    scope_id: str | None,
+    expected: str | None = None,
+    discord_transport: Transport = None,
+) -> None:
+    """`default` drops the place's own pick: the menu above it, or the built-in one, applies."""
+    target = await _target(rt, selector)
+    place_scope, limit_id = await _scope_id(
+        rt, target, scope, scope_id, transport=discord_transport, missing_ok=key == "default"
+    )
+    try:
+        await set_menu_use(
+            rt.sessionmaker,
+            _actor(target, command="menu use", reason=f"menu:{place_scope}:{limit_id}"),
+            platform=target.platform,
+            scope=place_scope,
+            scope_id=limit_id,
+            key=None if key == "default" else key,
+            expected=_expected_none_or(expected, str),
+        )
+    except StaleChannelValue as exc:
+        raise _stale(exc) from exc
+    label = _label(place_scope, limit_id)
+    what = "the default menu" if key == "default" else f"menu {key}"
+    console.print(f"{label}: uses {what}", markup=False)
 
 
-def _plan_payload(usage: PlanUsage) -> dict[str, Any]:
+# ---------- limits ----------
+
+
+def _limit_payload(usage: LimitUsage) -> dict[str, Any]:
+    row = usage.limit
     return {
-        **usage.value.as_json(),
-        "pool_used": format_credits(usage.pool_used),
+        "scope": row.scope,
+        "scope_id": row.scope_id,
+        "shared": None if row.shared is None else format_credits(row.shared),
+        "each_person": None if row.each_person is None else format_credits(row.each_person),
+        "window": row.window,
+        "starts_at": row.starts_at.isoformat() if row.starts_at else None,
+        "ends_at": row.ends_at.isoformat() if row.ends_at else None,
+        "revision": row.revision,
+        "menu": usage.menu,
+        "shared_used": format_credits(usage.shared_used),
         "state": usage.state,
         "summary": usage.summary,
-        "allowances": {a.platform_user_id: format_credits(a.credits) for a in usage.allowances},
+        "people": {p.platform_user_id: format_credits(p.each_person or ZERO) for p in usage.people},
     }
 
 
-def _table(console: Console, columns: tuple[str, ...], rows: list[tuple[Any, ...]]) -> None:
-    table = Table(show_header=True, header_style="bold")
-    for column in columns:
-        table.add_column(column)
-    for row in rows:
-        table.add_row(*(str(cell) for cell in row))
-    console.print(table)
+def _person_payload(row: SupportLimitRow) -> dict[str, Any]:
+    return {
+        "scope": row.scope,
+        "scope_id": row.scope_id,
+        "person": row.platform_user_id,
+        "each_person": None if row.each_person is None else format_credits(row.each_person),
+        "window": row.window,
+        "starts_at": row.starts_at.isoformat() if row.starts_at else None,
+        "ends_at": row.ends_at.isoformat() if row.ends_at else None,
+        "revision": row.revision,
+    }
 
 
-async def plan_set(
-    *,
-    rt: CliRuntime,
-    console: Console,
-    selector: TenantSelector | None,
-    scope: str,
-    scope_id: str | None,
-    pool: str | None = None,
-    per_person: str | None = None,
-    catalog: str | None = None,
-    window: str | None = None,
-    starts_at: str | None = None,
-    ends_at: str | None = None,
-    expected: str | None = None,
-    discord_transport: Transport = None,
-) -> None:
-    """Options left out keep the plan's values; `none` clears a limit or a date."""
-    target = await _target(rt, selector)
-    plan_scope, limit_id = await _scope_id(rt, target, scope, scope_id, transport=discord_transport)
-    change = PlanChange(catalog, pool, per_person, window, starts_at, ends_at)
-    async with rt.sessionmaker() as session:
-        spec, before = await merge_plan_change(
-            session, tenant_id=target.tenant_id, scope=plan_scope, scope_id=limit_id, change=change
-        )
-    try:
-        await set_plan(
-            rt.sessionmaker,
-            _actor(target, command="plan set", reason=f"plan:{plan_scope}:{limit_id}"),
-            platform=target.platform,
-            spec=spec,
-            expected=_expected_none_or(expected, _plan_json) or Expected(before),
-        )
-    except StaleChannelValue as exc:
-        raise _stale(exc) from exc
-    async with rt.sessionmaker() as session:
-        usage = await get_plan_usage(
-            session,
-            tenant_id=target.tenant_id,
-            scope=plan_scope,
-            scope_id=limit_id,
-            now=datetime.now(UTC),
-        )
-    assert usage is not None, "the plan just set"
-    _plan_table(console, [usage])
-
-
-async def plan_clear(
-    *,
-    rt: CliRuntime,
-    console: Console,
-    selector: TenantSelector | None,
-    scope: str,
-    scope_id: str | None,
-    expected: str | None = None,
-    discord_transport: Transport = None,
-) -> None:
-    target = await _target(rt, selector)
-    plan_scope, limit_id = await _scope_id(
-        rt, target, scope, scope_id, transport=discord_transport, missing_ok=True
-    )
-    try:
-        cleared = await clear_plan(
-            rt.sessionmaker,
-            _actor(target, command="plan clear", reason=f"plan:{plan_scope}:{limit_id}"),
-            platform=target.platform,
-            scope=plan_scope,
-            scope_id=limit_id,
-            expected=_expected_none_or(expected, _plan_json),
-        )
-    except StaleChannelValue as exc:
-        raise _stale(exc) from exc
-    label = _label(plan_scope, limit_id)
-    console.print(f"{label}: {'plan cleared' if cleared else 'had no plan'}", markup=False)
-
-
-async def plan_show(
-    *,
-    rt: CliRuntime,
-    console: Console,
-    selector: TenantSelector | None,
-    scope: str,
-    scope_id: str | None,
-    as_json: bool = False,
-    discord_transport: Transport = None,
-) -> None:
-    target = await _target(rt, selector)
-    plan_scope, limit_id = await _scope_id(
-        rt, target, scope, scope_id, transport=discord_transport, missing_ok=True
-    )
-    async with rt.sessionmaker() as session:
-        usage = await get_plan_usage(
-            session,
-            tenant_id=target.tenant_id,
-            scope=plan_scope,
-            scope_id=limit_id,
-            now=datetime.now(UTC),
-        )
-    if usage is None:
-        raise StoreError(f"{_label(plan_scope, limit_id)} has no plan")
-    if as_json:
-        _print_json(console, _plan_payload(usage))
-        return
-    _plan_table(console, [usage])
-
-
-def _plan_table(console: Console, plans: list[PlanUsage]) -> None:
+def _limit_table(console: Console, usages: list[LimitUsage]) -> None:
     _table(
         console,
-        ("scope", "id", "menu", "summary", "own caps"),
+        ("place", "menu", "limit", "own limits"),
         [
             (
-                u.plan.scope,
-                u.plan.scope_id or "-",
-                u.value.catalog or "default",
+                _label(u.limit.scope, u.limit.scope_id),
+                u.menu or "default",
                 u.summary,
-                ", ".join(f"{a.platform_user_id}={format_credits(a.credits)}" for a in u.allowances)
+                ", ".join(
+                    f"{p.platform_user_id}={format_credits(p.each_person or ZERO)}"
+                    for p in u.people
+                )
                 or "-",
             )
-            for u in plans
+            for u in usages
         ],
     )
 
 
-async def plan_list(
-    *, rt: CliRuntime, console: Console, selector: TenantSelector | None, as_json: bool
-) -> None:
-    target = await _target(rt, selector)
-    async with rt.sessionmaker() as session:
-        plans = await list_plan_usage(session, tenant_id=target.tenant_id, now=datetime.now(UTC))
-    if as_json:
-        _print_json(console, [_plan_payload(u) for u in plans])
-        return
-    if not plans:
-        console.print("No support plans. Requests use the default allowance.")
-        return
-    _plan_table(console, plans)
-
-
-# ---------- allowance ----------
-
-
-async def allowance_set(
+async def limit_set(
     *,
     rt: CliRuntime,
     console: Console,
     selector: TenantSelector | None,
-    platform_user_id: str,
-    credits: str | None,
-    plan: str | None = None,
+    scope: str,
+    scope_id: str | None,
+    shared: str | None = None,
+    each_person: str | None = None,
+    window: str | None = None,
+    starts_at: str | None = None,
+    ends_at: str | None = None,
+    person: str | None = None,
     expected: str | None = None,
     discord_transport: Transport = None,
 ) -> None:
-    """`credits` None clears the person's own cap."""
+    """Options left out keep the limit's values; `none` clears a credit amount or a date.
+
+    With `person`, the limit is that person's own at the place (`workspace`: everywhere).
+    """
     target = await _target(rt, selector)
-    platform_user_id = parse_person_id(target.platform, platform_user_id)
-    scope, scope_id = await _plan_ref(rt, target, plan, transport=discord_transport)
-    command = "allowance set" if credits is not None else "allowance clear"
-    actor = _actor(target, command=command, reason=f"allowance:{scope or 'default'}:{scope_id}")
-    wanted = _expected_none_or(expected, lambda raw: parse_credits(raw, name="--expected"))
-    label = _label(scope, scope_id)
+    place_scope, limit_id = await _scope_id(
+        rt, target, scope, scope_id, transport=discord_transport
+    )
+    who = None if person is None else parse_person_id(target.platform, person)
+    change = LimitChange(shared, each_person, window, starts_at, ends_at)
+    async with rt.sessionmaker() as session:
+        spec, before = await merge_limit_change(
+            session,
+            tenant_id=target.tenant_id,
+            scope=place_scope,
+            scope_id=limit_id,
+            change=change,
+            platform_user_id=who,
+        )
     try:
-        if credits is None:
-            cleared = await clear_allowance(
-                rt.sessionmaker,
-                actor,
-                platform=target.platform,
-                platform_user_id=platform_user_id,
-                scope=scope,
-                scope_id=scope_id,
-                expected=wanted,
-            )
-            done = "cap cleared" if cleared else "had no own cap"
-        else:
-            amount = parse_credits(credits)
-            await set_allowance(
-                rt.sessionmaker,
-                actor,
-                platform=target.platform,
-                platform_user_id=platform_user_id,
-                credits=amount,
-                scope=scope,
-                scope_id=scope_id,
-                expected=wanted,
-            )
-            done = f"cap {format_credits(amount)}"
+        row = await set_limit(
+            rt.sessionmaker,
+            _actor(target, command="limit set", reason=f"limit:{place_scope}:{limit_id}"),
+            platform=target.platform,
+            spec=spec,
+            expected=_expected_none_or(expected, _revision) or Expected(before),
+        )
     except StaleChannelValue as exc:
         raise _stale(exc) from exc
-    console.print(f"{platform_user_id} under the {label}: {done}", markup=False)
+    if who is not None:
+        console.print(
+            f"{_label(place_scope, limit_id, who)}: {format_credits(row.each_person or ZERO)} "
+            f"credits, {window_text(row, now=datetime.now(UTC))}",
+            markup=False,
+        )
+        return
+    async with rt.sessionmaker() as session:
+        usage = await get_limit_usage(
+            session,
+            tenant_id=target.tenant_id,
+            scope=place_scope,
+            scope_id=limit_id,
+            now=datetime.now(UTC),
+        )
+    assert usage is not None, "the limit just set"
+    _limit_table(console, [usage])
+
+
+async def limit_clear(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    selector: TenantSelector | None,
+    scope: str,
+    scope_id: str | None,
+    person: str | None = None,
+    expected: str | None = None,
+    discord_transport: Transport = None,
+) -> None:
+    target = await _target(rt, selector)
+    place_scope, limit_id = await _scope_id(
+        rt, target, scope, scope_id, transport=discord_transport, missing_ok=True
+    )
+    who = None if person is None else parse_person_id(target.platform, person)
+    try:
+        cleared = await clear_limit(
+            rt.sessionmaker,
+            _actor(target, command="limit clear", reason=f"limit:{place_scope}:{limit_id}"),
+            platform=target.platform,
+            scope=place_scope,
+            scope_id=limit_id,
+            platform_user_id=who,
+            expected=_expected_none_or(expected, _revision),
+        )
+    except StaleChannelValue as exc:
+        raise _stale(exc) from exc
+    label = _label(place_scope, limit_id, who)
+    console.print(f"{label}: {'limit cleared' if cleared else 'had no limit'}", markup=False)
+
+
+async def limit_list(
+    *, rt: CliRuntime, console: Console, selector: TenantSelector | None, as_json: bool
+) -> None:
+    target = await _target(rt, selector)
+    async with rt.sessionmaker() as session:
+        usages = await list_limit_usage(session, tenant_id=target.tenant_id, now=datetime.now(UTC))
+        people = await store.list_limits(session, tenant_id=target.tenant_id, people=True)
+    if as_json:
+        _print_json(
+            console,
+            {
+                "limits": [_limit_payload(u) for u in usages],
+                "people": [_person_payload(p) for p in people],
+            },
+        )
+        return
+    if not usages and not people:
+        console.print("No limits. Requests use the default credits per person.")
+        return
+    if usages:
+        _limit_table(console, usages)
+    if people:
+        _table(
+            console,
+            ("place", "person", "credits", "when"),
+            [
+                (
+                    _label(p.scope, p.scope_id),
+                    p.platform_user_id,
+                    format_credits(p.each_person or ZERO),
+                    window_text(p, now=datetime.now(UTC)),
+                )
+                for p in people
+            ],
+        )
+
+
+# ---------- channel ----------
+
+
+async def channel_set(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    selector: TenantSelector | None,
+    channel_id: str,
+    team: str | None = None,
+    service_url: str | None = None,
+    expected: str | None = None,
+    discord_transport: Transport = None,
+) -> None:
+    """Send this workspace's support requests to `channel_id`; Teams also takes team and URL."""
+    target = await _target(rt, selector)
+    channel = await parent_channel(
+        rt,
+        platform=target.platform,
+        workspace_id=target.workspace_id,
+        channel_id=channel_id,
+        transport=discord_transport,
+    )
+    if target.platform == "teams" and not (team and service_url):
+        raise typer.BadParameter("Teams needs --team and --service-url")
+    pick = ChannelPick(
+        platform=target.platform,
+        channel_id=channel,
+        slack_team_id=target.workspace_id if target.platform == "slack" else None,
+        teams_team_id=team if target.platform == "teams" else None,
+        teams_service_url=service_url if target.platform == "teams" else None,
+    )
+    await _write_channel(rt, console, target, pick, expected, "channel set")
+    console.print(f"support requests go to {channel}", markup=False)
+
+
+async def channel_reset(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    selector: TenantSelector | None,
+    expected: str | None = None,
+) -> None:
+    target = await _target(rt, selector)
+    await _write_channel(rt, console, target, None, expected, "channel reset")
+    console.print("support requests go to the default channel", markup=False)
+
+
+async def _write_channel(
+    rt: CliRuntime,
+    console: Console,
+    target: _Target,
+    pick: ChannelPick | None,
+    expected: str | None,
+    command: str,
+) -> None:
+    try:
+        await set_support_channel(
+            rt.sessionmaker,
+            _actor(target, command=command, reason="channel"),
+            pick=pick,
+            own_allowed=own_channel_allowed(rt.settings),
+            expected=_expected_none_or(expected, _revision),
+        )
+    except StaleChannelValue as exc:
+        raise _stale(exc) from exc
+
+
+async def channel_show(
+    *, rt: CliRuntime, console: Console, selector: TenantSelector | None, as_json: bool
+) -> None:
+    target = await _target(rt, selector)
+    async with rt.sessionmaker() as session:
+        own = await store.get_support_channel(session, tenant_id=target.tenant_id)
+        destination = await support_destination(
+            session, tenant_id=target.tenant_id, platform=target.platform, settings=rt.settings
+        )
+    allowed = own_channel_allowed(rt.settings)
+    if as_json:
+        _print_json(
+            console,
+            {
+                "own_allowed": allowed,
+                "destination": None
+                if destination is None
+                else {"channel_id": destination.channel_id, "own": destination.own},
+                "own": None
+                if own is None
+                else {
+                    "platform": own.platform,
+                    "channel_id": own.channel_id,
+                    "revision": own.revision,
+                },
+            },
+        )
+        return
+    if destination is None:
+        console.print("Requests go nowhere: no support channel is set.", markup=False)
+    else:
+        kind = "its own" if destination.own else "the default"
+        console.print(f"Requests go to {destination.channel_id} ({kind} channel).", markup=False)
+    if own is not None:
+        console.print(f"Own channel: {own.channel_id}, revision {own.revision}.", markup=False)
+    if not allowed:
+        console.print("This deployment keeps its own request channel.", markup=False)
 
 
 # ---------- requests ----------
@@ -589,7 +705,7 @@ async def requests_list(
     selector: TenantSelector | None,
     pending: bool = False,
     undelivered: bool = False,
-    plan: str | None = None,
+    place: str | None = None,
     limit: int = 50,
     as_json: bool = False,
     discord_transport: Transport = None,
@@ -597,15 +713,13 @@ async def requests_list(
     target = await _target(rt, selector)
     limit_id: uuid.UUID | None = None
     async with rt.sessionmaker() as session:
-        if plan is not None:
-            scope, scope_id = await _plan_ref(rt, target, plan, transport=discord_transport)
-            if scope is None:
-                raise StoreError("--plan names a workspace, agent or channel plan")
-            row = await store.get_plan(
+        if place is not None:
+            scope, scope_id = await _place_ref(rt, target, place, transport=discord_transport)
+            row = await store.get_limit(
                 session, tenant_id=target.tenant_id, scope=scope, scope_id=scope_id
             )
             if row is None:
-                raise StoreError(f"{_label(scope, scope_id)} has no plan")
+                raise StoreError(f"{_label(scope, scope_id)} has no limit")
             limit_id = row.id
         rows = await ledger.list_requests(
             session,
@@ -677,8 +791,8 @@ async def requests_settle(
 # ---------- commands ----------
 
 
-@catalog_app.command("set")
-def catalog_set_command(
+@menu_app.command("set")
+def menu_set_command(
     ctx: typer.Context,
     key: Annotated[str, typer.Argument(help="Menu key: a-z, 0-9 and -.")],
     file: Annotated[Path, typer.Argument(help="YAML or JSON menu.", exists=True, dir_okay=False)],
@@ -689,180 +803,190 @@ def catalog_set_command(
     """Add or replace a menu of support options."""
     text = file.read_text(encoding="utf-8")
     _run(
-        lambda rt, console: catalog_set(
+        lambda rt, console: menu_set(
             rt=rt, console=console, selector=ctx.obj, key=key, text=text, expected=expected
         )
     )
 
 
-@catalog_app.command("show")
-def catalog_show_command(
+@menu_app.command("show")
+def menu_show_command(
     ctx: typer.Context, key: str, as_json: Annotated[bool, JSON_OPTION] = False
 ) -> None:
-    """Print a menu as YAML that `catalog set` takes back."""
+    """Print a menu as YAML that `menu set` takes back."""
     _run(
-        lambda rt, console: catalog_show(
+        lambda rt, console: menu_show(
             rt=rt, console=console, selector=ctx.obj, key=key, as_json=as_json
         )
     )
 
 
-@catalog_app.command("list")
-def catalog_list_command(ctx: typer.Context, as_json: Annotated[bool, JSON_OPTION] = False) -> None:
-    """Every menu with its options and prices."""
-    _run(
-        lambda rt, console: catalog_list(rt=rt, console=console, selector=ctx.obj, as_json=as_json)
-    )
+@menu_app.command("list")
+def menu_list_command(ctx: typer.Context, as_json: Annotated[bool, JSON_OPTION] = False) -> None:
+    """Every menu with its options, prices and the places using it."""
+    _run(lambda rt, console: menu_list(rt=rt, console=console, selector=ctx.obj, as_json=as_json))
 
 
-@catalog_app.command("rm")
-def catalog_rm_command(
+@menu_app.command("rm")
+def menu_rm_command(
     ctx: typer.Context,
     key: str,
     expected: Annotated[
         str | None, typer.Option("--expected", help="Revision you last read.")
     ] = None,
 ) -> None:
-    """Remove a menu no plan uses."""
+    """Remove a menu no place uses."""
     _run(
-        lambda rt, console: catalog_rm(
+        lambda rt, console: menu_rm(
             rt=rt, console=console, selector=ctx.obj, key=key, expected=expected
         )
     )
 
 
-@plan_app.command("set")
-def plan_set_command(
+@menu_app.command("use")
+def menu_use_command(
+    ctx: typer.Context,
+    key: Annotated[str, typer.Argument(help="Menu key, or `default` for the built-in menu.")],
+    scope: Annotated[str, typer.Argument(help=_SCOPE_HELP)],
+    scope_id: Annotated[str | None, typer.Argument(help=_ID_HELP)] = None,
+    expected: Annotated[
+        str | None, typer.Option("--expected", help="Menu key the place uses now, or `none`.")
+    ] = None,
+) -> None:
+    """Pick the menu a place offers."""
+    _run(
+        lambda rt, console: menu_use(
+            rt=rt,
+            console=console,
+            selector=ctx.obj,
+            key=key,
+            scope=scope,
+            scope_id=scope_id,
+            expected=expected,
+        )
+    )
+
+
+@limit_app.command("set")
+def limit_set_command(
     ctx: typer.Context,
     scope: Annotated[str, typer.Argument(help=_SCOPE_HELP)],
     scope_id: Annotated[str | None, typer.Argument(help=_ID_HELP)] = None,
-    pool: Annotated[
-        str | None, typer.Option("--pool", help="Credits shared by everyone, or `none`.")
+    shared: Annotated[
+        str | None, typer.Option("--shared", help="Credits everyone shares, or `none`.")
     ] = None,
-    per_person: Annotated[
-        str | None, typer.Option("--per-person", help="Credits each person may use, or `none`.")
-    ] = None,
-    catalog: Annotated[
-        str | None, typer.Option("--catalog", help="Menu key, or `default`.")
+    each_person: Annotated[
+        str | None, typer.Option("--each-person", help="Credits each person may use, or `none`.")
     ] = None,
     window: Annotated[
-        str | None, typer.Option("--window", help="total, monthly or fixed. New plans: total.")
+        str | None, typer.Option("--window", help="total or monthly. New limits: total.")
     ] = None,
     starts_at: Annotated[
         str | None, typer.Option("--starts-at", help="ISO 8601, UTC without an offset, or `none`.")
     ] = None,
     ends_at: Annotated[
-        str | None, typer.Option("--ends-at", help="ISO 8601; fixed windows only.")
+        str | None, typer.Option("--ends-at", help="ISO 8601, or `none`. Not counted from then.")
     ] = None,
-    expected: Annotated[str | None, _EXPECTED_PLAN] = None,
+    person: Annotated[
+        str | None,
+        typer.Option("--person", help="Set this person's own limit at the place instead."),
+    ] = None,
+    expected: Annotated[str | None, _EXPECTED_LIMIT] = None,
 ) -> None:
-    """Set a plan; options left out keep the plan's values."""
+    """Set a limit; options left out keep the limit's values."""
     _run(
-        lambda rt, console: plan_set(
+        lambda rt, console: limit_set(
             rt=rt,
             console=console,
             selector=ctx.obj,
             scope=scope,
             scope_id=scope_id,
-            pool=pool,
-            per_person=per_person,
-            catalog=catalog,
+            shared=shared,
+            each_person=each_person,
             window=window,
             starts_at=starts_at,
             ends_at=ends_at,
+            person=person,
             expected=expected,
         )
     )
 
 
-@plan_app.command("clear")
-def plan_clear_command(
+@limit_app.command("clear")
+def limit_clear_command(
     ctx: typer.Context,
     scope: Annotated[str, typer.Argument(help=_SCOPE_HELP)],
     scope_id: Annotated[str | None, typer.Argument(help=_ID_HELP)] = None,
-    expected: Annotated[str | None, _EXPECTED_PLAN] = None,
+    person: Annotated[
+        str | None, typer.Option("--person", help="Clear this person's own limit instead.")
+    ] = None,
+    expected: Annotated[str | None, _EXPECTED_LIMIT] = None,
 ) -> None:
-    """Remove a plan; its requests keep their charges."""
+    """Remove a limit; a place's pending requests are declined, settled ones keep their charges."""
     _run(
-        lambda rt, console: plan_clear(
+        lambda rt, console: limit_clear(
             rt=rt,
             console=console,
             selector=ctx.obj,
             scope=scope,
             scope_id=scope_id,
+            person=person,
             expected=expected,
         )
     )
 
 
-@plan_app.command("show")
-def plan_show_command(
+@limit_app.command("list")
+def limit_list_command(ctx: typer.Context, as_json: Annotated[bool, JSON_OPTION] = False) -> None:
+    """Every limit with what it used, and each person's own limits."""
+    _run(lambda rt, console: limit_list(rt=rt, console=console, selector=ctx.obj, as_json=as_json))
+
+
+@channel_app.command("set")
+def channel_set_command(
     ctx: typer.Context,
-    scope: Annotated[str, typer.Argument(help=_SCOPE_HELP)],
-    scope_id: Annotated[str | None, typer.Argument(help=_ID_HELP)] = None,
-    as_json: Annotated[bool, JSON_OPTION] = False,
+    channel_id: Annotated[str, typer.Argument(help="Channel to receive support requests.")],
+    team: Annotated[str | None, typer.Option("--team", help="Teams: the team id.")] = None,
+    service_url: Annotated[
+        str | None, typer.Option("--service-url", help="Teams: the service URL.")
+    ] = None,
+    expected: Annotated[
+        str | None, typer.Option("--expected", help="Revision you last read, or `none`.")
+    ] = None,
 ) -> None:
-    """One plan with what it used."""
+    """Send this workspace's support requests to its own channel."""
     _run(
-        lambda rt, console: plan_show(
+        lambda rt, console: channel_set(
             rt=rt,
             console=console,
             selector=ctx.obj,
-            scope=scope,
-            scope_id=scope_id,
-            as_json=as_json,
-        )
-    )
-
-
-@plan_app.command("list")
-def plan_list_command(ctx: typer.Context, as_json: Annotated[bool, JSON_OPTION] = False) -> None:
-    """Every plan with what it used."""
-    _run(lambda rt, console: plan_list(rt=rt, console=console, selector=ctx.obj, as_json=as_json))
-
-
-_EXPECTED_CREDITS = typer.Option("--expected", help="Credits you last read, or `none`.")
-
-
-@allowance_app.command("set")
-def allowance_set_command(
-    ctx: typer.Context,
-    platform_user_id: Annotated[str, typer.Argument(help="The person's user id, or <@id>.")],
-    credits: Annotated[str, typer.Argument(help="Their own cap in credits.")],
-    plan: Annotated[str | None, _PLAN] = None,
-    expected: Annotated[str | None, _EXPECTED_CREDITS] = None,
-) -> None:
-    """Give one person their own cap under a plan."""
-    _run(
-        lambda rt, console: allowance_set(
-            rt=rt,
-            console=console,
-            selector=ctx.obj,
-            platform_user_id=platform_user_id,
-            credits=credits,
-            plan=plan,
+            channel_id=channel_id,
+            team=team,
+            service_url=service_url,
             expected=expected,
         )
     )
 
 
-@allowance_app.command("clear")
-def allowance_clear_command(
-    ctx: typer.Context,
-    platform_user_id: Annotated[str, typer.Argument(help="The person's user id, or <@id>.")],
-    plan: Annotated[str | None, _PLAN] = None,
-    expected: Annotated[str | None, _EXPECTED_CREDITS] = None,
-) -> None:
-    """Put one person back on the plan's per-person limit."""
+@channel_app.command("show")
+def channel_show_command(ctx: typer.Context, as_json: Annotated[bool, JSON_OPTION] = False) -> None:
+    """Where support requests go now."""
     _run(
-        lambda rt, console: allowance_set(
-            rt=rt,
-            console=console,
-            selector=ctx.obj,
-            platform_user_id=platform_user_id,
-            credits=None,
-            plan=plan,
-            expected=expected,
+        lambda rt, console: channel_show(rt=rt, console=console, selector=ctx.obj, as_json=as_json)
+    )
+
+
+@channel_app.command("reset")
+def channel_reset_command(
+    ctx: typer.Context,
+    expected: Annotated[
+        str | None, typer.Option("--expected", help="Revision you last read, or `none`.")
+    ] = None,
+) -> None:
+    """Go back to the default support channel."""
+    _run(
+        lambda rt, console: channel_reset(
+            rt=rt, console=console, selector=ctx.obj, expected=expected
         )
     )
 
@@ -874,8 +998,8 @@ def requests_list_command(
     undelivered: Annotated[
         bool, typer.Option("--undelivered", help="Only requests no support channel received.")
     ] = False,
-    plan: Annotated[
-        str | None, typer.Option("--plan", help="workspace, agent:<name> or channel:<id>.")
+    place: Annotated[
+        str | None, typer.Option("--place", help="workspace, agent:<name> or channel:<id>.")
     ] = None,
     limit: Annotated[int, typer.Option("--limit", min=1, max=500)] = 50,
     as_json: Annotated[bool, JSON_OPTION] = False,
@@ -888,7 +1012,7 @@ def requests_list_command(
             selector=ctx.obj,
             pending=pending,
             undelivered=undelivered,
-            plan=plan,
+            place=place,
             limit=limit,
             as_json=as_json,
         )
