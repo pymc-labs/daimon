@@ -114,20 +114,23 @@ export function useDefaultsSave() {
 
 export const useSupportPlans = () => useQuery({ queryKey: ["support-plans"], queryFn: () => api.get<SupportPlans>("/api/support-plans") })
 
+/** What a save answered: `fresh` is the page read again after a stale value (409), for the form to reload from. */
+export type SupportOutcome = Outcome & { fresh?: SupportPlans }
+
 /** Change a plan, menu or cap. The answer is the whole page; a stale value (409) reloads it. */
 export function useSupportSave() {
   const qc = useQueryClient()
-  const m = useMutation({ mutationFn: ({ path, body }: { path: string; body: unknown }) => api.put<SupportPlans>(`/api/support-plans/${path}`, body) })
+  const m = useMutation({ meta: { inline: true }, mutationFn: ({ path, body }: { path: string; body: unknown }) => api.put<SupportPlans>(`/api/support-plans/${path}`, body) })
   return {
     pending: m.isPending,
-    async run(path: string, body: unknown): Promise<Outcome> {
+    async run(path: string, body: unknown): Promise<SupportOutcome> {
       try {
         qc.setQueryData(["support-plans"], await m.mutateAsync({ path, body }))
         return { notes: [], error: null }
       } catch (e) {
         if (e instanceof ApiError && e.status === 409) {
           await qc.invalidateQueries({ queryKey: ["support-plans"] })
-          return { notes: [], error: "Changed meanwhile. Reloaded." }
+          return { notes: [], error: "Changed meanwhile. Reloaded.", fresh: qc.getQueryData<SupportPlans>(["support-plans"]) }
         }
         return { notes: [], error: e instanceof ApiError && e.message ? e.message : "Couldn't save" }
       }

@@ -6,12 +6,13 @@ import { QueryState } from "@/components/QueryState"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Textarea } from "@/components/ui/textarea"
 import { useConfirm } from "@/lib/confirm"
 import { channelLabel, plural } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { Field } from "@/modules/admin/shared"
-import { useChannels, useSupportPlans, useSupportSave, type Outcome } from "./api"
+import { useChannels, useSupportPlans, useSupportSave, type Outcome, type SupportOutcome } from "./api"
+import { MenuEditor } from "./MenuEditor"
+import { cleanKey, emptyMenu, menuErrors, toCatalog, toDraft, type MenuDraft } from "./menuDraft"
 import { Notice } from "./shared"
 import type { PersonCap, PlanScope, PlanValue, PlanWindow, SupportMenu, SupportPlan, SupportPlans } from "./types"
 
@@ -20,7 +21,6 @@ const WINDOWS: Record<PlanWindow, string> = { total: "In total", monthly: "Each 
 const STATES = { not_started: "Not started", ended: "Ended" } as const
 /** The select value for the default menu (a plan with no `catalog`). */
 const DEFAULT = "default"
-const MENU_TEMPLATE = { name: "", options: [{ key: "", label: "", price: { kind: "fixed", amount: "1" } }] }
 
 const day = (iso: string | null) => (iso ? iso.slice(0, 10) : "")
 const keyOf = (p: { scope: PlanScope; scope_id: string }) => `${p.scope}:${p.scope_id}`
@@ -95,6 +95,8 @@ function PlanForm({ d, plan, onDone }: { d: SupportPlans; plan?: SupportPlan; on
   const taken = new Set(d.plans.map(keyOf))
   const free = (scope: PlanScope, id: string) => !!plan || !taken.has(keyOf({ scope, scope_id: id }))
   const [out, setOut] = useState<Outcome | null>(null)
+  // The plan as it was when the form opened: what a save expects, whatever has been read since.
+  const [expected, setExpected] = useState<PlanValue | null>(plan ? valueOf(plan) : null)
   const [scope, setScope] = useState<PlanScope>(plan?.scope ?? (free("workspace", "") ? "workspace" : "channel"))
   const [place, setPlace] = useState(plan?.scope_id ?? "")
   const [menu, setMenu] = useState(plan?.catalog ?? DEFAULT)
@@ -109,21 +111,33 @@ function PlanForm({ d, plan, onDone }: { d: SupportPlans; plan?: SupportPlan; on
   const choices = (scope === "agent" ? d.agents : channels.map((c) => ({ id: c.id, name: channelLabel(c.name, c.kind) })))
     .filter((c) => free(scope, c.id))
   const target = scope === "workspace" ? "" : place
-  const finish = (r: Outcome) => { setOut(r); if (!r.error) onDone() }
+  /** Fill the form from a plan as the server has it now, and expect that value. */
+  const load = (p: SupportPlan) => {
+    setExpected(valueOf(p)); setMenu(p.catalog ?? DEFAULT); setPool(p.pool ?? ""); setEach(p.per_person ?? "")
+    setWindow(p.window); setStarts(day(p.starts_at)); setEnds(day(p.ends_at))
+  }
+  const finish = (r: SupportOutcome) => {
+    setOut(r)
+    if (!r.error) return onDone()
+    if (!r.fresh) return
+    const now = r.fresh.plans.find((p) => keyOf(p) === keyOf({ scope, scope_id: target }))
+    if (now) load(now)
+    else if (plan) onDone()
+  }
 
   const submit = async () => finish(await save.run("plan", {
-    scope, scope_id: target, expected: plan ? valueOf(plan) : null,
+    scope, scope_id: target, expected,
     plan: {
       catalog: menu === DEFAULT ? null : menu, pool: pool || null, per_person: each || null, window,
-      starts_at: window === "monthly" ? null : instant(starts, plan?.starts_at ?? null),
-      ends_at: window === "fixed" ? instant(ends, plan?.ends_at ?? null) : null,
+      starts_at: window === "monthly" ? null : instant(starts, expected?.starts_at ?? null),
+      ends_at: window === "fixed" ? instant(ends, expected?.ends_at ?? null) : null,
     },
   }))
   const remove = async () => {
     if (!plan) return
     const caps = plan.allowances.length
     if (!(await confirm({ title: "Remove the plan?", body: caps ? `${plural(caps, "own cap")} go with it.` : undefined, action: "Remove", destructive: true }))) return
-    finish(await save.run("plan", { scope: plan.scope, scope_id: plan.scope_id, plan: null, expected: valueOf(plan) }))
+    finish(await save.run("plan", { scope: plan.scope, scope_id: plan.scope_id, plan: null, expected }))
   }
 
   return (
@@ -165,8 +179,8 @@ function PlanForm({ d, plan, onDone }: { d: SupportPlans; plan?: SupportPlan; on
             <SelectContent>{(Object.keys(WINDOWS) as PlanWindow[]).map((w) => <SelectItem key={w} value={w}>{WINDOWS[w]}</SelectItem>)}</SelectContent>
           </Select>
         </Field>
-        {window !== "monthly" && <Field label={window === "fixed" ? "From" : "Counting from"}><Input aria-label={window === "fixed" ? "From" : "Counting from"} type="date" value={starts} onChange={(e) => setStarts(e.target.value)} /></Field>}
-        {window === "fixed" && <Field label="Until"><Input aria-label="Until" type="date" value={ends} onChange={(e) => setEnds(e.target.value)} /></Field>}
+        {window !== "monthly" && <Field label={`${window === "fixed" ? "From" : "Counting from"} (UTC)`}><Input aria-label={`${window === "fixed" ? "From" : "Counting from"} (UTC)`} type="date" value={starts} onChange={(e) => setStarts(e.target.value)} /></Field>}
+        {window === "fixed" && <Field label="Until (UTC)"><Input aria-label="Until (UTC)" type="date" value={ends} onChange={(e) => setEnds(e.target.value)} /></Field>}
       </div>
       <Actions pending={save.pending} ready={!!plan || scope === "workspace" || !!place} onSave={() => void submit()} onCancel={onDone} onRemove={plan && (() => void remove())} />
       <Notice out={out} />
@@ -175,16 +189,19 @@ function PlanForm({ d, plan, onDone }: { d: SupportPlans; plan?: SupportPlan; on
 }
 
 type CapRow = { cap: PersonCap; plan: SupportPlan | null }
+const capRows = (d: SupportPlans): CapRow[] => [
+  ...d.default_allowances.map((cap) => ({ cap, plan: null })),
+  ...d.plans.flatMap((plan) => plan.allowances.map((cap) => ({ cap, plan }))),
+]
+const capAt = (rows: CapRow[], where: string, id: string) =>
+  rows.find((r) => (r.plan ? keyOf(r.plan) : DEFAULT) === where && r.cap.platform_user_id === id)?.cap.credits ?? null
 const capPlace = (plan: SupportPlan | null) => (plan ? { scope: plan.scope, scope_id: plan.scope_id } : {})
 
 function Caps({ d }: { d: SupportPlans }) {
   const save = useSupportSave()
   const [out, setOut] = useState<Outcome | null>(null)
   const [adding, setAdding] = useState(false)
-  const rows: CapRow[] = [
-    ...d.default_allowances.map((cap) => ({ cap, plan: null })),
-    ...d.plans.flatMap((plan) => plan.allowances.map((cap) => ({ cap, plan }))),
-  ]
+  const rows = capRows(d)
   const clear = async ({ cap, plan }: CapRow) =>
     setOut(await save.run("allowances", { platform_user_id: cap.platform_user_id, credits: null, ...capPlace(plan), expected: cap.credits }))
   return (
@@ -212,13 +229,18 @@ function CapForm({ d, rows, onDone }: { d: SupportPlans; rows: CapRow[]; onDone:
   const [person, setPerson] = useState("")
   const [where, setWhere] = useState(DEFAULT)
   const [credits, setCredits] = useState("")
+  // The caps as they were when the form opened: what a save expects, whatever has been read since.
+  const [seen, setSeen] = useState(rows)
   const plan = d.plans.find((p) => keyOf(p) === where) ?? null
   const submit = async () => {
     const id = person.trim()
-    const had = rows.find((r) => r.plan === plan && r.cap.platform_user_id === id)
-    const r = await save.run("allowances", { platform_user_id: id, credits, ...capPlace(plan), expected: had?.cap.credits ?? null })
+    const r = await save.run("allowances", { platform_user_id: id, credits, ...capPlace(plan), expected: capAt(seen, where, id) })
     setOut(r)
-    if (!r.error) onDone()
+    if (!r.error) return onDone()
+    if (!r.fresh) return
+    const now = capRows(r.fresh)
+    setSeen(now)
+    setCredits(capAt(now, where, id) ?? "")
   }
   return (
     <div className="space-y-3">
@@ -262,31 +284,42 @@ function Menus({ d }: { d: SupportPlans }) {
   )
 }
 
+/** The ids of every row in order: it changes when a row is added, removed or moved. */
+const shape = (m: MenuDraft) => JSON.stringify(m.options.map((o) => [o.id, o.fields.map((f) => f.id), o.price.steps.map((x) => x.id)]))
+
 function MenuForm({ menu, used, onDone }: { menu?: SupportMenu; used?: boolean; onDone: () => void }) {
   const save = useSupportSave()
   const confirm = useConfirm()
   const [out, setOut] = useState<Outcome | null>(null)
   const [key, setKey] = useState(menu?.key ?? "")
-  const [json, setJson] = useState(JSON.stringify(menu?.catalog ?? MENU_TEMPLATE, null, 2))
-  const finish = (r: Outcome) => { setOut(r); if (!r.error) onDone() }
-  const put = (catalog: Record<string, unknown> | null) =>
-    save.run(`catalogs/${encodeURIComponent(key.trim())}`, { catalog, expected_revision: menu?.revision ?? null })
-  const submit = async () => {
-    let catalog: unknown
-    try { catalog = JSON.parse(json) } catch { catalog = null }
-    if (!catalog || typeof catalog !== "object" || Array.isArray(catalog)) return setOut({ notes: [], error: "Not valid JSON" })
-    finish(await put(catalog as Record<string, unknown>))
+  const [draft, setDraft] = useState(() => (menu ? toDraft(menu.catalog) : emptyMenu()))
+  // The revision as it was when the form opened: what a save expects, whatever has been read since.
+  const [revision, setRevision] = useState(menu?.revision ?? null)
+  const errors = menuErrors(out?.error ?? null, draft)
+  // An error names rows by place, so it goes when the rows move.
+  const edit = (next: MenuDraft) => { if (shape(next) !== shape(draft)) setOut(null); setDraft(next) }
+  const finish = (r: SupportOutcome) => {
+    setOut(r)
+    if (!r.error) return onDone()
+    if (!r.fresh) return
+    const now = r.fresh.catalogs.find((m) => m.key === key.trim())
+    if (now) { setDraft(toDraft(now.catalog)); setRevision(now.revision) }
+    else if (menu) onDone()
   }
+  const put = (catalog: Record<string, unknown> | null) =>
+    save.run(`catalogs/${encodeURIComponent(key.trim())}`, { catalog, expected_revision: revision })
   const remove = async () => {
     if (!(await confirm({ title: "Remove the menu?", action: "Remove", destructive: true }))) return
     finish(await put(null))
   }
   return (
-    <div className="space-y-3">
-      {!menu && <Field label="Key"><Input aria-label="Key" className="w-60 max-sm:w-full" value={key} onChange={(e) => setKey(e.target.value)} placeholder="support" /></Field>}
-      <Field label="Menu"><Textarea aria-label="Menu JSON" className="min-h-48 font-mono text-xs md:text-xs" spellCheck={false} value={json} onChange={(e) => setJson(e.target.value)} /></Field>
-      <Actions pending={save.pending} ready={!!key.trim()} onSave={() => void submit()} onCancel={onDone} onRemove={menu && !used ? () => void remove() : undefined} />
-      <Notice out={out} />
+    <div className="space-y-4">
+      {!menu && <Field label="Key"><Input aria-label="Key" className="w-60 max-sm:w-full" maxLength={32} value={key} onChange={(e) => setKey(cleanKey(e.target.value, "-"))} placeholder="support" /></Field>}
+      <MenuEditor draft={draft} errors={errors} onChange={edit} />
+      <div>
+        <Actions pending={save.pending} ready={!!key.trim()} onSave={() => void put(toCatalog(draft)).then(finish)} onCancel={onDone} onRemove={menu && !used ? () => void remove() : undefined} />
+        <Notice out={out && { ...out, error: errors.rest }} />
+      </div>
     </div>
   )
 }
