@@ -28,8 +28,8 @@ Hygiene contract (mirrors the Discord feedback modal): the submitted text is
 somebody's unsolicited criticism and belongs in the database row. It never
 enters a log record, an action_id or private_metadata. Log lines carry the
 feedback row id and the reason codes only. The one other place it may go is
-the support channel, and only for a tenant that turned that on
-(`SupportSettings.feedback_to_support`): then the form says so before it is
+the support channel, and only where `support_feedback` is on
+(`support_routing.feedback_destination`): then the form says so before it is
 sent, and each submission is posted there once, beside the person, the agent
 and a link to the answer (`post_to_support_channel`, the Ask a human path).
 """
@@ -54,7 +54,7 @@ from daimon.adapters.slack.modal_limits import MAX_PLAIN_TEXT_INPUT_CHARS
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.place_access import may_start_turn_at, resolve_clicker
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.adapters.slack.support_escalation import post_to_support_channel
+from daimon.adapters.slack.support_escalation import answer_origin, post_to_support_channel
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.message_feedback import FEEDBACK_REASONS, Vote, known_feedback_reasons
 from daimon.core.permissions import readers_limited_at
@@ -70,6 +70,7 @@ from daimon.core.stores.message_feedback import (
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import get_latest_thread_session
 from daimon.core.support_escalation import SEALED_POST_MARKER
+from daimon.core.support_routing import SupportDestination, feedback_destination
 from slack_sdk.web.async_client import AsyncWebClient
 
 __all__ = [
@@ -261,18 +262,15 @@ def _details_prompt_blocks(place: _AnswerPlace) -> list[dict[str, Any]]:
     ]
 
 
-def _support_channel(runtime: SlackRuntime, *, team_id: str) -> str | None:
-    """The channel this workspace's submitted forms also go to, or None (the default).
-
-    Anything but a configured string channel and a literal True reads as off,
-    so a half-built settings object fails closed, as `slack_support_enabled` does.
-    """
-    support = runtime.settings.support
-    channel = cast(object, support.slack_escalation_channel_id)
-    if not isinstance(channel, str) or not channel:
-        return None
-    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-    return channel if cast(object, support.routes_feedback(tenant_id)) is True else None
+async def _support_destination(
+    runtime: SlackRuntime, *, team_id: str, channel_id: str, thread_ts: str
+) -> SupportDestination | None:
+    """Where this answer's submitted forms also go, or None (kept in the database only)."""
+    origin = await answer_origin(
+        runtime, team_id=team_id, channel_id=channel_id, thread_ts=thread_ts
+    )
+    async with runtime.sessionmaker() as session:
+        return await feedback_destination(session, runtime.settings, origin.feature_place)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -539,7 +537,10 @@ async def handle_feedback_vote(runtime: SlackRuntime, payload: dict[str, Any]) -
                 channel_id=channel_id,
                 message_ts=message_ts,
                 thread_ts=thread_ts,
-                shared=_support_channel(runtime, team_id=team_id) is not None,
+                shared=await _support_destination(
+                    runtime, team_id=team_id, channel_id=channel_id, thread_ts=thread_ts
+                )
+                is not None,
                 requested_by=requested_by,
             ),
         )
@@ -626,7 +627,10 @@ async def handle_feedback_details_click(runtime: SlackRuntime, payload: dict[str
             channel_id=channel_id,
             message_ts=message_ts,
             thread_ts=thread_ts,
-            shared=_support_channel(runtime, team_id=team_id) is not None,
+            shared=await _support_destination(
+                runtime, team_id=team_id, channel_id=channel_id, thread_ts=thread_ts
+            )
+            is not None,
             requested_by=requested_by,
         ),
     )
@@ -705,8 +709,10 @@ async def run_feedback_text_submission(
         feedback_id=str(recorded.row_id),
         reasons=list(d.reasons),
     )
-    dest_channel = _support_channel(runtime, team_id=team_id)
-    if dest_channel is not None and recorded.details_changed:
+    destination = await _support_destination(
+        runtime, team_id=team_id, channel_id=d.channel_id, thread_ts=d.thread_ts
+    )
+    if destination is not None and recorded.details_changed:
         # Best-effort: the form is already recorded, whatever the post does.
         post = await post_to_support_channel(
             runtime,
@@ -714,7 +720,7 @@ async def run_feedback_text_submission(
             source_team_id=team_id,
             channel_id=d.channel_id,
             message_ts=d.message_ts,
-            dest_channel=dest_channel,
+            destination=destination,
             render=lambda link: render_feedback_post(
                 decision=d, team_id=team_id, user_id=user_id, recorded=recorded, link=link
             ),

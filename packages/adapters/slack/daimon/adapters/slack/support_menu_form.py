@@ -32,7 +32,7 @@ from daimon.core.support import (
 )
 from daimon.core.support_escalation import ASK_THE_TEAM, SEALED_NOTE_HINT, offer_text
 
-PLAN_CALLBACK_ID: Final = "support_plan_request"
+MENU_CALLBACK_ID: Final = "support_plan_request"
 OPTION_ACTION_ID: Final = "support_option_pick"
 OPTION_BLOCK_ID: Final = "support_option_block"
 _STEP_ACTION_ID: Final = "support_step_input"
@@ -116,7 +116,7 @@ def _option_blocks(option: SupportOption) -> list[dict[str, Any]]:
     return blocks
 
 
-def build_plan_menu(
+def build_menu_modal(
     *,
     channel_id: str,
     message_ts: str,
@@ -174,14 +174,14 @@ def build_plan_menu(
         title=ASK_THE_TEAM,
         blocks=blocks,
         private_metadata=json.dumps(meta, separators=(",", ":")),
-        callback_id=PLAN_CALLBACK_ID,
+        callback_id=MENU_CALLBACK_ID,
         close="Cancel",
         submit="Send",
     )
 
 
 @dataclasses.dataclass(frozen=True)
-class PlanForm:
+class MenuForm:
     """A read menu form: its routing handles, and the choice or the field errors."""
 
     channel_id: str
@@ -207,12 +207,12 @@ def form_meta(view: dict[str, Any]) -> dict[str, Any]:
         return {}
 
 
-def read_plan_form(view: dict[str, Any]) -> PlanForm:
+def read_menu_form(view: dict[str, Any]) -> MenuForm:
     """Pure read of a submitted menu form; a pick not rendered yet asks for a moment."""
     meta = form_meta(view)
     values = _dict(_dict(view.get("state")).get("values"))
     message_ts = str(meta.get("message_ts") or "")
-    form = PlanForm(
+    form = MenuForm(
         channel_id=str(meta.get("channel_id") or ""),
         message_ts=message_ts,
         thread_ts=str(meta.get("thread_ts") or "") or message_ts,
@@ -248,9 +248,9 @@ __all__ = [
     "OFFER_PROMPT",
     "OPTION_ACTION_ID",
     "OPTION_BLOCK_ID",
-    "PLAN_CALLBACK_ID",
-    "PlanForm",
-    "build_plan_menu",
+    "MENU_CALLBACK_ID",
+    "MenuForm",
+    "build_menu_modal",
     "form_meta",
-    "read_plan_form",
+    "read_menu_form",
 ]

@@ -39,7 +39,7 @@ per answer message (keyed on the Slack message ``ts``), under a per-person
 ledger lock in the same transaction as the credit count, so a double click,
 two open modals or a Slack retry spend one credit and post once.
 
-A support plan with a menu shows it in the same modal: picking an option
+A support limit with a menu shows it in the same modal: picking an option
 (`handle_option_pick`) re-renders the modal with its fields, and Send records
 it (`submit_request`, at the answer's channel, thread and agent). A pending
 request's post carries Set charge and Decline (`support_settle`).
@@ -77,11 +77,11 @@ from daimon.adapters.slack.place_access import (
     stored_clicker,
 )
 from daimon.adapters.slack.runtime import SlackRuntime
-from daimon.adapters.slack.support_plan_form import (
+from daimon.adapters.slack.support_menu_form import (
     OFFER_PROMPT,
-    build_plan_menu,
+    build_menu_modal,
     form_meta,
-    read_plan_form,
+    read_menu_form,
 )
 from daimon.adapters.slack.support_post import (
     NOT_NOTIFIED_LINE,
@@ -90,7 +90,6 @@ from daimon.adapters.slack.support_post import (
     request_facts,
 )
 from daimon.core.authz import Action, Place, Subject, authorize
-from daimon.core.config import SupportSettings
 from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.permissions import readers_limited_at
@@ -127,11 +126,16 @@ from daimon.core.support_escalation import (
     SEALED_NOTE_HINT,
     SEALED_POST_MARKER,
     UNAVAILABLE,
-    is_enabled,
     offer_text,
 )
-from daimon.core.support_routing import log_undelivered
+from daimon.core.support_routing import (
+    SupportDestination,
+    log_undelivered,
+    support_destination,
+)
+from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
+from slack_sdk.web.async_slack_response import AsyncSlackResponse
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -143,13 +147,13 @@ __all__ = [
     "answer_origin",
     "build_ask_human_button",
     "build_support_modal",
-    "evaluate_plan_submission",
+    "evaluate_menu_submission",
     "evaluate_support_submission",
     "handle_ask_human_click",
     "handle_option_pick",
     "post_to_support_channel",
+    "post_blocker",
     "run_support_submission",
-    "slack_support_enabled",
 ]
 
 log = structlog.get_logger()
@@ -168,19 +172,6 @@ POLICY_UNREADABLE: Final = (
 )
 CHECK_FAILED: Final = "That didn't work. Try again."
 FORM_DID_NOT_OPEN: Final = "That didn't work. Try again."
-
-
-def slack_support_enabled(support: SupportSettings) -> bool:
-    """Whether Slack answers offer Ask a human (its own channel set, credits on).
-
-    Anything but a configured string channel and an integer allowance reads
-    as off, so a half-built settings object fails closed.
-    """
-    channel = cast(object, support.slack_escalation_channel_id)
-    allowance = cast(object, support.credits_per_user)
-    if not isinstance(channel, str) or not isinstance(allowance, int):
-        return False
-    return is_enabled(channel_id=channel, allowance=allowance)
 
 
 def build_ask_human_button() -> dict[str, Any]:
@@ -213,8 +204,8 @@ def build_support_modal(
 ) -> dict[str, Any]:
     """The note form. ``private_metadata`` carries routing handles only, never identity.
 
-    `remaining` counts the default plan's requests left; with None (an admin,
-    or a plan without a menu) `footer` says what the request uses instead.
+    `remaining` counts the default allowance's requests left; with None (an admin,
+    or a limit without a menu) `footer` says what the request uses instead.
     The submit derives tenant and person from the verified payload, not from
     here, so a forged metadata blob can only point the CLICKER's own request
     (counted against their own allowance) at a different message.
@@ -264,7 +255,7 @@ def build_support_modal(
 
 @dataclasses.dataclass(frozen=True)
 class AnswerOrigin:
-    """The answer a request is about, and the place its plan and feature are read at."""
+    """The answer a request is about, and the place its limit and feature are read at."""
 
     tenant_id: uuid.UUID
     channel_id: str
@@ -381,10 +372,10 @@ def evaluate_support_submission(payload: dict[str, Any]) -> SupportSubmission:
     return dataclasses.replace(base, proceed=True, note=note)
 
 
-def evaluate_plan_submission(payload: dict[str, Any]) -> SupportSubmission:
+def evaluate_menu_submission(payload: dict[str, Any]) -> SupportSubmission:
     """Pure evaluation of a menu form, before the single ack; field errors keep it open."""
     view: dict[str, Any] = payload.get("view") or {}
-    form = read_plan_form(view)
+    form = read_menu_form(view)
     base = _base_submission(
         payload, channel_id=form.channel_id, message_ts=form.message_ts, thread_ts=form.thread_ts
     )
@@ -467,7 +458,7 @@ async def _decide_click(
     if view.menu is not None:
         # A menu asks once per option: `submit_request` dedups, so another
         # option on the same answer stays open.
-        return build_plan_menu(
+        return build_menu_modal(
             channel_id=channel_id,
             message_ts=message_ts,
             thread_ts=thread_ts,
@@ -524,19 +515,6 @@ async def handle_ask_human_click(runtime: SlackRuntime, payload: dict[str, Any])
 
     client = await resolve_web_client(runtime, team_id=team_id)
     if client is None:
-        return
-
-    if not slack_support_enabled(runtime.settings.support):
-        log.info("support.disabled", platform="slack")
-        await post_ephemeral(
-            client,
-            channel_id=channel_id,
-            user_id=user_id,
-            thread_ts=thread_ts,
-            message_ts=message_ts,
-            text=UNAVAILABLE,
-            error=True,
-        )
         return
 
     view_id = await open_modal(
@@ -608,7 +586,7 @@ async def _picked_menu(
     meta: dict[str, Any],
     picked: str,
 ) -> dict[str, Any]:
-    """The menu with `picked`'s form, read from the plan now (decision 9)."""
+    """The menu with `picked`'s form, read from the limit now (decision 9)."""
     message_ts = str(meta.get("message_ts") or "")
     thread_ts = str(meta.get("thread_ts") or "") or message_ts
     channel_id = str(meta.get("channel_id") or "")
@@ -640,7 +618,7 @@ async def _picked_menu(
         policy, channel_id=channel_id, thread_id=thread_ts
     )
     refusal = pick_refusal(view, option, asked=asked)
-    return build_plan_menu(
+    return build_menu_modal(
         channel_id=channel_id,
         message_ts=message_ts,
         thread_ts=thread_ts,
@@ -724,14 +702,16 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
         )
 
     support = runtime.settings.support
-    dest_channel = support.slack_escalation_channel_id
-    if dest_channel is None or not slack_support_enabled(support):
-        await reply(UNAVAILABLE)
-        return
     origin = await answer_origin(
         runtime, team_id=s.team_id, channel_id=s.channel_id, thread_ts=s.thread_ts
     )
-    if not await _escalation_offered(runtime, origin):
+    destination = None
+    if await _escalation_offered(runtime, origin):
+        async with runtime.sessionmaker() as session:
+            destination = await support_destination(
+                session, tenant_id=origin.tenant_id, platform="slack", settings=runtime.settings
+            )
+    if destination is None:
         # Disabled between the click and the submit. Nothing is spent.
         await reply(UNAVAILABLE)
         return
@@ -810,7 +790,7 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
             runtime,
             source_client=client,
             submission=s,
-            dest_channel=dest_channel,
+            destination=destination,
             sealed=sealed,
             row=row,
             view=view,
@@ -884,7 +864,7 @@ def render_escalation_post(
     No answer text and no channel name: the same fields Discord posts. The
     requester's name and workspace are spelled out because the escalation
     channel may sit in another workspace, where the mention would not resolve.
-    A plan request adds its `facts` (terms, status, balance) after the head.
+    A limit request adds its `facts` (terms, status, balance) after the head.
     """
     head, rest = _post_parts(submission=submission, link=link, sealed=sealed)
     body = escape_mrkdwn(submission.note if note is None else note)
@@ -896,7 +876,7 @@ async def _post_to_escalation_channel(
     *,
     source_client: AsyncWebClient,
     submission: SupportSubmission,
-    dest_channel: str,
+    destination: SupportDestination,
     sealed: bool,
     row: SupportEscalationRow,
     view: LimitView,
@@ -911,8 +891,7 @@ async def _post_to_escalation_channel(
         facts = request_facts(row, menu=view.menu is not None, balance=balance)
     blocks: Callable[[str | None], list[dict[str, Any]]] | None = None
     text_facts = facts
-    # `support_settle` accepts a settle in the named escalation workspace, or from
-    # the request's own workspace when none is named.
+    # `support_settle` accepts a settle in the channel stamped below.
     if facts is not None and row.status == "pending":
         pending_facts = facts
         text_facts = f"{facts}\n{NOT_NOTIFIED_LINE}"
@@ -935,7 +914,7 @@ async def _post_to_escalation_channel(
         source_team_id=s.team_id,
         channel_id=s.channel_id,
         message_ts=s.message_ts,
-        dest_channel=dest_channel,
+        destination=destination,
         render=lambda link: render_escalation_post(
             submission=s, link=link, sealed=sealed, facts=text_facts, note=note
         ),
@@ -950,7 +929,7 @@ async def post_to_support_channel(
     source_team_id: str,
     channel_id: str,
     message_ts: str,
-    dest_channel: str,
+    destination: SupportDestination,
     render: Callable[[str | None], str],
     render_blocks: Callable[[str | None], list[dict[str, Any]]] | None = None,
 ) -> SupportPost | None:
@@ -958,8 +937,8 @@ async def post_to_support_channel(
 
     Shared by Ask a human and the routed 👎 form (`daimon.adapters.slack.feedback`).
     `render_blocks` adds blocks (the settle buttons) beside the text.
-    Posts with the escalation workspace's token when
-    `slack_escalation_team_id` names one, else the source workspace's own. The
+    Posts with the destination workspace's token (`destination.slack_team_id`),
+    else the source workspace's own, joining a public channel it is not in. The
     destination tenant's policy is read fresh and asked `authorize(POST)` with
     no agent immediately before the send (after the permalink round trip), so
     a channel protected meanwhile is refused.
@@ -967,8 +946,8 @@ async def post_to_support_channel(
     instant between that read and Slack accepting the post is not ordered
     against it.
     """
-    support = runtime.settings.support
-    dest_team = support.slack_escalation_team_id or source_team_id
+    dest_channel = destination.channel_id
+    dest_team = destination.slack_team_id or source_team_id
     dest_client = (
         source_client
         if dest_team == source_team_id
@@ -994,17 +973,59 @@ async def post_to_support_channel(
     ):
         log.warning("support.destination_protected", channel_id=dest_channel)
         return None
-    try:
-        resp = await dest_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+
+    async def send() -> AsyncSlackResponse:
+        return await dest_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
             channel=dest_channel, text=text, unfurl_links=False, unfurl_media=False, **extra
         )
+
+    try:
+        try:
+            resp = await send()
+        except SlackApiError as err:
+            if error_name(err) != "not_in_channel" or await post_blocker(dest_client, dest_channel):
+                raise
+            resp = await send()
     except CLICK_REPLY_ERRORS as err:
         # As with the DMs: an ambiguous timeout stays undelivered; daimon does not re-post.
         log.warning("support.channel_undeliverable", channel_id=dest_channel, error=error_name(err))
         return None
-    channel: Any = resp.get("channel")  # pyright: ignore[reportUnknownMemberType]
-    ts: Any = resp.get("ts")  # pyright: ignore[reportUnknownMemberType]
+    channel: Any = resp.get("channel")
+    ts: Any = resp.get("ts")
     return SupportPost(
         channel_id=channel if isinstance(channel, str) and channel else dest_channel,
         ts=ts if isinstance(ts, str) and ts else None,
     )
+
+
+CANNOT_SEE: Final = "Daimon can't find this channel. If it's private, invite Daimon."
+ARCHIVED: Final = "This channel is archived."
+INVITE: Final = "Invite Daimon to this channel."
+
+
+async def post_blocker(client: AsyncWebClient, channel_id: str) -> str | None:
+    """Why Daimon can't post requests in `channel_id`, or None when it can.
+
+    Daimon joins a public channel it is not in; a private one needs an invite.
+    """
+    try:
+        resp = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk kwargs
+    except CLICK_REPLY_ERRORS:
+        return CANNOT_SEE
+    raw: object = resp.get("channel")  # pyright: ignore[reportUnknownMemberType]
+    info = cast("dict[str, Any]", raw) if isinstance(raw, dict) else {}
+    if not info:
+        return CANNOT_SEE
+    if info.get("is_archived"):
+        return ARCHIVED
+    if info.get("is_member"):
+        return None
+    if info.get("is_private"):
+        return INVITE
+    try:
+        await client.conversations_join(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk kwargs
+    except CLICK_REPLY_ERRORS as err:
+        log.info("support.channel_join_failed", channel_id=channel_id, error=error_name(err))
+        return INVITE
+    log.info("support.channel_joined", channel_id=channel_id)
+    return None

@@ -11,7 +11,7 @@ import json
 import re
 import uuid
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import yarl
@@ -23,12 +23,10 @@ from daimon.adapters.slack.support_escalation import (
     CHECK_FAILED,
     FORM_DID_NOT_OPEN,
     NOT_ALLOWED,
-    SEALED_NOTE_HINT,
     SUPPORT_CALLBACK_ID,
     evaluate_support_submission,
     handle_ask_human_click,
     run_support_submission,
-    slack_support_enabled,
 )
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import SupportSettings
@@ -39,11 +37,13 @@ from daimon.core.support_escalation import (
     ALREADY_REQUESTED,
     OUT_OF_CREDITS,
     RECORDED_UNDELIVERED,
+    SEALED_NOTE_HINT,
     UNAVAILABLE,
     offer_text,
     received_text,
 )
 from daimon.testing.factories import make_tenant
+from daimon.testing.settings_mock import mock_settings
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
@@ -93,7 +93,7 @@ async def _seed(
 def _runtime(
     fernet_key: str, factory: async_sessionmaker[AsyncSession], support: SupportSettings
 ) -> Any:
-    settings = MagicMock()
+    settings = mock_settings()
     settings.support = support
     return build_slack_runtime(fernet_key, factory, settings=settings)
 
@@ -172,27 +172,25 @@ def permalink(fake_slack_web_client: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
-async def test_slack_support_is_off_until_its_own_channel_is_set() -> None:
-    assert not slack_support_enabled(SupportSettings())
-    assert not slack_support_enabled(SupportSettings(escalation_channel_id="123")), (
-        "the Discord channel must not switch Slack on: no cross-platform posting"
-    )
-    assert slack_support_enabled(_support())
-    assert not slack_support_enabled(_support(credits_per_user=0))
-
-
-async def test_click_when_unset_opens_nothing(
+@pytest.mark.parametrize(
+    "support",
+    [SupportSettings(), SupportSettings(escalation_channel_id="123")],
+    ids=["no-channel", "discord-channel-only"],
+)
+async def test_click_without_a_slack_channel_offers_no_form(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
+    support: SupportSettings,
 ) -> None:
+    """With no Slack request channel, the Discord one must not switch Slack on."""
     _tenant, key = await _seed(db_session)
-    runtime = _runtime(key, db_session_factory, SupportSettings())
+    runtime = _runtime(key, db_session_factory, support)
 
     await handle_ask_human_click(runtime, _click())
 
-    assert _VIEWS_OPEN not in fake_slack_web_client.mock.requests
-    assert _ephemeral_texts(fake_slack_web_client) == [UNAVAILABLE]
+    assert _notice(fake_slack_web_client) == UNAVAILABLE, "the checking notice says it is off"
+    assert not any("callback_id" in v for v in _shown(fake_slack_web_client)), "no form is offered"
 
 
 async def test_submit_when_unset_records_nothing(
@@ -710,3 +708,72 @@ async def test_click_opens_the_modal_before_any_database_read(
         await handle_ask_human_click(runtime, _click())
 
     assert opened_first == [True], "the trigger_id lives 3 seconds; reads come after the modal"
+
+
+# ---------------------------------------------------------------------------
+# post_blocker
+# ---------------------------------------------------------------------------
+
+_INFO_PATTERN = re.compile(r"https://slack\.com/api/conversations\.info.*")
+_JOIN_PATTERN = re.compile(r"https://slack\.com/api/conversations\.join.*")
+
+
+def _joined(fake: Any) -> bool:
+    return any(url.path == "/api/conversations.join" for (_, url) in fake.mock.requests)
+
+
+def _info(fake: Any, payload: dict[str, Any]) -> None:
+    fake.mock.get(_INFO_PATTERN, payload=payload)  # pyright: ignore[reportUnknownMemberType]
+
+
+@pytest.mark.parametrize(
+    ("channel", "expected"),
+    [
+        ({"id": "C1", "is_member": True}, None),
+        ({"id": "C1", "is_archived": True, "is_member": True}, slack_support.ARCHIVED),
+        ({"id": "C1", "is_private": True}, slack_support.INVITE),
+    ],
+    ids=["member", "archived", "private-not-member"],
+)
+async def test_post_blocker_reads_the_channel(
+    fake_slack_web_client: Any, channel: dict[str, Any], expected: str | None
+) -> None:
+    """A member posts; an archived channel or a private one Daimon is not in is refused."""
+    _info(fake_slack_web_client, {"ok": True, "channel": channel})
+
+    blocker = await slack_support.post_blocker(fake_slack_web_client.client, "C1")
+
+    assert blocker == expected, f"{channel} reads as {expected!r}"
+    assert not _joined(fake_slack_web_client), "nothing to join"
+
+
+async def test_post_blocker_joins_a_public_channel_it_is_not_in(fake_slack_web_client: Any) -> None:
+    """A public channel is joined, so the post needs no invite."""
+    _info(fake_slack_web_client, {"ok": True, "channel": {"id": "C1"}})
+    fake_slack_web_client.mock.post(_JOIN_PATTERN, payload={"ok": True, "channel": {"id": "C1"}})  # pyright: ignore[reportUnknownMemberType]
+
+    assert await slack_support.post_blocker(fake_slack_web_client.client, "C1") is None, (
+        "joined, so it can post"
+    )
+    assert _joined(fake_slack_web_client), "Daimon joined the channel"
+
+
+async def test_post_blocker_asks_for_an_invite_when_the_join_fails(
+    fake_slack_web_client: Any,
+) -> None:
+    """A refused join says to invite Daimon."""
+    _info(fake_slack_web_client, {"ok": True, "channel": {"id": "C1"}})
+    fake_slack_web_client.mock.post(_JOIN_PATTERN, payload={"ok": False, "error": "missing_scope"})  # pyright: ignore[reportUnknownMemberType]
+
+    assert await slack_support.post_blocker(fake_slack_web_client.client, "C1") == (
+        slack_support.INVITE
+    ), "the join failed"
+
+
+async def test_post_blocker_cannot_see_an_unknown_channel(fake_slack_web_client: Any) -> None:
+    """A channel Slack won't describe (gone, or private without Daimon) can't be used."""
+    _info(fake_slack_web_client, {"ok": False, "error": "channel_not_found"})
+
+    assert await slack_support.post_blocker(fake_slack_web_client.client, "C1") == (
+        slack_support.CANNOT_SEE
+    ), "channel_not_found reads as cannot see"

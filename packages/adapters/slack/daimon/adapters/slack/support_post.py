@@ -1,4 +1,4 @@
-"""The support channel post of a plan request: its lines, settle buttons and closing.
+"""The support channel post of a limit request: its lines, settle buttons and closing.
 
 Shared by Ask a person (`support_escalation`) and its settle controls
 (`support_settle`). The buttons carry the request id, so they work after a restart.
@@ -46,7 +46,7 @@ def status_line(row: SupportEscalationRow) -> str:
 
 
 def request_facts(row: SupportEscalationRow, *, menu: bool, balance: str | None) -> str:
-    """A plan request's lines: its terms on a configured menu, status and balance."""
+    """A limit request's lines: its terms on a configured menu, status and balance."""
     lines = [escape_mrkdwn(option_text(row.option))] if menu and row.option is not None else []
     lines.append(status_line(row))
     if balance:

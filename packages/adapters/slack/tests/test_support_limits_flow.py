@@ -1,4 +1,4 @@
-"""Support plans on Slack: the menu, option forms, admin exemption and settling a post.
+"""Support limits on Slack: the menu, option forms, admin exemption and settling a post.
 
 Real Postgres plus the transport-level fake Slack, as `test_support_escalation.py`.
 """
@@ -10,7 +10,7 @@ import re
 import uuid
 from decimal import Decimal
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 import yarl
@@ -19,16 +19,16 @@ from daimon.adapters.slack import support_escalation as slack_support
 from daimon.adapters.slack.support_escalation import (
     ASK_HUMAN_ACTION_ID,
     SUPPORT_CALLBACK_ID,
-    evaluate_plan_submission,
+    evaluate_menu_submission,
     evaluate_support_submission,
     handle_ask_human_click,
     handle_option_pick,
     run_support_submission,
 )
-from daimon.adapters.slack.support_plan_form import (
+from daimon.adapters.slack.support_menu_form import (
+    MENU_CALLBACK_ID,
     OPTION_ACTION_ID,
     OPTION_BLOCK_ID,
-    PLAN_CALLBACK_ID,
 )
 from daimon.adapters.slack.support_post import (
     NOT_NOTIFIED_LINE,
@@ -44,7 +44,7 @@ from daimon.adapters.slack.support_settle import (
 from daimon.core.config import SupportSettings
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_tenant_uuid
-from daimon.core.stores import support as plans
+from daimon.core.stores import support as store
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.support_escalation import submit_request
 from daimon.core.support import (
@@ -59,8 +59,8 @@ from daimon.core.support import (
     parse_menu,
 )
 from daimon.core.support_escalation import ALREADY_REQUESTED
-from daimon.core.windows import WindowBounds
 from daimon.testing.factories import make_tenant
+from daimon.testing.settings_mock import mock_settings
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -75,7 +75,7 @@ _STAFF = "U0STAFF"
 _CHANNEL = "C_ANSWERS"
 _THREAD = "1700000000.000001"
 _ANSWER_TS = "1700000001.000100"
-_ESC_CHANNEL = "C_ESCALATE"
+_ESC_CHANNEL = str(CHAT_OK_PAYLOAD["channel"])  # where the fake says a post landed
 _POST_TS = str(CHAT_OK_PAYLOAD["ts"])
 _PERMALINK = "https://sup.slack.com/archives/C_ANSWERS/p1700000001000100"
 D = Decimal
@@ -132,7 +132,7 @@ async def _seed(
     menu: bool = True,
     per_person: Decimal = _ALLOWANCE,
 ) -> str:
-    """A Slack tenant with a workspace plan, on MENU unless `menu` is False; its fernet key."""
+    """A Slack tenant with a workspace limit, on MENU unless `menu` is False; its fernet key."""
     fernet_key = Fernet.generate_key().decode()
     fernet = build_multifernet((fernet_key,))
     async with factory() as session, session.begin():
@@ -140,28 +140,36 @@ async def _seed(
         await upsert_slack_bot_token(
             session, team_id=_TEAM, encrypted_token=encrypt_token(fernet, "xoxb-test")
         )
-        catalog = None
         if menu:
-            catalog = await plans.set_catalog(
+            row = await store.set_menu(
                 session, tenant_id=tenant.id, key="support", spec=MENU, set_by_account_id=None
             )
-        await plans.set_plan(
+            await store.set_menu_use(
+                session,
+                tenant_id=tenant.id,
+                scope="workspace",
+                scope_id="",
+                menu_id=row.id,
+                set_by_account_id=None,
+            )
+        await store.set_limit(
             session,
             tenant_id=tenant.id,
-            platform="slack",
             scope="workspace",
             scope_id="",
-            catalog_id=None if catalog is None else catalog.id,
-            pool=None,
-            per_person=per_person,
-            window=WindowBounds("total", None, None),
+            platform_user_id=None,
+            shared=None,
+            each_person=per_person,
+            window="total",
+            starts_at=None,
+            ends_at=None,
             set_by_account_id=None,
         )
     return fernet_key
 
 
 def _runtime(fernet_key: str, factory: async_sessionmaker[AsyncSession], **support: Any) -> Any:
-    settings = MagicMock()
+    settings = mock_settings()
     support = {"slack_escalation_team_id": _TEAM, **support}
     settings.support = SupportSettings(slack_escalation_channel_id=_ESC_CHANNEL, **support)
     return build_slack_runtime(fernet_key, factory, settings=settings)
@@ -268,7 +276,7 @@ def _send(view: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
 async def _pending(runtime: Any, fake: Any) -> tuple[str, dict[str, Any]]:
     """A pending Review request: its id and the support post as Slack holds it."""
     picked = await _pick(runtime, fake, await _menu(runtime, fake), "review")
-    sent = evaluate_plan_submission(_send(picked, {OPTION_BLOCK_ID: _picked("review")}))
+    sent = evaluate_menu_submission(_send(picked, {OPTION_BLOCK_ID: _picked("review")}))
     await run_support_submission(runtime, sent)
     post = _sent(fake, _POST)[-1]
     return str(post["blocks"][-1]["elements"][0]["value"]), {
@@ -300,12 +308,12 @@ def _charge(view: dict[str, Any], amount: str) -> dict[str, Any]:
     return payload
 
 
-async def test_click_when_plan_has_a_menu_then_shows_options_and_balance(
+async def test_click_when_limit_has_a_menu_then_shows_options_and_balance(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
     key = await _seed(db_session_factory)
     view = await _menu(_runtime(key, db_session_factory), fake)
-    assert view["callback_id"] == PLAN_CALLBACK_ID
+    assert view["callback_id"] == MENU_CALLBACK_ID
     radio = next(b for b in view["blocks"] if b.get("block_id") == OPTION_BLOCK_ID)["element"]
     assert [o["value"] for o in radio["options"]] == [
         _value(k) for k in ("quick", "review", "call")
@@ -344,7 +352,7 @@ async def test_pick_when_balance_cannot_cover_it_then_send_is_refused(
     runtime = _runtime(key, db_session_factory)
     view = await _pick(runtime, fake, await _menu(runtime, fake), "review")
     assert NOT_ENOUGH_CREDITS in json.dumps(view), "the menu says why"
-    sent = evaluate_plan_submission(_send(view, {OPTION_BLOCK_ID: _picked("review")}))
+    sent = evaluate_menu_submission(_send(view, {OPTION_BLOCK_ID: _picked("review")}))
     assert not sent.proceed
     assert sent.response_payload == {
         "response_action": "errors",
@@ -405,7 +413,7 @@ async def test_pick_when_already_asked_at_no_credits_then_already_asked_and_send
     await _asked_before(db_session_factory, "quick")
     view = await _pick(runtime, fake, menu, "quick")
     assert json.dumps(ALREADY_REQUESTED)[1:-1] in json.dumps(view), "the menu says why"
-    sent = evaluate_plan_submission(_send(view, {OPTION_BLOCK_ID: _picked("quick")}))
+    sent = evaluate_menu_submission(_send(view, {OPTION_BLOCK_ID: _picked("quick")}))
     assert sent.response_payload == {
         "response_action": "errors",
         "errors": {OPTION_BLOCK_ID: ALREADY_REQUESTED},
@@ -418,7 +426,7 @@ async def test_send_when_option_has_no_fields_then_posts_pending_with_settle_but
     key = await _seed(db_session_factory)
     escalation_id, post = await _pending(_runtime(key, db_session_factory), fake)
     assert "Review: 1-3 credits\nPending: 1-3 credits\n1 of 2 credits left" in post["text"], (
-        "a plan request's post names its terms, status and balance"
+        "a limit request's post names its terms, status and balance"
     )
     assert NOT_NOTIFIED_LINE in post["text"], "decision 8 beside the settle buttons"
     buttons = post["blocks"][-1]["elements"]
@@ -495,7 +503,7 @@ async def test_send_when_option_has_steps_and_fields_then_charged_at_submit(
         "support_step:call": {"support_step_input": {"selected_option": {"value": "1"}}},
         "support_field:call:topic": {"support_field_input": {"value": "Billing export"}},
     }
-    await run_support_submission(runtime, evaluate_plan_submission(_send(view, values)))
+    await run_support_submission(runtime, evaluate_menu_submission(_send(view, values)))
     post = _sent(fake, _POST)[-1]
     assert "Call, 1 hour: 1 credit\nCharged 1 credit" in post["text"], "a step is charged now"
     assert "Topic: Billing export" in post["text"], "the answers are the note"
@@ -594,22 +602,91 @@ async def test_decline_when_pending_then_releases_the_hold(
     assert (status, charge, by) == ("declined", D(0), _STAFF)
 
 
-@pytest.mark.parametrize(
-    ("channel", "support"),
-    [("C_OTHER", {}), (_ESC_CHANNEL, {"slack_escalation_team_id": "T_OTHER"})],
-    ids=["other channel", "other workspace"],
-)
 async def test_settle_click_when_outside_the_support_channel_then_refuses(
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake: Any,
-    channel: str,
-    support: dict[str, str],
+    db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
     key = await _seed(db_session_factory)
-    runtime = _runtime(key, db_session_factory, **support)
-    message = {"ts": _POST_TS}
-    click = _settle_click(
-        SETTLE_DECLINE_ACTION_ID, uuid.uuid4().hex, message=message, channel=channel
-    )
+    runtime = _runtime(key, db_session_factory)
+    escalation_id, post = await _pending(runtime, fake)
+    click = _settle_click(SETTLE_DECLINE_ACTION_ID, escalation_id, message=post, channel="C_OTHER")
     await handle_settle_click(runtime, click)
+    assert _said(fake) == SETTLE_ELSEWHERE, "only the posted channel settles"
+    ((_id, status, *_rest),) = await _rows(db_session_factory)
+    assert status == "pending", "nothing was settled"
+
+
+async def _own_channel(factory: async_sessionmaker[AsyncSession], channel_id: str) -> None:
+    """The workspace picks its own request channel."""
+    async with factory() as session, session.begin():
+        await store.set_support_channel(
+            session,
+            tenant_id=derive_tenant_uuid(platform="slack", workspace_id=_TEAM),
+            platform="slack",
+            channel_id=channel_id,
+            slack_team_id=_TEAM,
+            set_by_account_id=None,
+        )
+
+
+async def _stamps(factory: async_sessionmaker[AsyncSession]) -> list[tuple[Any, ...]]:
+    async with factory() as session:
+        result = await session.execute(
+            text("SELECT support_channel_id, support_post_id FROM support_escalations")
+        )
+        return [tuple(r) for r in result.all()]
+
+
+async def test_send_when_the_workspace_has_its_own_channel_then_posts_and_stamps_there(
+    db_session_factory: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    key = await _seed(db_session_factory)
+    await _own_channel(db_session_factory, "C_OWN")
+    await _pending(_runtime(key, db_session_factory), fake)
+    assert _sent(fake, _POST)[-1]["channel"] == "C_OWN", "the workspace's own channel"
+    assert await _stamps(db_session_factory) == [(_ESC_CHANNEL, _POST_TS)], (
+        "the channel Slack says the post landed in is stamped"
+    )
+
+
+async def test_send_when_own_channels_are_off_then_posts_to_the_deployment_channel(
+    db_session_factory: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    key = await _seed(db_session_factory)
+    await _own_channel(db_session_factory, "C_OWN")
+    runtime = _runtime(key, db_session_factory)
+    runtime.settings.features["support_own_channel"] = "off"
+    await _pending(runtime, fake)
+    assert _sent(fake, _POST)[-1]["channel"] == _ESC_CHANNEL, "the deployment's channel"
+
+
+async def test_settle_when_the_channel_changed_then_the_open_request_settles_where_posted(
+    db_session_factory: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    key = await _seed(db_session_factory)
+    runtime = _runtime(key, db_session_factory)
+    escalation_id, post = await _pending(runtime, fake)
+    await _own_channel(db_session_factory, "C_OWN")
+    moved = _settle_click(SETTLE_DECLINE_ACTION_ID, escalation_id, message=post, channel="C_OWN")
+    await handle_settle_click(runtime, moved)
+    assert _said(fake) == SETTLE_ELSEWHERE, "the new channel did not get it"
+    await handle_settle_click(
+        runtime, _settle_click(SETTLE_DECLINE_ACTION_ID, escalation_id, message=post)
+    )
+    assert _said(fake) == f"Declined. No credits used. {CLIENT_NOT_NOTIFIED}"
+
+
+async def test_settle_when_the_request_predates_the_stamp_then_the_default_channel_settles(
+    db_session_factory: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    key = await _seed(db_session_factory)
+    runtime = _runtime(key, db_session_factory)
+    await _asked_before(db_session_factory, "review")
+    ((escalation_id, *_rest),) = await _rows(db_session_factory)
+    assert await _stamps(db_session_factory) == [(None, None)], "an old, unstamped request"
+    post = {"ts": _POST_TS, "text": "Human support requested", "blocks": []}
+    value = uuid.UUID(str(escalation_id)).hex
+    elsewhere = _settle_click(SETTLE_DECLINE_ACTION_ID, value, message=post, channel="C_OTHER")
+    await handle_settle_click(runtime, elsewhere)
     assert _said(fake) == SETTLE_ELSEWHERE
+    await handle_settle_click(runtime, _settle_click(SETTLE_DECLINE_ACTION_ID, value, message=post))
+    assert _said(fake) == f"Declined. No credits used. {CLIENT_NOT_NOTIFIED}"

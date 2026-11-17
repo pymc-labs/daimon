@@ -33,9 +33,9 @@ from daimon.adapters.slack.support_post import (
     closed_post,
     status_line,
 )
-from daimon.core.config import SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.identity import find_platform_principal
+from daimon.core.stores.support import get_support_channel
 from daimon.core.stores.support_escalation import SettleOutcome, get_request
 from daimon.core.stores.support_rows import SupportEscalationRow
 from daimon.core.support import (
@@ -54,7 +54,7 @@ from daimon.core.support import (
     settled_text,
 )
 from daimon.core.support_changes import settle_from_post
-from daimon.core.support_routing import in_channel
+from daimon.core.support_routing import settle_channel_ok
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -82,24 +82,31 @@ def _settler(by: str | None) -> str | None:
     return f"<@{by}>" if by and _SLACK_USER.fullmatch(by) else by
 
 
-def _in_support_channel(support: SupportSettings, *, team_id: str, channel_id: str) -> bool:
-    """The configured channel, in the configured escalation workspace.
+async def _settles_here(
+    runtime: SlackRuntime, *, team_id: str, channel_id: str, row: SupportEscalationRow
+) -> bool:
+    """The click is in the channel `row` was posted to, in a workspace that may hold it.
 
-    With no workspace named, any workspace passes here; `_settles_here` then
-    matches the clicker's workspace to the request's tenant.
+    The channel stamped at posting, so open requests stay settleable there
+    after a channel change. The workspace is the request's own, the
+    deployment's escalation one, or the one its own channel sits in.
     """
-    if support.slack_escalation_team_id not in (None, team_id):
-        return False
-    return in_channel(
-        configured=support.slack_escalation_channel_id, channel_id=channel_id, parent_id=None
-    )
-
-
-def _settles_here(support: SupportSettings, *, team_id: str, row: SupportEscalationRow) -> bool:
-    """A named escalation workspace already matched; unset, the request must be this workspace's."""
-    if support.slack_escalation_team_id is not None:
+    support = runtime.settings.support
+    async with runtime.sessionmaker() as session:
+        own = await get_support_channel(session, tenant_id=row.tenant_id)
+        if not await settle_channel_ok(
+            session,
+            row=row,
+            channel_id=channel_id,
+            parent_id=None,
+            default_channel_id=support.slack_escalation_channel_id,
+        ):
+            return False
+    if derive_tenant_uuid(platform="slack", workspace_id=team_id) == row.tenant_id:
         return True
-    return derive_tenant_uuid(platform="slack", workspace_id=team_id) == row.tenant_id
+    if support.slack_escalation_team_id == team_id:
+        return True
+    return own is not None and own.platform == "slack" and own.slack_team_id == team_id
 
 
 async def _notice(client: AsyncWebClient, post: _Post, text: str, *, error: bool) -> None:
@@ -170,6 +177,9 @@ async def _finish(
         return
     if outcome.status == "limit_gone":
         await _notice(client, post, LIMIT_GONE, error=True)
+        return
+    if outcome.status == "not_here":
+        await _notice(client, post, SETTLE_ELSEWHERE, error=True)
         return
     if outcome.status in ("invalid", "over_balance"):
         text = settle_range_text(after.bounds, counted=after.counted, available=outcome.available)
@@ -261,7 +271,7 @@ def settle_modal(row: SupportEscalationRow, *, channel_id: str, message_ts: str)
 
 
 async def handle_settle_click(runtime: SlackRuntime, payload: dict[str, Any]) -> None:
-    """Set charge opens the form; Decline settles. Checks the channel, then the request now."""
+    """Set charge opens the form; Decline settles. Checks the request now, then its channel."""
     if is_external_interactive(payload):
         log.info("support.external_click_rejected")
         return
@@ -284,10 +294,6 @@ async def handle_settle_click(runtime: SlackRuntime, payload: dict[str, Any]) ->
     client = await resolve_web_client(runtime, team_id=post.team_id)
     if client is None:
         return
-    support = runtime.settings.support
-    if not _in_support_channel(support, team_id=post.team_id, channel_id=post.channel_id):
-        await _notice(client, post, SETTLE_ELSEWHERE, error=True)
-        return
     try:
         escalation_id = _escalation_id(action.get("value"))
         row = None
@@ -296,7 +302,9 @@ async def handle_settle_click(runtime: SlackRuntime, payload: dict[str, Any]) ->
                 row = await get_request(session, escalation_id=escalation_id)
         if row is None:
             await _notice(client, post, REQUEST_GONE, error=True)
-        elif not _settles_here(support, team_id=post.team_id, row=row):
+        elif not await _settles_here(
+            runtime, team_id=post.team_id, channel_id=post.channel_id, row=row
+        ):
             await _notice(client, post, SETTLE_ELSEWHERE, error=True)
         elif row.status != "pending":
             outcome = SettleOutcome(status="already_settled", row=row)
@@ -379,18 +387,13 @@ async def run_settle_submission(runtime: SlackRuntime, submission: SettleSubmiss
     if client is None:
         return
     post = _Post(team_id=s.team_id, user_id=s.user_id, channel_id=s.channel_id, ts=s.message_ts)
-    if not _in_support_channel(
-        runtime.settings.support, team_id=s.team_id, channel_id=s.channel_id
-    ):
-        await _notice(client, post, SETTLE_ELSEWHERE, error=True)
-        return
     try:
         async with runtime.sessionmaker() as session:
             row = await get_request(session, escalation_id=s.escalation_id)
         if row is None:
             await _notice(client, post, REQUEST_GONE, error=True)
             return
-        if not _settles_here(runtime.settings.support, team_id=s.team_id, row=row):
+        if not await _settles_here(runtime, team_id=s.team_id, channel_id=s.channel_id, row=row):
             await _notice(client, post, SETTLE_ELSEWHERE, error=True)
             return
         await _settle(runtime, client, post, row=row, charge=s.charge)

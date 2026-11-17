@@ -203,14 +203,13 @@ from daimon.adapters.slack.shared_channel import (
 from daimon.adapters.slack.support_escalation import (
     ASK_HUMAN_ACTION_ID,
     SUPPORT_CALLBACK_ID,
-    evaluate_plan_submission,
+    evaluate_menu_submission,
     evaluate_support_submission,
     handle_ask_human_click,
     handle_option_pick,
     run_support_submission,
-    slack_support_enabled,
 )
-from daimon.adapters.slack.support_plan_form import OPTION_ACTION_ID, PLAN_CALLBACK_ID
+from daimon.adapters.slack.support_menu_form import MENU_CALLBACK_ID, OPTION_ACTION_ID
 from daimon.adapters.slack.support_post import SETTLE_DECLINE_ACTION_ID, SETTLE_SET_ACTION_ID
 from daimon.adapters.slack.support_settle import (
     SETTLE_CALLBACK_ID,
@@ -1276,14 +1275,14 @@ class SlackApp:
                 )
                 if _sup.proceed:
                     self._spawn(run_support_submission(self.runtime, _sup))
-            elif cb_id == PLAN_CALLBACK_ID:
+            elif cb_id == MENU_CALLBACK_ID:
                 # Pure evaluate (no I/O) — must run before the single ack.
-                _plan = evaluate_plan_submission(payload)
+                _menu = evaluate_menu_submission(payload)
                 await client.send_socket_mode_response(
-                    SocketModeResponse(envelope_id=req.envelope_id, payload=_plan.response_payload)
+                    SocketModeResponse(envelope_id=req.envelope_id, payload=_menu.response_payload)
                 )
-                if _plan.proceed:
-                    self._spawn(run_support_submission(self.runtime, _plan))
+                if _menu.proceed:
+                    self._spawn(run_support_submission(self.runtime, _menu))
             elif cb_id == SETTLE_CALLBACK_ID:
                 # Pure evaluate (no I/O) — must run before the single ack.
                 _settle = evaluate_settle_submission(payload)
@@ -2706,8 +2705,7 @@ class SlackApp:
             sessionmaker=self.runtime.sessionmaker,
             reply_people_cap=self._reply_people_cap(admission),
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-            ask_human=slack_support_enabled(self.runtime.settings.support)
-            and admission.feature_on("support_escalation"),
+            ask_human=admission.feature_on("support_escalation"),
             vote_buttons=admission.shown("message_feedback", "slack"),
             tenant_id=tenant_id,
             budget_channel_id=admission.budget_channel_id,
@@ -3169,8 +3167,7 @@ class SlackApp:
                     sessionmaker=self.runtime.sessionmaker,
                     reply_people_cap=self._reply_people_cap(admission),
                     alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-                    ask_human=slack_support_enabled(self.runtime.settings.support)
-                    and admission.feature_on("support_escalation"),
+                    ask_human=admission.feature_on("support_escalation"),
                     vote_buttons=admission.shown("message_feedback", "slack"),
                     tenant_id=tenant_id,
                     budget_channel_id=admission.budget_channel_id,
@@ -3625,8 +3622,7 @@ class SlackApp:
                 attended=row.reason != "watch_fired" and continuation_attended(row),
             ),
             alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-            ask_human=slack_support_enabled(self.runtime.settings.support)
-            and follow_admission.feature_on("support_escalation"),
+            ask_human=follow_admission.feature_on("support_escalation"),
             vote_buttons=follow_admission.shown("message_feedback", "slack"),
             tenant_id=tenant_id,
             budget_channel_id=follow_admission.budget_channel_id,
@@ -3728,8 +3724,7 @@ class SlackApp:
                     attended=row.reason != "watch_fired" and continuation_attended(row),
                 ),
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
-                ask_human=slack_support_enabled(self.runtime.settings.support)
-                and follow_admission.feature_on("support_escalation"),
+                ask_human=follow_admission.feature_on("support_escalation"),
                 vote_buttons=follow_admission.shown("message_feedback", "slack"),
                 tenant_id=tenant_id,
                 budget_channel_id=follow_admission.budget_channel_id,
