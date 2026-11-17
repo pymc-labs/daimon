@@ -1862,43 +1862,35 @@ class BillingSettings(BaseModel):
 
 
 class SupportSettings(BaseModel):
-    """Human-support escalation: where requests land, and how many each user gets.
+    """Ask a person: the default channel per platform, and each person's default credits.
 
-    `credits_per_user` is a COUNT of human interactions, deliberately not the
-    USD in `BillingSettings.signup_credit`. Sharing a ledger with billing would
-    let a support request eat the tenant's ability to run turns, and would give
-    a paid-up tenant unlimited support. Different unit, different table.
+    Support credits are their own unit, not the USD in `BillingSettings.signup_credit`:
+    sharing billing's ledger would let a request eat a tenant's turns and give a paid-up
+    tenant unlimited support. A request is charged to the most specific place with a
+    support limit, else to the person's default credits.
 
-    Each platform's requests go only to its own channel: Discord's to
-    `escalation_channel_id`, Slack's to `slack_escalation_channel_id`, Teams'
-    to `teams_escalation_channel_id`. An unset channel disables the affordance
-    it serves entirely rather than recording requests nobody will ever see.
-    Failing closed is the honest behaviour: an escalate button that reaches no
-    one is worse than no button, because the person believes they have asked
-    for help. Every platform spends the same per-user, per-tenant allowance
-    from one ledger.
+    Each platform's requests go to its own default channel, or to a channel the
+    workspace picked while `support_own_channel` is on. With neither, Ask a person is
+    unavailable there: a button that reaches no one is worse than none.
     """
 
     escalation_channel_id: str | None = Field(
         default=None,
         description=(
-            "Discord channel id where human-support requests from Discord are "
-            "posted (the unprefixed name predates per-platform channels). A Teams "
-            "id (`19:…`) left here is ignored. Unset (the default) disables the "
-            "escalate affordance on Discord — a request that reaches nobody is "
-            "worse than no button at all. A channel rather than operator DMs: it "
-            "survives one person's DMs being closed, and it leaves a shared "
-            "record anyone on the rota can pick up. The bot must be able to post "
-            "there."
+            "Default Discord channel id for Ask a person requests from Discord (the "
+            "unprefixed name predates per-platform channels). A Teams id (`19:…`) left "
+            "here is ignored. A workspace may pick its own channel instead while "
+            "support_own_channel is on. Unset, with no own channel, Ask a person is "
+            "unavailable on Discord. The bot must be able to post there."
         ),
     )
     slack_escalation_channel_id: str | None = Field(
         default=None,
         description=(
-            "Slack channel id where human-support requests from Slack are "
-            "posted. Unset (the default) disables the Ask the team button on "
-            "Slack. Slack requests never go to another platform's channel, nor "
-            "theirs here. The bot must be a member of the channel."
+            "Default Slack channel id for Ask a person requests from Slack. A workspace "
+            "may pick its own channel instead while support_own_channel is on. Unset, "
+            "with no own channel, Ask a person is unavailable on Slack. Requests never "
+            "go to another platform's channel. The bot must be a member of the channel."
         ),
     )
     slack_escalation_team_id: str | None = Field(
@@ -1914,13 +1906,24 @@ class SupportSettings(BaseModel):
     teams_escalation_channel_id: str | None = Field(
         default=None,
         description=(
-            "Teams channel id (`19:…`) where human-support requests from Teams are "
-            "posted. Unset (the default) disables Ask a person on Teams. Teams "
-            "requests never go to the Discord or Slack channel, nor theirs here. "
-            "The Teams bot must be a member of the channel's team (and of the "
-            "channel, if it is private)."
+            "Default Teams channel id (`19:…`) for Ask a person requests from Teams. A "
+            "workspace may pick its own channel instead while support_own_channel is on. "
+            "Unset, with no own channel, Ask a person is unavailable on Teams. Requests "
+            "never go to another platform's channel. The Teams bot must be a member of "
+            "the channel's team (and of the channel, if it is private)."
         ),
     )
+
+    def channel_for(self, platform: str) -> str | None:
+        """The default request channel on `platform`; another platform's id counts as unset."""
+        channel = {
+            "discord": self.escalation_channel_id,
+            "slack": self.slack_escalation_channel_id,
+            "teams": self.teams_escalation_channel_id,
+        }.get(platform)
+        if not channel or channel.startswith("19:") != (platform == "teams"):
+            return None
+        return channel
 
     @field_validator("teams_escalation_channel_id")
     @classmethod
@@ -1938,9 +1941,10 @@ class SupportSettings(BaseModel):
         default=20,
         ge=0,
         description=(
-            "How many human-support requests each user gets within a tenant. "
-            "A COUNT of interactions, NOT the USD in DAIMON_BILLING__SIGNUP_CREDIT — "
-            "the two are deliberately separate ledgers. 0 disables escalation."
+            "Default support credits each person gets within a workspace, spent where no "
+            "support limit applies. A request costs its menu option's price, one credit "
+            "on the default menu. Not the USD in DAIMON_BILLING__SIGNUP_CREDIT. 0 leaves "
+            "Ask a person to places with a support limit."
         ),
     )
     feedback_to_support: dict[uuid.UUID, bool] = Field(

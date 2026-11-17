@@ -167,7 +167,7 @@ MinAmount = Annotated[
     Decimal, BeforeValidator(_credits_in), AfterValidator(_min_check), _CreditsText
 ]
 
-# ---------- Catalog spec ----------
+# ---------- Menu spec ----------
 
 _Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 OptionKey = Annotated[str, StringConstraints(pattern=f"^{OPTION_KEY_PATTERN}$")]
@@ -369,7 +369,7 @@ def parse_menu(data: object) -> MenuSpec:
     try:
         return MenuSpec.model_validate(data)
     except ValidationError as exc:
-        raise SupportError(f"Catalog not valid: {_readable(exc, data)}") from exc
+        raise SupportError(f"Menu not valid: {_readable(exc, data)}") from exc
 
 
 def load_menu(text: str) -> MenuSpec:
@@ -377,7 +377,7 @@ def load_menu(text: str) -> MenuSpec:
     try:
         data: object = yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise SupportError(f"Catalog not valid: not YAML or JSON{_yaml_where(exc)}") from exc
+        raise SupportError(f"Menu not valid: not YAML or JSON{_yaml_where(exc)}") from exc
     return parse_menu(data)
 
 

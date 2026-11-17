@@ -52,16 +52,8 @@ class SupportDestination:
 
 
 def deployment_channel(support: SupportSettings, platform: str) -> str | None:
-    """The operator's request channel for one platform."""
-    match platform:
-        case "discord":
-            return support.escalation_channel_id
-        case "slack":
-            return support.slack_escalation_channel_id
-        case "teams":
-            return support.teams_escalation_channel_id
-        case _:
-            return None
+    """The operator's request channel for one platform; another platform's id is ignored."""
+    return support.channel_for(platform)
 
 
 def own_channel_allowed(settings: Settings | None) -> bool:

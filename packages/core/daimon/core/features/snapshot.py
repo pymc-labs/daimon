@@ -112,23 +112,13 @@ their tools work (and list or remove what exists) without the operator gate or t
 _SUPPORT: Final = frozenset({"support_channel", "support_credits"})
 
 
-def _deployment_channel_set(settings: Settings, platform: str) -> bool:
-    support = settings.support
-    channel = {
-        "discord": support.escalation_channel_id,
-        "slack": support.slack_escalation_channel_id,
-        "teams": support.teams_escalation_channel_id,
-    }.get(platform)
-    return bool(channel) and not (platform == "discord" and (channel or "").startswith("19:"))
-
-
 def support_met(
     need: Requirement, settings: Settings, platform: str, setup: SupportSetup | None
 ) -> bool:
     """Whether a support requirement holds on `platform`. `setup` is the workspace's own;
     None checks the deployment alone."""
     if need == "support_channel":
-        return _deployment_channel_set(settings, platform) or (
+        return settings.support.channel_for(platform) is not None or (
             setup is not None
             and setup.own_platform == platform
             and deployment_on(settings, "support_own_channel", platform)
