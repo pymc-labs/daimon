@@ -1,6 +1,7 @@
 """Async store for `feature_values`: the features set at each tier of each place.
 
-Unused place columns hold '' (`routine_id` NULL); rows come back with them as stored. A
+Unused place columns hold '' (`routine_id` NULL); a routine row's `channel_id` is its
+routine id. Rows come back with them as stored. A
 pinned feature's On carries its `pin`, written with the value. Every write bumps the
 tenant's `feature_revision`, which keys the resolver's cache.
 Callers own the transaction; every write ends with `await session.flush()`.
@@ -34,7 +35,8 @@ def _ids(target: FeatureTarget) -> tuple[str, str, str, uuid.UUID | None]:
     if target.tier == "routine":
         if routine is None:
             raise ValueError("the routine tier needs a routine_id")
-        return "", "", "", routine
+        # The id in `channel_id` keeps routine rows apart in `uq_feature_values_place`.
+        return "", str(routine), "", routine
     return target.agent_id or "", channel if target.tier != "workspace" else "", thread, None
 
 
@@ -191,7 +193,7 @@ async def set_feature_value(
     else:
         stmt = stmt.on_conflict_do_update(
             index_elements=["tenant_id", "tier", "agent_id", "channel_id", "key"],
-            index_where=text("tier NOT IN ('thread', 'routine')"),
+            index_where=text("tier <> 'thread'"),
             set_=changes,
         )
     row = (await session.scalars(stmt.returning(FeatureValue))).one()

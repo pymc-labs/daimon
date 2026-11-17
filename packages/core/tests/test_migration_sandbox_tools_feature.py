@@ -245,9 +245,11 @@ async def test_the_downgrade_drops_what_has_no_older_form(db_session: AsyncSessi
     def cycle(sync: Connection) -> None:
         with Operations.context(MigrationContext.configure(sync)):
             sync.execute(text(
-                "INSERT INTO feature_values (tenant_id, tier, routine_id, key, value, pin, surface)"
-                " VALUES (:t, 'routine', :on, 'routine_sandbox_tools', 'on', CAST(:pin AS jsonb),"
-                " 'cli'), (:t, 'routine', :off, 'routine_sandbox_tools', 'off', NULL, 'cli')"
+                "INSERT INTO feature_values (tenant_id, tier, channel_id, routine_id, key, value,"
+                " pin, surface) VALUES (:t, 'routine', CAST(:on AS uuid)::text, :on,"
+                " 'routine_sandbox_tools', 'on', CAST(:pin AS jsonb), 'cli'),"
+                " (:t, 'routine', CAST(:off AS uuid)::text, :off, 'routine_sandbox_tools', 'off',"
+                " NULL, 'cli')"
             ), {"t": tenant.id, "on": routine.id, "off": off.id, "pin": pin})  # fmt: skip
             sync.execute(text(
                 "INSERT INTO feature_values (tenant_id, tier, agent_id, key, value, pin, surface)"

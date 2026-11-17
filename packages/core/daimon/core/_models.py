@@ -2680,9 +2680,10 @@ class FeatureValue(Base):
     Rows exist for the workspace, agent, channel, thread and routine tiers (the deployment
     tier is the `features` setting). Unused place columns hold '' (`routine_id` NULL). A
     thread row is keyed by its thread key alone; its `channel_id` is the channel the thread
-    sits in, '' when unknown. A routine row goes with its routine. A pinned feature's On
-    keeps in `pin` what it covers. `daimon.core.features.resolver` combines the rows;
-    `locked` is final for every tier below.
+    sits in, '' when unknown. A routine row goes with its routine and holds its id in
+    `channel_id` too, so `uq_feature_values_place` serves every tier but the thread. A
+    pinned feature's On keeps in `pin` what it covers. `daimon.core.features.resolver`
+    combines the rows; `locked` is final for every tier below.
     """
 
     __tablename__ = "feature_values"
@@ -2699,7 +2700,9 @@ class FeatureValue(Base):
             "NOT (locked AND tier IN ('thread', 'routine'))", name="ck_feature_values_lock"
         ),
         CheckConstraint(
-            "(tier = 'routine') = (routine_id IS NOT NULL)", name="ck_feature_values_routine"
+            "(tier = 'routine') = (routine_id IS NOT NULL)"
+            " AND (routine_id IS NULL OR channel_id = routine_id::text)",
+            name="ck_feature_values_routine",
         ),
         CheckConstraint(
             "key <> 'routine_sandbox_tools' OR value <> 'on'"
@@ -2714,7 +2717,7 @@ class FeatureValue(Base):
             "channel_id",
             "key",
             unique=True,
-            postgresql_where=text("tier NOT IN ('thread', 'routine')"),
+            postgresql_where=text("tier <> 'thread'"),
         ),
         Index(
             "uq_feature_values_thread",

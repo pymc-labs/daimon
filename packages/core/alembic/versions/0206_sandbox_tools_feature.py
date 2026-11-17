@@ -5,10 +5,12 @@ most specific for a routine's runs; it takes no lock. Its `pin` keeps what a pin
 covers: the agent id and environment name at the agent tier, the agent version and
 environment revision at the routine tier. Each routine opt-in moves to a routine-tier On
 with its pin, and its history to `channel_changes`; DM routines never ran built-ins, so
-theirs are dropped. The routine columns and `routine_sandbox_history` go. `system` joins
-both surface checks for changes Daimon makes itself. A `routine_sandbox_tools` On must carry
-its pin. Downgrading restores routine opt-ins and their history and drops agent opt-ins,
-routine Offs and every change Daimon made itself (`system`).
+theirs are dropped. A routine row's `channel_id` holds its routine id, so
+`uq_feature_values_place` keeps the predicate older releases upsert against. The routine
+columns and `routine_sandbox_history` go. `system` joins both surface checks for changes
+Daimon makes itself. A `routine_sandbox_tools` On must carry its pin. Downgrading restores
+routine opt-ins and their history and drops agent opt-ins, routine Offs and every change
+Daimon made itself (`system`).
 
 downgrade: destructive
 """
@@ -42,17 +44,6 @@ def _feature_checks(tiers: str, surfaces: str, unlockable: str) -> None:
     )
 
 
-def _place_index(where: str) -> None:
-    op.drop_index("uq_feature_values_place", table_name="feature_values")
-    op.create_index(
-        "uq_feature_values_place",
-        "feature_values",
-        ["tenant_id", "tier", "agent_id", "channel_id", "key"],
-        unique=True,
-        postgresql_where=sa.text(where),
-    )
-
-
 def _change_surfaces(surfaces: str) -> None:
     op.drop_constraint("ck_channel_changes_surface", "channel_changes", type_="check")
     op.create_check_constraint(
@@ -74,7 +65,8 @@ def upgrade() -> None:
     op.create_check_constraint(
         "ck_feature_values_routine",
         "feature_values",
-        "(tier = 'routine') = (routine_id IS NOT NULL)",
+        "(tier = 'routine') = (routine_id IS NOT NULL)"
+        " AND (routine_id IS NULL OR channel_id = routine_id::text)",
     )
     op.create_index(
         "uq_feature_values_routine", "feature_values", ["routine_id", "key"], unique=True
@@ -84,7 +76,6 @@ def upgrade() -> None:
         "'web', 'chat', 'panel', 'cli', 'system', 'spec', 'migration'",
         "'thread', 'routine'",
     )
-    _place_index("tier NOT IN ('thread', 'routine')")
     _change_surfaces("'web', 'chat', 'panel', 'cli', 'system'")
     op.add_column("feature_values", sa.Column("pin", postgresql.JSONB(), nullable=True))
     op.create_check_constraint(
@@ -100,8 +91,8 @@ def upgrade() -> None:
         " AND destination_kind IS DISTINCT FROM 'dm'"
     )
     op.execute(
-        "INSERT INTO feature_values (tenant_id, tier, routine_id, key, value, pin, surface,"
-        f" set_at) SELECT tenant_id, 'routine', id, '{_KEY}', 'on',"
+        "INSERT INTO feature_values (tenant_id, tier, channel_id, routine_id, key, value, pin,"
+        f" surface, set_at) SELECT tenant_id, 'routine', id::text, id, '{_KEY}', 'on',"
         f" {_PIN_JSON.format(p='sandbox_')}, 'migration', coalesce(sandbox_tools_set_at, now())"
         f" FROM routines WHERE {opted_in}"
     )
@@ -198,7 +189,6 @@ def downgrade() -> None:
     op.execute(f"DELETE FROM feature_values WHERE tier = 'routine' OR key = '{_KEY}'")
     op.execute("DELETE FROM feature_values WHERE surface = 'system'")
     _change_surfaces("'web', 'chat', 'panel', 'cli'")
-    _place_index("tier <> 'thread'")
     _feature_checks(
         "'workspace', 'agent', 'channel', 'thread'",
         "'web', 'chat', 'panel', 'cli', 'spec', 'migration'",
