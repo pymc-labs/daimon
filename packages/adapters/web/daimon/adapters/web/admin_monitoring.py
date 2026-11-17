@@ -1,8 +1,8 @@
-"""`/api/admin/monitoring`: the conversations kept for a monitored agent, for platform admins.
+"""`/api/admin/monitoring`: the conversations kept for a monitored agent, for workspace admins.
 
-Only those who may turn monitoring on read it, as in chat. Every read is written to the
-audit trail before anything is returned, the first page of a list or transcript only:
-loading more is the same read.
+Only those who may turn monitoring on read it, as in chat
+(`monitoring_view.may_read_monitored`). Every read is written to the audit trail before
+anything is returned, the first page of a list or transcript only: loading more is the same read.
 """
 
 from __future__ import annotations
@@ -12,9 +12,9 @@ from datetime import date
 from typing import Annotated, Any
 
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.adapters.web.admin_common import WorkspaceAdmin, listed_agents
+from daimon.adapters.web.admin_common import listed_agents
 from daimon.adapters.web.audit import audit
-from daimon.adapters.web.caller import WebCaller
+from daimon.adapters.web.caller import WebCaller, current_caller
 from daimon.adapters.web.paging import PageRequest, cut, page_of
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import monitoring_view as view
@@ -22,11 +22,10 @@ from daimon.core.monitoring import MonitoringState
 from daimon.core.monitoring_view import Where
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores.domain import MonitoredConversationRow, MonitoredEventRow, WebPersonRow
-from daimon.core.web_roles_rules import server_admin
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 _NO_AGENT = "This agent isn't in the workspace."
-_PLATFORM_ADMINS = "Only platform admins can read monitored conversations."
+_ADMINS_ONLY = "Only workspace admins can read monitored conversations."
 
 
 def _switch(state: MonitoringState) -> dict[str, Any]:
@@ -63,18 +62,22 @@ def _event(row: MonitoredEventRow) -> dict[str, Any]:
     }
 
 
-async def _platform_admin(request: Request, caller: WorkspaceAdmin) -> WebCaller:
-    """A platform admin, the bar for the switches and the chat tools: a web grant alone is
-    not enough. Checked before a read is audited."""
+async def _monitoring_reader(
+    request: Request, caller: Annotated[WebCaller, Depends(current_caller)]
+) -> WebCaller:
+    """A workspace owner or admin, the bar the chat tools and the agent page share. Checked
+    live, before a read is audited."""
     runtime: WebRuntime = request.app.state.runtime
     async with runtime.sessionmaker() as db:
-        allowed = await server_admin(db, caller.person)
+        allowed = await view.may_read_monitored(
+            db, tenant_id=caller.person.tenant_id, account_id=caller.person.account_id
+        )
     if not allowed:
-        raise HTTPException(status_code=403, detail=_PLATFORM_ADMINS)
+        raise HTTPException(status_code=403, detail=_ADMINS_ONLY)
     return caller
 
 
-PlatformAdmin = Annotated[WebCaller, Depends(_platform_admin)]
+MonitoringReader = Annotated[WebCaller, Depends(_monitoring_reader)]
 
 
 def monitoring_router(runtime: WebRuntime) -> APIRouter:
@@ -106,7 +109,7 @@ def monitoring_router(runtime: WebRuntime) -> APIRouter:
 
     @router.get("/agents/{agent_id}")
     async def agent_switches(  # pyright: ignore[reportUnusedFunction]
-        caller: PlatformAdmin, agent_id: str
+        caller: MonitoringReader, agent_id: str
     ) -> dict[str, Any]:
         agent = await agent_of(caller, agent_id)
         async with runtime.sessionmaker() as db:
@@ -122,7 +125,7 @@ def monitoring_router(runtime: WebRuntime) -> APIRouter:
 
     @router.get("/agents/{agent_id}/conversations")
     async def conversations(  # pyright: ignore[reportUnusedFunction]
-        caller: PlatformAdmin,
+        caller: MonitoringReader,
         agent_id: str,
         response: Response,
         page: Annotated[PageRequest, Depends(page_of(50))],
@@ -158,7 +161,7 @@ def monitoring_router(runtime: WebRuntime) -> APIRouter:
 
     @router.get("/agents/{agent_id}/conversations/{conversation_id}")
     async def transcript(  # pyright: ignore[reportUnusedFunction]
-        caller: PlatformAdmin,
+        caller: MonitoringReader,
         agent_id: str,
         conversation_id: str,
         response: Response,
