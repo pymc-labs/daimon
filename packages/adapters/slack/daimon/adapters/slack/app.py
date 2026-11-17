@@ -203,10 +203,20 @@ from daimon.adapters.slack.shared_channel import (
 from daimon.adapters.slack.support_escalation import (
     ASK_HUMAN_ACTION_ID,
     SUPPORT_CALLBACK_ID,
+    evaluate_plan_submission,
     evaluate_support_submission,
     handle_ask_human_click,
+    handle_option_pick,
     run_support_submission,
     slack_support_enabled,
+)
+from daimon.adapters.slack.support_plan_form import OPTION_ACTION_ID, PLAN_CALLBACK_ID
+from daimon.adapters.slack.support_post import SETTLE_DECLINE_ACTION_ID, SETTLE_SET_ACTION_ID
+from daimon.adapters.slack.support_settle import (
+    SETTLE_CALLBACK_ID,
+    evaluate_settle_submission,
+    handle_settle_click,
+    run_settle_submission,
 )
 from daimon.adapters.slack.thread_handoff import (
     HAND_OVER_ACTION_ID,
@@ -1266,6 +1276,24 @@ class SlackApp:
                 )
                 if _sup.proceed:
                     self._spawn(run_support_submission(self.runtime, _sup))
+            elif cb_id == PLAN_CALLBACK_ID:
+                # Pure evaluate (no I/O) — must run before the single ack.
+                _plan = evaluate_plan_submission(payload)
+                await client.send_socket_mode_response(
+                    SocketModeResponse(envelope_id=req.envelope_id, payload=_plan.response_payload)
+                )
+                if _plan.proceed:
+                    self._spawn(run_support_submission(self.runtime, _plan))
+            elif cb_id == SETTLE_CALLBACK_ID:
+                # Pure evaluate (no I/O) — must run before the single ack.
+                _settle = evaluate_settle_submission(payload)
+                await client.send_socket_mode_response(
+                    SocketModeResponse(
+                        envelope_id=req.envelope_id, payload=_settle.response_payload
+                    )
+                )
+                if _settle.proceed:
+                    self._spawn(run_settle_submission(self.runtime, _settle))
             else:
                 # Unknown view_submission callback_id — log and ack empty.
                 log.info("slack.on_request.unknown_view_submission_callback", callback_id=cb_id)
@@ -1607,6 +1635,10 @@ class SlackApp:
             self._spawn(handle_feedback_details_click(self.runtime, payload))
         elif action_id == ASK_HUMAN_ACTION_ID:
             self._spawn(handle_ask_human_click(self.runtime, payload))
+        elif action_id == OPTION_ACTION_ID:
+            self._spawn(handle_option_pick(self.runtime, payload))
+        elif action_id in (SETTLE_SET_ACTION_ID, SETTLE_DECLINE_ACTION_ID):
+            self._spawn(handle_settle_click(self.runtime, payload))
         elif action_id.startswith(PROVIDER_ACTION_PREFIX):
             self._spawn(self._provider_actions.handle_click(payload))
         elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):

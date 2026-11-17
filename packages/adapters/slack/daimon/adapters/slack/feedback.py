@@ -708,7 +708,7 @@ async def run_feedback_text_submission(
     dest_channel = _support_channel(runtime, team_id=team_id)
     if dest_channel is not None and recorded.details_changed:
         # Best-effort: the form is already recorded, whatever the post does.
-        delivered = await post_to_support_channel(
+        post = await post_to_support_channel(
             runtime,
             source_client=client,
             source_team_id=team_id,
@@ -719,6 +719,7 @@ async def run_feedback_text_submission(
                 decision=d, team_id=team_id, user_id=user_id, recorded=recorded, link=link
             ),
         )
+        delivered = post is not None
         log.info(
             "feedback.routed_to_support", feedback_id=str(recorded.row_id), delivered=delivered
         )
