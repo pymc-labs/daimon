@@ -79,7 +79,9 @@ A menu that a plan uses cannot be removed.
 A `range` or `quoted` request holds its minimum until staff settle it. Anyone
 in the support channel settles it from the request's post, or declines it to
 refund the hold. The person who asked is not told the final charge, so tell
-them yourself. Every settle is recorded with who made it.
+them yourself. Every settle is recorded with who made it. On Slack, settling
+needs the support channel's workspace set (`slack_escalation_team_id`). Clearing
+a plan declines its pending requests.
 
 ## Change plans
 
