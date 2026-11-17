@@ -513,11 +513,11 @@ class _Db:
 
 
 @pytest.mark.parametrize("settle_s", [0.0, 1.0], ids=["in_budget", "out_of_budget"])
-async def test_the_kept_replies_wait_for_the_settle_and_have_their_own_budget(
+async def test_the_kept_replies_follow_the_settle_inside_its_budget(
     monkeypatch: pytest.MonkeyPatch, settle_s: float
 ) -> None:
-    """Keeping replies never eats the billing settle's budget: it runs after, even when the
-    settle ran out of time."""
+    """Keeping replies runs after the billing settle and before the request is cleared,
+    and never past `budget_s`: when the settle used it up, the request stays unchanged."""
     order: list[str] = []
     request = SimpleNamespace(turn_event_id="evt_u1")
 
@@ -532,8 +532,9 @@ async def test_the_kept_replies_wait_for_the_settle_and_have_their_own_budget(
         order.append("settle")
         return SimpleNamespace(complete=True)
 
-    async def keep(*_args: object, **_kwargs: object) -> None:
+    async def keep(*_args: object, **_kwargs: object) -> bool:
         order.append("keep")
+        return True
 
     state = session_settle_state
     monkeypatch.setattr(state, "settle_request", settle_request)
@@ -546,4 +547,85 @@ async def test_the_kept_replies_wait_for_the_settle_and_have_their_own_budget(
         cast(Any, None), cast(Any, _Db), session, markup=Decimal(1), budget_s=0.2
     )
 
-    assert order == (["settle", "clear", "keep"] if settle_s == 0 else ["keep"]), order
+    assert order == (["settle", "keep", "clear"] if settle_s == 0 else []), order
+
+
+async def test_a_reply_that_could_not_be_read_is_kept_by_a_later_settle(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A settle whose reply read fails or runs out of time leaves the request, so the next
+    sweep keeps the reply; once it is kept the request is cleared."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await _switch_on(db_session, tenant.id, "monitor_mcp")
+    assert await capture_question(
+        db_session_factory,
+        None,
+        tenant_id=tenant.id,
+        agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agt_a"),
+        platform="mcp",
+        account_id=account.id,
+        conversation="sesn_1",
+        turn_ref="evt_u1",
+        content="hello",
+    )
+    async with db_session_factory() as s, s.begin():
+        _, requested_at = await session_settle_state.request_settle(s, managed_session_id="sesn_1")
+        await session_settle_state.name_settle_turn(
+            s, managed_session_id="sesn_1", requested_at=requested_at, turn_event_id="evt_u1"
+        )
+
+    async def settle(*_args: object, **_kwargs: object) -> object:
+        return SimpleNamespace(complete=True)
+
+    reads: list[str] = []
+
+    async def list_events(*_args: object, **_kwargs: object) -> _Page:
+        reads.append("read")
+        if len(reads) == 1:
+            raise TimeoutError
+        return _Page(
+            [
+                _event("session.status_idle"),
+                _event("agent.message", text="the reply"),
+                _event("user.message", "evt_u1"),
+            ]
+        )
+
+    monkeypatch.setattr(usage_sweep, "settle_stamped_session", settle)
+    monkeypatch.setattr(usage_sweep, "_list_events", list_events)
+    session = cast(
+        Any,
+        SimpleNamespace(
+            id="sesn_1",
+            status="terminated",
+            metadata={MA_METADATA_KEY_TENANT: str(tenant.id)},
+        ),
+    )
+
+    async def pending() -> object:
+        async with db_session_factory() as s:
+            return await session_settle_state.settle_request(s, managed_session_id="sesn_1")
+
+    async def kept() -> list[str | None]:
+        async with db_session_factory() as s:
+            rows = await store.list_events(
+                s,
+                tenant_id=tenant.id,
+                agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agt_a"),
+            )
+        return [row.content for row in rows if row.kind == "answer"]
+
+    async def sweep() -> None:
+        await usage_sweep.settle_finished_turn(
+            cast(Any, None), db_session_factory, session, markup=Decimal(1), budget_s=None
+        )
+
+    await sweep()
+    assert await pending() is not None, "the request was cleared with the reply unkept"
+    assert await kept() == [], "kept a reply that could not be read"
+    await sweep()
+    assert await kept() == ["the reply"], "the later sweep did not keep the reply"
+    assert await pending() is None, "the request outlived its kept reply"

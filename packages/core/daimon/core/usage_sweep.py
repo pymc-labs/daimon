@@ -572,15 +572,16 @@ async def _keep_monitored_replies(
     anthropic: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
     session: BetaManagedAgentsSession,
-) -> None:
+) -> bool:
     """Keep the replies to this agent chat session's kept questions whose turns ended
     (`daimon.core.monitoring`): each turn's newest `agent.message` text. A turn paused on
     a confirmation has not ended; it is kept by a later settle. Bounded by
-    `KEEP_REPLIES_BUDGET_S`: what is left unkept waits for the next settle."""
+    `KEEP_REPLIES_BUDGET_S`. False when the read failed or ran out of time, so a reply may
+    be unkept: the caller leaves its settle request, and the next sweep retries."""
     try:
         tenant_id = uuid.UUID(session.metadata.get(MA_METADATA_KEY_TENANT) or "")
     except ValueError:
-        return
+        return True
     try:
         async with asyncio.timeout(KEEP_REPLIES_BUDGET_S):
             await _keep_replies(anthropic, sessionmaker, session, tenant_id)
@@ -589,6 +590,8 @@ async def _keep_monitored_replies(
     # Billing goes on without the kept reply: the question stays open for a later settle.
     except (TimeoutError, _anthropic.APIError, SQLAlchemyError):
         log.warning("monitoring.capture_failed", kind="answer", exc_info=True)
+        return False
+    return True
 
 
 async def _keep_replies(
@@ -671,8 +674,9 @@ async def settle_finished_turn(
     request this call verified (a newer send replaces it), so a settle cut
     short, or one racing a send, leaves it for the next read or the drain.
     `budget_s` bounds the settle, database work included; on expiry the
-    request stays. A turn that ended then keeps its monitored replies, on a
-    budget of their own.
+    request stays. A turn that ended then keeps its monitored replies, within
+    `budget_s` and a budget of their own; the request is cleared only once they
+    were read too, so a reply that could not be read is retried by the next sweep.
 
     Named boundary: an upstream or database error is logged and the request
     kept, except a rate limit, which propagates so the drain stops its pass
@@ -681,7 +685,6 @@ async def settle_finished_turn(
     if session.status not in ("idle", "terminated"):
         return None
     deadline = None if budget_s is None else time.monotonic() + budget_s
-    ended = False
     result: SettleResult | None = None
     try:
         async with asyncio.timeout(budget_s):
@@ -700,7 +703,6 @@ async def settle_finished_turn(
                 anthropic, session.id, request, scope=_stamped_scope(session)
             ):
                 return None
-            ended = True
             result = await settle_stamped_session(
                 anthropic,
                 sessionmaker,
@@ -709,7 +711,10 @@ async def settle_finished_turn(
                 max_pages=max_pages,
                 deadline=deadline,
             )
-            if result is None or result.complete:
+            # Before the request is cleared: the open questions are the retry list, and
+            # nothing else would revisit a reply that could not be read.
+            replies_kept = await _keep_monitored_replies(anthropic, sessionmaker, session)
+            if (result is None or result.complete) and replies_kept:
                 async with sessionmaker() as s, s.begin():
                     await session_settle_state.clear_settle_request(
                         s, managed_session_id=session.id, request=request
@@ -721,8 +726,6 @@ async def settle_finished_turn(
     except (_anthropic.APIError, SQLAlchemyError):
         log.exception("billing.settle_failed", managed_session_id=session.id)
         result = None
-    if ended:
-        await _keep_monitored_replies(anthropic, sessionmaker, session)
     return result
 
 
