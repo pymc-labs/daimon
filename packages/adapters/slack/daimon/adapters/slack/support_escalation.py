@@ -24,9 +24,8 @@ it asks `authorize(POST)` with no agent, the same check a routine delivery
 asks, from a fresh policy read right before the send: a protected destination
 is refused.
 
-A channel with its own admins sends the request to them by DM first, then to
-the server admins, and to the escalation channel only when no DM landed
-(`daimon.core.support_routing`); the DM carries what the post would.
+Every request is posted in the escalation channel: `daimon.core.support_routing`
+has no DM tier, so no one is messaged directly.
 
 What reaches the escalation channel: the requester (mention, name, workspace),
 a permalink to the answer, and the note the person typed. Nothing from the

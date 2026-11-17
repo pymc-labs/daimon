@@ -27,9 +27,8 @@ survives one person's DMs being closed, leaves a shared record anyone on the
 rota can pick up, and does not silently make whoever is first in a config list
 the only person who ever hears anything.
 
-A channel with its own admins is the exception: its requests go to those
-admins by DM first, then to the server admins, and to the channel only when
-no DM landed (`daimon.core.support_routing`).
+There is no exception: `daimon.core.support_routing` has no DM tier, so every
+request goes to the channel and no one is messaged directly.
 
 Delivery ordering is the load-bearing part of this module. The row is
 committed BEFORE the post is attempted, and `delivered_at` is stamped only

@@ -9,21 +9,18 @@ Ask a human). An admin of the deployment asks for free. It is a bare word, so
 prose such as "support vector machines" stays a turn. As on Discord, the row
 is committed before the post and stamped delivered only once the post lands,
 so a failed post loses nothing. Delivery runs in the background once the row
-is committed: a Teams invoke must be answered within seconds, and walking a
-tier of admins' chats can take longer, so the person is told the request is
+is committed: a Teams invoke must be answered within seconds, and the post
+can take longer, so the person is told the request is
 recorded before it lands. `enabled` decides whether the command is registered.
 
 A request asked from a channel is open to the people who could have asked the
 agent there (`answer_access`), as on Slack, decided when the form is shown and
-again on Send. If that channel has its own admins, the request goes to them in
-1:1 chats first, then to the tenant's admins (`daimon.core.support_routing`),
-each held to the tenant's DM policy and found on the channel's team roster.
-Otherwise, or when no chat landed, this bot posts it in
-`DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID`, Teams' own channel, as Slack
-has its own. A request whose charge is still to be set is always posted
-there too, with the charge and Set charge / Decline (`support_settle`). A
-channel read only from inside is marked in the post, so whoever picks it up
-answers there, and the form warns that the note leaves it.
+again on Send. This bot posts the request in `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID`,
+Teams' own channel, as Slack has its own; `daimon.core.support_routing` has no
+DM tier, so no one is messaged directly. A request whose charge is still to be
+set carries the charge and Set charge / Decline (`support_settle`). A channel
+read only from inside is marked in the post, so whoever picks it up answers
+there, and the form warns that the note leaves it.
 
 When it is, every answer also gets an Ask a human button (`card.ASK_HUMAN_DIALOG`),
 Slack's: it opens the same form in a dialog only the clicker sees, for the
