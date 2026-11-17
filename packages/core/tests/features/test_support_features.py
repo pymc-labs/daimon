@@ -77,10 +77,10 @@ async def test_the_workspaces_own_channel_meets_the_channel_requirement(
     assert held.unavailable == "requires", "the operator keeps every request in the default channel"
 
 
-async def test_a_place_limit_gives_credits_when_everyone_has_none(
+async def test_any_limit_gives_credits_when_everyone_has_none(
     db_session: AsyncSession,
 ) -> None:
-    """Everyone at 0 needs a place's limit; a person's row only caps, so it is not enough."""
+    """Everyone at 0 needs a limit: a person's row gives that person credits, so it counts."""
     tenant = await make_tenant(db_session)
     settings = _settings(slack_escalation_channel_id="C1", credits_per_user=0)
     place = FeaturePlace(tenant.id, "slack")
@@ -89,11 +89,9 @@ async def test_a_place_limit_gives_credits_when_everyone_has_none(
     ).unavailable == "requires"
 
     await _limit(db_session, tenant.id, person="U1")
-    person_only = await feature_in(db_session, settings, place, "support_escalation")
-    assert person_only.unavailable == "requires", "a person's row adds no credits"
-
-    await _limit(db_session, tenant.id)
-    assert (await feature_in(db_session, settings, place, "support_escalation")).on
+    assert (await feature_in(db_session, settings, place, "support_escalation")).on, (
+        "a person's own limit is credits"
+    )
 
 
 async def test_feedback_needs_a_channel_but_no_credits(db_session: AsyncSession) -> None:

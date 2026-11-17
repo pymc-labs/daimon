@@ -36,6 +36,8 @@ from daimon.core.stores.support_rows import (
     SupportLimitRow,
     SupportMenuRow,
 )
+from daimon.core.stores.teams_installations import get_teams_installation
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.support import (
     LimitSpec,
     MenuSpec,
@@ -57,6 +59,7 @@ SETTLE_SETTING = "support_settle"
 MENU_IN_USE = "A place still uses this menu. Change that place first"
 NO_MENU = "No menu has that key."
 OWN_CHANNEL_LOCKED = "Requests go to the default channel. Ask whoever runs Daimon."
+NOT_IN_WORKSPACE = "That channel is not in this workspace."
 
 
 def may_set_support(subject: Subject) -> Decision:
@@ -467,13 +470,32 @@ def _channel_json(row: SupportChannelRow | None) -> JsonValue:
 
 @dataclass(frozen=True)
 class ChannelPick:
-    """Where a workspace's requests go; the adapter checked the channel exists."""
+    """Where a workspace's requests go; the adapter checked the channel exists.
+
+    The surface passes the workspace it resolved the channel in (`discord_guild_id`,
+    `slack_team_id` or `teams_team_id`); `set_support_channel` checks it is this tenant's.
+    """
 
     platform: str
     channel_id: str
+    discord_guild_id: str | None = None
     slack_team_id: str | None = None
     teams_team_id: str | None = None
     teams_service_url: str | None = None
+
+
+async def _foreign_channel(session: AsyncSession, tenant_id: uuid.UUID, pick: ChannelPick) -> bool:
+    """True when the pick's guild or team is not this tenant's workspace."""
+    if pick.platform == "teams":
+        if not pick.teams_team_id:
+            return True
+        found = await get_teams_installation(
+            session, tenant_id=tenant_id, team_id=pick.teams_team_id
+        )
+        return found is None
+    own = {"discord": pick.discord_guild_id, "slack": pick.slack_team_id}.get(pick.platform)
+    tenant = await get_tenant(session, tenant_id)
+    return tenant is None or tenant.platform != pick.platform or own != tenant.external_id
 
 
 async def set_support_channel(
@@ -487,13 +509,16 @@ async def set_support_channel(
     """Set the workspace's own request channel, or drop it (`pick` None: the default applies).
 
     `own_allowed` is the `support_own_channel` feature (`support_routing.own_channel_allowed`).
-    Requests already open stay where they were posted.
+    Requests already open stay where they were posted. A pick outside the tenant's own
+    Discord server, Slack workspace or installed Teams team is refused (`NOT_IN_WORKSPACE`).
     """
     _require_admin(actor)
     if not own_allowed:
         raise ChannelChangeRefused(OWN_CHANNEL_LOCKED, kind="forbidden")
     async with sessionmaker.begin() as session:
         await lock_access_policy(session, tenant_id=actor.tenant_id)
+        if pick is not None and await _foreign_channel(session, actor.tenant_id, pick):
+            raise ChannelChangeRefused(NOT_IN_WORKSPACE, kind="invalid")
         before = await store.get_support_channel(session, tenant_id=actor.tenant_id)
         _stale_check(CHANNEL_SETTING, _revision(before), expected, _channel_json(before))
         row = None
@@ -670,6 +695,7 @@ __all__ = [
     "MENU_SETTING",
     "MENU_USE_SETTING",
     "NO_MENU",
+    "NOT_IN_WORKSPACE",
     "OWN_CHANNEL_LOCKED",
     "SETTLE_SETTING",
     "ChannelPick",

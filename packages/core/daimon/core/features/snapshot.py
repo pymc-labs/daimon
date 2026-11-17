@@ -123,7 +123,7 @@ def support_met(
             and setup.own_platform == platform
             and deployment_on(settings, "support_own_channel", platform)
         )
-    return settings.support.credits_per_user > 0 or (setup is not None and setup.place_limits)
+    return settings.support.credits_per_user > 0 or (setup is not None and setup.limits)
 
 
 def unavailable_reason(

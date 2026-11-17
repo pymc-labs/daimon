@@ -137,10 +137,10 @@ class SupportEscalationRow(_Row):
 @dataclass(frozen=True)
 class SupportSetup:
     """What a workspace set up for Ask a person, as the support requirements read it:
-    the platform of its own channel, and whether any place has a limit."""
+    the platform of its own channel, and whether any limit exists, a person's included."""
 
     own_platform: str | None = None
-    place_limits: bool = False
+    limits: bool = False
 
 
 @dataclass(frozen=True)

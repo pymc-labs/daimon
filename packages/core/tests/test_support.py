@@ -104,7 +104,16 @@ def test_parse_credits_when_valid_then_keeps_the_exact_amount(value: object) -> 
     assert parse_credits(value) == D(str(value)), "credits are exact decimals"
 
 
-@pytest.mark.parametrize("value", [0.5, True, "1.234", "-1", "100001", "abc", "NaN", None])
+@pytest.mark.parametrize(("value", "expected"), [("1.500", "1.5"), ("2.0", "2"), ("0.250", "0.25")])
+def test_parse_credits_when_trailing_zeros_then_accepts_the_same_amount(
+    value: str, expected: str
+) -> None:
+    assert parse_credits(value) == D(expected), "1.500 is 1.5, not a third decimal place"
+
+
+@pytest.mark.parametrize(
+    "value", [0.5, True, "1.234", "1.2501", "-1", "100001", "abc", "NaN", None]
+)
 def test_parse_credits_when_float_or_out_of_range_then_refuses(value: object) -> None:
     with pytest.raises(SupportError):
         parse_credits(value)

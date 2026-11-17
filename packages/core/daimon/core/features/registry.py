@@ -42,7 +42,7 @@ Requirement = Literal[
 ]
 """``platform_adapter``: the chat platform's adapter is set up in this deployment.
 ``support_channel``: the platform has a request channel, the deployment's or the workspace's own.
-``support_credits``: people have credits to ask (Everyone above 0, or a place's limit).
+``support_credits``: people have credits to ask (Everyone above 0, or any limit).
 The rest name one integration's setup: its operator switch or host address, credentials and keys."""
 DEFAULT: Final = "default"
 """The value a control writes to drop its own setting and inherit."""

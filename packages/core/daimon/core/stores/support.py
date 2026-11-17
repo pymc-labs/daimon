@@ -402,13 +402,12 @@ async def get_support_channel(
 
 
 async def get_support_setup(session: AsyncSession, *, tenant_id: uuid.UUID) -> SupportSetup:
-    """The workspace's own channel platform and whether a place has a limit, in one read."""
+    """The workspace's own channel platform and whether any limit exists, in one read."""
     own = select(SupportChannel.platform).where(SupportChannel.tenant_id == tenant_id)
-    limits = exists().where(
-        SupportLimit.tenant_id == tenant_id, SupportLimit.platform_user_id.is_(None)
-    )
+    # A person's limit gives that person credits (`_balance`), so it counts as one existing.
+    limits = exists().where(SupportLimit.tenant_id == tenant_id)
     row = (await session.execute(select(own.scalar_subquery(), limits))).one()
-    return SupportSetup(own_platform=row[0], place_limits=bool(row[1]))
+    return SupportSetup(own_platform=row[0], limits=bool(row[1]))
 
 
 async def set_support_channel(

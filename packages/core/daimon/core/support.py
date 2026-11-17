@@ -64,6 +64,7 @@ MAX_MENU_NAME: Final = 75
 MAX_AMOUNT: Final = Decimal(1000)
 MAX_LIMIT: Final = Decimal(100000)
 MIN_CHARGE: Final = Decimal("0.01")
+_CENT: Final = Decimal("0.01")
 MENU_KEY_PATTERN: Final = r"[a-z0-9-]{1,32}"
 OPTION_KEY_PATTERN: Final = r"[a-z0-9_]{1,32}"
 
@@ -106,12 +107,12 @@ def _decimal(value: object, *, name: str) -> Decimal:
             ) from exc
     else:
         raise SupportError(f'{name} must be a decimal string such as "0.5"', field=name)
-    exponent = amount.as_tuple().exponent
     if not amount.is_finite():
         raise SupportError(f"{name} must be a number of credits", field=name)
-    if isinstance(exponent, int) and exponent < -2:
+    # "1.500" is 1.5: only a nonzero digit past the second place is refused.
+    if cast(int, amount.normalize().as_tuple().exponent) < -2:
         raise SupportError(f"{name} must have at most two decimal places", field=name)
-    return amount
+    return amount.quantize(_CENT) if cast(int, amount.as_tuple().exponent) < -2 else amount
 
 
 def parse_credits(value: object, *, name: str = "credits") -> Decimal:

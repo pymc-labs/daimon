@@ -13,6 +13,7 @@ from daimon.core.channel_changes import ChannelActor, ChannelChangeRefused, Expe
 from daimon.core.errors import StaleChannelValue
 from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores.channel_changes import WORKSPACE_ID, list_changes
+from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.support import RequestChoice, SupportPlace, parse_limit_spec, parse_menu
 from daimon.core.support_changes import (
@@ -20,6 +21,7 @@ from daimon.core.support_changes import (
     LIMIT_SETTING,
     MENU_SETTING,
     MENU_USE_SETTING,
+    NOT_IN_WORKSPACE,
     SETTLE_SETTING,
     ChannelPick,
     clear_limit,
@@ -61,8 +63,11 @@ def _actor(tenant_id: uuid.UUID, subject: Subject | None = None) -> ChannelActor
     )
 
 
+TEAM = "T_OWN"
+
+
 async def _tenant(db_session: AsyncSession) -> uuid.UUID:
-    tenant = await make_tenant(db_session, platform="slack")
+    tenant = await make_tenant(db_session, platform="slack", workspace_id=TEAM)
     await db_session.commit()
     return tenant.id
 
@@ -153,7 +158,9 @@ async def test_changes_when_not_an_admin_then_forbidden_and_unrecorded(
         set_menu(f, member, platform="slack", key="support", spec=MENU),
         remove_menu(f, member, platform="slack", key="support"),
         set_menu_use(f, member, platform="slack", scope="workspace", scope_id="", key=None),
-        set_support_channel(f, member, pick=ChannelPick("slack", "S9"), own_allowed=True),
+        set_support_channel(
+            f, member, pick=ChannelPick("slack", "S9", slack_team_id=TEAM), own_allowed=True
+        ),
         settle(f, member, escalation_id=uuid.uuid4(), charge=D(1), default_allowance=20),
     )
     for attempt in attempts:
@@ -321,12 +328,63 @@ def test_stale_text_when_each_setting_then_says_what_is_there_in_brief(
     assert stale_text(StaleChannelValue(setting, current)).endswith(f" Now: {now}."), setting
 
 
+async def test_set_support_channel_when_outside_the_workspace_then_refused_and_unrecorded(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    tenant_id = await _tenant(db_session)
+    await record_teams_installation(
+        db_session, tenant_id=tenant_id, team_id="TM_OWN", group_id="g", name=None
+    )
+    await db_session.commit()
+    actor = _actor(tenant_id)
+    foreign = (
+        ChannelPick("slack", "S9", slack_team_id="T_OTHER"),
+        ChannelPick("slack", "S9"),
+        ChannelPick("discord", "S9", discord_guild_id=TEAM),
+        ChannelPick("teams", "S9", teams_team_id="TM_OTHER", teams_service_url="u"),
+        ChannelPick("teams", "S9", teams_service_url="u"),
+        ChannelPick("web", "S9"),
+    )
+    for pick in foreign:
+        with pytest.raises(ChannelChangeRefused) as refused:
+            await set_support_channel(db_session_factory, actor, pick=pick, own_allowed=True)
+        assert refused.value.kind == "invalid", f"{pick} is not this workspace's"
+        assert str(refused.value) == NOT_IN_WORKSPACE
+    assert await list_changes(db_session, tenant_id=tenant_id, channel_id=WORKSPACE_ID) == []
+    own = ChannelPick("teams", "S9", teams_team_id="TM_OWN", teams_service_url="u")
+    # The tenant is Slack, so a Teams pick still needs its install but not the tenant's platform.
+    row = await set_support_channel(db_session_factory, actor, pick=own, own_allowed=True)
+    assert row and row.teams_team_id == "TM_OWN", "an installed team is this workspace's"
+
+
+async def test_set_support_channel_when_discord_then_guild_must_be_the_tenants(
+    db_session: AsyncSession, db_session_factory: Factory
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="G1")
+    await db_session.commit()
+    actor = _actor(tenant.id)
+    with pytest.raises(ChannelChangeRefused):
+        await set_support_channel(
+            db_session_factory,
+            actor,
+            pick=ChannelPick("discord", "C9", discord_guild_id="G2"),
+            own_allowed=True,
+        )
+    row = await set_support_channel(
+        db_session_factory,
+        actor,
+        pick=ChannelPick("discord", "C9", discord_guild_id="G1"),
+        own_allowed=True,
+    )
+    assert row and row.channel_id == "C9"
+
+
 async def test_set_support_channel_when_set_and_dropped_then_audited_on_the_workspace(
     db_session: AsyncSession, db_session_factory: Factory
 ) -> None:
     tenant_id = await _tenant(db_session)
     actor = _actor(tenant_id)
-    pick = ChannelPick("slack", "S9")
+    pick = ChannelPick("slack", "S9", slack_team_id=TEAM)
     with pytest.raises(ChannelChangeRefused) as locked:
         await set_support_channel(db_session_factory, actor, pick=pick, own_allowed=False)
     assert locked.value.kind == "forbidden", "the operator keeps the default channel"

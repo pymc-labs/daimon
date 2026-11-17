@@ -18,7 +18,7 @@ from daimon.core.support import (
     SupportWindow,
     parse_menu,
 )
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_support_escalation, make_tenant
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -165,19 +165,7 @@ async def _settle(
 
 
 async def _legacy(session: AsyncSession, tenant_id: uuid.UUID, message: str) -> None:
-    row = await ledger.record_escalation(
-        session,
-        tenant_id=tenant_id,
-        account_id=None,
-        platform="slack",
-        platform_user_id="U1",
-        channel_id="C1",
-        message_id=message,
-        ma_session_id=None,
-        note="help",
-        allowance=20,
-    )
-    assert row is not None, "the legacy path still records"
+    await make_support_escalation(session, tenant_id=tenant_id, message_id=message)
 
 
 async def test_default_spent_when_legacy_rows_then_equals_their_count(
@@ -194,10 +182,7 @@ async def test_default_spent_when_legacy_rows_then_equals_their_count(
         "settled",
     ), "a default request is charged 1 at submit"
     spent = await ledger.default_spent(db_session, tenant_id=tenant.id, platform_user_id="U1")
-    count = await ledger.count_escalations_for_user(
-        db_session, tenant_id=tenant.id, platform_user_id="U1"
-    )
-    assert (spent, count) == (D(3), 3), "the sum equals today's count"
+    assert spent == D(3), "the sum equals the number of rows"
 
 
 async def test_submit_when_default_allowance_spent_then_out_of_credits_unless_raised(
@@ -524,6 +509,15 @@ async def test_limit_spent_when_monthly_then_last_months_rows_do_not_count(
     ), "a new month starts empty"
     then = await ledger.limit_spent(db_session, limit=limit, platform_user_id="U1", as_of=old)
     assert then == (D(1), D(1)), "the old month still holds its row"
+
+
+async def test_submit_when_now_is_given_then_the_row_is_created_at_that_time(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session, platform="slack")
+    at = datetime.now(UTC) - timedelta(days=3)
+    row = (await _submit(db_session, tenant.id, now=at)).row
+    assert row and row.created_at == at, "the window check and the stored time share one clock"
 
 
 async def test_set_menu_when_set_again_then_revision_rises_tenant_wide(

@@ -11,7 +11,12 @@ from daimon.core.purge import purge_account, purge_principal
 from daimon.core.stores import support as store
 from daimon.core.stores import support_escalation as ledger
 from daimon.core.support import RequestChoice, SupportPlace, parse_menu
-from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+from daimon.testing.factories import (
+    make_account,
+    make_platform_principal,
+    make_support_escalation,
+    make_tenant,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -89,6 +94,12 @@ async def _person_with_limit_history(db_session: AsyncSession) -> tuple[uuid.UUI
         )
         assert outcome.row, f"{user} recorded on the limit"
         ids[user] = outcome.row.id
+    await ledger.mark_delivered(
+        db_session,
+        escalation_id=ids[GONE],
+        support_channel_id="S1",
+        support_post_id="post-1",
+    )
     settled = await ledger.settle_request(
         db_session,
         escalation_id=ids[STAY],
@@ -98,19 +109,15 @@ async def _person_with_limit_history(db_session: AsyncSession) -> tuple[uuid.UUI
         default_allowance=20,
     )
     assert settled.status == "settled", "GONE settled STAY's request as staff"
-    legacy = await ledger.record_escalation(
+    await make_support_escalation(
         db_session,
         tenant_id=tenant.id,
         account_id=account.id,
-        platform="slack",
         platform_user_id=GONE,
         channel_id="C2",
         message_id="m-legacy",
-        ma_session_id=None,
         note="old ask",
-        allowance=20,
-    )
-    assert legacy, "a default-ledger row"
+    )  # a default-ledger row
     await db_session.commit()
     return principal.id, account.id
 
@@ -135,18 +142,19 @@ async def test_purge_principal_when_limit_history_then_anonymizes_and_keeps_char
         report.support_settlers_cleared,
     )
     assert counts == (1, 1, 2, 1), "legacy row deleted; limit row, own limits and settler handled"
-    rows = {r.message_id: r for r in await _rows(db_session)}
-    assert set(rows) == {f"m-{GONE}", f"m-{STAY}"}, "only the default-ledger row is deleted"
-    gone = rows[f"m-{GONE}"]
-    assert (gone.platform_user_id, gone.account_id, gone.ma_session_id) == (
-        ledger.PURGED_USER,
+    rows = {r.platform_user_id: r for r in await _rows(db_session)}
+    assert set(rows) == {ledger.PURGED_USER, STAY}, "only the default-ledger row is deleted"
+    gone = rows[ledger.PURGED_USER]
+    assert (gone.account_id, gone.ma_session_id, gone.message_id) == (
         None,
         None,
-    ), "the person is erased from their limit row"
+        "",
+    ), "the person and their origin message are erased from their limit row"
+    assert gone.support_post_id == "post-1", "the support post stays, a settle needs it"
     assert (gone.note, gone.answers) == ("", None), "their words go with them"
     assert (gone.status, gone.hold) == ("pending", D(1)), "the shared credits keep the hold"
     assert (gone.limit_id is not None, gone.person_limit_id) == (True, None), "own limit unlinked"
-    stay = rows[f"m-{STAY}"]
+    stay = rows[STAY]
     assert (stay.settled_by, stay.settled_by_account_id) == (None, None), "the settler is cleared"
     assert (stay.platform_user_id, stay.charge) == (STAY, D("1.5")), "the bystander's row stays"
     limits = (await db_session.execute(select(SupportLimit))).scalars().all()
