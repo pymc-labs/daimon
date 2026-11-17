@@ -2757,6 +2757,17 @@ class LongJobsSettings(BaseModel):
     )
 
 
+class MonitoringSettings(BaseModel):
+    retention_days: int = Field(
+        default=90,
+        ge=1,
+        description=(
+            "Days a monitored question, answer or tool call is kept before the scheduler "
+            "deletes it, default 90."
+        ),
+    )
+
+
 class RepoMemorySettings(BaseModel):
     enabled: bool = Field(
         default=False,
@@ -2798,6 +2809,7 @@ def get_repo_memory_settings(settings: object) -> RepoMemorySettings:
 class Settings(BaseSettings):
     compute: ComputeSettings = Field(default_factory=ComputeSettings)
     long_jobs: LongJobsSettings = Field(default_factory=LongJobsSettings)
+    monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
     security_audit_retention_days: int = Field(
         default=90,
         ge=0,

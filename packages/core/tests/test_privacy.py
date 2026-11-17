@@ -998,6 +998,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "microsoft_user_tokens": "microsoft_user_tokens",
         "web_people": "web_people",
         "web_admin_grants": "web_admin_grants",
+        "monitored_events": "monitored_events",
         "mux_slots": "mux_slots",
         "mux_binding_generations": "mux_binding_generations",
         "mux_journal_sessions": "mux_journal_sessions",
@@ -1068,6 +1069,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         # The web app: a person, with their identities, tokens and browser sessions, and
         # the admin grants of the account.
         "web_people": "account_id FK -> accounts.id",
+        "monitored_events": "account_id FK -> accounts.id; monitoring.delete_for_account",
         "workspace_admins": "account_id FK -> accounts.id",
         # The person's user id leaves every grant; updated_by is SET NULL.
         "daimon_admins": "subject_id and granted_by are erased by platform principal",

@@ -705,6 +705,39 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         authority=_ADMIN,
         legacy_env=("DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION",),
     ),
+    *(
+        FeatureSpec(
+            key=key,
+            name=name,
+            category="guardrails",
+            effect="capability",
+            values=_ON_OFF,
+            default="off",
+            tiers=("deployment", "workspace", "agent"),
+            # Read on every recorded turn, so a conversation begun before it is turned on
+            # is recorded from then on, and nothing from before.
+            binds="turn",
+            doc=doc,
+            platforms=EVERY_PLATFORM,
+            authority=_SERVER_ADMIN,
+        )
+        for key, name, doc in (
+            (
+                "monitor_direct_messages",
+                "Monitor direct messages",
+                "Keeps what people ask this agent in direct messages and web chat, and what "
+                "it answers, for workspace admins to read. Kept from when it is turned on, "
+                "for the deployment's retention period.",
+            ),
+            (
+                "monitor_mcp",
+                "Monitor MCP",
+                "Keeps what people ask this agent over MCP and what it answers, and the name, "
+                "time and outcome of each other MCP tool they call on it, never what the call "
+                "sent or returned. Kept from when it is turned on, for the retention period.",
+            ),
+        )
+    ),
 )
 
 

@@ -41,6 +41,7 @@ from daimon.core.stores import lead_intake as lead_intake_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
 from daimon.core.stores import microsoft_user_tokens as microsoft_tokens_store
+from daimon.core.stores import monitoring as monitoring_store
 from daimon.core.stores import mux_erasure as mux_erasure_store
 from daimon.core.stores import platform_names as platform_names_store
 from daimon.core.stores import routines as routines_store
@@ -112,6 +113,7 @@ class PurgePreview(BaseModel):
     lead_intakes: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     web_people: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     web_admin_grants: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    monitored_events: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     # Provider-neutral conversation state erased with the account (stores.mux_erasure),
     # one row per PurgeReport mux field.
     mux_slots: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
@@ -514,6 +516,7 @@ async def collect_purge_preview(
         web_admin_grants_total = await web_roles_store.count_admin_grants_for_account(
             session, account_id=account_id
         )
+        monitored_total = await monitoring_store.count_for_account(session, account_id=account_id)
         host_call_cards_total = await host_call_cards_store.count_for_account(
             session, account_id=account_id
         )
@@ -568,6 +571,7 @@ async def collect_purge_preview(
         microsoft_user_tokens=PurgePreviewRow(count=microsoft_user_tokens_total, example=None),
         web_people=PurgePreviewRow(count=web_people_total, example=None),
         web_admin_grants=PurgePreviewRow(count=web_admin_grants_total, example=None),
+        monitored_events=PurgePreviewRow(count=monitored_total, example=None),
         mux_slots=PurgePreviewRow(count=mux.erased.slots, example=None),
         mux_binding_generations=PurgePreviewRow(count=mux.erased.binding_generations, example=None),
         mux_journal_sessions=PurgePreviewRow(count=mux.erased.journal_sessions, example=None),

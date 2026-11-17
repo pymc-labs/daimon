@@ -87,6 +87,8 @@ Where each feature can be set, and its default.
 | Reach check | `reach_budget` | Guardrail | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |
 | Built-in tools in routines | `unattended_capabilities` | Guardrail | Allowed | ✓ | ✓ | ✓ |  |  |  |
 | Routines must say where they post | `require_routine_destination` | Guardrail | Optional | ✓ | ✓ |  |  |  |  |
+| Monitor direct messages | `monitor_direct_messages` | Guardrail | Off | ✓ | ✓ | ✓ |  |  |  |
+| Monitor MCP | `monitor_mcp` | Guardrail | Off | ✓ | ✓ | ✓ |  |  |  |
 
 ## Approvals
 
@@ -945,3 +947,27 @@ A routine the agent makes must name where its results go, or it is not made. Exi
 | Levels | Deployment, Workspace |
 | Combines | Stricter wins |
 | Deprecated | `DAIMON_MCP__REQUIRE_ROUTINE_DESTINATION` |
+
+## Monitor direct messages
+
+Keeps what people ask this agent in direct messages and web chat, and what it answers, for workspace admins to read. Kept from when it is turned on, for the deployment's retention period.
+
+| | |
+| --- | --- |
+| Key | `monitor_direct_messages` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace, Agent |
+| Combines | Off above is a ceiling |
+
+## Monitor MCP
+
+Keeps what people ask this agent over MCP and what it answers, and the name, time and outcome of each other MCP tool they call on it, never what the call sent or returned. Kept from when it is turned on, for the retention period.
+
+| | |
+| --- | --- |
+| Key | `monitor_mcp` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Deployment, Workspace, Agent |
+| Combines | Off above is a ceiling |

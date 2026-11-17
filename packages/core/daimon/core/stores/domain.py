@@ -1980,6 +1980,29 @@ class WebMessageRow(BaseModel):
     created_at: datetime
 
 
+MonitoredPlatform = Literal["discord", "slack", "teams", "web", "mcp"]
+MonitoredKind = Literal["question", "answer", "tool"]
+
+
+class MonitoredEventRow(BaseModel):
+    """A kept question, answer or MCP tool call (`stores.monitoring`)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    agent_id: uuid.UUID
+    platform: MonitoredPlatform
+    account_id: uuid.UUID
+    conversation: str | None
+    turn_ref: str | None
+    kind: MonitoredKind
+    content: str | None
+    tool_name: str | None
+    outcome: str | None
+    created_at: datetime
+
+
 class PendingCarryOverRow(BaseModel):
     """A replacement session's framing not yet sent (`stores.pending_carry_overs`)."""
 
