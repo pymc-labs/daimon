@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from datetime import UTC, datetime
 from typing import cast
 
 import structlog
@@ -48,7 +49,6 @@ from daimon.adapters.discord.support_escalation import (
     SupportEscalateButton,
     answer_origin,
     discord_channel,
-    ended_text,
     menu_message,
     requester_is_admin,
 )
@@ -68,8 +68,14 @@ from daimon.core.stores.support_escalation import resolve_plan
 from daimon.core.stores.support_rows import PlanView
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import get_latest_thread_session
-from daimon.core.support_escalation import OUT_OF_CREDITS, is_enabled, is_escalation_reaction
-from daimon.core.support_plans import EXEMPT_OFFER, NOT_ENOUGH_CREDITS, balance_text, price_bounds
+from daimon.core.support_escalation import is_enabled, is_escalation_reaction
+from daimon.core.support_plans import (
+    EXEMPT_OFFER,
+    balance_text,
+    ended_text,
+    out_of_credits_text,
+    price_bounds,
+)
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -114,11 +120,11 @@ def support_offer(
 ) -> tuple[discord.Embed, discord.ui.View] | str:
     """The direct message an escalate reaction sends: a menu, the note button, or why not."""
     if not view.active:
-        return ended_text(view)
+        return ended_text(view, now=datetime.now(UTC))
     if view.catalog is not None:
         return menu_message(origin, view)
     if not view.affordable(price_bounds(view.spec.options[0].price)):
-        return OUT_OF_CREDITS if view.charged_to == "default" else NOT_ENOUGH_CREDITS
+        return out_of_credits_text(view.charged_to)
     available = view.available
     if view.charged_to == "default" and available is not None:
         embed = support_prompt_embed(origin.link, remaining=int(available))

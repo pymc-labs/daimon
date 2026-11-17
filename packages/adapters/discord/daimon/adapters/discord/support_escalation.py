@@ -74,12 +74,10 @@ from daimon.core.stores.support_plans import plans_for_place
 from daimon.core.stores.support_rows import PlanView, SupportEscalationRow
 from daimon.core.stores.thread_sessions import get_latest_thread_session
 from daimon.core.support_escalation import (
-    ALREADY_REQUESTED,
     ASK_THE_TEAM,
     CUSTOM_ID_TEMPLATE,
     EMPTY_NOTE,
     ESCALATE,
-    OUT_OF_CREDITS,
     SEALED_NOTE_HINT,
     SEALED_POST_MARKER,
     UNAVAILABLE,
@@ -92,7 +90,6 @@ from daimon.core.support_plans import (
     NOT_ENOUGH_CREDITS,
     OPTIONS_CHANGED,
     ChoiceField,
-    PriceBounds,
     RequestChoice,
     StepsPrice,
     SupportOption,
@@ -100,12 +97,14 @@ from daimon.core.support_plans import (
     SupportPlanError,
     TextField,
     balance_text,
+    cheapest_bounds,
     credits_text,
+    ended_text,
     governing_plan,
     inactive_text,
-    price_bounds,
     price_text,
     received_text,
+    refusal_text,
 )
 
 import discord
@@ -217,22 +216,6 @@ def _sealed_hint() -> str:
     return "\n\n".join(f"-# {line}" for line in SEALED_NOTE_HINT.split("\n\n"))
 
 
-def _cheapest(option: SupportOption) -> PriceBounds:
-    """The least an option can hold: a steps price's smallest step."""
-    price = option.price
-    if isinstance(price, StepsPrice):
-        low = min(step.amount for step in price.steps)
-        return PriceBounds(low, low)
-    return price_bounds(price)
-
-
-def ended_text(view: PlanView) -> str:
-    """Why a plan outside its window takes no request."""
-    plan = view.plan
-    text = None if plan is None else inactive_text(plan, now=datetime.now(UTC))
-    return text or UNAVAILABLE
-
-
 async def _notice(
     interaction: discord.Interaction[Any], text: str, *, neutral: bool = False
 ) -> None:
@@ -247,19 +230,10 @@ async def _report_failure(interaction: discord.Interaction[Any], text: str) -> N
 
 
 async def _refuse(interaction: discord.Interaction[Any], outcome: SubmitOutcome) -> None:
-    view = outcome.view
-    if outcome.status == "duplicate":
-        await _notice(interaction, ALREADY_REQUESTED, neutral=True)
-    elif outcome.status == "out_of_credits" and view is not None:
-        _log.info("support.out_of_credits", charged_to=view.charged_to)
-        default = view.charged_to == "default"
-        await _notice(interaction, OUT_OF_CREDITS if default else NOT_ENOUGH_CREDITS)
-    elif outcome.status == "stale":
-        await _notice(interaction, OPTIONS_CHANGED)
-    elif outcome.status == "plan_inactive" and view is not None:
-        await _notice(interaction, ended_text(view))
-    else:
-        await _notice(interaction, UNAVAILABLE)
+    if outcome.status == "out_of_credits" and outcome.view is not None:
+        _log.info("support.out_of_credits", charged_to=outcome.view.charged_to)
+    text = refusal_text(outcome, now=datetime.now(UTC))
+    await _notice(interaction, text, neutral=outcome.status == "duplicate")
 
 
 def _post_body(
@@ -628,11 +602,11 @@ class SupportMenuSelect(
             await _report_failure(interaction, OPTIONS_CHANGED)
             return
         if not view.active:
-            await _report_failure(interaction, ended_text(view))
+            await _report_failure(interaction, ended_text(view, now=datetime.now(UTC)))
             return
         # Only an option the balance cannot cover asks Discord who the requester
         # is, so the form still opens inside the interaction's three seconds.
-        if not view.affordable(_cheapest(option)) and not await requester_is_admin(
+        if not view.affordable(cheapest_bounds(option.price)) and not await requester_is_admin(
             bot, guild_id=origin.guild_id, user_id=user_id
         ):
             await _report_failure(interaction, NOT_ENOUGH_CREDITS)
@@ -758,7 +732,6 @@ __all__ = [
     "SupportOptionModal",
     "answer_origin",
     "discord_channel",
-    "ended_text",
     "menu_message",
     "post_to_support_channel",
     "requester_is_admin",

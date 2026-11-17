@@ -7,10 +7,15 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
+from daimon.core.stores.support_escalation import SubmitOutcome, SubmitStatus
+from daimon.core.stores.support_rows import PlanView
+from daimon.core.support_escalation import ALREADY_REQUESTED, OUT_OF_CREDITS, UNAVAILABLE
 from daimon.core.support_plans import (
     CLIENT_NOT_NOTIFIED,
     DEFAULT_CATALOG,
     EXEMPT_RECEIVED,
+    NOT_ENOUGH_CREDITS,
+    OPTIONS_CHANGED,
     Balance,
     PlanScope,
     PriceBounds,
@@ -19,6 +24,7 @@ from daimon.core.support_plans import (
     SupportPlace,
     SupportPlanError,
     balance_text,
+    cheapest_bounds,
     format_credits,
     governing_plan,
     hold_for,
@@ -34,6 +40,7 @@ from daimon.core.support_plans import (
     price_bounds,
     price_text,
     received_text,
+    refusal_text,
     request_note,
     settle_problem,
     settle_range_text,
@@ -339,3 +346,28 @@ def test_option_text_when_each_kind_then_names_the_terms_asked_on() -> None:
         "Call, 1 hour: 1 credit",
         "Review: 1-3 credits",
     ], texts
+
+
+def test_cheapest_bounds_when_steps_then_the_smallest_step() -> None:
+    spec = parse_catalog(CATALOG)
+    quick, call, *_ = spec.options
+    assert cheapest_bounds(call.price) == PriceBounds(D("0.5"), D("0.5")), "smallest step"
+    assert cheapest_bounds(quick.price) == price_bounds(quick.price), "others: their bounds"
+
+
+def test_refusal_text_when_each_status_then_one_shared_line() -> None:
+    balance = Balance(pool=None, pool_used=D(0), cap=None, person_used=D(0))
+    default = PlanView(plan=None, catalog=None, balance=balance, state="active")
+    exempt = PlanView(plan=None, catalog=None, balance=balance, state="active", exempt=True)
+    now = datetime(2026, 12, 1, tzinfo=UTC)
+    cases: tuple[tuple[SubmitStatus, PlanView, str], ...] = (
+        ("duplicate", default, ALREADY_REQUESTED),
+        ("out_of_credits", default, OUT_OF_CREDITS),
+        ("out_of_credits", exempt, NOT_ENOUGH_CREDITS),
+        ("stale", default, OPTIONS_CHANGED),
+        ("plan_inactive", default, UNAVAILABLE),
+        ("refused", default, UNAVAILABLE),
+    )
+    for status, view, want in cases:
+        got = refusal_text(SubmitOutcome(status=status, row=None, view=view), now=now)
+        assert got == want, (status, got)

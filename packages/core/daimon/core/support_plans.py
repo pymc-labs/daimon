@@ -20,10 +20,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Annotated, Final, Literal, Protocol
+from typing import TYPE_CHECKING, Annotated, Final, Literal, Protocol
 
 import yaml
 from daimon.core.errors import DaimonError
+from daimon.core.support_escalation import ALREADY_REQUESTED, OUT_OF_CREDITS, UNAVAILABLE
 from daimon.core.windows import (
     WindowBounds,
     Windowed,
@@ -42,6 +43,10 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
+
+if TYPE_CHECKING:
+    from daimon.core.stores.support_escalation import SubmitOutcome
+    from daimon.core.stores.support_rows import PlanView
 
 # Limits: the lowest common denominator of Discord, Slack and Teams.
 MAX_OPTIONS: Final = 10  # Slack radio_buttons
@@ -363,6 +368,14 @@ def price_bounds(price: Price, *, step: int | None = None) -> PriceBounds:
     if isinstance(price, FixedPrice):
         return PriceBounds(price.amount, price.amount)
     return PriceBounds(price.min, price.max)
+
+
+def cheapest_bounds(price: Price) -> PriceBounds:
+    """The least an option can hold, before a step is picked: a steps price's smallest step."""
+    if isinstance(price, StepsPrice):
+        low = min(step.amount for step in price.steps)
+        return PriceBounds(low, low)
+    return price_bounds(price)
 
 
 def settles_at_submit(price: Price) -> bool:
@@ -706,6 +719,32 @@ def received_text(*, status: RequestStatus, charged_to: ChargedTo) -> str:
     if status == "pending":
         return f"{RECEIVED}\n{PENDING_RECEIVED}"
     return RECEIVED
+
+
+def out_of_credits_text(charged_to: ChargedTo) -> str:
+    """The default plan keeps its request count's words; a configured plan speaks credits."""
+    return OUT_OF_CREDITS if charged_to == "default" else NOT_ENOUGH_CREDITS
+
+
+def ended_text(view: PlanView, *, now: datetime) -> str:
+    """Why a plan outside its window takes no request."""
+    plan = view.plan
+    text = None if plan is None else inactive_text(plan, now=now)
+    return text or UNAVAILABLE
+
+
+def refusal_text(outcome: SubmitOutcome, *, now: datetime) -> str:
+    """Why `submit_request` recorded nothing; a "duplicate" is a neutral notice, the rest errors."""
+    view = outcome.view
+    if outcome.status == "duplicate":
+        return ALREADY_REQUESTED
+    if outcome.status == "out_of_credits" and view is not None:
+        return out_of_credits_text(view.charged_to)
+    if outcome.status == "stale":
+        return OPTIONS_CHANGED
+    if outcome.status == "plan_inactive" and view is not None:
+        return ended_text(view, now=now)
+    return UNAVAILABLE
 
 
 def post_status_text(
