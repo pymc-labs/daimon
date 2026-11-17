@@ -195,6 +195,7 @@ async def _rows(sessionmaker: async_sessionmaker[AsyncSession]) -> list[Any]:
 async def test_button_when_limit_has_a_menu_then_shows_options_and_balance(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """The button shows the menu's options and the balance."""
     await _seed(db_session_factory)
     bot = _bot(db_session_factory)
     interaction = _interaction(bot)
@@ -469,6 +470,7 @@ async def test_answer_origin_when_uncached_then_a_recorded_thread_names_its_pare
 async def test_button_when_the_limit_ended_then_says_so(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """An ended limit says so instead of offering anything."""
     ends = datetime(2026, 1, 18, tzinfo=UTC)
     await _seed(db_session_factory, ends_at=ends)
     interaction = _interaction(_bot(db_session_factory))
@@ -505,6 +507,7 @@ async def test_default_note_when_requester_is_admin_then_uses_no_credits(
 async def test_default_note_when_no_limit_then_post_is_unchanged(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Without a limit the default note posts as before."""
     async with db_session_factory() as session, session.begin():
         await make_tenant(session, platform="discord", workspace_id=_GUILD)
     bot = _bot(db_session_factory)
@@ -620,6 +623,12 @@ def _also_at(bot: Any, channel_id: int) -> Any:
     return bot
 
 
+def _only_at(bot: Any, channel_id: int) -> Any:
+    """`bot` with its support channel mock at `channel_id` and nothing at 999."""
+    bot.get_channel = MagicMock(side_effect=lambda cid: bot.support if cid == channel_id else None)
+    return bot
+
+
 async def _stamps(sessionmaker: async_sessionmaker[AsyncSession]) -> list[tuple[Any, ...]]:
     async with sessionmaker() as session:
         result = await session.execute(
@@ -631,20 +640,19 @@ async def _stamps(sessionmaker: async_sessionmaker[AsyncSession]) -> list[tuple[
 async def test_confirm_when_the_workspace_has_its_own_channel_then_posts_and_stamps_there(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """A workspace's own channel takes its requests; the stamp names it."""
     await _seed(db_session_factory)
     await _own_channel(db_session_factory, "888")
-    bot = _also_at(_bot(db_session_factory), 888)
-    bot.get_channel.side_effect = (lambda f: lambda cid: None if cid == 999 else f(cid))(
-        bot.get_channel.side_effect
-    )
+    bot = _only_at(_bot(db_session_factory), 888)
     await _confirmed(bot, "review")
-    bot.support.send.assert_awaited_once()
+    assert bot.support.send.await_count == 1, "posted once"
     assert await _stamps(db_session_factory) == [("888", "555")], "the post's channel is stamped"
 
 
 async def test_confirm_when_own_channels_are_off_then_posts_to_the_deployment_channel(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """With `support_own_channel` off a picked channel is ignored."""
     await _seed(db_session_factory)
     await _own_channel(db_session_factory, "888")
     bot = _bot(db_session_factory)
@@ -656,6 +664,7 @@ async def test_confirm_when_own_channels_are_off_then_posts_to_the_deployment_ch
 async def test_settle_when_the_channel_changed_then_the_open_request_settles_where_posted(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """An open request settles where it was posted, not in the newly picked channel."""
     view, content = await _pending(db_session_factory)
     await _own_channel(db_session_factory, "888")
     bot = _also_at(_bot(db_session_factory), 888)
@@ -665,12 +674,14 @@ async def test_settle_when_the_channel_changed_then_the_open_request_settles_whe
     assert _said(moved.response.send_message) == SETTLE_ELSEWHERE, "the new channel did not get it"
     click = _on_post(bot, content)
     await view.children[1].callback(click)
-    assert _said(click.followup.send) == f"Declined. No credits used. {CLIENT_NOT_NOTIFIED}"
+    said = _said(click.followup.send)
+    assert said == f"Declined. No credits used. {CLIENT_NOT_NOTIFIED}", said
 
 
 async def test_settle_when_the_request_predates_the_stamp_then_the_default_channel_settles(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """A request from before the stamp settles in the deployment channel only."""
     await _seed(db_session_factory)
     await _asked_before(db_session_factory, "review")
     ((escalation_id, _status, _hold, _post),) = await _rows(db_session_factory)
@@ -678,15 +689,17 @@ async def test_settle_when_the_request_predates_the_stamp_then_the_default_chann
     button = SupportSettleButton(escalation_id=escalation_id, action="decline")
     elsewhere = _interaction(_bot(db_session_factory), user_id=8, channel_id=123)
     await button.callback(elsewhere)
-    assert _said(elsewhere.response.send_message) == SETTLE_ELSEWHERE
+    assert _said(elsewhere.response.send_message) == SETTLE_ELSEWHERE, "another channel refuses"
     click = _on_post(_bot(db_session_factory), "Human support requested")
     await button.callback(click)
-    assert _said(click.followup.send) == f"Declined. No credits used. {CLIENT_NOT_NOTIFIED}"
+    said = _said(click.followup.send)
+    assert said == f"Declined. No credits used. {CLIENT_NOT_NOTIFIED}", said
 
 
 async def test_button_when_an_uncached_admin_has_no_credits_then_the_form_opens(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """An admin missing from the cache is fetched once and stays exempt."""
     await _seed(db_session_factory, menu=False, per_person=D("0.1"))
     bot = _cold_bot(db_session_factory)
     admin = MagicMock(spec=discord.Member)
@@ -700,6 +713,7 @@ async def test_button_when_an_uncached_admin_has_no_credits_then_the_form_opens(
 
 
 def test_new_templates_when_matched_then_overlap_no_other() -> None:
+    """Menu, settle and old `sup:` ids each dispatch to exactly one item."""
     menu = _menu_select().item.custom_id
     settle = f"sps:{uuid.uuid4().hex}:set"
     button = f"sup:{_GUILD}:{_THREAD}:{_ANSWER}"
@@ -708,7 +722,7 @@ def test_new_templates_when_matched_then_overlap_no_other() -> None:
         "settle": SupportSettleButton.__discord_ui_compiled_template__,
         "button": SupportEscalateButton.__discord_ui_compiled_template__,
     }
-    assert templates["button"].pattern == BUTTON_TEMPLATE
+    assert templates["button"].pattern == BUTTON_TEMPLATE, "old sup: ids keep their template"
     for name, custom_id in {"menu": menu, "settle": settle, "button": button}.items():
         matched = [key for key, template in templates.items() if template.fullmatch(custom_id)]
         assert matched == [name], f"{custom_id} must dispatch to exactly one item"
@@ -718,6 +732,7 @@ def test_new_templates_when_matched_then_overlap_no_other() -> None:
 async def test_reaction_when_limit_has_a_menu_then_dms_the_menu(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """A thumbs-down under a limit with a menu DMs the menu."""
     await _seed(db_session_factory)
     bot = _bot(db_session_factory)
     user = MagicMock()
@@ -736,6 +751,7 @@ async def test_reaction_when_limit_has_a_menu_then_dms_the_menu(
 async def test_reaction_when_no_limit_then_dms_the_note_button_with_requests_left(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Without a limit the DM offers the note button and requests left."""
     async with db_session_factory() as session, session.begin():
         await make_tenant(session, platform="discord", workspace_id=_GUILD)
     bot = _bot(db_session_factory)

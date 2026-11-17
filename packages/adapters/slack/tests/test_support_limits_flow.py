@@ -311,6 +311,7 @@ def _charge(view: dict[str, Any], amount: str) -> dict[str, Any]:
 async def test_click_when_limit_has_a_menu_then_shows_options_and_balance(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
+    """The click shows the menu's options and the balance."""
     key = await _seed(db_session_factory)
     view = await _menu(_runtime(key, db_session_factory), fake)
     assert view["callback_id"] == MENU_CALLBACK_ID
@@ -639,6 +640,7 @@ async def _stamps(factory: async_sessionmaker[AsyncSession]) -> list[tuple[Any, 
 async def test_send_when_the_workspace_has_its_own_channel_then_posts_and_stamps_there(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
+    """A workspace's own channel takes its requests; the stamp is where Slack says it landed."""
     key = await _seed(db_session_factory)
     await _own_channel(db_session_factory, "C_OWN")
     await _pending(_runtime(key, db_session_factory), fake)
@@ -651,6 +653,7 @@ async def test_send_when_the_workspace_has_its_own_channel_then_posts_and_stamps
 async def test_send_when_own_channels_are_off_then_posts_to_the_deployment_channel(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
+    """With `support_own_channel` off a picked channel is ignored."""
     key = await _seed(db_session_factory)
     await _own_channel(db_session_factory, "C_OWN")
     runtime = _runtime(key, db_session_factory)
@@ -662,6 +665,7 @@ async def test_send_when_own_channels_are_off_then_posts_to_the_deployment_chann
 async def test_settle_when_the_channel_changed_then_the_open_request_settles_where_posted(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
+    """An open request settles where it was posted, not in the newly picked channel."""
     key = await _seed(db_session_factory)
     runtime = _runtime(key, db_session_factory)
     escalation_id, post = await _pending(runtime, fake)
@@ -672,21 +676,22 @@ async def test_settle_when_the_channel_changed_then_the_open_request_settles_whe
     await handle_settle_click(
         runtime, _settle_click(SETTLE_DECLINE_ACTION_ID, escalation_id, message=post)
     )
-    assert _said(fake) == f"Declined. No credits used. {CLIENT_NOT_NOTIFIED}"
+    assert _said(fake) == f"Declined. No credits used. {CLIENT_NOT_NOTIFIED}", "the posted one does"
 
 
 async def test_settle_when_the_request_predates_the_stamp_then_the_default_channel_settles(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
+    """A request from before the stamp settles in the deployment channel only."""
     key = await _seed(db_session_factory)
     runtime = _runtime(key, db_session_factory)
     await _asked_before(db_session_factory, "review")
     ((escalation_id, *_rest),) = await _rows(db_session_factory)
     assert await _stamps(db_session_factory) == [(None, None)], "an old, unstamped request"
-    post = {"ts": _POST_TS, "text": "Human support requested", "blocks": []}
+    post: dict[str, Any] = {"ts": _POST_TS, "text": "Human support requested", "blocks": []}
     value = uuid.UUID(str(escalation_id)).hex
     elsewhere = _settle_click(SETTLE_DECLINE_ACTION_ID, value, message=post, channel="C_OTHER")
     await handle_settle_click(runtime, elsewhere)
-    assert _said(fake) == SETTLE_ELSEWHERE
+    assert _said(fake) == SETTLE_ELSEWHERE, "another channel refuses"
     await handle_settle_click(runtime, _settle_click(SETTLE_DECLINE_ACTION_ID, value, message=post))
-    assert _said(fake) == f"Declined. No credits used. {CLIENT_NOT_NOTIFIED}"
+    assert _said(fake) == f"Declined. No credits used. {CLIENT_NOT_NOTIFIED}", "the default does"

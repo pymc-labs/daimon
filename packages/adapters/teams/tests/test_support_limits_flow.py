@@ -328,7 +328,7 @@ async def _asked_before(
             default_allowance=20,
             exempt=False,
         )
-    assert outcome.status == "recorded", outcome.status
+    assert outcome.status == "recorded" and outcome.row is not None, outcome.status
     return outcome.row.id
 
 
