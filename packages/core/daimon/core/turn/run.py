@@ -1497,6 +1497,8 @@ async def _keep_question(
         return None
     if platform not in ("discord", "slack", "teams", "web"):
         return None
+    if not prepared.admission.feature_on("monitor_direct_messages"):
+        return None  # Off in the turn's own snapshot: no read on the way to the agent.
     return await capture_question(
         deps.sessionmaker,
         deps.settings,

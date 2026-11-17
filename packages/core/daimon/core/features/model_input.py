@@ -24,6 +24,7 @@ TOOLSET_KEYS: Final[tuple[str, ...]] = (*SESSION_KEYS, "repo_memory")
 TURN_KEYS: Final[tuple[str, ...]] = ("web_awareness",)
 PER_TURN_KEYS: Final[tuple[str, ...]] = (
     "mcp_briefing", "repo_memory", "context_provider", "origin_fragments",
+    "monitor_direct_messages",
 )  # fmt: skip
 """Turn-bound switches each turn checks with `Admission.feature_on`."""
 MODEL_INPUT_KEYS: Final[tuple[str, ...]] = ("guidance", *SESSION_KEYS, *TURN_KEYS)

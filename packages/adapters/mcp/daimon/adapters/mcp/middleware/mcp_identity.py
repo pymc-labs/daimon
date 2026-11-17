@@ -50,7 +50,13 @@ from daimon.core.host_memory import HOST_MEMORY_TAG, HOST_MEMORY_TOOLS
 from daimon.core.host_web_fetch import HOST_WEB_FETCH_TAG
 from daimon.core.mcp_auth import HOST_BUILTINS_CLAIM
 from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
-from daimon.core.monitoring import MCP_NOTICE, capture_tool_call, mcp_notice_due, record_notice
+from daimon.core.monitoring import (
+    MCP_NOTICE,
+    capture_tool_call,
+    may_monitor,
+    mcp_notice_due,
+    record_notice,
+)
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.operator_tokens import scope_tag
 from daimon.core.security_audit import capture_decision, record_denial
@@ -201,6 +207,9 @@ class IdentityMiddleware(Middleware):
         self._audit_timeout = 2.0
         self._audit_max_pending = 128
         self._audit_slots = asyncio.Semaphore(2)
+        # Monitoring writes queue apart, so a burst of them never delays the audit.
+        self._monitoring_tasks: set[asyncio.Task[None]] = set()
+        self._monitoring_slots = asyncio.Semaphore(2)
         self._host_call_gate: HostCallGate | None = None
 
     async def on_request(self, context: MiddlewareContext, call_next: CallNext) -> object:
@@ -215,8 +224,8 @@ class IdentityMiddleware(Middleware):
         agent_id = _uuid_or_none(await self._agent_id_resolver(context))
         token = get_access_token()
         claims = token.claims if token is not None else {}
-        monitored_agent = (
-            _person_agent(agent_id, claims) if context.method == "tools/call" else None
+        monitored_agent = await self._monitored_agent(
+            tenant_id, _person_agent(agent_id, claims) if context.method == "tools/call" else None
         )
         started_at = datetime.now(UTC)
         chat_agent = claims.get("chat_agent_id")
@@ -380,9 +389,29 @@ class IdentityMiddleware(Middleware):
             ),
         )
 
+    async def _monitored_agent(
+        self, tenant_id: uuid.UUID, agent_id: uuid.UUID | None
+    ) -> uuid.UUID | None:
+        """`agent_id` while the workspace monitors any agent over MCP (a memo, seldom a
+        read); None skips every monitoring step of the call."""
+        if agent_id is None:
+            return None
+        try:
+            async with asyncio.timeout(self._audit_timeout):
+                on = await may_monitor(
+                    self._audit_sessionmaker, self._settings, tenant_id=tenant_id, platform="mcp"
+                )
+        # Unknown: the steps behind it check the agent itself, each bounded and best effort.
+        except Exception:
+            structlog.get_logger(__name__).warning(
+                "monitoring.capture_failed", kind="tool", exc_info=True
+            )
+            on = True
+        return agent_id if on else None
+
     def _queue_monitoring(self, kind: str, write: Callable[[], Awaitable[object]]) -> None:
-        """Keep a monitored agent's row in the background, bounded like the audit."""
-        if len(self._audit_tasks) >= self._audit_max_pending:
+        """Keep a monitored agent's row in the background, bounded on its own slots."""
+        if len(self._monitoring_tasks) >= self._audit_max_pending:
             structlog.get_logger(__name__).warning(
                 "monitoring.capture_failed", kind=kind, error_type="QueueFull"
             )
@@ -390,7 +419,7 @@ class IdentityMiddleware(Middleware):
 
         async def bounded() -> None:
             try:
-                async with asyncio.timeout(self._audit_timeout), self._audit_slots:
+                async with asyncio.timeout(self._audit_timeout), self._monitoring_slots:
                     await write()
             except TimeoutError:
                 structlog.get_logger(__name__).warning(
@@ -398,8 +427,8 @@ class IdentityMiddleware(Middleware):
                 )
 
         task = asyncio.create_task(bounded(), name=f"monitoring-{kind}-write")
-        self._audit_tasks.add(task)
-        task.add_done_callback(self._audit_tasks.discard)
+        self._monitoring_tasks.add(task)
+        task.add_done_callback(self._monitoring_tasks.discard)
 
     def _queue_audit(self, event: SecurityAuditEntry) -> None:
         if len(self._audit_tasks) >= self._audit_max_pending:
@@ -433,8 +462,8 @@ class IdentityMiddleware(Middleware):
 
     async def drain_audit(self) -> None:
         """Wait for tracked, timeout-bounded writes during orderly teardown."""
-        if self._audit_tasks:
-            await asyncio.gather(*tuple(self._audit_tasks), return_exceptions=True)
+        if pending := (*self._audit_tasks, *self._monitoring_tasks):
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def _resolve_request(
         self,

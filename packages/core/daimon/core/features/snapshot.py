@@ -257,11 +257,13 @@ class FeatureSnapshot:
 
 
 class FeatureCache:
-    """Stored rows per (tenant, revision, place): a bounded memo that cannot go stale."""
+    """Stored rows per (tenant, revision, place): a bounded memo that cannot go stale.
+    `generation` counts clears, so a memo built on it can tell a feature changed."""
 
     def __init__(self, size: int = 2048) -> None:
         self._size = size
         self._rows: OrderedDict[tuple[object, ...], list[FeatureValueRow]] = OrderedDict()
+        self.generation = 0
 
     def get(self, key: tuple[object, ...]) -> list[FeatureValueRow] | None:
         found = self._rows.get(key)
@@ -277,6 +279,7 @@ class FeatureCache:
 
     def clear(self) -> None:
         self._rows.clear()
+        self.generation += 1
 
 
 CACHE = FeatureCache()

@@ -17,6 +17,7 @@ from typing import Any, cast
 
 import pytest
 from daimon.core.direct_messages import _CollectReply  # pyright: ignore[reportPrivateUsage]
+from daimon.core.features.snapshot import CACHE
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.monitoring import (
     CHAT_NOTICE,
@@ -230,6 +231,7 @@ async def _switch(
             set_by=None,
             surface="web",
         )
+    CACHE.clear()  # As `change_feature` does.
 
 
 async def test_each_conversation_is_told_once_per_switch_on(

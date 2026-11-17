@@ -13,12 +13,14 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from daimon.core import monitoring, monitoring_view
+from daimon.core.features.snapshot import CACHE
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.monitoring import (
     MCP_NOTICE,
     capture_answer,
     capture_question,
     capture_tool_call,
+    may_monitor,
     mcp_notice_due,
     monitoring_state,
     record_notice,
@@ -59,6 +61,7 @@ async def _switch(
         surface="web",
     )
     await session.commit()
+    CACHE.clear()  # As `change_feature` does.
     return row
 
 
@@ -275,6 +278,35 @@ async def test_a_tool_call_keeps_its_name_time_and_outcome_only(
         at,
     ), row
     assert row.content is None and row.conversation is None and row.turn_ref is None, row
+
+
+async def test_may_monitor_holds_its_answer_until_a_feature_changes(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    """The hot path's memo: a store write alone leaves it; a feature change drops it."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    memo = functools.partial(
+        may_monitor, db_session_factory, None, tenant_id=tenant.id, platform="discord"
+    )
+
+    assert not await memo(), "nothing is monitored yet"
+    await set_feature_value(
+        db_session,
+        tenant_id=tenant.id,
+        target=FeatureTarget("agent", agent_id="agt_a"),
+        key="monitor_direct_messages",
+        value="on",
+        set_by=None,
+        surface="web",
+    )
+    await db_session.commit()
+    assert not await memo(), "held until a feature change"
+    CACHE.clear()
+    assert await memo(), "a feature change drops the memo"
+    assert not await may_monitor(db_session_factory, None, tenant_id=tenant.id, platform="mcp"), (
+        "per platform"
+    )
 
 
 async def test_a_tool_call_is_kept_only_once_the_person_was_told(

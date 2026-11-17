@@ -18,9 +18,11 @@ from typing import Any, cast
 import pytest
 from daimon.core import usage_sweep
 from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
+from daimon.core.features.snapshot import CACHE
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.monitoring import KeptQuestion, capture_question
 from daimon.core.stores import monitoring as store
+from daimon.core.stores import session_settle_state
 from daimon.core.stores.domain import FeatureTarget
 from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.turn import run
@@ -116,9 +118,18 @@ def test_run_prepared_turn_keeps_the_question_and_both_endings() -> None:
     assert any(id(c) not in in_handler for c in answers), "a finished turn must keep its answer"
 
 
+def _all_on(_key: str) -> bool:
+    return True
+
+
 def _prepared(*, is_dm: bool | None, account_id: uuid.UUID, agent: str = "agt_a") -> Any:
     grant = None if is_dm is None else SimpleNamespace(is_dm=is_dm)
-    admission = SimpleNamespace(grant=grant, agent=SimpleNamespace(id=agent), account_id=account_id)
+    admission = SimpleNamespace(
+        grant=grant,
+        agent=SimpleNamespace(id=agent),
+        account_id=account_id,
+        feature_on=_all_on,
+    )
     return SimpleNamespace(admission=admission)
 
 
@@ -156,6 +167,7 @@ async def _switch_on(session: AsyncSession, tenant_id: uuid.UUID, key: str) -> N
         surface="web",
     )
     await session.commit()
+    CACHE.clear()  # As `change_feature` does.
 
 
 async def test_every_direct_message_platform_and_web_chat_keeps_the_question(
@@ -310,7 +322,7 @@ async def test_the_kept_replies_wait_for_the_settle_and_have_their_own_budget(
     async def keep(*_args: object, **_kwargs: object) -> None:
         order.append("keep")
 
-    state = usage_sweep.session_settle_state
+    state = session_settle_state
     monkeypatch.setattr(state, "settle_request", settle_request)
     monkeypatch.setattr(state, "clear_settle_request", clear)
     monkeypatch.setattr(usage_sweep, "settle_stamped_session", settle)

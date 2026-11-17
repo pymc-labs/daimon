@@ -11,6 +11,7 @@ was. `must_tell` decides when the person is told, with the same words on every p
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -20,7 +21,7 @@ import structlog
 from daimon.core.config import Settings
 from daimon.core.features.registry import FEATURES, TIERS, FeatureSpec
 from daimon.core.features.resolver import ResolvedFeature
-from daimon.core.features.snapshot import FeaturePlace, resolve_one
+from daimon.core.features.snapshot import CACHE, FeaturePlace, resolve_one
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import monitoring as store
 from daimon.core.stores.domain import FeatureValueRow, MonitoredPlatform
@@ -28,6 +29,9 @@ from daimon.core.stores.feature_values import list_feature_values
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
+
+_ANY_TTL = 30.0
+_any_memo: dict[tuple[uuid.UUID, MonitoredPlatform], tuple[float, int, bool]] = {}
 
 
 @dataclass(frozen=True)
@@ -132,16 +136,50 @@ async def monitors_any(
     """Whether admins monitor any agent in the workspace, here or over MCP (the privacy
     panel's line)."""
     for where in dict.fromkeys((platform, "mcp")):
-        spec = monitoring_spec(where)
-        rows = await list_feature_values(session, tenant_id=tenant_id, keys=(spec.key,))
-        workspace = [row for row in rows if row.tier == "workspace"]
-        if resolve_one(spec, settings, FeaturePlace(tenant_id, where), workspace).on:
+        if await _any_on(session, settings, tenant_id=tenant_id, platform=where):
             return True
-        for agent in {row.agent_id for row in rows if row.tier == "agent" and row.agent_id}:
-            mine = [*workspace, *(r for r in rows if r.tier == "agent" and r.agent_id == agent)]
-            place = FeaturePlace(tenant_id, where, agent_id=agent)
-            if resolve_one(spec, settings, place, mine).on:
-                return True
+    return False
+
+
+async def may_monitor(
+    sessions: async_sessionmaker[AsyncSession],
+    settings: Settings | None,
+    *,
+    tenant_id: uuid.UUID,
+    platform: MonitoredPlatform,
+) -> bool:
+    """Whether any agent in the workspace is monitored on `platform`, so a hot path skips
+    the rest. Held 30 seconds per process; a feature change in this process drops it."""
+    key: tuple[uuid.UUID, MonitoredPlatform] = (tenant_id, platform)
+    now, generation = time.monotonic(), CACHE.generation
+    hit = _any_memo.get(key)
+    if hit is not None and hit[0] > now and hit[1] == generation:
+        return hit[2]
+    async with sessions() as session:
+        on = await _any_on(session, settings, tenant_id=tenant_id, platform=platform)
+    if len(_any_memo) >= 4096:
+        _any_memo.clear()
+    _any_memo[key] = (now + _ANY_TTL, generation, on)
+    return on
+
+
+async def _any_on(
+    session: AsyncSession,
+    settings: Settings | None,
+    *,
+    tenant_id: uuid.UUID,
+    platform: MonitoredPlatform,
+) -> bool:
+    spec = monitoring_spec(platform)
+    rows = await list_feature_values(session, tenant_id=tenant_id, keys=(spec.key,))
+    workspace = [row for row in rows if row.tier == "workspace"]
+    if resolve_one(spec, settings, FeaturePlace(tenant_id, platform), workspace).on:
+        return True
+    for agent in {row.agent_id for row in rows if row.tier == "agent" and row.agent_id}:
+        mine = [*workspace, *(r for r in rows if r.tier == "agent" and r.agent_id == agent)]
+        place = FeaturePlace(tenant_id, platform, agent_id=agent)
+        if resolve_one(spec, settings, place, mine).on:
+            return True
     return False
 
 
@@ -193,6 +231,8 @@ async def capture_question(
     if account_id is None:
         return None
     try:
+        if not await may_monitor(sessions, settings, tenant_id=tenant_id, platform=platform):
+            return None
         async with sessions() as session, session.begin():
             state = await monitoring_state(
                 session, settings, tenant_id=tenant_id, agent_id=agent_id, platform=platform
@@ -272,6 +312,8 @@ async def monitored_notice(
 ) -> MonitoringNotice | None:
     """The notice a place shown before any question carries while the agent is
     monitored (web chat, `describe_agent`, the MCP briefing); None when it is not."""
+    if not await may_monitor(sessions, settings, tenant_id=tenant_id, platform=platform):
+        return None
     async with sessions() as session:
         state = await monitoring_state(
             session, settings, tenant_id=tenant_id, agent_id=agent_id, platform=platform
