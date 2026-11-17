@@ -1,6 +1,6 @@
 """Set charge and Decline on a pending support post, at parity with Slack and Discord.
 
-Anyone acting in the configured support channel may settle (decision 4);
+Anyone acting in the channel the request was posted to may settle (decision 4);
 `settle_from_post` audits it. The requester is never messaged (decision 8):
 the post and the settler's confirmation say so. The charge is an input on the
 post itself, sent with Set charge (Action.Execute); the buttons carry only the
@@ -29,7 +29,7 @@ from daimon.adapters.teams.identity import DENIED, canonical_uuid
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.support import closed_post_lines
-from daimon.adapters.teams.support_plan_card import CHARGE_INPUT, closed_card
+from daimon.adapters.teams.support_menu_card import CHARGE_INPUT, closed_card
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.platform_names import get_user_names
 from daimon.core.stores.support_escalation import SettleOutcome, get_request
@@ -46,13 +46,14 @@ from daimon.core.support import (
     settled_text,
 )
 from daimon.core.support_changes import settle_from_post
-from daimon.core.support_routing import in_channel
+from daimon.core.support_routing import settle_channel_ok
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
     MessageActivityInput,
 )
 from microsoft_teams.apps import ActivityContext
+from sqlalchemy.ext.asyncio import AsyncSession
 
 log = structlog.get_logger(__name__)
 
@@ -77,14 +78,19 @@ class TeamsSupportSettle:
     ) -> AdaptiveCardInvokeResponse:
         return await guarded(self._act(ctx), toast(FAILED), "teams.support.settle_failed")
 
-    def _in_support_channel(self, activity: AdaptiveCardInvokeActivity) -> bool:
+    async def _posted_here(
+        self, session: AsyncSession, activity: AdaptiveCardInvokeActivity, row: SupportEscalationRow
+    ) -> bool:
+        """Whether the click came from the channel `row` was posted to."""
         conversation = activity.conversation
         if conversation.conversation_type != "channel":
             return False
-        return in_channel(
-            configured=self._runtime.settings.support.teams_escalation_channel_id,
+        return await settle_channel_ok(
+            session,
+            row=row,
             channel_id=conversation.id.split(";", 1)[0],
             parent_id=None,
+            default_channel_id=self._runtime.settings.support.teams_escalation_channel_id,
         )
 
     async def _settler(self, tenant_id: uuid.UUID, by: str | None) -> str | None:
@@ -107,16 +113,17 @@ class TeamsSupportSettle:
             return toast(DENIED)
         if actor.foreign:
             return toast(DENIED)
-        if not self._in_support_channel(activity):
-            return toast(SETTLE_ELSEWHERE)
         data = submitted_fields(activity.value.action.data)
         escalation_id = _escalation_id(data.get("request"))
-        row = None
+        row, here = None, False
         if escalation_id is not None:
             async with self._runtime.sessionmaker() as session:
                 row = await get_request(session, escalation_id=escalation_id)
+                here = row is not None and await self._posted_here(session, activity, row)
         if row is None:
             return toast(REQUEST_GONE)
+        if not here:
+            return toast(SETTLE_ELSEWHERE)
         if row.status != "pending":
             outcome = SettleOutcome(status="already_settled", row=row)
             return await self._finish(ctx, actor, data, before=row, outcome=outcome)
@@ -173,6 +180,8 @@ class TeamsSupportSettle:
             return toast(REQUEST_GONE)
         if outcome.status == "limit_gone":
             return toast(LIMIT_GONE)
+        if outcome.status == "not_here":
+            return toast(SETTLE_ELSEWHERE)
         if outcome.status in ("invalid", "over_balance"):
             return toast(
                 settle_range_text(after.bounds, counted=after.counted, available=outcome.available)

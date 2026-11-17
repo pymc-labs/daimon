@@ -61,7 +61,7 @@ from daimon.adapters.teams.setup_panel import SetupPanel
 from daimon.adapters.teams.support import VERB as SUPPORT_VERB
 from daimon.adapters.teams.support import SupportCommand
 from daimon.adapters.teams.support import enabled as support_enabled
-from daimon.adapters.teams.support_plan_card import SETTLE_VERB as SUPPORT_SETTLE_VERB
+from daimon.adapters.teams.support_menu_card import SETTLE_VERB as SUPPORT_SETTLE_VERB
 from daimon.adapters.teams.support_settle import TeamsSupportSettle
 from daimon.adapters.teams.team_owners import fetch_team_owner_ids
 from daimon.adapters.teams.thread_handoff import TeamsThreadHandoff
@@ -472,10 +472,9 @@ def create_teams_http_service(
         teams_app.on_card_action_execute(SUPPORT_VERB, support.on_action)
         teams_app.on_dialog_open(card.ASK_HUMAN_DIALOG, support.on_ask_open)
         teams_app.on_dialog_submit(card.ASK_HUMAN_DIALOG, support.on_ask_submit)
-    # Posts already in the channel stay settleable while asking is off (credits at 0).
-    if runtime.settings.support.teams_escalation_channel_id:
-        settle = TeamsSupportSettle(runtime)
-        teams_app.on_card_action_execute(SUPPORT_SETTLE_VERB, settle.on_action)
+    # Always on: posts stay settleable where they were posted, whatever changed since.
+    settle = TeamsSupportSettle(runtime)
+    teams_app.on_card_action_execute(SUPPORT_SETTLE_VERB, settle.on_action)
     teams_app.on_dialog_open(setup_card.CREATE_DIALOG, setup.on_create_open)
     teams_app.on_dialog_submit(setup_card.CREATE_DIALOG, setup.on_create_submit)
     teams_app.on_dialog_open(setup_card.TOKEN_DIALOG, setup.on_token_open)

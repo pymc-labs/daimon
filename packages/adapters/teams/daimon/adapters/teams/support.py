@@ -1,9 +1,9 @@
-"""The `support` command: ask a person, paid for from the person's support plan.
+"""The `support` command: ask a person, paid for from the person's support limit.
 
 Discord asks with a reaction on an answer; here `support` posts a form in the
 1:1 chat, answered there like every command, and sending it spends from the
-plan (`daimon.core.support`). With no plan, a request spends one of
-`credits_per_user`; a plan with a menu first offers its options, then the
+limit (`daimon.core.support`). With no limit, a request spends one of
+`credits_per_user`; a limit with a menu first offers its options, then the
 picked option's form, on a card the chat replaces (a dialog's `continue` for
 Ask a human). An admin of the deployment asks for free. It is a bare word, so
 prose such as "support vector machines" stays a turn. As on Discord, the row
@@ -15,8 +15,8 @@ recorded before it lands. `enabled` decides whether the command is registered.
 
 A request asked from a channel is open to the people who could have asked the
 agent there (`answer_access`), as on Slack, decided when the form is shown and
-again on Send. This bot posts the request in `DAIMON_SUPPORT__TEAMS_ESCALATION_CHANNEL_ID`,
-Teams' own channel, as Slack has its own; `daimon.core.support_routing` has no
+again on Send. This bot posts the request in the workspace's request channel
+(`support_routing.support_destination`); `daimon.core.support_routing` has no
 DM tier, so no one is messaged directly. A request whose charge is still to be
 set carries the charge and Set charge / Decline (`support_settle`). A channel
 read only from inside is marked in the post, so whoever picks it up answers
@@ -29,8 +29,8 @@ links to the message the button is on, the card just below the answer.
 One person asks once per answer and option: a second Send is told the first
 is in hand and spends nothing. Access is decided for the last time under the
 ledger and policy locks, in the transaction that spends. The same post path
-carries a tenant's routed 👎 forms (`routes_feedback`, `feedback`), which
-spend nothing.
+carries a place's routed 👎 forms (`feedback`), which spend nothing. A long
+post is cut line by line, each cut marked, to fit Teams' cap (`post_size`).
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from typing import Final
 
 import structlog
 from daimon.adapters.teams.admin_caller import admin_caller
@@ -79,8 +80,9 @@ from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.identity import DENIED, TeamsInbound
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.output_delivery import Spawn
+from daimon.adapters.teams.post_size import fit_lines
 from daimon.adapters.teams.runtime import TeamsRuntime
-from daimon.adapters.teams.support_plan_card import (
+from daimon.adapters.teams.support_menu_card import (
     MAX_NOTE_CHARS,
     MENU_PROMPT,
     NEXT,
@@ -109,6 +111,7 @@ from daimon.core.stores.support_escalation import (
     submit_request,
 )
 from daimon.core.stores.support_rows import LimitView, SupportEscalationRow
+from daimon.core.stores.teams_installations import list_teams_installations
 from daimon.core.stores.thread_sessions import get_latest_thread_session
 from daimon.core.support import (
     CHOOSE_OPTION,
@@ -125,7 +128,8 @@ from daimon.core.support import (
     picked_option,
     received_text,
 )
-from daimon.core.support import refusal_text as plan_refusal
+from daimon.core.support import refusal_text as limit_refusal
+from daimon.core.support_changes import ChannelPick
 from daimon.core.support_escalation import (
     ALREADY_REQUESTED,
     ESCALATE,
@@ -135,7 +139,14 @@ from daimon.core.support_escalation import (
     SEALED_POST_MARKER,
     UNAVAILABLE,
 )
-from daimon.core.support_routing import log_undelivered, support_recipient_tiers
+from daimon.core.support_routing import (
+    SupportDestination,
+    log_undelivered,
+    own_channel_allowed,
+    support_destination,
+    support_recipient_tiers,
+)
+from daimon.core.teams_bot_framework import SERVICE_URL
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
@@ -167,8 +178,11 @@ __all__ = [
     "requester",
     "support_post",
     "post_card_to_support_channel",
+    "NOT_INSTALLED",
+    "ChannelNames",
+    "channel_pick",
+    "post_blocker",
     "post_to_support_channel",
-    "routes_feedback",
 ]
 
 log = structlog.get_logger(__name__)
@@ -198,7 +212,9 @@ def _link_text(link: str) -> str:
 def support_post(head: str, link: str, *lines: str) -> str:
     """`head`, the answer's `link`, then `lines`, a paragraph each: a Teams message
     drops single line breaks."""
-    return "\n\n".join(line for line in (head, _link_text(link), *lines) if line.strip())
+    return "\n\n".join(
+        fit_lines([line for line in (head, _link_text(link), *lines) if line.strip()])
+    )
 
 
 def requester(user_name: str | None, user_id: str) -> str:
@@ -219,19 +235,11 @@ def closed_post_lines(
 
 
 def enabled(settings: Settings) -> bool:
-    """Whether escalation is on: a Teams channel to post in and credits to spend."""
-    support = settings.support
-    return bool(support.teams_escalation_channel_id) and support.credits_per_user > 0
+    """Whether the command is registered: a request could have a channel to go to.
 
-
-def routes_feedback(settings: Settings, tenant_id: uuid.UUID) -> bool:
-    """Whether this tenant's submitted 👎 forms also go to the escalation channel.
-
-    Off unless the tenant turned it on and a Teams channel is set; credits play
-    no part, since a form spends none.
+    `support_escalation` at the answer's place decides each request.
     """
-    support = settings.support
-    return bool(support.teams_escalation_channel_id) and support.routes_feedback(tenant_id)
+    return bool(settings.support.teams_escalation_channel_id) or own_channel_allowed(settings)
 
 
 def _refusal(access: AnswerAccess) -> str:
@@ -282,13 +290,13 @@ class _Asked:
         )
 
     def lines(self, facts: Sequence[str] = ()) -> list[str]:
-        """The post's lines before the note: who, the plan's facts, a link, the marker."""
+        """The post's lines before the note: who, the limit's facts, a link, the marker."""
         sealed = SEALED_LINE if self.sealed else ""
         parts = (self.head, *facts, _link_text(self.link), sealed)
         return [line for line in parts if line.strip()]
 
     def body(self, note: str, facts: Sequence[str] = ()) -> str:
-        """The request as the support team reads it: who, a plan's facts, a link, the note."""
+        """The request as the support team reads it: who, a limit's facts, a link, the note."""
         return support_post(
             "\n\n".join([self.head, *facts]),
             self.link,
@@ -299,7 +307,7 @@ class _Asked:
 
 @dataclass(frozen=True)
 class _Origin:
-    """The answer a request is about, and the place its plan and feature are read at."""
+    """The answer a request is about, and the place its limit and feature are read at."""
 
     tenant_id: uuid.UUID
     channel_id: str | None
@@ -349,7 +357,7 @@ async def _native_admin(runtime: TeamsRuntime, inbound: TeamsInbound) -> bool:
 
 @dataclass(frozen=True)
 class _Decided:
-    """Who may ask here, on which plan, and whether the note leaves a sealed channel."""
+    """Who may ask here, on which limit, and whether the note leaves a sealed channel."""
 
     origin: _Origin
     view: LimitView
@@ -363,7 +371,7 @@ class _Decided:
 
 
 def form_text(remaining: int | None) -> str:
-    """The note form's prompt, with the requests left on the default plan."""
+    """The note form's prompt, with the requests left on the default allowance."""
     if remaining is None:
         return MENU_PROMPT
     return FORM_TEXT.format(
@@ -372,7 +380,7 @@ def form_text(remaining: int | None) -> str:
 
 
 def _form_hints(view: LimitView) -> tuple[int | None, str | None]:
-    """The default plan counts requests; any other plan shows its balance or the exemption."""
+    """The default allowance counts requests; a limit shows its balance or the exemption."""
     left = view.available if view.charged_to == "default" else None
     if left is not None:
         return int(max(left, 0)), None
@@ -422,7 +430,7 @@ def form_card(
 def menu_card(
     token: str, view: LimitView, *, sealed: bool, error: str | None = None
 ) -> AdaptiveCard:
-    """A plan's menu in the chat; Next replaces it with the picked option's form."""
+    """A limit's menu in the chat; Next replaces it with the picked option's form."""
     pick = button(VERB, NEXT, "pick", ask=token)
     return AdaptiveCard(
         body=[
@@ -496,7 +504,7 @@ def _option_dialog(
 
 
 def _facts(row: SupportEscalationRow, view: LimitView) -> list[str]:
-    """A plan request's lines for the post; the default plan's post is unchanged."""
+    """A limit request's lines for the post; the default post is unchanged."""
     if row.charged_to == "default":
         return []
     balance = balance_text(view.balance, view.period) if row.charged_to == "limit" else None
@@ -541,7 +549,7 @@ class SupportCommand:
     async def _decide(
         self, actor: Actor, asked: _Asked, *, refuse: Callable[[AnswerAccess], str]
     ) -> _Decided | str:
-        """Whether `actor` may ask here and on which plan; a str is the refusal.
+        """Whether `actor` may ask here and on which limit; a str is the refusal.
 
         Read each time a form is shown; `_escalate` decides again under the locks.
         """
@@ -629,13 +637,13 @@ class SupportCommand:
         else:
             asked = replace(asked, message_id=card_id)
         if op == "pick" or (op == "send" and data.get(OPTION_INPUT)):
-            return await self._act_plan(actor, token, asked, data, send=op == "send")
+            return await self._act_menu(actor, token, asked, data, send=op == "send")
         note = str(data.get(NOTE_INPUT) or "").strip()[:MAX_NOTE_CHARS]
         if not note:
             return toast(USAGE)
         return await self._send(actor, token, asked, RequestChoice.default(note))
 
-    async def _act_plan(
+    async def _act_menu(
         self,
         actor: Actor,
         token: str,
@@ -729,7 +737,7 @@ class SupportCommand:
         asked = self._dialog_asked(actor, activity.from_.name, place)
         stage = data.get("stage")
         if stage in ("pick", "send"):
-            return await self._ask_plan(actor, asked, data, send=stage == "send")
+            return await self._ask_menu(actor, asked, data, send=stage == "send")
         note = str(data.get(NOTE_INPUT) or "").strip()[:MAX_NOTE_CHARS]
         if not note:
             # Only someone who may ask there gets the form back to fix.
@@ -742,7 +750,7 @@ class SupportCommand:
         choice = RequestChoice.default(note)
         return dialog_message(await self._escalate(actor, asked, choice, not_allowed=NOT_ALLOWED))
 
-    async def _ask_plan(
+    async def _ask_menu(
         self, actor: Actor, asked: _Asked, data: Mapping[str, object], *, send: bool
     ) -> TaskModuleResponse:
         """The dialog's menu Next (answered with the option's card), or its Send."""
@@ -776,7 +784,13 @@ class SupportCommand:
         runtime = self._runtime
         tenant_id = actor.tenant_id
         origin = await _origin(runtime, tenant_id, asked)
-        if not await self._offered(origin):
+        destination = None
+        if await self._offered(origin):
+            async with runtime.sessionmaker() as session:
+                destination = await support_destination(
+                    session, tenant_id=tenant_id, platform="teams", settings=runtime.settings
+                )
+        if destination is None:
             return UNAVAILABLE
         refusal, sealed = not_allowed, False
         source_allowed = None
@@ -825,14 +839,21 @@ class SupportCommand:
         row, view = outcome.row, outcome.view
         if outcome.status != "recorded" or row is None or view is None:
             _log_not_recorded(outcome, tenant_id)
-            return plan_refusal(outcome, now=datetime.now(UTC))
+            return limit_refusal(outcome, now=datetime.now(UTC))
         log.info("support.escalation_recorded", escalation_id=str(row.id))
         asked = replace(asked, sealed=sealed)
-        self._spawn(self._deliver(tenant_id, asked, row, view), name="teams.support.deliver")
+        self._spawn(
+            self._deliver(tenant_id, asked, row, view, destination), name="teams.support.deliver"
+        )
         return received_text(row, view)
 
     async def _deliver(
-        self, tenant_id: uuid.UUID, asked: _Asked, row: SupportEscalationRow, view: LimitView
+        self,
+        tenant_id: uuid.UUID,
+        asked: _Asked,
+        row: SupportEscalationRow,
+        view: LimitView,
+        destination: SupportDestination,
     ) -> None:
         """Best effort: the row is committed, and stays undelivered unless a post lands.
 
@@ -855,12 +876,16 @@ class SupportCommand:
         post_id = None
         if row.status == "pending":
             card = settle_card(row, asked.lines(facts))
-            post_id = await post_card_to_support_channel(self._runtime, self._direct, card)
+            post_id = await post_card_to_support_channel(
+                self._runtime, self._direct, destination, card
+            )
         elif not delivered:
-            delivered = await post_to_support_channel(self._runtime, self._direct, body)
+            delivered = await post_to_support_channel(
+                self._runtime, self._direct, destination, body
+            )
         delivered = delivered or post_id is not None
         if delivered:
-            channel = self._runtime.settings.support.teams_escalation_channel_id
+            channel = destination.channel_id
             try:
                 async with self._runtime.sessionmaker.begin() as session:
                     await mark_delivered(
@@ -919,41 +944,46 @@ class SupportCommand:
 
 
 async def post_to_support_channel(
-    runtime: TeamsRuntime, direct: DirectChats | None, body: str
+    runtime: TeamsRuntime, direct: DirectChats | None, destination: SupportDestination, body: str
 ) -> bool:
-    """Post `body` to the Teams escalation channel; False when it did not land."""
+    """Post `body` to the request channel; False when it did not land."""
 
     async def send(chats: DirectChats, channel: str) -> str:
         return await chats.post(channel, body)
 
-    return await _post_in_support_channel(runtime, direct, send) is not None
+    return await _post_in_support_channel(runtime, direct, destination, send) is not None
 
 
 async def post_card_to_support_channel(
-    runtime: TeamsRuntime, direct: DirectChats | None, card: AdaptiveCard
+    runtime: TeamsRuntime,
+    direct: DirectChats | None,
+    destination: SupportDestination,
+    card: AdaptiveCard,
 ) -> str | None:
-    """Post `card` to the Teams escalation channel; its activity id, None when it did not land."""
+    """Post `card` to the request channel; its activity id, None when it did not land."""
 
     async def send(chats: DirectChats, channel: str) -> str:
         return await chats.post_card(channel, MessageActivityInput().add_card(card))
 
-    return await _post_in_support_channel(runtime, direct, send)
+    return await _post_in_support_channel(runtime, direct, destination, send)
 
 
 async def _post_in_support_channel(
     runtime: TeamsRuntime,
     direct: DirectChats | None,
+    destination: SupportDestination,
     send: Callable[[DirectChats, str], Awaitable[str]],
 ) -> str | None:
-    """`send` to the escalation channel when this bot may post there.
+    """`send` to the request channel when this bot may post there.
 
     The channel is asked `authorize(POST)` with no agent, on a policy read
     just before the send, as Slack does, so a channel protected meanwhile is
-    refused. No lock is held across the send.
+    refused. No lock is held across the send. This process posts through one
+    pinned service URL (`SERVICE_URL`), the one a picked channel stores.
     """
-    channel = runtime.settings.support.teams_escalation_channel_id
+    channel = destination.channel_id
     try:
-        if not channel or direct is None or not await _may_post_to(runtime, channel):
+        if direct is None or not await _may_post_to(runtime, channel):
             return None
         return await send(direct, channel)
     except (SQLAlchemyError, *TEAMS_SEND_ERRORS) as exc:
@@ -978,3 +1008,38 @@ async def _may_post_to(runtime: TeamsRuntime, channel: str) -> bool:
         log.warning("support.destination_protected", channel_id=channel)
         return False
     return True
+
+
+ChannelNames = Callable[[str], Awaitable[Mapping[str, str | None]]]
+"""A team's standard channels by id (`http_service.channel_names`); empty when unreadable."""
+
+NOT_INSTALLED: Final = "Add Daimon to this channel's team."
+
+
+async def channel_pick(
+    runtime: TeamsRuntime, channels: ChannelNames, *, tenant_id: uuid.UUID, channel_id: str
+) -> ChannelPick | str:
+    """`channel_id` as a request channel, with its team and service URL; a str says why not.
+
+    Daimon posts only in a team it is installed in, so the channel is looked
+    up in each installed team's channel list.
+    """
+    async with runtime.sessionmaker() as session:
+        installs = await list_teams_installations(session, tenant_id=tenant_id)
+    for install in installs:
+        if channel_id in await channels(install.team_id):
+            return ChannelPick(
+                platform="teams",
+                channel_id=channel_id,
+                teams_team_id=install.team_id,
+                teams_service_url=SERVICE_URL,
+            )
+    return NOT_INSTALLED
+
+
+async def post_blocker(
+    runtime: TeamsRuntime, channels: ChannelNames, *, tenant_id: uuid.UUID, channel_id: str
+) -> str | None:
+    """Why Daimon can't post requests in `channel_id`, or None when it can."""
+    pick = await channel_pick(runtime, channels, tenant_id=tenant_id, channel_id=channel_id)
+    return pick if isinstance(pick, str) else None

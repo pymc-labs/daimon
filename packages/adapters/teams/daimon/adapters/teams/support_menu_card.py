@@ -1,4 +1,4 @@
-"""Ask a person's menu, option form and support post cards for a plan's request.
+"""Ask a person's menu, option form and support post cards for a limit request.
 
 Pure: builds and reads cards only. The menu and the picked option's form are
 two cards (a dialog's `continue`, or the typed form's Next), as Slack
@@ -13,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from typing import Final
 
 from daimon.adapters.teams.card_actions import error_text, text_lines
+from daimon.adapters.teams.post_size import fit_lines
 from daimon.core.stores.support_rows import LimitView, SupportEscalationRow
 from daimon.core.support import (
     CHARGE_FIELD,
@@ -74,7 +75,7 @@ def subtle(text: str) -> TextBlock:
 
 
 def footer(view: LimitView) -> str | None:
-    """What a request uses here, when it is not the default plan's request count."""
+    """What a request uses here, when it is not the default allowance's request count."""
     return EXEMPT_OFFER if view.exempt else balance_text(view.balance, view.period)
 
 
@@ -170,15 +171,18 @@ def status_line(row: SupportEscalationRow) -> str:
 
 
 def request_facts(row: SupportEscalationRow, *, menu: bool, balance: str | None) -> list[str]:
-    """A plan request's lines: its terms on a configured menu, status and balance."""
+    """A limit request's lines: its terms on a configured menu, status and balance."""
     lines = [option_text(row.option)] if menu and row.option is not None else []
     lines.append(status_line(row))
     return [*lines, balance] if balance else lines
 
 
 def _note_blocks(note: str) -> list[CardElement]:
-    """The note in full, a block per line: each field's `Label: answer` starts its own."""
-    return text_lines(*(line for line in note.splitlines() if line.strip()))
+    """The note, a block per line: each field's `Label: answer` starts its own.
+
+    A long line is cut, marked, so the post fits Teams' cap (`post_size`).
+    """
+    return text_lines(*fit_lines([line for line in note.splitlines() if line.strip()]))
 
 
 def settle_card(row: SupportEscalationRow, lines: Sequence[str]) -> AdaptiveCard:

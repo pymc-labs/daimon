@@ -19,7 +19,7 @@ from daimon.adapters.teams import card
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.identity import DENIED
 from daimon.adapters.teams.support import NOTE_INPUT
-from daimon.adapters.teams.support_plan_card import CHARGE_INPUT, SETTLE_VERB
+from daimon.adapters.teams.support_menu_card import CHARGE_INPUT, SETTLE_VERB
 from daimon.core import platform_names
 from daimon.core.config import SupportSettings
 from daimon.core.ma_identity import derive_tenant_uuid
