@@ -36,6 +36,7 @@ from daimon.core.stores.support_rows import SupportEscalationRow
 from daimon.core.support_plan_changes import is_support_channel, settle_from_post
 from daimon.core.support_plans import (
     CHARGE_FIELD,
+    PLAN_GONE,
     REQUEST_GONE,
     SETTLE_ELSEWHERE,
     SupportPlanError,
@@ -170,6 +171,8 @@ class TeamsSupportSettle:
         after = outcome.row
         if after is None:
             return toast(REQUEST_GONE)
+        if outcome.status == "plan_gone":
+            return toast(PLAN_GONE)
         if outcome.status in ("invalid", "over_balance"):
             return toast(
                 settle_range_text(after.bounds, counted=after.counted, available=outcome.available)

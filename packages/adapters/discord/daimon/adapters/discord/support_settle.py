@@ -28,6 +28,7 @@ from daimon.core.support_plans import (
     CHARGE_FIELD,
     CLIENT_NOT_NOTIFIED,
     DECLINE,
+    PLAN_GONE,
     REQUEST_GONE,
     SET_CHARGE,
     SETTLE_ELSEWHERE,
@@ -110,6 +111,9 @@ async def _finish(
     after = outcome.row
     if after is None:
         await _notice(interaction, REQUEST_GONE)
+        return
+    if outcome.status == "plan_gone":
+        await _notice(interaction, PLAN_GONE)
         return
     if outcome.status in ("invalid", "over_balance"):
         text = settle_range_text(after.bounds, counted=after.counted, available=outcome.available)
