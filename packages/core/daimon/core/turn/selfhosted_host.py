@@ -19,7 +19,7 @@ from daimon.core.mux_backend import (
 from daimon.core.pricing import ProviderPrice
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import reauthorize
-from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
+from daimon.core.turn.errors import AdmissionDenied, SessionBusyError, SessionPreparationFailed
 from daimon.core.turn.io import TurnCodecRequest, TurnIO, register_turn_codec
 from daimon.core.turn.persistence import current_persistence
 from daimon.core.turn.prepare import (
@@ -325,6 +325,47 @@ async def _advance_binding(
             raise _busy(now, "binding_changed") from error
 
 
+async def _publish_first_binding(
+    request: ProviderPreparationRequest,
+    store: StateStore,
+    binding: ProviderBinding,
+    revision: ConfigRevision,
+) -> ProviderBinding:
+    """Bind a thread on `revision` unless its conversation was set to another model after it.
+
+    A model change (`daimon selfhosted change-model`) releases the threads it finds on
+    the old model, so a first binding planned before it must not land after it, even
+    when a later revision hides the move (a clear, the old model set again): the
+    message does not run, and the person is asked to send it again. Changes that never
+    select another model (a clear, the same model again, another backend) still bind
+    on `revision`. The check and the binding share one transaction under the policy
+    fence configuration writers hold, so only the Postgres store that owns these
+    sessions checks; another store (a test's, in memory) binds unchecked.
+    """
+    from daimon.core.session_fence_retry import retry_fences
+    from daimon.core.stores import mux_state
+    from daimon.core.stores.access_policy import lock_policy_writes_shared
+
+    sessionmaker = request.deps.sessionmaker
+    if not (isinstance(store, PostgresStateStore) and store.owns_sessions(sessionmaker)):
+        return await store.put_binding(binding, expected_generation=0)
+
+    async def publish() -> ProviderBinding:
+        async with sessionmaker.begin() as session:
+            await lock_policy_writes_shared(session, tenant_id=request.tenant_id)
+            later = await mux_state.overrides_after(session, revision.channel, revision.local)
+            if any(
+                override.backend == revision.backend and override.model != revision.model
+                for override in later
+            ):
+                raise SessionPreparationFailed(
+                    reasons=("model",), stage="create", retry_after=request.now()
+                )
+            return await mux_state.put_binding(session, binding, expected_generation=0)
+
+    return await retry_fences(publish, label="selfhosted_first_binding")
+
+
 async def prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTurn:
     try:
         return await _prepare_selfhosted(request)
@@ -434,7 +475,7 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
             config_revision=revision.local,
             legacy_account_id=request.scope.account_id,
         )
-        binding = await store.put_binding(binding, expected_generation=0)
+        binding = await _publish_first_binding(request, store, binding, revision)
         backend = driver(runtime, revision, request.scope, binding, store=store)
         ref = native.ref
     else:

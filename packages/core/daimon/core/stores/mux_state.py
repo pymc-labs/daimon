@@ -264,6 +264,59 @@ async def latest_config_revision_and_sharing(
     return ConfigRevision.model_validate(revision), bool(shared)
 
 
+async def overrides_after(
+    session: AsyncSession, channel: ChannelRef, local: int
+) -> list[ConfigRevision]:
+    """The channel's overrides (its own configurations and clears) after revision `local`."""
+    rows = await session.scalars(
+        select(ChannelConfigRevision.revision)
+        .where(
+            *_channel_where(channel),
+            ChannelConfigRevision.origin.in_(("channel", "channel_clear")),
+            ChannelConfigRevision.local > local,
+        )
+        .order_by(ChannelConfigRevision.local)
+    )
+    return [ConfigRevision.model_validate(row) for row in rows]
+
+
+async def channels_configured_as(
+    session: AsyncSession, *, tenant_id: uuid.UUID, digests: Collection[str]
+) -> list[ConfigRevision]:
+    """The current revision of each of the tenant's channels configured as one of `digests`.
+
+    Current is the newest override, as `latest_config_revision(overrides_only=True)`
+    reads it, and it must be the channel's own: a cleared channel is left out.
+    """
+    newest = (
+        select(
+            ChannelConfigRevision.platform,
+            ChannelConfigRevision.channel_id,
+            ChannelConfigRevision.digest,
+            ChannelConfigRevision.origin,
+            ChannelConfigRevision.revision,
+            func.row_number()
+            .over(
+                partition_by=(ChannelConfigRevision.platform, ChannelConfigRevision.channel_id),
+                order_by=ChannelConfigRevision.local.desc(),
+            )
+            .label("rank"),
+        )
+        .where(
+            ChannelConfigRevision.tenant_id == tenant_id,
+            ChannelConfigRevision.origin.in_(("channel", "channel_clear")),
+            ChannelConfigRevision.local > 0,
+        )
+        .subquery()
+    )
+    rows = await session.scalars(
+        select(newest.c.revision)
+        .where(newest.c.rank == 1, newest.c.origin == "channel", newest.c.digest.in_(digests))
+        .order_by(newest.c.platform, newest.c.channel_id)
+    )
+    return [ConfigRevision.model_validate(row) for row in rows]
+
+
 async def thread_has_caller_sessions(
     session: AsyncSession,
     *,
@@ -324,6 +377,27 @@ async def get_binding(
         return None
     binding = await _binding(session, row.binding_id, row.generation, read_persisted=read_persisted)
     return None if is_released(binding) and not include_released else binding
+
+
+async def channel_bindings(session: AsyncSession, channel: ChannelRef) -> list[BindingContract]:
+    """The current binding of every slot in the channel's threads, released ones included."""
+    rows = await session.scalars(
+        select(ProviderBinding.binding)
+        .join(
+            ProviderBindingSlot,
+            and_(
+                ProviderBindingSlot.binding_id == ProviderBinding.binding_id,
+                ProviderBindingSlot.generation == ProviderBinding.generation,
+            ),
+        )
+        .where(
+            ProviderBindingSlot.tenant_id == _tenant(channel.tenant_id),
+            ProviderBindingSlot.platform == channel.platform,
+            ProviderBindingSlot.channel_id == channel.channel_id,
+        )
+        .order_by(ProviderBindingSlot.thread_id, ProviderBindingSlot.account_id)
+    )
+    return [BindingContract.model_validate(row) for row in rows]
 
 
 async def put_binding(

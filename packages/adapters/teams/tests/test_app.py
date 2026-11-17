@@ -28,6 +28,7 @@ from daimon.adapters.teams.context import HistoryBlock
 from daimon.adapters.teams.identity import INPUT_TOO_LONG, MAX_INBOUND_MESSAGE_BYTES, TeamsInbound
 from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.continuity.messages import render_preparation_failed
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
@@ -45,13 +46,18 @@ from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_inte
 from daimon.core.stores.turn_outcomes import OutcomeRecord, list_for_tenant
 from daimon.core.teams_threads import new_setup_thread_id
 from daimon.core.turn.admission import AdmissionDenied
-from daimon.core.turn.errors import AdmissionDenialReason, MissingTurnConfigError
+from daimon.core.turn.errors import (
+    AdmissionDenialReason,
+    MissingTurnConfigError,
+    SessionPreparationFailed,
+)
 from daimon.core.turn.outcomes import current_outcome, drain_outcomes
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.slots import holding, wait_for_slot
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
 from microsoft_teams.api import AdaptiveCardActionCardResponse, MessageActivity
+from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -1058,6 +1064,26 @@ async def test_a_refusal_that_sends_the_person_to_an_admin_says_who_the_admins_a
     [notice] = [shown_text(a) for a in sender.activities]
     assert notice.startswith("Daimon isn't set up in this channel yet.\n\nAsk an admin to ")
     assert notice.endswith("\n\nAdmins are the owners of the Leads team.") is named
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_message_planned_before_a_model_change_asks_to_be_sent_again(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender = FakeSender()
+    teams = _app(db_session_factory, sender)
+    # A selfhosted message whose conversation moved to another model before it bound.
+    moved = SessionPreparationFailed(
+        reasons=("model",), stage="create", retry_after=datetime.now(UTC)
+    )
+    with (
+        patched_admission(),
+        patch.object(app_module, "bind_session", AsyncMock(side_effect=moved)),
+    ):
+        await teams._run_turn(make_inbound(), TENANT)
+    notice = sender.activities[-1]
+    assert shown_text(notice) == render_preparation_failed(DEFAULT_AGENT_NAME), "not a handoff"
+    assert '"attention"' in notice.model_dump_json(), "it did not run: an error card"
 
 
 def _unprompted_reply() -> TeamsInbound:

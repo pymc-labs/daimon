@@ -188,6 +188,17 @@ async def delete_operations_for_account(session: AsyncSession, *, account_id: UU
     return len(list(removed))
 
 
+async def lock_resources(session: AsyncSession, tenant_id: UUID) -> None:
+    """Hold off the tenant's selfhosted agent and environment writes until this transaction ends."""
+    await session.execute(
+        select(
+            func.pg_advisory_xact_lock(
+                func.hashtextextended(f"selfhosted-resources:{tenant_id}", 0)
+            )
+        )
+    )
+
+
 class _Resources[
     Spec: (AgentSpec, EnvironmentSpec),
     Patch: (AgentPatch, EnvironmentPatch),
@@ -270,13 +281,7 @@ class _Resources[
                     )
                     if account is None:
                         raise ScopeViolation("selfhosted", "account no longer exists")
-                await session.execute(
-                    select(
-                        func.pg_advisory_xact_lock(
-                            func.hashtextextended("selfhosted-resources:" + str(tenant), 0)
-                        )
-                    )
-                )
+                await lock_resources(session, tenant)
                 exists = await session.scalar(
                     select(Tenant.id)
                     .where(Tenant.id == tenant, Tenant.archived_at.is_(None))

@@ -19,7 +19,7 @@ from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.prepare import ProviderPreparationRequest
 from daimon.core.turn.selfhosted_codec import PROFILE
 from daimon.core.turn.selfhosted_host import SelfHostedHostRuntime, register_host
-from mux.contracts.config import ConfigRevision
+from mux.contracts.config import BackendConfig, ConfigRevision
 from mux.contracts.ids import ResourceRef, Scope, SkillRef
 from mux.contracts.resources import AgentSpec, SessionSpec
 from mux.drivers.selfhosted import DirectTransport, FoundryInvocationsTransport
@@ -147,6 +147,11 @@ def merge_tool_policy(
         key: max((permission(original, key), permission(host, key)), key=rank.__getitem__)
         for key in original.keys() | host.keys()
     }
+
+
+def selfhosted_config(model: str) -> BackendConfig:
+    """A channel configuration for the selfhosted loop on `model`."""
+    return BackendConfig(backend="selfhosted", profile=PROFILE, model=model)
 
 
 class SelfHostedDeployment(BaseModel):

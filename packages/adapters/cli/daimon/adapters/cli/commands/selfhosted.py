@@ -1,25 +1,38 @@
-"""Initialize tenant-owned self-hosted resources using only Postgres."""
+"""Set up tenant-owned self-hosted resources and move them to another model."""
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 from uuid import UUID, uuid4
 
 import typer
+from daimon.core.channel_backend import channel_ref, set_channel_backend
 from daimon.core.db import build_engine
+from daimon.core.errors import DaimonError
+from daimon.core.stores import mux_state
+from daimon.core.stores.access_policy import policy_write_transaction
 from daimon.core.stores.selfhosted_resources import (
     SelfHostedAgents,
     SelfHostedEnvironments,
+    list_live_agent_facts,
+    lock_resources,
 )
+from daimon.core.thread_release import caller_slot, release_pending
+from daimon.core.turn.selfhosted_deployment import selfhosted_config
+from mux.contracts.config import resolve_default
 from mux.contracts.extensions import ExtensionConfig
-from mux.contracts.ids import ModelRef, Scope
-from mux.contracts.resources import Agent, AgentSpec, Environment, EnvironmentSpec
+from mux.contracts.ids import ChannelRef, ModelRef, Revision, Scope
+from mux.contracts.resources import Agent, AgentPatch, AgentSpec, Environment, EnvironmentSpec
 from mux.drivers.selfhosted import HarnessConfig
-from mux.errors import ProviderError
+from mux.errors import BindingConflict, ProviderError
 from mux.profiles.selfhosted import LOOP
-from pydantic import ValidationError
+from mux.state.store import binding_slot, released_successor
+from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -27,6 +40,43 @@ if TYPE_CHECKING:
     from daimon.core.turn.run import RunOutcome
 
 selfhosted_app = typer.Typer(help="Manage tenant-owned self-hosted agents and environments.")
+
+DatabaseUrl = Annotated[
+    str,
+    typer.Option(
+        "--database-url",
+        envvar=["DAIMON_DATABASE__URL", "DAIMON_DATABASE_URL"],
+        show_envvar=True,
+        help="Postgres connection URL.",
+    ),
+]
+
+
+def _operator(tenant_id: UUID) -> Scope:
+    """The deployment operator's scope: no personal account, the tenant's records only."""
+    return Scope(
+        tenant_id=str(tenant_id),
+        account_id="operator",
+        principal_id="cli",
+        authorization_id="cli-deployment-operator",
+    )
+
+
+@asynccontextmanager
+async def _database(database_url: str) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    try:
+        engine = build_engine(database_url)
+    except Exception:
+        # URL/dialect errors can contain isolated password fragments that
+        # credential redactors cannot identify without the original DSN.
+        raise typer.BadParameter(
+            "database configuration invalid (scheme/host/port check)",
+            param_hint="--database-url",
+        ) from None
+    try:
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()
 
 
 async def initialize(
@@ -40,12 +90,7 @@ async def initialize(
     harness: HarnessConfig,
 ) -> tuple[str, str]:
     """Reuse matching named resources; refuse drift rather than rewriting them."""
-    scope = Scope(
-        tenant_id=str(tenant_id),
-        account_id="operator",
-        principal_id="cli",
-        authorization_id="cli-deployment-operator",
-    )
+    scope = _operator(tenant_id)
     agents = SelfHostedAgents(sessionmaker)
     environments = SelfHostedEnvironments(sessionmaker)
     agent_spec = AgentSpec(
@@ -115,15 +160,7 @@ def _matching(resource: Agent | Environment, spec: AgentSpec | EnvironmentSpec) 
 def selfhosted_init_command(
     tenant_id: Annotated[UUID, typer.Option("--tenant-id", help="Existing tenant UUID.")],
     harness_url: Annotated[str, typer.Option("--harness-url", help="Harness HTTP endpoint.")],
-    database_url: Annotated[
-        str,
-        typer.Option(
-            "--database-url",
-            envvar=["DAIMON_DATABASE__URL", "DAIMON_DATABASE_URL"],
-            show_envvar=True,
-            help="Postgres connection URL.",
-        ),
-    ],
+    database_url: DatabaseUrl,
     model: Annotated[
         str, typer.Option("--model", help="Azure model deployment name.")
     ] = "gpt-6.1-sol",
@@ -176,18 +213,9 @@ def selfhosted_init_command(
         ) from None
 
     async def run() -> tuple[str, str]:
-        try:
-            engine = build_engine(database_url)
-        except Exception:
-            # URL/dialect errors can contain isolated password fragments that
-            # credential redactors cannot identify without the original DSN.
-            raise typer.BadParameter(
-                "database configuration invalid (scheme/host/port check)",
-                param_hint="--database-url",
-            ) from None
-        try:
+        async with _database(database_url) as sessionmaker:
             return await initialize(
-                async_sessionmaker(engine, expire_on_commit=False),
+                sessionmaker,
                 tenant_id=tenant_id,
                 name=name,
                 model=model,
@@ -195,8 +223,6 @@ def selfhosted_init_command(
                 environment_name=environment_name,
                 harness=harness,
             )
-        finally:
-            await engine.dispose()
 
     try:
         agent_id, environment_id = asyncio.run(run())
@@ -212,6 +238,265 @@ def selfhosted_init_command(
         ) from None
     typer.echo(agent_id)
     typer.echo(environment_id)
+
+
+class ModelChangeRefused(DaimonError):
+    """A model change that cannot go ahead as its dry run showed."""
+
+
+@dataclass(frozen=True)
+class ModelChange:
+    """Move a tenant's agents, conversations and threads from `from_model` to `model`.
+
+    `conversations` names the conversations to move; empty means every one on `from_model`.
+    While agents move it must name every one, as each conversation answers with them.
+    """
+
+    tenant_id: UUID
+    from_model: str
+    model: str
+    conversations: tuple[str, ...] = ()
+
+
+class _Planned(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class PlannedThread(_Planned):
+    """A caller's thread answered on the old model, at the binding generation seen."""
+
+    thread_id: str
+    account_id: UUID
+    generation: int
+
+
+class PlannedConversation(_Planned):
+    """A conversation on the old model, at the revision seen, and its threads there."""
+
+    platform: str
+    channel_id: str
+    revision: int
+    threads: tuple[PlannedThread, ...]
+
+
+class PlannedAgent(_Planned):
+    """An agent on the old model, at the revision seen."""
+
+    id: str
+    name: str
+    revision: int
+
+
+class ModelChangePlan(_Planned):
+    """What a dry run found on the old model: exactly what `apply_model_change` writes."""
+
+    tenant_id: UUID
+    from_model: str
+    model: str
+    agents: tuple[PlannedAgent, ...]
+    conversations: tuple[PlannedConversation, ...]
+
+
+async def _threads_on(
+    session: AsyncSession, channel: ChannelRef, digest: str
+) -> tuple[PlannedThread, ...]:
+    """The channel's caller threads bound to one of its revisions configured as `digest`,
+    except those whose next turn already selects afresh."""
+    threads: list[PlannedThread] = []
+    for binding in await mux_state.channel_bindings(session, channel):
+        if binding.legacy_account_id is None:
+            continue  # A shared thread: only a caller's own thread is released.
+        bound = await mux_state.get_config_revision(session, channel, binding.config_revision)
+        if (
+            bound is not None
+            and bound.digest == digest
+            and not await release_pending(session, binding_slot(binding))
+        ):
+            threads.append(
+                PlannedThread(
+                    thread_id=binding.thread.thread_id,
+                    account_id=UUID(binding.legacy_account_id),
+                    generation=binding.generation,
+                )
+            )
+    return tuple(threads)
+
+
+async def _plan(session: AsyncSession, change: ModelChange) -> ModelChangePlan:
+    """Conversations on the old model, and ones already on the new model with
+    threads still on the old one (as a `register` run before the change leaves them)."""
+    old, new = (
+        resolve_default(selfhosted_config(model)).content_digest()
+        for model in (change.from_model, change.model)
+    )
+    revisions = await mux_state.channels_configured_as(
+        session, tenant_id=change.tenant_id, digests=(old, new)
+    )
+    conversations: list[PlannedConversation] = []
+    for revision in revisions:
+        threads = await _threads_on(session, revision.channel, old)
+        if revision.digest == old or threads:
+            conversations.append(
+                PlannedConversation(
+                    platform=revision.channel.platform,
+                    channel_id=revision.channel.channel_id,
+                    revision=revision.local,
+                    threads=threads,
+                )
+            )
+    agents = tuple(
+        PlannedAgent(id=agent.id, name=agent.name, revision=agent.version)
+        for agent in sorted(
+            await list_live_agent_facts(session, tenant_id=change.tenant_id),
+            key=lambda agent: agent.id,
+        )
+        if agent.model.id == change.from_model
+    )
+    if change.conversations:
+        listed = set(change.conversations)
+        if missing := sorted(listed - {c.channel_id for c in conversations}):
+            raise ModelChangeRefused(f"not on {change.from_model}: {', '.join(missing)}")
+        # Every conversation shares the tenant's agents: one left on the old model
+        # while they move could not answer.
+        if agents and (left := [c.channel_id for c in conversations if c.channel_id not in listed]):
+            raise ModelChangeRefused(
+                f"the agents move too, so list every conversation on {change.from_model}; "
+                f"missing: {', '.join(left)}"
+            )
+        conversations = [c for c in conversations if c.channel_id in listed]
+    return ModelChangePlan(
+        tenant_id=change.tenant_id,
+        from_model=change.from_model,
+        model=change.model,
+        agents=agents,
+        conversations=tuple(conversations),
+    )
+
+
+async def plan_model_change(
+    sessionmaker: async_sessionmaker[AsyncSession], change: ModelChange
+) -> ModelChangePlan:
+    """The dry run: what `change` would move, read without writing anything."""
+    async with sessionmaker() as session:
+        return await _plan(session, change)
+
+
+async def apply_model_change(
+    sessionmaker: async_sessionmaker[AsyncSession], change: ModelChange, plan: ModelChangePlan
+) -> None:
+    """Write `plan` if a dry run of `change` finds it still; refuse otherwise.
+
+    One transaction holds the tenant's policy and resource locks: each conversation
+    gets a new revision on the new model, and each planned thread is released at the
+    generation seen, through the binding compare-and-swap, so its next message starts
+    a new session there. A thread whose binding moved meanwhile refuses the whole
+    change. Then each agent moves at the revision seen. Configuration history is only
+    appended to, and a cleared conversation is never planned.
+    """
+    config = selfhosted_config(change.model)
+    stale = f"what is on {change.from_model} changed since the dry run; nothing was written"
+    async with policy_write_transaction(sessionmaker, tenant_id=change.tenant_id) as session:
+        await lock_resources(session, change.tenant_id)
+        if await _plan(session, change) != plan:
+            raise ModelChangeRefused(stale)
+        for conversation in plan.conversations:
+            channel = channel_ref(change.tenant_id, conversation.platform, conversation.channel_id)
+            await set_channel_backend(session, channel, config)
+            for thread in conversation.threads:
+                slot = caller_slot(
+                    tenant_id=change.tenant_id,
+                    platform=conversation.platform,
+                    channel_id=conversation.channel_id,
+                    thread_id=thread.thread_id,
+                    account_id=thread.account_id,
+                )
+                bound = await mux_state.get_binding(session, slot)
+                if bound is None:
+                    raise ModelChangeRefused(stale)
+                try:
+                    await mux_state.put_binding(
+                        session, released_successor(bound), expected_generation=thread.generation
+                    )
+                except BindingConflict:
+                    raise ModelChangeRefused(stale) from None
+    agents, scope = SelfHostedAgents(sessionmaker), _operator(change.tenant_id)
+    for planned in plan.agents:
+        try:
+            agent = await agents.resolve(scope, planned.id)
+            await agents.update(
+                scope,
+                agent.ref,
+                AgentPatch(model=agent.spec.model.model_copy(update={"id": change.model})),
+                expected=Revision(local=planned.revision),
+                key=f"selfhosted-change-model:{planned.id}:{planned.revision}",
+            )
+        except ProviderError:
+            raise ModelChangeRefused(
+                f"agent {planned.name} changed since the dry run; the conversations moved, "
+                "so run the dry run again to move the agent"
+            ) from None
+
+
+@selfhosted_app.command("change-model")
+def selfhosted_change_model_command(
+    tenant_id: Annotated[UUID, typer.Option("--tenant-id", help="Existing tenant UUID.")],
+    from_model: Annotated[
+        str, typer.Option("--from-model", help="The model the conversations are on now.")
+    ],
+    model: Annotated[str, typer.Option("--model", help="Azure model deployment to move to.")],
+    database_url: DatabaseUrl,
+    conversations: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--conversation",
+            help="A channel or chat ID to move; repeat it. Default, and needed while agents "
+            "move: every one on --from-model.",
+        ),
+    ] = None,
+    apply: Annotated[
+        typer.FileText | None,
+        typer.Option("--apply", help="Write this plan, as the dry run printed it; - reads stdin."),
+    ] = None,
+) -> None:
+    """Move a tenant's agents, conversations and threads to another model.
+
+    Without --apply, print the plan as JSON and write nothing. With it, write the
+    plan only if a dry run would print it now.
+    """
+    if not from_model.strip() or not model.strip() or from_model == model:
+        raise typer.BadParameter("name two different models", param_hint="--model")
+    change = ModelChange(
+        tenant_id=tenant_id,
+        from_model=from_model,
+        model=model,
+        conversations=tuple(conversations or ()),
+    )
+    try:
+        planned = ModelChangePlan.model_validate_json(apply.read()) if apply else None
+    except ValidationError:
+        raise typer.BadParameter("not a plan a dry run printed", param_hint="--apply") from None
+
+    async def run() -> ModelChangePlan:
+        async with _database(database_url) as sessionmaker:
+            if planned is None:
+                return await plan_model_change(sessionmaker, change)
+            await apply_model_change(sessionmaker, change, planned)
+            return planned
+
+    try:
+        plan = asyncio.run(run())
+    except ModelChangeRefused as refused:
+        typer.echo(f"Refused: {refused}.", err=True)
+        raise typer.Exit(code=1) from None
+    if planned is None:
+        typer.echo(plan.model_dump_json(indent=2))
+        typer.echo("Dry run: nothing was written. Pass this plan to --apply to write it.", err=True)
+        return
+    threads = sum(len(conversation.threads) for conversation in plan.conversations)
+    typer.echo(
+        f"Moved to {model}: {len(plan.agents)} agent(s), {len(plan.conversations)} "
+        f"conversation(s); {threads} thread(s) start a new session at their next message."
+    )
 
 
 async def operator_turn(

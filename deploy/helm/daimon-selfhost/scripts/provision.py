@@ -26,7 +26,7 @@ from daimon.core.stores.access_policy import (
 )
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_write import set_fields
-from mux.contracts.config import BackendConfig
+from daimon.core.turn.selfhosted_deployment import selfhosted_config
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 
@@ -56,9 +56,7 @@ async def _select_selfhosted(
 ) -> str:
     """Make the channel's turns use the selfhosted loop; return the config digest."""
     revision = await set_channel_backend(
-        s,
-        channel_ref(tenant_id, platform, channel_id),
-        BackendConfig(backend="selfhosted", profile="selfhosted.loop", model=model),
+        s, channel_ref(tenant_id, platform, channel_id), selfhosted_config(model)
     )
     return revision.content_digest()
 
