@@ -92,6 +92,7 @@ export function Destination({ d }: { d: SupportPage }) {
           },
           { key: "state", label: "State", control: state },
           { key: "open", label: "Open requests", control: <span className={c.open.count ? undefined : "text-muted-foreground"}>{c.open.count || "None"}</span> },
+          ...(d.undelivered.length ? [{ key: "undelivered", label: "Not delivered", control: <span className="text-destructive">{d.undelivered.length}</span> }] : []),
         ]}
       /></Section>
       {error && <p role="alert" className="mt-2 text-xs text-destructive">{error}</p>}

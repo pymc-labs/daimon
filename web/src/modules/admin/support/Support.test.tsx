@@ -21,9 +21,9 @@ const limit: Limit = {
   shared: "5", each_person: "2", window: "monthly", starts_at: null, ends_at: null,
   used: "1", state: "active", revision: 3, recent: [],
 }
-const menu = { key: "support", name: "Support", revision: 3, summary: "", options: 1, used_in: [], catalog: { name: "Support", options: [{ key: "look", label: "Look", price: { kind: "fixed", amount: "1" } }] } }
+const menu = { key: "support", name: "Support", revision: 3, summary: "", options: 1, used_in: [], body: { name: "Support", options: [{ key: "look", label: "Look", price: { kind: "fixed", amount: "1" } }] } }
 const data: SupportPage = {
-  platform: "discord", everyone: { each_person: "20" },
+  platform: "discord", everyone: { each_person: "20" }, undelivered: [],
   limits: [limit], menus: [menu], menu_use: [{ scope: "workspace", scope_id: "", name: "Workspace", menu: null }],
   places: [], agents: [{ id: "daimon", name: "Daimon" }],
   channel: { own_allowed: true, value: null, default: { name: "support" }, state: "ready", detail: null, open: { count: 0, where: null }, revision: 2 },
@@ -163,7 +163,7 @@ describe("menus", () => {
     const d = await drawer("/?menu=support")
     stale()
     const theirs = { name: "Their menu", options: [{ key: "call", label: "Call", price: { kind: "fixed", amount: "2" } }] }
-    current = { ...data, menus: [{ ...menu, revision: 4, catalog: theirs }] }
+    current = { ...data, menus: [{ ...menu, revision: 4, body: theirs }] }
     await userEvent.click(d.getByRole("button", { name: "Save" }))
     expect(await d.findByRole("alert")).toHaveTextContent("Changed meanwhile. Reloaded.")
     expect(d.getByLabelText("Menu name")).toHaveValue("Their menu")
@@ -191,6 +191,17 @@ describe("requests go to", () => {
     await userEvent.click(await screen.findByRole("combobox", { name: "Channel" }))
     await userEvent.click(await screen.findByRole("option", { name: /help/ }))
     await waitFor(() => expect(api.put).toHaveBeenCalledWith("/api/support/channel", { channel_id: "c2", expected_revision: 2 }))
+  })
+
+  it("lists requests no channel received only when there are some", async () => {
+    view({ ...data, undelivered: [{ at: "2026-01-01T00:00:00Z", person: "Priya", credits: "1", what: "Look" }] })
+    expect(await screen.findByText("Not delivered")).toBeInTheDocument()
+  })
+
+  it("has no undelivered row by default", async () => {
+    view(data)
+    await screen.findByText("Open requests")
+    expect(screen.queryByText("Not delivered")).not.toBeInTheDocument()
   })
 
   it("shows only the number of open requests", async () => {

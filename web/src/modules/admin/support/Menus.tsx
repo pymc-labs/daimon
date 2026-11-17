@@ -86,7 +86,7 @@ function MenuDetail({ d, menu }: { d: SupportPage; menu?: Menu }) {
   const save = useSupportSave()
   const confirm = useConfirm()
   const [, setOpen] = useParam("menu")
-  const [draft, setDraft] = useState(() => (menu ? toDraft(menu.catalog) : emptyMenu()))
+  const [draft, setDraft] = useState(() => (menu ? toDraft(menu.body) : emptyMenu()))
   // The revision as it was read: what a save expects, whatever has been read since.
   const [revision, setRevision] = useState(menu?.revision ?? null)
   const [out, setOut] = useState<Outcome | null>(null)
@@ -94,13 +94,13 @@ function MenuDetail({ d, menu }: { d: SupportPage; menu?: Menu }) {
   // An error names rows by place, so it goes when the rows move.
   const edit = (next: MenuDraft) => { if (shape(next) !== shape(draft)) setOut(null); setDraft(next) }
   const key = menu?.key ?? menuKey(draft.name, d.menus.map((m) => m.key))
-  const put = async (catalog: Record<string, unknown> | null) => {
-    const r = await save.run(`menus/${encodeURIComponent(key)}`, { menu: catalog, expected_revision: revision })
+  const put = async (body: Record<string, unknown> | null) => {
+    const r = await save.run(`menus/${encodeURIComponent(key)}`, { menu: body, expected_revision: revision })
     setOut(r)
-    if (!r.error) { setOpen(null); toast(catalog ? "Menu saved" : "Menu removed"); return }
+    if (!r.error) { setOpen(null); toast(body ? "Menu saved" : "Menu removed"); return }
     if (!r.fresh) return
     const now = r.fresh.menus.find((m) => m.key === key)
-    if (now) { setDraft(toDraft(now.catalog)); setRevision(now.revision) } else if (menu) setOpen(null)
+    if (now) { setDraft(toDraft(now.body)); setRevision(now.revision) } else if (menu) setOpen(null)
   }
   const remove = async () => {
     if (await confirm({ title: "Remove menu?", body: menu?.name, action: "Remove", destructive: true })) await put(null)

@@ -91,10 +91,10 @@ function priceText(p: Record<string, unknown>): string {
   const [low, high] = p.kind === "steps" ? [Math.min(...amounts), Math.max(...amounts)] : [Number(p.min), Number(p.max)]
   return low === high ? word(String(low)) : `${low}-${high} credits`
 }
-const summary = (catalog: Record<string, unknown>) => list(catalog.options).map((o) => `${bag(o).label} (${priceText(bag(bag(o).price))})`).join(", ")
+const summary = (body: Record<string, unknown>) => list(body.options).map((o) => `${bag(o).label} (${priceText(bag(bag(o).price))})`).join(", ")
 
-const menuOf = (key: string, catalog: Record<string, unknown>, revision = 1): Omit<Menu, "used_in"> =>
-  ({ key, name: String(catalog.name ?? key), revision, catalog, summary: summary(catalog), options: list(catalog.options).length })
+const menuOf = (key: string, body: Record<string, unknown>, revision = 1): Omit<Menu, "used_in"> =>
+  ({ key, name: String(body.name ?? key), revision, body, summary: summary(body), options: list(body.options).length })
 let menus: Omit<Menu, "used_in">[] = [
   menuOf("support", { name: "Support", options: [
     { key: "review", label: "Review this thread", price: { kind: "range", min: "1", max: "3" } },
@@ -136,7 +136,7 @@ const page = (): SupportPage => {
   const none = supportFlag() === "unmet"
   const picked = own && !none ? channel : null
   return {
-    platform: "discord", everyone: { each_person: "20" }, limits,
+    platform: "discord", undelivered: [], everyone: { each_person: "20" }, limits,
     menus: menus.map((m) => ({ ...m, used_in: Object.entries(uses).filter(([, k]) => k === m.key).map(([at]) => { const [scope, id] = at.split("|") as [Scope, string]; return { scope, scope_id: id, name: scope === "workspace" ? "Workspace" : (NAMES[id] ?? id) } }) })),
     menu_use: [
       { scope: "workspace", scope_id: "", name: "Workspace", menu: uses["workspace|"] ?? null },
@@ -171,7 +171,7 @@ export const supportHandlers: HttpHandler[] = [
   http.get("/api/support", async () => { await wait(); return me()?.capabilities.includes("workspace.manage") ? ok() : forbidden() }),
   http.put("/api/support/limits", async ({ request }) => {
     const b = (await request.json()) as LimitChange
-    if (!known(b.scope, b.scope_id)) return missing("No such place.")
+    if (b.limit && !known(b.scope, b.scope_id)) return missing("No such place.")
     const at = limits.find((l) => l.scope === b.scope && l.scope_id === b.scope_id && l.person_id === b.person_id)
     if ((at?.revision ?? null) !== b.expected_revision) return stale()
     if (!b.limit) { limits = limits.filter((l) => l !== at); return ok() }
@@ -183,7 +183,7 @@ export const supportHandlers: HttpHandler[] = [
   }),
   http.put("/api/support/menus/use", async ({ request }) => {
     const b = (await request.json()) as MenuUseChange
-    if (!known(b.scope, b.scope_id)) return missing("No such place.")
+    if (b.menu && !known(b.scope, b.scope_id)) return missing("No such place.")
     const k = `${b.scope}|${b.scope_id}`
     if ((uses[k] ?? null) !== b.expected) return stale()
     if (b.menu && !menus.some((m) => m.key === b.menu)) return missing("No menu has that key.")

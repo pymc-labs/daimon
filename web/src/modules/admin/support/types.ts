@@ -42,7 +42,7 @@ export type Menu = {
   summary: string
   options: number
   used_in: { scope: Scope; scope_id: string; name: string }[]
-  catalog: Record<string, unknown>
+  body: Record<string, unknown>
 }
 
 export type RequestChannel = {
@@ -70,6 +70,8 @@ export type SupportPage = {
   places: Place[]
   agents: { id: string; name: string }[]
   channel: RequestChannel
+  /** Requests no support channel received, newest first. */
+  undelivered: Charge[]
 }
 
 /** PUT /api/support/limits; `limit` null removes the row. `expected_revision` null means the row is new. */

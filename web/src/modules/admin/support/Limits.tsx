@@ -35,6 +35,7 @@ const ordered = (list: Limit[]) =>
 
 const kindOf = (l: Limit) => (l.person_id ? "person" : l.scope)
 const each = (l: Limit) => (l.each_person == null ? "–" : `${credits(Number(l.each_person))}${l.window === "monthly" ? " / month" : " total"}`)
+const eachShort = (l: Limit) => (l.each_person == null ? "–" : `${credits(Number(l.each_person))} each`)
 const shared = (l: Limit) => (l.shared == null ? "–" : `${credits(Number(l.shared))}${l.window === "monthly" ? " / month" : " total"}`)
 /** The last day included, as a UTC day like the form reads it. */
 const until = (l: Limit) => (l.ends_at ? shortDate(`${lastDay(l.ends_at)}T12:00:00`) : "Never")
@@ -94,7 +95,7 @@ export function Limits({ d }: { d: SupportPage }) {
               <TableCell className="max-md:max-w-0"><Name l={l} /></TableCell>
               <TableCell className="text-right whitespace-nowrap tabular max-md:hidden">{shared(l)}</TableCell>
               <TableCell className="text-right whitespace-nowrap tabular">
-                {l.shared == null ? each(l) : <><span className="max-sm:hidden">{each(l)}</span><span className="ml-auto block w-36 sm:hidden"><Used l={l} /></span></>}
+                {l.shared == null ? <><span className="max-sm:hidden">{each(l)}</span><span className="sm:hidden">{eachShort(l)}</span></> : <><span className="max-sm:hidden">{each(l)}</span><span className="ml-auto block w-36 sm:hidden"><Used l={l} /></span></>}
               </TableCell>
               <TableCell className="max-sm:hidden"><Used l={l} /></TableCell>
               <TableCell className="text-muted-foreground max-lg:hidden">{until(l)}</TableCell>

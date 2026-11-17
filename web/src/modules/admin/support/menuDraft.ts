@@ -1,4 +1,4 @@
-// A menu for Ask a person as the editor holds it: strings and stable row ids, turned into and out of the API's catalog.
+// A menu for Ask a person as the editor holds it: strings and stable row ids, turned into and out of the API's menu body.
 // Limits and key rules follow `daimon.core.support_plans`.
 import type { Problem } from "@/lib/api"
 
@@ -91,7 +91,7 @@ function fieldsOf(o: OptionDraft): Bag[] {
   })
 }
 
-/** The API's catalog; a blank key is made from the label, and made different from the others. */
+/** The API's menu body; a blank key is made from the label, and made different from the others. */
 export function toCatalog(m: MenuDraft): Bag {
   const taken = new Set(m.options.map((o) => o.key).filter(Boolean))
   const keyOf = (o: OptionDraft) => {
