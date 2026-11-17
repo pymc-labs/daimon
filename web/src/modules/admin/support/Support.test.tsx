@@ -30,13 +30,14 @@ const data: SupportPage = {
 }
 
 let current = data
+const found = [{ id: "1100000000000000013", name: "Marcus Webb", handle: "marcus_w" }]
 const Page = () => {
   const { data: d } = useSupportPage()
   return d ? <><Limits d={d} /><Menus d={d} /><Destination d={d} /></> : null
 }
 const view = (start: SupportPage = data, url = "/") => {
   current = start
-  vi.mocked(api.get).mockImplementation(async (path: string) => (path === "/api/channels" ? { platform: "discord", channels: [{ id: "c1", name: "general", kind: "channel", platform: "discord" }, { id: "c2", name: "help", kind: "channel", platform: "discord" }] } : current) as never)
+  vi.mocked(api.get).mockImplementation(async (path: string) => path.startsWith("/api/support/people") ? (decodeURIComponent(path).endsWith("=mar") ? found : []) as never : (path === "/api/channels" ? { platform: "discord", channels: [{ id: "c1", name: "general", kind: "channel", platform: "discord" }, { id: "c2", name: "help", kind: "channel", platform: "discord" }] } : current) as never)
   vi.mocked(api.put).mockResolvedValue(data as never)
   render(
     <QueryClientProvider client={new QueryClient()}>
@@ -58,6 +59,45 @@ describe("limits", () => {
     view({ ...data, limits: [{ ...limit, ends_at: "2030-03-11T00:00:00Z" }] })
     expect(await screen.findByRole("columnheader", { name: "Last day" })).toBeInTheDocument()
     expect(screen.getByRole("cell", { name: "10 Mar 2030" })).toBeInTheDocument()
+  })
+
+  describe("adding a person's limit", () => {
+    const open = async () => {
+      view()
+      await userEvent.click(await screen.findByRole("button", { name: "Add limit" }))
+      const dialog = within(screen.getByRole("dialog"))
+      await userEvent.click(dialog.getByRole("radio", { name: "Person" }))
+      await userEvent.click(dialog.getByRole("button", { name: "Choose" }))
+      return dialog
+    }
+    const submit = async (dialog: ReturnType<typeof within>) => {
+      await userEvent.type(dialog.getByLabelText("Credits"), "3")
+      await userEvent.click(dialog.getByRole("button", { name: "Add limit" }))
+      return vi.mocked(api.put).mock.calls.at(-1)![1] as { person_id: string }
+    }
+
+    it("finds a chat-only person by name and sends their platform id", async () => {
+      const dialog = await open()
+      await userEvent.type(screen.getByPlaceholderText("Find a person"), "mar")
+      expect(await screen.findByText("marcus_w")).toBeInTheDocument()
+      await userEvent.click(screen.getByRole("option", { name: /Marcus Webb/ }))
+      expect(await dialog.findByRole("button", { name: "Marcus Webb" })).toBeInTheDocument()
+      expect((await submit(dialog)).person_id).toBe("1100000000000000013")
+    })
+
+    it("offers a typed mention as an id to use", async () => {
+      const dialog = await open()
+      await userEvent.type(screen.getByPlaceholderText("Find a person"), "<@1100000000000000099>")
+      await userEvent.click(await screen.findByRole("option", { name: "Use id 1100000000000000099" }))
+      expect((await submit(dialog)).person_id).toBe("1100000000000000099")
+    })
+
+    it("offers no id for text that is not one", async () => {
+      await open()
+      await userEvent.type(screen.getByPlaceholderText("Find a person"), "nobody")
+      await waitFor(() => expect(api.get).toHaveBeenCalledWith("/api/support/people?q=nobody"))
+      expect(screen.queryByRole("option")).not.toBeInTheDocument()
+    })
   })
 
   it("lists the built-in row first, locked", async () => {

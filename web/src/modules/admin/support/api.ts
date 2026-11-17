@@ -1,9 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
 import { ApiError, api, type Problem } from "@/lib/api"
 import { channelLabel } from "@/lib/format"
 import { useChannels } from "@/modules/channels/api"
-import type { Place, SupportPage } from "./types"
+import type { PersonHit, Place, SupportPage } from "./types"
 
 /** Under `features`, so a feature change reloads the page's places too. */
 export const KEY = ["features", "support"]
@@ -43,3 +43,12 @@ export function usePlaces(d: SupportPage): Place[] {
     ...channels.map((c): Place => ({ scope: "channel", id: c.id, name: channelLabel(c.name, c.kind) })),
   ]
 }
+
+/** The first few people of the workspace's platform whose name or handle contains `q`, chat-only ones too. */
+export const usePeopleFind = (q: string) =>
+  useQuery({
+    queryKey: ["support", "people", q],
+    queryFn: () => api.get<PersonHit[]>(`/api/support/people?q=${encodeURIComponent(q)}`),
+    enabled: !!q,
+    placeholderData: keepPreviousData,
+  })

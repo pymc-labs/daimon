@@ -86,3 +86,6 @@ export type MenuChange = { menu: Record<string, unknown> | null; expected_revisi
 export type MenuUseChange = { scope: Scope; scope_id: string; menu: string | null; expected: string | null }
 /** PUT /api/support/channel; `channel_id` null falls back to the default. */
 export type ChannelChange = { channel_id: string | null; expected_revision: number | null }
+
+/** A person the workspace's platform knows, as `GET /api/support/people?q=` finds them; `id` is the platform user id. */
+export type PersonHit = { id: string; name: string; handle: string | null }

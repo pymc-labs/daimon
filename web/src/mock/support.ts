@@ -10,6 +10,14 @@ const AGENTS = [{ id: "daimon", name: "Daimon" }, { id: "clv-desk", name: "CLV D
 const CHANNELS = [{ id: "c_general", name: "general" }, { id: "c_clv", name: "clv-models" }, { id: "c_questions", name: "questions" }, { id: "c_mmm", name: "mmm" }]
 const NAMES: Record<string, string> = Object.fromEntries([...AGENTS, ...CHANNELS].map((p) => [p.id, p.name]))
 const PEOPLE: Record<string, string> = { p_priya: "Priya Raman", p_aiko: "Aiko Tanaka", p_owen: "Owen Brooks" }
+/** Everyone the chat has seen, by platform user id: web people and those who never signed in. */
+const CHAT: { id: string; name: string; handle: string | null }[] = [
+  { id: "1100000000000000011", name: "Priya Raman", handle: "priya" },
+  { id: "1100000000000000012", name: "Aiko Tanaka", handle: "aiko.t" },
+  { id: "1100000000000000013", name: "Marcus Webb", handle: "marcus_w" },
+  { id: "1100000000000000014", name: "Dana Okafor", handle: "dana" },
+  { id: "1100000000000000015", name: "Dario Lenz", handle: "dlenz" },
+]
 
 const stale = () => HttpResponse.json({ detail: "This changed since you opened it. Reload and try again." }, { status: 409 })
 const missing = (detail: string) => HttpResponse.json({ detail }, { status: 404 })
@@ -118,7 +126,7 @@ const RECENT = [
 ]
 const row = (scope: Scope, scope_id: string, person_id: string | null, v: Partial<LimitValue>, used: string, revision = 1): Limit => {
   const value: LimitValue = { shared: null, each_person: null, window: "monthly", starts_at: null, ends_at: null, ...v }
-  return { ...value, scope, scope_id, name: scope === "workspace" ? null : (NAMES[scope_id] ?? null), person_id, person_name: person_id ? (PEOPLE[person_id] ?? null) : null, used, state: stateOf(value), revision, recent: Number(used) ? RECENT : [] }
+  return { ...value, scope, scope_id, name: scope === "workspace" ? null : (NAMES[scope_id] ?? null), person_id, person_name: person_id ? (PEOPLE[person_id] ?? CHAT.find((c) => c.id === person_id)?.name ?? null) : null, used, state: stateOf(value), revision, recent: Number(used) ? RECENT : [] }
 }
 let limits: Limit[] = [
   row("workspace", "", null, { shared: "200", each_person: "20" }, "64.5", 2),
@@ -169,6 +177,11 @@ function checkLimit(b: LimitChange): Problem[] {
 export const supportHandlers: HttpHandler[] = [
   http.all("/api/support/*", async () => { await wait(); if (!me()?.capabilities.includes("workspace.manage")) return forbidden() }),
   http.get("/api/support", async () => { await wait(); return me()?.capabilities.includes("workspace.manage") ? ok() : forbidden() }),
+  http.get("/api/support/people", async ({ request }) => {
+    const q = (new URL(request.url).searchParams.get("q") ?? "").trim().toLowerCase()
+    if (!q || q.length > 100) return refuse([{ loc: ["query", "q"], msg: "String should have at least 1 character" }])
+    return HttpResponse.json(CHAT.filter((c) => `${c.name} ${c.handle ?? ""}`.toLowerCase().includes(q)).slice(0, 8))
+  }),
   http.put("/api/support/limits", async ({ request }) => {
     const b = (await request.json()) as LimitChange
     if (b.limit && !known(b.scope, b.scope_id)) return missing("No such place.")

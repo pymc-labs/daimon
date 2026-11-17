@@ -15,12 +15,12 @@ import { useConfirm } from "@/lib/confirm"
 import { shortDate } from "@/lib/format"
 import { rowProps, useParam } from "@/lib/filters"
 import { Field } from "@/modules/admin/shared"
-import { SubjectPicker } from "@/modules/credits/Allowances"
 import type { Subject } from "@/modules/credits/types"
 import { usePlaces, useSupportSave, type Outcome } from "./api"
 import { emptyForm, formOf, limitErrors, toValue, type LimitErrors, type LimitForm } from "./limitForm"
 import { credits, keyOf, lastDay, placeName } from "./lib"
 import { Cards, Section } from "./parts"
+import { PersonPicker } from "./PersonPicker"
 import type { Limit, Place, Scope, SupportPage, Window } from "./types"
 
 const ICONS = { workspace: Building2, agent: Bot, channel: Hash, person: UserRound }
@@ -188,7 +188,7 @@ function AddLimit({ d, open, onOpenChange, channel }: { d: SupportPage; open: bo
           )}
           {isPerson && (
             <>
-              <Field label="Person"><SubjectPicker peopleOnly value={person} onChange={setPerson} /></Field>
+              <Field label="Person"><PersonPicker platform={d.platform} value={person} onChange={setPerson} /></Field>
               <Field label="In">
                 <Select value={where} onValueChange={setWhere}>
                   <SelectTrigger className="w-full" aria-label="In"><SelectValue /></SelectTrigger>

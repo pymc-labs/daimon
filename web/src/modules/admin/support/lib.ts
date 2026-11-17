@@ -34,3 +34,12 @@ export function menuKey(name: string, taken: string[]): string {
   for (let n = 2; taken.includes(key); n++) key = `${base}-${n}`
   return key
 }
+
+const MENTION = /^<@!?([^>|]+)(?:\|[^>]*)?>$/
+const ID_SHAPE: Record<string, RegExp> = { discord: /^\d{17,20}$/, slack: /^[UW][A-Z0-9]{8,}$/, teams: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i }
+/** The user id a typed id or mention (`<@123>`) names on `platform`, or null when the text is neither. */
+export function platformUserId(platform: string, text: string): string | null {
+  const t = text.trim()
+  const id = (MENTION.exec(t)?.[1] ?? t).trim()
+  return ID_SHAPE[platform]?.test(id) ? (platform === "teams" ? id.toLowerCase() : id) : null
+}
