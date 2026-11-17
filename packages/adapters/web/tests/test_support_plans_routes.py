@@ -204,3 +204,46 @@ async def test_members_can_neither_read_nor_change_support_plans(
         }
 
     assert set(refused.values()) == {403}, refused
+
+
+async def test_cap_when_set_from_a_thread_or_for_an_unknown_agent_then_parent_or_refused(
+    web_client: WebClientFactory, db_session_factory: Factory, tmp_path: Path
+) -> None:
+    async with _support(web_client, db_session_factory, tmp_path) as admin:
+        put = admin.client.put
+        await put(
+            "/api/support-plans/catalogs/support",
+            json={"catalog": _MENU, "expected_revision": None},
+        )
+        await put(
+            "/api/support-plans/plan",
+            json={"scope": "channel", "scope_id": "c1", "plan": _PLAN, "expected": None},
+        )
+        from_thread = await put(
+            "/api/support-plans/allowances",
+            json={
+                "platform_user_id": "u1",
+                "credits": "4",
+                "scope": "channel",
+                "scope_id": "t9",
+                "expected": None,
+            },
+        )
+        bad_agent = await put(
+            "/api/support-plans/allowances",
+            json={
+                "platform_user_id": "u1",
+                "credits": "4",
+                "scope": "agent",
+                "scope_id": "agent_x",
+                "expected": None,
+            },
+        )
+
+    assert from_thread.status_code == 200, from_thread.text
+    (shown,) = from_thread.json()["plans"]
+    assert (shown["scope_id"], shown["allowances"]) == (
+        "c1",
+        [{"platform_user_id": "u1", "name": None, "credits": "4"}],
+    ), "the cap sits on the thread's parent channel, where the plan is"
+    assert bad_agent.status_code == 422, "an agent that is not in the workspace"

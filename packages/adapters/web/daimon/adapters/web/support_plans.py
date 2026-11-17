@@ -376,6 +376,10 @@ def support_plans_router(runtime: WebRuntime) -> APIRouter:
             expected = Expected(
                 None if body.expected is None else parse_credits(body.expected, name="expected")
             )
+            if body.credits is not None and scope == "channel":
+                scope_id = await channel_of(caller, scope_id)
+            if body.credits is not None and scope == "agent":
+                await check_agent(caller, scope_id)
             target = await place_label(caller, platform, scope, scope_id)
             actor = _actor(caller, action=_PLAN_ACTION, target=target, detail="Own cap")
             if body.credits is None:
