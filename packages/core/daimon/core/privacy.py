@@ -106,7 +106,7 @@ class PurgePreview(BaseModel):
     message_feedback: PurgePreviewRow
     support_escalations: PurgePreviewRow
     support_requests_anonymized: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
-    support_allowances: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    support_person_limits: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     support_settlers_cleared: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     daimon_admins: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     agent_post_requesters: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
@@ -465,7 +465,7 @@ async def collect_purge_preview(
             account_id=account_id,
             platform_user_keys=message_feedback_platform_user_keys,
         )
-        support_allowances_count = await support_store.count_person_limits_for_people(
+        support_person_limits_count = await support_store.count_person_limits_for_people(
             session, platform_user_keys=message_feedback_platform_user_keys
         )
         support_settlers_count = await support_escalation_store.count_settled_by(
@@ -579,7 +579,7 @@ async def collect_purge_preview(
         message_feedback=message_feedback,
         support_escalations=support_escalations,
         support_requests_anonymized=PurgePreviewRow(count=support_anonymized_count, example=None),
-        support_allowances=PurgePreviewRow(count=support_allowances_count, example=None),
+        support_person_limits=PurgePreviewRow(count=support_person_limits_count, example=None),
         support_settlers_cleared=PurgePreviewRow(count=support_settlers_count, example=None),
         daimon_admins=PurgePreviewRow(count=daimon_admins_total, example=None),
         agent_post_requesters=PurgePreviewRow(count=agent_post_requesters_total, example=None),

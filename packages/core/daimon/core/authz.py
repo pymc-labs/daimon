@@ -106,7 +106,7 @@ class Action(StrEnum):
     MANAGE_AGENTS = "manage_agents"
     # Set, clear or raise the budget of one channel (`Place.channel_id`).
     SET_CHANNEL_BUDGET = "set_channel_budget"
-    # Set support plans, catalogs and allowances, or settle a request by hand.
+    # Set support limits, menus and the request channel, or settle a request by hand.
     SET_SUPPORT = "set_support"
     # Add or remove the extra skills one channel's turns run with (`Place.channel_id`).
     SET_CHANNEL_SKILLS = "set_channel_skills"

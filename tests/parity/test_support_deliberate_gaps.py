@@ -23,7 +23,7 @@ import pytest
 from daimon.adapters.cli.commands.support import _stale  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.discord import support_settle as discord_settle
 from daimon.adapters.discord.support_escalation import SupportOptionModal
-from daimon.adapters.mcp.tools.support_plans import _refused  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools.support import _refused  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.slack import support_settle as slack_settle
 from daimon.adapters.slack.support_plan_form import (
     OPTION_ACTION_ID,

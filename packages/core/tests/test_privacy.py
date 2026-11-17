@@ -992,7 +992,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "message_feedback": "message_feedback",
         "support_escalations": "support_escalations",
         "support_requests_anonymized": "support_requests_anonymized",
-        "support_allowances": "support_allowances",
+        "support_person_limits": "support_person_limits",
         "support_settlers_cleared": "support_settlers_cleared",
         "daimon_admins": "daimon_admins",
         "agent_post_requesters": "agent_post_requesters",
@@ -1067,7 +1067,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "wizard_session": "account_id FK -> accounts.id",
         "message_feedback": "account_id FK -> accounts.id",
         "support_escalations": "account_id FK -> accounts.id; limit rows anonymized, not deleted",
-        "support_allowances": "the person's rows deleted by platform user; set_by is SET NULL",
+        "support_person_limits": "the person's rows deleted by platform user; set_by is SET NULL",
         "direct_message_conversations": "account_id FK -> accounts.id",
         # The web app: a person, with their identities, tokens and browser sessions, and
         # the admin grants of the account.
@@ -1217,7 +1217,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             "feature_values",
             # Support limits, menus and channels are tenant config; `set_by_account_id`
             # is attribution only, severed by ON DELETE SET NULL. A person's own
-            # limit rows are deleted by platform user (`support_allowances`).
+            # limit rows are deleted by platform user (`support_person_limits`).
             "support_limits",
             "support_menus",
             "support_menu_places",

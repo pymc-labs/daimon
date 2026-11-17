@@ -366,7 +366,8 @@ async def test_channel_when_the_deployment_keeps_it_then_refuses(
     shown = await _get_channel_impl(runtime, auth)
     assert (shown.own_allowed, shown.channel_id, shown.revision) == (False, None, 0)
     with pytest.raises(
-        ToolError, match="The deployment keeps its own request channel. Nothing was saved."
+        ToolError,
+        match="Requests go to the default channel. Ask whoever runs Daimon. Nothing was saved.",
     ):
         await _set_channel_impl(
             runtime, auth, channel_id=_THREAD, service_url=None, expected_revision=None

@@ -131,7 +131,7 @@ async def test_purge_principal_when_limit_history_then_anonymizes_and_keeps_char
     counts = (
         report.support_escalations,
         report.support_requests_anonymized,
-        report.support_allowances,
+        report.support_person_limits,
         report.support_settlers_cleared,
     )
     assert counts == (1, 1, 2, 1), "legacy row deleted; limit row, own limits and settler handled"
@@ -166,12 +166,12 @@ async def test_purge_account_when_limit_history_then_matches_its_preview(
     assert (
         (
             preview.support_requests_anonymized.count,
-            preview.support_allowances.count,
+            preview.support_person_limits.count,
             preview.support_settlers_cleared.count,
         )
         == (
             report.support_requests_anonymized,
-            report.support_allowances,
+            report.support_person_limits,
             report.support_settlers_cleared,
         )
         == (1, 2, 1)

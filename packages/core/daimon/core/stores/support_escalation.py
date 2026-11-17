@@ -18,11 +18,11 @@ refuses a second request from the same person on the same message, so a
 double click or a platform retry neither spends a second credit nor posts
 twice.
 
-Support plans (`daimon.core.support`) make the rows a credit ledger:
-each is charged to the `default` ledger, a `plan`, or nothing (`exempt`), and
+Support limits (`daimon.core.support`) make the rows a credit ledger:
+each is charged to the `default` ledger, a `limit`, or nothing (`exempt`), and
 spends `COALESCE(charge, hold)`. `submit_request` and `settle_request` are the
-plan-aware writers. Lock order, each transaction-scoped and never reversed:
-the plan (`daimon:support_plan:<id>`), the person (above), then the tenant
+limit-aware writers. Lock order, each transaction-scoped and never reversed:
+the limit (`daimon:support_limit:<id>`), the person (above), then the tenant
 (`lock_access_policy`). Config writers take only the tenant lock and settles
 only the first two, so no two paths wait on each other in opposite orders.
 """

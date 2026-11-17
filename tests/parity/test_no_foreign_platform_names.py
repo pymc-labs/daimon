@@ -196,6 +196,8 @@ _MAY_NAME: dict[str, frozenset[str]] = {
     "packages/adapters/mcp/daimon/adapters/mcp/tools/long_jobs.py": frozenset({"discord"}),
     "packages/adapters/mcp/daimon/adapters/mcp/tools/routines.py": frozenset({"slack"}),
     "packages/adapters/mcp/daimon/adapters/mcp/tools/skill_uploads.py": frozenset(_APPS),
+    # The Teams-only service_url refusal, reached only when the channel is a Teams one.
+    "packages/adapters/mcp/daimon/adapters/mcp/tools/support.py": frozenset({"teams"}),
     "packages/adapters/scheduler/daimon/adapters/scheduler/settings.py": frozenset({"discord"}),
     "packages/core/daimon/core/agent_guidance.py": frozenset(_APPS),
     "packages/core/daimon/core/platform_system.py": frozenset(_APPS),

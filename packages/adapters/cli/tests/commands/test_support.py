@@ -75,6 +75,7 @@ def _settings(*, discord: bool = False) -> object:
             slack_escalation_channel_id=None,
             slack_escalation_team_id=None,
             teams_escalation_channel_id=None,
+            channel_for=lambda platform: None,
         ),
     )
 
@@ -335,7 +336,7 @@ async def test_channel_when_the_deployment_keeps_it_then_refused_else_set_shown_
     console, out = _console()
     where = {"rt": rt, "console": console, "selector": selector}
     _allow_own_channel(monkeypatch, allowed=False)
-    with pytest.raises(ChannelChangeRefused, match="keeps its own request channel"):
+    with pytest.raises(ChannelChangeRefused, match="Requests go to the default channel"):
         await channel_set(**where, channel_id="C9")
     _allow_own_channel(monkeypatch)
     await channel_set(**where, channel_id="C9", expected="none")

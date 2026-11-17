@@ -223,7 +223,7 @@ class PurgeReport(BaseModel):
     support_escalations: int = 0
     # Plan rows keep their charge with the person erased (decision 7).
     support_requests_anonymized: int = 0
-    support_allowances: int = 0
+    support_person_limits: int = 0
     # Requests the person settled as staff: who settled is cleared, the charge kept.
     support_settlers_cleared: int = 0
     daimon_admins: int = 0
@@ -277,7 +277,7 @@ class PurgeReport(BaseModel):
             support_requests_anonymized=(
                 self.support_requests_anonymized + other.support_requests_anonymized
             ),
-            support_allowances=self.support_allowances + other.support_allowances,
+            support_person_limits=self.support_person_limits + other.support_person_limits,
             support_settlers_cleared=self.support_settlers_cleared + other.support_settlers_cleared,
             daimon_admins=self.daimon_admins + other.daimon_admins,
             agent_post_requesters=self.agent_post_requesters + other.agent_post_requesters,
@@ -390,7 +390,7 @@ async def _purge_principal_in_session(
                 platform_user_id=principal.external_id,
             )
         )
-        support_allowances_count = await support_store.delete_person_limits_for_people(
+        support_person_limits_count = await support_store.delete_person_limits_for_people(
             session, platform_user_keys=[(principal.tenant_id, principal.external_id)]
         )
         # A support post may sit in another tenant, so a settler matches in any.
@@ -461,7 +461,7 @@ async def _purge_principal_in_session(
         # principal owns no support_escalations rows — same reasoning, and the
         # same refusal to match on os_user, as message_feedback above.
         support_escalations_count = 0
-        support_anonymized_count = support_allowances_count = support_settlers_count = 0
+        support_anonymized_count = support_person_limits_count = support_settlers_count = 0
         daimon_admins_count = 0
 
     user_skills_count = await user_skills_store.delete_user_skills_for_principal(
@@ -525,7 +525,7 @@ async def _purge_principal_in_session(
         message_feedback=message_feedback_count,
         support_escalations=support_escalations_count,
         support_requests_anonymized=support_anonymized_count,
-        support_allowances=support_allowances_count,
+        support_person_limits=support_person_limits_count,
         support_settlers_cleared=support_settlers_count,
         daimon_admins=daimon_admins_count,
         agent_post_requesters=agent_post_requesters_count,
