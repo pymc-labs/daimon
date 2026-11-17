@@ -173,6 +173,7 @@ from daimon.core.stores import selfhosted_resources as selfhosted_store
 from daimon.core.stores import slack_turn_contexts as slack_turn_contexts_store
 from daimon.core.stores import slack_user_tokens as slack_user_tokens_store
 from daimon.core.stores import support_escalation as support_escalation_store
+from daimon.core.stores import support_plans as support_plans_store
 from daimon.core.stores import tag_opt_outs as tag_opt_outs_store
 from daimon.core.stores import teams_message_admissions as teams_admissions_store
 from daimon.core.stores import tenants as tenants_store
@@ -220,6 +221,11 @@ class PurgeReport(BaseModel):
     wizard_sessions: int = 0
     message_feedback: int = 0
     support_escalations: int = 0
+    # Plan rows keep their charge with the person erased (decision 7).
+    support_requests_anonymized: int = 0
+    support_allowances: int = 0
+    # Requests the person settled as staff: who settled is cleared, the charge kept.
+    support_settlers_cleared: int = 0
     daimon_admins: int = 0
     agent_post_requesters: int = 0
     platform_user_names: int = 0
@@ -268,6 +274,11 @@ class PurgeReport(BaseModel):
             wizard_sessions=self.wizard_sessions + other.wizard_sessions,
             message_feedback=self.message_feedback + other.message_feedback,
             support_escalations=self.support_escalations + other.support_escalations,
+            support_requests_anonymized=(
+                self.support_requests_anonymized + other.support_requests_anonymized
+            ),
+            support_allowances=self.support_allowances + other.support_allowances,
+            support_settlers_cleared=self.support_settlers_cleared + other.support_settlers_cleared,
             daimon_admins=self.daimon_admins + other.daimon_admins,
             agent_post_requesters=self.agent_post_requesters + other.agent_post_requesters,
             platform_user_names=self.platform_user_names + other.platform_user_names,
@@ -371,6 +382,21 @@ async def _purge_principal_in_session(
                 platform_user_id=principal.external_id,
             )
         )
+        # A plan row is the pool's ledger too: the person leaves it, the charge stays.
+        support_anonymized_count = (
+            await support_escalation_store.anonymize_plan_requests_for_platform_user(
+                session,
+                tenant_id=principal.tenant_id,
+                platform_user_id=principal.external_id,
+            )
+        )
+        support_allowances_count = await support_plans_store.delete_allowances_for_people(
+            session, platform_user_keys=[(principal.tenant_id, principal.external_id)]
+        )
+        # A support post may sit in another tenant, so a settler matches in any.
+        support_settlers_count = await support_escalation_store.clear_settler(
+            session, settler_keys=[(principal.platform, principal.external_id)]
+        )
         # A channel admin grant names the person by platform user id; the row
         # itself is the tenant's, so only their id leaves it.
         from daimon.core.stores.daimon_admins import erase_user
@@ -435,6 +461,7 @@ async def _purge_principal_in_session(
         # principal owns no support_escalations rows — same reasoning, and the
         # same refusal to match on os_user, as message_feedback above.
         support_escalations_count = 0
+        support_anonymized_count = support_allowances_count = support_settlers_count = 0
         daimon_admins_count = 0
 
     user_skills_count = await user_skills_store.delete_user_skills_for_principal(
@@ -497,6 +524,9 @@ async def _purge_principal_in_session(
         wizard_sessions=wizard_sessions_count,
         message_feedback=message_feedback_count,
         support_escalations=support_escalations_count,
+        support_requests_anonymized=support_anonymized_count,
+        support_allowances=support_allowances_count,
+        support_settlers_cleared=support_settlers_count,
         daimon_admins=daimon_admins_count,
         agent_post_requesters=agent_post_requesters_count,
         platform_user_names=platform_user_names_count,
@@ -677,6 +707,12 @@ async def _purge_account_transaction(
             session, account_id=account_id, platform_user_keys=platform_user_keys
         )
     )
+    support_anonymized_count = await support_escalation_store.anonymize_plan_requests_for_account(
+        session, account_id=account_id, platform_user_keys=platform_user_keys
+    )
+    support_settlers_count = await support_escalation_store.clear_settler(
+        session, account_id=account_id
+    )
 
     # slack_turn_contexts: keyed by (tenant_id, account_id), not
     # principal_id. Loop every tenant the account's principals belong to —
@@ -734,6 +770,8 @@ async def _purge_account_transaction(
             github_connect_click_intents=github_connect_click_intents_count,
             message_feedback=message_feedback_count,
             support_escalations=support_escalations_count,
+            support_requests_anonymized=support_anonymized_count,
+            support_settlers_cleared=support_settlers_count,
             user_configs=user_cfg_count,
             accounts=account_count,
             github_user_links=github_user_links_count,
