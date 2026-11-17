@@ -19,6 +19,7 @@ from daimon.core.stores.support_rows import SupportAllowanceRow, SupportPlanRow
 from daimon.core.support_plan_changes import PlanValue
 from daimon.core.support_plans import (
     PlanScope,
+    SupportCatalogSpec,
     SupportPlanError,
     already_settled_text,
     credits_text,
@@ -26,6 +27,7 @@ from daimon.core.support_plans import (
     inactive_text,
     parse_credits,
     parse_scope,
+    price_text,
     settle_range_text,
     settled_text,
 )
@@ -162,6 +164,11 @@ def parse_plan_value(data: Mapping[str, object]) -> PlanValue:
     )
 
 
+def options_text(spec: SupportCatalogSpec) -> str:
+    """A menu in one line: `Review (1-3 credits), Call (2 credits)`."""
+    return ", ".join(f"{o.label} ({price_text(o.price)})" for o in spec.options)
+
+
 def settle_outcome_text(outcome: ledger.SettleOutcome, *, correction: bool = False) -> str:
     """The settler's answer for every outcome; a done settle carries the decision-8 warning."""
     row = outcome.row
@@ -185,6 +192,7 @@ __all__ = [
     "PlanUsage",
     "get_plan_usage",
     "list_plan_usage",
+    "options_text",
     "parse_plan_value",
     "settle_outcome_text",
     "usage_text",

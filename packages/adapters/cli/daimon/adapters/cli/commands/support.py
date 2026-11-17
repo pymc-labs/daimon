@@ -39,6 +39,7 @@ from daimon.core.support_plan_admin import (
     PlanUsage,
     get_plan_usage,
     list_plan_usage,
+    options_text,
     parse_plan_value,
     settle_outcome_text,
 )
@@ -60,7 +61,6 @@ from daimon.core.support_plans import (
     parse_credits,
     parse_plan_spec,
     parse_scope,
-    price_text,
 )
 from pydantic import BaseModel
 from rich.console import Console
@@ -293,7 +293,7 @@ async def catalog_list(
             key=r.key,
             name=r.name,
             revision=r.revision,
-            options=", ".join(f"{o.label} ({price_text(o.price)})" for o in r.spec.options),
+            options=options_text(r.spec),
         )
         for r in rows
     ]
