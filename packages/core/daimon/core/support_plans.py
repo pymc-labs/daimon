@@ -46,7 +46,7 @@ from pydantic import (
 
 if TYPE_CHECKING:
     from daimon.core.stores.support_escalation import SubmitOutcome
-    from daimon.core.stores.support_rows import PlanView
+    from daimon.core.stores.support_rows import PlanView, SupportEscalationRow
 
 # Limits: the lowest common denominator of Discord, Slack and Teams.
 MAX_OPTIONS: Final = 10  # Slack radio_buttons
@@ -786,13 +786,22 @@ PLAN_GONE: Final = "This request's plan was removed. Decline it instead."
 SETTLE_ELSEWHERE: Final = "Set the charge in the support channel."
 
 
-def received_text(*, status: RequestStatus, charged_to: ChargedTo) -> str:
-    """The requester's confirmation: pending adds a line, an admin's says it used nothing."""
-    if charged_to == "exempt":
+def received_text(row: SupportEscalationRow, view: PlanView) -> str:
+    """The requester's confirmation. A plan request adds what it used and what is left.
+
+    `view` is `SubmitOutcome.view`, read with this request already spent. An
+    admin's says it used nothing; the default plan keeps its one line.
+    """
+    if row.charged_to == "exempt":
         return f"{RECEIVED}\n{EXEMPT_RECEIVED}"
-    if status == "pending":
-        return f"{RECEIVED}\n{PENDING_RECEIVED}"
-    return RECEIVED
+    if row.charged_to == "default":
+        return f"{RECEIVED}\n{PENDING_RECEIVED}" if row.status == "pending" else RECEIVED
+    if row.status == "pending":
+        held = f"Holding {credits_text(row.hold)}. " if row.hold > 0 else ""
+        return f"{RECEIVED}\n{held}{PENDING_RECEIVED}"
+    left = balance_text(view.balance, view.plan)
+    used = f"Used {credits_text(row.counted)}."
+    return f"{RECEIVED}\n{used} {left}." if left else f"{RECEIVED}\n{used}"
 
 
 def out_of_credits_text(charged_to: ChargedTo) -> str:

@@ -829,9 +829,7 @@ async def run_support_submission(runtime: SlackRuntime, submission: SupportSubmi
         delivered=post is not None,
     )
     await reply(
-        received_text(status=row.status, charged_to=row.charged_to)
-        if post is not None
-        else RECORDED_UNDELIVERED,
+        received_text(row, view) if post is not None else RECORDED_UNDELIVERED,
         error=False,
     )
 

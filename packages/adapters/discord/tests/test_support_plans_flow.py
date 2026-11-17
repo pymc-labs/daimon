@@ -207,7 +207,7 @@ async def test_pick_when_option_has_no_fields_then_posts_pending_with_settle_but
     assert [b.item.label for b in view.children] == ["Set charge", "Decline"]
     assert (
         _said(interaction.followup.send)
-        == "Request sent. Someone will reply.\nWe will confirm the charge."
+        == "Request sent. Someone will reply.\nHolding 1 credit. We will confirm the charge."
     )
     ((_id, status, hold, post_id),) = await _rows(db_session_factory)
     assert (status, hold, post_id) == ("pending", D(1), "555"), (
@@ -235,7 +235,9 @@ async def test_pick_when_option_has_steps_and_fields_then_its_form_submits_settl
     assert "Call, 1 hour: 1 credit\nCharged 1 credit" in body, "a step is charged at submit"
     assert "Topic: Billing export" in body, "the answers are the note"
     assert "view" not in bot.support.send.await_args.kwargs, "nothing left to settle"
-    assert _said(submit.followup.send) == "Request sent. Someone will reply."
+    assert _said(submit.followup.send) == (
+        "Request sent. Someone will reply.\nUsed 1 credit. 1 of 2 credits left."
+    ), "the confirmation says what it used and what is left"
 
 
 async def test_pick_when_the_menu_changed_then_options_changed(

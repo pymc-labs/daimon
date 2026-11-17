@@ -347,7 +347,10 @@ async def test_send_when_option_has_no_fields_then_posts_pending_with_settle_but
     assert NOT_NOTIFIED_LINE in post["text"], "decision 8 beside the settle buttons"
     buttons = post["blocks"][-1]["elements"]
     assert [b["action_id"] for b in buttons] == [SETTLE_SET_ACTION_ID, SETTLE_DECLINE_ACTION_ID]
-    assert _said(fake) == "Request sent. Someone will reply.\nWe will confirm the charge."
+    assert (
+        _said(fake)
+        == "Request sent. Someone will reply.\nHolding 1 credit. We will confirm the charge."
+    )
     ((row_id, status, hold, _charge, post_id, _answers, _by),) = await _rows(db_session_factory)
     assert row_id.hex == escalation_id
     assert (status, hold, post_id) == ("pending", D(1), _POST_TS), "holds its minimum; post id"
@@ -421,7 +424,9 @@ async def test_send_when_option_has_steps_and_fields_then_charged_at_submit(
     assert "Call, 1 hour: 1 credit\nCharged 1 credit" in post["text"], "a step is charged now"
     assert "Topic: Billing export" in post["text"], "the answers are the note"
     assert "blocks" not in post, "nothing left to settle"
-    assert _said(fake) == "Request sent. Someone will reply."
+    assert _said(fake) == (
+        "Request sent. Someone will reply.\nUsed 1 credit. 1 of 2 credits left."
+    ), "the confirmation says what it used and what is left"
 
 
 async def test_default_note_when_requester_is_admin_then_uses_no_credits(

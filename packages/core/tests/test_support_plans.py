@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 from daimon.core.stores.support_escalation import SubmitOutcome, SubmitStatus
-from daimon.core.stores.support_rows import PlanView
+from daimon.core.stores.support_rows import PlanView, SupportEscalationRow
 from daimon.core.support_escalation import ALREADY_REQUESTED, OUT_OF_CREDITS, UNAVAILABLE
 from daimon.core.support_plans import (
     CLIENT_NOT_NOTIFIED,
@@ -17,6 +18,7 @@ from daimon.core.support_plans import (
     NOT_ENOUGH_CREDITS,
     OPTIONS_CHANGED,
     Balance,
+    ChargedTo,
     PlanScope,
     PriceBounds,
     QuotedPrice,
@@ -312,10 +314,40 @@ def test_inactive_text_when_outside_the_window_then_says_when() -> None:
     assert inactive_text(window, now=datetime(2026, 12, 1, tzinfo=UTC)) is None, "active"
 
 
-def test_received_text_when_exempt_then_says_no_credits_were_used() -> None:
-    text = received_text(status="settled", charged_to="exempt")
-    assert text.endswith(EXEMPT_RECEIVED), "decision 5: an admin's request used no credits"
-    assert "confirm" in received_text(status="pending", charged_to="plan"), "pending line"
+def _request(
+    charged_to: ChargedTo, status: RequestStatus, hold: Decimal, charge: Decimal | None
+) -> SupportEscalationRow:
+    now = datetime(2026, 12, 1, tzinfo=UTC)
+    return SupportEscalationRow(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        account_id=None,
+        platform="slack",
+        platform_user_id="U1",
+        channel_id="C1",
+        message_id="m1",
+        ma_session_id=None,
+        note="",
+        delivered_at=None,
+        created_at=now,
+        charged_to=charged_to,
+        hold=hold,
+        charge=charge,
+        status=status,
+    )
+
+
+def test_received_text_when_each_kind_of_request_then_says_what_it_used() -> None:
+    team = Balance(pool=D(2), pool_used=D("0.5"), cap=None, person_used=D(0))
+    view = PlanView(plan=None, catalog=None, balance=team, state="active")
+    settled = received_text(_request("plan", "settled", D("0.5"), D("0.5")), view)
+    assert settled.endswith("\nUsed 0.5 credits. 1.5 of 2 team credits left."), settled
+    pending = received_text(_request("plan", "pending", D(1), None), view)
+    assert pending.endswith("\nHolding 1 credit. We will confirm the charge."), pending
+    exempt = received_text(_request("exempt", "settled", D(0), D(0)), view)
+    assert exempt.endswith(EXEMPT_RECEIVED), "decision 5: an admin's request used no credits"
+    default = received_text(_request("default", "settled", D(1), D(1)), view)
+    assert default == "Request sent. Someone will reply.", "the default plan keeps its line"
 
 
 def test_settled_text_when_charged_or_declined_then_warns_the_client_is_not_told() -> None:

@@ -389,7 +389,9 @@ async def test_ask_a_person_when_plan_has_a_menu_then_the_dialog_continues_to_th
     assert_card_renders(form)
     assert nexted["task"]["type"] == "continue", "the option's card, in the same dialog"
     assert (pick["data"]["stage"], send["data"]["stage"]) == ("pick", "send")
-    assert sent["task"]["value"] == "Request sent. Someone will reply.", sent
+    assert sent["task"]["value"] == (
+        "Request sent. Someone will reply.\nUsed 0.5 credits. 1.5 of 2 credits left."
+    ), sent
     [post] = _posts(teams_api_fake)
     assert "Call, 30 min: 0.5 credits" in str(post.body["text"]), "charged at its step"
 

@@ -374,7 +374,7 @@ async def submit_answer_request(
         tenant_id=str(origin.tenant_id),
         delivered=post is not None,
     )
-    text = received_text(status=row.status, charged_to=row.charged_to)
+    text = received_text(row, view)
     await _notice(interaction, text, neutral=post is not None)
 
 

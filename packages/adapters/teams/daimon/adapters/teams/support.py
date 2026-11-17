@@ -827,7 +827,7 @@ class SupportCommand:
         log.info("support.escalation_recorded", escalation_id=str(row.id))
         asked = replace(asked, sealed=sealed)
         self._spawn(self._deliver(tenant_id, asked, row, view), name="teams.support.deliver")
-        return received_text(status=row.status, charged_to=row.charged_to)
+        return received_text(row, view)
 
     async def _deliver(
         self, tenant_id: uuid.UUID, asked: _Asked, row: SupportEscalationRow, view: PlanView
