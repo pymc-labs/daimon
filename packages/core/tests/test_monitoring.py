@@ -67,7 +67,7 @@ async def _ask(
     conversation: str = "dm-1",
     turn_ref: str = "t1",
 ) -> bool:
-    return await capture_question(
+    kept = await capture_question(
         sessions,
         None,
         tenant_id=tenant_id,
@@ -78,6 +78,7 @@ async def _ask(
         turn_ref=turn_ref,
         content=f"question {turn_ref}",
     )
+    return kept is not None
 
 
 async def _answer(sessions: Sessions, tenant_id: uuid.UUID, turn_ref: str) -> bool:

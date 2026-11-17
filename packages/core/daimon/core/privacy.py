@@ -162,6 +162,7 @@ def held_lines(preview: PurgePreview) -> list[str]:
         (preview.mux_slots, "saved conversation"),
         (preview.mux_journal_events, "saved conversation message"),
         (preview.host_call_cards, "approval request"),
+        (preview.monitored_events, "record admins can read"),
     )
     parts = [
         "saved settings"
@@ -188,6 +189,8 @@ def _plural(label: str) -> str:
         return "links from agents to your GitHub keys"
     if label == "post an agent made for you":
         return "posts agents made for you"
+    if label == "record admins can read":
+        return "records admins can read"
     return f"{label}s"
 
 
@@ -198,16 +201,21 @@ DELETE_PAUSED: Final[str] = (
 )
 
 
-def privacy_lines(display_name: str) -> tuple[str, str]:
-    """The privacy panel's two lines: what the deployment keeps, what Anthropic keeps.
+MONITORED_LINE: Final[str] = "Admins can read your conversations with the agents they monitor."
+
+
+def privacy_lines(display_name: str, *, monitored: bool = False) -> tuple[str, ...]:
+    """The privacy panel's lines: what the deployment keeps, what Anthropic keeps, and, when
+    admins monitor an agent in the workspace (`monitoring.monitors_any`), that they can read it.
 
     The categories behind them are the privacy policy's, one button away.
     """
-    return (
+    lines = (
         f"{display_name} stores your linked accounts, routines and settings. "
         "Saved GitHub keys are encrypted.",
         "Anthropic stores your agents and their conversations.",
     )
+    return (*lines, MONITORED_LINE) if monitored else lines
 
 
 def delete_scope_lines(display_name: str) -> tuple[str, str]:

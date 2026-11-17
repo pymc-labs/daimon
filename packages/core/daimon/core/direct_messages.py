@@ -31,6 +31,7 @@ from daimon.core.handoff_context import TranscriptTurn, render_previous_session
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.membership_subject import resolve_subject
+from daimon.core.monitoring import MonitoringNotice
 from daimon.core.mux_backend import resource_scope
 from daimon.core.output_runtime import OutputRuntime
 from daimon.core.permissions import dm_source_limited, limited_ids
@@ -245,7 +246,7 @@ def cold_dm_text(platform: ChatPlatform, *, dms_on: bool | None) -> str:
     if dms_on:
         return (
             "I answer in channels first.\n"
-            f"Mention me in a channel, or run `{command}` in one to continue privately here."
+            f"Mention me in a channel, or run `{command}` in one to continue here."
         )
     if dms_on is None:
         return (
@@ -561,7 +562,18 @@ async def start_cold_dm(
 DmTurnCard = Callable[[Admission, asyncio.Event], TurnLifecycle]
 
 
+#: Shows the monitoring notice on a DM path that renders no card (`card_for`).
+TellMonitored = Callable[[MonitoringNotice], Awaitable[None]]
+
+
 class _CollectReply(TurnLifecycle):
+    def __init__(self, tell: TellMonitored | None = None) -> None:
+        self._tell = tell
+
+    async def on_monitoring_notice(self, notice: MonitoringNotice) -> None:
+        if self._tell is not None:
+            await self._tell(notice)
+
     async def on_render(self, state: TurnState) -> None:
         pass
 
@@ -624,6 +636,7 @@ async def _run_admitted_dm_turn(
     request_text: str | None = None,
     platform_channel_id: str | None = None,
     platform_message_id: str | None = None,
+    tell: TellMonitored | None = None,
 ) -> tuple[str, str, OutputRuntime | None]:
     """Run one admitted, bound private turn and return its final text and session.
 
@@ -669,7 +682,7 @@ async def _run_admitted_dm_turn(
 
         cancel = asyncio.Event()
         lifecycle = (
-            card_for(prepared.admission, cancel) if card_for is not None else _CollectReply()
+            card_for(prepared.admission, cancel) if card_for is not None else _CollectReply(tell)
         )
         try:
             outcome = await run_prepared_turn(
@@ -721,6 +734,7 @@ async def reply_to_dm(
     verified_membership: bool | None = None,
     on_agent: Callable[[str], Awaitable[None]] | None = None,
     platform_channel_id: str | None = None,
+    tell: TellMonitored | None = None,
 ) -> str | None:
     """Compatibility text API for adapters that do not consume a delivery grant."""
     reply = await reply_to_dm_result(
@@ -736,6 +750,7 @@ async def reply_to_dm(
         verified_membership=verified_membership,
         on_agent=on_agent,
         platform_channel_id=platform_channel_id,
+        tell=tell,
     )
     return reply.text if reply is not None else None
 
@@ -756,6 +771,7 @@ async def reply_to_dm_result(
     confirmation_for: Callable[[Admission], ConfirmationHook] | None = None,
     card_for: DmTurnCard | None = None,
     platform_channel_id: str | None = None,
+    tell: TellMonitored | None = None,
 ) -> DirectMessageReply | None:
     """Admit every DM, serialize its scope, run a billed turn, retain bounded history.
 
@@ -768,7 +784,8 @@ async def reply_to_dm_result(
     `confirmation_for` builds the approval-card hook for the admitted turn; an
     adapter that cannot show a card in a DM omits it and approvals are refused.
     `card_for` shows the turn's progress; the card must recheck delivery access
-    before each write, as the adapter does before sending the answer.
+    before each write, as the adapter does before sending the answer. Without a card,
+    `tell` shows the monitoring notice (`daimon.core.monitoring.must_tell`).
     """
     async with owner_dm_turn(deps, platform=platform, owner=external_user_id, wait=True):
         now = datetime.now(UTC)
@@ -898,6 +915,7 @@ async def reply_to_dm_result(
                     confirmation_for(prepared.admission) if confirmation_for is not None else None
                 ),
                 card_for=card_for,
+                tell=tell,
                 request_text=text,
                 platform_channel_id=platform_channel_id,
                 platform_message_id=message_id if platform_channel_id is not None else None,

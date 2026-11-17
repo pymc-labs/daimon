@@ -17,7 +17,7 @@ import pytest
 from daimon.core import usage_sweep
 from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.monitoring import capture_question
+from daimon.core.monitoring import KeptQuestion, capture_question
 from daimon.core.stores import monitoring as store
 from daimon.core.stores.domain import FeatureTarget
 from daimon.core.stores.feature_values import set_feature_value
@@ -130,7 +130,7 @@ async def _keep(
     origin: str = "chat",
     request_text: str | None = "hello",
     thread_id: str = "thread-1",
-) -> str | None:
+) -> KeptQuestion | None:
     deps = cast(Any, SimpleNamespace(sessionmaker=sessions, settings=None))
     return await run._keep_question(  # pyright: ignore[reportPrivateUsage]
         deps,

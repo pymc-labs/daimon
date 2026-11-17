@@ -48,7 +48,7 @@ from daimon.core.ma import replay_events
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_tool_annotations import agent_mcp_token_for, mcp_annotation_lookup
 from daimon.core.model_presets import model_choice_id
-from daimon.core.monitoring import capture_answer, capture_question
+from daimon.core.monitoring import KeptQuestion, capture_answer, capture_question
 from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime, turn_backend
 from daimon.core.mux_compat import legacy_call
 from daimon.core.output_runtime import (
@@ -130,6 +130,7 @@ from daimon.core.turn.lifecycle import (
     ReconnectReason,
     TurnLifecycle,
     acknowledge,
+    tell_monitored,
 )
 from daimon.core.turn.mcp_context import mcp_context_prefix, tool_permission
 from daimon.core.turn.outbound import scrubbed_for
@@ -1306,7 +1307,7 @@ async def run_prepared_turn(
             reseed_user_message=reseed_user_message,
             now=now(),
         )
-    kept_question = await _keep_question(
+    kept = await _keep_question(
         deps,
         prepared,
         tenant_id=tenant_id,
@@ -1315,6 +1316,9 @@ async def run_prepared_turn(
         origin=origin,
         request_text=request_text,
     )
+    kept_question = kept.turn_ref if kept is not None else None
+    if kept is not None and kept.notice is not None:
+        await tell_monitored(lifecycle, kept.notice)
     observation.thread_id = thread_id
     observation.account_id = prepared.admission.account_id
     observation.agent_id = prepared.admission.agent.id
@@ -1480,17 +1484,16 @@ async def _keep_question(
     thread_id: str,
     origin: TurnContext,
     request_text: str | None,
-) -> str | None:
+) -> KeptQuestion | None:
     """Keep a person's direct message or web chat question when the answering agent is
-    monitored (`daimon.core.monitoring`); returns the turn's ref for its answer."""
+    monitored (`daimon.core.monitoring`), with the turn's ref for its answer."""
     grant = prepared.admission.grant
     direct = platform == "web" or (grant is not None and grant.is_dm)
     if origin != "chat" or request_text is None or not direct:
         return None
     if platform not in ("discord", "slack", "teams", "web"):
         return None
-    turn_ref = str(uuid.uuid4())
-    kept = await capture_question(
+    return await capture_question(
         deps.sessionmaker,
         deps.settings,
         tenant_id=tenant_id,
@@ -1498,10 +1501,9 @@ async def _keep_question(
         platform=platform,
         account_id=prepared.admission.account_id,
         conversation=thread_id,
-        turn_ref=turn_ref,
+        turn_ref=str(uuid.uuid4()),
         content=request_text,
     )
-    return turn_ref if kept else None
 
 
 async def _repo_memory_state(

@@ -59,7 +59,7 @@ DESCRIPTIONS: Mapping[Action, str] = MappingProxyType(
         "memory": "What the agent remembers",
         "model": "This conversation's model",
         "routines": "Scheduled jobs",
-        "dm_me": "Continue privately (an admin turns it on)",
+        "dm_me": "Continue in a direct message (an admin turns it on)",
         "billing": "Your usage and credit",
         "settings": "Turn features on or off here",
         "privacy": "See, export or delete your data",

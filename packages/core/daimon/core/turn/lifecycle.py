@@ -77,11 +77,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Literal, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 import structlog
 from anthropic.types import RawMessageStreamEvent
 from daimon.core.turn.state import TurnState
+
+if TYPE_CHECKING:
+    from daimon.core.monitoring import MonitoringNotice
 
 ReconnectReason = Literal["connection_dropped", "clean_close", "read_timeout"]
 InterruptSource = Literal["sigint", "cancel_event"]
@@ -108,6 +111,24 @@ class TurnLifecycle(Protocol):
 
 
 Acknowledgment = Literal["accepted", "done"]
+
+
+async def tell_monitored(lifecycle: TurnLifecycle, notice: MonitoringNotice) -> None:
+    """Show `notice` on its own, apart from the reply (`daimon.core.monitoring.must_tell`).
+
+    Optional and best-effort like `acknowledge`: a missing hook does nothing, and a
+    failure is logged without failing or stalling the turn.
+    """
+    hook = getattr(lifecycle, "on_monitoring_notice", None)
+    if hook is None:
+        return
+    try:
+        async with asyncio.timeout(3):
+            await cast("Callable[[MonitoringNotice], Awaitable[None]]", hook)(notice)
+    except Exception as exc:
+        structlog.get_logger(__name__).warning(
+            "turn.monitoring_notice_failed", error_type=type(exc).__name__
+        )
 
 
 def stop_rendering(lifecycle: TurnLifecycle) -> None:

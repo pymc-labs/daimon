@@ -96,6 +96,20 @@ async def get_open_question(
     return MonitoredEventRow.model_validate(question)
 
 
+async def last_question_at(
+    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, conversation: str
+) -> datetime | None:
+    """When this agent's newest kept question in the conversation was asked."""
+    return await session.scalar(
+        select(func.max(MonitoredEvent.created_at)).where(
+            MonitoredEvent.tenant_id == tenant_id,
+            MonitoredEvent.conversation == conversation,
+            MonitoredEvent.agent_id == agent_id,
+            MonitoredEvent.kind == "question",
+        )
+    )
+
+
 async def open_question_refs(
     session: AsyncSession, *, tenant_id: uuid.UUID, conversation: str
 ) -> list[str]:

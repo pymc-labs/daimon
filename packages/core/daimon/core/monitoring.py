@@ -4,12 +4,14 @@
 `monitor_mcp` covers MCP agent chat and the person's other MCP tool calls on that agent,
 by name, time and outcome only. Both are keyed on the agent that answers and read when a
 question is asked, so a conversation begun earlier is kept from the switch on, never
-before it, and an answer is kept only when its question was.
+before it, and an answer is kept only when its question was. `must_tell` decides when the
+person is told, with the same words on every path.
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -20,7 +22,7 @@ from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.features.snapshot import FeaturePlace, resolve_one
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores import monitoring as store
-from daimon.core.stores.domain import MonitoredPlatform
+from daimon.core.stores.domain import FeatureValueRow, MonitoredPlatform
 from daimon.core.stores.feature_values import list_feature_values
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -40,6 +42,46 @@ class MonitoringState:
         return self.feature.on
 
 
+@dataclass(frozen=True)
+class MonitoringNotice:
+    """What a monitored person is told: what is happening, then who can help."""
+
+    line: str
+    help: str
+
+    @property
+    def text(self) -> str:
+        return f"{self.line}\n\n{self.help}"
+
+
+_HELP = "Ask an admin if you have questions."
+CHAT_NOTICE = MonitoringNotice("Admins can read what you and this agent say here.", _HELP)
+MCP_NOTICE = MonitoringNotice(
+    "Admins can read what you and this agent say, and see which of its tools you use.", _HELP
+)
+
+
+def notice_for(platform: MonitoredPlatform) -> MonitoringNotice:
+    return MCP_NOTICE if platform == "mcp" else CHAT_NOTICE
+
+
+@dataclass(frozen=True)
+class KeptQuestion:
+    """A kept question; `notice` is what the person must be told now, if anything."""
+
+    turn_ref: str
+    notice: MonitoringNotice | None
+
+
+def must_tell(state: MonitoringState, told_at: datetime | None) -> bool:
+    """The one rule: tell the person when the turn is monitored and this conversation
+    was not told since monitoring was last switched on. `told_at` is the conversation's
+    newest kept question before this one: the first kept question after a switch tells."""
+    if not state.on:
+        return False
+    return told_at is None or (state.since is not None and told_at < state.since)
+
+
 def monitoring_spec(platform: MonitoredPlatform) -> FeatureSpec:
     return FEATURES["monitor_mcp"] if platform == "mcp" else FEATURES["monitor_direct_messages"]
 
@@ -54,9 +96,65 @@ async def monitoring_state(
 ) -> MonitoringState:
     """The feature for the agent whose derived id is `agent_id` (MCP knows no other)."""
     spec = monitoring_spec(platform)
+    rows = await list_feature_values(session, tenant_id=tenant_id, keys=(spec.key,))
+    return _state(spec, settings, rows, tenant_id=tenant_id, agent_id=agent_id, platform=platform)
+
+
+async def monitored_agents(
+    session: AsyncSession,
+    settings: Settings | None,
+    *,
+    tenant_id: uuid.UUID,
+    agent_ids: Iterable[uuid.UUID],
+    platform: MonitoredPlatform,
+) -> set[uuid.UUID]:
+    """Which of `agent_ids` are monitored, from one read of the workspace's settings."""
+    spec = monitoring_spec(platform)
+    rows = await list_feature_values(session, tenant_id=tenant_id, keys=(spec.key,))
+    return {
+        agent_id
+        for agent_id in agent_ids
+        if _state(
+            spec, settings, rows, tenant_id=tenant_id, agent_id=agent_id, platform=platform
+        ).on
+    }
+
+
+async def monitors_any(
+    session: AsyncSession,
+    settings: Settings | None,
+    *,
+    tenant_id: uuid.UUID,
+    platform: MonitoredPlatform,
+) -> bool:
+    """Whether admins monitor any agent in the workspace, here or over MCP (the privacy
+    panel's line)."""
+    for where in dict.fromkeys((platform, "mcp")):
+        spec = monitoring_spec(where)
+        rows = await list_feature_values(session, tenant_id=tenant_id, keys=(spec.key,))
+        workspace = [row for row in rows if row.tier == "workspace"]
+        if resolve_one(spec, settings, FeaturePlace(tenant_id, where), workspace).on:
+            return True
+        for agent in {row.agent_id for row in rows if row.tier == "agent" and row.agent_id}:
+            mine = [*workspace, *(r for r in rows if r.tier == "agent" and r.agent_id == agent)]
+            place = FeaturePlace(tenant_id, where, agent_id=agent)
+            if resolve_one(spec, settings, place, mine).on:
+                return True
+    return False
+
+
+def _state(
+    spec: FeatureSpec,
+    settings: Settings | None,
+    all_rows: Sequence[FeatureValueRow],
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    platform: MonitoredPlatform,
+) -> MonitoringState:
     rows = [
         row
-        for row in await list_feature_values(session, tenant_id=tenant_id, keys=(spec.key,))
+        for row in all_rows
         if row.tier == "workspace"
         or (
             row.tier == "agent"
@@ -82,26 +180,50 @@ async def capture_question(
     conversation: str,
     turn_ref: str,
     content: str,
-) -> bool:
-    """Keep the person's question when the agent is monitored now; True when kept."""
+) -> KeptQuestion | None:
+    """Keep the person's question when the agent is monitored now, saying whether they
+    must be told (`must_tell`); None when nothing was kept."""
     if account_id is None:
-        return False
+        return None
     try:
         async with sessions() as session, session.begin():
             state = await monitoring_state(
                 session, settings, tenant_id=tenant_id, agent_id=agent_id, platform=platform
             )
             if not state.on:
-                return False
+                return None
+            told_at = await store.last_question_at(
+                session, tenant_id=tenant_id, agent_id=agent_id, conversation=conversation
+            )
             subject = store.MonitoredSubject(
                 tenant_id, agent_id, platform, account_id, conversation
             )
             entry = store.MonitoredEntry("question", content=content, turn_ref=turn_ref)
-            return await store.record_events(session, subject, (entry,)) == 1
+            if await store.record_events(session, subject, (entry,)) != 1:
+                return None
+            tell = must_tell(state, told_at)
+            return KeptQuestion(turn_ref, notice_for(platform) if tell else None)
     # Keeping a copy for admins never fails the person's turn; the gap is logged.
     except Exception:
         log.warning("monitoring.capture_failed", kind="question", platform=platform, exc_info=True)
-        return False
+        return None
+
+
+async def monitored_notice(
+    sessions: async_sessionmaker[AsyncSession],
+    settings: Settings | None,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    platform: MonitoredPlatform,
+) -> MonitoringNotice | None:
+    """The notice a place shown before any question carries while the agent is
+    monitored (web chat, `describe_agent`, the MCP briefing); None when it is not."""
+    async with sessions() as session:
+        state = await monitoring_state(
+            session, settings, tenant_id=tenant_id, agent_id=agent_id, platform=platform
+        )
+    return notice_for(platform) if state.on else None
 
 
 async def capture_answer(
