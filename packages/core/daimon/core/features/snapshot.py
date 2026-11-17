@@ -169,6 +169,19 @@ def server_setup_met(spec: FeatureSpec, settings: Settings) -> bool:
     return all(_SETUP[need](settings) for need in spec.requires if need in SERVER_SETUP)
 
 
+def lacks_only_server_setup(
+    spec: FeatureSpec,
+    settings: Settings | None,
+    place: FeaturePlace,
+    support: SupportSetup | None = None,
+) -> bool:
+    """Whether `spec` is unavailable at `place` only for `SERVER_SETUP`, which a worker may not
+    carry: there it can't tell setup the MCP server has from setup nobody has."""
+    return unavailable_reason(spec, settings, place, support) == "requires" and (
+        unavailable_reason(spec, settings, place, support, server_setup=False) is None
+    )
+
+
 async def support_setup(
     session: AsyncSession,
     settings: Settings | None,

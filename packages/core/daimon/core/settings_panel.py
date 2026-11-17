@@ -38,10 +38,11 @@ from daimon.core.features.service import (
     change_feature,
     read_features,
     tier_word,
+    unseen_setup_allows,
     where,
 )
 from daimon.core.features.service import change_refusal as feature_refusal
-from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.features.snapshot import FeaturePlace, lacks_only_server_setup
 from daimon.core.features.surface import (
     CATEGORIES,
     change_note,
@@ -322,7 +323,8 @@ async def _feature(
     )
     title = spec.name
     lines = [f"In effect: {source_text(spec, view.resolved, place.platform)}."]
-    if view.resolved.unavailable is not None:
+    unseen = lacks_only_server_setup(spec, settings, place)
+    if view.resolved.unavailable is not None and not unseen:
         return PanelScreen(title, tuple(lines), back=back)
     selects: list[PanelSelect] = []
     paging: tuple[PanelOption, ...] = ()
@@ -345,6 +347,13 @@ async def _feature(
             page=page,
             picker=picker_page,
         )
+        if unseen:  # Setup only the MCP server may carry: Off and its lock still apply.
+            options = tuple(
+                (token, label)
+                for token, label in options
+                if (picked := parse_choice(token)) is not None
+                and unseen_setup_allows(spec, picked.value, settings, place)
+            )
         if options:
             choices = tuple(PanelOption(value, label) for value, label in options)
             selects.append(PanelSelect(f"Change for {where(own.tier, place.platform)}", choices))

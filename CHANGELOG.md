@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer drops those tools from the session. The MCP server judges that setup with
   its own settings: without it, the tools leave every tool list it serves and a call
   is refused as not set up on this deployment. A capability turned Off still removes
-  its tools from the session.
+  its tools from the session. A settings panel on such a worker still reads the
+  feature as Not set up, but it can be turned Off, locked Off or reset to Default.
 - **Admin > Support follows the order an admin sets Ask a person up.** Turn it
   on for the workspace, choose where it shows, pick the request channel, then
   set credit limits and menus in one list. The later steps stay open when it is
