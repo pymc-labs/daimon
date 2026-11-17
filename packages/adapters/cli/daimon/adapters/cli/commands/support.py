@@ -995,7 +995,8 @@ def requests_list_command(
     ctx: typer.Context,
     pending: Annotated[bool, typer.Option("--pending", help="Only requests to settle.")] = False,
     undelivered: Annotated[
-        bool, typer.Option("--undelivered", help="Only pending requests no support channel received.")
+        bool,
+        typer.Option("--undelivered", help="Only pending requests no support channel received."),
     ] = False,
     place: Annotated[
         str | None, typer.Option("--place", help="workspace, agent:<name> or channel:<id>.")
