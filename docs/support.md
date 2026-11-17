@@ -153,5 +153,5 @@ daimon support requests list --undelivered
 handled: pending ones, and ones already charged at submit (a fixed or steps
 price, or exempt). Settling a pending one charges within its price; declining
 releases the hold. Settling a charged one keeps the charge as is; declining
-refunds it. The `support_*` tools in [MCP tools](mcp-tools.md) do the same from an
-MCP client.
+refunds it. The `support_*` tools in [MCP tools](mcp-tools.md) and **Not
+delivered** in Admin > Support do the same; chat posts only settle pending ones.
