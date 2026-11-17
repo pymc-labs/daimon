@@ -353,22 +353,42 @@ async def test_send_when_option_has_no_fields_then_posts_pending_with_settle_but
     assert (status, hold, post_id) == ("pending", D(1), _POST_TS), "holds its minimum; post id"
 
 
-async def test_send_when_no_escalation_workspace_is_named_then_no_settle_buttons_and_no_settle(
+async def test_decline_when_no_escalation_workspace_is_named_then_the_requests_own_workspace_settles(
     db_session_factory: async_sessionmaker[AsyncSession], fake: Any
 ) -> None:
     key, _revision = await _seed(db_session_factory)
     runtime = _runtime(key, db_session_factory, slack_escalation_team_id=None)
-    picked = await _pick(runtime, fake, await _menu(runtime, fake), "review")
-    await run_support_submission(
-        runtime, evaluate_plan_submission(_send(picked, {OPTION_BLOCK_ID: _picked("review")}))
-    )
-    post = _sent(fake, _POST)[-1]
-    assert "blocks" not in post, "a shared channel's other workspaces could settle"
-    ((escalation_id, *_rest),) = await _rows(db_session_factory)
-    message = {"ts": _POST_TS, "text": post["text"]}
+    escalation_id, post = await _pending(runtime, fake)
+    assert [b["action_id"] for b in post["blocks"][-1]["elements"]] == [
+        SETTLE_SET_ACTION_ID,
+        SETTLE_DECLINE_ACTION_ID,
+    ], "the post carries the settle buttons"
+    fake.mock.get(_HISTORY_PATTERN, payload={"ok": True, "messages": [post]}, repeat=True)  # pyright: ignore[reportUnknownMemberType]
     await handle_settle_click(
-        runtime, _settle_click(SETTLE_DECLINE_ACTION_ID, escalation_id.hex, message=message)
+        runtime, _settle_click(SETTLE_DECLINE_ACTION_ID, escalation_id, message=post)
     )
+    assert _said(fake) == f"Declined. No credits used. {CLIENT_NOT_NOTIFIED}"
+    ((_id, status, *_rest),) = await _rows(db_session_factory)
+    assert status == "declined"
+
+
+async def test_settle_when_no_escalation_workspace_is_named_then_another_workspace_is_refused(
+    db_session_factory: async_sessionmaker[AsyncSession], fake: Any
+) -> None:
+    key, _revision = await _seed(db_session_factory)
+    runtime = _runtime(key, db_session_factory, slack_escalation_team_id=None)
+    escalation_id, post = await _pending(runtime, fake)
+    async with db_session_factory() as session, session.begin():
+        await make_tenant(session, platform="slack", workspace_id="T_OTHER")
+        await upsert_slack_bot_token(
+            session,
+            team_id="T_OTHER",
+            encrypted_token=encrypt_token(build_multifernet((key,)), "xoxb-other"),
+        )
+    click = _settle_click(SETTLE_DECLINE_ACTION_ID, escalation_id, message=post)
+    click["team"] = {"id": "T_OTHER"}
+    click["user"] = {"id": _STAFF, "team_id": "T_OTHER"}
+    await handle_settle_click(runtime, click)
     assert _said(fake) == SETTLE_ELSEWHERE
     ((_id, status, *_rest),) = await _rows(db_session_factory)
     assert status == "pending", "nothing settled"

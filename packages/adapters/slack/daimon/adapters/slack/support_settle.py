@@ -84,13 +84,21 @@ def _settler(by: str | None) -> str | None:
 def _in_support_channel(support: SupportSettings, *, team_id: str, channel_id: str) -> bool:
     """The configured channel, in the configured escalation workspace.
 
-    With no workspace named, another workspace sharing the channel could settle.
+    With no workspace named, any workspace passes here; `_settles_here` then
+    matches the clicker's workspace to the request's tenant.
     """
-    if support.slack_escalation_team_id != team_id:
+    if support.slack_escalation_team_id not in (None, team_id):
         return False
     return is_support_channel(
         configured=support.slack_escalation_channel_id, channel_id=channel_id, parent_id=None
     )
+
+
+def _settles_here(support: SupportSettings, *, team_id: str, row: SupportEscalationRow) -> bool:
+    """A named escalation workspace already matched; unset, the request must be this workspace's."""
+    if support.slack_escalation_team_id is not None:
+        return True
+    return derive_tenant_uuid(platform="slack", workspace_id=team_id) == row.tenant_id
 
 
 async def _notice(client: AsyncWebClient, post: _Post, text: str, *, error: bool) -> None:
@@ -284,6 +292,8 @@ async def handle_settle_click(runtime: SlackRuntime, payload: dict[str, Any]) ->
                 row = await get_request(session, escalation_id=escalation_id)
         if row is None:
             await _notice(client, post, REQUEST_GONE, error=True)
+        elif not _settles_here(support, team_id=post.team_id, row=row):
+            await _notice(client, post, SETTLE_ELSEWHERE, error=True)
         elif row.status != "pending":
             outcome = SettleOutcome(status="already_settled", row=row)
             await _finish(client, post, before=row, outcome=outcome, message=message)
@@ -375,6 +385,9 @@ async def run_settle_submission(runtime: SlackRuntime, submission: SettleSubmiss
             row = await get_request(session, escalation_id=s.escalation_id)
         if row is None:
             await _notice(client, post, REQUEST_GONE, error=True)
+            return
+        if not _settles_here(runtime.settings.support, team_id=s.team_id, row=row):
+            await _notice(client, post, SETTLE_ELSEWHERE, error=True)
             return
         await _settle(runtime, client, post, row=row, charge=s.charge)
     except (SQLAlchemyError, OSError, *CLICK_REPLY_ERRORS) as err:
