@@ -1,57 +1,99 @@
-# Support plans
+# Ask a person
 
 **Ask a person** sends a request from a conversation to your support team.
-Support plans decide how many credits people have, what each request costs and
-which options they pick from. Without a plan, each person has
+Limits decide how many credits people have, menus decide what a request costs
+and which options people pick, and a channel decides where requests land.
+Without any setup, each person has
 [`DAIMON_SUPPORT__CREDITS_PER_USER`](configuration.md#daimon_support__credits_per_user)
 credits in total, and a request costs one.
 
-## Where a plan applies
+## Set it up
 
-A plan is set on the workspace, on one agent or on one channel. A request uses
-the first plan that exists for the place it was asked in:
+Admins set everything under **Admin** > **Support** in the web app. Every
+change is recorded in the audit log and applies to the next request.
 
-1. the channel's plan, where a thread uses its parent channel's;
-2. the agent's plan;
-3. the workspace plan;
-4. the default allowance.
+1. Turn Ask a person on where you want it, in the
+   [feature](features.md#ask-a-person) settings.
+2. Pick the channel that receives requests.
+3. Set limits for everyone, an agent, a channel or one person.
+4. Write menus of options, and pick which place offers which menu.
 
-Plans never stack. A request is charged to one plan only, and plan requests
-never count toward the default allowance. A request from a workspace admin is
-sent but charged nowhere. To hide Ask a person in one place, turn its
-[feature](features.md#ask-a-person) off there. To offer it only where a plan
-applies, turn it off in the channels without one: zero credits per user turns
-it off everywhere, plans included.
+Without step 2, requests go to the channel your deployment keeps. Without
+step 3, the default credits apply. Without step 4, a request costs one credit.
 
-## Credits and windows
+## Request channel
 
-Credits are decimal amounts with up to two places, such as `0.25`. A plan has
-shared credits, credits per person, or both, and the stricter one wins. Shared
-credits are one pool for everyone the plan covers.
+Requests go to one channel per platform. Where the deployment allows it,
+a workspace picks its own channel. Otherwise the deployment's channel
+receives every request. Changing the channel moves only new requests;
+open ones stay where they were posted.
 
-A plan counts the credits used in its window:
+```sh
+daimon support channel set 456
+daimon support channel show
+daimon support channel reset
+```
+
+On Teams, add `--team` and `--service-url` to `channel set`. A thread id
+resolves to its parent channel.
+
+## Limits
+
+A limit sets credits for a place: the workspace, one agent or one channel.
+Credits are decimal amounts with up to two places, such as `0.25`. A limit has
+shared credits, credits for each person, or both, and the stricter one wins.
+Shared credits are one pool for everyone at the place.
 
 | Window | Counts |
 | --- | --- |
 | `total` | everything since its start date, or ever |
 | `monthly` | the current UTC calendar month |
-| `fixed` | from its start date until its end date |
 
-An admin sets the dates by hand; a plan never starts on its first request.
-Before its start or after its end, a plan blocks requests. It never falls back
-to the default allowance. Clear the plan to restore the default.
+A limit also has an optional start date and end date. An admin sets both by
+hand; a limit never starts on its first request. Before the start or from the
+end, requests at that place are refused. They never fall back to the default
+credits. The end date itself is not counted.
 
-## Own caps
+```sh
+daimon support limit set channel 456 --shared 20 --each-person 2 --window monthly
+daimon support limit set agent helper --each-person 1 --ends-at 2030-06-01T00:00
+daimon support limit list
+daimon support limit clear channel 456
+```
 
-An own cap gives one person a different limit under one plan, in place of its
-credits per person. A cap set with no plan changes that person's default
-allowance. Caps name the person by their platform user id or `<@id>` mention:
-a Discord number, a Slack member id or a Teams Entra object id.
+`limit set` changes only the options you pass; `none` clears one. Each `set`
+takes `--expected` with the revision you last read, and refuses when it
+changed meanwhile.
+
+## How limits combine
+
+A request is charged to one place: the most specific one that has a limit.
+
+| Place | Wins over |
+| --- | --- |
+| channel | agent, workspace, everyone |
+| agent | workspace, everyone |
+| workspace | everyone |
+| everyone | nothing; the default credits |
+
+Limits never stack. A request counts only at the place that is charged, and
+admins are never charged. A person's own limit sets one person's cap at a
+place, or everywhere. It replaces the place's credits for each person for that
+person, and never adds credits to the place. A person's cap at a channel beats
+their cap everywhere.
+
+Name the person by platform user id or `<@id>` mention: a Discord number, a
+Slack member id or a Teams Entra object id.
+
+```sh
+daimon support limit set workspace --each-person 5 --person 112233445566778899
+daimon support limit set channel 456 --each-person 1 --person 112233445566778899
+```
 
 ## Menus
 
 A menu lists the options a person picks from, each with a price and up to four
-form fields. A plan with no menu offers one option at one credit. A menu takes
+form fields. A place with no menu offers one option at one credit. A menu takes
 1 to 10 options, with labels of at most 75 characters.
 
 | Price | Charge |
@@ -76,37 +118,31 @@ options:
     price: {kind: range, min: "0.5", max: "1"}
 ```
 
-A menu that a plan uses cannot be removed.
+Save the menu under a key, then pick it for a place. A menu that a place
+uses cannot be removed.
 
-## Settling requests
+```sh
+daimon support menu set support support.yaml
+daimon support menu use support channel 456
+daimon support menu use default channel 456
+```
+
+## Settle requests
 
 A `range` or `quoted` request holds its minimum until staff settle it. Anyone
 in the support channel settles it from the request's post, or declines it to
 refund the hold. The person who asked is not told the final charge, so tell
 them yourself. Every settle is recorded with who made it. On Slack, with
 `slack_escalation_team_id` set, settling works only in that workspace; with it
-unset, only someone from the workspace the request came from can settle. Clearing
-a plan declines its pending requests.
-
-## Change plans
-
-Admins change plans, own caps and menus under **Channels** > **Support** in the
-web app. Every change is recorded in the audit log, and applies to the next
-request with no restart.
-
-The same changes work from the command line. A thread id resolves to its parent
-channel.
+unset, only someone from the workspace the request came from can settle.
+Clearing a limit declines its pending requests.
 
 ```sh
-daimon support --guild 123 catalog set support support.yaml
-daimon support --guild 123 plan set channel 456 --pool 2 --window monthly --catalog support
-daimon support --guild 123 allowance set 112233445566778899 5 --plan channel:456
-daimon support --guild 123 requests list --pending
-daimon support --guild 123 requests settle <request-id> 1.5
+daimon support requests list --pending
+daimon support requests settle <request-id> 1.5
+daimon support requests list --undelivered
 ```
 
-`plan set` changes only the options you pass; `none` clears a limit or a date.
-Each `set` takes `--expected` with the value you last read, and refuses when it
-changed meanwhile. `requests list --undelivered` shows requests the support
-channel never received, to settle or decline. The `support_*` tools in
-[MCP tools](mcp-tools.md) do the same from an MCP client.
+`--undelivered` shows requests no support channel received, to settle or
+decline. The `support_*` tools in [MCP tools](mcp-tools.md) do the same from an
+MCP client.

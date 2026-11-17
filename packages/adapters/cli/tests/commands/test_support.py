@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import shlex
 import uuid
 from datetime import UTC, datetime
 from io import StringIO
+from pathlib import Path
 from types import SimpleNamespace
 
+import click
 import httpx
 import pytest
 import typer
@@ -444,3 +447,23 @@ async def test_menu_when_expected_zero_then_it_means_none_as_in_the_mcp_tool(
         await menu_set(**where, key="support", text=MENU, expected="0")
     with pytest.raises(StoreError):
         await menu_rm(**where, key="support", expected="0")
+
+
+def _docs_commands() -> list[list[str]]:
+    """Each `daimon support ...` line of the support page, as words."""
+    page = next(p for p in Path(__file__).parents if (p / "docs" / "support.md").exists())
+    lines = (page / "docs" / "support.md").read_text().splitlines()
+    return [shlex.split(x)[1:] for x in lines if x.startswith("daimon support ")]
+
+
+@pytest.mark.parametrize("words", _docs_commands(), ids=" ".join)
+def test_docs_commands_when_read_then_name_real_commands_and_options(words: list[str]) -> None:
+    """The commands on docs/support.md exist, and so do the options they use."""
+    node: click.Command = typer.main.get_command(app)
+    for word in words:
+        if isinstance(node, click.Group) and word in node.commands:
+            node = node.commands[word]
+    assert not isinstance(node, click.Group), f"{words} stops at a group"
+    options = {o for p in node.params for o in getattr(p, "opts", [])}
+    used = [w for w in words if w.startswith("--")]
+    assert set(used) <= options, f"{set(used) - options} is not an option of {words}"

@@ -169,7 +169,7 @@ not copied.
 
 Set `DAIMON_SUPPORT__SLACK_ESCALATION_CHANNEL_ID` to show an **Ask a person**
 button beside 👍 and 👎. Each send spends the credits its
-[support plan](support-plans.md) sets, one by default, and sends one request to
+[limits and menu](support.md) set, one by default, and sends one request to
 that channel. The post carries the requester and a link, never
 answer text. The bot must be in the channel. Leave it unset to hide the
 button. External Slack Connect members cannot use it.
