@@ -806,12 +806,7 @@ async def test_requests_show_as_recent_used_open_and_undelivered(
         ("1", "Ask a person", "1"),
     ], "newest first, by option and person"
     assert page["channel"]["open"]["count"] == 0, "fixed-price requests settle at once"
-    assert [(c["credits"], c["what"]) for c in page["undelivered"]] == [("1", "Ask a person")], (
-        "the request nobody received"
-    )
-    assert page["undelivered"][0]["price"] == {"kind": "fixed", "min": "1", "max": "1"}, (
-        "the default option's price"
-    )
+    assert page["undelivered"] == [], "a request that settled at submit has nothing to settle"
 
 
 async def test_a_range_priced_request_counts_as_open_until_settled(
@@ -926,6 +921,10 @@ async def test_an_undelivered_request_is_settled_or_declined_from_the_page(
     assert over.status_code == 422 and _locs(over) == [["charge"]], over.text
     assert settled.status_code == 200, settled.text
     assert "limits" in settled.json() and "undelivered" in settled.json(), "the whole page"
+    assert [i["id"] for i in settled.json()["undelivered"]] == [str(second)], (
+        "a settled request leaves the list"
+    )
+    assert declined.json()["undelivered"] == [], "so does a declined one"
     assert again.status_code == 409 and declined_again.status_code == 409, "no longer pending"
     assert declined.status_code == 200, declined.text
     assert refused.status_code == 403, "admins only"
