@@ -103,6 +103,7 @@ daimon support --guild 123 requests list --pending
 daimon support --guild 123 requests settle <request-id> 1.5
 ```
 
+`plan set` changes only the options you pass; `none` clears a limit or a date.
 Each `set` takes `--expected` with the value you last read, and refuses when it
 changed meanwhile. `requests list --undelivered` shows requests the support
 channel never received, to settle or decline. The `support_*` tools in

@@ -15,13 +15,21 @@ from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores.support_rows import SupportPlanRow
 from daimon.core.support_plan_admin import (
     NO_REQUEST,
+    PlanChange,
     get_plan_usage,
     list_plan_usage,
+    merge_plan,
     parse_plan_value,
     settle_outcome_text,
     usage_text,
 )
-from daimon.core.support_plan_changes import set_allowance, set_catalog, set_plan, settle
+from daimon.core.support_plan_changes import (
+    PlanValue,
+    set_allowance,
+    set_catalog,
+    set_plan,
+    settle,
+)
 from daimon.core.support_plans import (
     CLIENT_NOT_NOTIFIED,
     RequestChoice,
@@ -111,7 +119,7 @@ async def test_list_plan_usage_when_plans_exist_then_workspace_first_with_pool_u
         "an ended plan says so, with the exact window an admin set"
     )
     assert channel.pool_used == D(1), "the pending range request holds its minimum"
-    assert channel.summary == "1 of 5 credits used", "the pool in words"
+    assert channel.summary == "1 of 5 credits used, all time", "the pool and window in words"
     assert channel.value.catalog == "support", "the menu key, not its id"
     assert [a.platform_user_id for a in channel.allowances] == ["U1"], "own cap listed"
 
@@ -197,3 +205,47 @@ def test_usage_text_when_window_spans_years_then_exact_times_in_utc() -> None:
     assert (
         text == "Not started: 1 of 10 credits used, 24 Nov 09:00 UTC until 1 Jan 2027 00:00 UTC"
     ), text
+
+
+FIXED = PlanValue(
+    "channel",
+    "C1",
+    "support",
+    D(10),
+    D(2),
+    "fixed",
+    datetime(2026, 11, 18, 9, tzinfo=UTC),
+    datetime(2026, 11, 24, 9, tzinfo=UTC),
+)
+
+
+def test_merge_plan_when_options_left_out_then_keeps_menu_limits_and_dates() -> None:
+    spec = merge_plan(FIXED, scope="channel", scope_id="C1", change=PlanChange(pool="12"))
+    assert (spec.catalog, spec.pool, spec.per_person) == ("support", D(12), D(2)), "kept"
+    assert (spec.window.window, spec.window.starts_at, spec.window.ends_at) == (
+        "fixed",
+        FIXED.starts_at,
+        FIXED.ends_at,
+    ), "the dates are kept"
+    new = merge_plan(None, scope="channel", scope_id="C1", change=PlanChange(pool="1"))
+    assert (new.catalog, new.per_person, new.window.window) == (None, None, "total"), (
+        "with no plan, what is left out is unset"
+    )
+
+
+def test_merge_plan_when_none_or_a_new_window_then_clears_what_it_cannot_hold() -> None:
+    cleared = merge_plan(
+        FIXED,
+        scope="channel",
+        scope_id="C1",
+        change=PlanChange(catalog="default", per_person="none"),
+    )
+    assert (cleared.catalog, cleared.per_person, cleared.pool) == (None, None, D(10)), "cleared"
+    total = merge_plan(FIXED, scope="channel", scope_id="C1", change=PlanChange(window="total"))
+    assert (total.window.starts_at, total.window.ends_at) == (FIXED.starts_at, None), (
+        "a total window keeps its start, not the end"
+    )
+    monthly = merge_plan(FIXED, scope="channel", scope_id="C1", change=PlanChange(window="monthly"))
+    assert monthly.window.starts_at is None, "a monthly window holds no dates"
+    with pytest.raises(SupportPlanError, match="needs both starts_at and ends_at"):
+        merge_plan(FIXED, scope="channel", scope_id="C1", change=PlanChange(ends_at="none"))

@@ -621,7 +621,7 @@ credentials.
 | `support_catalog_set` | admin only | Set, replace or remove (``catalog`` null) a support menu. |
 | `support_plan_clear` | admin only | Remove a support plan and the own caps under it. |
 | `support_plan_list` | admin only | List support plans for Ask a person, with credits used. |
-| `support_plan_set` | admin only | Set or replace the support plan of the workspace, an agent or a channel. |
+| `support_plan_set` | admin only | Set the support plan of the workspace, an agent or a channel. |
 | `support_requests_list` | admin only | List support requests, newest first; pending only by default. |
 | `support_requests_settle` | admin only | Settle a support request at ``charge`` credits, or decline it (null). |
 

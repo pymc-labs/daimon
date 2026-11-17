@@ -10344,16 +10344,18 @@
     }),
     'support_plan_set': dict({
       'description': '''
-        Set or replace the support plan of the workspace, an agent or a channel. Admin-only.
+        Set the support plan of the workspace, an agent or a channel. Admin-only.
         <blank line>
         ``scope_id``: none for the workspace, an agent name or id, or a channel id
         (a thread id resolves to its parent). The most specific plan governs a
-        request; plans never stack. ``pool`` is credits shared by everyone,
-        ``per_person`` each person's cap, both decimal strings such as ``"0.5"``.
-        ``catalog`` is a menu key; none is the default menu. ``window``: ``total``
-        since ``starts_at``, ``monthly`` per UTC month, ``fixed`` between the dates.
-        A plan outside its dates refuses requests. ``expected``: the plan as
-        ``support_plan_list`` gave it, or ``"none"``; a mismatch saves nothing.
+        request; plans never stack. Arguments left out keep the plan's values;
+        ``"none"`` clears ``pool``, ``per_person`` or a date. ``pool`` is credits
+        shared by everyone, ``per_person`` each person's cap, decimal strings such
+        as ``"0.5"``. ``catalog``: a menu key or ``"default"``. ``window``: ``total``
+        since ``starts_at``, ``monthly`` per UTC month, ``fixed`` from ``starts_at``
+        until ``ends_at`` (exclusive), set by hand. A plan outside its dates refuses
+        requests. ``expected``: the plan as ``support_plan_list`` gave it, or ``"none"``;
+        a mismatch saves nothing.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -10449,13 +10451,20 @@
             'default': None,
           }),
           'window': dict({
-            'default': 'total',
-            'enum': list([
-              'total',
-              'monthly',
-              'fixed',
+            'anyOf': list([
+              dict({
+                'enum': list([
+                  'total',
+                  'monthly',
+                  'fixed',
+                ]),
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
             ]),
-            'type': 'string',
+            'default': None,
           }),
         }),
         'required': list([

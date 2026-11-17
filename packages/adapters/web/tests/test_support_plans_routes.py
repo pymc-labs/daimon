@@ -103,7 +103,7 @@ async def test_admin_sets_a_menu_a_thread_plan_and_a_cap_then_reads_them_back(
     assert (shown["scope_id"], shown["name"], shown["summary"]) == (
         "c1",
         "general",
-        "0 of 5 credits used, 2 per person",
+        "0 of 5 credits used, 2 per person, all time",
     ), "the thread's parent holds the plan, by name"
     assert shown["allowances"] == [{"platform_user_id": "u1", "name": None, "credits": "4"}], (
         "the person's own cap under the plan"

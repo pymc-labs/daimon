@@ -36,9 +36,11 @@ from daimon.core.stores.security_audit import append_event
 from daimon.core.stores.support_rows import SupportEscalationRow
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.support_plan_admin import (
+    PlanChange,
     PlanUsage,
     get_plan_usage,
     list_plan_usage,
+    merge_plan_change,
     options_text,
     parse_plan_value,
     settle_outcome_text,
@@ -59,7 +61,6 @@ from daimon.core.support_plans import (
     format_credits,
     load_catalog,
     parse_credits,
-    parse_plan_spec,
     parse_scope,
 )
 from pydantic import BaseModel
@@ -366,32 +367,27 @@ async def plan_set(
     pool: str | None = None,
     per_person: str | None = None,
     catalog: str | None = None,
-    window: str = "total",
+    window: str | None = None,
     starts_at: str | None = None,
     ends_at: str | None = None,
     expected: str | None = None,
     discord_transport: Transport = None,
 ) -> None:
+    """Options left out keep the plan's values; `none` clears a limit or a date."""
     target = await _target(rt, selector)
     plan_scope, plan_id = await _scope_id(rt, target, scope, scope_id, transport=discord_transport)
-    spec = parse_plan_spec(
-        scope=plan_scope,
-        scope_id=plan_id or None,
-        catalog=catalog,
-        pool=pool,
-        per_person=per_person,
-        window=window,
-        starts_at=starts_at,
-        ends_at=ends_at,
-    )
-    label = _label(plan_scope, plan_id)
+    change = PlanChange(catalog, pool, per_person, window, starts_at, ends_at)
+    async with rt.sessionmaker() as session:
+        spec, before = await merge_plan_change(
+            session, tenant_id=target.tenant_id, scope=plan_scope, scope_id=plan_id, change=change
+        )
     try:
         await set_plan(
             rt.sessionmaker,
             _actor(target, command="plan set", reason=f"plan:{plan_scope}:{plan_id}"),
             platform=target.platform,
             spec=spec,
-            expected=_expected_none_or(expected, _plan_json),
+            expected=_expected_none_or(expected, _plan_json) or Expected(before),
         )
     except StaleChannelValue as exc:
         raise _stale(exc) from exc
@@ -403,7 +399,8 @@ async def plan_set(
             scope_id=plan_id,
             now=datetime.now(UTC),
         )
-    console.print(f"{label}: {usage.summary if usage else 'set'}", markup=False)
+    assert usage is not None, "the plan just set"
+    _plan_table(console, [usage])
 
 
 async def plan_clear(
@@ -731,23 +728,27 @@ def plan_set_command(
     ctx: typer.Context,
     scope: Annotated[str, typer.Argument(help=_SCOPE_HELP)],
     scope_id: Annotated[str | None, typer.Argument(help=_ID_HELP)] = None,
-    pool: Annotated[str | None, typer.Option("--pool", help="Credits shared by everyone.")] = None,
+    pool: Annotated[
+        str | None, typer.Option("--pool", help="Credits shared by everyone, or `none`.")
+    ] = None,
     per_person: Annotated[
-        str | None, typer.Option("--per-person", help="Credits each person may use.")
+        str | None, typer.Option("--per-person", help="Credits each person may use, or `none`.")
     ] = None,
     catalog: Annotated[
         str | None, typer.Option("--catalog", help="Menu key, or `default`.")
     ] = None,
-    window: Annotated[str, typer.Option("--window", help="total, monthly or fixed.")] = "total",
+    window: Annotated[
+        str | None, typer.Option("--window", help="total, monthly or fixed. New plans: total.")
+    ] = None,
     starts_at: Annotated[
-        str | None, typer.Option("--starts-at", help="ISO 8601, UTC without an offset.")
+        str | None, typer.Option("--starts-at", help="ISO 8601, UTC without an offset, or `none`.")
     ] = None,
     ends_at: Annotated[
         str | None, typer.Option("--ends-at", help="ISO 8601; fixed windows only.")
     ] = None,
     expected: Annotated[str | None, _EXPECTED_PLAN] = None,
 ) -> None:
-    """Set or replace a plan."""
+    """Set a plan; options left out keep the plan's values."""
     _run(
         lambda rt, console: plan_set(
             rt=rt,

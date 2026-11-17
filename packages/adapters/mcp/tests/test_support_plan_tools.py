@@ -117,7 +117,7 @@ async def test_admin_sets_a_plan_on_a_threads_parent_and_round_trips_expected(
     assert (result.scope_id, result.pool, result.summary) == (
         _PARENT,
         "5",
-        "0 of 5 credits used",
+        "0 of 5 credits used, all time",
     ), "stored on the parent, credits as decimal strings"
     (listed,) = await _list_plans_impl(runtime, auth)
     shown = dataclasses.asdict(listed)
@@ -331,3 +331,22 @@ async def test_settle_tells_the_settler_the_client_is_not_told_and_corrects(
         await _settle_request_impl(
             runtime, auth, request_id=str(uuid.uuid4()), charge="1", expected_charge=None
         )
+
+
+async def test_set_plan_when_arguments_left_out_then_keeps_the_plans_values(
+    committing_sessionmaker: Factory,
+) -> None:
+    tenant, account_id = await _seed(committing_sessionmaker)
+    runtime, auth = _runtime(committing_sessionmaker), _auth(tenant, account_id)
+    await _set_catalog_impl(runtime, auth, key="support", catalog=_MENU, expected_revision=None)
+    dates = {"window": "fixed", "starts_at": "2026-11-18T09:00", "ends_at": "2026-11-24T09:00"}
+    plan = {**_PLAN, "scope": "channel", "scope_id": _PARENT}
+    await _set_plan_impl(runtime, auth, **{**plan, **dates, "catalog": "support", "pool": "5"})
+    changed = await _set_plan_impl(runtime, auth, **{**plan, "window": None, "per_person": "1"})
+    assert (changed.catalog, changed.pool, changed.per_person, changed.window) == (
+        "support",
+        "5",
+        "1",
+        "fixed",
+    ), "the menu, pool and window are kept"
+    assert changed.ends_at == "2026-11-24T09:00:00+00:00", "the dates are kept"

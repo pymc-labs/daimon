@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 from io import StringIO
 from types import SimpleNamespace
 
@@ -29,6 +30,8 @@ from daimon.core.errors import StoreError
 from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores import support_plans as plans
 from daimon.core.stores.security_audit import list_events
+from daimon.core.support_plan_admin import window_text
+from daimon.core.support_plan_changes import PlanValue
 from daimon.core.support_plans import CLIENT_NOT_NOTIFIED, RequestChoice, SupportPlace
 from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
@@ -135,7 +138,8 @@ async def test_plan_when_set_for_an_agent_name_then_stored_under_its_id(
     console, out = _console()
     where = {"rt": rt, "console": console, "selector": selector}
     await plan_set(**where, scope="agent", scope_id="helper", pool="10", window="monthly")
-    assert "agent agent_helper1: 0 of 10 credits used, this month" in out.getvalue(), "summary"
+    assert "agent_helper1" in out.getvalue(), "the agent's id"
+    assert "0 of 10 credits used, this month" in out.getvalue(), "summary"
     await plan_list(**where, as_json=True)
     (listed,) = json.loads(out.getvalue().strip().splitlines()[-1])
     assert (listed["scope_id"], listed["pool"], listed["catalog"]) == (
@@ -185,7 +189,43 @@ async def test_plan_set_when_a_discord_thread_then_its_parent_channel(
         per_person="2",
         discord_transport=transport,
     )
-    assert "channel 900: 2 per person" in out.getvalue(), "the thread's parent holds the plan"
+    assert "900" in out.getvalue() and "901" not in out.getvalue(), "the thread's parent"
+
+
+async def test_plan_set_when_rerun_with_one_option_then_keeps_menu_and_dates(
+    db_session_factory: Factory,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, settings=_settings())
+    _, selector = await _tenant(db_session_factory)
+    console, out = _console()
+    where = {"rt": rt, "console": console, "selector": selector}
+    await catalog_set(**where, key="support", text=MENU)
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) + timedelta(days=1)
+    dates = {"starts_at": start.isoformat(), "ends_at": (start + timedelta(days=6)).isoformat()}
+    await plan_set(
+        **where,
+        scope="channel",
+        scope_id="C1",
+        pool="5",
+        catalog="support",
+        window="fixed",
+        **dates,
+    )
+    await plan_set(**where, scope="channel", scope_id="C1", pool="8")
+
+    def last_row() -> str:
+        return [line for line in out.getvalue().splitlines() if "C1" in line][-1]
+
+    window = window_text(
+        PlanValue("channel", "C1", None, None, None, "fixed", start, start + timedelta(days=6)),
+        now=datetime.now(UTC),
+    )
+    assert "support" in last_row(), f"the menu is kept: {last_row()}"
+    assert f"0 of 8 credits used, {window}" in last_row(), f"dates kept, in full: {last_row()}"
+    await plan_set(
+        **where, scope="channel", scope_id="C1", window="total", pool="none", per_person="1"
+    )
+    assert "1 per person, since" in last_row(), f"pool and end cleared: {last_row()}"
 
 
 async def test_allowance_when_set_then_listed_and_cleared_under_its_plan(

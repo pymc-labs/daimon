@@ -33,9 +33,11 @@ from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores import support_plans as store
 from daimon.core.stores.support_rows import SupportCatalogRow, SupportEscalationRow
 from daimon.core.support_plan_admin import (
+    PlanChange,
     PlanUsage,
     get_plan_usage,
     list_plan_usage,
+    merge_plan_change,
     options_text,
     parse_plan_value,
     settle_outcome_text,
@@ -57,7 +59,6 @@ from daimon.core.support_plans import (
     format_credits,
     parse_catalog,
     parse_credits,
-    parse_plan_spec,
     parse_scope,
 )
 from fastmcp import Context, FastMCP
@@ -288,31 +289,33 @@ async def _set_plan_impl(
     catalog: str | None,
     pool: str | None,
     per_person: str | None,
-    window: str,
+    window: str | None,
     starts_at: str | None,
     ends_at: str | None,
     expected: dict[str, object] | Literal["none"] | None,
 ) -> SupportPlanResult:
-    """Validate everything before the write: a refused call leaves no row behind."""
+    """Validate everything before the write: a refused call leaves no row behind.
+
+    Arguments left out keep the plan's values (`merge_plan`), as in the CLI.
+    """
     platform = _require_support_admin(auth)
     plan_scope, place_id = await _place(runtime, auth, scope, scope_id)
+    change = PlanChange(catalog, pool, per_person, window, starts_at, ends_at)
     try:
-        spec = parse_plan_spec(
-            scope=plan_scope,
-            scope_id=place_id or None,
-            catalog=catalog,
-            pool=pool,
-            per_person=per_person,
-            window=window,
-            starts_at=starts_at,
-            ends_at=ends_at,
-        )
+        async with runtime.session_factory() as session:
+            spec, before = await merge_plan_change(
+                session,
+                tenant_id=auth.tenant_id,
+                scope=plan_scope,
+                scope_id=place_id,
+                change=change,
+            )
         await set_plan(
             runtime.session_factory,
             _actor(auth),
             platform=platform,
             spec=spec,
-            expected=_expected_plan(expected),
+            expected=_expected_plan(expected) or Expected(before),
         )
     except (SupportPlanError, ChannelChangeRefused, StaleChannelValue) as exc:
         raise _refused(exc) from exc
@@ -540,21 +543,23 @@ def register_support_plan_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         catalog: str | None = None,
         pool: str | None = None,
         per_person: str | None = None,
-        window: Literal["total", "monthly", "fixed"] = "total",
+        window: Literal["total", "monthly", "fixed"] | None = None,
         starts_at: str | None = None,
         ends_at: str | None = None,
         expected: dict[str, object] | Literal["none"] | None = None,
     ) -> SupportPlanResult:
-        """Set or replace the support plan of the workspace, an agent or a channel. Admin-only.
+        """Set the support plan of the workspace, an agent or a channel. Admin-only.
 
         ``scope_id``: none for the workspace, an agent name or id, or a channel id
         (a thread id resolves to its parent). The most specific plan governs a
-        request; plans never stack. ``pool`` is credits shared by everyone,
-        ``per_person`` each person's cap, both decimal strings such as ``"0.5"``.
-        ``catalog`` is a menu key; none is the default menu. ``window``: ``total``
-        since ``starts_at``, ``monthly`` per UTC month, ``fixed`` between the dates.
-        A plan outside its dates refuses requests. ``expected``: the plan as
-        ``support_plan_list`` gave it, or ``"none"``; a mismatch saves nothing.
+        request; plans never stack. Arguments left out keep the plan's values;
+        ``"none"`` clears ``pool``, ``per_person`` or a date. ``pool`` is credits
+        shared by everyone, ``per_person`` each person's cap, decimal strings such
+        as ``"0.5"``. ``catalog``: a menu key or ``"default"``. ``window``: ``total``
+        since ``starts_at``, ``monthly`` per UTC month, ``fixed`` from ``starts_at``
+        until ``ends_at`` (exclusive), set by hand. A plan outside its dates refuses
+        requests. ``expected``: the plan as ``support_plan_list`` gave it, or ``"none"``;
+        a mismatch saves nothing.
         """
         return await _set_plan_impl(
             runtime,
