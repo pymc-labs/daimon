@@ -1,7 +1,6 @@
 """Ask a person reaches every chat path through one core helper, found by AST.
 
-Each path is listed with what it does. A path not wired yet is a strict xfail
-with its reason: wiring it makes the test pass, and its mark must go.
+Each path is listed with what it does.
 """
 
 import ast
@@ -11,7 +10,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 CHAT = ("discord", "slack", "teams")
-_R2 = "R2: the chat adapters still read the settings, not support_routing"
 
 OFFERS = {
     "discord/feedback_reactions.py": "the reaction under an answer",
@@ -88,10 +86,8 @@ def test_settle_when_clicked_then_the_post_checks_the_stamped_channel(platform: 
             assert _keyword(call, kw) is not None, f"settle_from_post gets {kw}"
 
 
-_UNWIRED = pytest.mark.xfail(reason=_R2, strict=True)
-
 ROUTED = [
-    pytest.param(helper, platform, what, marks=_UNWIRED, id=f"{helper}-{platform}")
+    pytest.param(helper, platform, what, id=f"{helper}-{platform}")
     for helper, what in (
         ("support_destination", "where a request is posted"),
         ("feedback_destination", "where a thumbs-down form also goes"),
@@ -108,7 +104,7 @@ def test_routing_when_a_path_picks_a_channel_then_core_picks_it(
     assert _calls(helper, (platform,)), f"{platform}: {what} comes from support_routing.{helper}"
 
 
-@pytest.mark.parametrize("platform", [pytest.param(p, marks=_UNWIRED) for p in CHAT])
+@pytest.mark.parametrize("platform", CHAT)
 def test_routing_when_a_chat_adapter_runs_then_it_reads_no_channel_setting(platform: str) -> None:
     """A wrong-platform id, an own channel, and the feature are core's; never re-read here."""
     reads = {
