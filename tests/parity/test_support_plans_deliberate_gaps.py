@@ -1,11 +1,11 @@
 """Executable record of where Ask a person's plan menu differs between platforms.
 
-Picking an option with no step and no fields sends the request at once on
-Discord: its select answers with a deferral, no form. A Slack modal cannot
-submit from a radio pick, so the option stays picked and Send sends it. Teams
-shows the menu, then the option's card (a dialog's `continue`, or the typed
-form's Next). Teams settles on the post itself and names the settler by name.
-Every other rule (prices, fields, the 3000-character cap) is shared core.
+Every platform confirms a picked option before sending it. Discord opens a
+modal, which for an option with no step and no fields holds only its terms and
+Discord's own Submit. A Slack modal keeps the option picked until Send. Teams
+shows the option's card (a dialog's `continue`, or the typed form's Next).
+Teams settles on the post itself and names the settler by name. Every other
+rule (prices, fields, each field's character cap) is shared core.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from unittest.mock import MagicMock
 
 import discord
 from daimon.adapters.discord import support_settle as discord_settle
-from daimon.adapters.discord.support_escalation import SupportMenuSelect, SupportOptionModal
+from daimon.adapters.discord.support_escalation import SupportOptionModal
 from daimon.adapters.slack import support_settle as slack_settle
 from daimon.adapters.slack.support_plan_form import (
     OPTION_ACTION_ID,
@@ -38,7 +38,7 @@ from daimon.core.support_plans import (
     option_value,
     parse_catalog,
 )
-from discord.ui import TextInput
+from discord.ui import TextDisplay, TextInput
 from microsoft_teams.cards import ChoiceSetInput, TextBlock
 from microsoft_teams.cards import TextInput as TeamsTextInput
 
@@ -90,7 +90,8 @@ def _picked(key: str) -> dict[str, Any]:
     return {**menu, "state": {"values": {OPTION_BLOCK_ID: pick}}}
 
 
-def test_option_without_fields_when_picked_then_discord_sends_and_slack_waits_for_send() -> None:
+def test_option_without_fields_when_picked_then_each_platform_confirms_its_own_way() -> None:
+    """Discord cannot rename a modal's Submit, so its confirm is the terms above Submit."""
     slack = _picked("quick")
     assert slack["submit"], "Slack: the picked option keeps the modal's Send"
     inputs = [b for b in slack["blocks"] if b["type"] == "input"]
@@ -98,10 +99,14 @@ def test_option_without_fields_when_picked_then_discord_sends_and_slack_waits_fo
     form = read_plan_form(slack)
     assert form.errors is None and form.choice is not None, "Slack: Send submits the pick"
     assert form.choice.option_key == "quick"
-    discord = inspect.getsource(SupportMenuSelect._pick)  # pyright: ignore[reportPrivateUsage]
-    assert "if not option.fields and not isinstance(option.price, StepsPrice):" in discord, (
-        "Discord: the pick itself submits; "
-        "packages/adapters/discord/tests/test_support_plans_flow.py proves the post"
+    discord = SupportOptionModal(runtime=MagicMock(), origin=MagicMock(), option=_MENU.options[0])
+    assert [type(c) for c in discord.children] == [TextDisplay], (
+        "Discord: the terms alone; packages/adapters/discord/tests/test_support_plans_flow.py "
+        "proves Submit posts it"
+    )
+    teams = teams_card.option_body(_MENU.options[0])
+    assert not [e for e in teams if isinstance(e, ChoiceSetInput | TeamsTextInput)], (
+        "Teams: the option's card, terms only, above Send"
     )
 
 

@@ -464,7 +464,7 @@ def _answer(item: _FieldInput) -> str:
 
 
 class SupportOptionModal(discord.ui.Modal, title=ASK_THE_TEAM):
-    """One configured option's form: its terms, then a step and its fields."""
+    """One configured option's form: its terms, then a step and its fields (or just Submit)."""
 
     def __init__(
         self,
@@ -673,11 +673,6 @@ class SupportMenuSelect(
             return
         if (refused := pick_refusal(view, option, asked=asked)) is not None:
             await _report_failure(interaction, refused, neutral=refused == ALREADY_REQUESTED)
-            return
-        if not option.fields and not isinstance(option.price, StepsPrice):
-            await interaction.response.defer(ephemeral=True, thinking=True)
-            choice = RequestChoice.of(option)
-            await submit_answer_request(interaction, runtime=runtime, origin=origin, choice=choice)
             return
         sealed = await answer_is_sealed(runtime, origin)
         await interaction.response.send_modal(

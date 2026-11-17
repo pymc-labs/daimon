@@ -203,13 +203,36 @@ async def test_button_when_plan_has_a_menu_then_shows_options_and_balance(
     ], "each value carries its option's terms"
 
 
-async def test_pick_when_option_has_no_fields_then_posts_pending_with_settle_buttons(
+async def _confirmed(bot: Any, key: str) -> Any:
+    """Pick `key`, then Submit its form untouched; the submit's interaction."""
+    modal = (await _pick(bot, key)).response.send_modal.await_args.args[0]
+    assert isinstance(modal, SupportOptionModal), "every pick opens the option's form"
+    submit = _interaction(bot)
+    await modal.on_submit(submit)
+    return submit
+
+
+async def test_pick_when_option_has_no_fields_then_confirms_its_terms_before_sending(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     await _seed(db_session_factory)
     bot = _bot(db_session_factory)
-    interaction = await _pick(bot, "review")
-    interaction.response.send_modal.assert_not_awaited()
+    interaction = await _pick(bot, "quick")
+    interaction.response.defer.assert_not_awaited()
+    modal = interaction.response.send_modal.await_args.args[0]
+    assert isinstance(modal, SupportOptionModal)
+    [terms] = modal.children
+    assert isinstance(terms, discord.ui.TextDisplay) and terms.content == "**Quick**: 0.5 credits"
+    bot.support.send.assert_not_awaited()
+    assert await _rows(db_session_factory) == [], "nothing recorded before Submit"
+
+
+async def test_confirm_when_option_has_no_fields_then_posts_pending_with_settle_buttons(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    await _seed(db_session_factory)
+    bot = _bot(db_session_factory)
+    interaction = await _confirmed(bot, "review")
     send = bot.support.send.await_args
     body, view = send.args[0], send.kwargs["view"]
     assert "Review: 1-3 credits\nPending: 1-3 credits\n1 of 2 credits left" in body, (
@@ -469,7 +492,7 @@ async def _pending(sessionmaker: async_sessionmaker[AsyncSession]) -> tuple[Any,
     """A pending Review request on a fresh tenant; its settle view and the posted text."""
     await _seed(sessionmaker)
     bot = _bot(sessionmaker)
-    await _pick(bot, "review")
+    await _confirmed(bot, "review")
     send = bot.support.send.await_args
     return send.kwargs["view"], send.args[0]
 
