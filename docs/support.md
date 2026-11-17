@@ -29,6 +29,7 @@ Requests go to one channel per platform. Where the deployment allows it,
 a workspace picks its own channel. Otherwise the deployment's channel
 receives every request. Changing the channel moves only new requests;
 open ones stay where they were posted.
+A channel outside the workspace is refused.
 
 ```sh
 daimon support channel set 456
@@ -42,9 +43,9 @@ resolves to its parent channel.
 ## Limits
 
 A limit sets credits for a place: the workspace, one agent or one channel.
-Credits are decimal amounts with up to two places, such as `0.25`. A limit has
-shared credits, credits for each person, or both, and the stricter one wins.
-Shared credits are one pool for everyone at the place.
+Credits are decimal amounts with up to two places, such as `0.25` or `1.5`.
+A limit has shared credits, credits for each person, or both, and the stricter
+one wins. Shared credits are one pool for everyone at the place.
 
 | Window | Counts |
 | --- | --- |
@@ -84,7 +85,8 @@ After a purge, a person's own count starts again; shared credits still bind.
 A person's own limit sets one person's cap at a
 place, or everywhere. It replaces the place's credits for each person for that
 person, and never adds credits to the place. A person's cap at a channel beats
-their cap everywhere.
+their cap everywhere. A person's own limit also makes Ask a person available
+where the default credits are 0.
 
 Name the person by platform user id or `<@id>` mention: a Discord number, a
 Slack member id or a Teams Entra object id.
