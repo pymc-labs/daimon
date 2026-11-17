@@ -106,6 +106,12 @@ _SETUP: Final[Mapping[Requirement, Callable[[Settings], bool]]] = {
 offered them, so a check here must never be stricter than the tools. Watches and GitHub have none:
 their tools work (and list or remove what exists) without the operator gate or the App."""
 
+SERVER_SETUP: Final[frozenset[Requirement]] = frozenset(
+    {"compute_setup", "notebook_host", "report_host", "gemini_key", "microsoft_accounts"}
+)
+"""Setup only the MCP server's tools use. A worker may not carry it, so a session's toolset leaves
+it to the MCP server, whose capability gate judges it with its own settings."""
+
 
 def support_channel_set(settings: Settings, platform: str) -> bool:
     """Whether `platform` has an escalation channel it can post in and credits to spend."""
@@ -123,18 +129,22 @@ def support_channel_set(settings: Settings, platform: str) -> bool:
 
 
 def unavailable_reason(
-    spec: FeatureSpec, settings: Settings | None, place: FeaturePlace
+    spec: FeatureSpec,
+    settings: Settings | None,
+    place: FeaturePlace,
+    *,
+    server_setup: bool = True,
 ) -> Unavailable | None:
     """Why `spec` cannot apply at `place`, or None. `depends_on` is checked by the caller;
-    without `settings` (a reader of a feature with no deployment tier) `requires` is too."""
+    without `settings` (a reader of a feature with no deployment tier) `requires` is too,
+    and without `server_setup` the requirements in `SERVER_SETUP` are."""
     if not spec.on_platform(place.platform):
         return "platform"
+    judged = [need for need in spec.requires if server_setup or need not in SERVER_SETUP]
     if settings is not None and (
-        ("platform_adapter" in spec.requires and not _adapter_set_up(settings, place.platform))
-        or (
-            "support_channel" in spec.requires and not support_channel_set(settings, place.platform)
-        )
-        or not all(_SETUP[need](settings) for need in spec.requires if need in _SETUP)
+        ("platform_adapter" in judged and not _adapter_set_up(settings, place.platform))
+        or ("support_channel" in judged and not support_channel_set(settings, place.platform))
+        or not all(_SETUP[need](settings) for need in judged if need in _SETUP)
     ):
         return "requires"
     if not spec.tiers_on(place.backend):
@@ -200,9 +210,11 @@ def resolve_one(
     rows: Iterable[FeatureValueRow],
     resolved: Mapping[str, ResolvedFeature] | None = None,
     agent_builtins: Mapping[str, bool | None] | None = None,
+    *,
+    server_setup: bool = True,
 ) -> ResolvedFeature:
     """Pure: one feature at one place from its rows; `resolved` answers `depends_on`."""
-    reason = unavailable_reason(spec, settings, place)
+    reason = unavailable_reason(spec, settings, place, server_setup=server_setup)
     if reason is None and any(
         resolved is not None and dep in resolved and not resolved[dep].on for dep in spec.depends_on
     ):
@@ -319,9 +331,11 @@ async def resolve_features(
     keys: Collection[str] | None = None,
     cache: FeatureCache = CACHE,
     agent_builtins: Mapping[str, bool | None] | None = None,
+    server_setup: bool = True,
 ) -> FeatureSnapshot:
     """Resolve `keys` (every registered feature by default) for `place` in one read;
     `agent_builtins` (`model_input.agent_builtins`) is the agent tier of each `tool.*`.
+    A session's toolset passes `server_setup=False`: see `SERVER_SETUP`.
 
     Without `settings` the deployment tier is the registry default. A database failure
     raises; this reader never falls back to a default. Callers that must keep working
@@ -347,7 +361,9 @@ async def resolve_features(
     # A feature's dependencies resolve first, even ones the caller did not ask for.
     for spec in resolution_order(wanted):
         if spec.key != "approvals":
-            resolved[spec.key] = resolve_one(spec, settings, place, rows, resolved, agent_builtins)
+            resolved[spec.key] = resolve_one(
+                spec, settings, place, rows, resolved, agent_builtins, server_setup=server_setup
+            )
     return FeatureSnapshot(place, revision, {key: resolved[key] for key in wanted})
 
 

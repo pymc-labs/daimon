@@ -28,7 +28,13 @@ from daimon.core.features.service import (
     change_feature,
     read_features,
 )
-from daimon.core.features.snapshot import CACHE, FeaturePlace, FeatureSnapshot, resolve_one
+from daimon.core.features.snapshot import (
+    CACHE,
+    SERVER_SETUP,
+    FeaturePlace,
+    FeatureSnapshot,
+    resolve_one,
+)
 from daimon.core.features.tool_gate import SESSION_KEPT_TOOLS
 from daimon.core.features.toolset import place_toolset
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
@@ -278,6 +284,35 @@ def test_a_capability_without_setup_hides_its_tools_and_only_those() -> None:
     assert toolset.off_capabilities == unset | {"long_jobs"}, "setup missing, or Off by default"
     for key in ("watches", "github", "routines", "lead_intake"):
         assert features[key].on, f"{key} has no setup condition its tools share"
+
+
+async def test_a_worker_without_the_mcp_servers_setup_keeps_its_tools_in_the_session(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Only the MCP server carries the notebook and report host settings: the worker's session
+    keeps their tools for the MCP server to judge, and an Off still hides them."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    CACHE.clear()
+    place = FeaturePlace(tenant.id, "web", agent_id="agent_tools")
+    toolset = await place_toolset(db_session_factory, SETTINGS, place, _agent())
+    server_set_up = {k for k, spec in FEATURES.items() if set(spec.requires) & SERVER_SETUP}
+    assert not toolset.off_capabilities & server_set_up, "the worker judged the server's setup"
+    kept = CAPABILITY_TOOLS["notebooks"] | CAPABILITY_TOOLS["report_publish"]
+    assert not kept & toolset.hidden_daimon_tools, "notebook or report tools left the session"
+    await set_feature_value(
+        db_session,
+        tenant_id=tenant.id,
+        target=FeatureTarget("workspace"),
+        key="notebooks",
+        value="off",
+        set_by=None,
+        surface="web",
+    )
+    await db_session.commit()
+    CACHE.clear()
+    toolset = await place_toolset(db_session_factory, SETTINGS, place, _agent())
+    assert "notebooks" in toolset.off_capabilities, "a workspace Off still hides the tools"
 
 
 def test_long_jobs_tools_return_when_a_workspace_turns_them_on() -> None:

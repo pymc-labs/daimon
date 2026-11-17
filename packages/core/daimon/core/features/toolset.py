@@ -33,6 +33,6 @@ async def place_session(
     """The toolset and identity features a new session of `agent` at `place` gets."""
     keys = tuple(dict.fromkeys((*TOOLSET_KEYS, *IDENTITY_RESOLVE_KEYS)))
     features = await resolve_features(
-        sessions, settings, place, keys=keys, agent_builtins=builtins_of(agent)
+        sessions, settings, place, keys=keys, agent_builtins=builtins_of(agent), server_setup=False
     )
     return agent_toolset(features, agent), SessionIdentity.of(features)

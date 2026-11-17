@@ -18,8 +18,9 @@ import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsCustomSkill
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.billing import BillingConfig
+from daimon.core.capability_tools import CAPABILITY_TOOLS
 from daimon.core.channel_budget_notice import BudgetNotice, drain_budget_notices
-from daimon.core.config import McpSettings
+from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.direct_messages import start_dm
 from daimon.core.errors import DaimonError
 from daimon.core.features.registry import DEFAULT
@@ -52,7 +53,7 @@ from mux.testing.drivers.anthropic.ma import (
     list_response,
     skill_response,
 )
-from pydantic import SecretStr
+from pydantic import PostgresDsn, SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -1279,6 +1280,40 @@ def _admittable_router(tenant: TenantRow) -> MARouter:
         ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
         ma_environment(id="env_1", name="default", tenant_id=tenant.id),
     )
+
+
+async def test_admit_without_the_notebook_host_settings_keeps_the_notebook_tools(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A deployment where only the MCP server carries the notebook host settings: the worker
+    admitting the turn leaves that setup to the MCP server and keeps the tools."""
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    worker = Settings.model_validate(
+        {
+            "database": DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://u:p@localhost/d")),
+            "anthropic": AnthropicSettings(api_key=SecretStr("test")),
+        }
+    )
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+
+    admission = await admit(
+        replace(deps, settings=worker),
+        origin="chat",
+        tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id="chan-1",
+        now=_NOW,
+    )
+
+    hidden = admission.toolset.hidden_daimon_tools
+    assert not CAPABILITY_TOOLS["notebooks"] & hidden, f"notebook tools hidden: {hidden}"
+    assert not CAPABILITY_TOOLS["report_publish"] & hidden, f"report tools hidden: {hidden}"
 
 
 @pytest.mark.parametrize(("read_on", "expected"), [(False, False), (True, True)])

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Chat sessions keep notebook and report tools the MCP server is set up for.**
+  In a deployment where only the MCP server carries the notebook host, report host,
+  Gemini, cloud computer or Microsoft 365 settings, the worker running a chat turn no
+  longer drops those tools from the session. The MCP server judges that setup with
+  its own settings: without it, the tools stay out of its tool list and a call is
+  refused. A capability turned Off still removes its tools from the session.
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and
   the MCP tools. A run nobody started, such as a routine, never applies one at once.
