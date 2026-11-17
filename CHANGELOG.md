@@ -11,14 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   direct messages and Monitor coding tools, are off by default and set per
   workspace or agent. While one is on, Daimon keeps what people ask that agent
   and what it answers, from the switch on and never before it. For other tool
-  calls from coding tools it keeps only the name, time and outcome. Only platform
-  admins read it, on the agent page, in a Monitoring tab in admin, or with the
-  `list_monitored_activity` and `get_monitored_conversation` tools. Operators see
-  counts and times with `daimon monitoring list`. People see a neutral notice at
-  their first direct message, in web chat, in the MCP descriptions and in their
-  first tool result. The privacy panel says what admins can read. Rows are
-  deleted with the person's account and after
-  `DAIMON_MONITORING__RETENTION_DAYS` (default 90).
+  calls from coding tools it keeps only the name, time and outcome. Only
+  workspace admins turn it on and read it, never an agent's owner, on the agent
+  page, in a Monitoring tab in admin, or with the `list_monitored_activity` and
+  `get_monitored_conversation` tools. Operators see counts and times with
+  `daimon monitoring list`. People see a neutral notice at their first direct
+  message, in web chat, in the MCP descriptions and in their first tool result.
+  The privacy panel says what admins can read. Rows are deleted with the
+  person's account and after `DAIMON_MONITORING__RETENTION_DAYS` (default 90).
 - **Switching an agent to another provider works like a model pick.** A switch
   that loses nothing applies at once, in Discord, Slack, Teams, the web app and
   the MCP tools. A run nobody started, such as a routine, never applies one at once.

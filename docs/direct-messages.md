@@ -51,7 +51,7 @@ The opening message names the server and agent, and offers **Switch server**
 and **New conversation**. `/dm-settings` shows those buttons again, and `/new`
 starts an empty conversation with the same server and its current DM agent.
 Buttons expire after fifteen minutes, and only the latest set works. When
-platform admins [monitor](features.md#monitor-direct-messages) the agent, a
+workspace admins [monitor](features.md#monitor-direct-messages) the agent, a
 card tells the person once, at their first message after it starts.
 
 A cold conversation starts with no history and no channel access. Switching
