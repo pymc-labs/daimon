@@ -209,7 +209,7 @@ async def test_set_allowance_when_recorded_then_the_audit_names_no_person(
             db_session_factory,
             actor,
             platform="slack",
-            platform_user_id="U_SECRET",
+            platform_user_id="USECRET",
             credits=D(3),
             scope="workspace",
         )
@@ -218,7 +218,7 @@ async def test_set_allowance_when_recorded_then_the_audit_names_no_person(
         db_session_factory,
         actor,
         platform="slack",
-        platform_user_id="U_SECRET",
+        platform_user_id="USECRET",
         credits=D(3),
         expected=Expected(None),
     )
@@ -227,14 +227,14 @@ async def test_set_allowance_when_recorded_then_the_audit_names_no_person(
             db_session_factory,
             actor,
             platform="slack",
-            platform_user_id="U_SECRET",
+            platform_user_id="USECRET",
             expected=Expected(D(2)),
         )
     first = await clear_allowance(
-        db_session_factory, actor, platform="slack", platform_user_id="U_SECRET"
+        db_session_factory, actor, platform="slack", platform_user_id="USECRET"
     )
     second = await clear_allowance(
-        db_session_factory, actor, platform="slack", platform_user_id="U_SECRET"
+        db_session_factory, actor, platform="slack", platform_user_id="USECRET"
     )
     assert (first, second) == (True, False), "cleared once"
     changes = await list_changes(db_session, tenant_id=tenant_id, channel_id=WORKSPACE_ID)
@@ -244,7 +244,7 @@ async def test_set_allowance_when_recorded_then_the_audit_names_no_person(
         (None, {"plan": "default", "credits": "3"}),
     ], "set then cleared, on the default plan"
     dumped = json.dumps([[c.before, c.after] for c in changes])
-    assert "U_SECRET" not in dumped, "channel_changes never names a person"
+    assert "USECRET" not in dumped, "channel_changes never names a person"
 
 
 async def test_settle_when_admin_then_charges_and_audits_the_amount_only(

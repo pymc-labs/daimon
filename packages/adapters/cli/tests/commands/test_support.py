@@ -32,7 +32,12 @@ from daimon.core.stores import support_plans as plans
 from daimon.core.stores.security_audit import list_events
 from daimon.core.support_plan_admin import window_text
 from daimon.core.support_plan_changes import PlanValue
-from daimon.core.support_plans import CLIENT_NOT_NOTIFIED, RequestChoice, SupportPlace
+from daimon.core.support_plans import (
+    CLIENT_NOT_NOTIFIED,
+    RequestChoice,
+    SupportPlace,
+    SupportPlanError,
+)
 from daimon.testing.factories import make_tenant
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from rich.console import Console
@@ -246,6 +251,19 @@ async def test_allowance_when_set_then_listed_and_cleared_under_its_plan(
         **where, platform_user_id="U1", credits=None, plan="channel:C1", expected="4"
     )
     assert "U1 under the channel C1: cap cleared" in out.getvalue(), "cleared"
+
+
+async def test_allowance_when_id_is_a_mention_or_not_a_slack_id_then_unwraps_or_refuses(
+    db_session_factory: Factory,
+) -> None:
+    rt = build_cli_runtime(db_session_factory, settings=_settings())
+    _, selector = await _tenant(db_session_factory)
+    console, out = _console()
+    where = {"rt": rt, "console": console, "selector": selector}
+    with pytest.raises(SupportPlanError, match="alice is not a Slack user id"):
+        await allowance_set(**where, platform_user_id="alice", credits="4")
+    await allowance_set(**where, platform_user_id="<@U1|alice>", credits="4")
+    assert "U1 under the default plan: cap 4" in out.getvalue(), f"unwrapped: {out.getvalue()}"
 
 
 async def test_requests_when_settled_then_the_settler_is_told_the_client_is_not(

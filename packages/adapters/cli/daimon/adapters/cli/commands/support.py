@@ -61,6 +61,7 @@ from daimon.core.support_plans import (
     format_credits,
     load_catalog,
     parse_credits,
+    parse_person_id,
     parse_scope,
 )
 from pydantic import BaseModel
@@ -511,6 +512,7 @@ async def allowance_set(
 ) -> None:
     """`credits` None clears the person's own cap."""
     target = await _target(rt, selector)
+    platform_user_id = parse_person_id(target.platform, platform_user_id)
     scope, scope_id = await _plan_ref(rt, target, plan, transport=discord_transport)
     command = "allowance set" if credits is not None else "allowance clear"
     actor = _actor(target, command=command, reason=f"allowance:{scope or 'default'}:{scope_id}")
@@ -819,7 +821,7 @@ _EXPECTED_CREDITS = typer.Option("--expected", help="Credits you last read, or `
 @allowance_app.command("set")
 def allowance_set_command(
     ctx: typer.Context,
-    platform_user_id: Annotated[str, typer.Argument(help="The person's platform user id.")],
+    platform_user_id: Annotated[str, typer.Argument(help="The person's user id, or <@id>.")],
     credits: Annotated[str, typer.Argument(help="Their own cap in credits.")],
     plan: Annotated[str | None, _PLAN] = None,
     expected: Annotated[str | None, _EXPECTED_CREDITS] = None,
@@ -841,7 +843,7 @@ def allowance_set_command(
 @allowance_app.command("clear")
 def allowance_clear_command(
     ctx: typer.Context,
-    platform_user_id: Annotated[str, typer.Argument(help="The person's platform user id.")],
+    platform_user_id: Annotated[str, typer.Argument(help="The person's user id, or <@id>.")],
     plan: Annotated[str | None, _PLAN] = None,
     expected: Annotated[str | None, _EXPECTED_CREDITS] = None,
 ) -> None:

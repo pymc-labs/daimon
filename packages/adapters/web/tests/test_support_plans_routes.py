@@ -19,6 +19,7 @@ from .test_admin_routes import Admin, signed_in_admin
 
 type Factory = async_sessionmaker[AsyncSession]
 
+_P1, _P2 = "100000000000000001", "100000000000000002"
 _OPTION: dict[str, object] = {
     "key": "review",
     "label": "Review",
@@ -33,7 +34,7 @@ _ROUTES: list[tuple[str, str, dict[str, object] | None]] = [
     (
         "PUT",
         "/api/support-plans/allowances",
-        {"platform_user_id": "u1", "credits": "4", "expected": None},
+        {"platform_user_id": _P1, "credits": "4", "expected": None},
     ),
 ]
 
@@ -73,7 +74,7 @@ async def test_admin_sets_a_menu_a_thread_plan_and_a_cap_then_reads_them_back(
         cap = await put(
             "/api/support-plans/allowances",
             json={
-                "platform_user_id": "u1",
+                "platform_user_id": _P1,
                 "credits": "4",
                 "scope": "channel",
                 "scope_id": "c1",
@@ -82,7 +83,7 @@ async def test_admin_sets_a_menu_a_thread_plan_and_a_cap_then_reads_them_back(
         )
         default_cap = await put(
             "/api/support-plans/allowances",
-            json={"platform_user_id": "u2", "credits": "0.5", "expected": None},
+            json={"platform_user_id": f"<@{_P2}>", "credits": "0.5", "expected": None},
         )
         trail = await shown_trail(db_session_factory, admin.ws.tenant_id)
 
@@ -105,10 +106,13 @@ async def test_admin_sets_a_menu_a_thread_plan_and_a_cap_then_reads_them_back(
         "general",
         "0 of 5 credits used, 2 per person, all time",
     ), "the thread's parent holds the plan, by name"
-    assert shown["allowances"] == [{"platform_user_id": "u1", "name": None, "credits": "4"}], (
+    assert shown["allowances"] == [{"platform_user_id": _P1, "name": None, "credits": "4"}], (
         "the person's own cap under the plan"
     )
-    assert page["default_allowances"][0]["credits"] == "0.5", "a cap where no plan applies"
+    (own,) = page["default_allowances"]
+    assert (own["platform_user_id"], own["credits"]) == (_P2, "0.5"), (
+        "a cap where no plan applies, the mention unwrapped"
+    )
     assert page["default_credits"] == "20", "the deployment's default count"
     assert trail[-4:] == [
         ("Changed support menu", "support", "Menu"),
@@ -210,11 +214,15 @@ async def test_values_that_cannot_be_used_are_refused_and_nothing_is_saved(
                 "/api/support-plans/catalogs/Bad Key",
                 json={"catalog": _MENU, "expected_revision": None},
             ),
+            await put(
+                "/api/support-plans/allowances",
+                json={"platform_user_id": "u1", "credits": "1", "expected": None},
+            ),
         ]
         no_plan = await put(
             "/api/support-plans/allowances",
             json={
-                "platform_user_id": "u1",
+                "platform_user_id": _P1,
                 "credits": "1",
                 "scope": "channel",
                 "scope_id": "c1",
@@ -223,9 +231,12 @@ async def test_values_that_cannot_be_used_are_refused_and_nothing_is_saved(
         )
         page = (await admin.client.get("/api/support-plans")).json()
 
-    assert [r.status_code for r in refused] == [422] * 5, [r.text for r in refused]
+    assert [r.status_code for r in refused] == [422] * 6, [r.text for r in refused]
+    assert "u1 is not a Discord user id" in refused[-1].text, "a cap names the bad id"
     assert no_plan.status_code == 404, "a cap under a plan that does not exist"
-    assert (page["plans"], page["catalogs"]) == ([], []), "nothing saved"
+    assert (page["plans"], page["catalogs"], page["default_allowances"]) == ([], [], []), (
+        "nothing saved"
+    )
 
 
 async def test_members_can_neither_read_nor_change_support_plans(
@@ -257,7 +268,7 @@ async def test_cap_when_set_from_a_thread_or_for_an_unknown_agent_then_parent_or
         from_thread = await put(
             "/api/support-plans/allowances",
             json={
-                "platform_user_id": "u1",
+                "platform_user_id": _P1,
                 "credits": "4",
                 "scope": "channel",
                 "scope_id": "t9",
@@ -267,7 +278,7 @@ async def test_cap_when_set_from_a_thread_or_for_an_unknown_agent_then_parent_or
         bad_agent = await put(
             "/api/support-plans/allowances",
             json={
-                "platform_user_id": "u1",
+                "platform_user_id": _P1,
                 "credits": "4",
                 "scope": "agent",
                 "scope_id": "agent_x",
@@ -279,6 +290,6 @@ async def test_cap_when_set_from_a_thread_or_for_an_unknown_agent_then_parent_or
     (shown,) = from_thread.json()["plans"]
     assert (shown["scope_id"], shown["allowances"]) == (
         "c1",
-        [{"platform_user_id": "u1", "name": None, "credits": "4"}],
+        [{"platform_user_id": _P1, "name": None, "credits": "4"}],
     ), "the cap sits on the thread's parent channel, where the plan is"
     assert bad_agent.status_code == 422, "an agent that is not in the workspace"

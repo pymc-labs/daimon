@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -45,6 +46,7 @@ from daimon.core.support_plans import (
     parse_amount,
     parse_catalog,
     parse_credits,
+    parse_person_id,
     parse_plan_spec,
     pick_refusal,
     picked_option,
@@ -289,6 +291,44 @@ def test_parse_plan_spec_when_valid_then_parses_every_part() -> None:
 def test_parse_plan_spec_when_invalid_then_refuses(kwargs: dict[str, object]) -> None:
     with pytest.raises(SupportPlanError):
         parse_plan_spec(**kwargs)  # type: ignore[arg-type]
+
+
+_GUID = "6f2b3c1e-0a4d-4b8e-9c7f-1d2e3f4a5b6c"
+
+
+@pytest.mark.parametrize(
+    ("platform", "raw", "stored"),
+    [
+        ("discord", " <@!100000000000000001> ", "100000000000000001"),
+        ("discord", "100000000000000001", "100000000000000001"),
+        ("slack", "<@U012AB3CD|alice>", "U012AB3CD"),
+        ("slack", "w012ab3cd", "W012AB3CD"),
+        ("teams", _GUID.upper(), _GUID),
+        ("web", " anyone ", "anyone"),
+    ],
+)
+def test_parse_person_id_when_valid_or_a_mention_then_the_stored_form(
+    platform: str, raw: str, stored: str
+) -> None:
+    assert parse_person_id(platform, raw) == stored, f"{platform} {raw!r}"
+
+
+@pytest.mark.parametrize(
+    ("platform", "raw", "message"),
+    [
+        ("discord", "u1", "u1 is not a Discord user id"),
+        ("discord", "<@12>", "<@12> is not a Discord user id"),
+        ("slack", "alice", "alice is not a Slack user id"),
+        ("slack", "C012AB3CD", "C012AB3CD is not a Slack user id"),
+        ("teams", "29:1abc", "29:1abc is not a Teams user id"),
+        ("discord", "  ", "Name the person"),
+    ],
+)
+def test_parse_person_id_when_not_the_platforms_form_then_echoes_it(
+    platform: str, raw: str, message: str
+) -> None:
+    with pytest.raises(SupportPlanError, match=re.escape(message)):
+        parse_person_id(platform, raw)
 
 
 def test_balance_when_both_axes_then_the_stricter_one_is_available() -> None:

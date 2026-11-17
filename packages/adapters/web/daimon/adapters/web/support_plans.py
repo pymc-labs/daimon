@@ -46,6 +46,7 @@ from daimon.core.support_plans import (
     parse_catalog,
     parse_catalog_key,
     parse_credits,
+    parse_person_id,
     parse_plan_spec,
     parse_scope,
 )
@@ -396,10 +397,8 @@ def support_plans_router(runtime: WebRuntime) -> APIRouter:
         caller: ChannelAdmin, body: AllowanceChange
     ) -> SupportPlansJson:
         platform = await platform_of(caller)
-        user_id = body.platform_user_id.strip()
-        if not user_id:
-            raise HTTPException(422, "Enter the person's user id.")
         with channel_refusals():
+            user_id = parse_person_id(platform, body.platform_user_id)
             scope, scope_id = (
                 (None, "")
                 if body.scope is None

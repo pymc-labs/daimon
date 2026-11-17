@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import uuid
 from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
@@ -650,6 +651,38 @@ def parse_scope(scope: str, scope_id: str | None) -> tuple[PlanScope, str]:
     return ("agent" if scope == "agent" else "channel"), scope_id.strip()
 
 
+_MENTION = re.compile(r"<@!?([^>|]+)(?:\|[^>]*)?>")
+_DISCORD_ID = re.compile(r"\d{17,20}")
+_SLACK_ID = re.compile(r"[UW][A-Z0-9]+")
+
+
+def parse_person_id(platform: str, raw: str) -> str:
+    """A person's id as the platform stores it: `<@id>` unwrapped, then checked.
+
+    Discord takes a numeric snowflake, Slack a `U`/`W` member id, Teams an
+    Entra object id (lowercase UUID); another platform any non-empty id.
+    """
+    text = raw.strip()
+    mention = _MENTION.fullmatch(text)
+    value = mention.group(1).strip() if mention else text
+    if not value:
+        raise SupportPlanError("Name the person by their user id.")
+    if platform == "discord" and not _DISCORD_ID.fullmatch(value):
+        raise SupportPlanError(f"{text} is not a Discord user id. Use their numeric id.")
+    if platform == "slack":
+        value = value.upper()
+        if not _SLACK_ID.fullmatch(value):
+            raise SupportPlanError(f"{text} is not a Slack user id. Use their member id (U...).")
+    if platform == "teams":
+        try:
+            value = str(uuid.UUID(value))
+        except ValueError:
+            raise SupportPlanError(
+                f"{text} is not a Teams user id. Use their Microsoft Entra object id."
+            ) from None
+    return value
+
+
 def check_plan_limits(*, pool: Decimal | None, per_person: Decimal | None) -> None:
     if pool is None and per_person is None:
         raise SupportPlanError("Set a pool, a per-person limit or both.")
@@ -961,6 +994,7 @@ __all__ = [
     "parse_amount",
     "parse_catalog",
     "parse_credits",
+    "parse_person_id",
     "parse_plan_spec",
     "price_bounds",
 ]

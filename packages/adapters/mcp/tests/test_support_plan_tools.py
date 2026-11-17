@@ -19,6 +19,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _channel_target as channel_target
 from daimon.adapters.mcp.tools import support_plans as tools
 from daimon.adapters.mcp.tools.support_plans import (
+    SupportAllowanceResult,
     _clear_plan_impl,  # pyright: ignore[reportPrivateUsage]
     _get_catalogs_impl,  # pyright: ignore[reportPrivateUsage]
     _list_plans_impl,  # pyright: ignore[reportPrivateUsage]
@@ -59,6 +60,7 @@ _MENU: dict[str, object] = {
         {"key": "review", "label": "Review", "price": {"kind": "range", "min": "1", "max": "3"}}
     ],
 }
+_PERSON = "100000000000000001"
 _PLAN = {
     "scope_id": None,
     "catalog": None,
@@ -204,7 +206,7 @@ async def test_a_cap_sets_under_a_threads_plan_and_the_default_then_clears(
         return await _set_allowance_impl(
             runtime,
             auth,
-            platform_user_id="u1",
+            platform_user_id=_PERSON,
             credits=credits,
             scope=scope,
             scope_id=_THREAD if scope else None,
@@ -214,7 +216,7 @@ async def test_a_cap_sets_under_a_threads_plan_and_the_default_then_clears(
     capped = await cap("0.5")
     assert (capped.scope_id, capped.credits) == (_PARENT, "0.5"), "the thread's parent plan"
     (listed,) = await _list_plans_impl(runtime, auth)
-    assert listed.allowances == {"u1": "0.5"}, "listed under the plan"
+    assert listed.allowances == {_PERSON: "0.5"}, "listed under the plan"
     default = await cap("3", scope=None)
     assert (default.scope, default.credits) == (None, "3"), "the default allowance"
     with pytest.raises(ToolError, match="Nothing was saved"):
@@ -222,6 +224,31 @@ async def test_a_cap_sets_under_a_threads_plan_and_the_default_then_clears(
     assert (await cap(None, expected="0.5")).credits is None, "cleared"
     (listed,) = await _list_plans_impl(runtime, auth)
     assert listed.allowances == {}, "back to the plan's cap"
+
+
+async def test_cap_when_id_is_a_mention_or_not_a_discord_id_then_unwraps_or_refuses(
+    committing_sessionmaker: Factory,
+) -> None:
+    tenant, account_id = await _seed(committing_sessionmaker)
+    runtime, auth = _runtime(committing_sessionmaker), _auth(tenant, account_id)
+
+    async def cap(person: str) -> SupportAllowanceResult:
+        return await _set_allowance_impl(
+            runtime,
+            auth,
+            platform_user_id=person,
+            credits="2",
+            scope=None,
+            scope_id=None,
+            expected=None,
+        )
+
+    assert (await cap(f" <@!{_PERSON}> ")).platform_user_id == _PERSON, "the mention unwrapped"
+    with pytest.raises(ToolError, match="u1 is not a Discord user id"):
+        await cap("u1")
+    async with committing_sessionmaker() as session:
+        caps = await store.list_allowances(session, tenant_id=tenant.id, plan_id=None)
+    assert [c.platform_user_id for c in caps] == [_PERSON], "only the valid id saved"
 
 
 async def test_catalog_set_checks_the_revision_and_removes_with_none(

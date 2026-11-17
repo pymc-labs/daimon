@@ -10144,6 +10144,7 @@
       'description': '''
         Give one person their own cap under a plan, or clear it (``credits`` null). Admin-only.
         <blank line>
+        ``platform_user_id`` is the person's id on the platform, or ``<@id>``.
         No ``scope`` is the default allowance, where no plan applies; otherwise
         the plan's place as for ``support_plan_set``. ``credits`` is a decimal
         string. ``expected``: the cap last read, or ``"none"``; a mismatch saves nothing.

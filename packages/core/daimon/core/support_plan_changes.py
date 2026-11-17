@@ -43,6 +43,7 @@ from daimon.core.support_plans import (
     format_credits,
     parse_catalog_key,
     parse_credits,
+    parse_person_id,
 )
 from daimon.core.windows import BudgetWindow
 from pydantic import JsonValue
@@ -409,6 +410,7 @@ async def _change_allowance(
     expected: Expected[Decimal | None] | None,
 ) -> tuple[Decimal | None, SupportAllowanceRow | None]:
     _require_admin(actor)
+    platform_user_id = parse_person_id(platform, platform_user_id)
     async with sessionmaker.begin() as session:
         await lock_access_policy(session, tenant_id=actor.tenant_id)
         plan = await _allowance_plan(session, actor, scope=scope, scope_id=scope_id)

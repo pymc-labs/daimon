@@ -45,7 +45,8 @@ to the default allowance. Clear the plan to restore the default.
 
 An own cap gives one person a different limit under one plan, in place of its
 credits per person. A cap set with no plan changes that person's default
-allowance. Caps name the person by their platform user id.
+allowance. Caps name the person by their platform user id or `<@id>` mention:
+a Discord number, a Slack member id or a Teams Entra object id.
 
 ## Menus
 
@@ -99,7 +100,7 @@ channel.
 ```sh
 daimon support --guild 123 catalog set support support.yaml
 daimon support --guild 123 plan set channel 456 --pool 2 --window monthly --catalog support
-daimon support --guild 123 allowance set 789 5 --plan channel:456
+daimon support --guild 123 allowance set 112233445566778899 5 --plan channel:456
 daimon support --guild 123 requests list --pending
 daimon support --guild 123 requests settle <request-id> 1.5
 ```

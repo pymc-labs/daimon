@@ -59,6 +59,7 @@ from daimon.core.support_plans import (
     format_credits,
     parse_catalog,
     parse_credits,
+    parse_person_id,
     parse_scope,
 )
 from fastmcp import Context, FastMCP
@@ -366,9 +367,10 @@ async def _set_allowance_impl(
     expected: str | None,
 ) -> SupportAllowanceResult:
     platform = _require_support_admin(auth)
-    user_id = platform_user_id.strip()
-    if not user_id:
-        raise ToolError("platform_user_id is empty. Nothing was saved.")
+    try:
+        user_id = parse_person_id(platform, platform_user_id)
+    except SupportPlanError as exc:
+        raise _refused(exc) from exc
     plan_scope: PlanScope | None = None
     place_id = ""
     if scope is not None:
@@ -601,6 +603,7 @@ def register_support_plan_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> SupportAllowanceResult:
         """Give one person their own cap under a plan, or clear it (``credits`` null). Admin-only.
 
+        ``platform_user_id`` is the person's id on the platform, or ``<@id>``.
         No ``scope`` is the default allowance, where no plan applies; otherwise
         the plan's place as for ``support_plan_set``. ``credits`` is a decimal
         string. ``expected``: the cap last read, or ``"none"``; a mismatch saves nothing.
