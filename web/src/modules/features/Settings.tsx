@@ -17,12 +17,12 @@ type Group = { name: string; rows: { key: string; label: string; control: React.
 /** The label of a value as people read it. */
 const labelOf = (s: FeatureSchema, value: string) => s.values.find((v) => v.value === value)?.label ?? value
 
-/** A value held by a level above: the value with a lock and who to ask. */
-export function Locked({ label, by }: { label: string; by: string }) {
+/** A value held by a level above: the value with a lock and who to ask; `note` replaces the default words. */
+export function Locked({ label, by, note }: { label: string; by: string; note?: string }) {
   return (
     <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
       <span className="inline-flex items-center gap-1.5"><Lock className="size-3.5 text-muted-foreground" />{label}</span>
-      <span className="text-xs text-muted-foreground">Locked by the {by.toLowerCase()}. Ask an admin.</span>
+      <span className="text-xs text-muted-foreground">{note ?? `Locked by the ${by.toLowerCase()}. Ask an admin.`}</span>
     </span>
   )
 }

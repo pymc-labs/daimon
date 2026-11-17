@@ -12,7 +12,7 @@ const schema = (key: string, name: string, tiers: Tier[] = ALL, fallback = "on")
 })
 const SCHEMA = [
   schema("progress_plans", "Progress plans"), schema("participation", "Thread participation"),
-  schema("support_escalation", "Ask a person", ["deployment", "workspace", "agent", "channel"], "off"), schema("support_feedback", "After a thumbs down", ["deployment", "workspace", "agent", "channel"], "off"),
+  schema("support_escalation", "Ask a person", ["deployment", "workspace", "agent", "channel"], "off"), schema("support_feedback", "Thumbs-down feedback", ["deployment", "workspace", "agent", "channel"], "off"),
   schema("support_own_channel", "Own request channel", ["deployment"]),
   schema("guidance", "Setup guidance", ["deployment", "workspace", "agent"]), schema("tool.bash", "Built-in tool: bash"), schema("cost_footer", "Cost footer"),
 ]
@@ -41,7 +41,9 @@ function viewOf(url: URL, s: FeatureSchema): FeatureView {
   const set = locked ?? [...tiers].reverse().find((t) => t.value !== "default")
   const value = set?.value ?? s.default
   const unavailable = s.key === "tool.bash" && url.searchParams.get("channel") === NO_SANDBOX ? REASON : s.key === "support_escalation" && flag() === "unmet" ? "Pick a support channel." : null
-  return { key: s.key, tiers, value, source: set?.tier ?? "default", locked: !!locked, unavailable, summary: ON_OFF.find((o) => o.value === value)?.label ?? value }
+  // An unmet requirement resolves to off, as the server does.
+  const shown = unavailable && s.key === "support_escalation" ? "off" : value
+  return { key: s.key, tiers, value: shown, source: set?.tier ?? "default", locked: !!locked, unavailable, summary: ON_OFF.find((o) => o.value === shown)?.label ?? shown }
 }
 
 /** The agents and channels that have a value of their own for `key`, as `{ scope, id }`. */

@@ -1,7 +1,7 @@
 // Ask a person admin: limits, menus, which menu each place uses and the request channel, as `/api/support*` serves them.
 import { http, HttpResponse, type HttpHandler } from "msw"
 
-import type { ChannelChange, Limit, LimitChange, LimitValue, Menu, MenuChange, MenuUseChange, Scope, SupportPage } from "@/modules/admin/support/types"
+import type { ChannelChange, Limit, LimitChange, LimitValue, Menu, MenuChange, MenuUseChange, Scope, SupportPage, Undelivered } from "@/modules/admin/support/types"
 import { overridden, supportFlag } from "./features"
 import { forbidden, wait } from "./util"
 import { me } from "./world"
@@ -133,9 +133,15 @@ let limits: Limit[] = [
   row("agent", "daimon", null, { each_person: "10", window: "total" }, "12"),
   row("channel", "c_general", null, { shared: "50", each_person: "5" }, "46", 4),
   row("channel", "c_clv", null, { shared: "30", window: "total", starts_at: ago(60), ends_at: ago(5) }, "22.5"),
-  row("workspace", "", "p_priya", { each_person: "40" }, "7.5"),
-  row("channel", "c_clv", "p_aiko", { each_person: "3", ends_at: new Date(Date.now() + 21 * DAY).toISOString().slice(0, 10) + "T00:00:00Z" }, "1.5"),
+  row("workspace", "", "1100000000000000011", { each_person: "40" }, "7.5"),
+  row("channel", "c_clv", "1100000000000000012", { each_person: "3", ends_at: new Date(Date.now() + 21 * DAY).toISOString().slice(0, 10) + "T00:00:00Z" }, "1.5"),
   row("agent", "clv-desk", null, { shared: "15", window: "total", starts_at: new Date(Date.now() + 9 * DAY).toISOString().slice(0, 10) + "T00:00:00Z" }, "0"),
+]
+/** `?support=undelivered` shows requests no channel received. */
+let lost: Undelivered[] = [
+  { id: "r_1", at: ago(0.2), person: "Priya Raman", credits: "2", what: "Live coaching, 1 hour", price: { kind: "fixed", min: "2", max: null } },
+  { id: "r_2", at: ago(2), person: "Aiko Tanaka", credits: "3", what: "Review this thread", price: { kind: "range", min: "1", max: "3" } },
+  { id: "r_3", at: ago(4), person: "Owen Brooks", credits: "20", what: "Build it", price: { kind: "quoted", min: "0", max: "20" } },
 ]
 let channel = { id: "c_questions", name: "questions", revision: 2 as number | null }
 
@@ -149,7 +155,7 @@ const page = (): SupportPage => {
   const none = supportFlag() === "unmet"
   const picked = own && !none ? channel : null
   return {
-    platform: "discord", undelivered: [], everyone: { each_person: "20" }, limits,
+    platform: "discord", undelivered: supportFlag() === "undelivered" ? lost : [], everyone: { each_person: "20" }, limits,
     menus: menus.map((m) => ({ ...m, used_in: Object.entries(uses).filter(([, k]) => k === m.key).map(([at]) => { const [scope, id] = at.split("|") as [Scope, string]; return { scope, scope_id: id, name: scope === "workspace" ? "Workspace" : (NAMES[id] ?? id) } }) })),
     menu_use: [
       { scope: "workspace", scope_id: "", name: "Workspace", menu: uses["workspace|"] ?? null },
@@ -161,7 +167,7 @@ const page = (): SupportPage => {
     channel: {
       own_allowed: own, value: picked && { id: picked.id, name: picked.name }, default: { name: "general" },
       ...(none ? { state: "none" as const, detail: "Pick a support channel." } : posting()),
-      open: { count: none ? 0 : 3, where: none ? null : (picked ?? { name: "general" }).name }, revision: picked?.revision ?? null,
+      open: { count: none ? 0 : 3, where: none ? [] : [...new Set([(picked ?? { name: "general" }).name, "questions"])] }, revision: picked?.revision ?? null,
     },
   }
 }
@@ -186,6 +192,22 @@ export const supportHandlers: HttpHandler[] = [
     const q = (new URL(request.url).searchParams.get("q") ?? "").trim().toLowerCase()
     if (!q || q.length > 100) return refuse([{ loc: ["query", "q"], msg: "String should have at least 1 character" }])
     return HttpResponse.json(CHAT.filter((c) => `${c.name} ${c.handle ?? ""}`.toLowerCase().includes(q)).slice(0, 8))
+  }),
+  http.post("/api/support/requests/:id/settle", async ({ params, request }) => {
+    const r = lost.find((x) => x.id === params.id)
+    if (!r) return missing("No such request.")
+    const { charge } = (await request.json()) as { charge: string }
+    const low = Number(r.price.min), high = r.price.kind === "fixed" ? low : r.price.max == null ? 100000 : Number(r.price.max)
+    const bad = credits(charge, low, high)
+    if (bad) return refuse([{ loc: ["charge"], msg: bad }])
+    lost = lost.filter((x) => x !== r)
+    return ok()
+  }),
+  http.post("/api/support/requests/:id/decline", async ({ params }) => {
+    const r = lost.find((x) => x.id === params.id)
+    if (!r) return missing("No such request.")
+    lost = lost.filter((x) => x !== r)
+    return ok()
   }),
   http.put("/api/support/limits", async ({ request }) => {
     const b = (await request.json()) as LimitChange

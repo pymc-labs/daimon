@@ -23,11 +23,11 @@ const Txt = ({ aria, error, onChange, ...props }: TxtProps) => (
 )
 const Labeled = ({ label, ...props }: TxtProps & { label: string }) => <Field label={label}><Txt {...props} /></Field>
 
-function Pick<T extends string>({ value, onChange, choices, aria, className }: { value: T; onChange: (v: T) => void; choices: Record<T, string>; aria: string; className?: string }) {
+function Pick<T extends string>({ value, onChange, choices, aria, className, disabled = [] }: { value: T; onChange: (v: T) => void; choices: Record<T, string>; aria: string; className?: string; disabled?: T[] }) {
   return (
     <Select value={value} onValueChange={(v) => onChange(v as T)}>
       <SelectTrigger className={className ?? "w-full"} aria-label={aria}><SelectValue /></SelectTrigger>
-      <SelectContent>{(Object.keys(choices) as T[]).map((k) => <SelectItem key={k} value={k}>{choices[k]}</SelectItem>)}</SelectContent>
+      <SelectContent>{(Object.keys(choices) as T[]).map((k) => <SelectItem key={k} value={k} disabled={disabled.includes(k)}>{choices[k]}</SelectItem>)}</SelectContent>
     </Select>
   )
 }
@@ -141,7 +141,7 @@ function PriceEditor({ o, name, p, at, onChange }: { o: OptionDraft; name: strin
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-3 gap-3 max-sm:grid-cols-2">
-        <div className={price.kind === "range" || price.kind === "quoted" ? "max-sm:col-span-2" : undefined}><Field label="Price"><Pick value={price.kind} onChange={(kind: PriceKind) => set({ kind })} choices={PRICES} aria={`Price of ${name}`} /></Field></div>
+        <div className={price.kind === "range" || price.kind === "quoted" ? "max-sm:col-span-2" : undefined}><Field label="Price"><Pick value={price.kind} onChange={(kind: PriceKind) => set({ kind })} choices={PRICES} aria={`Price of ${name}`} disabled={o.fields.length >= LIMITS.fields && price.kind !== "steps" ? ["steps"] : []} /></Field></div>
         {price.kind === "fixed" && money("Credits", "amount", "1")}
         {price.kind === "range" && <>{money("Min", "min", "1")}{money("Max", "max", "3")}</>}
         {price.kind === "quoted" && <>{money("Min", "min", "0")}{money("Max", "max", "No limit")}</>}

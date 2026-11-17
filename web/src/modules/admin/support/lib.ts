@@ -1,5 +1,6 @@
 import { cleanKey } from "./menuDraft"
-import type { Limit, LimitValue, Place, Scope } from "./types"
+import type { FeatureView } from "@/modules/features/types"
+import type { Limit, LimitValue, Place, Scope, SupportPage, Undelivered } from "./types"
 
 export const SCOPES: Record<Scope, string> = { workspace: "Workspace", agent: "Agent", channel: "Channel" }
 
@@ -42,4 +43,19 @@ export function platformUserId(platform: string, text: string): string | null {
   const t = text.trim()
   const id = (MENTION.exec(t)?.[1] ?? t).trim()
   return ID_SHAPE[platform]?.test(id) ? (platform === "teams" ? id.toLowerCase() : id) : null
+}
+
+/** Whether an admin turned Ask a person on: the nearest workspace or deployment value, not the resolved one, which reads off while a requirement is unmet. */
+export function askedOn(view: FeatureView | undefined): boolean {
+  const own = (view?.tiers ?? []).filter((t) => t.tier === "workspace" || t.tier === "deployment")
+  const set = own.find((t) => t.locked) ?? [...own].reverse().find((t) => t.value !== "default")
+  return set?.value === "on"
+}
+
+/** The distinct channels open requests sit in; none when they have no channel yet. */
+export const openIn = (where: SupportPage["channel"]["open"]["where"]): string[] => [...new Set(typeof where === "string" ? [where] : (where ?? []))]
+
+/** What settling a request may charge: from `min` up to `max`; a fixed price is exactly its amount, a quote without a top has none. */
+export function chargeRange(p: Undelivered["price"]): { min: number; max: number | null } {
+  return { min: Number(p.min), max: p.kind === "fixed" ? Number(p.min) : p.max == null ? null : Number(p.max) }
 }

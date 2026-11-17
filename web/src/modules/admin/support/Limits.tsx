@@ -15,6 +15,7 @@ import { useConfirm } from "@/lib/confirm"
 import { shortDate } from "@/lib/format"
 import { rowProps, useParam } from "@/lib/filters"
 import { Field } from "@/modules/admin/shared"
+import { Unavailable } from "@/modules/features/Settings"
 import type { Subject } from "@/modules/credits/types"
 import { usePlaces, useSupportSave, type Outcome } from "./api"
 import { emptyForm, formOf, limitErrors, toValue, type LimitErrors, type LimitForm } from "./limitForm"
@@ -63,13 +64,14 @@ export function Used({ l }: { l: Limit }) {
 }
 
 /** Step 4: one list of limits, general to specific. */
-export function Limits({ d }: { d: SupportPage }) {
+export function Limits({ d, unmet }: { d: SupportPage; /** Why Ask a person is unavailable, when credits can fix it. */ unmet?: string | null }) {
   const [adding, setAdding] = useState(false)
   const [, setOpen] = useParam("limit")
   const [add, setAdd] = useParam("add")
   const list = ordered(d.limits)
   return (
-    <Section title="Credits" add={<Button size="xs" variant="outline" onClick={() => setAdding(true)}><Plus />Add limit</Button>}>
+    <Section title="Credit limits" add={<Button size="xs" variant="outline" onClick={() => setAdding(true)}><Plus />Add limit</Button>}>
+      {unmet && <div className="mb-2 text-sm"><Unavailable reason={unmet} /></div>}
       <Table>
         <TableHeader>
           <TableRow className="hover:bg-transparent">
@@ -110,7 +112,7 @@ export function Limits({ d }: { d: SupportPage }) {
           return l ? <LimitDetail key={id} l={l} /> : null
         }}
       </Drawer>
-      <AddLimit key={add ?? ""} d={d} open={adding || !!add} onOpenChange={(o) => { setAdding(o); if (!o) setAdd(null) }} channel={add ?? ""} />
+      <AddLimit key={add ?? ""} d={d} open={adding || !!add} onOpenChange={(o) => { setAdding(o); if (!o) setAdd(null) }} channel={add ?? ""} onExisting={setOpen} />
     </Section>
   )
 }
@@ -148,7 +150,7 @@ function Fields({ form, set, person, errors }: { form: LimitForm; set: (f: Parti
 const FOR: Record<"workspace" | "agent" | "channel" | "person", string> = KIND
 
 /** Add limit: who it is for, the place, then the credits and dates. */
-function AddLimit({ d, open, onOpenChange, channel }: { d: SupportPage; open: boolean; onOpenChange: (o: boolean) => void; channel: string }) {
+function AddLimit({ d, open, onOpenChange, channel, onExisting }: { d: SupportPage; open: boolean; onOpenChange: (o: boolean) => void; channel: string; onExisting: (key: string) => void }) {
   const save = useSupportSave()
   const places = usePlaces(d)
   const [kind, setKind] = useState<keyof typeof FOR>("channel")
@@ -165,6 +167,8 @@ function AddLimit({ d, open, onOpenChange, channel }: { d: SupportPage; open: bo
   const errors = limitErrors(out?.error ?? null, out?.problems ?? [])
   const reset = () => { setKind("channel"); setPlace(""); setPerson(null); setWhere("everywhere"); setForm(emptyForm()); setOut(null) }
   const submit = async () => {
+    // A person already limited here has a row: open it, a second one would only be refused as changed.
+    if (isPerson && has(at.scope, at.scope_id, person!.id)) { onOpenChange(false); reset(); onExisting(keyOf({ ...at, person_id: person!.id })); return }
     const r = await save.run("limits", { ...at, person_id: isPerson ? person!.id : null, limit: toValue(form, null, isPerson), expected_revision: null })
     setOut(r)
     if (r.error) return

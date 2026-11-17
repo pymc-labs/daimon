@@ -90,6 +90,7 @@ function MenuDetail({ d, menu }: { d: SupportPage; menu?: Menu }) {
   // The revision as it was read: what a save expects, whatever has been read since.
   const [revision, setRevision] = useState(menu?.revision ?? null)
   const [out, setOut] = useState<Outcome | null>(null)
+  const [inUse, setInUse] = useState<string | null>(null)
   const errors = menuErrors(out?.error ?? null, out?.problems ?? [], draft)
   // An error names rows by place, so it goes when the rows move.
   const edit = (next: MenuDraft) => { if (shape(next) !== shape(draft)) setOut(null); setDraft(next) }
@@ -103,6 +104,7 @@ function MenuDetail({ d, menu }: { d: SupportPage; menu?: Menu }) {
     if (now) { setDraft(toDraft(now.body)); setRevision(now.revision) } else if (menu) setOpen(null)
   }
   const remove = async () => {
+    if (menu?.used_in.length) { setInUse(`Used in ${menu.used_in.map((u) => u.name).join(", ")}. Pick another menu there first.`); return }
     if (await confirm({ title: "Remove menu?", body: menu?.name, action: "Remove", destructive: true })) await put(null)
   }
   return (
@@ -116,11 +118,11 @@ function MenuDetail({ d, menu }: { d: SupportPage; menu?: Menu }) {
       <PanelSection><MenuEditor draft={draft} errors={errors} onChange={edit} /></PanelSection>
       <div className="sticky bottom-0 mt-auto border-t bg-popover px-5 py-3">
         <Actions>
-          {menu && <Button variant="ghost" className="mr-auto text-destructive max-sm:mr-0" disabled={save.pending || menu.used_in.length > 0} onClick={() => void remove()}>Remove</Button>}
+          {menu && <Button variant="ghost" className="mr-auto text-destructive max-sm:mr-0" disabled={save.pending} onClick={() => void remove()}>Remove</Button>}
           <Button variant="outline" onClick={() => setOpen(null)}>Cancel</Button>
           <Button disabled={save.pending || !draft.name.trim()} onClick={() => void put(toCatalog(draft))}>Save</Button>
         </Actions>
-        <Failure>{errors.rest}</Failure>
+        <Failure>{errors.rest ?? inUse}</Failure>
       </div>
     </div>
   )

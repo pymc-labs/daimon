@@ -13,15 +13,15 @@ export const useSupportPage = (enabled = true) => useQuery({ queryKey: KEY, quer
 /** What a save answered: `fresh` is the page read again after a stale value (409), for the form to reload from. */
 export type Outcome = { error: string | null; problems: Problem[]; fresh?: SupportPage }
 
-/** Change a limit, menu or the request channel. The answer is the whole page; a stale value (409) reloads it. */
+/** Change a limit, menu or the request channel (PUT), or settle or decline a request (`post`). The answer is the whole page; a stale value (409) reloads it. */
 export function useSupportSave() {
   const qc = useQueryClient()
-  const m = useMutation({ meta: { inline: true }, mutationFn: ({ path, body }: { path: string; body: unknown }) => api.put<SupportPage>(`/api/support/${path}`, body) })
+  const m = useMutation({ meta: { inline: true }, mutationFn: ({ path, body, post }: { path: string; body: unknown; post: boolean }) => (post ? api.post<SupportPage>(`/api/support/${path}`, body) : api.put<SupportPage>(`/api/support/${path}`, body)) })
   return {
     pending: m.isPending,
-    async run(path: string, body: unknown): Promise<Outcome> {
+    async run(path: string, body: unknown, post = false): Promise<Outcome> {
       try {
-        qc.setQueryData(KEY, await m.mutateAsync({ path, body }))
+        qc.setQueryData(KEY, await m.mutateAsync({ path, body, post }))
         return { error: null, problems: [] }
       } catch (e) {
         if (e instanceof ApiError && e.status === 409) {

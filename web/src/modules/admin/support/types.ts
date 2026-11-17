@@ -16,6 +16,9 @@ export type LimitValue = {
 
 export type Charge = { at: string; person: string; credits: string; what: string }
 
+/** A request no support channel received. `credits` are held; `price` bounds what settling may charge (a fixed price is `min`). */
+export type Undelivered = Charge & { id: string; price: { kind: "fixed" | "quoted" | "range"; min: string; max: string | null } }
+
 /** One row of the limits list. A row is its place and, for a person, who; `person_id` null is everyone there. */
 export type Limit = LimitValue & {
   scope: Scope
@@ -55,7 +58,8 @@ export type RequestChannel = {
   state: "ready" | "blocked" | "none" | "unverified"
   /** Why `state` is not ready; null when it is. */
   detail: string | null
-  open: { count: number; where: string | null }
+  /** The channels the open requests sit in; one name or null from older servers. */
+  open: { count: number; where: string[] | string | null }
   revision: number | null
 }
 
@@ -71,7 +75,7 @@ export type SupportPage = {
   agents: { id: string; name: string }[]
   channel: RequestChannel
   /** Requests no support channel received, newest first. */
-  undelivered: Charge[]
+  undelivered: Undelivered[]
 }
 
 /** PUT /api/support/limits; `limit` null removes the row. `expected_revision` null means the row is new. */

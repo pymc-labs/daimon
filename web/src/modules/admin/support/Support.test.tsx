@@ -8,19 +8,41 @@ import { api, ApiError } from "@/lib/api"
 import { Ctx } from "@/lib/confirm"
 import { Limits } from "./Limits"
 import { Menus } from "./Menus"
-import { Destination } from "./Support"
+import { Destination, Support } from "./Support"
+import { ChannelSupport } from "./ChannelSupport"
+import { UndeliveredDrawer } from "./Undelivered"
 import { useSupportPage } from "./api"
+import type { FeatureSchema, FeatureView } from "@/modules/features/types"
 import type { Limit, SupportPage } from "./types"
 
 Object.assign(Element.prototype, { hasPointerCapture: () => false, releasePointerCapture: () => {}, scrollIntoView: () => {} })
 
-vi.mock("@/lib/api", async (orig) => ({ ...(await orig<typeof import("@/lib/api")>()), api: { get: vi.fn(), put: vi.fn() } }))
+vi.mock("@/lib/api", async (orig) => ({ ...(await orig<typeof import("@/lib/api")>()), api: { get: vi.fn(), put: vi.fn(), post: vi.fn() } }))
+
+let features: FeatureView[] = []
+const ok = <T,>(d: T) => ({ data: d, error: null, isError: false, refetch: () => {} })
+const schema = (key: string, name: string): FeatureSchema => ({
+  key, name, category: "chat", categoryName: "Chat", default: "on", tiers: ["deployment", "workspace", "agent", "channel", "thread"],
+  lockable: ["workspace", "channel"], platforms: ["discord"], threadAnyone: false, native: false, doc: "",
+  values: [{ value: "on", label: "On" }, { value: "off", label: "Off" }],
+})
+vi.mock("@/modules/features/api", () => ({
+  useFeatureSchema: () => ok([schema("support_escalation", "Ask a person"), schema("support_feedback", "Thumbs-down feedback")]),
+  useFeatures: () => ok({ platform: "discord", features }),
+  useFeatureSave: () => ({ pending: false, run: vi.fn() }),
+}))
+vi.mock("@/lib/hooks", async (orig) => ({ ...(await orig<typeof import("@/lib/hooks")>()), useCan: () => () => true }))
+const feature = (key: string, workspace: string, over: Partial<FeatureView> = {}): FeatureView => ({
+  key, tiers: [{ tier: "workspace", value: workspace, locked: false, text: workspace }, { tier: "channel", value: "default", locked: false, text: "default" }],
+  value: workspace === "on" ? "on" : "off", source: "workspace", locked: false, unavailable: null, summary: "", ...over,
+})
 
 const limit: Limit = {
   scope: "channel", scope_id: "c1", name: "general", person_id: null, person_name: null,
   shared: "5", each_person: "2", window: "monthly", starts_at: null, ends_at: null,
   used: "1", state: "active", revision: 3, recent: [],
 }
+const lost = { id: "r1", at: "2026-01-01T00:00:00Z", person: "Priya", credits: "2", what: "Look", price: { kind: "range" as const, min: "1", max: "3" } }
 const menu = { key: "support", name: "Support", revision: 3, summary: "", options: 1, used_in: [], body: { name: "Support", options: [{ key: "look", label: "Look", price: { kind: "fixed", amount: "1" } }] } }
 const data: SupportPage = {
   platform: "discord", everyone: { each_person: "20" }, undelivered: [],
@@ -35,15 +57,18 @@ const Page = () => {
   const { data: d } = useSupportPage()
   return d ? <><Limits d={d} /><Menus d={d} /><Destination d={d} /></> : null
 }
-const view = (start: SupportPage = data, url = "/") => {
+const mount = (Body: () => React.ReactNode, url = "/") =>
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <Ctx.Provider value={async () => "action"}><MemoryRouter initialEntries={[url]}><Body /></MemoryRouter></Ctx.Provider>
+    </QueryClientProvider>,
+  )
+const view = (start: SupportPage = data, url = "/", Body: () => React.ReactNode = Page) => {
   current = start
   vi.mocked(api.get).mockImplementation(async (path: string) => path.startsWith("/api/support/people") ? (decodeURIComponent(path).endsWith("=mar") ? found : []) as never : (path === "/api/channels" ? { platform: "discord", channels: [{ id: "c1", name: "general", kind: "channel", platform: "discord" }, { id: "c2", name: "help", kind: "channel", platform: "discord" }] } : current) as never)
   vi.mocked(api.put).mockResolvedValue(data as never)
-  render(
-    <QueryClientProvider client={new QueryClient()}>
-      <Ctx.Provider value={async () => "action"}><MemoryRouter initialEntries={[url]}><Page /></MemoryRouter></Ctx.Provider>
-    </QueryClientProvider>,
-  )
+  vi.mocked(api.post).mockResolvedValue(data as never)
+  mount(Body, url)
 }
 const stale = () => vi.mocked(api.put).mockRejectedValueOnce(new ApiError(409, "stale"))
 const drawer = async (url: string, start = data) => { view(start, url); return within(await screen.findByRole("dialog")) }
@@ -51,6 +76,7 @@ const sentLimit = () => (vi.mocked(api.put).mock.calls.at(-1)![1] as { limit: { 
 
 beforeEach(() => {
   vi.clearAllMocks()
+  features = [feature("support_escalation", "on"), feature("support_feedback", "on")]
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} })
 })
 
@@ -218,19 +244,45 @@ describe("menus", () => {
     expect(await d.findByText("String should have at least 1 character")).toBeInTheDocument()
   })
 
-  it("cannot remove a menu that is in use", async () => {
-    const used = { ...menu, used_in: [{ scope: "channel" as const, scope_id: "c1", name: "general" }] }
+  it("says where a menu in use is used instead of removing it", async () => {
+    const used = { ...menu, used_in: [{ scope: "channel" as const, scope_id: "c1", name: "general" }, { scope: "workspace" as const, scope_id: "", name: "Workspace" }] }
     const d = await drawer("/?menu=support", { ...data, menus: [used] })
-    expect(d.getByRole("button", { name: "Remove" })).toBeDisabled()
+    expect(d.getByRole("button", { name: "Remove" })).toBeEnabled()
+    await userEvent.click(d.getByRole("button", { name: "Remove" }))
+    expect(await d.findByText("Used in general, Workspace. Pick another menu there first.")).toBeInTheDocument()
+    expect(api.put).not.toHaveBeenCalled()
+  })
+
+  it("disables a steps price once the option has four fields", async () => {
+    const full = { ...menu, body: { name: "Support", options: [{ key: "look", label: "Look", price: { kind: "fixed", amount: "1" }, fields: ["a", "b", "c", "d"].map((k) => ({ key: k, label: k, kind: "text" })) }] } }
+    const d = await drawer("/?menu=support", { ...data, menus: [full] })
+    if (!d.queryByRole("combobox", { name: "Price of option 1" })) await userEvent.click(d.getByRole("button", { name: "Open option 1" }))
+    await userEvent.click(await d.findByRole("combobox", { name: "Price of option 1" }))
+    expect(await screen.findByRole("option", { name: "Pick a price" })).toHaveAttribute("aria-disabled", "true")
   })
 })
 
 describe("requests go to", () => {
   it("asks before moving open requests, then sends the revision read", async () => {
-    view({ ...data, channel: { ...data.channel, open: { count: 3, where: "support" } } })
+    view({ ...data, channel: { ...data.channel, open: { count: 3, where: ["support"] } } })
     await userEvent.click(await screen.findByRole("combobox", { name: "Channel" }))
     await userEvent.click(await screen.findByRole("option", { name: /help/ }))
     await waitFor(() => expect(api.put).toHaveBeenCalledWith("/api/support/channel", { channel_id: "c2", expected_revision: 2 }))
+  })
+
+  it.each([
+    [null, "3 open requests stay. New ones go to the new channel."],
+    [["support"], "3 open requests stay in support. New ones go to the new channel."],
+    [["support", "help", "support"], "3 open requests stay in support, help. New ones go to the new channel."],
+  ])("names where open requests stay, never null: %j", async (where, body) => {
+    const ask = vi.fn(async () => "action")
+    current = { ...data, channel: { ...data.channel, open: { count: 3, where } } }
+    vi.mocked(api.get).mockImplementation(async (path: string) => (path === "/api/channels" ? { platform: "discord", channels: [{ id: "c2", name: "help", kind: "channel", platform: "discord" }] } : current) as never)
+    vi.mocked(api.put).mockResolvedValue(data as never)
+    render(<QueryClientProvider client={new QueryClient()}><Ctx.Provider value={ask as never}><MemoryRouter><Page /></MemoryRouter></Ctx.Provider></QueryClientProvider>)
+    await userEvent.click(await screen.findByRole("combobox", { name: "Channel" }))
+    await userEvent.click(await screen.findByRole("option", { name: /help/ }))
+    expect(ask).toHaveBeenCalledWith(expect.objectContaining({ body }))
   })
 
   it.each([
@@ -252,7 +304,7 @@ describe("requests go to", () => {
   })
 
   it("lists requests no channel received only when there are some", async () => {
-    view({ ...data, undelivered: [{ at: "2026-01-01T00:00:00Z", person: "Priya", credits: "1", what: "Look" }] })
+    view({ ...data, undelivered: [lost] })
     expect(await screen.findByText("Not delivered")).toBeInTheDocument()
   })
 
@@ -263,7 +315,7 @@ describe("requests go to", () => {
   })
 
   it("shows only the number of open requests", async () => {
-    view({ ...data, channel: { ...data.channel, open: { count: 3, where: "support" } } })
+    view({ ...data, channel: { ...data.channel, open: { count: 3, where: ["support"] } } })
     expect(await screen.findByText("3")).toBeInTheDocument()
     expect(screen.queryByText(/in support/)).not.toBeInTheDocument()
   })
@@ -278,7 +330,131 @@ describe("requests go to", () => {
 
   it("shows a lock when the deployment sets the channel", async () => {
     view({ ...data, channel: { ...data.channel, own_allowed: false } })
-    expect(await screen.findByText(/Locked by the deployment/)).toBeInTheDocument()
+    expect(await screen.findByText("Set by whoever runs Daimon")).toBeInTheDocument()
+    expect(screen.getByText("Built-in default (support)")).toBeInTheDocument()
     expect(screen.queryByRole("combobox", { name: "Channel" })).not.toBeInTheDocument()
+  })
+
+  it("puts the feedback switch under requests go to, whatever Ask a person is set to", async () => {
+    features = [feature("support_escalation", "off"), feature("support_feedback", "on")]
+    view(data, "/", Support)
+    expect(await screen.findByText("Send thumbs-down feedback")).toBeInTheDocument()
+    expect(screen.getByRole("combobox", { name: "Thumbs-down feedback" })).toBeInTheDocument()
+    expect(screen.queryByText("Where it shows")).not.toBeInTheDocument()
+  })
+})
+
+describe("the steps in order", () => {
+  it("shows steps 2 to 5 when asked on but a requirement is unmet, with the reason at the step that fixes it", async () => {
+    features = [feature("support_escalation", "on", { value: "off", unavailable: "Pick a support channel first." }), feature("support_feedback", "on")]
+    view({ ...data, channel: { ...data.channel, state: "ready" } }, "/", Support)
+    expect(await screen.findByText("Where it shows")).toBeInTheDocument()
+    expect(screen.getByText("Credit limits")).toBeInTheDocument()
+    expect(screen.getByText("Menus")).toBeInTheDocument()
+    expect(screen.getAllByText("Pick a support channel first.")).toHaveLength(2)
+  })
+
+  it("hides steps 2, 4 and 5 while Ask a person is off", async () => {
+    features = [feature("support_escalation", "off"), feature("support_feedback", "on")]
+    view(data, "/", Support)
+    await screen.findByText("Requests go to")
+    expect(screen.queryByText("Where it shows")).not.toBeInTheDocument()
+    expect(screen.queryByText("Credit limits")).not.toBeInTheDocument()
+    expect(screen.queryByText("Menus")).not.toBeInTheDocument()
+  })
+
+  it("opens the existing limit when a person already has one in that place", async () => {
+    const mine = { ...limit, scope: "workspace" as const, scope_id: "", name: "Workspace", person_id: "1100000000000000013", person_name: "Marcus Webb" }
+    view({ ...data, limits: [limit, mine] })
+    await userEvent.click(await screen.findByRole("button", { name: "Add limit" }))
+    const dialog = within(screen.getByRole("dialog"))
+    await userEvent.click(dialog.getByRole("radio", { name: "Person" }))
+    await userEvent.click(dialog.getByRole("button", { name: "Choose" }))
+    await userEvent.type(screen.getByPlaceholderText("Find a person"), "mar")
+    await userEvent.click(await screen.findByRole("option", { name: /Marcus Webb/ }))
+    await userEvent.type(dialog.getByLabelText("Credits"), "3")
+    await userEvent.click(dialog.getByRole("button", { name: "Add limit" }))
+    expect(api.put).not.toHaveBeenCalled()
+    await waitFor(() => expect(screen.getAllByRole("dialog")).toHaveLength(1))
+    expect(within(screen.getByRole("dialog")).getByRole("button", { name: "Remove" })).toBeInTheDocument()
+  })
+})
+
+describe("not delivered", () => {
+  const open = (list = [lost, { ...lost, id: "r2", person: "Sam", price: { kind: "fixed" as const, min: "2", max: null } }]) =>
+    view({ ...data, undelivered: list }, "/?undelivered=all", () => { const { data: d } = useSupportPage(); return d ? <UndeliveredDrawer d={d} /> : null })
+
+  it("lists each request with who, what and the credits held, and says the person is not told", async () => {
+    open()
+    const d = within(await screen.findByRole("dialog"))
+    expect(await d.findByText("Priya")).toBeInTheDocument()
+    expect(d.getByText("Sam")).toBeInTheDocument()
+    expect(d.getAllByText("Look")).toHaveLength(2)
+    expect(d.getByText("Person told")).toBeInTheDocument()
+    expect(d.getByText("No")).toBeInTheDocument()
+  })
+
+  it("settles with the charge typed", async () => {
+    open()
+    const d = within(await screen.findByRole("dialog"))
+    const [charge] = await d.findAllByRole("textbox", { name: "Charge" })
+    await userEvent.clear(charge!)
+    await userEvent.type(charge!, "2.5")
+    await userEvent.click(d.getAllByRole("button", { name: "Settle" })[0]!)
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith("/api/support/requests/r1/settle", { charge: "2.5" }))
+  })
+
+  it("holds a fixed price at its amount and bounds a range", async () => {
+    open()
+    const d = within(await screen.findByRole("dialog"))
+    const [range, fixed] = await d.findAllByRole("textbox", { name: "Charge" })
+    expect(fixed).toBeDisabled()
+    expect(fixed).toHaveValue("2")
+    await userEvent.clear(range!)
+    await userEvent.type(range!, "9")
+    expect(await d.findByText("Credits 1 to 3")).toBeInTheDocument()
+    expect(d.getAllByRole("button", { name: "Settle" })[0]).toBeDisabled()
+  })
+
+  it("declines after asking", async () => {
+    open()
+    const d = within(await screen.findByRole("dialog"))
+    await userEvent.click((await d.findAllByRole("button", { name: "Decline" }))[1]!)
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith("/api/support/requests/r2/decline", {}))
+  })
+
+  it("shows a refused charge under the input", async () => {
+    open()
+    const d = within(await screen.findByRole("dialog"))
+    vi.mocked(api.post).mockRejectedValueOnce(new ApiError(422, "invalid", [{ loc: ["charge"], msg: "Charge is above the price." }]))
+    await userEvent.click((await d.findAllByRole("button", { name: "Settle" }))[0]!)
+    expect(await d.findByText("Charge is above the price.")).toBeInTheDocument()
+  })
+
+  it("reloads when the request is no longer pending", async () => {
+    open()
+    const d = within(await screen.findByRole("dialog"))
+    vi.mocked(api.post).mockRejectedValueOnce(new ApiError(409, "gone"))
+    await userEvent.click((await d.findAllByRole("button", { name: "Settle" }))[0]!)
+    expect(await d.findByText("Changed meanwhile. Reloaded.")).toBeInTheDocument()
+  })
+})
+
+describe("a channel's Ask a person", () => {
+  const channel = () => <ChannelSupport id="c1" edit />
+  const withMenus = { ...data, menus: [menu], menu_use: [{ scope: "workspace" as const, scope_id: "", name: "Workspace", menu: null }, { scope: "channel" as const, scope_id: "c1", name: "general", menu: null }] }
+
+  it("shows the thumbs-down feedback switch and names the default menu like Menus", async () => {
+    view(withMenus, "/", channel)
+    expect(await screen.findByRole("combobox", { name: "Thumbs-down feedback" })).toBeInTheDocument()
+    expect(screen.getByRole("combobox", { name: "Menu" })).toHaveTextContent("Built-in default")
+  })
+
+  it("shows a refused menu pick under the select", async () => {
+    view(withMenus, "/", channel)
+    vi.mocked(api.put).mockRejectedValueOnce(new ApiError(409, "stale"))
+    await userEvent.click(await screen.findByRole("combobox", { name: "Menu" }))
+    await userEvent.click(await screen.findByRole("option", { name: "Support" }))
+    expect(await screen.findByText("Changed meanwhile. Reloaded.")).toBeInTheDocument()
   })
 })
