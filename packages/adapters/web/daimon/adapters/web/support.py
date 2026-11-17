@@ -28,10 +28,16 @@ from daimon.core.stores import support_escalation as ledger
 from daimon.core.stores import web_people
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.feature_values import list_feature_values
-from daimon.core.stores.platform_names import get_channel_names, get_user_names
+from daimon.core.stores.platform_names import (
+    KnownName,
+    get_channel_names,
+    get_user_names,
+    search_user_names,
+)
 from daimon.core.stores.support_rows import SupportEscalationRow, SupportLimitRow
 from daimon.core.stores.teams_channel_subscriptions import get_teams_channel_subscription
 from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.workspace_members import list_chat_standings, list_synced
 from daimon.core.support import (
     MenuSpec,
     SupportError,
@@ -64,7 +70,7 @@ from daimon.core.support_routing import (
     support_destination,
 )
 from daimon.core.windows import WindowState
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -80,6 +86,8 @@ _RECENT = 5
 _OPEN_SHOWN = 500
 _UNDELIVERED_SHOWN = 50
 _NEITHER = "Set a shared limit"
+_PEOPLE_SHOWN = 8
+_WEB_PEOPLE_READ = 50
 
 Problem = dict[str, object]
 Loc = list[str | int]
@@ -211,6 +219,13 @@ class RequestChannelJson(BaseModel):
 
 class EveryoneJson(BaseModel):
     each_person: str
+
+
+class PersonHitJson(BaseModel):
+    id: str
+    """The person's id on the workspace's platform: what a limit row takes as `person_id`."""
+    name: str
+    handle: str | None
 
 
 class SupportPageJson(BaseModel):
@@ -657,6 +672,62 @@ def support_router(runtime: WebRuntime) -> APIRouter:
     @router.get("")
     async def get_page(caller: WorkspaceAdmin) -> SupportPageJson:  # pyright: ignore[reportUnusedFunction]
         return await page(caller)
+
+    @router.get("/people")
+    async def find_people(  # pyright: ignore[reportUnusedFunction]
+        caller: WorkspaceAdmin, q: Annotated[str, Query(min_length=1, max_length=100)]
+    ) -> list[PersonHitJson]:
+        """People on the workspace's platform whose name or handle contains `q`: web people
+        with a chat account and everyone the chat has seen, each once by platform id.
+
+        Where the member list was loaded in full only members are offered; where it was not,
+        nobody named is hidden.
+        """
+        tenant_id = caller.person.tenant_id
+        platform = await platform_of(caller)
+        needle = q.strip()
+        if not needle:
+            return []
+        async with runtime.sessionmaker() as db:
+            synced = tenant_id in await list_synced(db, tenant_ids=[tenant_id])
+            web = await web_people.list_people(
+                db, tenant_id=tenant_id, limit=_WEB_PEOPLE_READ, search=needle
+            )
+            standings = await list_chat_standings(
+                db, people=[(tenant_id, w.account_id) for w in web]
+            )
+            hits: dict[str, str] = {}
+            for w in web:
+                standing = standings.get((tenant_id, w.account_id))
+                if (
+                    standing is not None
+                    and standing.platform == platform
+                    and (standing.member or not synced)
+                ):
+                    hits[standing.platform_user_id] = w.display_name
+            named = await search_user_names(
+                db,
+                tenant_id=tenant_id,
+                platform=platform,
+                query=needle,
+                members_only=synced,
+                limit=_PEOPLE_SHOWN,
+            )
+            # Handles of web people come from the same table; the ones just read keep theirs.
+            known: dict[str, KnownName] = named | await get_user_names(
+                db, tenant_id=tenant_id, platform=platform, user_ids=hits.keys() - named.keys()
+            )
+        found = {
+            uid: (hits.get(uid) or (known[uid].label if uid in known else None) or uid)
+            for uid in hits.keys() | named.keys()
+        }
+        ordered = sorted(found, key=lambda uid: (found[uid].casefold(), uid))[:_PEOPLE_SHOWN]
+        return [
+            PersonHitJson(
+                id=uid, name=found[uid], handle=known[uid].handle if uid in known else None
+            )
+            for uid in ordered
+        ]
 
     @router.put("/limits")
     async def put_limit(  # pyright: ignore[reportUnusedFunction]

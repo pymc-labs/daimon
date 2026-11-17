@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,10 +13,12 @@ import pytest
 from daimon.core.config import Settings, SupportSettings, TurnSettings
 from daimon.core.platform_names import ChannelSighting
 from daimon.core.stores import support_escalation as ledger
+from daimon.core.stores import workspace_members as members_store
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import FeatureTarget
 from daimon.core.stores.feature_values import set_feature_value
-from daimon.core.stores.platform_names import upsert_channel_names
+from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.stores.platform_names import KnownName, upsert_channel_names, upsert_user_names
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.support import MenuSpec, RequestChoice, SupportPlace
 from daimon.testing.factories import make_platform_principal
@@ -56,6 +59,7 @@ _UNSET = Settings(
 )
 _ROUTES: list[tuple[str, str, dict[str, Any] | None]] = [
     ("GET", "/api/support", None),
+    ("GET", "/api/support/people?q=a", None),
     (
         "PUT",
         "/api/support/limits",
@@ -489,6 +493,75 @@ async def test_person_limits_map_a_web_person_to_the_platform_user_and_back(
     assert [r["person_id"] for r in cleared.json()["limits"] if r["person_id"]] == [
         "100000000000000002"
     ], "the row removed by person id"
+
+
+async def test_people_search_finds_chat_only_people_and_web_people_once_each(
+    web_client: WebClientFactory, db_session_factory: Factory, tmp_path: Path
+) -> None:
+    """A chat user who never signed in to the web app is found by name or handle; a web
+    person with a chat account is found by their web name, once, with their handle."""
+    async with _support(web_client, db_session_factory, tmp_path) as admin:
+        async with db_session_factory.begin() as db:
+            tenant = await get_tenant(db, admin.ws.tenant_id)
+            account = await get_account(db, admin.ws.person.account_id)
+            assert tenant is not None and account is not None, "the workspace and its person"
+            await make_platform_principal(
+                db, platform="discord", external_id=_P1, tenant=tenant, account=account
+            )
+            names = {
+                _P1: KnownName("Ada L", "lovelace"),
+                "100000000000000002": KnownName("Adam Chat"),
+            }
+            for user in names:
+                if user != _P1:
+                    await get_or_create_platform_principal(
+                        db, tenant_id=tenant.id, platform="discord", external_id=user
+                    )
+            await upsert_user_names(db, tenant_id=tenant.id, platform="discord", names=names)
+        found = await admin.client.get("/api/support/people", params={"q": "AD"})
+        by_handle = await admin.client.get("/api/support/people", params={"q": "LOVEL"})
+        none = await admin.client.get("/api/support/people", params={"q": "zzz"})
+        blank = await admin.client.get("/api/support/people", params={"q": "  "})
+        missing = await admin.client.get("/api/support/people")
+        long = await admin.client.get("/api/support/people", params={"q": "a" * 101})
+
+    assert found.status_code == 200, found.text
+    assert found.json() == [
+        {"id": _P1, "name": "Ada", "handle": "lovelace"},
+        {"id": "100000000000000002", "name": "Adam Chat", "handle": None},
+    ], "the web person under their web name with the chat handle, the chat-only person; each once"
+    assert [p["id"] for p in by_handle.json()] == [_P1], "found by handle"
+    assert none.json() == [] and blank.json() == [], "no match, and a blank query, are empty"
+    assert missing.status_code == 422 and long.status_code == 422, "q is 1 to 100 characters"
+
+
+async def test_people_search_offers_only_listed_members_once_the_list_is_loaded(
+    web_client: WebClientFactory, db_session_factory: Factory, tmp_path: Path
+) -> None:
+    """With no member list nobody named is hidden; with one loaded in full, only members."""
+    async with _support(web_client, db_session_factory, tmp_path) as admin:
+        tenant_id = admin.ws.tenant_id
+        async with db_session_factory.begin() as db:
+            for user, name in (("1", "Sam In"), ("2", "Sam Gone")):
+                await get_or_create_platform_principal(
+                    db, tenant_id=tenant_id, platform="discord", external_id=user
+                )
+                await upsert_user_names(
+                    db, tenant_id=tenant_id, platform="discord", names={user: KnownName(name)}
+                )
+        before = await admin.client.get("/api/support/people", params={"q": "sam"})
+        async with db_session_factory.begin() as db:
+            await members_store.replace_members(
+                db,
+                tenant_id=tenant_id,
+                members={"1": False},
+                workspace_name="Guild",
+                now=datetime.now(UTC),
+            )
+        after = await admin.client.get("/api/support/people", params={"q": "sam"})
+
+    assert [p["id"] for p in before.json()] == ["2", "1"], "named people, listed or not"
+    assert [p["id"] for p in after.json()] == ["1"], "a loaded list narrows to its members"
 
 
 async def test_the_request_channel_is_locked_when_own_channels_are_off(
