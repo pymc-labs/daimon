@@ -36,7 +36,7 @@ from typing import cast
 import structlog
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.adapters.discord.support_escalation import post_to_support_channel
+from daimon.adapters.discord.support_post import post_to_support_channel
 from daimon.core.config import SupportSettings
 from daimon.core.stores.domain import MessageFeedbackRow
 from daimon.core.stores.message_feedback import attach_feedback_text
@@ -96,12 +96,13 @@ class FeedbackModal(discord.ui.Modal, title="What went wrong?"):
         channel_id = support_channel_for(self._runtime.settings.support, updated_row.tenant_id)
         if channel_id is not None:
             # Best-effort: the text is already recorded, whatever the post does.
-            delivered = await post_to_support_channel(
+            post = await post_to_support_channel(
                 cast(commands.Bot, interaction.client),
                 channel_id=channel_id,
                 body=await self._support_post(interaction, updated_row),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+            delivered = post is not None
             log = _log.info if delivered else _log.warning
             log(
                 "feedback.routed_to_support",
