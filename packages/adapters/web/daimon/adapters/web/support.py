@@ -8,7 +8,7 @@ is the whole page, read fresh.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -18,6 +18,7 @@ from daimon.adapters.web.access import is_admin
 from daimon.adapters.web.admin_common import WorkspaceAdmin, listed_agents
 from daimon.adapters.web.audit import audit
 from daimon.adapters.web.caller import WebCaller
+from daimon.adapters.web.channel_visibility import request_channel_check
 from daimon.adapters.web.channels import channel_refusals, one_row
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.authz import Subject
@@ -211,7 +212,7 @@ class RequestChannelJson(BaseModel):
     own_allowed: bool
     value: NamedJson | None
     default: DefaultJson | None
-    state: Literal["ready", "blocked", "none"]
+    state: Literal["ready", "blocked", "none", "unverified"]
     detail: str | None
     open: OpenJson
     revision: int | None
@@ -316,19 +317,30 @@ def credits_or_none(value: Decimal | None) -> str | None:
     return None if value is None else format_credits(value)
 
 
-def request_channel_state(
-    destination: SupportDestination | None, *, own_allowed: bool
-) -> tuple[Literal["ready", "blocked", "none"], str | None]:
-    """Can Daimon post to where requests go, and what to do if not.
+def channel_label(names: Mapping[str, str], channel_id: str) -> str:
+    """`#general` for a channel seen by name; "the channel" before it has been."""
+    name = names.get(channel_id)
+    return f"#{name}" if name and name != channel_id else "the channel"
 
-    The per-platform "can post here" check comes later as a core function; until then a
-    destination means `ready` and none means `none`. The one place to swap it.
+
+async def request_channel_state(
+    runtime: WebRuntime,
+    destination: SupportDestination | None,
+    *,
+    own_allowed: bool,
+    label: str,
+    fresh: bool = False,
+) -> tuple[Literal["ready", "blocked", "none", "unverified"], str | None]:
+    """Can Daimon post to where requests go, and what to do if not; asked of the platform.
+
+    `label` names the channel in the instruction. `fresh` skips the 60 s cache.
     """
-    if destination is not None:
-        return "ready", None
-    if own_allowed:
-        return "none", "Pick a channel for requests."
-    return "none", "Ask the operator to set a request channel."
+    if destination is None:
+        if own_allowed:
+            return "none", "Pick a channel for requests."
+        return "none", "Ask the operator to set a request channel."
+    check = await request_channel_check(runtime, destination, label=label, fresh=fresh)
+    return check.state, check.detail
 
 
 def _actor(caller: WebCaller, *, action: str, target: str, detail: str) -> ChannelActor:
@@ -566,7 +578,13 @@ def support_router(runtime: WebRuntime) -> APIRouter:
         own_allowed = own_channel_allowed(runtime.settings)
         mine_channel = own if own is not None and own.platform == platform else None
         default_id = _default_channel(platform)
-        state, detail = request_channel_state(destination, own_allowed=own_allowed)
+        shown = destination.channel_id if destination else ""
+        state, detail = await request_channel_state(
+            runtime,
+            destination,
+            own_allowed=own_allowed,
+            label=channel_label(names, shown),
+        )
         placed = next((r.support_channel_id for r in open_now if r.support_channel_id), None)
         return SupportPageJson(
             platform=platform,
@@ -881,6 +899,23 @@ def support_router(runtime: WebRuntime) -> APIRouter:
                     teams_service_url=sub.service_url if sub else None,
                 )
                 label = f"#{row.name.name}" if row.name else row.channel_id
+                checked = await request_channel_state(
+                    runtime,
+                    SupportDestination(
+                        platform=platform,
+                        channel_id=pick.channel_id,
+                        own=True,
+                        slack_team_id=pick.slack_team_id,
+                        teams_team_id=pick.teams_team_id,
+                        teams_service_url=pick.teams_service_url,
+                    ),
+                    own_allowed=True,
+                    label=f"#{row.name.name}" if row.name else "the channel",
+                    fresh=True,
+                )
+                # Only a definite answer refuses: a check that could not run saves.
+                if checked[0] == "blocked":
+                    raise problem(["channel_id"], checked[1] or "Daimon can't post there.")
             actor = _actor(caller, action=_CHANNEL_ACTION, target=label, detail="Request channel")
             await set_support_channel(
                 runtime.sessionmaker,
