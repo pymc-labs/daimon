@@ -327,6 +327,7 @@ source_modules = [
     "daimon.core.purge",
     "daimon.core.reader_agent",
     "daimon.core.release",
+    "daimon.core.relay_scope",
     "daimon.core.reports",
     "daimon.core.repo_memory",
     "daimon.core.repo_memory_tools",

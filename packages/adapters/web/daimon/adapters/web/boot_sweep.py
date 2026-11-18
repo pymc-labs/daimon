@@ -15,20 +15,15 @@ from datetime import UTC, datetime
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.adapters.web.files import UNREFERENCED_UPLOAD_TTL
-from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.stores import file_uploads, helper_asks
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores import web_sessions as sessions_store
-from daimon.core.stores.thread_sessions import (
-    clear_active_turn_if_message_id,
-    list_orphaned_turns,
-    mark_dead,
-)
+from daimon.core.stores.thread_sessions import list_orphaned_turns
 from daimon.core.stores.turn_card_intents import (
     list_recoverable_turn_card_intents,
     retire_turn_card_intent,
 )
-from mux.contracts.ids import Scope
+from daimon.core.turn.bookkeeping import retire_orphan_marker
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -49,23 +44,7 @@ async def sweep_orphaned_web_turns(
     for row in orphans:
         if row.active_turn_message_id is None:  # pragma: no cover - filtered by the query
             continue
-        async with sessionmaker.begin() as session:
-            cleared = await clear_active_turn_if_message_id(
-                session, id=row.id, expected_message_id=row.active_turn_message_id
-            )
-            if cleared and not await interrupt_orphaned_session(
-                anthropic,
-                session_id=row.ma_session_id,
-                scope=Scope(
-                    tenant_id=str(row.tenant_id),
-                    account_id=str(row.account_id),
-                    principal_id="daimon",
-                    authorization_id="web-orphan-sweep",
-                )
-                if row.account_id is not None
-                else None,
-            ):
-                await mark_dead(session, id=row.id)
+        await retire_orphan_marker(sessionmaker, anthropic, row, platform="web")
     for intent in intents:
         async with sessionmaker.begin() as session:
             await retire_turn_card_intent(

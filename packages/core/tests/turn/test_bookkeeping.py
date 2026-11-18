@@ -13,7 +13,7 @@ from daimon.core.stores.thread_sessions import (
     get_thread_session_by_id,
     mark_turn_active,
 )
-from daimon.core.turn.bookkeeping import recover_orphan_marker
+from daimon.core.turn.bookkeeping import orphan_scope, recover_orphan_marker
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -133,3 +133,23 @@ async def test_failed_detach_rolls_back_marker_clear(
         current = await get_thread_session_by_id(session, id=row.id)
     assert current is not None and current.status == "live"
     assert current.active_turn_message_id == "card-old", "the next sweep can retry"
+
+
+@pytest.mark.parametrize("platform", ["discord", "slack", "teams", "web"])
+async def test_orphan_scope_names_the_sweep_and_needs_an_account(
+    db_session: AsyncSession, platform: str
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await create_thread_session(
+        db_session,
+        tenant_id=tenant.id,
+        platform="discord",
+        thread_id=f"scope-{platform}",
+        account_id=account.id,
+        ma_session_id="sess_scope",
+    )
+    scope = orphan_scope(row, platform=platform)
+    assert scope is not None and scope.authorization_id == f"{platform}-orphan-sweep"
+    assert scope.account_id == str(account.id) and scope.principal_id == "daimon"
+    assert orphan_scope(row.model_copy(update={"account_id": None}), platform=platform) is None

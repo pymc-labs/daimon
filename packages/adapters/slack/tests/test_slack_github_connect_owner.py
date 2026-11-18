@@ -17,8 +17,8 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import agent_owners
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.domain import Role
-from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+from daimon.testing.slack_notices import shown_text
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

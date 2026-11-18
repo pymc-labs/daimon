@@ -100,6 +100,11 @@ from daimon.core.permissions import (
     home_of,
     limiting_ids_at,
 )
+from daimon.core.relay_scope import (
+    agent_has_identity_relay,
+    relay_seal_ids,
+    without_long_term_memory,
+)
 from daimon.core.scope import HelperTarget, ResolvedConfig, ScopeContext
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_snapshot import MaSkill
@@ -329,6 +334,9 @@ class HelperCall:
 
     target: HelperTarget
     thread_key: str
+    # The asking turn is a relay agent's: its helper inherits the held, sealed,
+    # memory-free turn whatever servers the helper itself has (`daimon.core.relay_scope`).
+    relay_scoped: bool = False
 
 
 @dataclass(frozen=True)
@@ -355,6 +363,8 @@ class AdmitRequest:
     spend_person: SpendPerson | None
     surface: Surface | None
     principal_platform: str | None
+    # The turn was admitted as a relay agent's (`daimon.core.relay_scope`); its helpers inherit it.
+    relay_scoped: bool = False
 
 
 @dataclass(frozen=True)
@@ -396,6 +406,8 @@ class Admission:
     # The origin channel is shared with another organisation (stamped on the turn origin).
     shared_channel: bool = False
     private_dm_id: str | None = None
+    # A relay agent's turn (`daimon.core.relay_scope`): held, sealed, no memory, a fresh session.
+    relay_scoped: bool = False
     # The channel and thread the turn runs in, and every sealed id that seals
     # them (the channel and a thread sealed on its own): stamped on the session
     # so the transcript tools can apply the seal to it
@@ -732,6 +744,7 @@ async def admit(
         spend_person=spend_person,
         surface=surface,
         principal_platform=principal_platform,
+        relay_scoped=result.relay_scoped,
     )
     return replace(result, observation=observation, request=request)
 
@@ -768,7 +781,7 @@ async def admit_helper(
         spend_person=request.spend_person,
         surface=request.surface,
         principal_platform=request.principal_platform,
-        helper=helper,
+        helper=replace(helper, relay_scoped=request.relay_scoped),
     )
 
 
@@ -1446,6 +1459,19 @@ async def _admit_gates(
     # role is the adapter's live one, never a stored role. ---
     from daimon.core.turn.invocation import human_invocation
 
+    # An agent with a signed-identity MCP server answers with what its channel's
+    # readers can read, so its turn stays in that channel (`daimon.core.relay_scope`).
+    relay_agent = (helper is not None and helper.relay_scoped) or agent_has_identity_relay(
+        (server.url for server in agent.mcp_servers), public_url=deps.public_url
+    )
+    if relay_agent and not is_dm:
+        hold = (
+            replace(hold, relay=True)
+            if hold is not None
+            else TurnHold(platform, channel_id, client=False, relay=True)
+        )
+        subject = replace(subject, is_admin=False)
+        effective_admin = False
     grant = AdmissionGrant(
         tenant_id=tenant_id,
         subject=subject,
@@ -1486,6 +1512,10 @@ async def _admit_gates(
     # own (a Discord thread by id, a Slack one as channel_id:thread_ts). All of
     # them are recorded, so unsealing one later leaves the others holding.
     seal_ids = limiting_ids_at(policy, channel_id=channel_id, thread_id=thread_id)
+    if relay_agent and not is_dm:
+        # What the relay answers is for this channel's readers: the session stays
+        # sealed to the channel (and thread) it ran in, as for any limited channel.
+        seal_ids |= relay_seal_ids(channel_id=channel_id, thread_id=thread_id)
     source_sealed = bool(seal_ids)
     memory_read_only = _memory_read_only(
         policy, grant, source_sealed, await _dm_memory_read_only(deps, grant)
@@ -1913,6 +1943,7 @@ async def _admit_gates(
         source_shared=source_shared,
         hold=hold,
         shared_channel=shared,
+        relay_scoped=relay_agent,
         origin_channel_id=channel_id,
         origin_thread_id=thread_id,
         origin_seal_ids=seal_ids,
@@ -1983,6 +2014,8 @@ async def _admit_gates(
             account_id=principal.account_id,
             now=now,
         )
+    if relay_agent and result.features is not None:
+        result = replace(result, features=without_long_term_memory(result.features))
     mark("result")
     _log.info(
         "turn.admission_timing",
@@ -2187,7 +2220,12 @@ async def _tightened_hold(
         return grant, shared
     hold = TurnHold(grant.platform, grant.channel_id, client)
     if grant.hold is not None:
-        hold = TurnHold(hold.platform, grant.hold.channel_id, client or grant.hold.client)
+        hold = TurnHold(
+            hold.platform,
+            grant.hold.channel_id,
+            client or grant.hold.client,
+            relay=grant.hold.relay,
+        )
     subject = replace(grant.subject, is_admin=False, client=hold.client)
     return replace(grant, subject=subject, hold=hold), shared
 

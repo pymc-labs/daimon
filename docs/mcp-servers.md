@@ -105,6 +105,11 @@ The token carries `iss`, `aud`, `iat`, `exp`, `agent`, `agent_name`, `ws`
 (`<platform>:<user id>`), `channel` and `msg`. Routines, agent chat and senders
 from another organisation name no person. Without `workspaces`, every
 workspace's agents reach the server. Request bodies over 4 MiB are refused.
+
+A channel turn of an agent with a relay server runs held: it posts only in its
+channel and its threads, sends no DMs and has no admin tools. The agent keeps no
+long-term memory, and its sessions are sealed to the channel.
+
 Only agents on Anthropic Managed Agents can use the relay. Self-hosted harness,
 GPT and Gemini agents cannot.
 

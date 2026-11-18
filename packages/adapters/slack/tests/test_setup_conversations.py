@@ -34,8 +34,8 @@ from daimon.core.stores.platform_names import list_channel_names
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.core.turn.deps import build_turn_deps
-from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_tenant
+from daimon.testing.slack_notices import shown_text
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
 from pydantic import PostgresDsn, SecretStr
 from slack_sdk.errors import SlackApiError

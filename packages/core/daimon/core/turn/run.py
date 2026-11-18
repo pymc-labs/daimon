@@ -1036,6 +1036,10 @@ async def _with_handoff_summary(
         )
     if taken is None:
         return user_message, None
+    if getattr(prepared.admission, "relay_scoped", False):
+        # A relay turn is handed no summary: it is taken (so it is not kept) and dropped.
+        log.info("turn.handoff_summary_dropped_for_relay", thread_id=thread_id)
+        return user_message, None
     from_name, summary = taken
     log.info("turn.handoff_summary_seeded", thread_id=thread_id, chars=len(summary))
     seeded = f"{render_handoff_summary(summary, from_agent_name=from_name)}\n\n{user_message}"

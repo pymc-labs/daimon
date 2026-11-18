@@ -328,6 +328,11 @@ async def source_metadata_readable(
 
     Admin status and the hub's admin transcript exception never bypass source
     privacy here. Private contexts still require their owner's execution grant.
+
+    A relay turn's hold reads no stored output of any session, its own
+    included: a compute or job row records no verified id of the turn that
+    made it, so none can be told apart from an earlier turn's. Any other hold,
+    or none, is judged as before.
     """
     facts = session_facts(metadata, owned=True)
     if facts.private and metadata.get(MA_METADATA_KEY_ACCOUNT) != str(auth.account_id):
@@ -360,5 +365,8 @@ async def source_metadata_readable(
             # 'owned' discharges only READ_SESSION's ownership precondition: act
             # was already decided by long_job_access; source/private checks remain.
             session=facts,
+            # Only a relay hold is passed on: it refuses every session. A plain
+            # hold keeps its earlier, source-privacy-only check.
+            hold=read.hold if read.hold is not None and read.hold.relay else None,
         )
     )

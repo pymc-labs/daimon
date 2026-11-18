@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 from daimon.adapters.mcp.tools.github_request_delivery import _slack_blocks
 from daimon.adapters.slack.agent_setup import github_requests as module
+from daimon.core import github_request_decisions as decisions
 from daimon.core.github_connect_cards import build_connect_card
 from daimon.core.github_request_cards import RequestCard
 from daimon.core.stores.github_access import InstallationLimitError
@@ -125,7 +126,7 @@ async def test_review_requires_card_ts_and_live_admin(monkeypatch: pytest.Monkey
     )
     monkeypatch.setattr(module, "get_delivery", AsyncMock(return_value=None))
     monkeypatch.setattr(
-        module,
+        decisions,
         "approve_connected_request",
         AsyncMock(
             side_effect=InstallationLimitError(
@@ -170,7 +171,7 @@ async def test_ephemeral_requester_buttons_use_container_ts(
     monkeypatch.setattr(module, "get_delivery", AsyncMock(return_value=delivery))
     monkeypatch.setattr(module, "resolve_is_platform_admin", AsyncMock(return_value=True))
     monkeypatch.setattr(module, "cancel_request", AsyncMock(return_value=True))
-    monkeypatch.setattr(module, "approve_connected_request", AsyncMock(return_value=True))
+    monkeypatch.setattr(decisions, "approve_connected_request", AsyncMock(return_value=True))
     monkeypatch.setattr(module, "lock_delivery_slot", AsyncMock())
     record = AsyncMock(return_value=True)
     monkeypatch.setattr(module, "record_reposted_requester_card", record)
@@ -186,7 +187,7 @@ async def test_ephemeral_requester_buttons_use_container_ts(
     if decision == "cancel":
         module.cancel_request.assert_awaited_once()  # type: ignore[attr-defined]
     else:
-        module.approve_connected_request.assert_awaited_once()  # type: ignore[attr-defined]
+        decisions.approve_connected_request.assert_awaited_once()  # type: ignore[attr-defined]
     # Re-posting the requester card replaces the bound timestamp.
     await module.update_requester_card(
         runtime,

@@ -85,10 +85,10 @@ opened.
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
-from collections.abc import Collection, Sequence
 from datetime import UTC, datetime
-from typing import Final, cast
+from typing import Final, Unpack, cast
 
 import anthropic
 import httpx
@@ -116,22 +116,24 @@ from daimon.core.continuity.messages import (
     ConfigurationChange,
     render_env_import_rejected,
 )
+from daimon.core.credential_flow import (
+    CardEdit,
+    McpConnectConfig,
+    submit_env,
+    submit_env_file,
+    submit_mcp,
+)
 from daimon.core.credential_requests import (
     CredentialRequestOutcome,
-    availability_for_request,
-    mcp_permission_message,
     split_skill_repo_target,
 )
 from daimon.core.credential_submit import (
-    apply_env_file_submit,
-    apply_env_submit,
     apply_watch_credential_submit,
     consume_credential_submit,
     guard_credential_save,
     prepare_env_submit,
     prepare_mcp_submit,
     settle_credential_submit,
-    write_mcp_submit,
     write_repo_submit,
     write_skill_repo_submit,
 )
@@ -142,10 +144,8 @@ from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.defaults.spec_merge import merge_skills_with_ma
 from daimon.core.env_file import (
     MAX_ENV_FILE_BYTES,
-    EnvEntry,
     EnvFileRejected,
     decode_env_bytes,
-    env_collision_line,
     env_name_problem,
     parse_env_file,
 )
@@ -155,14 +155,9 @@ from daimon.core.github_visibility import pat_can_access_repo
 from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.mcp_attach import (
     McpConnectDecision,
-    McpServerReplaceRefusedError,
     decide_mcp_connect,
 )
-from daimon.core.mcp_token_check import check_token, rejected_token_message
 from daimon.core.mcp_token_connect import (
-    McpAgentGoneError,
-    McpAttachFailedError,
-    McpTokenWriteFailedError,
     connect_mcp_server_with_token,
 )
 from daimon.core.mux_backend import resource_scope
@@ -171,18 +166,13 @@ from daimon.core.operation_policy import PolicyOutcome, decide_operation
 from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
     CardState,
-    RefusalReason,
-    build_posted_card,
-    card_text,
 )
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.skills.sync import summarize_failed_imports
 from daimon.core.stores import credential_requests
-from daimon.core.stores.agent_files import (
-    AgentEnvEncryptionRequiredError,
-)
-from daimon.core.stores.domain import CredentialRequestRow
+from daimon.core.stores.domain import ChatPlatform, CredentialRequestRow
 from mux.errors import ScopeViolation
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
 
@@ -198,10 +188,6 @@ _MAX_TITLE_CHARS: Final[int] = 45
 #: renderer (`posted_controls.edit`) uses, because both read the same row.
 _UNNAMED_AGENT: Final[str] = "the agent"
 _UNNAMED_RESPONDER: Final[str] = "Daimon"
-
-#: How many colliding keys the refusal names before it summarises the rest,
-#: matching what `render_env_import_rejected` shows for a rejected file.
-_COLLISIONS_SHOWN: Final[int] = 3
 
 
 def _title(target: str, agent: str, fallback: str) -> str:
@@ -235,35 +221,6 @@ def _text_input_of[ModalT: discord.ui.Modal](
     the narrowing is of a fact the caller established one line earlier.
     """
     return cast(discord.ui.TextInput[ModalT], label.component)
-
-
-def _env_card_text(
-    row: CredentialRequestRow,
-    *,
-    state: CardState,
-    refusal: RefusalReason | None = None,
-    replaces: str | None = None,
-) -> str:
-    """The words the env card itself now carries, for the ephemeral to repeat.
-
-    A refusal and a superseded replacement are the two outcomes the
-    submitter needs in their own reply as well as on the card; writing them
-    twice is how the two drift, so both come from the one card builder.
-    """
-    return card_text(
-        build_posted_card(
-            kind="env",
-            state=state,
-            agent_name=_agent_name(row),
-            responder_name=row.responder_name or _UNNAMED_RESPONDER,
-            target=row.target,
-            requester_platform_user_id=row.requester_platform_user_id,
-            expires_at=row.expires_at,
-            token=row.token,
-            refusal=refusal,
-            replaces=replaces,
-        )
-    )
 
 
 async def _settle_spent_request(
@@ -300,38 +257,6 @@ async def _record_refused_outcome(runtime: DiscordRuntime, row: CredentialReques
         await credential_requests.set_credential_request_outcome(
             session, token=row.token, outcome="write_failed"
         )
-
-
-async def _refuse_for_unavailable_target(
-    runtime: DiscordRuntime, interaction: discord.Interaction, row: CredentialRequestRow
-) -> None:
-    """Close a SPENT request whose target turned out to be unusable.
-
-    Unlike `_record_refused_outcome`, whose request is still live, the consume
-    has already happened here — so leaving the card on `received` would have it
-    say "Saving…" about a save that stopped. Nothing is known to have reached a
-    store on this path, so the terminal state is `refused` rather than
-    `partial`, and no continuation is queued: work waiting on this value must
-    not resume on a value that never landed.
-    """
-    async with runtime.sessionmaker.begin() as session:
-        await credential_requests.set_credential_request_outcome(
-            session, token=row.token, outcome="write_failed"
-        )
-    await edit_posted_card(
-        interaction.client, row=row, state="refused", refusal="target_unavailable"
-    )
-
-
-async def _refuse_for_rejected_token(
-    runtime: DiscordRuntime, interaction: discord.Interaction, row: CredentialRequestRow
-) -> None:
-    """Close a SPENT request whose token the server refused before any write."""
-    async with runtime.sessionmaker.begin() as session:
-        await credential_requests.set_credential_request_outcome(
-            session, token=row.token, outcome="token_rejected"
-        )
-    await edit_posted_card(interaction.client, row=row, state="refused", refusal="token_rejected")
 
 
 async def _dispatch_origin_thread(
@@ -452,6 +377,34 @@ async def _decide_mcp_connect_at_submit(
     )
 
 
+@dataclasses.dataclass(frozen=True)
+class _DiscordCredentialPort:
+    """A modal submission's ephemeral follow-ups, card edits and thread resume."""
+
+    runtime: DiscordRuntime
+    interaction: discord.Interaction
+    platform: ChatPlatform = "discord"
+    log_prefix: str = "credential_modal"
+
+    @property
+    def sessionmaker(self) -> async_sessionmaker[AsyncSession]:
+        return self.runtime.sessionmaker
+
+    async def reply(self, text: str) -> None:
+        await self.interaction.followup.send(embed=build_notice_embed(text), ephemeral=True)
+
+    async def edit_card(
+        self, row: CredentialRequestRow, state: CardState, **card: Unpack[CardEdit]
+    ) -> None:
+        await edit_posted_card(self.interaction.client, row=row, state=state, **card)
+
+    async def resume(self, row: CredentialRequestRow) -> None:
+        await _dispatch_origin_thread(self.interaction, row)
+
+    def write_failed(self, kind: str, err: Exception) -> None:
+        _log.error(f"credential_modal.{kind}_write_failed", err_type=type(err).__name__)
+
+
 class EnvCredentialModal(discord.ui.Modal):
     """Add one key: one value, atomic consume, existing agent_files write."""
 
@@ -523,109 +476,13 @@ class EnvCredentialModal(discord.ui.Modal):
         plan = await prepare_env_submit(
             self._runtime.sessionmaker, row=self._row, replacement_refused=replacement_refused
         )
-        shadowed = plan.shadowed
-        try:
-            result = await apply_env_submit(
-                self._runtime.sessionmaker,
-                row=self._row,
-                agent=agent,
-                platform="discord",
-                value=raw_value,
-                plan=plan,
-                now=datetime.now(UTC),
-            )
-            consumed_row = result.consumed
-            if consumed_row is None:
-                await interaction.followup.send(
-                    embed=build_notice_embed(_NO_LONGER_VALID), ephemeral=True
-                )
-                return
-            state, outcome = result.state, result.outcome
-            is_continuation_queued = result.queued
-        except FormPinRefused as refused:
-            # Decided with the consume: rolled back, nothing stored.
-            await interaction.followup.send(
-                embed=build_notice_embed(refused.refusal), ephemeral=True
-            )
-            return
-        except AgentEnvEncryptionRequiredError as err:
-            # Rolled back with the consume: nothing stored, the request stays live.
-            _log.error("credential_modal.env_write_refused_no_crypto_keys")
-            await interaction.followup.send(embed=build_notice_embed(str(err)), ephemeral=True)
-            return
-        except Exception:
-            _log.exception("credential_modal.env_write_failed", key=self._row.target)
-            await interaction.followup.send(
-                embed=build_notice_embed("Something went wrong — please try again."),
-                ephemeral=True,
-            )
-            return
-
-        # Log the key NAME only — never the value.
-        _log.info("credential_modal.env.submit", key=consumed_row.target, outcome=outcome)
-        # After the transaction, not inside it: the consume, the file write and
-        # the continuation commit together here, so this is the first point the
-        # row is durably spent, and it keeps a Discord round trip out of an open
-        # transaction. The `received` edit still runs first: the terminal edit
-        # below can fail, and a card left saying "Saving…" is a better last
-        # state than one still offering a button that can only be refused.
-        await edit_posted_card(interaction.client, row=consumed_row, state="received")
-        if state == "refused":
-            await edit_posted_card(
-                interaction.client,
-                row=consumed_row,
-                state="refused",
-                refusal="replacement_admin_required",
-                replaces=shadowed,
-            )
-            await interaction.followup.send(
-                embed=build_notice_embed(
-                    _env_card_text(
-                        consumed_row,
-                        state="refused",
-                        refusal="replacement_admin_required",
-                        replaces=shadowed,
-                    )
-                ),
-                ephemeral=True,
-            )
-            return
-        if state == "superseded":
-            await edit_posted_card(interaction.client, row=consumed_row, state="superseded")
-            await interaction.followup.send(
-                embed=build_notice_embed(_env_card_text(consumed_row, state="superseded")),
-                ephemeral=True,
-            )
-            return
-        await edit_posted_card(
-            interaction.client,
-            row=consumed_row,
-            state="applied",
-            outcome=ConfigurationChange(
-                target_name=_agent_name(consumed_row),
-                kind="key",
-                availability=availability_for_request(consumed_row),
-                detail=consumed_row.target,
-            ),
+        await submit_env(
+            _DiscordCredentialPort(self._runtime, interaction),
+            row=self._row,
+            agent=agent,
+            value=raw_value,
+            plan=plan,
         )
-        if is_continuation_queued:
-            await _dispatch_origin_thread(interaction, consumed_row)
-
-
-def _collision_lines(collisions: Sequence[EnvEntry], held: Collection[str]) -> tuple[str, ...]:
-    """Name the keys the file would have overwritten, by name and line only.
-
-    A value never reaches this copy: the card these lines land on is public
-    to the channel, so the only facts it may carry are the ones already on
-    the uploader's screen.
-    """
-    lines = [env_collision_line(entry, held) for entry in collisions]
-    shown = lines[:_COLLISIONS_SHOWN]
-    remaining = len(lines) - _COLLISIONS_SHOWN
-    if remaining > 0:
-        shown.append(f"…and {remaining} more.")
-    shown.append("Nothing was changed. Take them out of the file, or ask to replace them by name.")
-    return tuple(shown)
 
 
 class EnvFileModal(discord.ui.Modal):
@@ -719,78 +576,12 @@ class EnvFileModal(discord.ui.Modal):
         if agent is None:
             return
 
-        try:
-            consumed_row, collisions, is_continuation_queued, held = await apply_env_file_submit(
-                self._runtime.sessionmaker,
-                row=self._row,
-                agent=agent,
-                platform="discord",
-                entries=entries,
-                now=datetime.now(UTC),
-            )
-            if consumed_row is None:
-                await interaction.followup.send(
-                    embed=build_notice_embed(_NO_LONGER_VALID), ephemeral=True
-                )
-                return
-        except FormPinRefused as refused:
-            # Decided with the consume: rolled back, nothing stored.
-            await interaction.followup.send(
-                embed=build_notice_embed(refused.refusal), ephemeral=True
-            )
-            return
-        except AgentEnvEncryptionRequiredError as err:
-            # Rolled back with the consume: nothing stored, the request stays live.
-            _log.error("credential_modal.env_write_refused_no_crypto_keys")
-            await interaction.followup.send(embed=build_notice_embed(str(err)), ephemeral=True)
-            return
-        except Exception:
-            # Named boundary: discord.py swallows whatever escapes on_submit.
-            _log.exception("credential_modal.env_file_write_failed", key_count=len(entries))
-            await interaction.followup.send(
-                embed=build_notice_embed("Something went wrong — please try again."),
-                ephemeral=True,
-            )
-            return
-
-        # Key NAMES and counts only — never a value.
-        _log.info(
-            "credential_modal.env_file.submit",
-            key_count=len(entries),
-            collision_count=len(collisions),
-        )
-        if collisions:
-            refusal_lines = _collision_lines(collisions, held)
-            await edit_posted_card(
-                interaction.client,
-                row=self._row,
-                state="refused",
-                refusal="env_file_invalid",
-                refusal_lines=refusal_lines,
-            )
-            await interaction.followup.send(
-                embed=build_notice_embed(
-                    "\n".join((f"No keys were saved for {agent_name}.", *refusal_lines))
-                ),
-                ephemeral=True,
-            )
-            return
-
-        # No success ephemeral: the card below is the receipt, and a second
-        # copy of it in the thread says the same thing twice.
-        await edit_posted_card(
-            interaction.client,
+        await submit_env_file(
+            _DiscordCredentialPort(self._runtime, interaction),
             row=self._row,
-            state="applied",
-            outcome=ConfigurationChange(
-                target_name=agent_name,
-                kind="keys_bulk",
-                availability=availability_for_request(consumed_row),
-                count=len(entries),
-            ),
+            agent=agent,
+            entries=entries,
         )
-        if is_continuation_queued:
-            await _dispatch_origin_thread(interaction, consumed_row)
 
 
 class McpCredentialModal(discord.ui.Modal):
@@ -817,36 +608,6 @@ class McpCredentialModal(discord.ui.Modal):
         )
         self.token_input = _text_input_of(token_label)
         self.add_item(token_label)
-
-    async def _refuse_replacement(
-        self,
-        interaction: discord.Interaction,
-        consumed_row: CredentialRequestRow,
-        *,
-        policy_refused: bool = False,
-    ) -> None:
-        """Spend the request and write nothing: no vault token, no attach."""
-        await _settle_spent_request(
-            self._runtime,
-            row=consumed_row,
-            outcome="policy_refused" if policy_refused else "write_failed",
-            carries_work=False,
-        )
-        await edit_posted_card(
-            interaction.client,
-            row=consumed_row,
-            state="refused",
-            refusal="mcp_permission_required" if policy_refused else "replacement_admin_required",
-        )
-        await interaction.followup.send(
-            embed=build_notice_embed(
-                (mcp_permission_message(_agent_name(consumed_row)) + " Nothing was saved.")
-                if policy_refused
-                else f"{_agent_name(consumed_row)} already has this connection. Nothing was saved."
-                "\n\nOnly a server admin can replace it."
-            ),
-            ephemeral=True,
-        )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
@@ -885,158 +646,22 @@ class McpCredentialModal(discord.ui.Modal):
             ),
             clock=lambda: datetime.now(UTC),
         )
-        try:
-            consumed_row = await consume_credential_submit(
-                self._runtime.sessionmaker, row=self._row, agent=agent, now=now
-            )
-        except FormPinRefused as refused:
-            await interaction.followup.send(
-                embed=build_notice_embed(refused.refusal), ephemeral=True
-            )
-            return
-        if consumed_row is None:
-            await interaction.followup.send(
-                embed=build_notice_embed(_NO_LONGER_VALID), ephemeral=True
-            )
-            return
-
-        async with guard_credential_save(
-            self._runtime.sessionmaker,
-            row=consumed_row,
-            edit_retry=lambda retry, reason: edit_posted_card(
-                interaction.client, row=retry, state="requested", retry_reason=reason
+        await submit_mcp(
+            _DiscordCredentialPort(self._runtime, interaction),
+            row=self._row,
+            agent=agent,
+            value=token_value,
+            connect=connect,
+            config=McpConnectConfig(
+                anthropic=self._runtime.anthropic,
+                fernet=self._runtime.turn_deps.fernet,
+                probe=self._runtime.mcp_token_probe,
+                jwt_secret=jwt_secret_setting.get_secret_value().encode(),
+                public_url=str(public_url_setting),
+                connect=connect_mcp_server_with_token,
             ),
-            edit_pending=lambda pending, notice: edit_posted_card(
-                interaction.client, row=pending, state="received", saving_notice=notice
-            ),
-        ) as attempt:
-            await edit_posted_card(interaction.client, row=consumed_row, state="received")
-            if connect.refused:
-                attempt.retry_allowed = False
-                await self._refuse_replacement(
-                    interaction, consumed_row, policy_refused=not connect.replaces
-                )
-                return
-
-            mcp_server_url = consumed_row.mcp_server_url
-            if mcp_server_url is None:
-                attempt.retry_allowed = False
-                _log.error(
-                    "credential_modal.mcp_missing_server_url", agent_id=str(consumed_row.agent_id)
-                )
-                await _refuse_for_unavailable_target(self._runtime, interaction, consumed_row)
-                await interaction.followup.send(
-                    embed=build_notice_embed(
-                        "This request is missing its server URL — please ask again."
-                    ),
-                    ephemeral=True,
-                )
-                return
-
-            _log.info(
-                "credential_modal.mcp.submit",
-                mcp_server_url=mcp_server_url,
-                token_present=bool(token_value),
-            )
-            # Ask the server first. A token it rejects would otherwise be stored,
-            # mirrored into every caller's vault and attached, and every turn from
-            # then on would carry a failed MCP init. A server that cannot be
-            # reached is not a verdict: the save proceeds and MA reports later.
-            rejection = await check_token(
-                self._runtime.mcp_token_probe, mcp_server_url=mcp_server_url, token=token_value
-            )
-            if rejection is not None:
-                await _refuse_for_rejected_token(self._runtime, interaction, consumed_row)
-                await interaction.followup.send(
-                    embed=build_notice_embed(rejected_token_message(rejection)), ephemeral=True
-                )
-                return
-            try:
-                await write_mcp_submit(
-                    self._runtime.anthropic,
-                    session_factory=self._runtime.sessionmaker,
-                    row=consumed_row,
-                    fernet=self._runtime.turn_deps.fernet,
-                    value=token_value,
-                    replace_allowed=connect.replace_allowed,
-                    jwt_secret=jwt_secret_setting.get_secret_value().encode(),
-                    public_url=str(public_url_setting),
-                    now=now,
-                    connect=connect_mcp_server_with_token,
-                )
-            except McpServerReplaceRefusedError:
-                attempt.retry_allowed = False
-                # A server or token for this URL appeared after the pre-consume check.
-                await self._refuse_replacement(interaction, consumed_row)
-                return
-            except (McpAgentGoneError, McpAttachFailedError) as err:
-                attempt.retry_allowed = not isinstance(err, McpAgentGoneError)
-                # Exception class name only; SDK failures can include the request
-                # envelope. Nothing was stored.
-                _log.warning(
-                    "credential_modal.mcp_attach_failed",
-                    mcp_server_url=mcp_server_url,
-                    err_type=type(err.__cause__ or err).__name__,
-                )
-                await _refuse_for_unavailable_target(self._runtime, interaction, consumed_row)
-                await interaction.followup.send(
-                    embed=build_notice_embed(
-                        f"`{mcp_server_url}` could not be attached to the "
-                        "agent. Nothing was saved. Try again using the same form."
-                    ),
-                    ephemeral=True,
-                )
-                return
-            except McpTokenWriteFailedError as err:
-                _log.warning(
-                    "credential_modal.mcp_write_failed",
-                    mcp_server_url=mcp_server_url,
-                    err_type=type(err.__cause__ or err).__name__,
-                )
-                is_queued = await _settle_spent_request(
-                    self._runtime,
-                    row=consumed_row,
-                    outcome="write_failed",
-                    carries_work=False,
-                )
-                await edit_posted_card(
-                    interaction.client,
-                    row=consumed_row,
-                    state="partial",
-                    outcome=ConfigurationChange(
-                        target_name=_agent_name(consumed_row),
-                        kind="mcp",
-                        availability="preparation_failed",
-                        detail=consumed_row.target,
-                    ),
-                )
-                await interaction.followup.send(
-                    embed=build_notice_embed(
-                        f"`{mcp_server_url}` is attached, but saving its token did not finish. "
-                        "Try again using the same form."
-                    ),
-                    ephemeral=True,
-                )
-                if is_queued:
-                    await _dispatch_origin_thread(interaction, consumed_row)
-                return
-
-            is_continuation_queued = await _settle_spent_request(
-                self._runtime, row=consumed_row, outcome="applied", carries_work=True
-            )
-            await edit_posted_card(
-                interaction.client,
-                row=consumed_row,
-                state="applied",
-                outcome=ConfigurationChange(
-                    target_name=_agent_name(consumed_row),
-                    kind="mcp",
-                    availability="next_message",
-                    detail=consumed_row.target,
-                ),
-            )
-            if is_continuation_queued:
-                await _dispatch_origin_thread(interaction, consumed_row)
+            now=now,
+        )
 
 
 class WatchCredentialModal(discord.ui.Modal):

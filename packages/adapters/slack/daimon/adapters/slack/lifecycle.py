@@ -43,7 +43,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Literal, cast
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import aiohttp
@@ -69,7 +69,6 @@ from daimon.adapters.slack.mrkdwn import (
     markdown_block_fallback,
     seal_markdown_block,
 )
-from daimon.adapters.slack.progress_receipt import InitialProgressReceipt
 from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.adapters.slack.support_escalation import build_ask_human_button
 from daimon.adapters.slack.tables import render_slack_tables
@@ -199,7 +198,6 @@ class SlackTurnLifecycle(OutputGate):
         sessionmaker: async_sessionmaker[AsyncSession] | None = None,
         tenant_id: UUID | None = None,
         budget_channel_id: str | None = None,
-        on_initial_progress: Callable[[InitialProgressReceipt], None] | None = None,
         alert_webhook_url: SecretStr | None = None,
         ask_human: bool = False,
         vote_buttons: bool = True,
@@ -228,7 +226,6 @@ class SlackTurnLifecycle(OutputGate):
         self._ma_agent_id = ma_agent_id
         self._intent_id = intent_id
         self._budget_channel_id = budget_channel_id
-        self._on_initial_progress = on_initial_progress
         self._alert_webhook_url = alert_webhook_url
         self._channel = channel
         self._agent_name = agent_name
@@ -375,7 +372,7 @@ class SlackTurnLifecycle(OutputGate):
         card, before its response supplies the message ts. Once the response
         returns, the ts is registered as a recovery and legacy lookup key.
         """
-        await self._maybe_flush(initial=True)
+        await self._maybe_flush()
 
     async def on_sse_event(self, event: RawMessageStreamEvent) -> None:
         # Cheap local tap per the hardened TurnLifecycle contract:
@@ -410,7 +407,7 @@ class SlackTurnLifecycle(OutputGate):
                 else dataclasses.replace(self._state, text_preview=None)
             )
 
-    async def _maybe_flush(self, *, initial: bool = False) -> None:
+    async def _maybe_flush(self) -> None:
         """Post or update the status message, subject to debounce. No-op after terminal."""
         if self._terminal:
             return
@@ -427,11 +424,6 @@ class SlackTurnLifecycle(OutputGate):
             cancel_key = self._status_ts
         blocks = await self._untag_blocks(to_blocks(self._state, now=now, cancel_key=cancel_key))
         text = await self._untag(to_fallback_text(self._state, now=now))
-        rendered_json = (
-            json.dumps({"blocks": blocks, "text": text})
-            if initial and self._on_initial_progress is not None
-            else None
-        )
 
         if self._status_ts is None:
             # First flush — immediate, no debounce.
@@ -456,8 +448,6 @@ class SlackTurnLifecycle(OutputGate):
                     self._pending_registered = False
                 raise
             self._status_ts = cast(str, resp["ts"])  # pyright: ignore[reportUnknownVariableType]
-            if rendered_json is not None:
-                self._observe_initial_progress(rendered_json, operation="send")
             self._register(self._status_ts, self._cancel, self._author_id)
             # The card is now routable by its message ts. Remove the temporary
             # key promptly so later clicks follow any recovery rebind of that ts.
@@ -476,25 +466,6 @@ class SlackTurnLifecycle(OutputGate):
                 text=text,
             )
             self._last_flush = now
-            if rendered_json is not None:
-                self._observe_initial_progress(rendered_json, operation="edit")
-
-    def _observe_initial_progress(
-        self, rendered_json: str, *, operation: Literal["send", "edit"]
-    ) -> None:
-        if self._on_initial_progress is None:
-            return
-        assert self._status_ts is not None
-        self._on_initial_progress(
-            InitialProgressReceipt(
-                operation=operation,
-                destination_id=self._channel,
-                thread_id=self._thread_ts,
-                message_id=self._status_ts,
-                rendered_json=rendered_json,
-                observed_s=self._clock(),
-            )
-        )
 
     def _apply_usage(self, state: TurnState) -> None:
         """Price accumulated token totals onto the Block Kit state.
