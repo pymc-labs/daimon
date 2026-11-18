@@ -13,6 +13,7 @@ from daimon.adapters.teams.card_actions import button, error_text, heading, text
 from daimon.core.privacy import (
     PRIVACY_TITLE,
     PurgePreview,
+    cascade_lines,
     delete_scope_lines,
     privacy_lines,
     summary_line,
@@ -85,43 +86,7 @@ def export_card(preview: PurgePreview, *, bot: str) -> AdaptiveCard:
 
 
 def _will_happen(preview: PurgePreview) -> list[str]:
-    def amount(count: int, singular: str) -> str:
-        return f"**{count}** {singular if count == 1 else singular + 's'}"
-
-    lines: list[str] = []
-    if preview.linked_principals.count:
-        n = amount(preview.linked_principals.count, "linked account")
-        ex = preview.linked_principals.example or "—"
-        lines.append(f"🔑 Remove {n}, for example {ex}")
-    if preview.routines.count:
-        lines.append(f"⏰ Cancel {amount(preview.routines.count, 'routine')}")
-    if preview.principal_links.count:
-        lines.append(
-            f"🔗 Remove {amount(preview.principal_links.count, 'link')} between your accounts"
-        )
-    if preview.user_configs.count:
-        lines.append("⚙ Remove your saved settings")
-    if preview.user_skills.count:
-        n = amount(preview.user_skills.count, "skill")
-        ex = preview.user_skills.example or "—"
-        lines.append(f"🧰 Forget {n} you synced, for example {ex}")
-    if preview.github_user_links.count:
-        lines.append(f"🔗 Unlink {amount(preview.github_user_links.count, 'GitHub account')}")
-    if preview.mcp_tokens.count:
-        lines.append(f"🎫 Delete {amount(preview.mcp_tokens.count, 'Daimon access token')}")
-    if preview.slack_user_tokens.count:
-        lines.append(f"🔐 Delete {amount(preview.slack_user_tokens.count, 'saved access token')}")
-    if preview.microsoft_user_tokens.count:
-        lines.append("🔌 Disconnect your Microsoft account")
-    if preview.slack_turn_contexts.count:
-        n = amount(preview.slack_turn_contexts.count, "temporary request record")
-        lines.append(f"💬 Delete {n}")
-    if preview.direct_message_conversations.count:
-        n = amount(preview.direct_message_conversations.count, "private conversation")
-        lines.append(f"💬 Delete Daimon's saved data for {n}")
-    if preview.account.count > 0:
-        lines.append("🪪 Remove your account")
-    return lines or ["Nothing to delete."]
+    return cascade_lines(preview, "teams", code="") or ["Nothing to delete."]
 
 
 def confirm_card(

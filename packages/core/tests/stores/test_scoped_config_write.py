@@ -17,7 +17,6 @@ from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import (
     clear_agent_references,
     clear_environment_references,
-    delete_propagation_row,
     propagate,
     set_fields,
     unset_fields,
@@ -600,77 +599,6 @@ async def test_last_write_wins_records_new_actor(db_session: AsyncSession) -> No
     assert orm.agent_name_set_by_account_id == actor_b.id, (
         "audit FK should reflect the second committer"
     )
-
-
-async def test_delete_propagation_row_removes_user_active_channel_row(
-    db_session: AsyncSession,
-) -> None:
-    t = await make_tenant(db_session)
-    actor = await make_account(db_session, tenant=t)
-    scope = ChannelScopeRef(tenant_id=t.id, channel_id="c1")
-    await set_fields(
-        db_session,
-        scope=scope,
-        tenant_id=t.id,
-        mode="user_active",
-        actor_account_id=actor.id,
-    )
-    deleted = await delete_propagation_row(db_session, scope=scope)
-    assert deleted is True, "delete_propagation_row must report True on successful delete"
-    row = await get_scope(db_session, scope=scope)
-    assert row is None, "user_active channel row must be gone"
-
-
-async def test_delete_propagation_row_idempotent_when_missing(db_session: AsyncSession) -> None:
-    t = await make_tenant(db_session)
-    scope = ChannelScopeRef(tenant_id=t.id, channel_id="c1")
-    deleted = await delete_propagation_row(db_session, scope=scope)
-    assert deleted is False, "delete on a nonexistent row must return False, not raise"
-
-
-async def test_delete_propagation_row_tenant_scope(db_session: AsyncSession) -> None:
-    t = await make_tenant(db_session)
-    actor = await make_account(db_session, tenant=t)
-    scope = TenantScopeRef(tenant_id=t.id)
-    await set_fields(
-        db_session,
-        scope=scope,
-        tenant_id=t.id,
-        mode="user_active",
-        actor_account_id=actor.id,
-    )
-    deleted = await delete_propagation_row(db_session, scope=scope)
-    assert deleted is True
-    row = await get_scope(db_session, scope=scope)
-    assert row is None, "user_active tenant row must be gone"
-
-
-async def test_delete_propagation_row_does_not_touch_other_tenants(
-    db_session: AsyncSession,
-) -> None:
-    t1 = await make_tenant(db_session)
-    t2 = await make_tenant(db_session)
-    actor_t1 = await make_account(db_session, tenant=t1)
-    actor_t2 = await make_account(db_session, tenant=t2)
-    scope_t1 = TenantScopeRef(tenant_id=t1.id)
-    scope_t2 = TenantScopeRef(tenant_id=t2.id)
-    await set_fields(
-        db_session,
-        scope=scope_t1,
-        tenant_id=t1.id,
-        mode="user_active",
-        actor_account_id=actor_t1.id,
-    )
-    await set_fields(
-        db_session,
-        scope=scope_t2,
-        tenant_id=t2.id,
-        mode="user_active",
-        actor_account_id=actor_t2.id,
-    )
-    await delete_propagation_row(db_session, scope=scope_t1)
-    surviving = await get_scope(db_session, scope=scope_t2)
-    assert surviving is not None, "deleting t1's row must not touch t2's row"
 
 
 # ---------------------------------------------------------------------------

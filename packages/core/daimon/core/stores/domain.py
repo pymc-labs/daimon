@@ -255,16 +255,6 @@ RoutineDestinationKind = Literal["channel", "thread", "dm"]
 RoutineDeliveryStatus = Literal["pending", "claimed", "delivered", "skipped"]
 
 
-class UnattendedRequester(BaseModel):
-    """Whose rights a routine or queued wake fires with: their stored role and role ids."""
-
-    model_config = ConfigDict(frozen=True)
-
-    platform_user_id: str
-    is_admin: bool = False
-    role_ids: tuple[str, ...] = ()
-
-
 @dataclass(frozen=True)
 class SandboxPin:
     """The agent version and environment revision an admin's routine opt-in covers."""
@@ -434,30 +424,6 @@ class TaskContinuationRow(BaseModel):
     attempts: int = 0
 
 
-class GitHubOauthStateRow(BaseModel):
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    state: uuid.UUID
-    platform: str
-    platform_user_id: str
-    scopes: tuple[str, ...]
-    created_at: datetime
-    consumed_at: datetime | None
-    tenant_id: uuid.UUID
-    agent_id: uuid.UUID | None = None
-
-
-class GitHubCredentialRow(BaseModel):
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    principal_id: uuid.UUID
-    github_login: str
-    encrypted_token: bytes
-    scopes: tuple[str, ...]
-    created_at: datetime
-    updated_at: datetime
-
-
 class AgentMcpCredentialRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -599,13 +565,6 @@ class SlackTurnContextRow(BaseModel):
     channel_id: str
     thread_ts: str
     started_at: datetime
-
-
-class AgentGithubBindingRow(BaseModel):
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    agent_id: uuid.UUID
-    principal_id: uuid.UUID
 
 
 class AgentGoogleBindingRow(BaseModel):
@@ -938,29 +897,6 @@ class AgentRepoBindingRow(BaseModel):
     updated_at: datetime
 
 
-class AgentSkillRepoCredentialRow(BaseModel):
-    """Pydantic row for AgentSkillRepoCredential — a per-repo skill-import token.
-
-    Separate from `AgentRepoBindingRow` for the reason its ORM docstring
-    gives: one working repo per agent, any number of skill repos, and
-    enrolling one must never move the other.
-    """
-
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    tenant_id: uuid.UUID
-    agent_id: uuid.UUID
-    repo_url: str
-    default_branch: str
-    path: str
-    ma_secret_ref: str
-    proof_kind: RepoProofKind | None = None
-    proof_at: datetime | None = None
-    proof_account_id: uuid.UUID | None = None
-    created_at: datetime
-    updated_at: datetime
-
-
 class AgentMemoryStoreRow(BaseModel):
     """Pydantic row for AgentMemoryStore (agent memory feature)."""
 
@@ -968,19 +904,6 @@ class AgentMemoryStoreRow(BaseModel):
 
     tenant_id: uuid.UUID
     agent_id: uuid.UUID
-    memory_store_id: str
-    created_at: datetime
-
-
-class AgentChannelMemoryStoreRow(BaseModel):
-    """Pydantic row for AgentChannelMemoryStore (a held channel's memory)."""
-
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    tenant_id: uuid.UUID
-    agent_id: uuid.UUID
-    platform: str
-    channel_id: str
     memory_store_id: str
     created_at: datetime
 

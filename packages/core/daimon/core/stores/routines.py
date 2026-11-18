@@ -20,8 +20,6 @@ from typing import Any, Final, Literal, cast
 
 import structlog
 from daimon.core._models import (
-    Account,
-    PlatformPrincipal,
     Routine,
     RoutineSandboxHistoryRecord,
     Tenant,
@@ -36,11 +34,9 @@ from daimon.core.routine_move import routine_never_fired
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import (
     CatchUpPolicy,
-    Role,
     RoutineDestinationKind,
     RoutineRow,
     SandboxPin,
-    UnattendedRequester,
 )
 from daimon.core.stores.security_audit import append_event
 from sqlalchemy import and_, delete, false, func, or_, select, true, update
@@ -258,50 +254,6 @@ async def list_routines_for_channel(
         .order_by(Routine.created_at, Routine.id)
     )
     return [RoutineRow.model_validate(r) for r in rows]
-
-
-async def list_routine_creators(
-    session: AsyncSession,
-    *,
-    tenant_id: _uuid.UUID,
-    platform: str,
-    agent_names: Collection[str],
-    agent_id: str | None = None,
-) -> list[UnattendedRequester]:
-    """Who made the routines that run the agent, paused ones included.
-
-    A routine counts when it names any of `agent_names` or runs `agent_id`.
-
-    A routine with no recorded creator never fires and is left out; a creator
-    with no account yet fires as a plain member.
-    """
-    rows = await session.execute(
-        select(Routine.created_by_user_id, Account.role, Account.platform_role_ids)
-        .outerjoin(
-            PlatformPrincipal,
-            and_(
-                PlatformPrincipal.tenant_id == Routine.tenant_id,
-                PlatformPrincipal.platform == platform,
-                PlatformPrincipal.external_id == Routine.created_by_user_id,
-            ),
-        )
-        .outerjoin(Account, Account.id == PlatformPrincipal.account_id)
-        .where(
-            Routine.tenant_id == tenant_id,
-            or_(Routine.agent_name.in_(agent_names), Routine.agent_id == agent_id),
-            Routine.created_by_user_id.is_not(None),
-        )
-        .distinct()
-    )
-    return [
-        UnattendedRequester(
-            platform_user_id=user_id,
-            is_admin=role == Role.ADMIN,
-            role_ids=tuple(role_ids or ()),
-        )
-        for user_id, role, role_ids in rows.tuples()
-        if user_id is not None
-    ]
 
 
 async def list_routine_channel_ids(

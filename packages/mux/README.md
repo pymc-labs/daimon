@@ -107,14 +107,6 @@ journal lease, and an adapter that omits unverified cost. An accounting posture
 does not enable a profile. Aggregates require disjoint transitive coverage,
 including absent descendants; their coverage sets remain fixed across revisions.
 
-The host's offline `daimon.core.usage_delegation` API accounts complete,
-explicitly attributed OpenAI root/child turn inventories atomically. It retains
-native child IDs/meters, refuses reassignment or omitted known work, and charges
-measured shared infrastructure once. Unverified membership/disjointness, models,
-prices or measurements cannot establish actual spend. A native collector must
-prove the scope before delegation is enabled; this API does not register a
-profile or lift the delegation-disabled host restriction.
-
 The host's `daimon.core.selfhosted_usage` consumes selfhosted incremental
 model-request observations through the transactional usage outbox and credit
 ledger. Before model I/O, runtime admission must persist the deployment,

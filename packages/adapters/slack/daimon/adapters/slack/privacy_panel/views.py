@@ -25,6 +25,7 @@ from daimon.core.privacy import (
     DELETE_PAUSED,
     PRIVACY_TITLE,
     PurgePreview,
+    cascade_lines,
     delete_scope_lines,
     privacy_lines,
 )
@@ -41,50 +42,13 @@ def _cascade_blocks(preview: PurgePreview) -> list[dict[str, Any]]:
     Port of privacy_panel/cascade.py (Discord) — two groups:
     what-will-be-deleted / what-is-kept-elsewhere.
     """
-    will_happen_lines: list[str] = []
+    will_happen_lines = [
+        f"• {line}"
+        for line in cascade_lines(preview, "slack", bold="*", escape=escape_mrkdwn, app="Slack")
+    ]
 
-    def amount(count: int, singular: str, plural: str | None = None) -> str:
-        return f"*{count}* {singular if count == 1 else plural or singular + 's'}"
-
-    if preview.linked_principals.count > 0:
-        ex = escape_mrkdwn(preview.linked_principals.example or "—")
-        n = amount(preview.linked_principals.count, "linked account")
-        will_happen_lines.append(f"• 🔑 Remove {n}, for example `{ex}`")
-    if preview.routines.count > 0:
-        will_happen_lines.append(f"• ⏰ Cancel {amount(preview.routines.count, 'routine')}")
-    if preview.principal_links.count > 0:
-        will_happen_lines.append(
-            f"• 🔗 Remove {amount(preview.principal_links.count, 'link')} between your accounts"
-        )
-    if preview.user_configs.count > 0:
-        will_happen_lines.append("• ⚙ Remove your saved settings")
-    if preview.user_skills.count > 0:
-        ex = escape_mrkdwn(preview.user_skills.example or "—")
-        n = amount(preview.user_skills.count, "skill")
-        will_happen_lines.append(f"• 🧰 Forget {n} you synced, for example `{ex}`")
-    if preview.github_user_links.count > 0:
-        will_happen_lines.append(
-            f"• 🔗 Unlink {amount(preview.github_user_links.count, 'GitHub account')}"
-        )
-    if preview.mcp_tokens.count > 0:
-        will_happen_lines.append(
-            f"• 🎫 Delete {amount(preview.mcp_tokens.count, 'Daimon access token')}"
-        )
-    if preview.slack_user_tokens.count > 0:
-        will_happen_lines.append(
-            f"• 🔐 Delete {amount(preview.slack_user_tokens.count, 'saved Slack access token')}"
-        )
-    if preview.slack_turn_contexts.count > 0:
-        n = amount(preview.slack_turn_contexts.count, "temporary Slack request record")
-        will_happen_lines.append(f"• 💬 Delete {n}")
-    if preview.direct_message_conversations.count > 0:
-        n = amount(preview.direct_message_conversations.count, "private conversation")
-        will_happen_lines.append(f"• 💬 Delete Daimon's saved data for {n}")
-    if preview.mux_slots.count > 0:
-        n = amount(preview.mux_slots.count, "saved conversation")
-        will_happen_lines.append(f"• 💬 Delete Daimon's copy of {n}, with its messages")
-    if preview.account.count > 0:
-        will_happen_lines.append("• 🪪 Remove your account")
+    def amount(count: int, singular: str) -> str:
+        return f"*{count}* {singular if count == 1 else singular + 's'}"
 
     will_happen_text = "⚡ *What will happen*\n\n" + (
         "\n".join(will_happen_lines) if will_happen_lines else "_Nothing to delete._"

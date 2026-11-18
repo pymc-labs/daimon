@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Annotated, Any, ClassVar
 
 from daimon.core import _erasure_guards
 from sqlalchemy import (
@@ -39,10 +39,40 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.types import TypeEngine
+
+# Repeated column shapes. A bare `Mapped[T]` gets its SQL type from
+# `Base.type_annotation_map` and its nullability from `| None`.
+TsNow = Annotated[datetime, mapped_column(server_default=func.now())]
+TsNowOnUpdate = Annotated[datetime, mapped_column(server_default=func.now(), onupdate=func.now())]
+UuidPk = Annotated[
+    uuid.UUID, mapped_column(primary_key=True, server_default=func.gen_random_uuid())
+]
+TenantFK = Annotated[uuid.UUID, mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))]
+TenantPk = Annotated[
+    uuid.UUID, mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True)
+]
+AccountFK = Annotated[uuid.UUID, mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"))]
+AccountSetNull = Annotated[
+    uuid.UUID | None, mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"))
+]
+FalseFlag = Annotated[bool, mapped_column(server_default=text("false"))]
 
 
 class Base(DeclarativeBase):
     """Declarative base for all daimon-core ORM models."""
+
+    type_annotation_map: ClassVar[dict[Any, TypeEngine[Any]]] = {
+        str: Text(),
+        uuid.UUID: UUID(as_uuid=True),
+        datetime: DateTime(timezone=True),
+        int: Integer(),
+        bool: Boolean(),
+        bytes: LargeBinary(),
+        dict[str, Any]: JSONB(),
+        list[str]: ARRAY(Text),
+        date: Date(),
+    }
 
 
 class AgentAvatar(Base):
@@ -51,28 +81,22 @@ class AgentAvatar(Base):
         CheckConstraint("source IN ('default', 'upload')", name="ck_agent_avatars_source"),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    agent_name: Mapped[str] = mapped_column(Text, primary_key=True)
-    token: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
-    sha256: Mapped[str] = mapped_column(Text, nullable=False)
-    png: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    png_128: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    png_512: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    previous_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
-    previous_png: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    previous_png_128: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    previous_png_512: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    face_combo: Mapped[str | None] = mapped_column(Text, nullable=True)
-    face_thumbnail: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    source: Mapped[str] = mapped_column(Text, nullable=False)
-    updated_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    tenant_id: Mapped[TenantPk]
+    agent_name: Mapped[str] = mapped_column(primary_key=True)
+    token: Mapped[str] = mapped_column(unique=True)
+    sha256: Mapped[str]
+    png: Mapped[bytes]
+    png_128: Mapped[bytes | None]
+    png_512: Mapped[bytes | None]
+    previous_sha256: Mapped[str | None]
+    previous_png: Mapped[bytes | None]
+    previous_png_128: Mapped[bytes | None]
+    previous_png_512: Mapped[bytes | None]
+    face_combo: Mapped[str | None]
+    face_thumbnail: Mapped[bytes | None]
+    source: Mapped[str]
+    updated_by_account_id: Mapped[AccountSetNull]
+    updated_at: Mapped[TsNow]
 
 
 # Skill titles name a tenant by the first 8 hex chars of its id, so no two
@@ -91,61 +115,34 @@ class Tenant(Base):
         Index(TENANT_ID_PREFIX_INDEX, text("left(CAST(id AS TEXT), 8)"), unique=True),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        server_default=func.gen_random_uuid(),
-    )
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    external_id: Mapped[str] = mapped_column(Text, nullable=False)
-    provision_status: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'ready'")
-    )
-    funding_mode: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'prepaid'")
-    )
-    turn_cap: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    id: Mapped[UuidPk]
+    platform: Mapped[str]
+    external_id: Mapped[str]
+    provision_status: Mapped[str] = mapped_column(server_default=text("'ready'"))
+    funding_mode: Mapped[str] = mapped_column(server_default=text("'prepaid'"))
+    turn_cap: Mapped[int | None]
     # Read by nothing: typed mentions are the `plain_text_mentions` feature now (migration
     # 0189 copied this value). Kept so an older build still starts.
-    plain_text_mentions: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
+    plain_text_mentions: Mapped[FalseFlag]
     # Bumped by every feature_values write: the feature resolver's cache key.
-    feature_revision: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, server_default=text("0")
-    )
-    last_reconcile_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    registered_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    feature_revision: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+    last_reconcile_error: Mapped[str | None]
+    archived_at: Mapped[datetime | None]
+    registered_at: Mapped[TsNow]
+    created_at: Mapped[TsNow]
 
 
 class Account(Base):
     __tablename__ = "accounts"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        server_default=func.gen_random_uuid(),
-    )
+    id: Mapped[UuidPk]
     tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
+        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
     )
-    role: Mapped[str] = mapped_column(Text, nullable=False, server_default="user")
+    role: Mapped[str] = mapped_column(server_default="user")
     # Legacy role ids retained with the existing account column.
-    platform_role_ids: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    platform_role_ids: Mapped[list[str]] = mapped_column(server_default=text("'{}'::text[]"))
+    created_at: Mapped[TsNow]
 
 
 class CliPrincipal(Base):
@@ -155,24 +152,11 @@ class CliPrincipal(Base):
         Index("ix_cli_principals_tenant_id", "tenant_id"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        server_default=func.gen_random_uuid(),
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    os_user: Mapped[str] = mapped_column(Text)
-    account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("accounts.id", ondelete="RESTRICT"),
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    os_user: Mapped[str]
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id", ondelete="RESTRICT"))
+    created_at: Mapped[TsNow]
 
 
 class PlatformPrincipal(Base):
@@ -189,29 +173,16 @@ class PlatformPrincipal(Base):
         Index("ix_platform_principals_account_id", "account_id"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        server_default=func.gen_random_uuid(),
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    platform: Mapped[str] = mapped_column(Text)
-    external_id: Mapped[str] = mapped_column(Text)
-    account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("accounts.id", ondelete="RESTRICT"),
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    active_agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    platform: Mapped[str]
+    external_id: Mapped[str]
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id", ondelete="RESTRICT"))
+    created_at: Mapped[TsNow]
+    active_agent_name: Mapped[str | None]
     # Home organisation id of a person verified to belong to another organisation.
     # Sticky: written once by admission, never cleared by code.
-    foreign_home_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    foreign_home_id: Mapped[str | None]
 
 
 class PrincipalLink(Base):
@@ -223,28 +194,22 @@ class PrincipalLink(Base):
     )
 
     cli_principal_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("cli_principals.id", ondelete="CASCADE"),
+        ForeignKey("cli_principals.id", ondelete="CASCADE")
     )
     platform_principal_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("platform_principals.id", ondelete="CASCADE"),
+        ForeignKey("platform_principals.id", ondelete="CASCADE")
     )
-    linked_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    linked_at: Mapped[TsNow]
 
 
 class UserConfig(Base):
     __tablename__ = "user_config"
 
     account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("accounts.id", ondelete="CASCADE"),
-        primary_key=True,
+        ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
     )
-    agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    environment_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    agent_name: Mapped[str | None]
+    environment_name: Mapped[str | None]
 
 
 class TenantConfig(Base):
@@ -266,16 +231,12 @@ class TenantConfig(Base):
         CheckConstraint("mode IN ('agent', 'user_active')", name="ck_tenant_config_mode"),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    environment_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    agent_name_set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True
-    )
-    agent_name_set_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    mode: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'agent'"))
+    tenant_id: Mapped[uuid.UUID]
+    agent_name: Mapped[str | None]
+    environment_name: Mapped[str | None]
+    agent_name_set_by_account_id: Mapped[uuid.UUID | None]
+    agent_name_set_at: Mapped[datetime | None]
+    mode: Mapped[str] = mapped_column(server_default=text("'agent'"))
 
 
 class TenantAccessPolicyRecord(Base):
@@ -295,19 +256,15 @@ class TenantAccessPolicyRecord(Base):
         ),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    policy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    tenant_id: Mapped[uuid.UUID]
+    policy: Mapped[dict[str, Any]]
     enabled_backends: Mapped[list[str]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[\"anthropic\"]'::jsonb")
+        JSONB, server_default=text("'[\"anthropic\"]'::jsonb")
     )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    updated_at: Mapped[TsNow]
     # False: an admin never chose; the tenant follows the deployment's keyed providers
     # and `enabled_backends` keeps Anthropic only, which older builds still read safely.
-    enabled_backends_explicit: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
+    enabled_backends_explicit: Mapped[FalseFlag]
 
 
 class AgentToolRuleRecord(Base):
@@ -338,17 +295,17 @@ class AgentToolRuleRecord(Base):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    agent_id: Mapped[str] = mapped_column(Text)
-    agent_name: Mapped[str] = mapped_column(Text)
-    tool_key: Mapped[str] = mapped_column(Text)
-    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    server_url: Mapped[str] = mapped_column(Text)
-    rule: Mapped[str | None] = mapped_column(Text, nullable=True)
-    scope: Mapped[str] = mapped_column(Text)
-    revision: Mapped[int] = mapped_column(Integer)
-    set_by: Mapped[str] = mapped_column(Text)
-    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    tenant_id: Mapped[uuid.UUID]
+    agent_id: Mapped[str]
+    agent_name: Mapped[str]
+    tool_key: Mapped[str]
+    channel_id: Mapped[str | None]
+    server_url: Mapped[str]
+    rule: Mapped[str | None]
+    scope: Mapped[str]
+    revision: Mapped[int]
+    set_by: Mapped[str]
+    set_at: Mapped[datetime]
 
 
 class AgentToolRuleHistoryRecord(Base):
@@ -356,21 +313,21 @@ class AgentToolRuleHistoryRecord(Base):
     __table_args__ = (ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),)
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    agent_id: Mapped[str] = mapped_column(Text)
-    tool_key: Mapped[str] = mapped_column(Text)
-    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    revision: Mapped[int] = mapped_column(Integer)
-    set_by: Mapped[str] = mapped_column(Text)
-    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    before_rule: Mapped[str | None] = mapped_column(Text, nullable=True)
-    before_scope: Mapped[str | None] = mapped_column(Text, nullable=True)
-    before_agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    before_server_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    after_rule: Mapped[str | None] = mapped_column(Text, nullable=True)
-    after_scope: Mapped[str | None] = mapped_column(Text, nullable=True)
-    after_agent_name: Mapped[str] = mapped_column(Text)
-    after_server_url: Mapped[str] = mapped_column(Text)
+    tenant_id: Mapped[uuid.UUID]
+    agent_id: Mapped[str]
+    tool_key: Mapped[str]
+    channel_id: Mapped[str | None]
+    revision: Mapped[int]
+    set_by: Mapped[str]
+    set_at: Mapped[datetime]
+    before_rule: Mapped[str | None]
+    before_scope: Mapped[str | None]
+    before_agent_name: Mapped[str | None]
+    before_server_url: Mapped[str | None]
+    after_rule: Mapped[str | None]
+    after_scope: Mapped[str | None]
+    after_agent_name: Mapped[str]
+    after_server_url: Mapped[str]
 
 
 class ChannelConfig(Base):
@@ -392,23 +349,15 @@ class ChannelConfig(Base):
         CheckConstraint("mode IN ('agent', 'user_active')", name="ck_channel_config_mode"),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    channel_id: Mapped[str] = mapped_column(Text)
-    agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    environment_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    agent_name_set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        nullable=True,
-    )
-    agent_name_set_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
+    tenant_id: Mapped[uuid.UUID]
+    channel_id: Mapped[str]
+    agent_name: Mapped[str | None]
+    environment_name: Mapped[str | None]
+    agent_name_set_by_account_id: Mapped[uuid.UUID | None]
+    agent_name_set_at: Mapped[datetime | None]
     # A server admin set `agent_name`, as decided when it was set: that makes the
-    agent_name_set_by_admin: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
-    mode: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'agent'"))
+    agent_name_set_by_admin: Mapped[FalseFlag]
+    mode: Mapped[str] = mapped_column(server_default=text("'agent'"))
 
 
 class DaimonAdmin(Base):
@@ -423,12 +372,12 @@ class DaimonAdmin(Base):
         CheckConstraint("subject_kind = 'user' OR platform = 'discord'"),
         CheckConstraint("length(subject_id) > 0"),
     )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    platform: Mapped[str] = mapped_column(Text)
-    subject_kind: Mapped[str] = mapped_column(Text)
-    subject_id: Mapped[str] = mapped_column(Text)
-    granted_by: Mapped[str | None] = mapped_column(Text, nullable=True)
-    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    tenant_id: Mapped[uuid.UUID]
+    platform: Mapped[str]
+    subject_kind: Mapped[str]
+    subject_id: Mapped[str]
+    granted_by: Mapped[str | None]
+    granted_at: Mapped[TsNow]
 
 
 class Routine(Base):
@@ -469,100 +418,66 @@ class Routine(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        server_default=func.gen_random_uuid(),
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    created_by_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
-    name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    cron_expr: Mapped[str] = mapped_column(Text, nullable=False)
-    timezone: Mapped[str] = mapped_column(Text, nullable=False, server_default="UTC")
-    trigger_message: Mapped[str] = mapped_column(Text, nullable=False)
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
-    catch_up_policy: Mapped[str] = mapped_column(Text, nullable=False, server_default="skip")
-    last_skipped_from: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    last_skipped_until: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    last_skip_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    next_fire_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    source_routine_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    seeded_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_fired_slot: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_finished_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    handback_paused_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    handback_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    handback_next_fire_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    last_finished_claim_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    last_result_tail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    created_by_user_id: Mapped[str | None]
+    agent_id: Mapped[str]
+    agent_name: Mapped[str]
+    name: Mapped[str | None]
+    cron_expr: Mapped[str]
+    timezone: Mapped[str] = mapped_column(server_default="UTC")
+    trigger_message: Mapped[str]
+    enabled: Mapped[bool] = mapped_column(server_default=text("true"))
+    catch_up_policy: Mapped[str] = mapped_column(server_default="skip")
+    last_skipped_from: Mapped[datetime | None]
+    last_skipped_until: Mapped[datetime | None]
+    last_skip_reason: Mapped[str | None]
+    next_fire_at: Mapped[datetime | None]
+    source_routine_id: Mapped[uuid.UUID | None]
+    seeded_after: Mapped[datetime | None]
+    last_fired_at: Mapped[datetime | None]
+    last_fired_slot: Mapped[datetime | None]
+    last_finished_at: Mapped[datetime | None]
+    handback_paused_at: Mapped[datetime | None]
+    handback_enabled: Mapped[bool | None]
+    handback_next_fire_at: Mapped[datetime | None]
+    last_finished_claim_at: Mapped[datetime | None]
+    last_error: Mapped[str | None]
+    last_result_tail: Mapped[str | None]
     # Optional place the result goes, and the outbox that posts it.
-    destination_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
-    destination_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    delivery_status: Mapped[str | None] = mapped_column(Text, nullable=True)
-    delivery_lease_owner: Mapped[str | None] = mapped_column(Text, nullable=True)
-    delivery_lease_expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    delivery_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    destination_kind: Mapped[str | None]
+    destination_id: Mapped[str | None]
+    delivery_status: Mapped[str | None]
+    delivery_lease_owner: Mapped[str | None]
+    delivery_lease_expires_at: Mapped[datetime | None]
+    delivery_note: Mapped[str | None]
     # The text a pending post carries: that fire's result, copied so a writer
     # that only knows `last_result_tail` cannot change what gets posted.
-    delivery_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
-    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    delivery_payload: Mapped[str | None]
+    delivered_at: Mapped[datetime | None]
     # Channel the routine's spend is attributed to and budget-gated by: its
     # destination's parent channel, resolved when the destination is set.
-    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel_id: Mapped[str | None]
     # The channel the routine was created from; None from the web or the CLI.
-    made_in_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    made_in_channel_id: Mapped[str | None]
     # Immutable creation-time provenance, independent of mutable delivery/budget placement.
-    source_provenance_known: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
-    source_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    source_thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_provenance_known: Mapped[FalseFlag]
+    source_channel_id: Mapped[str | None]
+    source_thread_id: Mapped[str | None]
     # An admin's opt-in to built-in sandbox tools for this routine's own runs;
     # every other unattended run keeps them off. Changed only through
     # `stores.routines.set_sandbox_tools`, which logs each change.
-    sandbox_tools_enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
-    sandbox_tools_set_by: Mapped[str | None] = mapped_column(Text, nullable=True)
-    sandbox_tools_set_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    sandbox_tools_enabled: Mapped[FalseFlag]
+    sandbox_tools_set_by: Mapped[str | None]
+    sandbox_tools_set_at: Mapped[datetime | None]
     # What the opt-in covers (`routine_sandbox.SandboxPin`): built-ins run only
     # while a fire's agent version and environment revision still match.
-    sandbox_agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    sandbox_agent_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    sandbox_environment_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    sandbox_environment_updated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    sandbox_agent_id: Mapped[str | None]
+    sandbox_agent_version: Mapped[int | None]
+    sandbox_environment_id: Mapped[str | None]
+    sandbox_environment_updated_at: Mapped[datetime | None]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNow]
 
 
 class RoutineSandboxHistoryRecord(Base):
@@ -579,20 +494,18 @@ class RoutineSandboxHistoryRecord(Base):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    routine_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    before_enabled: Mapped[bool] = mapped_column(Boolean)
-    after_enabled: Mapped[bool] = mapped_column(Boolean)
-    set_by: Mapped[str] = mapped_column(Text)
-    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    via: Mapped[str] = mapped_column(Text)
+    tenant_id: Mapped[uuid.UUID]
+    routine_id: Mapped[uuid.UUID]
+    before_enabled: Mapped[bool]
+    after_enabled: Mapped[bool]
+    set_by: Mapped[str]
+    set_at: Mapped[datetime]
+    via: Mapped[str]
     # The pin an opt-in recorded (`after_enabled`); null otherwise.
-    agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    agent_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    environment_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    environment_updated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    agent_id: Mapped[str | None]
+    agent_version: Mapped[int | None]
+    environment_id: Mapped[str | None]
+    environment_updated_at: Mapped[datetime | None]
 
 
 class ThreadSession(Base):
@@ -610,31 +523,23 @@ class ThreadSession(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        server_default=func.gen_random_uuid(),
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    ma_session_id: Mapped[str] = mapped_column(Text, nullable=False)
-    ma_agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    platform: Mapped[str]
+    thread_id: Mapped[str]
+    account_id: Mapped[uuid.UUID | None]
+    ma_session_id: Mapped[str]
+    ma_agent_id: Mapped[str | None]
     # The channel the session runs for, recorded at creation: a thread's parent,
     # or the channel a DM was moved from (`Admission.budget_channel_id`). NULL
     # when unknown; agent reach then counts the session as possibly anywhere.
-    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel_id: Mapped[str | None]
     # Immutable copy of the MA billing stamp. Empty means a legacy row whose
     # stamp is unknown; preparation replaces it before the next billed turn.
-    budget_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    seal_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
-    watermark_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    delivered_answer_chunk_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    budget_channel_id: Mapped[str | None]
+    seal_ids: Mapped[list[str] | None] = mapped_column(JSONB)
+    watermark_message_id: Mapped[str | None]
+    delivered_answer_chunk_ids: Mapped[list[str] | None] = mapped_column(JSONB)
     # Untyped Text on purpose — no CHECK, so widening the vocabulary never needs
     # a lock on a hot table. Values:
     #   'live'       the caller's current session (the only status the
@@ -644,71 +549,57 @@ class ThreadSession(Base):
     #   'superseded' replaced by a newer session carrying this one's work;
     #                `replaced_by_id` names the successor
     #   'retired'    deliberately abandoned on an explicit fresh start
-    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'live'"))
+    status: Mapped[str] = mapped_column(server_default=text("'live'"))
     # The configuration this session is actually running: an MA session freezes
     # its agent at create time, so the agent spec read at admission is not what
     # executes. A `daimon.core.session_snapshot.SessionSnapshot` serialized to
     # JSON. NULL on rows written before continuity existed.
-    effective_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    identity_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
-    mutable_fingerprint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    effective_config: Mapped[dict[str, Any] | None]
+    identity_fingerprint: Mapped[str | None]
+    mutable_fingerprint: Mapped[str | None]
     # What the session was created with (`EvalKey`); NULL on older rows.
-    eval_key: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    eval_key: Mapped[dict[str, Any] | None]
     # The provider-neutral binding this row backs (`provider_binding`), and its
     # generation. NULL until `stores.mux_state.link_legacy_thread_sessions`
     # fills backfilled rows (in batches, never under the migration's lock) or
     # the mux turn path writes them. No existing query reads them.
-    binding_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    binding_generation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    binding_id: Mapped[str | None]
+    binding_generation: Mapped[int | None]
     # Lineage of one continuing task across session replacements.
     predecessor_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("thread_sessions.id", ondelete="SET NULL"),
-        nullable=True,
+        ForeignKey("thread_sessions.id", ondelete="SET NULL")
     )
     replaced_by_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("thread_sessions.id", ondelete="SET NULL"),
-        nullable=True,
+        ForeignKey("thread_sessions.id", ondelete="SET NULL")
     )
     # The workspace bundle mounted into this session, and how complete it was:
     # 'full' (checkpointed workspace), 'transcript' (conversation only) or
     # 'history' (platform reseed only). No CHECK; the vocabulary is pinned by
     # `stores.domain.TransferKind` so adapters render honest copy from it.
-    transfer_file_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    transfer_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
+    transfer_file_id: Mapped[str | None]
+    transfer_kind: Mapped[str | None]
     # Set when the caller explicitly asked to start over; the next bind creates
     # the replacement first and only then retires this row.
-    fresh_start_requested_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    github_key_restart_notice: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
+    fresh_start_requested_at: Mapped[datetime | None]
+    github_key_restart_notice: Mapped[FalseFlag]
     # What this caller answered when asked whether uncommitted repository
     # changes should be copied into the successor's working files ('copy') or
     # left in the old checkout ('leave'). Held here because the question is
     # asked in one turn and the replacement it governs happens in a later one;
     # cleared when the row stops being live. No CHECK; the vocabulary is pinned
     # by `stores.domain.UnsavedWorkChoice`.
-    pending_unsaved_work: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pending_unsaved_work: Mapped[str | None]
     # Set while a turn is running, cleared when it reaches a terminal state.
     # Distinct from `status`, which is about the session mapping and stays
     # 'live' on every healthy thread forever. Slack needs the channel because a
     # Slack message is addressed by (channel, ts); Discord leaves it NULL since
     # a Discord message id is globally addressable on its own.
-    active_turn_owner_key: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    active_turn_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    active_turn_started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    active_turn_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    active_turn_owner_key: Mapped[int | None] = mapped_column(BigInteger)
+    active_turn_message_id: Mapped[str | None]
+    active_turn_started_at: Mapped[datetime | None]
+    active_turn_channel_id: Mapped[str | None]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNow]
 
 
 class TurnCardIntent(Base):
@@ -734,31 +625,21 @@ class TurnCardIntent(Base):
         Index("ix_turn_card_intents_recovery", "platform", "status", "created_at"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    turn_token: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    platform: Mapped[str]
+    thread_id: Mapped[str]
+    turn_token: Mapped[uuid.UUID]
     # Slack addresses a message by (channel, timestamp); Discord needs no channel.
-    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel_id: Mapped[str | None]
     # NULL while prepared: the platform accepted no response yet, or the
     # process died before it could persist the response's message identifier.
-    message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    owner_key: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'prepared'"))
-    recovery_failures: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0")
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    message_id: Mapped[str | None]
+    owner_key: Mapped[int | None] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(server_default=text("'prepared'"))
+    recovery_failures: Mapped[int] = mapped_column(server_default=text("0"))
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNow]
 
 
 class UserSkill(Base):
@@ -795,29 +676,20 @@ class UserSkill(Base):
         CheckConstraint("source IN ('repo', 'upload')", name="ck_user_skills_source"),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    principal_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
-    name: Mapped[str] = mapped_column(Text, nullable=False)
-    source_repo_url: Mapped[str] = mapped_column(Text, nullable=False)
-    source_repo_branch: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
-    source_path: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
-    content_hash: Mapped[str] = mapped_column(Text, nullable=False)
-    anthropic_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    anthropic_latest_version: Mapped[str | None] = mapped_column(Text, nullable=True)
-    source: Mapped[str] = mapped_column(Text, nullable=False, server_default="repo")
-    origin: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
-    added_by_account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
+    tenant_id: Mapped[TenantFK]
+    principal_id: Mapped[uuid.UUID]
+    agent_name: Mapped[str]
+    name: Mapped[str]
+    source_repo_url: Mapped[str]
+    source_repo_branch: Mapped[str] = mapped_column(server_default="")
+    source_path: Mapped[str] = mapped_column(server_default="")
+    content_hash: Mapped[str]
+    anthropic_id: Mapped[str | None]
+    anthropic_latest_version: Mapped[str | None]
+    source: Mapped[str] = mapped_column(server_default="repo")
+    origin: Mapped[str] = mapped_column(server_default="")
+    added_by_account_id: Mapped[uuid.UUID | None]
+    updated_at: Mapped[TsNowOnUpdate]
 
 
 class SeededSkill(Base):
@@ -840,20 +712,11 @@ class SeededSkill(Base):
     __tablename__ = "seeded_skills"
     __table_args__ = (PrimaryKeyConstraint("tenant_id", "name", name="pk_seeded_skills"),)
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    name: Mapped[str] = mapped_column(Text, nullable=False)
-    content_hash: Mapped[str] = mapped_column(Text, nullable=False)
-    anthropic_id: Mapped[str] = mapped_column(Text, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
+    tenant_id: Mapped[TenantFK]
+    name: Mapped[str]
+    content_hash: Mapped[str]
+    anthropic_id: Mapped[str]
+    updated_at: Mapped[TsNowOnUpdate]
 
 
 class AgentGoogleBinding(Base):
@@ -869,18 +732,11 @@ class AgentGoogleBinding(Base):
 
     __tablename__ = "agent_google_binding"
 
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    email: Mapped[str] = mapped_column(Text, nullable=False)
-    scopes: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    email: Mapped[str]
+    scopes: Mapped[list[str]]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
 
 
 class AgentMcpCredential(Base):
@@ -909,23 +765,14 @@ class AgentMcpCredential(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[TenantFK]
     # No FK: agents live in MA, not the local DB (same rationale as UserSkill.agent_name).
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    mcp_server_url: Mapped[str] = mapped_column(Text, nullable=False)
-    encrypted_token: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
+    agent_id: Mapped[uuid.UUID]
+    mcp_server_url: Mapped[str]
+    encrypted_token: Mapped[bytes]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
 
 
 class UsageEvent(Base):
@@ -956,44 +803,28 @@ class UsageEvent(Base):
         Index("usage_events_tenant_agent_occurred_idx", "tenant_id", "agent_id", "occurred_at"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    occurred_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    platform_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    managed_session_id: Mapped[str] = mapped_column(Text, nullable=False)
-    model: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
-    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
-    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
-    cache_read_input_tokens: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0")
-    )
-    cache_creation_input_tokens: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0")
-    )
-    event_id: Mapped[str] = mapped_column(Text, nullable=False)
-    observation_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    occurred_at: Mapped[TsNow]
+    platform_user_id: Mapped[str | None]
+    managed_session_id: Mapped[str]
+    model: Mapped[str] = mapped_column(server_default=text("''"))
+    input_tokens: Mapped[int] = mapped_column(server_default=text("0"))
+    output_tokens: Mapped[int] = mapped_column(server_default=text("0"))
+    cache_read_input_tokens: Mapped[int] = mapped_column(server_default=text("0"))
+    cache_creation_input_tokens: Mapped[int] = mapped_column(server_default=text("0"))
+    event_id: Mapped[str]
+    observation_revision: Mapped[int | None]
     # Parent channel of the turn or tool call that spent it; NULL when unknown.
-    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel_id: Mapped[str | None]
     # The agent whose turn or tool call spent it; NULL when unknown, and on rows
     # written before spend was attributed to agents.
-    agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    agent_id: Mapped[str | None]
     # Web searches: the most any revision reported, those the free allowance
     # covered, and the latest revision's billed ones (`stores.usage_events.SearchTally`).
-    web_searches: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
-    free_web_searches: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0")
-    )
-    paid_web_searches: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0")
-    )
+    web_searches: Mapped[int] = mapped_column(server_default=text("0"))
+    free_web_searches: Mapped[int] = mapped_column(server_default=text("0"))
+    paid_web_searches: Mapped[int] = mapped_column(server_default=text("0"))
 
 
 class WebSearchAllowance(Base):
@@ -1006,11 +837,11 @@ class WebSearchAllowance(Base):
     __tablename__ = "web_search_allowances"
     __table_args__ = (CheckConstraint("used >= 0", name="ck_web_search_allowances_used"),)
 
-    provider: Mapped[str] = mapped_column(Text, primary_key=True)
-    account_scope_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    pool: Mapped[str] = mapped_column(Text, primary_key=True)
-    period: Mapped[date] = mapped_column(Date, primary_key=True)
-    used: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider: Mapped[str] = mapped_column(primary_key=True)
+    account_scope_id: Mapped[str] = mapped_column(primary_key=True)
+    pool: Mapped[str] = mapped_column(primary_key=True)
+    period: Mapped[date] = mapped_column(primary_key=True)
+    used: Mapped[int]
 
 
 class TenantUserCap(Base):
@@ -1034,22 +865,11 @@ class TenantUserCap(Base):
         Index("tenant_user_caps_tenant_idx", "tenant_id"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    platform_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    cap_usd: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    platform_user_id: Mapped[str | None]
+    cap_usd: Mapped[Decimal] = mapped_column(Numeric(10, 2))
+    updated_at: Mapped[TsNowOnUpdate]
 
 
 class PaymentEvent(Base):
@@ -1062,19 +882,13 @@ class PaymentEvent(Base):
     __tablename__ = "payment_events"
     __table_args__ = (Index("payment_events_tenant_idx", "tenant_id"),)
 
-    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    id: Mapped[str] = mapped_column(primary_key=True)
     # payment_events.tenant_id is NOT NULL (migration applied).
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    amount_usd: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
-    source: Mapped[str] = mapped_column(Text, nullable=False)
-    credited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    occurred_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    tenant_id: Mapped[TenantFK]
+    amount_usd: Mapped[Decimal] = mapped_column(Numeric(10, 2))
+    source: Mapped[str]
+    credited_at: Mapped[datetime | None]
+    occurred_at: Mapped[TsNow]
 
 
 class PendingPaymentClawback(Base):
@@ -1090,13 +904,11 @@ class PendingPaymentClawback(Base):
         Index("pending_payment_clawbacks_received_idx", "received_at"),
     )
 
-    event_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    payment_intent: Mapped[str] = mapped_column(Text, nullable=False)
-    event_type: Mapped[str] = mapped_column(Text, nullable=False)
-    target_amount_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
-    received_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    event_id: Mapped[str] = mapped_column(primary_key=True)
+    payment_intent: Mapped[str]
+    event_type: Mapped[str]
+    target_amount_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    received_at: Mapped[TsNow]
 
 
 class TenantLedger(Base):
@@ -1125,36 +937,26 @@ class TenantLedger(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    delta_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    delta_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6))
     # topup|manual_credit|trial|promo_credit|promo_expiry|promo_expiry_refund|*_debit|charge.*;
     # see billing.md
-    reason: Mapped[str] = mapped_column(Text, nullable=False)
-    idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str]
+    idempotency_key: Mapped[str]
     # Who made a manual credit from the web; NULL for every other row.
-    actor_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
-    )
+    actor_account_id: Mapped[AccountSetNull]
     payment_event_id: Mapped[str | None] = mapped_column(
-        Text, ForeignKey("payment_events.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("payment_events.id", ondelete="SET NULL")
     )
-    payment_intent: Mapped[str | None] = mapped_column(Text, nullable=True)
-    occurred_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    payment_intent: Mapped[str | None]
+    occurred_at: Mapped[TsNow]
     # On a debit: the parent channel whose budget the spend counts against. On a
     # channel promo credit: the channel it was redeemed for (budgets read debits only).
-    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel_id: Mapped[str | None]
     # A debit priced from incomplete provider counts (a `LedgerEstimate`); NULL when
     # fully metered. Never changes the amount: it says how the amount was reached.
-    estimate: Mapped[str | None] = mapped_column(Text, nullable=True)
+    estimate: Mapped[str | None]
 
 
 class ChannelSkill(Base):
@@ -1183,17 +985,15 @@ class ChannelSkill(Base):
         ),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    platform: Mapped[str] = mapped_column(Text)
-    channel_id: Mapped[str] = mapped_column(Text)
-    skill_id: Mapped[str] = mapped_column(Text)
-    version: Mapped[str] = mapped_column(Text, nullable=False)
-    name: Mapped[str] = mapped_column(Text, nullable=False)
-    owner_agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    added_by_account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    added_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    tenant_id: Mapped[uuid.UUID]
+    platform: Mapped[str]
+    channel_id: Mapped[str]
+    skill_id: Mapped[str]
+    version: Mapped[str]
+    name: Mapped[str]
+    owner_agent_name: Mapped[str | None]
+    added_by_account_id: Mapped[uuid.UUID | None]
+    added_at: Mapped[TsNow]
 
 
 class SkillSize(Base):
@@ -1207,19 +1007,17 @@ class SkillSize(Base):
         ),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    skill_id: Mapped[str] = mapped_column(Text)
-    version: Mapped[str] = mapped_column(Text)
-    name: Mapped[str] = mapped_column(Text, nullable=False)
-    total_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    largest_file_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    file_count: Mapped[int] = mapped_column(Integer, nullable=False)
-    text_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    tenant_id: Mapped[uuid.UUID]
+    skill_id: Mapped[str]
+    version: Mapped[str]
+    name: Mapped[str]
+    total_bytes: Mapped[int] = mapped_column(BigInteger)
+    largest_file_bytes: Mapped[int] = mapped_column(BigInteger)
+    file_count: Mapped[int]
+    text_only: Mapped[bool]
     # The SKILL.md's bytes; -1: not text; NULL: measured before this column, or unreadable.
-    manifest_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    measured_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    manifest_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    measured_at: Mapped[TsNow]
 
 
 class SkillCopy(Base):
@@ -1240,16 +1038,14 @@ class SkillCopy(Base):
         ),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    provider: Mapped[str] = mapped_column(Text)
-    account_scope_id: Mapped[str] = mapped_column(Text)
-    skill_id: Mapped[str] = mapped_column(Text)
-    version: Mapped[str] = mapped_column(Text)
-    copy_id: Mapped[str] = mapped_column(Text, nullable=False)
-    copy_version: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    tenant_id: Mapped[uuid.UUID]
+    provider: Mapped[str]
+    account_scope_id: Mapped[str]
+    skill_id: Mapped[str]
+    version: Mapped[str]
+    copy_id: Mapped[str]
+    copy_version: Mapped[str]
+    created_at: Mapped[TsNow]
 
 
 class AgentCreationChannel(Base):
@@ -1272,13 +1068,11 @@ class AgentCreationChannel(Base):
         ),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    ma_agent_id: Mapped[str] = mapped_column(Text)
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    tenant_id: Mapped[uuid.UUID]
+    ma_agent_id: Mapped[str]
+    platform: Mapped[str]
+    channel_id: Mapped[str]
+    created_at: Mapped[TsNow]
 
 
 class SpendAllowance(Base):
@@ -1303,28 +1097,18 @@ class SpendAllowance(Base):
         Index("ix_spend_allowances_tenant_subject", "tenant_id", "subject_kind", "subject_id"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    subject_kind: Mapped[str] = mapped_column(Text, nullable=False)
-    subject_id: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    amount_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
-    window: Mapped[str] = mapped_column(Text, nullable=False)
-    starts_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    is_cap: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    subject_kind: Mapped[str]
+    subject_id: Mapped[str]
+    agent_id: Mapped[str | None]
+    amount_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    window: Mapped[str]
+    starts_at: Mapped[TsNow]
+    expires_at: Mapped[datetime | None]
+    created_by_account_id: Mapped[AccountSetNull]
+    created_at: Mapped[TsNow]
+    is_cap: Mapped[FalseFlag]
 
 
 class ChannelBudget(Base):
@@ -1353,29 +1137,19 @@ class ChannelBudget(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    limit_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
-    window: Mapped[str] = mapped_column(Text, nullable=False)
-    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
-    )
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    platform: Mapped[str]
+    channel_id: Mapped[str]
+    limit_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    window: Mapped[str]
+    starts_at: Mapped[datetime | None]
+    ends_at: Mapped[datetime | None]
+    set_by_account_id: Mapped[AccountSetNull]
     # The window whose exhausted notice went out; cleared when the budget is set or raised.
-    exhausted_notice_key: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
-    )
+    exhausted_notice_key: Mapped[str | None]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
 
 
 class PromoCode(Base):
@@ -1418,30 +1192,22 @@ class PromoCode(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    code_hash: Mapped[str] = mapped_column(Text, nullable=False)
-    note: Mapped[str | None] = mapped_column(Text, nullable=True)
-    amount_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
-    kind: Mapped[str] = mapped_column(Text, nullable=False)
-    credit_starts_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    credit_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    redeem_starts_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    redeem_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    max_redemptions: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    redeemed_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    id: Mapped[UuidPk]
+    code_hash: Mapped[str]
+    note: Mapped[str | None]
+    amount_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    kind: Mapped[str]
+    credit_starts_at: Mapped[datetime | None]
+    credit_ends_at: Mapped[datetime | None]
+    redeem_starts_at: Mapped[datetime | None]
+    redeem_ends_at: Mapped[datetime | None]
+    max_redemptions: Mapped[int | None]
+    redeemed_count: Mapped[int] = mapped_column(server_default=text("0"))
+    created_at: Mapped[TsNow]
+    revoked_at: Mapped[datetime | None]
     # Set on a channel code: any member may redeem it into their own channel's
     # budget, and one channel takes at most this much from it.
-    channel_cap_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    channel_cap_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
 
 
 class PromoRedemption(Base):
@@ -1465,23 +1231,17 @@ class PromoRedemption(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
+    id: Mapped[UuidPk]
     promo_code_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("promo_codes.id", ondelete="RESTRICT"), nullable=False
+        ForeignKey("promo_codes.id", ondelete="RESTRICT")
     )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    redeemed_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
-    )
-    redeemed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    granted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    expired_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
-    reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    tenant_id: Mapped[TenantFK]
+    redeemed_by_account_id: Mapped[AccountSetNull]
+    redeemed_at: Mapped[datetime]
+    granted_at: Mapped[datetime | None]
+    expired_at: Mapped[datetime | None]
+    expired_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    reconciled_at: Mapped[datetime | None]
 
 
 class PromoChannelRedemption(Base):
@@ -1506,20 +1266,14 @@ class PromoChannelRedemption(Base):
         Index("promo_channel_redemptions_tenant_idx", "tenant_id"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
+    id: Mapped[UuidPk]
     promo_code_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("promo_codes.id", ondelete="RESTRICT"), nullable=False
+        ForeignKey("promo_codes.id", ondelete="RESTRICT")
     )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    redeemed_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
-    )
-    redeemed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    tenant_id: Mapped[TenantFK]
+    channel_id: Mapped[str]
+    redeemed_by_account_id: Mapped[AccountSetNull]
+    redeemed_at: Mapped[datetime]
 
 
 class PromoRedeemFailure(Base):
@@ -1535,15 +1289,11 @@ class PromoRedeemFailure(Base):
         Index("promo_redeem_failures_account_idx", "tenant_id", "account_id", "attempted_at"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    attempted_at: Mapped[datetime]
     account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True
+        ForeignKey("accounts.id", ondelete="CASCADE")
     )
 
 
@@ -1556,35 +1306,20 @@ class AgentFile(Base):
         CheckConstraint("encoding IN ('plain', 'fernet_v1')", name="ck_agent_files_encoding"),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    key: Mapped[str] = mapped_column(Text, nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    encoding: Mapped[str] = mapped_column(Text, nullable=False, server_default="plain")
+    tenant_id: Mapped[TenantFK]
+    agent_id: Mapped[uuid.UUID]
+    key: Mapped[str]
+    content: Mapped[str]
+    encoding: Mapped[str] = mapped_column(server_default="plain")
     # Attribution, not authorization: who first created the key and who last
     # replaced its value. No FK to accounts.id, matching CredentialRequest's
     # rationale — these rows are erased by the platform-user-scoped helper,
     # not by an accounts.id cascade. Both stay NULL for pre-migration rows and
     # for writes with no acting person (a self-edit tool run headless).
-    created_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True
-    )
-    last_set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
+    created_by_account_id: Mapped[uuid.UUID | None]
+    last_set_by_account_id: Mapped[uuid.UUID | None]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
 
 
 class PendingFileDelete(Base):
@@ -1598,11 +1333,9 @@ class PendingFileDelete(Base):
     __tablename__ = "pending_file_deletes"
     __table_args__ = (PrimaryKeyConstraint("file_id", name="pk_pending_file_deletes"),)
 
-    file_id: Mapped[str] = mapped_column(Text, nullable=False)
-    delete_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    file_id: Mapped[str]
+    delete_after: Mapped[datetime]
+    created_at: Mapped[TsNow]
 
 
 class PrivacySessionDelete(Base):
@@ -1610,12 +1343,10 @@ class PrivacySessionDelete(Base):
 
     __tablename__ = "privacy_session_deletes"
 
-    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    tenant_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
-    pending_session_ids: Mapped[dict[str, list[str]]] = mapped_column(JSONB, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    account_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    tenant_ids: Mapped[list[str]] = mapped_column(JSONB)
+    pending_session_ids: Mapped[dict[str, list[str]]] = mapped_column(JSONB)
+    created_at: Mapped[TsNow]
 
 
 class AgentMemoryStore(Base):
@@ -1624,16 +1355,10 @@ class AgentMemoryStore(Base):
     __tablename__ = "agent_memory_store"
     __table_args__ = (PrimaryKeyConstraint("tenant_id", "agent_id", name="pk_agent_memory_store"),)
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    memory_store_id: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    tenant_id: Mapped[TenantFK]
+    agent_id: Mapped[uuid.UUID]
+    memory_store_id: Mapped[str]
+    created_at: Mapped[TsNow]
 
 
 class AgentChannelMemoryStore(Base):
@@ -1651,18 +1376,12 @@ class AgentChannelMemoryStore(Base):
         ),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    memory_store_id: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    tenant_id: Mapped[TenantFK]
+    agent_id: Mapped[uuid.UUID]
+    platform: Mapped[str]
+    channel_id: Mapped[str]
+    memory_store_id: Mapped[str]
+    created_at: Mapped[TsNow]
 
 
 class AgentPersonalMemoryStore(Base):
@@ -1684,18 +1403,12 @@ class AgentPersonalMemoryStore(Base):
         Index("ix_agent_personal_memory_store_account_id", "account_id"),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    memory_store_id: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    tenant_id: Mapped[TenantFK]
+    agent_id: Mapped[uuid.UUID]
+    account_id: Mapped[uuid.UUID]
+    memory_store_id: Mapped[str]
+    created_at: Mapped[TsNow]
+    archived_at: Mapped[datetime | None]
 
 
 class GitHubAppInstallation(Base):
@@ -1711,26 +1424,19 @@ class GitHubAppInstallation(Base):
     )
 
     installation_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    account_login: Mapped[str] = mapped_column(Text, nullable=False)
-    repo_full_names: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
-    github_repo_full_names: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
-    github_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    github_removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    app: Mapped[str] = mapped_column(Text, nullable=False, server_default="legacy")
+    account_login: Mapped[str]
+    repo_full_names: Mapped[list[str]]
+    github_repo_full_names: Mapped[list[str] | None]
+    github_refreshed_at: Mapped[datetime | None]
+    github_removed_at: Mapped[datetime | None]
+    app: Mapped[str] = mapped_column(server_default="legacy")
     account_id: Mapped[int | None] = mapped_column(BigInteger)
-    account_type: Mapped[str | None] = mapped_column(Text)
-    repository_selection: Mapped[str | None] = mapped_column(Text)
+    account_type: Mapped[str | None]
+    repository_selection: Mapped[str | None]
     permissions: Mapped[dict[str, str] | None] = mapped_column(JSONB)
-    suspended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
+    suspended_at: Mapped[datetime | None]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
 
 
 class GitHubInstallationReconciliation(Base):
@@ -1746,24 +1452,16 @@ class GitHubInstallationReconciliation(Base):
     )
 
     installation_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    generation: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="1")
-    claimed_generation: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
-    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    available_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    lease_owner: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
-    )
+    generation: Mapped[int] = mapped_column(BigInteger, server_default="1")
+    claimed_generation: Mapped[int | None] = mapped_column(BigInteger)
+    state: Mapped[str] = mapped_column(server_default=text("'pending'"))
+    attempts: Mapped[int] = mapped_column(server_default="0")
+    available_at: Mapped[TsNow]
+    lease_owner: Mapped[uuid.UUID | None]
+    lease_expires_at: Mapped[datetime | None]
+    last_error: Mapped[str | None]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
 
 
 class GitHubInstallationDelivery(Base):
@@ -1771,12 +1469,10 @@ class GitHubInstallationDelivery(Base):
 
     __tablename__ = "github_installation_deliveries"
 
-    delivery_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    installation_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    event: Mapped[str] = mapped_column(Text, nullable=False)
-    received_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    delivery_id: Mapped[str] = mapped_column(primary_key=True)
+    installation_id: Mapped[int] = mapped_column(BigInteger)
+    event: Mapped[str]
+    received_at: Mapped[TsNow]
 
 
 class GitHubPushResync(Base):
@@ -1792,30 +1488,20 @@ class GitHubPushResync(Base):
         Index("ix_github_push_resyncs_due", "state", "available_at", "created_at"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    repo_full_name: Mapped[str] = mapped_column(Text, nullable=False)
-    ref: Mapped[str] = mapped_column(Text, nullable=False)
-    delivery_id: Mapped[str] = mapped_column(Text, nullable=False)
-    generation: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="1")
-    claimed_generation: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    state: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
-    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    available_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    lease_owner: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
-    )
+    id: Mapped[UuidPk]
+    repo_full_name: Mapped[str]
+    ref: Mapped[str]
+    delivery_id: Mapped[str]
+    generation: Mapped[int] = mapped_column(BigInteger, server_default="1")
+    claimed_generation: Mapped[int | None] = mapped_column(BigInteger)
+    state: Mapped[str] = mapped_column(server_default=text("'pending'"))
+    attempts: Mapped[int] = mapped_column(server_default="0")
+    available_at: Mapped[TsNow]
+    lease_owner: Mapped[uuid.UUID | None]
+    lease_expires_at: Mapped[datetime | None]
+    last_error: Mapped[str | None]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
 
 
 class GitHubPushDelivery(Base):
@@ -1824,12 +1510,10 @@ class GitHubPushDelivery(Base):
     __tablename__ = "github_push_deliveries"
     __table_args__ = (Index("ix_github_push_deliveries_received_at", "received_at"),)
 
-    delivery_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    repo_full_name: Mapped[str] = mapped_column(Text, nullable=False)
-    ref: Mapped[str] = mapped_column(Text, nullable=False)
-    received_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    delivery_id: Mapped[str] = mapped_column(primary_key=True)
+    repo_full_name: Mapped[str]
+    ref: Mapped[str]
+    received_at: Mapped[TsNow]
 
 
 class McpToken(Base):
@@ -1878,47 +1562,28 @@ class McpToken(Base):
         ),
     )
 
-    jti: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-    )
-    account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("accounts.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    kind: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'agent'"))
-    scopes: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
-    )
-    label: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    max_issued_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
-    issued_usd: Mapped[Decimal] = mapped_column(
-        Numeric(12, 2), nullable=False, server_default=text("0")
-    )
+    jti: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    account_id: Mapped[AccountFK]
+    tenant_id: Mapped[TenantFK]
+    agent_id: Mapped[str | None]
+    kind: Mapped[str] = mapped_column(server_default=text("'agent'"))
+    scopes: Mapped[list[str]] = mapped_column(server_default=text("'{}'::text[]"))
+    label: Mapped[str | None]
+    created_at: Mapped[TsNow]
+    expires_at: Mapped[datetime | None]
+    revoked_at: Mapped[datetime | None]
+    max_issued_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    issued_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), server_default=text("0"))
     # A provider turn's skill calls and the bytes `skill_read` returned, against
     # its budget (`daimon.adapters.mcp.tools.skill_reads`).
-    skill_bytes_read: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, server_default=text("0")
-    )
-    skill_calls: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    skill_bytes_read: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+    skill_calls: Mapped[int] = mapped_column(server_default=text("0"))
     # The channel the token was minted in, whose calls then run inside it; both
     # NULL for a token bound to no channel.
-    platform: Mapped[str | None] = mapped_column(Text, nullable=True)
-    channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    platform: Mapped[str | None]
+    channel_id: Mapped[str | None]
     # `provider_turn`: a chat-execution credential with no confirmation surface.
-    surface: Mapped[str | None] = mapped_column(Text, nullable=True)
+    surface: Mapped[str | None]
     # What an agent-kind credential was made for. 'coding': a key a person made from
     # the agent's "coding tools" button; 'report': a published report's seam token;
     # 'internal': a short-lived in-session or provider-turn credential. Not a secret
@@ -1926,11 +1591,11 @@ class McpToken(Base):
     # its holder's current role or ownership on every request. NULL for operator and
     # CLI tokens, and for an agent row an older process wrote (read as 'coding' unless
     # it is plainly internal; see the verifier).
-    purpose: Mapped[str | None] = mapped_column(Text, nullable=True)
+    purpose: Mapped[str | None]
     # Which coding tool a coding key was made for ('claude-code', 'codex', ..., or
     # 'token' for a key shown once on screen). Display only; NULL for older keys and
     # for every other kind of credential.
-    client: Mapped[str | None] = mapped_column(Text, nullable=True)
+    client: Mapped[str | None]
 
 
 class CodingKeyClaim(Base):
@@ -1950,27 +1615,21 @@ class CodingKeyClaim(Base):
         Index("ix_coding_key_claims_account_id", "account_id"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
-    )
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    account_id: Mapped[AccountFK]
+    agent_id: Mapped[uuid.UUID]
     # The agent's Managed Agents id, to load it live when the code is claimed.
-    ma_agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    ma_agent_id: Mapped[str]
     # The agent's name when the code was made: the label its key will carry.
-    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
-    client: Mapped[str] = mapped_column(Text, nullable=False)
-    batch: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    code_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    jti: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("mcp_tokens.jti", ondelete="SET NULL"), nullable=True
-    )
+    agent_name: Mapped[str]
+    client: Mapped[str]
+    batch: Mapped[uuid.UUID]
+    code_hash: Mapped[str] = mapped_column(unique=True)
+    created_at: Mapped[datetime]
+    expires_at: Mapped[datetime]
+    used_at: Mapped[datetime | None]
+    jti: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("mcp_tokens.jti", ondelete="SET NULL"))
 
 
 class SlackBotToken(Base):
@@ -1983,19 +1642,12 @@ class SlackBotToken(Base):
 
     __tablename__ = "slack_bot_tokens"
 
-    team_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    encrypted_token: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now(),
-        onupdate=func.now(),
-    )
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    refresh_token: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    team_id: Mapped[str] = mapped_column(primary_key=True)
+    encrypted_token: Mapped[bytes]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
+    expires_at: Mapped[datetime | None]
+    refresh_token: Mapped[bytes | None]
 
 
 class TeamsInstallation(Base):
@@ -2014,17 +1666,13 @@ class TeamsInstallation(Base):
         ),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    tenant_id: Mapped[uuid.UUID]
     #: The Bot Framework team id, which is also the General channel's id.
-    team_id: Mapped[str] = mapped_column(Text)
-    group_id: Mapped[str] = mapped_column(Text, nullable=False)
-    name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    installed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    team_id: Mapped[str]
+    group_id: Mapped[str]
+    name: Mapped[str | None]
+    installed_at: Mapped[TsNow]
+    updated_at: Mapped[TsNow]
 
 
 class TeamsChannelSubscription(Base):
@@ -2050,23 +1698,21 @@ class TeamsChannelSubscription(Base):
         UniqueConstraint("subscription_id", name="uq_teams_channel_subscriptions_subscription_id"),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    channel_id: Mapped[str] = mapped_column(Text)
-    team_id: Mapped[str] = mapped_column(Text, nullable=False)
-    group_id: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_type: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    team_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    bot_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    service_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    subscription_id: Mapped[str] = mapped_column(Text, nullable=False)
-    client_state_sha256: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    last_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    tenant_id: Mapped[uuid.UUID]
+    channel_id: Mapped[str]
+    team_id: Mapped[str]
+    group_id: Mapped[str]
+    channel_type: Mapped[str]
+    channel_name: Mapped[str | None]
+    team_name: Mapped[str | None]
+    bot_name: Mapped[str | None]
+    service_url: Mapped[str | None]
+    subscription_id: Mapped[str]
+    client_state_sha256: Mapped[bytes]
+    expires_at: Mapped[datetime]
+    last_message_id: Mapped[str | None]
+    last_message_at: Mapped[datetime | None]
+    updated_at: Mapped[TsNow]
 
 
 class TeamsMessageAdmission(Base):
@@ -2097,21 +1743,19 @@ class TeamsMessageAdmission(Base):
         Index("ix_teams_message_admissions_created", "tenant_id", "created_at"),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    channel_id: Mapped[str] = mapped_column(Text)
-    message_id: Mapped[str] = mapped_column(Text)
+    tenant_id: Mapped[uuid.UUID]
+    channel_id: Mapped[str]
+    message_id: Mapped[str]
     #: Where a notice about it goes: the thread or chat.
-    conversation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    conversation_id: Mapped[str]
     #: The sender's Entra object id, the privacy purge's key; None when unverified.
-    user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    owner_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    handled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
-    message: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    notice_sent: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
-    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    user_id: Mapped[str | None]
+    owner_key: Mapped[int] = mapped_column(BigInteger)
+    handled: Mapped[FalseFlag]
+    message: Mapped[dict[str, Any] | None]
+    notice_sent: Mapped[FalseFlag]
+    sent_at: Mapped[datetime]
+    created_at: Mapped[TsNow]
 
 
 class SlackUserToken(Base):
@@ -2124,18 +1768,14 @@ class SlackUserToken(Base):
 
     __tablename__ = "slack_user_tokens"
 
-    team_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    slack_user_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    encrypted_token: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    scopes: Mapped[str] = mapped_column(Text, nullable=False)
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    encrypted_refresh_token: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    team_id: Mapped[str] = mapped_column(primary_key=True)
+    slack_user_id: Mapped[str] = mapped_column(primary_key=True)
+    encrypted_token: Mapped[bytes]
+    scopes: Mapped[str]
+    expires_at: Mapped[datetime | None]
+    encrypted_refresh_token: Mapped[bytes | None]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNow]
 
 
 class MicrosoftUserToken(Base):
@@ -2156,12 +1796,12 @@ class MicrosoftUserToken(Base):
         ),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    user_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    encrypted_refresh_token: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    scopes: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    user_id: Mapped[str] = mapped_column(primary_key=True)
+    encrypted_refresh_token: Mapped[bytes]
+    scopes: Mapped[str]
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
 
 
 class ConnectorToken(Base):
@@ -2198,32 +1838,26 @@ class ConnectorToken(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
     account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=True
+        ForeignKey("accounts.id", ondelete="CASCADE")
     )
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    server_url: Mapped[str] = mapped_column(Text, nullable=False)
-    access_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    refresh_token_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    token_endpoint: Mapped[str] = mapped_column(Text, nullable=False)
-    client_id: Mapped[str] = mapped_column(Text, nullable=False)
-    client_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    token_endpoint_auth_method: Mapped[str] = mapped_column(Text, nullable=False)
-    scope: Mapped[str | None] = mapped_column(Text, nullable=True)
-    resource: Mapped[str | None] = mapped_column(Text, nullable=True)
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    refresh_owner: Mapped[str] = mapped_column(Text, nullable=False)
-    refresh_started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    agent_id: Mapped[uuid.UUID]
+    server_url: Mapped[str]
+    access_token_encrypted: Mapped[bytes]
+    refresh_token_encrypted: Mapped[bytes | None]
+    token_endpoint: Mapped[str]
+    client_id: Mapped[str]
+    client_secret_encrypted: Mapped[bytes | None]
+    token_endpoint_auth_method: Mapped[str]
+    scope: Mapped[str | None]
+    resource: Mapped[str | None]
+    expires_at: Mapped[datetime | None]
+    refresh_owner: Mapped[str]
+    refresh_started_at: Mapped[datetime | None]
+    created_at: Mapped[datetime]
+    updated_at: Mapped[datetime]
 
 
 class MicrosoftSignIn(Base):
@@ -2249,13 +1883,13 @@ class MicrosoftSignIn(Base):
         Index("ix_microsoft_sign_ins_user", "tenant_id", "user_id"),
     )
 
-    state: Mapped[str] = mapped_column(Text, primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    user_id: Mapped[str] = mapped_column(Text, nullable=False)
-    code_verifier: Mapped[str] = mapped_column(Text, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    state: Mapped[str] = mapped_column(primary_key=True)
+    tenant_id: Mapped[uuid.UUID]
+    account_id: Mapped[uuid.UUID]
+    user_id: Mapped[str]
+    code_verifier: Mapped[str]
+    expires_at: Mapped[datetime]
+    created_at: Mapped[datetime]
 
 
 class SlackConnectPrompt(Base):
@@ -2263,9 +1897,9 @@ class SlackConnectPrompt(Base):
 
     __tablename__ = "slack_connect_prompts"
 
-    team_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    slack_user_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    prompted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    team_id: Mapped[str] = mapped_column(primary_key=True)
+    slack_user_id: Mapped[str] = mapped_column(primary_key=True)
+    prompted_at: Mapped[datetime]
 
 
 class SlackTurnContext(Base):
@@ -2280,12 +1914,12 @@ class SlackTurnContext(Base):
     __tablename__ = "slack_turn_contexts"
     __table_args__ = (Index("ix_slack_turn_contexts_tenant_account", "tenant_id", "account_id"),)
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_ts: Mapped[str] = mapped_column(Text, nullable=False)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    tenant_id: Mapped[uuid.UUID]
+    account_id: Mapped[uuid.UUID]
+    channel_id: Mapped[str]
+    thread_ts: Mapped[str]
+    started_at: Mapped[datetime]
 
 
 class CredentialRequest(Base):
@@ -2318,42 +1952,34 @@ class CredentialRequest(Base):
         UniqueConstraint("idempotency_key", name="uq_credential_requests_idempotency_key"),
     )
 
-    token: Mapped[str] = mapped_column(Text, primary_key=True)
+    token: Mapped[str] = mapped_column(primary_key=True)
     # Constrained by ck_credential_requests_kind; the vocabulary itself is
     # `daimon.core.credential_requests.CredentialRequestKind`.
-    kind: Mapped[str] = mapped_column(Text, nullable=False)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    target: Mapped[str] = mapped_column(Text, nullable=False)
-    mcp_server_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    requester_platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    platform: Mapped[str | None] = mapped_column(Text, nullable=True)
-    parent_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    origin_thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    posted_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    idempotency_key: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    requested_work: Mapped[str | None] = mapped_column(Text, nullable=True)
-    target_ma_agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    target_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    responder_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    replaces_updated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    kind: Mapped[str]
+    tenant_id: Mapped[TenantFK]
+    agent_id: Mapped[uuid.UUID]
+    account_id: Mapped[uuid.UUID]
+    target: Mapped[str]
+    mcp_server_url: Mapped[str | None]
+    requester_platform_user_id: Mapped[str]
+    channel_id: Mapped[str]
+    platform: Mapped[str | None]
+    parent_channel_id: Mapped[str | None]
+    origin_thread_id: Mapped[str | None]
+    posted_message_id: Mapped[str | None]
+    idempotency_key: Mapped[uuid.UUID]
+    requested_work: Mapped[str | None]
+    target_ma_agent_id: Mapped[str | None]
+    target_name: Mapped[str | None]
+    responder_name: Mapped[str | None]
+    replaces_updated_at: Mapped[datetime | None]
     # Untyped Text with no CHECK, like `thread_sessions.pending_unsaved_work`:
     # the vocabulary is pinned by `CredentialRequestOutcome` in
     # `daimon.core.credential_requests`.
-    outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    outcome: Mapped[str | None]
+    created_at: Mapped[TsNow]
+    expires_at: Mapped[datetime]
+    used_at: Mapped[datetime | None]
 
 
 class McpOAuthFlow(Base):
@@ -2384,38 +2010,31 @@ class McpOAuthFlow(Base):
         ),
     )
 
-    state: Mapped[str] = mapped_column(Text, primary_key=True)
+    state: Mapped[str] = mapped_column(primary_key=True)
     request_token: Mapped[str] = mapped_column(
-        Text,
-        ForeignKey("credential_requests.token", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
+        ForeignKey("credential_requests.token", ondelete="CASCADE"), index=True
     )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    server_name: Mapped[str] = mapped_column(Text, nullable=False)
-    mcp_server_url: Mapped[str] = mapped_column(Text, nullable=False)
-    redirect_uri: Mapped[str] = mapped_column(Text, nullable=False)
-    code_verifier: Mapped[str] = mapped_column(Text, nullable=False)
-    client_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    client_secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
-    token_endpoint_auth_method: Mapped[str | None] = mapped_column(Text, nullable=True)
-    token_endpoint: Mapped[str | None] = mapped_column(Text, nullable=True)
-    authorization_endpoint: Mapped[str | None] = mapped_column(Text, nullable=True)
-    resource: Mapped[str | None] = mapped_column(Text, nullable=True)
-    scope: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    tenant_id: Mapped[TenantFK]
+    account_id: Mapped[uuid.UUID]
+    agent_id: Mapped[uuid.UUID]
+    server_name: Mapped[str]
+    mcp_server_url: Mapped[str]
+    redirect_uri: Mapped[str]
+    code_verifier: Mapped[str]
+    client_id: Mapped[str | None]
+    client_secret_encrypted: Mapped[str | None]
+    token_endpoint_auth_method: Mapped[str | None]
+    token_endpoint: Mapped[str | None]
+    authorization_endpoint: Mapped[str | None]
+    resource: Mapped[str | None]
+    scope: Mapped[str | None]
+    created_at: Mapped[TsNow]
+    expires_at: Mapped[datetime]
+    used_at: Mapped[datetime | None]
     # `used_at` is the replay gate, stamped before the callback knows whether
     # the person approved; `completed_at` is written only once their grant is
     # in the vault, which is what "connected" has to mean.
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None]
 
 
 class MessageFeedback(Base):
@@ -2452,37 +2071,23 @@ class MessageFeedback(Base):
         Index("message_feedback_tenant_idx", "tenant_id"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        server_default=func.gen_random_uuid(),
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-    )
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
     account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("accounts.id", ondelete="CASCADE"),
-        nullable=True,
+        ForeignKey("accounts.id", ondelete="CASCADE")
     )
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    message_id: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
-    ma_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    vote: Mapped[str] = mapped_column(Text, nullable=False)
-    feedback_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    platform: Mapped[str]
+    message_id: Mapped[str]
+    channel_id: Mapped[str]
+    platform_user_id: Mapped[str]
+    ma_session_id: Mapped[str | None]
+    vote: Mapped[str]
+    feedback_text: Mapped[str | None]
     # Reason codes picked in the "What went wrong?" form
     # (`daimon.core.message_feedback.FEEDBACK_REASONS`); NULL when none were.
-    feedback_reasons: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    feedback_reasons: Mapped[list[str] | None]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNow]
 
 
 class WizardSession(Base):
@@ -2524,31 +2129,21 @@ class WizardSession(Base):
         Index("ix_wizard_session_status_expires_at", "status", "expires_at"),
     )
 
-    id: Mapped[str] = mapped_column(Text, primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("accounts.id", ondelete="SET NULL"),
-        nullable=True,
-    )
-    requester_platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    message_id: Mapped[str] = mapped_column(Text, nullable=False)
+    id: Mapped[str] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    account_id: Mapped[AccountSetNull]
+    requester_platform_user_id: Mapped[str]
+    channel_id: Mapped[str]
+    message_id: Mapped[str]
     # dict[str, Any]: a serialized WizardSpec, validated back into the real
     # Pydantic model at read time — not a typing shortcut.
-    spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    answers: Mapped[dict[str, list[str]]] = mapped_column(JSONB, nullable=False)
-    current_step: Mapped[int] = mapped_column(Integer, nullable=False)
-    status: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    spec: Mapped[dict[str, Any]]
+    answers: Mapped[dict[str, list[str]]] = mapped_column(JSONB)
+    current_step: Mapped[int]
+    status: Mapped[str]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[datetime]
+    expires_at: Mapped[datetime]
 
 
 class SlackEventDedup(Base):
@@ -2570,12 +2165,10 @@ class SlackEventDedup(Base):
 
     __tablename__ = "slack_event_dedup"
 
-    team_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    channel: Mapped[str] = mapped_column(Text, primary_key=True)
-    event_ts: Mapped[str] = mapped_column(Text, primary_key=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    team_id: Mapped[str] = mapped_column(primary_key=True)
+    channel: Mapped[str] = mapped_column(primary_key=True)
+    event_ts: Mapped[str] = mapped_column(primary_key=True)
+    created_at: Mapped[TsNow]
 
 
 class FileUpload(Base):
@@ -2600,22 +2193,18 @@ class FileUpload(Base):
         Index("ix_file_uploads_person_id", "person_id"),
     )
 
-    id: Mapped[str] = mapped_column(Text, primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
+    id: Mapped[str] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
     # The web person a file belongs to; erasing the person erases the file.
     person_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="CASCADE"), nullable=True
+        ForeignKey("web_people.id", ondelete="CASCADE")
     )
-    upload_token: Mapped[str | None] = mapped_column(Text, nullable=True)
-    title: Mapped[str] = mapped_column(Text, nullable=False)
-    display_filename: Mapped[str] = mapped_column(Text, nullable=False)
-    content_type: Mapped[str] = mapped_column(Text, nullable=False)
-    content: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    upload_token: Mapped[str | None]
+    title: Mapped[str]
+    display_filename: Mapped[str]
+    content_type: Mapped[str]
+    content: Mapped[bytes | None]
+    created_at: Mapped[TsNow]
 
 
 # One counter for the menus, limits and channels of every tenant; it never goes back,
@@ -2640,28 +2229,16 @@ class SupportMenu(Base):
         CheckConstraint("key ~ '^[a-z0-9-]{1,32}$'", name="ck_support_menus_key"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    key: Mapped[str] = mapped_column(Text, nullable=False)
-    name: Mapped[str] = mapped_column(Text, nullable=False)
-    revision: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=SUPPORT_REVISION_SEQ.next_value()
-    )
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    key: Mapped[str]
+    name: Mapped[str]
+    revision: Mapped[int] = mapped_column(server_default=SUPPORT_REVISION_SEQ.next_value())
     # `SupportOption`s as JSON; the menu is `name` and these.
-    options: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
-    set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
-    )
+    options: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    set_by_account_id: Mapped[AccountSetNull]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
 
 
 class SupportMenuPlace(Base):
@@ -2673,23 +2250,13 @@ class SupportMenuPlace(Base):
         CheckConstraint(_SUPPORT_SCOPE_ID, name="ck_support_menu_places_scope_id"),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    scope: Mapped[str] = mapped_column(Text, primary_key=True)
-    scope_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    menu_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("support_menus.id", ondelete="RESTRICT"), nullable=False
-    )
-    set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
-    )
+    tenant_id: Mapped[TenantPk]
+    scope: Mapped[str] = mapped_column(primary_key=True)
+    scope_id: Mapped[str] = mapped_column(primary_key=True)
+    menu_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("support_menus.id", ondelete="RESTRICT"))
+    set_by_account_id: Mapped[AccountSetNull]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
 
 
 class SupportLimit(Base):
@@ -2736,32 +2303,20 @@ class SupportLimit(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    scope: Mapped[str] = mapped_column(Text, nullable=False)
-    scope_id: Mapped[str] = mapped_column(Text, nullable=False)
-    platform_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    shared: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
-    each_person: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
-    window: Mapped[str] = mapped_column(Text, nullable=False)
-    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    revision: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=SUPPORT_REVISION_SEQ.next_value()
-    )
-    set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
-    )
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    scope: Mapped[str]
+    scope_id: Mapped[str]
+    platform_user_id: Mapped[str | None]
+    shared: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    each_person: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    window: Mapped[str]
+    starts_at: Mapped[datetime | None]
+    ends_at: Mapped[datetime | None]
+    revision: Mapped[int] = mapped_column(server_default=SUPPORT_REVISION_SEQ.next_value())
+    set_by_account_id: Mapped[AccountSetNull]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
 
 
 class SupportChannel(Base):
@@ -2769,26 +2324,16 @@ class SupportChannel(Base):
 
     __tablename__ = "support_channels"
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    slack_team_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    teams_team_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    teams_service_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    revision: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=SUPPORT_REVISION_SEQ.next_value()
-    )
-    set_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
-    )
+    tenant_id: Mapped[TenantPk]
+    platform: Mapped[str]
+    channel_id: Mapped[str]
+    slack_team_id: Mapped[str | None]
+    teams_team_id: Mapped[str | None]
+    teams_service_url: Mapped[str | None]
+    revision: Mapped[int] = mapped_column(server_default=SUPPORT_REVISION_SEQ.next_value())
+    set_by_account_id: Mapped[AccountSetNull]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
 
 
 class SupportEscalation(Base):
@@ -2850,59 +2395,43 @@ class SupportEscalation(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        server_default=func.gen_random_uuid(),
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        nullable=False,
-    )
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
     account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("accounts.id", ondelete="CASCADE"),
-        nullable=True,
+        ForeignKey("accounts.id", ondelete="CASCADE")
     )
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    message_id: Mapped[str] = mapped_column(Text, nullable=False)
-    ma_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    note: Mapped[str] = mapped_column(Text, nullable=False)
-    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    platform: Mapped[str]
+    platform_user_id: Mapped[str]
+    channel_id: Mapped[str]
+    message_id: Mapped[str]
+    ma_session_id: Mapped[str | None]
+    note: Mapped[str]
+    delivered_at: Mapped[datetime | None]
+    created_at: Mapped[TsNow]
     # Support limits (0206). The server defaults are a default-ledger row charged
     # 1, which is what a writer that predates limits means.
-    charged_to: Mapped[str] = mapped_column(Text, nullable=False, server_default="default")
+    charged_to: Mapped[str] = mapped_column(server_default="default")
     # SET NULL: a cleared limit's rows count nowhere, never in the default ledger.
     limit_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("support_limits.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("support_limits.id", ondelete="SET NULL")
     )
     # The person's own limit that capped the request, so a settle reads the same cap.
     person_limit_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("support_limits.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("support_limits.id", ondelete="SET NULL")
     )
-    option_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    option_key: Mapped[str | None]
     # The terms requested on (`support.OptionSnapshot`); settling reads these.
-    option: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    answers: Mapped[dict[str, str] | None] = mapped_column(JSONB, nullable=True)
-    hold: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, server_default="1")
+    option: Mapped[dict[str, Any] | None]
+    answers: Mapped[dict[str, str] | None] = mapped_column(JSONB)
+    hold: Mapped[Decimal] = mapped_column(Numeric(10, 2), server_default="1")
     # NULL while pending; spent credit is COALESCE(charge, hold).
-    charge: Mapped[Decimal | None] = mapped_column(
-        Numeric(10, 2), nullable=True, server_default="1"
-    )
-    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="settled")
-    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    settled_by: Mapped[str | None] = mapped_column(Text, nullable=True)
-    settled_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
-    )
-    support_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    support_post_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    charge: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), server_default="1")
+    status: Mapped[str] = mapped_column(server_default="settled")
+    settled_at: Mapped[datetime | None]
+    settled_by: Mapped[str | None]
+    settled_by_account_id: Mapped[AccountSetNull]
+    support_channel_id: Mapped[str | None]
+    support_post_id: Mapped[str | None]
 
 
 class DeploymentIdentity(Base):
@@ -2917,11 +2446,9 @@ class DeploymentIdentity(Base):
     __tablename__ = "deployment_identity"
     __table_args__ = (CheckConstraint("singleton", name="ck_deployment_identity_singleton"),)
 
-    singleton: Mapped[bool] = mapped_column(Boolean, primary_key=True, server_default=text("true"))
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    singleton: Mapped[bool] = mapped_column(primary_key=True, server_default=text("true"))
+    id: Mapped[uuid.UUID]
+    created_at: Mapped[TsNow]
 
 
 class HubOAuthKv(Base):
@@ -2940,14 +2467,12 @@ class HubOAuthKv(Base):
 
     __tablename__ = "hub_oauth_kv"
 
-    collection: Mapped[str] = mapped_column(Text, primary_key=True)
-    key: Mapped[str] = mapped_column(Text, primary_key=True)
-    value: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
-    ttl: Mapped[float | None] = mapped_column(Double, nullable=True)
-    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True, index=True
-    )
+    collection: Mapped[str] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(primary_key=True)
+    value: Mapped[dict[str, object]] = mapped_column(JSONB)
+    ttl: Mapped[float | None] = mapped_column(Double)
+    created_at: Mapped[datetime | None]
+    expires_at: Mapped[datetime | None] = mapped_column(index=True)
 
 
 class FeatureValue(Base):
@@ -2993,24 +2518,18 @@ class FeatureValue(Base):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    tier: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_id: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
-    thread_key: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
-    key: Mapped[str] = mapped_column(Text, nullable=False)
-    value: Mapped[str] = mapped_column(Text, nullable=False)
-    locked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
-    set_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
-    )
-    surface: Mapped[str] = mapped_column(Text, nullable=False)
-    set_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    tenant_id: Mapped[TenantFK]
+    tier: Mapped[str]
+    agent_id: Mapped[str] = mapped_column(server_default=text("''"))
+    channel_id: Mapped[str] = mapped_column(server_default=text("''"))
+    thread_key: Mapped[str] = mapped_column(server_default=text("''"))
+    key: Mapped[str]
+    value: Mapped[str]
+    locked: Mapped[FalseFlag]
+    set_by: Mapped[AccountSetNull]
+    surface: Mapped[str]
+    set_at: Mapped[TsNow]
+    revision: Mapped[int] = mapped_column(BigInteger, server_default=text("1"))
 
 
 class ThreadModelSetting(Base):
@@ -3025,17 +2544,13 @@ class ThreadModelSetting(Base):
         PrimaryKeyConstraint("tenant_id", "platform", "thread_id", name="pk_thread_model_settings"),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
-    )
-    platform: Mapped[str] = mapped_column(Text)
-    thread_id: Mapped[str] = mapped_column(Text)
-    model: Mapped[str] = mapped_column(Text, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    tenant_id: Mapped[TenantFK]
+    platform: Mapped[str]
+    thread_id: Mapped[str]
+    model: Mapped[str]
+    updated_at: Mapped[TsNow]
     # The model's provider; null is a Claude model chosen before providers could be (0197).
-    provider: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provider: Mapped[str | None]
 
 
 class ThreadModelConsent(Base):
@@ -3053,17 +2568,13 @@ class ThreadModelConsent(Base):
         ),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
-    )
-    platform: Mapped[str] = mapped_column(Text)
-    thread_id: Mapped[str] = mapped_column(Text)
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    revision: Mapped[Any] = mapped_column(JSONB, nullable=False)
-    digest: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    tenant_id: Mapped[TenantFK]
+    platform: Mapped[str]
+    thread_id: Mapped[str]
+    agent_id: Mapped[uuid.UUID]
+    revision: Mapped[Any] = mapped_column(JSONB)
+    digest: Mapped[str]
+    created_at: Mapped[TsNow]
 
 
 class ThreadAutoResponse(Base):
@@ -3085,18 +2596,12 @@ class ThreadAutoResponse(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    message_id: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    platform: Mapped[str]
+    thread_id: Mapped[str]
+    message_id: Mapped[str]
+    created_at: Mapped[TsNow]
 
 
 class ThreadAgentBinding(Base):
@@ -3116,35 +2621,25 @@ class ThreadAgentBinding(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    kind: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'setup'"))
-    responder_ma_agent_id: Mapped[str] = mapped_column(Text, nullable=False)
-    responder_name: Mapped[str] = mapped_column(Text, nullable=False)
-    configuration_target_ma_agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    configuration_target_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    creator_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
-    )
-    archived: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
-    locked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
-    deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    platform: Mapped[str]
+    parent_channel_id: Mapped[str]
+    thread_id: Mapped[str]
+    kind: Mapped[str] = mapped_column(server_default=text("'setup'"))
+    responder_ma_agent_id: Mapped[str]
+    responder_name: Mapped[str]
+    configuration_target_ma_agent_id: Mapped[str | None]
+    configuration_target_name: Mapped[str | None]
+    creator_account_id: Mapped[AccountSetNull]
+    archived: Mapped[FalseFlag]
+    locked: Mapped[FalseFlag]
+    deleted: Mapped[FalseFlag]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNow]
     # A cross-provider hand-off's summary (JSON: from, summary), taken once by the
     # destination's first turn here; cleared when the binding is replaced or released.
-    handoff_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    handoff_summary: Mapped[str | None]
 
 
 class AgentNotice(Base):
@@ -3162,20 +2657,14 @@ class AgentNotice(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    platform: Mapped[str]
+    thread_id: Mapped[str]
     # The provider's agent id: a hand-off must not pass one agent's notices to another.
-    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
-    text: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    agent_id: Mapped[str]
+    text: Mapped[str]
+    created_at: Mapped[TsNow]
 
 
 class TurnOrigin(Base):
@@ -3184,60 +2673,44 @@ class TurnOrigin(Base):
     __tablename__ = "turn_origins"
     __table_args__ = (Index("turn_origins_expiry_idx", "expires_at"),)
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
-    )
-    chat_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    human_invocation: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    memory_read_only: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    attended: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    responder_ma_agent_id: Mapped[str] = mapped_column(Text, nullable=False)
-    responder_name: Mapped[str] = mapped_column(Text, nullable=False)
-    configuration_target_ma_agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    configuration_target_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    is_setup: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
-    role: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    account_id: Mapped[AccountFK]
+    chat_session_id: Mapped[str | None]
+    human_invocation: Mapped[bool | None]
+    memory_read_only: Mapped[bool | None]
+    attended: Mapped[FalseFlag]
+    platform: Mapped[str]
+    parent_channel_id: Mapped[str]
+    thread_id: Mapped[str]
+    responder_ma_agent_id: Mapped[str]
+    responder_name: Mapped[str]
+    configuration_target_ma_agent_id: Mapped[str | None]
+    configuration_target_name: Mapped[str | None]
+    is_setup: Mapped[FalseFlag]
+    role: Mapped[str]
+    created_at: Mapped[TsNow]
+    expires_at: Mapped[datetime]
     # The sender is from another organisation (Teams): no 1:1 chat with Daimon for them.
-    sender_foreign: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
+    sender_foreign: Mapped[FalseFlag]
     # Set by `archive_thread` on this turn's own thread; the adapter archives
     # the thread after the turn's last post.
-    archive_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archive_requested_at: Mapped[datetime | None]
     # The origin channel is shared with another organisation.
-    shared_channel: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
+    shared_channel: Mapped[FalseFlag]
     # The platform's ids for the turn's message: where it can be read, and the message.
-    platform_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    platform_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    platform_channel_id: Mapped[str | None]
+    platform_message_id: Mapped[str | None]
     # Set on a helper's turn: the origin of the turn that asked it. A helper asks no
     # helpers and changes nothing about the conversation it works for.
-    helper_of: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    helper_of: Mapped[uuid.UUID | None]
     # The process running this turn serves its helper asks (`daimon.core.helpers`).
-    serves_helpers: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
+    serves_helpers: Mapped[FalseFlag]
     # The agent may ask copies of itself: its `[self]` roster on a provider without
     # native multiagent (`daimon.core.self_helpers`).
-    self_helpers: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
+    self_helpers: Mapped[FalseFlag]
     # A helper turn's own session key, when the helper's agent id does not give it.
-    helper_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    helper_key: Mapped[str | None]
 
 
 class AgentHelper(Base):
@@ -3250,12 +2723,10 @@ class AgentHelper(Base):
         CheckConstraint("agent_id <> helper_agent_id", name="ck_agent_helpers_not_self"),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    agent_id: Mapped[str] = mapped_column(Text)
-    helper_agent_id: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    tenant_id: Mapped[uuid.UUID]
+    agent_id: Mapped[str]
+    helper_agent_id: Mapped[str]
+    created_at: Mapped[TsNow]
 
 
 class HelperAsk(Base):
@@ -3276,23 +2747,23 @@ class HelperAsk(Base):
         Index("helper_asks_files_token_idx", "files_token", unique=True),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    origin_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    helper_agent_id: Mapped[str] = mapped_column(Text)
-    helper_name: Mapped[str] = mapped_column(Text)
-    message: Mapped[str] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(Text, server_default=text("'queued'"))
-    reply: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    tenant_id: Mapped[uuid.UUID]
+    origin_id: Mapped[uuid.UUID]
+    helper_agent_id: Mapped[str]
+    helper_name: Mapped[str]
+    message: Mapped[str]
+    status: Mapped[str] = mapped_column(server_default=text("'queued'"))
+    reply: Mapped[str | None]
+    created_at: Mapped[datetime]
+    finished_at: Mapped[datetime | None]
     # Files passed to the helper and the files it sends back: `file_uploads` facts
     # ({id, name, size}). `files_token` is the capability in their download links.
     files: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
     reply_files: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, server_default=text("'[]'::jsonb")
     )
-    files_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    files_token: Mapped[str | None]
 
 
 class SharedChannel(Base):
@@ -3311,13 +2782,11 @@ class SharedChannel(Base):
         CheckConstraint("source IN ('platform', 'client')", name="ck_shared_channels_source"),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    first_seen_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    source: Mapped[str] = mapped_column(Text, nullable=False)
+    tenant_id: Mapped[uuid.UUID]
+    platform: Mapped[str]
+    channel_id: Mapped[str]
+    first_seen_at: Mapped[TsNow]
+    source: Mapped[str]
 
 
 class PendingSkillAdd(Base):
@@ -3346,25 +2815,19 @@ class PendingSkillAdd(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
-    )
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    ma_agent_id: Mapped[str] = mapped_column(Text, nullable=False)
-    content_hash: Mapped[str] = mapped_column(Text, nullable=False)
-    preview_origin_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    account_id: Mapped[AccountFK]
+    platform: Mapped[str]
+    thread_id: Mapped[str]
+    ma_agent_id: Mapped[str]
+    content_hash: Mapped[str]
+    preview_origin_id: Mapped[uuid.UUID]
+    created_at: Mapped[datetime]
+    expires_at: Mapped[datetime]
     # The turn whose person's explicit yes approved it; set at that turn's start.
-    approved_origin_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approved_origin_id: Mapped[uuid.UUID | None]
+    consumed_at: Mapped[datetime | None]
 
 
 class SessionPreparation(Base):
@@ -3391,32 +2854,22 @@ class SessionPreparation(Base):
         Index("session_preparations_mapping_idx", "mapping_id"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
+    id: Mapped[UuidPk]
     mapping_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("thread_sessions.id", ondelete="CASCADE"),
-        nullable=False,
+        ForeignKey("thread_sessions.id", ondelete="CASCADE")
     )
-    target_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
-    stage: Mapped[str] = mapped_column(Text, nullable=False)
-    transfer_file_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    transfer_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_fingerprint: Mapped[str]
+    stage: Mapped[str]
+    transfer_file_id: Mapped[str | None]
+    transfer_kind: Mapped[str | None]
     new_mapping_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("thread_sessions.id", ondelete="SET NULL"),
-        nullable=True,
+        ForeignKey("thread_sessions.id", ondelete="SET NULL")
     )
-    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    failure_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
-    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    failure_reason: Mapped[str | None]
+    failure_kind: Mapped[str | None]
+    attempts: Mapped[int] = mapped_column(server_default=text("0"))
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNow]
 
 
 class TaskContinuation(Base):
@@ -3469,41 +2922,33 @@ class TaskContinuation(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    attended: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    requester_account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    requester_external_user_id: Mapped[str] = mapped_column(Text, nullable=False)
-    target_ma_agent_id: Mapped[str] = mapped_column(Text, nullable=False)
-    target_name: Mapped[str] = mapped_column(Text, nullable=False)
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    attended: Mapped[FalseFlag]
+    platform: Mapped[str]
+    parent_channel_id: Mapped[str]
+    thread_id: Mapped[str]
+    requester_account_id: Mapped[uuid.UUID]
+    requester_external_user_id: Mapped[str]
+    target_ma_agent_id: Mapped[str]
+    target_name: Mapped[str]
     # NULL means the handoff carried no work to continue: the switch is
     # recorded, and nothing is ever dispatched (never a billed turn).
-    requested_work: Mapped[str | None] = mapped_column(Text, nullable=True)
-    reason: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
-    skip_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    idempotency_key: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    requested_work: Mapped[str | None]
+    reason: Mapped[str]
+    status: Mapped[str] = mapped_column(server_default=text("'pending'"))
+    skip_reason: Mapped[str | None]
+    idempotency_key: Mapped[uuid.UUID]
+    created_at: Mapped[TsNow]
+    claimed_at: Mapped[datetime | None]
+    delivered_at: Mapped[datetime | None]
     # NULL: dispatched only at the tail of the next turn in the thread (a
     # handoff). Set: also polled, and not claimable before this instant.
-    available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    lease_owner: Mapped[str | None] = mapped_column(Text, nullable=True)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    available_at: Mapped[datetime | None]
+    lease_owner: Mapped[str | None]
+    lease_expires_at: Mapped[datetime | None]
+    started_at: Mapped[datetime | None]
+    attempts: Mapped[int] = mapped_column(server_default=text("0"))
 
 
 class TurnOutcome(Base):
@@ -3533,39 +2978,39 @@ class TurnOutcome(Base):
         Index("ix_turn_outcomes_tenant_started", "tenant_id", "started_at"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
     tenant_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+        ForeignKey("tenants.id", ondelete="CASCADE")
     )
-    account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str | None] = mapped_column(Text)
-    thread_id: Mapped[str | None] = mapped_column(Text)
-    agent_id: Mapped[str | None] = mapped_column(Text)
-    session_id: Mapped[str | None] = mapped_column(Text)
-    origin: Mapped[str] = mapped_column(Text, nullable=False)
-    reason: Mapped[str] = mapped_column(Text, nullable=False)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    duration_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    recovered: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    error_class: Mapped[str | None] = mapped_column(Text)
-    release: Mapped[str] = mapped_column(Text, nullable=False)
-    usage_refs: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
+    account_id: Mapped[uuid.UUID | None]
+    platform: Mapped[str]
+    channel_id: Mapped[str | None]
+    thread_id: Mapped[str | None]
+    agent_id: Mapped[str | None]
+    session_id: Mapped[str | None]
+    origin: Mapped[str]
+    reason: Mapped[str]
+    started_at: Mapped[datetime]
+    ended_at: Mapped[datetime]
+    duration_ms: Mapped[int] = mapped_column(BigInteger)
+    recovered: Mapped[bool]
+    error_class: Mapped[str | None]
+    release: Mapped[str]
+    usage_refs: Mapped[list[dict[str, str]]] = mapped_column(JSONB)
 
     # NULL distinguishes historical outcomes from measured zero usage.
     input_tokens: Mapped[int | None] = mapped_column(BigInteger)
     output_tokens: Mapped[int | None] = mapped_column(BigInteger)
     cache_read_input_tokens: Mapped[int | None] = mapped_column(BigInteger)
     cache_creation_input_tokens: Mapped[int | None] = mapped_column(BigInteger)
-    model_calls: Mapped[int | None] = mapped_column(Integer)
+    model_calls: Mapped[int | None]
     model_ids: Mapped[list[str] | None] = mapped_column(JSONB)
     cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(20, 10))
-    unpriced_calls: Mapped[int | None] = mapped_column(Integer)
-    billing_posture: Mapped[str | None] = mapped_column(Text)
+    unpriced_calls: Mapped[int | None]
+    billing_posture: Mapped[str | None]
     # What the turn ran with (`daimon.core.features.eval_key.EvalKey`), for
     # grouping eval results. NULL on turns without a session snapshot.
-    eval_key: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    eval_key: Mapped[dict[str, Any] | None]
 
 
 class TenantGitHubRepo(Base):
@@ -3589,115 +3034,94 @@ class TenantGitHubRepo(Base):
         CheckConstraint("status IN ('active', 'suspended', 'revoked')"),
     )
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid.uuid4,
-        server_default=text("gen_random_uuid()"),
+        primary_key=True, default=uuid.uuid4, server_default=text("gen_random_uuid()")
     )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
-    )
+    tenant_id: Mapped[TenantFK]
     repo_id: Mapped[int] = mapped_column(BigInteger)
     # Null: any agent in the workspace may be granted it. Set: only that agent.
-    scope_agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    scope_agent_id: Mapped[uuid.UUID | None]
     owner_id: Mapped[int] = mapped_column(BigInteger)
     installation_id: Mapped[int] = mapped_column(BigInteger)
-    repo_full_name: Mapped[str] = mapped_column(Text)
-    max_access: Mapped[str] = mapped_column(Text)
+    repo_full_name: Mapped[str]
+    max_access: Mapped[str]
     authorized_by_github_user_id: Mapped[int] = mapped_column(BigInteger)
-    authorized_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
-    )
+    authorized_by_account_id: Mapped[AccountSetNull]
     # The confirming person's GitHub permission on the repo: admin, maintain,
     # write, triage or read. Null on rows authorized before it was recorded.
-    authorized_permission: Mapped[str | None] = mapped_column(Text)
-    authorized_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    status: Mapped[str] = mapped_column(Text, server_default="active")
-    status_reason: Mapped[str | None] = mapped_column(Text)
-    version: Mapped[int] = mapped_column(Integer, server_default="1")
+    authorized_permission: Mapped[str | None]
+    authorized_at: Mapped[TsNow]
+    status: Mapped[str] = mapped_column(server_default="active")
+    status_reason: Mapped[str | None]
+    version: Mapped[int] = mapped_column(server_default="1")
 
 
 class GitHubConnectInvitation(Base):
     __tablename__ = "github_connect_invitations"
-    token_hash: Mapped[str] = mapped_column(Text, primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
-    )
-    requester_account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE")
-    )
-    workspace_label: Mapped[str] = mapped_column(Text)
-    requester_label: Mapped[str] = mapped_column(Text)
-    requester_platform_user_id: Mapped[str | None] = mapped_column(Text)
-    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    agent_name: Mapped[str | None] = mapped_column(Text)
+    token_hash: Mapped[str] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    requester_account_id: Mapped[AccountFK]
+    workspace_label: Mapped[str]
+    requester_label: Mapped[str]
+    requester_platform_user_id: Mapped[str | None]
+    agent_id: Mapped[uuid.UUID | None]
+    agent_name: Mapped[str | None]
     # for it can be checked again when the repos are confirmed.
-    agent_ma_id: Mapped[str | None] = mapped_column(Text)
-    operator_issued: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
-    connected_repo_count: Mapped[int | None] = mapped_column(Integer)
-    origin_platform: Mapped[str | None] = mapped_column(Text)
-    origin_parent_channel_id: Mapped[str | None] = mapped_column(Text)
-    origin_thread_id: Mapped[str | None] = mapped_column(Text)
-    origin_ma_agent_id: Mapped[str | None] = mapped_column(Text)
-    origin_responder_name: Mapped[str | None] = mapped_column(Text)
-    requested_work: Mapped[str | None] = mapped_column(Text)
-    requested_repo: Mapped[str | None] = mapped_column(Text)
-    encrypted_origin_followup: Mapped[bytes | None] = mapped_column(LargeBinary)
-    origin_followup_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    agent_ma_id: Mapped[str | None]
+    operator_issued: Mapped[FalseFlag]
+    connected_repo_count: Mapped[int | None]
+    origin_platform: Mapped[str | None]
+    origin_parent_channel_id: Mapped[str | None]
+    origin_thread_id: Mapped[str | None]
+    origin_ma_agent_id: Mapped[str | None]
+    origin_responder_name: Mapped[str | None]
+    requested_work: Mapped[str | None]
+    requested_repo: Mapped[str | None]
+    encrypted_origin_followup: Mapped[bytes | None]
+    origin_followup_expires_at: Mapped[datetime | None]
     connected_repos: Mapped[list[dict[str, str]] | None] = mapped_column(JSONB)
-    notice_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    notice_delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    notice_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
-    notice_next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    encrypted_token: Mapped[bytes | None] = mapped_column(LargeBinary)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    notice_claimed_at: Mapped[datetime | None]
+    notice_delivered_at: Mapped[datetime | None]
+    notice_attempts: Mapped[int] = mapped_column(server_default=text("0"))
+    notice_next_attempt_at: Mapped[datetime | None]
+    encrypted_token: Mapped[bytes | None]
+    expires_at: Mapped[datetime]
+    used_at: Mapped[datetime | None]
 
 
 class GitHubConnectClickIntent(Base):
     """Opaque requester-bound Discord button that mints on first click."""
 
     __tablename__ = "github_connect_click_intents"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    requester_account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
-    )
-    requester_platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_ma_id: Mapped[str | None] = mapped_column(Text)
-    origin_parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    origin_thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    origin_ma_agent_id: Mapped[str] = mapped_column(Text, nullable=False)
-    origin_responder_name: Mapped[str] = mapped_column(Text, nullable=False)
-    requested_work: Mapped[str | None] = mapped_column(Text)
-    requested_repo: Mapped[str | None] = mapped_column(Text)
-    encrypted_token: Mapped[bytes | None] = mapped_column(LargeBinary)
-    expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, index=True
-    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    requester_account_id: Mapped[AccountFK]
+    requester_platform_user_id: Mapped[str]
+    agent_id: Mapped[uuid.UUID]
+    agent_name: Mapped[str]
+    agent_ma_id: Mapped[str | None]
+    origin_parent_channel_id: Mapped[str]
+    origin_thread_id: Mapped[str]
+    origin_ma_agent_id: Mapped[str]
+    origin_responder_name: Mapped[str]
+    requested_work: Mapped[str | None]
+    requested_repo: Mapped[str | None]
+    encrypted_token: Mapped[bytes | None]
+    expires_at: Mapped[datetime] = mapped_column(index=True)
 
 
 class GitHubConnectFlow(Base):
     __tablename__ = "github_connect_flows"
-    state_hash: Mapped[str] = mapped_column(Text, primary_key=True)
+    state_hash: Mapped[str] = mapped_column(primary_key=True)
     invitation_hash: Mapped[str] = mapped_column(
-        Text, ForeignKey("github_connect_invitations.token_hash", ondelete="CASCADE")
+        ForeignKey("github_connect_invitations.token_hash", ondelete="CASCADE")
     )
-    cookie_hash: Mapped[str] = mapped_column(Text)
-    encrypted_verifier: Mapped[bytes] = mapped_column(LargeBinary)
-    encrypted_invitation_token: Mapped[bytes | None] = mapped_column(LargeBinary)
-    encrypted_user_token: Mapped[bytes | None] = mapped_column(LargeBinary)
+    cookie_hash: Mapped[str]
+    encrypted_verifier: Mapped[bytes]
+    encrypted_invitation_token: Mapped[bytes | None]
+    encrypted_user_token: Mapped[bytes | None]
     github_user_id: Mapped[int | None] = mapped_column(BigInteger)
-    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None]
+    expires_at: Mapped[datetime]
 
 
 class GitHubConnectRequest(Base):
@@ -3707,18 +3131,12 @@ class GitHubConnectRequest(Base):
             "tenant_id", "requester_account_id", "agent_id", name="uq_github_connect_request"
         ),
     )
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    requester_account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
-    )
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
-    requested_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[TenantFK]
+    requester_account_id: Mapped[AccountFK]
+    agent_id: Mapped[uuid.UUID]
+    agent_name: Mapped[str]
+    requested_at: Mapped[TsNow]
 
 
 class AgentGitHubGrant(Base):
@@ -3736,21 +3154,19 @@ class AgentGitHubGrant(Base):
     )
     # max_access belongs to tenant_github_repos, so the grant-writing store
     # must enforce ceiling_access <= max_access in the same transaction.
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    tenant_id: Mapped[uuid.UUID]
+    agent_id: Mapped[uuid.UUID]
     repo_id: Mapped[int] = mapped_column(BigInteger)
-    baseline_access: Mapped[str] = mapped_column(Text)
-    ceiling_access: Mapped[str] = mapped_column(Text)
-    mount_path: Mapped[str | None] = mapped_column(Text)
-    is_working_repo: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    baseline_access: Mapped[str]
+    ceiling_access: Mapped[str]
+    mount_path: Mapped[str | None]
+    is_working_repo: Mapped[FalseFlag]
     # The expand phase keeps the old `staged` column for old workers. A database
     # trigger mirrors its inverse here; new code reads only this field.
-    app_visible: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
-    granted_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
-    )
-    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    version: Mapped[int] = mapped_column(Integer, server_default="1")
+    app_visible: Mapped[bool] = mapped_column(server_default=text("true"))
+    granted_by_account_id: Mapped[AccountSetNull]
+    granted_at: Mapped[TsNow]
+    version: Mapped[int] = mapped_column(server_default="1")
 
 
 class AgentGitHubGrantDraft(Base):
@@ -3762,16 +3178,14 @@ class AgentGitHubGrantDraft(Base):
         ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
         CheckConstraint("operation IN ('upsert', 'remove')"),
     )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    tenant_id: Mapped[uuid.UUID]
+    agent_id: Mapped[uuid.UUID]
     repo_id: Mapped[int] = mapped_column(BigInteger)
-    operation: Mapped[str] = mapped_column(Text)
-    baseline_access: Mapped[str | None] = mapped_column(Text)
-    ceiling_access: Mapped[str | None] = mapped_column(Text)
-    is_working_repo: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
-    granted_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
-    )
+    operation: Mapped[str]
+    baseline_access: Mapped[str | None]
+    ceiling_access: Mapped[str | None]
+    is_working_repo: Mapped[FalseFlag]
+    granted_by_account_id: Mapped[AccountSetNull]
 
 
 class GitHubNewRepoNotice(Base):
@@ -3779,15 +3193,13 @@ class GitHubNewRepoNotice(Base):
 
     __tablename__ = "github_new_repo_notices"
     __table_args__ = (PrimaryKeyConstraint("tenant_id", "installation_id", "repo_full_name"),)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
-    )
+    tenant_id: Mapped[TenantFK]
     installation_id: Mapped[int] = mapped_column(BigInteger)
-    repo_full_name: Mapped[str] = mapped_column(Text)
-    queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    repo_full_name: Mapped[str]
+    queued_at: Mapped[TsNow]
+    delivered_at: Mapped[datetime | None]
+    claimed_at: Mapped[datetime | None]
+    dismissed_at: Mapped[datetime | None]
 
 
 class GitHubRemovalNotice(Base):
@@ -3795,15 +3207,13 @@ class GitHubRemovalNotice(Base):
 
     __tablename__ = "github_removal_notices"
     __table_args__ = (PrimaryKeyConstraint("tenant_id", "installation_id"),)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
-    )
+    tenant_id: Mapped[TenantFK]
     installation_id: Mapped[int] = mapped_column(BigInteger)
-    account_login: Mapped[str] = mapped_column(Text)
-    queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    account_login: Mapped[str]
+    queued_at: Mapped[TsNow]
+    confirmed_at: Mapped[datetime | None]
+    delivered_at: Mapped[datetime | None]
+    claimed_at: Mapped[datetime | None]
 
 
 class GitHubAccessRequest(Base):
@@ -3825,34 +3235,28 @@ class GitHubAccessRequest(Base):
             "status IN ('open', 'waiting_github', 'ready', 'cancelled', 'declined', 'expired')"
         ),
     )
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
-    )
-    requester_account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE")
-    )
-    requester_platform_user_id: Mapped[str] = mapped_column(Text)
-    platform: Mapped[str] = mapped_column(Text)
-    parent_channel_id: Mapped[str] = mapped_column(Text)
-    thread_id: Mapped[str] = mapped_column(Text)
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    ma_agent_id: Mapped[str] = mapped_column(Text)
-    agent_name: Mapped[str] = mapped_column(Text)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    requester_account_id: Mapped[AccountFK]
+    requester_platform_user_id: Mapped[str]
+    platform: Mapped[str]
+    parent_channel_id: Mapped[str]
+    thread_id: Mapped[str]
+    agent_id: Mapped[uuid.UUID]
+    ma_agent_id: Mapped[str]
+    agent_name: Mapped[str]
     repo_names: Mapped[list[str]] = mapped_column(JSONB)
-    required_ability: Mapped[str] = mapped_column(Text, server_default="read")
-    approved_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
-    )
-    requested_work: Mapped[str | None] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(Text, server_default="open")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    admin_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    admin_card_message_id: Mapped[str | None] = mapped_column(Text)
-    resumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    expiry_notice_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    required_ability: Mapped[str] = mapped_column(server_default="read")
+    approved_by_account_id: Mapped[AccountSetNull]
+    requested_work: Mapped[str | None]
+    status: Mapped[str] = mapped_column(server_default="open")
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNow]
+    expires_at: Mapped[datetime]
+    admin_notified_at: Mapped[datetime | None]
+    admin_card_message_id: Mapped[str | None]
+    resumed_at: Mapped[datetime | None]
+    expiry_notice_sent_at: Mapped[datetime | None]
 
 
 class GitHubGrantProposal(Base):
@@ -3870,23 +3274,19 @@ class GitHubGrantProposal(Base):
         ),
         Index("github_grant_proposals_expiry_idx", "expires_at"),
     )
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    requester_account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
-    )
-    requester_platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    repo_name: Mapped[str] = mapped_column(Text, nullable=False)
-    ability: Mapped[str] = mapped_column(Text, nullable=False)
-    origin_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    approved_origin_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    requester_account_id: Mapped[AccountFK]
+    requester_platform_user_id: Mapped[str]
+    platform: Mapped[str]
+    thread_id: Mapped[str]
+    agent_id: Mapped[uuid.UUID]
+    repo_name: Mapped[str]
+    ability: Mapped[str]
+    origin_id: Mapped[uuid.UUID]
+    approved_origin_id: Mapped[uuid.UUID | None]
+    created_at: Mapped[datetime]
+    expires_at: Mapped[datetime]
 
 
 class GitHubAccessRequestDelivery(Base):
@@ -3895,30 +3295,28 @@ class GitHubAccessRequestDelivery(Base):
     __tablename__ = "github_access_request_deliveries"
     __table_args__ = (PrimaryKeyConstraint("request_id", "recipient_account_id"),)
     request_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("github_access_requests.id", ondelete="CASCADE")
+        ForeignKey("github_access_requests.id", ondelete="CASCADE")
     )
-    recipient_account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE")
-    )
-    platform_user_id: Mapped[str] = mapped_column(Text)
-    message_id: Mapped[str | None] = mapped_column(Text)
-    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recipient_account_id: Mapped[AccountFK]
+    platform_user_id: Mapped[str]
+    message_id: Mapped[str | None]
+    delivered_at: Mapped[datetime | None]
+    dismissed_at: Mapped[datetime | None]
 
 
 class GitHubUserLink(Base):
     __tablename__ = "github_user_links"
     __table_args__ = (CheckConstraint("status IN ('active', 'broken')"),)
     github_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
-    login: Mapped[str] = mapped_column(Text)
-    encrypted_access_token: Mapped[bytes] = mapped_column(LargeBinary)
-    encrypted_refresh_token: Mapped[bytes | None] = mapped_column(LargeBinary)
-    access_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    refresh_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    token_generation: Mapped[int] = mapped_column(Integer, server_default="1")
-    link_generation: Mapped[int] = mapped_column(Integer, server_default="1")
-    status: Mapped[str] = mapped_column(Text, server_default="active")
-    linked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    login: Mapped[str]
+    encrypted_access_token: Mapped[bytes]
+    encrypted_refresh_token: Mapped[bytes | None]
+    access_expires_at: Mapped[datetime]
+    refresh_expires_at: Mapped[datetime | None]
+    token_generation: Mapped[int] = mapped_column(server_default="1")
+    link_generation: Mapped[int] = mapped_column(server_default="1")
+    status: Mapped[str] = mapped_column(server_default="active")
+    linked_at: Mapped[TsNow]
 
 
 class AccountGitHubLink(Base):
@@ -3927,15 +3325,15 @@ class AccountGitHubLink(Base):
         CheckConstraint("verified_via IN ('discord_oauth', 'slack_oidc', 'auto_attach_discord')"),
     )
     account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+        ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
     )
     github_user_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("github_user_links.github_user_id", ondelete="CASCADE")
     )
-    platform: Mapped[str] = mapped_column(Text)
-    platform_user_id: Mapped[str] = mapped_column(Text)
-    verified_via: Mapped[str] = mapped_column(Text)
-    linked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    platform: Mapped[str]
+    platform_user_id: Mapped[str]
+    verified_via: Mapped[str]
+    linked_at: Mapped[TsNow]
 
 
 class GitHubPersonalLinkIntent(Base):
@@ -3947,23 +3345,19 @@ class GitHubPersonalLinkIntent(Base):
         Index("uq_github_personal_link_intents_platform_state", "platform_state", unique=True),
         Index("uq_github_personal_link_intents_github_state", "github_state", unique=True),
     )
-    token_hash: Mapped[str] = mapped_column(Text, primary_key=True)
-    account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE")
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
-    )
-    platform: Mapped[str] = mapped_column(Text)
-    platform_user_id: Mapped[str] = mapped_column(Text)
-    platform_workspace_id: Mapped[str] = mapped_column(Text)
-    platform_state: Mapped[str | None] = mapped_column(Text)
-    github_state: Mapped[str | None] = mapped_column(Text)
-    browser_cookie_hash: Mapped[str | None] = mapped_column(Text)
-    encrypted_verifier: Mapped[bytes | None] = mapped_column(LargeBinary)
-    phase: Mapped[str] = mapped_column(Text, server_default="new")
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    token_hash: Mapped[str] = mapped_column(primary_key=True)
+    account_id: Mapped[AccountFK]
+    tenant_id: Mapped[TenantFK]
+    platform: Mapped[str]
+    platform_user_id: Mapped[str]
+    platform_workspace_id: Mapped[str]
+    platform_state: Mapped[str | None]
+    github_state: Mapped[str | None]
+    browser_cookie_hash: Mapped[str | None]
+    encrypted_verifier: Mapped[bytes | None]
+    phase: Mapped[str] = mapped_column(server_default="new")
+    expires_at: Mapped[datetime]
+    created_at: Mapped[TsNow]
 
 
 class GitHubIssuedToken(Base):
@@ -3982,36 +3376,30 @@ class GitHubIssuedToken(Base):
             postgresql_where=text("router_session_id IS NOT NULL AND status = 'delivered'"),
         ),
     )
-    token_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
+    token_id: Mapped[UuidPk]
     # Tenant deletion must revoke live installation tokens before this row cascades.
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
-    )
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    session_id: Mapped[str] = mapped_column(Text)
+    tenant_id: Mapped[TenantFK]
+    agent_id: Mapped[uuid.UUID]
+    session_id: Mapped[str]
     installation_id: Mapped[int] = mapped_column(BigInteger)
     repo_ids: Mapped[list[int]] = mapped_column(ARRAY(BigInteger))
     permissions: Mapped[dict[str, str]] = mapped_column(JSONB)
     grant_versions: Mapped[dict[str, int]] = mapped_column(JSONB)
-    requester_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
-    )
+    requester_account_id: Mapped[AccountSetNull]
     github_user_id: Mapped[int | None] = mapped_column(BigInteger)
-    link_generation: Mapped[int | None] = mapped_column(Integer)
-    encrypted_token: Mapped[bytes | None] = mapped_column(LargeBinary)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    status: Mapped[str] = mapped_column(Text, server_default="pending")
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    revoke_attempts: Mapped[int] = mapped_column(Integer, server_default="0")
-    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    revoke_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    link_generation: Mapped[int | None]
+    encrypted_token: Mapped[bytes | None]
+    expires_at: Mapped[datetime]
+    status: Mapped[str] = mapped_column(server_default="pending")
+    revoked_at: Mapped[datetime | None]
+    revoke_attempts: Mapped[int] = mapped_column(server_default="0")
+    superseded_at: Mapped[datetime | None]
+    revoke_after: Mapped[datetime | None]
+    created_at: Mapped[TsNow]
     # The router session this token serves, stamped on every row a routed
     # session mints, so the router finds the replacement after a rotation.
     router_session_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("github_router_sessions.id", ondelete="SET NULL")
+        ForeignKey("github_router_sessions.id", ondelete="SET NULL")
     )
 
 
@@ -4037,57 +3425,45 @@ class GitHubRouterSession(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
-    )
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    agent_id: Mapped[uuid.UUID]
     # Null for shared and headless sessions, and after account erasure.
-    account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
-    )
+    account_id: Mapped[AccountSetNull]
     # Set once Managed Agents has created the session.
-    ma_session_id: Mapped[str | None] = mapped_column(Text)
-    credential_sha256: Mapped[bytes] = mapped_column(LargeBinary, unique=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ma_session_id: Mapped[str | None]
+    credential_sha256: Mapped[bytes] = mapped_column(unique=True)
+    created_at: Mapped[TsNow]
+    expires_at: Mapped[datetime]
+    closed_at: Mapped[datetime | None]
+    last_used_at: Mapped[datetime | None]
 
 
 class GitHubAppSessionVault(Base):
     __tablename__ = "github_app_session_vaults"
     __table_args__ = (Index("ix_github_app_session_vaults_mcp_open", "is_mcp", "closed_at"),)
 
-    session_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
-    )
-    vault_id: Mapped[str] = mapped_column(Text)
-    is_unmapped: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    is_mcp: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
-    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
-    )
+    session_id: Mapped[str] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    vault_id: Mapped[str]
+    is_unmapped: Mapped[bool]
+    is_mcp: Mapped[FalseFlag]
+    agent_id: Mapped[uuid.UUID | None]
+    account_id: Mapped[AccountSetNull]
     repo_urls: Mapped[list[str] | None] = mapped_column(JSONB)
     repo_resource_ids: Mapped[dict[str, str] | None] = mapped_column(JSONB)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    last_started_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[TsNow]
+    last_started_at: Mapped[TsNow]
+    finished_at: Mapped[datetime | None]
+    closed_at: Mapped[datetime | None]
 
 
 class SecurityAuditEvent(Base):
     """Append-only security metadata with dedicated erasure and retention maintenance."""
 
     __tablename__ = "security_audit_events"
-    admin_subject_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
-    admin_subject_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    admin_subject_kind: Mapped[str | None]
+    admin_subject_id: Mapped[str | None]
 
     __table_args__ = (
         CheckConstraint(
@@ -4103,39 +3479,35 @@ class SecurityAuditEvent(Base):
             postgresql_where=text("turn_ref IS NOT NULL"),
         ),
     )
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    account_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    agent_name: Mapped[str | None] = mapped_column(Text)
-    platform: Mapped[str | None] = mapped_column(Text)
-    platform_user_id: Mapped[str | None] = mapped_column(Text)
-    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
-    operation: Mapped[str | None] = mapped_column(Text)
-    outcome: Mapped[str] = mapped_column(Text, nullable=False)
-    reason: Mapped[str] = mapped_column(Text, nullable=False)
-    occurred_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
-    )
-    token_kind: Mapped[str | None] = mapped_column(Text)
-    token_jti: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    scope: Mapped[str | None] = mapped_column(Text)
-    github_token_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    github_session_id: Mapped[str | None] = mapped_column(Text)
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[uuid.UUID]
+    account_id: Mapped[uuid.UUID | None]
+    agent_id: Mapped[uuid.UUID | None]
+    agent_name: Mapped[str | None]
+    platform: Mapped[str | None]
+    platform_user_id: Mapped[str | None]
+    tool_name: Mapped[str]
+    operation: Mapped[str | None]
+    outcome: Mapped[str]
+    reason: Mapped[str]
+    occurred_at: Mapped[datetime] = mapped_column(server_default=func.clock_timestamp())
+    token_kind: Mapped[str | None]
+    token_jti: Mapped[uuid.UUID | None]
+    scope: Mapped[str | None]
+    github_token_id: Mapped[uuid.UUID | None]
+    github_session_id: Mapped[str | None]
     github_installation_id: Mapped[int | None] = mapped_column(BigInteger)
     github_repo_ids: Mapped[list[int] | None] = mapped_column(ARRAY(BigInteger))
     github_permissions: Mapped[dict[str, str] | None] = mapped_column(JSONB)
     github_grant_versions: Mapped[dict[str, int] | None] = mapped_column(JSONB)
-    github_turn_origin_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    github_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    github_turn_origin_id: Mapped[uuid.UUID | None]
+    github_expires_at: Mapped[datetime | None]
     # Set only by the channel tidy tools: which message an edit or delete
     # touched, a keyed HMAC of the text it replaced, and the turn it ran in.
-    target_channel_id: Mapped[str | None] = mapped_column(Text)
-    target_message_id: Mapped[str | None] = mapped_column(Text)
-    content_hmac: Mapped[str | None] = mapped_column(Text)
-    turn_ref: Mapped[str | None] = mapped_column(Text)
+    target_channel_id: Mapped[str | None]
+    target_message_id: Mapped[str | None]
+    content_hmac: Mapped[str | None]
+    turn_ref: Mapped[str | None]
 
 
 class AgentPostedMessage(Base):
@@ -4183,37 +3555,31 @@ class AgentPostedMessage(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    message_id: Mapped[str] = mapped_column(Text, nullable=False)
-    parent_channel_id: Mapped[str | None] = mapped_column(Text)
-    thread_ts: Mapped[str | None] = mapped_column(Text)
-    kind: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    content_hmac: Mapped[str | None] = mapped_column(Text)
-    source: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'tool'"))
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    platform: Mapped[str]
+    channel_id: Mapped[str]
+    message_id: Mapped[str]
+    parent_channel_id: Mapped[str | None]
+    thread_ts: Mapped[str | None]
+    kind: Mapped[str]
+    agent_id: Mapped[uuid.UUID]
+    content_hmac: Mapped[str | None]
+    source: Mapped[str] = mapped_column(server_default=text("'tool'"))
     # The person whose message started the turn (`turn`), whose mention
     # opened the thread (`auto_thread`) or who made the routine (`routine`).
     # NULL for tool posts.
-    requester_platform_user_id: Mapped[str | None] = mapped_column(Text)
+    requester_platform_user_id: Mapped[str | None]
     # The turn that posted a `turn` row; no FK, intents are pruned once retired.
-    turn_card_intent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    turn_card_intent_id: Mapped[uuid.UUID | None]
     # What a Teams turn or routine post is (`PostRole`), so the agent can tell
     # its answer from the cards around it. NULL elsewhere.
-    role: Mapped[str | None] = mapped_column(Text)
+    role: Mapped[str | None]
     # One routine delivery: its chunks, which in a Teams channel each root
     # their own thread, so no channel groups them. NULL for other posts.
-    delivery_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    posted_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivery_id: Mapped[uuid.UUID | None]
+    posted_at: Mapped[TsNow]
+    deleted_at: Mapped[datetime | None]
 
 
 class ReachTally(Base):
@@ -4226,24 +3592,16 @@ class ReachTally(Base):
 
     __tablename__ = "reach_tallies"
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    turn_key: Mapped[str] = mapped_column(Text, primary_key=True)
-    threads: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
-    own_threads: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
-    places: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, server_default=text("'{}'")
-    )
-    people: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, server_default=text("'{}'")
-    )
-    approved_threads: Mapped[int | None] = mapped_column(Integer)
-    approved_places: Mapped[int | None] = mapped_column(Integer)
-    approved_people: Mapped[int | None] = mapped_column(Integer)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
-    )
+    tenant_id: Mapped[TenantPk]
+    turn_key: Mapped[str] = mapped_column(primary_key=True)
+    threads: Mapped[int] = mapped_column(server_default=text("0"))
+    own_threads: Mapped[int] = mapped_column(server_default=text("0"))
+    places: Mapped[list[str]] = mapped_column(server_default=text("'{}'"))
+    people: Mapped[list[str]] = mapped_column(server_default=text("'{}'"))
+    approved_threads: Mapped[int | None]
+    approved_places: Mapped[int | None]
+    approved_people: Mapped[int | None]
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), index=True)
 
 
 class TagOptOut(Base):
@@ -4256,55 +3614,45 @@ class TagOptOut(Base):
     __tablename__ = "tag_opt_outs"
 
     account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+        ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
     )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    tenant_id: Mapped[TenantFK]
+    created_at: Mapped[TsNow]
 
 
 class DirectMessagePolicy(Base):
     """Explicit tenant opt-in; absence leaves existing DM behavior unchanged."""
 
     __tablename__ = "direct_message_policies"
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    dm_agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    tenant_id: Mapped[TenantPk]
+    dm_agent_name: Mapped[str | None]
+    enabled: Mapped[FalseFlag]
 
 
 class DirectMessageConversation(Base):
     """One user's selected workspace for a private platform conversation."""
 
     __tablename__ = "direct_message_conversations"
-    platform: Mapped[str] = mapped_column(Text, primary_key=True)
-    route_key: Mapped[str] = mapped_column(Text, primary_key=True)
-    external_user_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
-    )
-    workspace_id: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    scope_id: Mapped[str] = mapped_column(Text, nullable=False)
-    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    platform: Mapped[str] = mapped_column(primary_key=True)
+    route_key: Mapped[str] = mapped_column(primary_key=True)
+    external_user_id: Mapped[str] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    account_id: Mapped[AccountFK]
+    workspace_id: Mapped[str]
+    channel_id: Mapped[str]
+    scope_id: Mapped[str]
+    source_url: Mapped[str]
     # The parent channel (and thread) /dm-me was run in; re-checked against seals
     # each turn, and the DM's spend counts toward that channel's budget.
-    source_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    source_thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_channel_id: Mapped[str | None]
+    source_thread_id: Mapped[str | None]
     # Slack: channel:thread_ts of every copied message, so later thread seals match.
-    source_thread_keys: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
-    context: Mapped[str] = mapped_column(Text, nullable=False)
-    memory_read_only: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    history: Mapped[list[dict[str, str]]] = mapped_column(JSONB, nullable=False)
-    recent_message_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
-    active_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_thread_keys: Mapped[list[str] | None]
+    context: Mapped[str]
+    memory_read_only: Mapped[bool]
+    history: Mapped[list[dict[str, str]]] = mapped_column(JSONB)
+    recent_message_ids: Mapped[list[str]]
+    active_until: Mapped[datetime | None]
 
 
 class PlatformUserName(Base):
@@ -4331,17 +3679,15 @@ class PlatformUserName(Base):
         ),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    platform: Mapped[str] = mapped_column(Text)
-    platform_user_id: Mapped[str] = mapped_column(Text)
+    tenant_id: Mapped[uuid.UUID]
+    platform: Mapped[str]
+    platform_user_id: Mapped[str]
     #: What the platform shows for them: a Discord server nickname or global
     #: name, a Slack display or real name, a Teams name.
-    display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    display_name: Mapped[str | None]
     #: Their account handle: a Discord username, a Slack username.
-    handle: Mapped[str | None] = mapped_column(Text, nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    handle: Mapped[str | None]
+    updated_at: Mapped[TsNow]
 
 
 class PlatformChannelName(Base):
@@ -4367,22 +3713,20 @@ class PlatformChannelName(Base):
         ),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    platform: Mapped[str] = mapped_column(Text)
-    channel_id: Mapped[str] = mapped_column(Text)
-    name: Mapped[str] = mapped_column(Text, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    tenant_id: Mapped[uuid.UUID]
+    platform: Mapped[str]
+    channel_id: Mapped[str]
+    name: Mapped[str]
+    updated_at: Mapped[TsNow]
     # What the adapter that saw the channel also knew: its kind (text, forum,
     # private, shared...) and its Discord category or Teams team.
-    kind: Mapped[str | None] = mapped_column(Text, nullable=True)
-    parent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    parent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    archived: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    kind: Mapped[str | None]
+    parent_id: Mapped[str | None]
+    parent_name: Mapped[str | None]
+    last_seen_at: Mapped[datetime | None]
+    archived: Mapped[bool | None]
     # Whether the platform still has it: "named", "gone" (deleted) or "direct" (a DM).
-    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="named")
+    status: Mapped[str] = mapped_column(server_default="named")
 
 
 class ChannelChange(Base):
@@ -4401,21 +3745,15 @@ class ChannelChange(Base):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    setting: Mapped[str] = mapped_column(Text, nullable=False)
-    before: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
-    after: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
-    actor_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
-    )
-    surface: Mapped[str] = mapped_column(Text, nullable=False)
-    at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    tenant_id: Mapped[TenantFK]
+    platform: Mapped[str]
+    channel_id: Mapped[str]
+    setting: Mapped[str]
+    before: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True))
+    after: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True))
+    actor_account_id: Mapped[AccountSetNull]
+    surface: Mapped[str]
+    at: Mapped[TsNow]
 
 
 # The provider-neutral state store (`daimon.core.stores.mux_state`, the
@@ -4438,17 +3776,15 @@ class ChannelConfigRevision(Base):
     __table_args__ = (PrimaryKeyConstraint("tenant_id", "platform", "channel_id", "local"),)
 
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    local: Mapped[int] = mapped_column(Integer, nullable=False)
-    digest: Mapped[str] = mapped_column(Text, nullable=False)
-    origin: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'channel'"))
-    agent_backend_ref: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    platform: Mapped[str]
+    channel_id: Mapped[str]
+    local: Mapped[int]
+    digest: Mapped[str]
+    origin: Mapped[str] = mapped_column(server_default=text("'channel'"))
+    agent_backend_ref: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True))
     # A `mux.contracts.config.ConfigRevision` as JSON.
-    revision: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    revision: Mapped[dict[str, Any]]
+    created_at: Mapped[TsNow]
 
 
 class ProviderBindingSlot(Base):
@@ -4472,13 +3808,13 @@ class ProviderBindingSlot(Base):
         ),
     )
 
-    binding_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    binding_id: Mapped[str] = mapped_column(primary_key=True)
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    account_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    platform: Mapped[str]
+    channel_id: Mapped[str]
+    thread_id: Mapped[str]
+    account_id: Mapped[str | None]
+    generation: Mapped[int]
 
 
 class ProviderBinding(Base):
@@ -4495,19 +3831,17 @@ class ProviderBinding(Base):
     )
 
     binding_id: Mapped[str] = mapped_column(
-        Text, ForeignKey("provider_binding_slot.binding_id", ondelete="CASCADE"), nullable=False
+        ForeignKey("provider_binding_slot.binding_id", ondelete="CASCADE")
     )
-    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    generation: Mapped[int]
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
-    provider: Mapped[str] = mapped_column(Text, nullable=False)
-    profile: Mapped[str] = mapped_column(Text, nullable=False)
+    provider: Mapped[str]
+    profile: Mapped[str]
     # A `mux.contracts.resources.ProviderBinding` as JSON.
-    binding: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    binding: Mapped[dict[str, Any]]
     # The `thread_sessions` row a backfilled generation came from; NULL otherwise.
-    legacy_row_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    legacy_row_id: Mapped[uuid.UUID | None]
+    created_at: Mapped[TsNow]
 
 
 class ThreadLease(Base):
@@ -4526,17 +3860,15 @@ class ThreadLease(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
+    id: Mapped[UuidPk]
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    account_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    last_fence: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    platform: Mapped[str]
+    channel_id: Mapped[str]
+    thread_id: Mapped[str]
+    account_id: Mapped[str | None]
+    last_fence: Mapped[int] = mapped_column(server_default=text("0"))
     # A `mux.state.lease.Lease` as JSON, or NULL when nobody holds the slot.
-    active: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    active: Mapped[dict[str, Any] | None]
 
 
 class ThreadProviderRelease(Base):
@@ -4560,16 +3892,14 @@ class ThreadProviderRelease(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
+    id: Mapped[UuidPk]
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    account_id: Mapped[str] = mapped_column(Text, nullable=False)
-    generation: Mapped[int] = mapped_column(Integer, nullable=False)
-    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    platform: Mapped[str]
+    channel_id: Mapped[str]
+    thread_id: Mapped[str]
+    account_id: Mapped[str]
+    generation: Mapped[int]
+    requested_at: Mapped[datetime]
 
 
 class BackendSwitchCard(Base):
@@ -4588,29 +3918,23 @@ class BackendSwitchCard(Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
+    id: Mapped[UuidPk]
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
-    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    setup_thread: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
-    requester_platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    account_id: Mapped[uuid.UUID]
+    platform: Mapped[str]
+    channel_id: Mapped[str]
+    thread_id: Mapped[str]
+    setup_thread: Mapped[FalseFlag]
+    requester_platform_user_id: Mapped[str]
     # The requester is from another organisation: never an admin at the press.
-    client: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
-    answering_agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    reference: Mapped[Any] = mapped_column(JSONB, nullable=False)
-    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
-    outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
-    message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    client: Mapped[FalseFlag]
+    answering_agent_name: Mapped[str | None]
+    reference: Mapped[Any] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(server_default=text("'pending'"))
+    outcome: Mapped[str | None]
+    message_id: Mapped[str | None]
+    expires_at: Mapped[datetime]
+    created_at: Mapped[TsNow]
 
 
 class HostCallCard(Base):
@@ -4640,32 +3964,26 @@ class HostCallCard(Base):
         Index("ix_host_call_cards_thread_status", "tenant_id", "platform", "thread_id", "status"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
+    id: Mapped[UuidPk]
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
-    origin_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    requester_account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
-    )
-    requester_platform_user_id: Mapped[str] = mapped_column(Text, nullable=False)
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    executing_agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    executing_ma_agent_id: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
-    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
-    args_digest: Mapped[str] = mapped_column(Text, nullable=False)
-    reference: Mapped[Any] = mapped_column(JSONB, nullable=False)
-    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'pending'"))
-    outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
-    message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    executing_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    origin_id: Mapped[uuid.UUID]
+    requester_account_id: Mapped[AccountFK]
+    requester_platform_user_id: Mapped[str]
+    platform: Mapped[str]
+    channel_id: Mapped[str]
+    thread_id: Mapped[str]
+    executing_agent_id: Mapped[uuid.UUID]
+    executing_ma_agent_id: Mapped[str]
+    agent_name: Mapped[str]
+    tool_name: Mapped[str]
+    args_digest: Mapped[str]
+    reference: Mapped[Any] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(server_default=text("'pending'"))
+    outcome: Mapped[str | None]
+    message_id: Mapped[str | None]
+    expires_at: Mapped[datetime]
+    executing_at: Mapped[datetime | None]
+    created_at: Mapped[TsNow]
 
 
 class MuxOperation(Base):
@@ -4679,15 +3997,13 @@ class MuxOperation(Base):
     __table_args__ = (PrimaryKeyConstraint("tenant_id", "account_id", "key"),)
 
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
-    account_id: Mapped[str] = mapped_column(Text, nullable=False)
-    key: Mapped[str] = mapped_column(Text, nullable=False)
-    principal_id: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(Text, nullable=False)
+    account_id: Mapped[str]
+    key: Mapped[str]
+    principal_id: Mapped[str]
+    status: Mapped[str]
     # A `mux.state.operations.OperationRecord` as JSON.
-    record: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    record: Mapped[dict[str, Any]]
+    updated_at: Mapped[TsNow]
 
 
 class JournalSession(Base):
@@ -4698,14 +4014,14 @@ class JournalSession(Base):
 
     __tablename__ = "journal_session"
 
-    session_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    session_id: Mapped[str] = mapped_column(primary_key=True)
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
     binding_id: Mapped[str] = mapped_column(
-        Text, ForeignKey("provider_binding_slot.binding_id", ondelete="CASCADE"), nullable=False
+        ForeignKey("provider_binding_slot.binding_id", ondelete="CASCADE")
     )
-    next_sequence: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    next_sequence: Mapped[int] = mapped_column(server_default=text("0"))
     # A `mux.contracts.resources.ProjectionSnapshot` as JSON; NULL before the first append.
-    projection: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    projection: Mapped[dict[str, Any] | None]
 
 
 class Journal(Base):
@@ -4720,15 +4036,15 @@ class Journal(Base):
     )
 
     session_id: Mapped[str] = mapped_column(
-        Text, ForeignKey("journal_session.session_id", ondelete="CASCADE"), nullable=False
+        ForeignKey("journal_session.session_id", ondelete="CASCADE")
     )
-    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    sequence: Mapped[int]
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
-    source_key: Mapped[str] = mapped_column(Text, nullable=False)
-    revision: Mapped[int] = mapped_column(Integer, nullable=False)
-    preview: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    source_key: Mapped[str]
+    revision: Mapped[int]
+    preview: Mapped[bool]
     # A `mux.contracts.events.Event` as JSON.
-    event: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    event: Mapped[dict[str, Any]]
 
 
 class UsageObservation(Base):
@@ -4743,12 +4059,12 @@ class UsageObservation(Base):
 
     # No foreign key to the slot: erasing a private slot must leave these rows
     # (see `AccountingBindingContext`).
-    binding_id: Mapped[str] = mapped_column(Text, nullable=False)
-    observation_id: Mapped[str] = mapped_column(Text, nullable=False)
-    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    binding_id: Mapped[str]
+    observation_id: Mapped[str]
+    revision: Mapped[int]
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
     # A `mux.state.usage_ledger.AppliedUsage` as JSON.
-    applied: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    applied: Mapped[dict[str, Any]]
 
 
 class AccountingOutbox(Base):
@@ -4766,17 +4082,15 @@ class AccountingOutbox(Base):
 
     # No foreign key to the slot: erasing a private slot must leave these rows
     # (see `AccountingBindingContext`).
-    binding_id: Mapped[str] = mapped_column(Text, nullable=False)
-    observation_id: Mapped[str] = mapped_column(Text, nullable=False)
-    revision: Mapped[int] = mapped_column(Integer, nullable=False)
-    prior_applied_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    binding_id: Mapped[str]
+    observation_id: Mapped[str]
+    revision: Mapped[int]
+    prior_applied_revision: Mapped[int | None]
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
     # A `mux.state.usage_ledger.OutboxRow` as JSON (its `applied` flag is `applied_at`).
-    row: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    row: Mapped[dict[str, Any]]
+    created_at: Mapped[TsNow]
+    applied_at: Mapped[datetime | None]
 
 
 class AccountingBindingContext(Base):
@@ -4792,14 +4106,14 @@ class AccountingBindingContext(Base):
 
     __tablename__ = "accounting_binding_context"
 
-    binding_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    binding_id: Mapped[str] = mapped_column(primary_key=True)
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    platform: Mapped[str]
+    channel_id: Mapped[str]
     # The newest generation's profile, and every profile the binding ever had: the
     # pending-usage drain settles only bindings that never left its profiles.
-    profile: Mapped[str] = mapped_column(Text, nullable=False)
-    profiles: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    profile: Mapped[str]
+    profiles: Mapped[list[str]]
 
 
 class ErasedPrincipal(Base):
@@ -4812,11 +4126,9 @@ class ErasedPrincipal(Base):
 
     __tablename__ = "erased_principal"
 
-    principal_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    erased_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    principal_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    account_id: Mapped[uuid.UUID]
+    erased_at: Mapped[TsNow]
 
 
 class ErasedAccount(Base):
@@ -4829,10 +4141,8 @@ class ErasedAccount(Base):
 
     __tablename__ = "erased_account"
 
-    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    erased_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    account_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    erased_at: Mapped[TsNow]
 
 
 class NeutralAgentRevision(Base):
@@ -4843,17 +4153,15 @@ class NeutralAgentRevision(Base):
         CheckConstraint("provider IN ('openai', 'gemini')", name="ck_neutral_agent_provider"),
         CheckConstraint("local_revision > 0", name="ck_neutral_agent_revision"),
     )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
+    tenant_id: Mapped[TenantPk]
     # No account key: a shared thread's owner has no account row (0204).
-    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    provider: Mapped[str] = mapped_column(Text, primary_key=True)
-    account_scope_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    catalog_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    local_revision: Mapped[int] = mapped_column(Integer, primary_key=True)
-    principal_id: Mapped[str] = mapped_column(Text, nullable=False)
-    agent: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    account_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    provider: Mapped[str] = mapped_column(primary_key=True)
+    account_scope_id: Mapped[str] = mapped_column(primary_key=True)
+    catalog_id: Mapped[str] = mapped_column(primary_key=True)
+    local_revision: Mapped[int] = mapped_column(primary_key=True)
+    principal_id: Mapped[str]
+    agent: Mapped[dict[str, Any]]
 
 
 class NeutralSkillVersion(Base):
@@ -4865,20 +4173,18 @@ class NeutralSkillVersion(Base):
             "provider IN ('openai', 'gemini', 'selfhosted')", name="ck_neutral_skill_provider"
         ),
     )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
+    tenant_id: Mapped[TenantPk]
     # No account key: a shared thread's owner has no account row (0204).
-    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    provider: Mapped[str] = mapped_column(Text, primary_key=True)
-    account_scope_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    skill_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    version: Mapped[str] = mapped_column(Text, primary_key=True)
-    principal_id: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
-    display_title: Mapped[str] = mapped_column(Text, nullable=False)
-    preview: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    zip_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    account_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    provider: Mapped[str] = mapped_column(primary_key=True)
+    account_scope_id: Mapped[str] = mapped_column(primary_key=True)
+    skill_id: Mapped[str] = mapped_column(primary_key=True)
+    version: Mapped[str] = mapped_column(primary_key=True)
+    principal_id: Mapped[str]
+    agent_name: Mapped[str]
+    display_title: Mapped[str]
+    preview: Mapped[dict[str, Any]]
+    zip_bytes: Mapped[bytes]
 
 
 class DiscordMessageAdmission(Base):
@@ -4889,19 +4195,15 @@ class DiscordMessageAdmission(Base):
         Index("ix_discord_admissions_activity", "tenant_id", "created_at"),
         Index("ix_discord_admissions_channel", "tenant_id", "channel_id", "created_at"),
     )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    message_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    owner_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    tenant_id: Mapped[TenantPk]
+    message_id: Mapped[str] = mapped_column(primary_key=True)
+    channel_id: Mapped[str]
+    owner_key: Mapped[int] = mapped_column(BigInteger)
     turn_card_intent_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("turn_card_intents.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("turn_card_intents.id", ondelete="SET NULL")
     )
-    handled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    handled: Mapped[FalseFlag]
+    created_at: Mapped[TsNow]
 
 
 class DiscordWorkerHeartbeat(Base):
@@ -4909,8 +4211,8 @@ class DiscordWorkerHeartbeat(Base):
 
     __tablename__ = "discord_worker_heartbeats"
     owner_key: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    lease_aware: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    seen_at: Mapped[datetime]
+    lease_aware: Mapped[FalseFlag]
 
 
 class DiscordGatewayLease(Base):
@@ -4918,9 +4220,9 @@ class DiscordGatewayLease(Base):
 
     __tablename__ = "discord_gateway_lease"
     id: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
-    holder_owner_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    holder_owner_key: Mapped[int] = mapped_column(BigInteger)
+    acquired_at: Mapped[datetime]
+    released_at: Mapped[datetime | None]
 
 
 class SessionSettleState(Base):
@@ -4941,16 +4243,14 @@ class SessionSettleState(Base):
 
     __tablename__ = "usage_reconcile_progress"
 
-    managed_session_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    covered_through: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    settle_turn_event_id: Mapped[str | None] = mapped_column(Text)
-    settle_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    managed_session_id: Mapped[str] = mapped_column(primary_key=True)
+    covered_through: Mapped[datetime | None]
+    settle_turn_event_id: Mapped[str | None]
+    settle_requested_at: Mapped[datetime | None]
     # The latest turn an agent-chat send started here, and its tool-rule channel.
-    unattended_turn_event_id: Mapped[str | None] = mapped_column(Text)
-    unattended_rules_channel_id: Mapped[str | None] = mapped_column(Text)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    unattended_turn_event_id: Mapped[str | None]
+    unattended_rules_channel_id: Mapped[str | None]
+    updated_at: Mapped[TsNow]
 
 
 class AgentBackendRevisionRecord(Base):
@@ -4979,29 +4279,27 @@ class AgentBackendRevisionRecord(Base):
         ),
     )
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    local: Mapped[int] = mapped_column(Integer, nullable=False)
-    backend: Mapped[str | None] = mapped_column(Text)
-    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
-    preview_digest: Mapped[str] = mapped_column(Text, nullable=False)
-    digest: Mapped[str] = mapped_column(Text, nullable=False)
-    previous_local: Mapped[int | None] = mapped_column(Integer)
+    agent_id: Mapped[uuid.UUID]
+    local: Mapped[int]
+    backend: Mapped[str | None]
+    agent_name: Mapped[str]
+    preview_digest: Mapped[str]
+    digest: Mapped[str]
+    previous_local: Mapped[int | None]
     # A loss consent older rows kept; no longer written, read and ignored.
-    drop_consent: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    drop_consent: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True))
+    created_at: Mapped[TsNow]
     # The admin-picked model; null is the provider's default (0118, so last).
-    model: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str | None]
     # The agent's own profile, requirements and thread mode; null is the
     # backend's default (0119).
-    profile: Mapped[str | None] = mapped_column(Text)
-    requires: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
-    thread_mode: Mapped[str | None] = mapped_column(Text)
+    profile: Mapped[str | None]
+    requires: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True))
+    thread_mode: Mapped[str | None]
     # The agent's reasoning effort on its non-default provider; null keeps the model's own.
-    effort: Mapped[str | None] = mapped_column(Text)
+    effort: Mapped[str | None]
     # The self-hosted environment record a self-hosted agent runs in (0202).
-    environment: Mapped[str | None] = mapped_column(Text)
+    environment: Mapped[str | None]
 
 
 class AgentOwner(Base):
@@ -5018,20 +4316,14 @@ class AgentOwner(Base):
         Index("ix_agent_owner_account", "owner_account_id"),
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_agent_owner_tenants"),
-        nullable=False,
+        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_agent_owner_tenants")
     )
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    agent_id: Mapped[uuid.UUID]
     owner_account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("accounts.id", ondelete="CASCADE", name="fk_agent_owner_accounts"),
-        nullable=False,
+        ForeignKey("accounts.id", ondelete="CASCADE", name="fk_agent_owner_accounts")
     )
-    source: Mapped[str] = mapped_column(Text, nullable=False)
-    recorded_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    source: Mapped[str]
+    recorded_at: Mapped[TsNow]
 
 
 class AgentCoOwner(Base):
@@ -5048,23 +4340,16 @@ class AgentCoOwner(Base):
         Index("ix_agent_co_owners_account", "account_id"),
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_agent_co_owners_tenants"),
-        nullable=False,
+        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_agent_co_owners_tenants")
     )
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    agent_id: Mapped[uuid.UUID]
     account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("accounts.id", ondelete="CASCADE", name="fk_agent_co_owners_accounts"),
-        nullable=False,
+        ForeignKey("accounts.id", ondelete="CASCADE", name="fk_agent_co_owners_accounts")
     )
     added_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("accounts.id", ondelete="SET NULL", name="fk_agent_co_owners_added_by"),
+        ForeignKey("accounts.id", ondelete="SET NULL", name="fk_agent_co_owners_added_by")
     )
-    added_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    added_at: Mapped[TsNow]
 
 
 class GeminiRuntimeState(Base):
@@ -5077,10 +4362,10 @@ class GeminiRuntimeState(Base):
     )
 
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
-    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    project: Mapped[str] = mapped_column(Text, nullable=False)
-    kind: Mapped[str] = mapped_column(Text, nullable=False)
-    body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    account_id: Mapped[uuid.UUID]
+    project: Mapped[str]
+    kind: Mapped[str]
+    body: Mapped[str | None]
 
 
 class Watch(Base):
@@ -5106,78 +4391,60 @@ class Watch(Base):
         ),
         CheckConstraint("max_turns_per_day BETWEEN 1 AND 240", name="ck_watches_max_turns"),
     )
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    owner_account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
-    )
-    owner_external_id: Mapped[str] = mapped_column(Text, nullable=False)
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    owner_account_id: Mapped[AccountFK]
+    owner_external_id: Mapped[str]
+    platform: Mapped[str]
+    parent_channel_id: Mapped[str]
+    thread_id: Mapped[str]
+    agent_id: Mapped[str]
+    agent_name: Mapped[str]
     # NULL unless `delivery` is 'thread': the others run each fire on a fresh session.
-    session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    session_id: Mapped[str | None]
     # Where a fire reports: 'thread' (the bound thread), 'dm' (the owner's DM) or
     # 'new_thread' (a new thread under the parent). `thread_id` and
     # `parent_channel_id` always name the place the watch was made.
-    delivery: Mapped[str] = mapped_column(Text, nullable=False, server_default="thread")
-    instructions: Mapped[str] = mapped_column(Text, nullable=False)
-    producer: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    page_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
-    source: Mapped[str] = mapped_column(Text, nullable=False, server_default="page_event")
-    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="active")
-    baseline: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb")
-    )
-    rule: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb")
-    )
-    source_state: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb")
-    )
+    delivery: Mapped[str] = mapped_column(server_default="thread")
+    instructions: Mapped[str]
+    producer: Mapped[str] = mapped_column(unique=True)
+    page_id: Mapped[uuid.UUID]
+    revision: Mapped[int] = mapped_column(server_default="1")
+    source: Mapped[str] = mapped_column(server_default="page_event")
+    status: Mapped[str] = mapped_column(server_default="active")
+    baseline: Mapped[dict[str, Any]] = mapped_column(server_default=text("'{}'::jsonb"))
+    rule: Mapped[dict[str, Any]] = mapped_column(server_default=text("'{}'::jsonb"))
+    source_state: Mapped[dict[str, Any]] = mapped_column(server_default=text("'{}'::jsonb"))
     # NULL is a permanent watch; it expires only after 30 days paused (`paused_at`).
-    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None]
     # The admin whose fresh admin check allowed a permanent watch, kept for audit.
-    permanent_approved_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    lease_owner: Mapped[str | None] = mapped_column(Text)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    next_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    backoff_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    consecutive_errors: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    max_turns_per_day: Mapped[int] = mapped_column(Integer, nullable=False, server_default="24")
-    max_fires: Mapped[int | None] = mapped_column(Integer)
-    fire_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    rate_window_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    rate_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    permanent_approved_by: Mapped[uuid.UUID | None]
+    paused_at: Mapped[datetime | None]
+    lease_owner: Mapped[str | None]
+    lease_expires_at: Mapped[datetime | None]
+    next_check_at: Mapped[datetime | None]
+    backoff_until: Mapped[datetime | None]
+    consecutive_errors: Mapped[int] = mapped_column(server_default="0")
+    max_turns_per_day: Mapped[int] = mapped_column(server_default="24")
+    max_fires: Mapped[int | None]
+    fire_count: Mapped[int] = mapped_column(server_default="0")
+    rate_window_at: Mapped[datetime | None]
+    rate_count: Mapped[int] = mapped_column(server_default="0")
+    created_at: Mapped[TsNow]
 
 
 class WatchCapability(Base):
     """Only the hash survives issuance. Secrets are never queryable."""
 
     __tablename__ = "watch_capabilities"
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    watch_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("watches.id", ondelete="CASCADE"), nullable=False
-    )
-    digest: Mapped[str] = mapped_column(Text, nullable=False)
-    key_id: Mapped[str] = mapped_column(Text, nullable=False)
-    generation: Mapped[int] = mapped_column(Integer, nullable=False)
-    operation: Mapped[str] = mapped_column(Text, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    id: Mapped[UuidPk]
+    watch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("watches.id", ondelete="CASCADE"))
+    digest: Mapped[str]
+    key_id: Mapped[str]
+    generation: Mapped[int]
+    operation: Mapped[str]
+    expires_at: Mapped[datetime]
+    revoked_at: Mapped[datetime | None]
 
 
 class WatchFiring(Base):
@@ -5185,26 +4452,20 @@ class WatchFiring(Base):
 
     __tablename__ = "watch_firings"
     wake_key: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("task_continuations.idempotency_key", ondelete="CASCADE"),
-        primary_key=True,
+        ForeignKey("task_continuations.idempotency_key", ondelete="CASCADE"), primary_key=True
     )
     watch_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("watches.id", ondelete="CASCADE"), nullable=False, index=True
+        ForeignKey("watches.id", ondelete="CASCADE"), index=True
     )
-    revision: Mapped[int] = mapped_column(Integer, nullable=False)
-    generation: Mapped[int] = mapped_column(Integer, nullable=False)
-    events: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb")
-    )
-    omitted: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    revision: Mapped[int]
+    generation: Mapped[int]
+    events: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    omitted: Mapped[int] = mapped_column(server_default="0")
+    created_at: Mapped[TsNow]
     # Written once: the thread a 'new_thread' fire made, so a retry reuses it.
-    delivery_thread_id: Mapped[str | None] = mapped_column(Text)
+    delivery_thread_id: Mapped[str | None]
     # Written once: the fresh session a 'dm' fire runs on.
-    delivery_session_id: Mapped[str | None] = mapped_column(Text)
+    delivery_session_id: Mapped[str | None]
 
 
 class WatchEvidence(Base):
@@ -5216,21 +4477,15 @@ class WatchEvidence(Base):
         Index("watch_inbox_accepted_idx", "accepted_at"),
         Index("watch_inbox_watch_idx", "watch_id"),
     )
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    watch_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("watches.id", ondelete="CASCADE"), nullable=False
-    )
-    producer: Mapped[str] = mapped_column(Text, nullable=False)
-    event_id: Mapped[str] = mapped_column(Text, nullable=False)
-    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    id: Mapped[UuidPk]
+    watch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("watches.id", ondelete="CASCADE"))
+    producer: Mapped[str]
+    event_id: Mapped[str]
+    payload: Mapped[str]
     wake_key: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("watch_firings.wake_key", ondelete="CASCADE"), nullable=False
+        ForeignKey("watch_firings.wake_key", ondelete="CASCADE")
     )
-    accepted_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    accepted_at: Mapped[TsNow]
 
 
 class WatchControl(Base):
@@ -5247,12 +4502,12 @@ class WatchControl(Base):
             name="ck_watch_controls_ceilings",
         ),
     )
-    scope: Mapped[str] = mapped_column(Text, primary_key=True)
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    scope: Mapped[str] = mapped_column(primary_key=True)
+    enabled: Mapped[FalseFlag]
     # Daily firing ceilings, on the global row or a tenant row (which overrides it);
     # NULL is the default, 24 per watch and 100 per owner.
-    max_turns_per_watch_per_day: Mapped[int | None] = mapped_column(Integer)
-    max_turns_per_owner_per_day: Mapped[int | None] = mapped_column(Integer)
+    max_turns_per_watch_per_day: Mapped[int | None]
+    max_turns_per_owner_per_day: Mapped[int | None]
 
 
 class WatchNoticeReceipt(Base):
@@ -5273,27 +4528,21 @@ class WatchNoticeReceipt(Base):
         ),
         Index("ix_watch_notice_receipt_time", "attempted_at"),
     )
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    watch_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    owner_account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
-    )
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    kind: Mapped[str] = mapped_column(Text, nullable=False)
-    generation: Mapped[int] = mapped_column(Integer, nullable=False)
-    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    watch_id: Mapped[uuid.UUID]
+    owner_account_id: Mapped[AccountFK]
+    platform: Mapped[str]
+    kind: Mapped[str]
+    generation: Mapped[int]
+    attempt: Mapped[int]
     # The notice claim's lease token, so an attempt maps to exactly one claim.
-    claim: Mapped[str] = mapped_column(Text, nullable=False)
-    outcome: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
-    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    channel_id: Mapped[str | None] = mapped_column(Text)
-    message_id: Mapped[str | None] = mapped_column(Text)
+    claim: Mapped[str]
+    outcome: Mapped[str] = mapped_column(server_default="pending")
+    attempted_at: Mapped[datetime]
+    settled_at: Mapped[datetime | None]
+    channel_id: Mapped[str | None]
+    message_id: Mapped[str | None]
 
 
 class WatchCredential(Base):
@@ -5310,53 +4559,39 @@ class WatchCredential(Base):
             "tenant_id", "owner_account_id", "server_url", name="uq_watch_credentials_owner_url"
         ),
     )
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    owner_account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
-    )
-    server_url: Mapped[str] = mapped_column(Text, nullable=False)
-    token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    rotated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    owner_account_id: Mapped[AccountFK]
+    server_url: Mapped[str]
+    token_encrypted: Mapped[bytes]
+    created_at: Mapped[TsNow]
+    rotated_at: Mapped[TsNow]
+    last_used_at: Mapped[datetime | None]
 
 
 class LeadIntakeConfig(Base):
     __tablename__ = "lead_intake_configs"
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    encrypted_credentials: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    tenant_id: Mapped[TenantPk]
+    config: Mapped[dict[str, Any]]
+    encrypted_credentials: Mapped[bytes]
 
 
 class LeadIntakeRecord(Base):
     __tablename__ = "lead_intakes"
     __table_args__ = (UniqueConstraint("tenant_id", "source_digest", name="uq_lead_source"),)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    source_digest: Mapped[str] = mapped_column(Text, nullable=False)
-    actor_digest: Mapped[str | None] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(Text, nullable=False)
-    encrypted_payload: Mapped[bytes | None] = mapped_column(LargeBinary)
-    encrypted_raw: Mapped[bytes | None] = mapped_column(LargeBinary)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    raw_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    tenant_id: Mapped[TenantPk]
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    source_digest: Mapped[str]
+    actor_digest: Mapped[str | None]
+    status: Mapped[str]
+    encrypted_payload: Mapped[bytes | None]
+    encrypted_raw: Mapped[bytes | None]
+    created_at: Mapped[datetime]
+    expires_at: Mapped[datetime]
+    raw_expires_at: Mapped[datetime]
     # Who may read a lead is fixed at capture; kept in plaintext so it outlives erasure.
-    destination_guild_id: Mapped[str] = mapped_column(Text, nullable=False)
-    destination_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    destination_guild_id: Mapped[str]
+    destination_channel_id: Mapped[str]
 
 
 class LeadIntakeEffect(Base):
@@ -5375,13 +4610,13 @@ class LeadIntakeEffect(Base):
             ondelete="CASCADE",
         ),
     )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    intake_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    step: Mapped[str] = mapped_column(Text, primary_key=True)
-    stable_key: Mapped[str] = mapped_column(Text, nullable=False)
-    state: Mapped[str] = mapped_column(Text, nullable=False)
-    remote_id: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    intake_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    step: Mapped[str] = mapped_column(primary_key=True)
+    stable_key: Mapped[str]
+    state: Mapped[str]
+    remote_id: Mapped[str | None]
+    created_at: Mapped[datetime]
 
 
 class LeadResolutionAudit(Base):
@@ -5393,32 +4628,26 @@ class LeadResolutionAudit(Base):
             ondelete="CASCADE",
         ),
     )
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    intake_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    encrypted_resolution: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    tenant_id: Mapped[uuid.UUID]
+    intake_id: Mapped[uuid.UUID]
+    encrypted_resolution: Mapped[bytes]
+    created_at: Mapped[datetime]
 
 
 class LeadMailboxState(Base):
     __tablename__ = "lead_mailbox_states"
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    mailbox_key: Mapped[str] = mapped_column(Text, primary_key=True)
-    encrypted_state: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    tenant_id: Mapped[TenantPk]
+    mailbox_key: Mapped[str] = mapped_column(primary_key=True)
+    encrypted_state: Mapped[bytes]
 
 
 class LeadIntakeExecution(Base):
     __tablename__ = "lead_intake_executions"
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    routine_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("routines.id", ondelete="CASCADE"), nullable=False
-    )
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    tenant_id: Mapped[TenantPk]
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    routine_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("routines.id", ondelete="CASCADE"))
+    expires_at: Mapped[datetime]
 
 
 class LeadOpportunityRecord(Base):
@@ -5430,27 +4659,25 @@ class LeadOpportunityRecord(Base):
             ondelete="CASCADE",
         ),
     )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    identity_digest: Mapped[str] = mapped_column(Text, primary_key=True)
-    intake_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    encrypted_mapping: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    identity_digest: Mapped[str] = mapped_column(primary_key=True)
+    intake_id: Mapped[uuid.UUID]
+    encrypted_mapping: Mapped[bytes]
+    expires_at: Mapped[datetime]
 
 
 class LeadMailboxScanRecord(Base):
     __tablename__ = "lead_mailbox_scans"
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    mailbox_key: Mapped[str] = mapped_column(Text, nullable=False)
-    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    state: Mapped[str] = mapped_column(Text, nullable=False)
-    discovered_count: Mapped[int] = mapped_column(Integer, nullable=False)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    error_code: Mapped[str | None] = mapped_column(Text)
+    tenant_id: Mapped[TenantPk]
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    mailbox_key: Mapped[str]
+    window_start: Mapped[datetime]
+    window_end: Mapped[datetime]
+    state: Mapped[str]
+    discovered_count: Mapped[int]
+    started_at: Mapped[datetime]
+    completed_at: Mapped[datetime | None]
+    error_code: Mapped[str | None]
 
 
 class LeadMailboxMessageRecord(Base):
@@ -5462,15 +4689,13 @@ class LeadMailboxMessageRecord(Base):
             ondelete="CASCADE",
         ),
     )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    source_digest: Mapped[str] = mapped_column(Text, primary_key=True)
-    mailbox_key: Mapped[str] = mapped_column(Text, nullable=False)
-    encrypted_message_id: Mapped[bytes | None] = mapped_column(LargeBinary)
-    disposition: Mapped[str] = mapped_column(Text, nullable=False)
-    intake_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    tenant_id: Mapped[TenantPk]
+    source_digest: Mapped[str] = mapped_column(primary_key=True)
+    mailbox_key: Mapped[str]
+    encrypted_message_id: Mapped[bytes | None]
+    disposition: Mapped[str]
+    intake_id: Mapped[uuid.UUID | None]
+    expires_at: Mapped[datetime]
 
 
 class SelfHostedAgentRecord(Base):
@@ -5487,19 +4712,17 @@ class SelfHostedAgentRecord(Base):
         ),
     )
 
-    id: Mapped[str] = mapped_column(Text, primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    name: Mapped[str] = mapped_column(Text, nullable=False)
-    spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    id: Mapped[str] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    name: Mapped[str]
+    spec: Mapped[dict[str, Any]]
     skill_attachments: Mapped[list[dict[str, str]]] = mapped_column(
-        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+        JSONB, default=list, server_default=text("'[]'::jsonb")
     )
-    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revision: Mapped[int] = mapped_column(default=1)
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNow]
+    archived_at: Mapped[datetime | None]
 
 
 class SelfHostedAgentVersion(Base):
@@ -5508,16 +4731,14 @@ class SelfHostedAgentVersion(Base):
     __tablename__ = "selfhosted_agent_versions"
 
     agent_id: Mapped[str] = mapped_column(
-        Text, ForeignKey("selfhosted_agents.id", ondelete="CASCADE"), primary_key=True
+        ForeignKey("selfhosted_agents.id", ondelete="CASCADE"), primary_key=True
     )
-    version: Mapped[int] = mapped_column(Integer, primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    name: Mapped[str] = mapped_column(Text, nullable=False)
-    spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    version: Mapped[int] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    name: Mapped[str]
+    spec: Mapped[dict[str, Any]]
+    archived: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[TsNow]
 
 
 class SelfHostedEnvironmentRecord(Base):
@@ -5534,16 +4755,14 @@ class SelfHostedEnvironmentRecord(Base):
         ),
     )
 
-    id: Mapped[str] = mapped_column(Text, primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    name: Mapped[str] = mapped_column(Text, nullable=False)
-    spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    id: Mapped[str] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    name: Mapped[str]
+    spec: Mapped[dict[str, Any]]
+    revision: Mapped[int] = mapped_column(default=1)
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNow]
+    archived_at: Mapped[datetime | None]
 
 
 class SelfHostedResourceOperation(Base):
@@ -5552,21 +4771,17 @@ class SelfHostedResourceOperation(Base):
     __tablename__ = "selfhosted_resource_operations"
     __table_args__ = (Index("ix_selfhosted_resource_operations_expires_at", "expires_at"),)
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    account_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    kind: Mapped[str] = mapped_column(Text, primary_key=True)
-    key: Mapped[str] = mapped_column(Text, primary_key=True)
-    principal_id: Mapped[str] = mapped_column(Text, nullable=False)
-    operation_id: Mapped[str] = mapped_column(Text, nullable=False)
-    action: Mapped[str] = mapped_column(Text, nullable=False)
-    digest: Mapped[str] = mapped_column(Text, nullable=False)
-    result: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=text("now() + interval '7 days'")
-    )
+    tenant_id: Mapped[TenantPk]
+    account_id: Mapped[str] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(primary_key=True)
+    principal_id: Mapped[str]
+    operation_id: Mapped[str]
+    action: Mapped[str]
+    digest: Mapped[str]
+    result: Mapped[dict[str, Any]]
+    created_at: Mapped[TsNow]
+    expires_at: Mapped[datetime] = mapped_column(server_default=text("now() + interval '7 days'"))
 
 
 class LongJobPolicyRecord(Base):
@@ -5587,32 +4802,26 @@ class LongJobPolicyRecord(Base):
             name="ck_long_job_policy_limits",
         ),
     )
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    agent_id: Mapped[str | None] = mapped_column(Text)
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    default_deadline_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
-    max_deadline_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
-    max_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
-    set_by: Mapped[str] = mapped_column(Text, nullable=False)
-    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    agent_id: Mapped[str | None]
+    enabled: Mapped[bool]
+    default_deadline_minutes: Mapped[int]
+    max_deadline_minutes: Mapped[int]
+    max_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6))
+    set_by: Mapped[str]
+    set_at: Mapped[datetime]
 
 
 class LongJobPolicyHistory(Base):
     __tablename__ = "long_job_policy_history"
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    agent_id: Mapped[str | None] = mapped_column(Text)
-    before: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
-    after: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    set_by: Mapped[str] = mapped_column(Text, nullable=False)
-    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    tenant_id: Mapped[TenantFK]
+    agent_id: Mapped[str | None]
+    before: Mapped[dict[str, Any] | None]
+    after: Mapped[dict[str, Any]]
+    set_by: Mapped[str]
+    set_at: Mapped[datetime]
 
 
 class LongJobRecord(Base):
@@ -5631,77 +4840,55 @@ class LongJobRecord(Base):
         CheckConstraint("deadline_minutes > 0 AND max_usd > 0", name="ck_long_job_limits"),
         Index("ix_long_job_claim", "tenant_id", "state", "lease_expires_at"),
     )
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    owner_account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
-    )
-    owner_external_user_id: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_version: Mapped[int] = mapped_column(Integer, nullable=False)
-    environment_id: Mapped[str] = mapped_column(Text, nullable=False)
-    environment_updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
-    )
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    parent_session_id: Mapped[str] = mapped_column(Text, nullable=False)
-    source_metadata: Mapped[dict[str, str]] = mapped_column(
-        JSONB, nullable=False, server_default="{}"
-    )
-    initial_send_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    tool_use_id: Mapped[str] = mapped_column(Text, nullable=False)
-    command: Mapped[str] = mapped_column(Text, nullable=False)
-    title: Mapped[str] = mapped_column(Text, nullable=False)
-    deadline_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
-    max_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
-    state: Mapped[str] = mapped_column(Text, nullable=False, server_default="queued")
-    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    worker_session_id: Mapped[str | None] = mapped_column(Text)
-    lease_owner: Mapped[str | None] = mapped_column(Text)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    stop_state: Mapped[str | None] = mapped_column(Text)
-    cancel_requested: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
-    interrupt_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    interrupted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    summary: Mapped[str | None] = mapped_column(Text)
-    exit_code: Mapped[int | None] = mapped_column(Integer)
-    output_files: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
-    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, server_default="0")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    owner_account_id: Mapped[AccountFK]
+    owner_external_user_id: Mapped[str]
+    agent_id: Mapped[str]
+    agent_name: Mapped[str]
+    agent_version: Mapped[int]
+    environment_id: Mapped[str]
+    environment_updated_at: Mapped[datetime]
+    platform: Mapped[str]
+    parent_channel_id: Mapped[str]
+    thread_id: Mapped[str]
+    parent_session_id: Mapped[str]
+    source_metadata: Mapped[dict[str, str]] = mapped_column(JSONB, server_default="{}")
+    initial_send_at: Mapped[datetime | None]
+    tool_use_id: Mapped[str]
+    command: Mapped[str]
+    title: Mapped[str]
+    deadline_minutes: Mapped[int]
+    max_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6))
+    state: Mapped[str] = mapped_column(server_default="queued")
+    version: Mapped[int] = mapped_column(server_default="0")
+    worker_session_id: Mapped[str | None]
+    lease_owner: Mapped[str | None]
+    lease_expires_at: Mapped[datetime | None]
+    deadline_at: Mapped[datetime | None]
+    stop_state: Mapped[str | None]
+    cancel_requested: Mapped[FalseFlag]
+    interrupt_attempted_at: Mapped[datetime | None]
+    interrupted_at: Mapped[datetime | None]
+    archived_at: Mapped[datetime | None]
+    summary: Mapped[str | None]
+    exit_code: Mapped[int | None]
+    output_files: Mapped[list[str]] = mapped_column(JSONB, server_default="[]")
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), server_default="0")
+    created_at: Mapped[TsNow]
+    finished_at: Mapped[datetime | None]
 
 
 class LongJobCancelAuditRecord(Base):
     __tablename__ = "long_job_cancel_audit"
 
-    audit_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("long_job.id", ondelete="CASCADE"), nullable=False
-    )
-    state: Mapped[str] = mapped_column(Text, nullable=False)
-    owner_account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    requested_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    requested_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    audit_id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[TenantFK]
+    id: Mapped[uuid.UUID] = mapped_column(ForeignKey("long_job.id", ondelete="CASCADE"))
+    state: Mapped[str]
+    owner_account_id: Mapped[uuid.UUID]
+    requested_by: Mapped[uuid.UUID]
+    requested_at: Mapped[TsNow]
 
 
 class ContextProviderBinding(Base):
@@ -5712,14 +4899,12 @@ class ContextProviderBinding(Base):
         PrimaryKeyConstraint("tenant_id", "channel_id", "agent_id"),
         ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
     )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
-    channel_id: Mapped[str] = mapped_column(Text, server_default=text("''"))
-    agent_id: Mapped[str] = mapped_column(Text, server_default=text("''"))
-    config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    updated_by: Mapped[str] = mapped_column(Text, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    tenant_id: Mapped[uuid.UUID]
+    channel_id: Mapped[str] = mapped_column(server_default=text("''"))
+    agent_id: Mapped[str] = mapped_column(server_default=text("''"))
+    config: Mapped[dict[str, Any]]
+    updated_by: Mapped[str]
+    updated_at: Mapped[TsNow]
 
 
 class ComputeSessionRecord(Base):
@@ -5735,38 +4920,32 @@ class ComputeSessionRecord(Base):
         ),
         Index("ix_compute_owner", "tenant_id", "owner_account_id", "state"),
     )
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    owner_account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
-    )
-    owner_external_user_id: Mapped[str] = mapped_column(Text, nullable=False)
-    deployment_id: Mapped[str] = mapped_column(Text, nullable=False)
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
-    source_metadata: Mapped[dict[str, str]] = mapped_column(
-        JSONB, nullable=False, server_default="{}"
-    )
-    extension_keys: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
-    request_key: Mapped[str] = mapped_column(Text, nullable=False)
-    app_name: Mapped[str] = mapped_column(Text, nullable=False)
-    profile: Mapped[str] = mapped_column(Text, nullable=False)
-    image: Mapped[str] = mapped_column(Text, nullable=False)
-    region: Mapped[str] = mapped_column(Text, nullable=False)
-    cpu_kind: Mapped[str] = mapped_column(Text, nullable=False)
-    cpus: Mapped[int] = mapped_column(Integer, nullable=False)
-    memory_mb: Mapped[int] = mapped_column(Integer, nullable=False)
-    state: Mapped[str] = mapped_column(Text, nullable=False, server_default="launching")
-    machine_id: Mapped[str | None] = mapped_column(Text)
-    ttl_hours: Mapped[int] = mapped_column(Integer, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    warned_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    owner_account_id: Mapped[AccountFK]
+    owner_external_user_id: Mapped[str]
+    deployment_id: Mapped[str]
+    platform: Mapped[str]
+    parent_channel_id: Mapped[str]
+    thread_id: Mapped[str]
+    agent_id: Mapped[str]
+    agent_name: Mapped[str]
+    source_metadata: Mapped[dict[str, str]] = mapped_column(JSONB, server_default="{}")
+    extension_keys: Mapped[list[str]] = mapped_column(JSONB, server_default="[]")
+    request_key: Mapped[str]
+    app_name: Mapped[str]
+    profile: Mapped[str]
+    image: Mapped[str]
+    region: Mapped[str]
+    cpu_kind: Mapped[str]
+    cpus: Mapped[int]
+    memory_mb: Mapped[int]
+    state: Mapped[str] = mapped_column(server_default="launching")
+    machine_id: Mapped[str | None]
+    ttl_hours: Mapped[int]
+    expires_at: Mapped[datetime]
+    created_at: Mapped[datetime]
+    warned_for: Mapped[datetime | None]
 
 
 class RepoMemory(Base):
@@ -5780,23 +4959,19 @@ class RepoMemory(Base):
         CheckConstraint("length(name) BETWEEN 1 AND 64", name="ck_repo_memory_name"),
         Index("ix_repo_memory_turn", "tenant_id", "repo_id", "kind", "name"),
     )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
+    tenant_id: Mapped[TenantPk]
     repo_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    name: Mapped[str] = mapped_column(Text, primary_key=True)
-    title: Mapped[str] = mapped_column(Text)
-    body: Mapped[str] = mapped_column(Text)
-    kind: Mapped[str] = mapped_column(Text)
-    scope: Mapped[str] = mapped_column(Text)
+    name: Mapped[str] = mapped_column(primary_key=True)
+    title: Mapped[str]
+    body: Mapped[str]
+    kind: Mapped[str]
+    scope: Mapped[str]
     # The erasure path deletes personal directives first; shared knowledge
     # survives with its attribution removed.
-    created_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL")
-    )
-    source_id: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_by_account_id: Mapped[AccountSetNull]
+    source_id: Mapped[str | None]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNow]
 
 
 class RepoMemorySession(Base):
@@ -5804,14 +4979,10 @@ class RepoMemorySession(Base):
 
     __tablename__ = "repo_memory_sessions"
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    provider: Mapped[str] = mapped_column(Text, primary_key=True)
-    session_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    tenant_id: Mapped[TenantPk]
+    provider: Mapped[str] = mapped_column(primary_key=True)
+    session_id: Mapped[str] = mapped_column(primary_key=True)
+    sha256: Mapped[str]
 
 
 class ComputeTaskRecord(Base):
@@ -5825,28 +4996,24 @@ class ComputeTaskRecord(Base):
         CheckConstraint("timeout_minutes > 0 AND output_bytes >= 0", name="ck_compute_task_limits"),
         Index("ix_compute_task_session", "tenant_id", "session_id", "state"),
     )
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
     session_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("compute_sessions.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("compute_sessions.id", ondelete="CASCADE")
     )
-    owner_account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
-    )
-    request_key: Mapped[str] = mapped_column(Text, nullable=False)
-    command_preview: Mapped[str] = mapped_column(Text, nullable=False)
-    state: Mapped[str] = mapped_column(Text, nullable=False, server_default="starting")
-    exit_code: Mapped[int | None] = mapped_column(Integer)
-    timeout_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
-    deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    output_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
-    output_tail: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
-    output_path: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    owner_account_id: Mapped[AccountFK]
+    request_key: Mapped[str]
+    command_preview: Mapped[str]
+    state: Mapped[str] = mapped_column(server_default="starting")
+    exit_code: Mapped[int | None]
+    timeout_minutes: Mapped[int]
+    deadline_at: Mapped[datetime]
+    output_bytes: Mapped[int] = mapped_column(BigInteger, server_default="0")
+    output_tail: Mapped[str] = mapped_column(server_default="")
+    output_path: Mapped[str]
+    created_at: Mapped[datetime]
+    finished_at: Mapped[datetime | None]
+    version: Mapped[int] = mapped_column(server_default="0")
 
 
 class AgentDaimonToolAllowlist(Base):
@@ -5861,14 +5028,10 @@ class AgentDaimonToolAllowlist(Base):
 
     __tablename__ = "agent_daimon_tool_allowlists"
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
+    tenant_id: Mapped[TenantPk]
     # derive_agent_uuid(tenant, MA agent id): the chat credential's chat_agent_id.
-    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    tool_names: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    agent_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    tool_names: Mapped[list[str]]
 
 
 class WebPerson(Base):
@@ -5887,30 +5050,18 @@ class WebPerson(Base):
         CheckConstraint("status IN ('active', 'suspended')", name="ck_web_people_status"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
-    )
-    kind: Mapped[str] = mapped_column(Text, nullable=False)
-    display_name: Mapped[str] = mapped_column(Text, nullable=False)
-    workspace_name: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
-    email: Mapped[str | None] = mapped_column(Text, nullable=True)
-    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="active")
-    invite_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    invited_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
-    )
-    last_seen_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    account_id: Mapped[AccountFK]
+    kind: Mapped[str]
+    display_name: Mapped[str]
+    workspace_name: Mapped[str] = mapped_column(server_default="")
+    email: Mapped[str | None]
+    status: Mapped[str] = mapped_column(server_default="active")
+    invite_id: Mapped[uuid.UUID | None]
+    invited_by_account_id: Mapped[AccountSetNull]
+    last_seen_at: Mapped[TsNow]
+    created_at: Mapped[TsNow]
 
 
 class WebIdentity(Base):
@@ -5929,25 +5080,15 @@ class WebIdentity(Base):
         Index("ix_web_identities_person", "person_id"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    person_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="CASCADE"), nullable=False
-    )
-    provider: Mapped[str] = mapped_column(Text, nullable=False)
-    issuer: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
-    subject: Mapped[str] = mapped_column(Text, nullable=False)
-    label: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
-    groups: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, server_default=text("'{}'")
-    )
-    linked_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    person_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("web_people.id", ondelete="CASCADE"))
+    provider: Mapped[str]
+    issuer: Mapped[str] = mapped_column(server_default="")
+    subject: Mapped[str]
+    label: Mapped[str] = mapped_column(server_default="")
+    groups: Mapped[list[str]] = mapped_column(server_default=text("'{}'"))
+    linked_at: Mapped[TsNow]
 
 
 class WebLogin(Base):
@@ -5955,12 +5096,8 @@ class WebLogin(Base):
 
     __tablename__ = "web_logins"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    id: Mapped[UuidPk]
+    created_at: Mapped[TsNow]
 
 
 class WebLoginAccount(Base):
@@ -5973,15 +5110,11 @@ class WebLoginAccount(Base):
     __tablename__ = "web_login_accounts"
     __table_args__ = (Index("ix_web_login_accounts_login", "login_id"),)
 
-    login_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("web_logins.id", ondelete="CASCADE"), nullable=False
-    )
-    provider: Mapped[str] = mapped_column(Text, primary_key=True)
-    subject: Mapped[str] = mapped_column(Text, primary_key=True)
-    display_name: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
-    last_proven_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    login_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("web_logins.id", ondelete="CASCADE"))
+    provider: Mapped[str] = mapped_column(primary_key=True)
+    subject: Mapped[str] = mapped_column(primary_key=True)
+    display_name: Mapped[str] = mapped_column(server_default="")
+    last_proven_at: Mapped[TsNow]
 
 
 class WebSession(Base):
@@ -5999,31 +5132,21 @@ class WebSession(Base):
         Index("ix_web_sessions_account", "provider", "subject"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    token_sha256: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, unique=True)
-    provider: Mapped[str] = mapped_column(Text, nullable=False)
-    issuer: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
-    subject: Mapped[str] = mapped_column(Text, nullable=False)
+    id: Mapped[UuidPk]
+    token_sha256: Mapped[bytes] = mapped_column(unique=True)
+    provider: Mapped[str]
+    issuer: Mapped[str] = mapped_column(server_default="")
+    subject: Mapped[str]
     current_person_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="CASCADE"), nullable=False
+        ForeignKey("web_people.id", ondelete="CASCADE")
     )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    last_seen_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    roles_checked_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    tenant_id: Mapped[TenantFK]
+    created_at: Mapped[TsNow]
+    last_seen_at: Mapped[TsNow]
+    expires_at: Mapped[datetime]
+    roles_checked_at: Mapped[TsNow]
     login_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("web_logins.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("web_logins.id", ondelete="SET NULL")
     )
 
 
@@ -6033,13 +5156,11 @@ class WebSessionPerson(Base):
     __tablename__ = "web_session_people"
 
     session_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("web_sessions.id", ondelete="CASCADE"), primary_key=True
+        ForeignKey("web_sessions.id", ondelete="CASCADE"), primary_key=True
     )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
+    tenant_id: Mapped[TenantFK]
     person_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="CASCADE"), primary_key=True
+        ForeignKey("web_people.id", ondelete="CASCADE"), primary_key=True
     )
 
 
@@ -6053,14 +5174,12 @@ class WebNodeToken(Base):
     __tablename__ = "web_node_tokens"
 
     person_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="CASCADE"), primary_key=True
+        ForeignKey("web_people.id", ondelete="CASCADE"), primary_key=True
     )
-    token_key: Mapped[str] = mapped_column(Text, primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    access_token_enc: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    token_key: Mapped[str] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    access_token_enc: Mapped[bytes]
+    expires_at: Mapped[datetime]
 
 
 class ServerSkill(Base):
@@ -6080,33 +5199,25 @@ class ServerSkill(Base):
         UniqueConstraint("tenant_id", "skill_id", name="uq_server_skills_skill"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    server: Mapped[str] = mapped_column(Text, nullable=False)
-    uri: Mapped[str] = mapped_column(Text, nullable=False)
-    name: Mapped[str] = mapped_column(Text, nullable=False)
-    skill_id: Mapped[str] = mapped_column(Text, nullable=False)
-    version_label: Mapped[str | None] = mapped_column(Text, nullable=True)
-    digest: Mapped[str] = mapped_column(Text, nullable=False)
-    manifest: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    server: Mapped[str]
+    uri: Mapped[str]
+    name: Mapped[str]
+    skill_id: Mapped[str]
+    version_label: Mapped[str | None]
+    digest: Mapped[str]
+    manifest: Mapped[dict[str, Any]]
     allowed_tools: Mapped[Any] = mapped_column(JSONB, nullable=True)
-    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="current")
-    pending_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
-    pending_label: Mapped[str | None] = mapped_column(Text, nullable=True)
-    pending_changes: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    added_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
-    )
-    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    status: Mapped[str] = mapped_column(server_default="current")
+    pending_digest: Mapped[str | None]
+    pending_label: Mapped[str | None]
+    pending_changes: Mapped[dict[str, Any] | None]
+    added_by_account_id: Mapped[AccountSetNull]
+    last_checked_at: Mapped[datetime | None]
+    last_error: Mapped[str | None]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNow]
 
 
 class ServerSkillDeployment(Base):
@@ -6118,17 +5229,13 @@ class ServerSkillDeployment(Base):
     )
 
     mirror_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("server_skills.id", ondelete="CASCADE"), primary_key=True
+        ForeignKey("server_skills.id", ondelete="CASCADE"), primary_key=True
     )
-    provider: Mapped[str] = mapped_column(Text, primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    digest: Mapped[str] = mapped_column(Text, nullable=False)
-    version: Mapped[str] = mapped_column(Text, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    provider: Mapped[str] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    digest: Mapped[str]
+    version: Mapped[str]
+    updated_at: Mapped[TsNow]
 
 
 class AgentSkillFollow(Base):
@@ -6136,18 +5243,14 @@ class AgentSkillFollow(Base):
 
     __tablename__ = "agent_skill_follows"
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    agent_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    skill_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    follow: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    tenant_id: Mapped[TenantPk]
+    agent_id: Mapped[str] = mapped_column(primary_key=True)
+    skill_id: Mapped[str] = mapped_column(primary_key=True)
+    follow: Mapped[bool]
     # The update the agent's backend consent held back: it waits for the owner's re-confirm.
-    held_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
-    held_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    held_digest: Mapped[str | None]
+    held_reason: Mapped[str | None]
+    updated_at: Mapped[TsNow]
 
 
 class WorkspaceMember(Base):
@@ -6161,14 +5264,10 @@ class WorkspaceMember(Base):
 
     __tablename__ = "workspace_members"
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    platform_user_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    tenant_id: Mapped[TenantPk]
+    platform_user_id: Mapped[str] = mapped_column(primary_key=True)
+    is_admin: Mapped[FalseFlag]
+    updated_at: Mapped[TsNow]
 
 
 class WorkspaceMemberSync(Base):
@@ -6180,11 +5279,9 @@ class WorkspaceMemberSync(Base):
 
     __tablename__ = "workspace_member_syncs"
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    workspace_name: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
-    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    tenant_id: Mapped[TenantPk]
+    workspace_name: Mapped[str] = mapped_column(server_default="")
+    synced_at: Mapped[datetime]
 
 
 class WorkspaceAdmin(Base):
@@ -6195,19 +5292,13 @@ class WorkspaceAdmin(Base):
         CheckConstraint("role IN ('owner', 'admin')", name="ck_workspace_admins_role"),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
+    tenant_id: Mapped[TenantPk]
     account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+        ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
     )
-    role: Mapped[str] = mapped_column(Text, nullable=False)
-    granted_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
-    )
-    granted_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    role: Mapped[str]
+    granted_by_account_id: Mapped[AccountSetNull]
+    granted_at: Mapped[TsNow]
 
 
 class WebAudit(Base):
@@ -6220,27 +5311,19 @@ class WebAudit(Base):
     __tablename__ = "web_audit"
     __table_args__ = (Index("ix_web_audit_tenant_at", "tenant_id", "at"),)
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    actor_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
-    )
-    action: Mapped[str] = mapped_column(Text, nullable=False)
-    target: Mapped[str] = mapped_column(Text, nullable=False)
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    at: Mapped[TsNow]
+    actor_account_id: Mapped[AccountSetNull]
+    action: Mapped[str]
+    target: Mapped[str]
     target_person_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("web_people.id", ondelete="SET NULL")
     )
     target_invite_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("web_invites.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("web_invites.id", ondelete="SET NULL")
     )
-    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    detail: Mapped[str | None]
 
 
 class WebInvite(Base):
@@ -6257,35 +5340,27 @@ class WebInvite(Base):
         CheckConstraint("role IN ('visitor', 'member')", name="ck_web_invites_role"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    token_sha256: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, unique=True)
-    kind: Mapped[str] = mapped_column(Text, nullable=False)
-    email: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
-    role: Mapped[str] = mapped_column(Text, nullable=False, server_default="visitor")
-    credit_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, server_default="0")
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    token_sha256: Mapped[bytes] = mapped_column(unique=True)
+    kind: Mapped[str]
+    email: Mapped[str] = mapped_column(server_default="")
+    role: Mapped[str] = mapped_column(server_default="visitor")
+    credit_usd: Mapped[Decimal] = mapped_column(Numeric(12, 2), server_default="0")
     # Whether a visitor this invite brings in may attach files in web chat.
-    allow_files: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    allow_files: Mapped[FalseFlag]
     # The person a sign-in link signs in.
     person_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="CASCADE"), nullable=True
+        ForeignKey("web_people.id", ondelete="CASCADE")
     )
-    created_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by_account_id: Mapped[AccountSetNull]
+    created_at: Mapped[TsNow]
+    expires_at: Mapped[datetime]
+    accepted_at: Mapped[datetime | None]
     accepted_by_person_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="CASCADE"), nullable=True
+        ForeignKey("web_people.id", ondelete="CASCADE")
     )
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None]
 
 
 class WebInviteAgent(Base):
@@ -6294,12 +5369,10 @@ class WebInviteAgent(Base):
     __tablename__ = "web_invite_agents"
 
     invite_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("web_invites.id", ondelete="CASCADE"), primary_key=True
+        ForeignKey("web_invites.id", ondelete="CASCADE"), primary_key=True
     )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    agent_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    agent_id: Mapped[str] = mapped_column(primary_key=True)
 
 
 class WebAgentGrant(Base):
@@ -6310,18 +5383,12 @@ class WebAgentGrant(Base):
         CheckConstraint("who IN ('everyone', 'groups', 'invites')", name="ck_web_agent_grants_who"),
     )
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    agent_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    web: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
-    who: Mapped[str] = mapped_column(Text, nullable=False, server_default="everyone")
-    groups: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, server_default=text("'{}'")
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    tenant_id: Mapped[TenantPk]
+    agent_id: Mapped[str] = mapped_column(primary_key=True)
+    web: Mapped[bool] = mapped_column(server_default=text("true"))
+    who: Mapped[str] = mapped_column(server_default="everyone")
+    groups: Mapped[list[str]] = mapped_column(server_default=text("'{}'"))
+    updated_at: Mapped[TsNow]
 
 
 class WebWorkspaceSettings(Base):
@@ -6329,16 +5396,10 @@ class WebWorkspaceSettings(Base):
 
     __tablename__ = "web_workspace_settings"
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    modules_off: Mapped[list[str]] = mapped_column(
-        ARRAY(Text), nullable=False, server_default=text("'{}'")
-    )
-    default_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    tenant_id: Mapped[TenantPk]
+    modules_off: Mapped[list[str]] = mapped_column(server_default=text("'{}'"))
+    default_agent: Mapped[str | None]
+    updated_at: Mapped[TsNow]
 
 
 class WebThread(Base):
@@ -6347,25 +5408,15 @@ class WebThread(Base):
     __tablename__ = "web_threads"
     __table_args__ = (Index("ix_web_threads_person_updated", "person_id", "updated_at"),)
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    person_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("web_people.id", ondelete="CASCADE"), nullable=False
-    )
-    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
-    title: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    person_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("web_people.id", ondelete="CASCADE"))
+    agent_id: Mapped[str]
+    agent_name: Mapped[str]
+    title: Mapped[str]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNow]
+    deleted_at: Mapped[datetime | None]
 
 
 class WebMessage(Base):
@@ -6388,27 +5439,19 @@ class WebMessage(Base):
         CheckConstraint("feedback IN ('up', 'down')", name="ck_web_messages_feedback"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    thread_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("web_threads.id", ondelete="CASCADE"), nullable=False
-    )
-    role: Mapped[str] = mapped_column(Text, nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
-    blocks: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb")
-    )
-    turn_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="done")
-    cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
-    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
-    seq: Mapped[int] = mapped_column(BigInteger, Identity(), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    thread_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("web_threads.id", ondelete="CASCADE"))
+    role: Mapped[str]
+    content: Mapped[str] = mapped_column(server_default="")
+    blocks: Mapped[dict[str, Any]] = mapped_column(server_default=text("'{}'::jsonb"))
+    turn_id: Mapped[uuid.UUID | None]
+    status: Mapped[str] = mapped_column(server_default="done")
+    cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    duration_ms: Mapped[int | None]
+    feedback: Mapped[str | None]
+    seq: Mapped[int] = mapped_column(BigInteger, Identity())
+    created_at: Mapped[TsNow]
 
 
 class AgentDraft(Base):
@@ -6421,24 +5464,18 @@ class AgentDraft(Base):
         Index("ix_agent_drafts_account", "account_id"),
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_agent_drafts_tenants"),
-        nullable=False,
+        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_agent_drafts_tenants")
     )
-    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_id: Mapped[str]
     account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("accounts.id", ondelete="CASCADE", name="fk_agent_drafts_accounts"),
-        nullable=False,
+        ForeignKey("accounts.id", ondelete="CASCADE", name="fk_agent_drafts_accounts")
     )
-    base_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    base_version: Mapped[int]
     # The agent as the draft began, kept so an apply can tell that places or tool rules
     # (which live outside the provider's agent, and so outside its version) moved.
-    base_config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    base_config: Mapped[dict[str, Any]]
+    config: Mapped[dict[str, Any]]
+    updated_at: Mapped[TsNow]
 
 
 class AgentVersion(Base):
@@ -6457,25 +5494,17 @@ class AgentVersion(Base):
         Index("ix_agent_versions_account", "account_id"),
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_agent_versions_tenants"),
-        nullable=False,
+        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_agent_versions_tenants")
     )
-    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
-    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    agent_id: Mapped[str]
+    version: Mapped[int]
     account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("accounts.id", ondelete="SET NULL", name="fk_agent_versions_accounts"),
-        nullable=True,
+        ForeignKey("accounts.id", ondelete="SET NULL", name="fk_agent_versions_accounts")
     )
-    note: Mapped[str | None] = mapped_column(Text, nullable=True)
-    changes: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb")
-    )
-    config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    note: Mapped[str | None]
+    changes: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    config: Mapped[dict[str, Any]]
+    at: Mapped[TsNow]
 
 
 class PendingCarryOver(Base):
@@ -6487,29 +5516,21 @@ class PendingCarryOver(Base):
         Index("ix_pending_carry_overs_created_at", "created_at"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
+    id: Mapped[UuidPk]
     tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_pending_carry_overs_tenants"),
-        nullable=False,
+        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_pending_carry_overs_tenants")
     )
     # The provider's id for the session that was never sent its framing.
-    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[str]
     # The framing quotes the person's earlier conversation: it goes with them.
     account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("accounts.id", ondelete="CASCADE", name="fk_pending_carry_overs_accounts"),
-        nullable=True,
+        ForeignKey("accounts.id", ondelete="CASCADE", name="fk_pending_carry_overs_accounts")
     )
-    user_prefix: Mapped[str] = mapped_column(Text, nullable=False)
+    user_prefix: Mapped[str]
     system_blocks: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+        JSONB, server_default=text("'[]'::jsonb")
     )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    created_at: Mapped[TsNow]
 
 
 def _install_erased_account_guards() -> None:

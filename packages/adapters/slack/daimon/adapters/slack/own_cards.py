@@ -1,8 +1,9 @@
 """Presses on the cards Daimon answers itself: a host call's Approve/Deny, a switch's Confirm.
 
 Posted from the MCP process (`tools._own_card`); the press re-verifies the clicker, the
-message and the tenant in core (`host_calls.press_host_call`, `switch_cards.press_switch_card`),
-the same guards as on Discord.
+message and the tenant in core (`host_calls.press_host_call`),
+the same guards as on Discord. A switch card posted before switches applied at once
+closes as expired.
 """
 
 from __future__ import annotations
@@ -109,27 +110,7 @@ async def _press(
             await say(NOT_YOURS if press is None else press.text)
             return None
         return host_calls.answered_call_card(press.text, approved=press.approved)
-    if (switch := switch_cards.parse_custom_id(action_id)) is not None:
-        pressed = await switch_cards.press_switch_card(
-            deps=runtime.turn_deps,
-            sessionmaker=runtime.sessionmaker,
-            anthropic=runtime.anthropic,
-            turn_settings=runtime.settings.turn,
-            deployment_default=runtime.deployment_default,
-            tenant_id=tenant_id,
-            card_id=switch[0],
-            action=switch[1],
-            clicker=clicker,
-            current_admin=current_admin,
-            place_word="workspace",
-            now=now,
-            message_id=message_ts,
-        )
-        if pressed is None or not pressed.closed:
-            await say(NOT_YOURS if pressed is None else pressed.text)
-            return None
-        return switch_cards.answered_switch_card(pressed)
-    return None
+    return switch_cards.expired_switch_card(action_id)
 
 
 async def _edit(client: AsyncWebClient, channel: str, ts: str, card: PostedCard) -> None:
