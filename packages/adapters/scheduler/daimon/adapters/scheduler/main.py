@@ -109,6 +109,7 @@ from daimon.core.routine_delivery import (
     placement_unknown_is_unsafe,
     record_routine_failure,
     render_routine_controls,
+    routine_links,
 )
 from daimon.core.routine_files import collect_routine_files
 from daimon.core.routine_hold import routine_hold
@@ -180,7 +181,6 @@ from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn_card_intent_sweep import sweep_retired_turn_card_intents
 from daimon.core.usage_recording import record_turn_usage
 from daimon.core.usage_sweep import sweep_headless_usage
-from daimon.core.web_links import WebLinks
 from daimon.core.wizard_sweep import sweep_expired_wizard_sessions
 from mux.errors import ScopeViolation
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
@@ -469,7 +469,7 @@ async def _build_fire(
                 row,
                 platform="discord",
                 direct_post=direct_post,
-                web=WebLinks.from_settings(settings.web),
+                web=await routine_links(sm, settings, row),
             )
             + "\n"
             + row.trigger_message
@@ -903,7 +903,7 @@ async def _build_fire(
                     row,
                     platform=platform,
                     direct_post=direct_post,
-                    web=WebLinks.from_settings(settings.web),
+                    web=await routine_links(sm, settings, row),
                     held=fire_hold is not None,
                 )
                 + "\n"
