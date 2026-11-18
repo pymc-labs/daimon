@@ -939,7 +939,8 @@ _PROVIDER_LABEL = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
 def _provider_facts(error: BaseException) -> dict[str, object]:
     """Why a provider call failed: the fields mux already redacts, or an SDK status
-    error's status, type and request id. Never a raw body, URL or request text."""
+    error's (an int `status_code`) status, type and request id. Never a raw body,
+    URL or request text."""
     from mux.errors import ProviderError
 
     if isinstance(error, ProviderError):
@@ -951,7 +952,7 @@ def _provider_facts(error: BaseException) -> dict[str, object]:
             "native_message": error.native_message,
         }
         return {key: value for key, value in facts.items() if value is not None}
-    if type(error).__module__.partition(".")[0] not in ("anthropic", "openai"):
+    if not isinstance(getattr(error, "status_code", None), int):
         return {}
     facts = {
         "status": getattr(error, "status_code", None),
