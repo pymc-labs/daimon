@@ -621,6 +621,8 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             and admin_only_surface
             and subject.platform_user_id is not None
             and not subject.via_agent_key
+            # a channel's own agent answers only in its home, admins included.
+            and not (agent.present and agent.permissions.home is not None)
         ):
             return ALLOW
         if not agent.present:
@@ -822,6 +824,16 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
             or (
                 not facts.private
                 and (facts.channel is not None or facts.legacy_thread_id is not None)
+                # never another person's conversation from a channel read only
+                # from inside -- sealed when it ran (seals only grow) or limited now.
+                and session_readable_from(
+                    policy,
+                    (),
+                    channel=facts.channel,
+                    thread=facts.thread,
+                    seal_ids=facts.seal_ids,
+                    legacy_thread_id=facts.legacy_thread_id,
+                )
             )
         )
     )

@@ -213,6 +213,7 @@ def _seal_allows(
     read: ChannelReadPolicy,
     legacy_thread_id: str | None,
     hub: tuple[Subject, Surface, Action],
+    owned: bool = True,
 ) -> bool:
     """Whether the calling turn may see this session under the channel seal.
 
@@ -241,7 +242,7 @@ def _seal_allows(
             origin_channel_ids=read.origin_channel_ids,
             origin=read.origin_place,
             session=_session_facts(
-                session.metadata or {}, owned=True, legacy_thread_id=legacy_thread_id
+                session.metadata or {}, owned=owned, legacy_thread_id=legacy_thread_id
             ),
             # A held credential reads only the sessions that ran in its channel.
             hold=read.hold,
@@ -289,7 +290,21 @@ async def sessions_outside_seals(
         runtime, auth, origin_context_id=origin_context_id, resolve_without_seals=True
     )
     legacy = await _legacy_threads(runtime, auth, read, sessions)
-    return [s for s in sessions if _seal_allows(s, read, legacy.get(s.id), hub)]
+    account = str(auth.account_id)
+    return [
+        s
+        for s in sessions
+        if _seal_allows(
+            s,
+            read,
+            legacy.get(s.id),
+            hub,
+            # Callers filter to the caller's own sessions first; only a hub read
+            # keeps another account's, which its seals then decide.
+            owned=hub[1] is not Surface.HUB
+            or (s.metadata or {}).get(MA_METADATA_KEY_ACCOUNT) == account,
+        )
+    ]
 
 
 async def require_session_outside_seals(

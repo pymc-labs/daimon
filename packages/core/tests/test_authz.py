@@ -578,7 +578,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
     ),
     # --- Session reads (G_seal_session_read, admin trust model) ---
     (
-        "admin_trust admin reads another account's sealed channel session from the hub",
+        "admin_trust admin never reads another account's sealed channel session from the hub",
         SEALED,
         {
             "subject": ADMIN,
@@ -586,7 +586,7 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
             "surface": Surface.HUB,
             "session": SessionFacts(channel="C_SEAL", seal_ids=frozenset({"C_SEAL"}), owned=False),
         },
-        ALLOW,
+        _deny("not_owner"),
     ),
     (
         "admin_trust admin never reads another member's private DM",
@@ -692,10 +692,10 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         ALLOW,
     ),
     (
-        "isolation server admin in their own DM",
+        "isolation server admin never runs a home agent in their own DM",
         ISOLATED,
         {"subject": ADMIN, "action": Action.RUN_AGENT, "surface": Surface.DM, "agent": ACME},
-        ALLOW,
+        _deny("runs_elsewhere"),
     ),
     (
         "isolation own agent never posts outside",

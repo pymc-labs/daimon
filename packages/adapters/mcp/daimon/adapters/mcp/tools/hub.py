@@ -184,6 +184,9 @@ def _hub_sees(
 ) -> bool:
     names = agent_pin_names(agent)
     permissions = agent_permissions(policy, names)
+    # a channel's own agent answers only in its home, so no hub lists it.
+    if permissions.home is not None:
+        return False
     if subject.is_admin:
         return True
     # A member's hub is outside every channel: only its effective workspace

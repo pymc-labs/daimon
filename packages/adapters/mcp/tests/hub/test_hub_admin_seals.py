@@ -181,22 +181,23 @@ async def _as(hub: _Hub, role: Role) -> None:
     hub.live_admin = role is Role.ADMIN
 
 
-async def test_an_admin_lists_and_reads_any_sealed_conversation_from_the_hub(hub: _Hub) -> None:
+async def test_an_admin_reads_only_their_own_sealed_conversation_from_the_hub(hub: _Hub) -> None:
     await _as(hub, Role.ADMIN)
-    someone_else = uuid.uuid4()
     hub.add_session("ses_mine_sealed", daimon_channel=_SEALED, daimon_thread="thr-1")
-    hub.add_session("ses_theirs_sealed", account=someone_else, daimon_channel=_SEALED)
+    hub.add_session("ses_theirs_sealed", account=uuid.uuid4(), daimon_channel=_SEALED)
+    hub.add_session("ses_theirs_open", account=uuid.uuid4(), daimon_channel="chan-open")
 
     listed = await hub.call("list_my_sessions")
     assert not listed.get("isError"), listed
-    assert "ses_mine_sealed" in str(listed) and "ses_theirs_sealed" in str(listed)
+    assert "ses_mine_sealed" in str(listed) and "ses_theirs_open" in str(listed)
+    assert "ses_theirs_sealed" not in str(listed)
 
-    for handle in ("ses_mine_sealed", "ses_theirs_sealed"):
-        session = await hub.call("get_session", handle=handle)
-        assert not session.get("isError"), session
+    for handle in ("ses_mine_sealed", "ses_theirs_open"):
         events = await hub.call("list_events", handle=handle)
-        assert not events.get("isError"), events
-        assert _TOPIC in str(events)
+        assert not events.get("isError") and _TOPIC in str(events), events
+    for tool in ("get_session", "list_events"):
+        theirs = await hub.call(tool, handle="ses_theirs_sealed")
+        assert theirs.get("isError") and _TOPIC not in str(theirs), theirs
     assert hub.sent == []
 
 
@@ -243,15 +244,15 @@ async def test_a_member_never_reads_a_sealed_conversation_from_the_hub(hub: _Hub
 async def test_a_demoted_admin_loses_hub_read_access_without_another_platform_turn(
     hub: _Hub,
 ) -> None:
-    hub.add_session("ses_sealed", account=uuid.uuid4(), daimon_channel=_SEALED)
+    hub.add_session("ses_theirs_open", account=uuid.uuid4(), daimon_channel="chan-open")
     await _as(hub, Role.ADMIN)
-    assert _TOPIC in str(await hub.call("list_events", handle="ses_sealed"))
+    assert _TOPIC in str(await hub.call("list_events", handle="ses_theirs_open"))
 
     # Keep both the stored role and the resolver's completed cache entry admin.
     hub.live_admin = False
-    events = await hub.call("list_events", handle="ses_sealed")
+    events = await hub.call("list_events", handle="ses_theirs_open")
     assert events.get("isError") and _TOPIC not in str(events)
-    assert "ses_sealed" not in str(await hub.call("list_my_sessions"))
+    assert "ses_theirs_open" not in str(await hub.call("list_my_sessions"))
 
 
 async def _map_thread(hub: _Hub, session_id: str, thread_id: str) -> None:
@@ -269,18 +270,16 @@ async def _map_thread(hub: _Hub, session_id: str, thread_id: str) -> None:
     await hub.db.commit()
 
 
-async def test_an_admin_reads_another_members_legacy_sealed_conversation(hub: _Hub) -> None:
-    """A session from before the channel stamp is found by its thread mapping."""
+async def test_an_admin_never_reads_another_members_legacy_sealed_conversation(hub: _Hub) -> None:
+    """A session from before the channel stamp is found by its thread mapping, and stays sealed."""
     hub.add_session("ses_legacy", account=uuid.uuid4())
     await _map_thread(hub, "ses_legacy", "thr-legacy")
     await _as(hub, Role.ADMIN)
 
-    listed = await hub.call("list_my_sessions")
-    assert not listed.get("isError") and "ses_legacy" in str(listed), listed
-    session = await hub.call("get_session", handle="ses_legacy")
-    assert not session.get("isError"), session
-    events = await hub.call("list_events", handle="ses_legacy")
-    assert not events.get("isError") and _TOPIC in str(events), events
+    assert "ses_legacy" not in str(await hub.call("list_my_sessions"))
+    for tool in ("get_session", "list_events"):
+        result = await hub.call(tool, handle="ses_legacy")
+        assert result.get("isError") and _TOPIC not in str(result), result
     assert hub.sent == []
 
 

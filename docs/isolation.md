@@ -56,8 +56,8 @@ A thread has one live session per caller, not one session in all. Two people
 in one thread never share an MA session, sandbox, transcript or output
 listing. Each session is stamped with its tenant and owner, and the transcript
 tools open only the caller's own sessions. The exception is a server admin
-reading a channel conversation through the hub, never a private DM and never
-to continue it.
+reading an open channel's conversation through the hub. It never covers a
+private DM, a sealed or limited channel, or continuing the conversation.
 
 When a session is replaced, for example after a configuration change, the
 carried work comes only from the caller's own previous session.
