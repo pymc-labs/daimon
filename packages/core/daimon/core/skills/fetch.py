@@ -107,7 +107,8 @@ async def fetch_repo(
                 status_code=exc.response.status_code,
             ) from exc
 
-        body = await read_capped(response, url=url, cap=max_tarball_bytes)
+        # `url` is quoted: this caller's cap message has always named it with repr.
+        body = await read_capped(response, url=repr(url), cap=max_tarball_bytes)
 
     tmp_dir = Path(tempfile.mkdtemp())
     try:
