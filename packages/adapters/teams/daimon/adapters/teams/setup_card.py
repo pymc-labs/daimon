@@ -28,8 +28,8 @@ from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.model_switch import (
     BACK_LABEL,
     CANCEL_LABEL,
-    TRY_AGAIN_LABEL,
     SWITCH_BACK_LABEL,
+    TRY_AGAIN_LABEL,
     ModelPicker,
 )
 from daimon.core.models_catalog import ModelChoice

@@ -59,8 +59,8 @@ from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.model_switch import (
     CANCEL_LABEL,
-    TRY_AGAIN_LABEL,
     SWITCH_BACK_LABEL,
+    TRY_AGAIN_LABEL,
     SwitchRefusal,
     back_to_claude,
     panel_actor,

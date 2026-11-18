@@ -27,7 +27,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from time import perf_counter
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import structlog
 from anthropic import APIError, APIStatusError
@@ -1161,6 +1161,7 @@ async def _admit_gates(
                     retained_revision = 0
                     backend_revision = None
                     backend_revision_origin = None
+
         if (
             selection_enabled
             and channel is not None
@@ -1172,7 +1173,8 @@ async def _admit_gates(
 
         if selection_enabled and backend_revision is not None:
             backend_footer_profile = backend_revision.profile
-        if selection_enabled and channel is not None and retained_revision == 0:
+        # `read_retained` assigns it; pyright does not see a closure's write.
+        if selection_enabled and channel is not None and cast(int | None, retained_revision) == 0:
             # Check the retained default profile too; its removal must refuse
             # the thread instead of silently selecting a new provider.
             default = resolve_default(BackendConfig())

@@ -12,8 +12,8 @@ import httpx
 import pytest
 from daimon.core import channel_backend
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.channel_backend import AgentSettings
 from daimon.core.authz import Subject
+from daimon.core.channel_backend import AgentSettings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES
 from daimon.core.stores import mux_state
@@ -1156,6 +1156,7 @@ async def test_a_shared_thread_handed_to_an_agent_with_its_own_switch_runs_that_
         assert made_for == other_agent.agent_id, "B runs its own switched revision"
         assert turn.admission.backend_revision_origin == "agent", turn.admission
         assert turn.admission.shared_owner is None, "B is not pinned to A's shared slot"
+
 
 @pytest.mark.parametrize("initial_backend", [None], indirect=True)
 @pytest.mark.parametrize(
