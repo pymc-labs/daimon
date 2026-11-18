@@ -483,26 +483,59 @@ async def test_a_native_no_drop_switch_writes_on_the_first_call(active_chat):
 
 
 @pytest.mark.parametrize("attended", [True, False])
-async def test_a_provider_turn_switch_applies_whether_or_not_someone_started_it(
+async def test_a_provider_turn_switch_applies_only_when_someone_started_the_run(
     active_chat, attended
 ):
-    """A routine or wake has nobody present; its switch applies as a model change does."""
+    """A routine or wake has nobody present: its switch is refused, like a model change."""
     runtime, auth, origin, service, trace, payload, _, _, agent, _ = active_chat
     payload["model"] = {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}}
     origin = await _origin_like(runtime, origin, attended=attended)
     agent()
-    shown = await _request_agent_backend_switch_impl(
-        runtime,
-        replace(auth, no_confirmation_surface=True),
-        agent_name="Researcher",
-        target_backend="anthropic",
-        origin_context_id=str(origin.id),
-    )
+
+    async def switch():
+        return await _request_agent_backend_switch_impl(
+            runtime,
+            replace(auth, no_confirmation_surface=True),
+            agent_name="Researcher",
+            target_backend="anthropic",
+            origin_context_id=str(origin.id),
+        )
+
+    if not attended:
+        with pytest.raises(ToolError, match="nobody started this run"):
+            await switch()
+        agent()
+        assert await service.current(await load_backend_agent_for(runtime, auth)) is None, (
+            "an unattended run writes nothing"
+        )
+        return
+    shown = await switch()
     assert shown.status == "changed", "the first call applies"
     agent()
     written = await service.current(await load_backend_agent_for(runtime, auth))
     assert written is not None, "the switch is written"
     assert not trace.replies and not trace.violations, "every scripted reply was used"
+
+
+async def test_a_switch_to_where_the_agent_already_is_changes_nothing(active_chat):
+    """Asking again for the provider and model in force writes no revision."""
+    runtime, auth, origin, service, trace, payload, _, _, agent, _ = active_chat
+    payload["model"] = {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}}
+    agent()
+    ask = dict(
+        agent_name="Researcher", target_backend="anthropic", origin_context_id=str(origin.id)
+    )
+    auth = replace(auth, no_confirmation_surface=True)
+    first = await _request_agent_backend_switch_impl(runtime, auth, **ask)
+    agent()
+    again = await _request_agent_backend_switch_impl(runtime, auth, **ask)
+    agent()
+    current = await service.current(await load_backend_agent_for(runtime, auth))
+    assert current is not None and current.local == first.expected_revision, (
+        "the repeat wrote no new revision"
+    )
+    assert again.expected_revision == first.expected_revision, "it names the revision in force"
+    assert "Nothing changed" in again.summary, "the summary says so"
 
 
 async def test_a_no_drop_switch_on_a_provider_turn_when_in_a_direct_message_then_is_refused(

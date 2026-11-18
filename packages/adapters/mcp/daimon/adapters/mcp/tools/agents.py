@@ -1934,6 +1934,13 @@ class AgentBackendSwitchInfo(BaseModel):
     agent_settings: str | None = Field(default=None, exclude_if=lambda value: value is None)
     # This chat's channel pins its own provider, which outranks the agent's setting here.
     channel_pin: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    # Deprecated: nothing is previewed any more. Kept, unset, for one release so a
+    # caller that reads it still validates.
+    preview_digest: str | None = Field(
+        default=None,
+        json_schema_extra={"deprecated": True},
+        exclude_if=lambda value: value is None,
+    )
 
 
 def _private_origin(origin: TurnOriginRow) -> bool:
@@ -1985,6 +1992,11 @@ async def _request_agent_backend_switch_impl(
     if origin is None:
         raise ToolError("Request this change from your active chat conversation.")
     refuse_helper(origin)
+    if not origin.attended:
+        raise ToolError(
+            "Only someone in the conversation can switch an agent's provider, and nobody "
+            "started this run. Nothing was changed."
+        )
 
     from daimon.adapters.mcp.tools.task_continuity import (
         _hand_off_task_impl,  # pyright: ignore[reportPrivateUsage]
@@ -2087,6 +2099,31 @@ async def _request_agent_backend_switch_impl(
         preview = await service.preview(agent, target_backend, model, settings)
         if not preview.allowed:
             raise ToolError("That model provider isn't turned on here. Nothing changed.")
+        if awaiting is None and (current := await service.current(agent)) is not None:
+            same_settings = settings is None or settings == channel_backend.AgentSettings.of(
+                current
+            )
+            if (
+                same_settings
+                and expected_revision in (None, current.local)
+                and (current.backend or DEFAULT_BACKEND) == target_backend
+                and current.model == preview.target_model
+            ):
+                return AgentBackendSwitchInfo(
+                    status="changed",
+                    agent_name=agent.name,
+                    target_backend=preview.target_backend,
+                    model=preview.target_model,
+                    models=selectable_models(preview.target_backend),
+                    expected_revision=current.local,
+                    unsupported_skills=preview.unsupported_skills,
+                    unsupported_mcps=preview.unsupported_mcps,
+                    unsupported_capabilities=preview.unsupported_capabilities,
+                    shared_thread_limits=preview.shared_thread_limits,
+                    cost_line=preview.cost_line,
+                    summary=f"{agent_name} already uses {uses_phrase(target_backend, model)}. "
+                    "Nothing changed.",
+                )
         try:
             revision = await _write_backend_model(
                 runtime,
