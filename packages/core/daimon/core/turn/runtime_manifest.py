@@ -736,10 +736,11 @@ async def _capture_source_capabilities(
                 for tool in tools
             ):
                 raise ValueError("source has no enabled daimon-mcp toolset")
-            # No OpenAI/Gemini turn has a confirmation card of its own. With the
-            # host call gate on for this platform, Daimon posts one for each gated
-            # call; otherwise a gated tool stays unavailable (and the server
-            # refuses it for provider-turn credentials). A retired gate's stored ask runs.
+            # Gemini has no MCP approval step, and an OpenAI agent cannot choose
+            # which MCP tools raise one, so Daimon posts the card for each gated call
+            # while the host call gate is on for this platform. Otherwise a gated tool
+            # stays unavailable (the server refuses it for provider-turn credentials).
+            # A retired gate's stored ask runs.
             from daimon.core.features.snapshot import deployment_on_everywhere
             from daimon.core.tool_safety import (
                 RETIRED_GATES,
@@ -875,10 +876,9 @@ async def _capture_source_capabilities(
                 or set(inputs.mcp_tools) != set(allowed)
             ):
                 raise ValueError("MCP representation expands the source allowlist")
-            # Hosted Agents MCP currently has no approval request/response
-            # protocol (unlike Responses). Keep confirmation-gated tools out
-            # of its executable allowlist and declare each as a per-tool loss.
-            # Never convert `ask` into `auto` or drop sibling tools.
+            # An agent cannot choose which hosted MCP tools ask for approval, so
+            # a tool still asking here (no card for it) stays out of the allowlist
+            # as a per-tool loss. Never convert `ask` into `auto` or drop siblings.
             unavailable_mcp_tools = tuple(
                 f"mcp_tool:{DAIMON_SERVER_NAME}:{name}"
                 for name, permission in sorted(permissions.items())
@@ -1098,12 +1098,20 @@ def source_instructions_preserved(required: str | None, system: str | None) -> b
     )
 
 
+#: An agent read a bare `model_controls` as "I can't change models" and refused a
+#: switch its tools could make, so the Claude-only settings are named as such.
+_UNAVAILABLE_WORDS: Final[Mapping[str, str]] = {
+    "model_controls": "Claude-only model settings (changing models still works)",
+    "effort_setting": "the Claude effort setting (changing models still works)",
+}
+
+
 def unavailable_line(drops: Sequence[str], names: Mapping[str, str] | None = None) -> str:
     """The agent's own line of what its copy lacks: a skill by its name, never its id."""
     words = (
         f"skill:{(names or {}).get(d.removeprefix('skill:'), d.removeprefix('skill:'))}"
         if d.startswith("skill:")
-        else d
+        else _UNAVAILABLE_WORDS.get(d, d)
         for d in drops
     )
     return "Unavailable capabilities: " + ", ".join(words) + "."
@@ -1157,6 +1165,13 @@ def _source_extension_obligation(
                 return None
         model = extension.value.get("model")
         if isinstance(model, dict):
+            # Unset fields and Claude's defaults (as the panel saves them) are no loss.
+            model = {
+                key: value
+                for key, value in model.items()
+                if (value.get("type") if isinstance(value, dict) else value)
+                not in (None, {"speed": "standard", "effort": "high"}.get(key))
+            }
             if set(model) <= {"id", "speed"} and model.get("speed") is None:
                 return None
             # The target carries effort and the agent states its own there; speed stays

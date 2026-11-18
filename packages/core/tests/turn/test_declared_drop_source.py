@@ -10,6 +10,7 @@ from daimon.core.turn.runtime_manifest import (
     classify_source_obligations,
     preview_source_drops,
     source_preservation_pin,
+    unavailable_line,
 )
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, SkillRef
@@ -576,17 +577,28 @@ def test_represented_native_builtin_loss_requires_tools_even_on_the_same_provide
         assert "tools" not in classify_source_obligations(source, native_retained, environment=None)
 
 
+def test_the_agent_reads_lost_claude_settings_as_such_not_as_lost_model_changes():
+    line = unavailable_line(("effort_setting", "model_controls", "sandbox"))
+    assert line.count("changing models still works") == 2, line
+    assert "model_controls" not in line and "effort_setting" not in line, line
+
+
 @pytest.mark.parametrize("provider", ["openai", "gemini"])
 @pytest.mark.parametrize(
     "controls,required",
     [
         ({}, False),
         ({"speed": None}, False),
-        ({"speed": "standard"}, True),
+        # Claude's defaults, as the model panel saves them, are no loss.
+        ({"speed": "standard"}, False),
+        ({"effort": None}, False),
+        ({"effort": "high", "speed": "standard"}, False),
+        ({"effort": {"type": "high"}}, False),
         ({"speed": "fast"}, True),
-        ({"effort": None}, True),
+        ({"inference_geo": "us"}, True),
         ({"effort": "low"}, "effort_setting"),
-        ({"effort": {"type": "medium"}, "speed": "standard"}, True),
+        ({"effort": {"type": "medium"}, "speed": "standard"}, "effort_setting"),
+        ({"effort": "low", "speed": "fast"}, True),
     ],
 )
 def test_model_controls_are_offered_only_for_valid_unrepresented_controls(

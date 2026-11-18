@@ -1212,7 +1212,7 @@ _LIVE_ROOT = json.loads(
         {
             "backend": backend,
             **_LIVE_ROOT,
-            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+            "model": {"id": "claude-haiku-5-5", "speed": "fast", "effort": {"type": "medium"}},
         }
         for backend in ("openai", "gemini")
     ],
@@ -1358,7 +1358,7 @@ async def test_well_formed_channel_skill_remains_a_declarable_loss(
     [
         {
             "backend": backend,
-            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+            "model": {"id": "claude-haiku-5-5", "speed": "fast", "effort": {"type": "medium"}},
         }
         for backend in ("openai", "gemini")
     ],
@@ -1370,7 +1370,7 @@ async def test_portable_recorded_model_controls_apply_and_prepare(switched_reque
     assert await declared(switched_request) == losses
     selected = await read_preparation_counterpart(request)
     assert selected.target_spec.declared_drops == losses, "the recorded controls are off there"
-    assert "model_controls" in selected.target_spec.system
+    assert "Claude-only model settings" in selected.target_spec.system
     assert not selected.target_spec.extensions
     assert len(constructions) == 1
 
@@ -1381,7 +1381,7 @@ async def test_portable_recorded_model_controls_apply_and_prepare(switched_reque
         {
             "backend": backend,
             "caller_mcp": True,
-            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+            "model": {"id": "claude-haiku-5-5", "speed": "fast", "effort": {"type": "medium"}},
         }
         for backend in ("openai", "gemini")
     ],
@@ -1444,7 +1444,7 @@ async def test_portable_native_switch_survives_store_and_retained_prepare(switch
         {
             "backend": "openai",
             "caller_mcp": True,
-            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+            "model": {"id": "claude-haiku-5-5", "speed": "fast", "effort": {"type": "medium"}},
         }
     ],
     indirect=True,

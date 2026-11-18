@@ -177,7 +177,7 @@ async def test_ordinary_confirmed_target_native_readback_and_two_real_host_turns
         {
             "backend": "gemini",
             "caller_mcp": True,
-            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+            "model": {"id": "claude-haiku-5-5", "speed": "fast", "effort": {"type": "medium"}},
         }
     ],
     indirect=True,
