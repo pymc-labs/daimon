@@ -2734,10 +2734,12 @@ async def capture_backend_source(
                 raise channel_backend.AgentBackendRefused("source_unavailable", detail="source")
             return captured
     except (APIError, TimeoutError) as error:
+        _log.warning("backend_source.unavailable", exc_info=True)
         raise channel_backend.AgentBackendRefused("source_unavailable") from error
     except TurnError as error:
         # A capture blip asks for a retry; it never confirms a loss.
         if channel_backend.transient_failure(error):
+            _log.warning("backend_source.unavailable", exc_info=True)
             raise channel_backend.AgentBackendRefused("source_unavailable") from error
         raise
     except ScopeViolation as error:
