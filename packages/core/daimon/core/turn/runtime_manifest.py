@@ -31,7 +31,7 @@ from daimon.core.turn.stage_timing import stage_timer
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, ResourceRef, SkillRef
-from mux.contracts.profile import Capability, Effort
+from mux.contracts.profile import Capability, Effort, Profile
 from mux.contracts.resources import (
     AgentSpec,
     EnvironmentSpec,
@@ -971,7 +971,9 @@ async def _capture_source_capabilities(
                 latest = dict(await asyncio.gather(*(resolve_latest(s) for s in unresolved)))
 
             async def verify_skill(
-                item: SourceSkillMapping, versions: Mapping[str, str] = latest
+                item: SourceSkillMapping,
+                versions: Mapping[str, str] = latest,
+                pinned: Profile = profile,
             ) -> None:
                 attached = next(s for s in spec.skills or () if s.id == item.source.id)
                 version = (
@@ -1004,8 +1006,14 @@ async def _capture_source_capabilities(
                 )
                 from mux.drivers.openai import bundle_digest
 
-                # The digest the driver pinned: of the bytes it uploads (`plain_bundle`).
-                if bundle_digest(canonical) != item.target.digest:
+                # The digest the target driver pinned: a content pin is of the bytes the
+                # OpenAI driver uploads (`plain_bundle`); a version pin, of the source bytes.
+                digest = (
+                    bundle_digest(canonical)
+                    if pinned.skill_digest == "content"
+                    else request_digest(canonical.model_dump(mode="json"))
+                )
+                if digest != item.target.digest:
                     raise ValueError("target skill digest differs from source bytes")
 
             await asyncio.gather(*(verify_skill(item) for item in inputs.skills))
