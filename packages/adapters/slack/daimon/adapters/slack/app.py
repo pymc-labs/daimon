@@ -231,7 +231,6 @@ from daimon.adapters.slack.thread_model import (
     handle_thread_model_confirm,
     handle_thread_model_pick,
     handle_thread_model_shortcut,
-    with_thread_reask_notifier,
 )
 from daimon.adapters.slack.tool_confirmation import (
     CONFIRMATION_CUSTOM_ID_PREFIX,
@@ -481,7 +480,7 @@ class SlackApp:
     def __init__(
         self, *, runtime: SlackRuntime, member_sync: SlackMemberSync | None = None
     ) -> None:
-        self.runtime = with_thread_reask_notifier(with_budget_notifier(runtime))
+        self.runtime = with_budget_notifier(runtime)
         # Keeps workspace member lists for web access; None leaves them alone.
         self.member_sync = member_sync
         # Slack timestamps are unique only within a workspace conversation.

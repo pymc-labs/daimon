@@ -76,16 +76,13 @@ from daimon.core.mcp_auth import (
 )
 from daimon.core.model_switch import (
     ModelPicker,
-    ModelSwitchPreview,
     SwitchRefusal,
     back_to_claude,
-    confirm_or_refusal,
     panel_actor,
     panel_edit_deps,
     pick_or_refusal,
     read_picker,
     set_effort,
-    switch_card_text,
 )
 from daimon.core.models_catalog import (
     ModelChoice,
@@ -657,9 +654,10 @@ class SetupPanel:
         data: Mapping[str, object],
         page: int,
     ) -> AdaptiveCardInvokeResponse:
-        """Pick a model, review it, confirm once; or step back, or switch back to Claude.
+        """Pick a model and it applies; or step back, or switch back to Claude.
 
-        Who may change the agent is decided by the write (admin or owner), not by the card.
+        Switch on a card from before picks applied at once applies its pick. Who may
+        change the agent is decided by the write (admin or owner), not by the card.
         """
         name = str(data.get("agent") or "")
         admin = actor.admin_for(DelegatedAction.AGENT_SETTINGS)
@@ -731,45 +729,19 @@ class SetupPanel:
                 return refused(done)
             await audit("allowed", "effort_set")
             return await details()
-        if op == "backend_confirm":
-            local, digest = data.get("revision"), data.get("digest")
-            if isinstance(local, bool) or not isinstance(local, int) or local < 0:
-                return toast("That preview is no longer available. Pick the model again.")
-            if not isinstance(digest, str):
-                return toast("That preview is no longer available. Pick the model again.")
-            done = await confirm_or_refusal(
-                service,
-                edit,
-                actor=who,
-                agent_name=name,
-                value=value,
-                digest=digest,
-                revision=local,
-                admin=admin,
-            )
-            if isinstance(done, SwitchRefusal):
-                await audit("denied", done.reason)
-                return refused(done)
-            await audit("allowed", "completed")
-            return await details()
-        shown = await pick_or_refusal(
+        if not value:
+            return toast("That pick is no longer on the card.\nChoose a model again.")
+        done = await pick_or_refusal(
             service, edit, actor=who, agent_name=name, value=value, admin=admin
         )
-        if isinstance(shown, SwitchRefusal):
-            await audit("denied", shown.reason)
-            return refused(shown)
-        if not isinstance(shown, ModelSwitchPreview):
-            await audit("allowed", "completed")
+        if isinstance(done, SwitchRefusal):
+            await audit("denied", done.reason)
+            return refused(done)
+        await audit("allowed", "completed")
+        if not done.lines:
             return await details()
         return replace_card(
-            cards.model_switch_card(
-                switch_card_text(shown, agent_name=name),
-                agent_name=name,
-                value=value,
-                revision=shown.revision,
-                digest=shown.digest,
-                confirm=shown.allowed,
-            )
+            cards.model_switch_card(done.lines, agent_name=name, value=value, refused=False)
         )
 
     async def _act(

@@ -5,12 +5,12 @@ import { ModelPreviewPanel } from "./ModelPreviewPanel"
 import type { ModelPreview } from "./types"
 
 const preview: ModelPreview = {
-  moves: true, card: true, allowed: true, skills: ["pricing"], servers: [], capabilities: [], title: "Switch Ada to GPT-6 Luna?",
-  lines: ["Stops working: memory and the pricing skill", "Shared threads keep the first model"], drops: ["memory", "skill:sk_1"], digest: "d", revision: 2, refusal: null,
+  moves: true, allowed: true, skills: ["pricing"], servers: [], capabilities: [],
+  lines: ["Stops working: memory and the pricing skill", "Shared threads keep the first model"], drops: ["memory", "skill:sk_1"], refusal: null,
 }
 
 describe("ModelPreviewPanel", () => {
-  it("shows the card's lines as the server words them", () => {
+  it("shows what is off as the server words it", () => {
     render(<ModelPreviewPanel preview={preview} />)
     for (const text of preview.lines) expect(screen.getByText(text), text).toBeInTheDocument()
   })
@@ -28,7 +28,7 @@ describe("ModelPreviewPanel", () => {
   })
 
   it("renders nothing for a pick that loses nothing, even one that moves provider", () => {
-    const { container } = render(<ModelPreviewPanel preview={{ ...preview, card: false, lines: [] }} />)
+    const { container } = render(<ModelPreviewPanel preview={{ ...preview, lines: [] }} />)
     expect(container, "empty").toBeEmptyDOMElement()
   })
 })

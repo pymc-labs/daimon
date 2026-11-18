@@ -693,10 +693,6 @@ class DaimonBot(commands.Bot):
             self.runtime,
             turn_deps=replace(self.runtime.turn_deps, membership_resolver=self.membership_resolver),
         )
-        # Local import: the re-ask card's module reaches the /model command module.
-        from daimon.adapters.discord.thread_model_reask import with_thread_reask_notifier
-
-        self.runtime = with_thread_reask_notifier(self.runtime, self)
         # The SDK routes slash commands, buttons, and modals before dispatching
         # on_interaction, so filter their gateway payload before those callbacks.
         parse_interaction = self._connection.parsers["INTERACTION_CREATE"]
@@ -1282,8 +1278,6 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.credential_button import CredentialRequestButton
 
         self.add_dynamic_items(CredentialRequestButton)
-        # The provider switch card the MCP process posts for an OpenAI or Gemini
-        # turn (no card of its own); its presses dispatch here for the same reason.
         from daimon.adapters.discord.posted_controls.switch_card import SwitchCardControl
 
         self.add_dynamic_items(SwitchCardControl)
@@ -1328,9 +1322,10 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.thread_handoff import HandOverButton
 
         self.add_dynamic_items(HandOverButton)
-        from daimon.adapters.discord.thread_model_reask import ReaskConfirmButton
+        # Switch on a conversation model card from before picks applied at once.
+        from daimon.adapters.discord.stale_thread_switch import StaleThreadSwitchButton
 
-        self.add_dynamic_items(ReaskConfirmButton)
+        self.add_dynamic_items(StaleThreadSwitchButton)
 
         from daimon.adapters.discord.github_connect_button import GitHubConnectButton
 

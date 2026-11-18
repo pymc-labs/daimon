@@ -140,11 +140,9 @@ An update that adds or changes a script, or changes `allowed-tools`, waits
 until an admin approves it. Other changes, such as `.md` and `.txt` files,
 apply without approval.
 
-An agent switched to OpenAI or Gemini moves only when its dropped capabilities
-stay the same. Otherwise it keeps its version and shows **Needs re-confirm**.
-Its update button moves it, and its owner then confirms the new drops. OpenAI
-uploads each version of a custom or channel skill, and a skill over its size
-limit is named on the switch card. Gemini carries the default skills only.
+An agent switched to OpenAI or Gemini follows updates too. OpenAI uploads each
+version of a custom or channel skill, and a skill over its size limit is off
+there. Gemini carries the default skills only.
 Self-hosted channels use their deployment's own skills.
 
 ## Give an agent Google Workspace access

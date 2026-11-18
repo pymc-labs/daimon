@@ -1,4 +1,7 @@
-"""Explicit source-loss consent stays with its original immutable backend revision."""
+"""An effective channel revision keeps the immutable agent backend revision it was made with.
+
+Rows written before switches applied at once keep a `drop_consent` column: it is
+read and ignored."""
 
 from __future__ import annotations
 
@@ -13,7 +16,6 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from daimon.core._models import AgentBackendRevisionRecord, Base, ChannelConfigRevision
 from daimon.core.stores import UnflushedReadState, agent_backends, mux_state
-from daimon.core.stores.domain import CompatibilityPreview
 from daimon.testing.db import DatabasePreflight, require_owned_sessionmaker
 from daimon.testing.factories import make_tenant
 from mux.contracts.config import ConfigRevision
@@ -21,7 +23,6 @@ from mux.contracts.ids import ChannelRef
 from mux.errors import ScopeViolation
 from mux.profiles import backend_selection
 from mux.state.store import ConfigRevisionConflict
-from pydantic import ValidationError
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
@@ -38,6 +39,7 @@ async def owned(db_preflight: DatabasePreflight, db_engine: AsyncEngine, db_clea
 
 
 def consent(*, source: str = "a", target: str = "b"):
+    """An old row's loss consent, written before switches applied at once."""
     return {
         "declared_drops": ["memory", "sandbox"],
         "source_pin": source * 64,
@@ -45,7 +47,7 @@ def consent(*, source: str = "a", target: str = "b"):
     }
 
 
-async def preference(session, channel, agent_id, *, local=1, value=None):
+async def preference(session, channel, agent_id, *, local=1):
     return await agent_backends.put_revision(
         session,
         tenant_id=uuid.UUID(channel.tenant_id),
@@ -56,7 +58,6 @@ async def preference(session, channel, agent_id, *, local=1, value=None):
         previous_local=local - 1 or None,
         preview_digest="preview",
         digest=f"preference-{local}",
-        drop_consent=consent() if value is None else value,
     )
 
 
@@ -64,61 +65,24 @@ def config(channel, local=1):
     return ConfigRevision.create(channel, local, backend_selection("openai"))
 
 
-async def test_consent_round_trips_through_the_public_revision_reader(owned):
+async def test_an_old_rows_consent_is_read_and_ignored(owned):
+    """A row that still holds a loss consent reads, and resolves, like any other."""
     sessions, channel, agent_id = owned
     async with sessions.begin() as session:
         written = await preference(session, channel, agent_id)
+        effective = await mux_state.put_config_revision(
+            session, config(channel), origin="agent", agent_revision=written
+        )
+        await session.execute(
+            update(AgentBackendRevisionRecord)
+            .where(AgentBackendRevisionRecord.agent_id == agent_id)
+            .values(drop_consent=consent())
+        )
     async with sessions() as session:
         read = await agent_backends.current(session, uuid.UUID(channel.tenant_id), agent_id)
-    assert read == written
-    assert read.declared_drops == ("memory", "sandbox")
-    assert read.drop_consent.source_pin == "a" * 64
-    assert read.drop_consent.target_digest == "b" * 64
-
-
-@pytest.mark.parametrize("changed", [None, {"source_pin": "invalid"}])
-async def test_cached_original_cannot_hide_a_persisted_consent_refusal(owned, changed):
-    sessions, channel, agent_id = owned
-    async with sessions.begin() as db:
-        original = await preference(db, channel, agent_id)
-        effective = await mux_state.put_config_revision(
-            db, config(channel), origin="agent", agent_revision=original
-        )
-    async with sessions.begin() as db:
-        cached = await db.scalar(
-            select(AgentBackendRevisionRecord).where(
-                AgentBackendRevisionRecord.agent_id == agent_id,
-                AgentBackendRevisionRecord.local == original.local,
-            )
-        )
-        await db.execute(
-            update(AgentBackendRevisionRecord)
-            .where(
-                AgentBackendRevisionRecord.agent_id == agent_id,
-                AgentBackendRevisionRecord.local == original.local,
-            )
-            .values(drop_consent=changed)
-            .execution_options(synchronize_session=False)
-        )
-        assert cached.drop_consent == consent()
-        assert (
-            await agent_backends.current(db, uuid.UUID(channel.tenant_id), agent_id)
-        ) == original
-        if changed is None:
-            persisted = await agent_backends.current(
-                db, uuid.UUID(channel.tenant_id), agent_id, local=original.local, persisted=True
-            )
-            assert persisted.drop_consent is None
-            refused = ScopeViolation
-        else:
-            with pytest.raises(ValidationError):
-                await agent_backends.current(
-                    db, uuid.UUID(channel.tenant_id), agent_id, local=original.local, persisted=True
-                )
-            refused = ValidationError
-        with pytest.raises(refused):
-            await mux_state.get_config_agent_revision(db, effective, agent_id=agent_id)
-        assert cached.drop_consent == consent() and not db.dirty
+        kept = await mux_state.get_config_agent_revision(session, effective, agent_id=agent_id)
+    assert read is not None and read.model_dump() == written.model_dump(), "read as written"
+    assert kept is not None and kept.local == written.local, "the association still resolves"
 
 
 async def test_dirty_original_cannot_replace_its_persisted_pin_or_autoflush(owned):
@@ -134,23 +98,23 @@ async def test_dirty_original_cannot_replace_its_persisted_pin_or_autoflush(owne
                 AgentBackendRevisionRecord.agent_id == agent_id
             )
         )
-        cached.drop_consent = consent(source="c")
+        cached.agent_name = "renamed"
         with pytest.raises(UnflushedReadState):
             await mux_state.get_config_agent_revision(db, effective, agent_id=agent_id)
         with pytest.raises(UnflushedReadState):
             await agent_backends.current(
                 db, uuid.UUID(channel.tenant_id), agent_id, local=original.local, persisted=True
             )
-        assert cached in db.dirty and cached.drop_consent == consent(source="c")
+        assert cached in db.dirty, "the edit is still pending"
         with db.no_autoflush:
             assert (
                 await db.scalar(
-                    select(AgentBackendRevisionRecord.drop_consent).where(
+                    select(AgentBackendRevisionRecord.agent_name).where(
                         AgentBackendRevisionRecord.agent_id == agent_id
                     )
                 )
-                == consent()
-            )
+                == "source"
+            ), "the read never flushed the pending edit"
         await db.rollback()
 
 
@@ -198,7 +162,6 @@ async def test_persisted_revision_read_keeps_pending_objects_unflushed(owned):
             preview_digest="preview",
             digest="pending",
             previous_local=None,
-            drop_consent=consent(),
         )
         db.add(pending)
         assert (
@@ -213,7 +176,8 @@ async def test_persisted_revision_read_keeps_pending_objects_unflushed(owned):
         await db.rollback()
 
 
-async def test_old_rows_have_no_consent_and_unchanged_serialized_fields(owned):
+async def test_a_revision_never_serializes_the_old_consent_column(owned):
+    """A revision's serialized fields are the ones every reader already knows."""
     sessions, channel, agent_id = owned
     async with sessions.begin() as session:
         value = await agent_backends.put_revision(
@@ -228,8 +192,7 @@ async def test_old_rows_have_no_consent_and_unchanged_serialized_fields(owned):
             digest="old",
         )
         revision = await mux_state.put_config_revision(session, config(channel), origin="agent")
-    assert value.declared_drops == ()
-    assert "drop_consent" not in value.model_dump(mode="json")
+    assert "drop_consent" not in value.model_dump(mode="json"), "never serialized"
     async with sessions() as session:
         assert (
             await mux_state.get_config_agent_revision(session, revision, agent_id=agent_id) is None
@@ -240,11 +203,12 @@ async def test_old_rows_have_no_consent_and_unchanged_serialized_fields(owned):
         )
 
 
-async def test_identical_selection_never_aliases_different_consent_revisions(owned):
+async def test_identical_selection_never_aliases_different_agent_revisions(owned):
+    """The same selection made for two agent revisions keeps each one's association."""
     sessions, channel, agent_id = owned
     async with sessions.begin() as session:
         original = await preference(session, channel, agent_id)
-        later = await preference(session, channel, agent_id, local=2, value=consent(source="c"))
+        later = await preference(session, channel, agent_id, local=2)
         first = await mux_state.put_config_revision(
             session, config(channel), origin="agent", agent_revision=original
         )
@@ -300,14 +264,14 @@ async def test_retained_association_never_reads_the_latest_preference(owned):
         )
     async with sessions() as session:
         latest = await agent_backends.current(session, uuid.UUID(channel.tenant_id), agent_id)
-        assert latest.local == 2 and latest.drop_consent is None
+        assert latest.local == 2, "the latest preference is the clear"
         assert (
             await mux_state.get_config_agent_revision(session, retained, agent_id=agent_id)
             == original
         )
 
 
-async def test_a_config_collision_cannot_replace_its_original_consent(owned):
+async def test_a_config_collision_cannot_replace_its_original_revision(owned):
     sessions, channel, agent_id = owned
     async with sessions.begin() as session:
         original = await preference(session, channel, agent_id)
@@ -353,7 +317,7 @@ async def test_both_public_association_writers_refuse_foreign_scope_before_a_wri
 
 @pytest.mark.parametrize(
     "corruption",
-    ["foreign_agent", "missing_original", "missing_consent", "bool_local", "extra", "invalid_uuid"],
+    ["foreign_agent", "missing_original", "bool_local", "extra", "invalid_uuid"],
 )
 async def test_original_association_corruption_is_typed_refused(owned, corruption):
     sessions, channel, agent_id = owned
@@ -363,28 +327,21 @@ async def test_original_association_corruption_is_typed_refused(owned, corruptio
             session, config(channel), origin="agent", agent_revision=original
         )
         raw = [str(agent_id), 1]
-        if corruption == "missing_consent":
-            await session.execute(
-                update(AgentBackendRevisionRecord)
-                .where(AgentBackendRevisionRecord.agent_id == agent_id)
-                .values(drop_consent=None)
-            )
+        if corruption == "foreign_agent":
+            raw[0] = str(uuid.uuid4())
+        elif corruption == "missing_original":
+            raw[1] = 100
+        elif corruption == "bool_local":
+            raw[1] = True
+        elif corruption == "extra":
+            raw.append("unknown")
         else:
-            if corruption == "foreign_agent":
-                raw[0] = str(uuid.uuid4())
-            elif corruption == "missing_original":
-                raw[1] = 100
-            elif corruption == "bool_local":
-                raw[1] = True
-            elif corruption == "extra":
-                raw.append("unknown")
-            else:
-                raw[0] = "not-an-id"
-            await session.execute(
-                update(ChannelConfigRevision)
-                .where(ChannelConfigRevision.tenant_id == uuid.UUID(channel.tenant_id))
-                .values(agent_backend_ref=raw)
-            )
+            raw[0] = "not-an-id"
+        await session.execute(
+            update(ChannelConfigRevision)
+            .where(ChannelConfigRevision.tenant_id == uuid.UUID(channel.tenant_id))
+            .values(agent_backend_ref=raw)
+        )
     async with sessions() as session:
         with pytest.raises(ScopeViolation):
             await mux_state.get_config_agent_revision(session, revision, agent_id=agent_id)
@@ -416,50 +373,6 @@ async def test_interleaved_identical_config_claims_keep_one_immutable_associatio
             session, config(channel), agent_id=agent_id
         )
         assert winner in (one, two)
-
-
-@pytest.mark.parametrize("invalid", ["instructions", "source_definition", "unknown", "duplicate"])
-def test_the_persisted_consent_uses_the_existing_closed_agent_spec_domain(invalid):
-    body = consent()
-    body["declared_drops"] = [invalid] if invalid != "duplicate" else ["memory", "memory"]
-    with pytest.raises(ValidationError):
-        CompatibilityPreview(
-            tenant_id=uuid.uuid4(),
-            agent_id=uuid.uuid4(),
-            target_backend="openai",
-            setting_revision=0,
-            policy_revision="policy",
-            unsupported_skills=(),
-            unsupported_mcps=(),
-            unsupported_capabilities=(),
-            shared_thread_limits=(),
-            cost_line="offline",
-            allowed=True,
-            digest="preview",
-            drop_consent=body,
-        )
-
-
-def test_a_saved_consent_may_declare_the_saved_keys_lost():
-    """`credentials` is a declarable loss: the target runs without the saved keys."""
-    body = consent()
-    body["declared_drops"] = ["credentials", "memory"]
-    preview = CompatibilityPreview(
-        tenant_id=uuid.uuid4(),
-        agent_id=uuid.uuid4(),
-        target_backend="openai",
-        setting_revision=0,
-        policy_revision="policy",
-        unsupported_skills=(),
-        unsupported_mcps=(),
-        unsupported_capabilities=(),
-        shared_thread_limits=(),
-        cost_line="offline",
-        allowed=True,
-        digest="preview",
-        drop_consent=body,
-    )
-    assert preview.declared_drops == ("credentials", "memory")
 
 
 @pytest.mark.fresh_schema
@@ -543,7 +456,7 @@ async def test_expand_downgrade_keeps_legacy_columns_and_rows_readable(
         )
 
 
-async def test_lost_preference_cas_rolls_back_both_consent_and_effective_association(owned):
+async def test_lost_preference_cas_rolls_back_both_revision_and_effective_association(owned):
     sessions, channel, agent_id = owned
     async with sessions.begin() as session:
         old = await agent_backends.put_revision(

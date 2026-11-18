@@ -265,13 +265,6 @@ _BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {
         "{agent} runs on {provider}, which isn't set up here yet.",
         'Ask {who} to say "switch {agent_mid} to {default}", or to finish setting up {provider}.',
     ),
-    # The provider is set up; the stored switch consent is stale. Never say the
-    # provider is missing (J6g): a fresh preview and Confirm is the fix. Only a
-    # conversation already on the provider gets this; a new one runs on Anthropic.
-    "re_confirm": _Copy(
-        "{agent}'s model-provider switch needs to be confirmed again.",
-        "In a new conversation, ask {agent_mid} to switch to {provider} again, then Confirm.",
-    ),
     # Nothing is missing (a blip, or a change mid-read): the same message works shortly.
     "preparation_busy": _Copy(
         "Daimon couldn't get {agent} ready on {provider} just now.",

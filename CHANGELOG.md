@@ -16,9 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   then and counts toward spend caps. No turn waits for its usage, a replayed
   turn keeps the counts already recorded, and a restart within that hour leaves
   the turn unfinished.
+- **Switching an agent's or a thread's provider applies at once, like a model
+  change.** No card asks to confirm it on Discord, Slack, Teams or the web app,
+  and the switch tool and the CLI apply on the first call. What the new provider
+  can't run, such as some skills, MCP servers or tools, is off there and said once
+  as information; it comes back on a switch back. Creating an agent on an OpenAI
+  or Gemini model sets its provider. Who may switch, the provider allowlist,
+  prices and daily caps are unchanged, and a switch button posted earlier applies
+  the switch when pressed.
 - **An agent switched to OpenAI keeps answering there after its prompt or tools
-  change.** A switch asks again only when the model or what the agent loses
-  changes. An agent whose Daimon tool list was long no longer fails to start on
+  change.** An agent whose Daimon tool list was long no longer fails to start on
   OpenAI, and a provider that is set up is never reported as missing.
 - **Chat sessions keep notebook and report tools the MCP server is set up for.**
   In a deployment where only the MCP server carries the notebook host, report host,

@@ -4,7 +4,7 @@ import { toast } from "sonner"
 
 import { ApiError, api } from "@/lib/api"
 import type {
-  Agent, AgentConfig, Consent, AgentSummary, AgentVersion, Backend, Catalog, DataServerAgent, DataServerAgentPatch, DataServerScope, DataServerStatus,
+  Agent, AgentConfig, AgentSummary, AgentVersion, Backend, Catalog, DataServerAgent, DataServerAgentPatch, DataServerScope, DataServerStatus,
   DataServerToolPut, DataServerTools, Draft, Effect, ModelPreview, ServerSkillMenu, Skill, SkillFiles, SkillFollow, Template,
 } from "./types"
 
@@ -79,7 +79,7 @@ export function useSetFollow(agentId: string) {
   })
 }
 
-/** Move the agent to the update its backend consent held back; the owner then re-confirms. */
+/** Move the agent to an update held back for it earlier. */
 export function useApplyUpdate(agentId: string) {
   const qc = useQueryClient()
   return useMutation({
@@ -234,7 +234,7 @@ export function useDiscard(id: string) {
 export function useApply(id: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ note, consent }: { note: string; consent?: Consent }) => api.post<Agent>(`/api/agents/${id}/apply`, { note, ...consent }),
+    mutationFn: ({ note }: { note: string }) => api.post<Agent>(`/api/agents/${id}/apply`, { note }),
     onSuccess: (a) => {
       qc.setQueryData(["agents", id], a)
       qc.setQueryData(["agents", id, "draft"], null)

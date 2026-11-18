@@ -12,7 +12,7 @@ import datetime
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from functools import partial
-from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, cast
+from typing import Annotated, Any, Final, Literal, cast
 
 import anthropic
 import anyio
@@ -25,7 +25,6 @@ from anthropic.types.beta.beta_managed_agents_url_mcp_server_params import (
     BetaManagedAgentsURLMCPServerParams,
 )
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.adapters.mcp.confirmed_call import card_satisfied
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import reachability
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
@@ -102,9 +101,6 @@ from mux.contracts.ids import ModelRef, Provider
 from mux.contracts.profile import Capability, Effort
 from mux.profiles import selectable_models
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
-
-if TYPE_CHECKING:
-    from daimon.core.confirmation import BackendSwitchReference
 
 log = structlog.get_logger()
 
@@ -615,7 +611,7 @@ async def _move_this_thread(
     *,
     pinned_here: bool,
 ) -> str:
-    """After a confirmed switch, move the requester's own slot of this thread too."""
+    """After a switch, move the requester's own slot of this thread too."""
     from daimon.core.switch_cards import move_this_thread
 
     return await move_this_thread(
@@ -781,9 +777,7 @@ async def _start_on_backend(
             backend,
             preview.setting_revision,
             actor,
-            expected_preview_digest=preview.digest,
             model=model,
-            accepted_drops=preview.declared_drops,
         )
     except (channel_backend.AgentBackendRefused, channel_backend.BackendUnsupported) as exc:
         # It was saved on the default provider and hasn't moved yet (dsh).
@@ -1022,8 +1016,8 @@ def _reject_reserved_servers(
 def _move_to_other_provider(auth: AuthIdentity, model: ModelSelection | None) -> ModelRef | None:
     """The other provider's model `model` names, when update_agent may move there itself.
 
-    Outside a chat turn the move is `change_model`'s; inside one it stays the switch card's,
-    so the admin confirms the preview.
+    Outside a chat turn the move is `change_model`'s; inside one it is
+    request_agent_backend_switch's, which also moves this thread.
     """
     if not isinstance(model, str) or is_priced_claude_model(model):
         return None
@@ -1553,9 +1547,8 @@ async def _capture_backend_source(
     auth: AuthIdentity,
     origin: TurnOriginRow | None,
     source: BackendAgent,
-    *,
-    self_posted: bool = False,
 ) -> BackendAgent:
+    """Read `source` in the origin's own public context, never a private one."""
     from daimon.adapters.mcp.tools._session_gate import session_card_gap
     from daimon.core.authz import Place
     from daimon.core.ma_resolver import new_resolver_cache
@@ -1563,10 +1556,10 @@ async def _capture_backend_source(
     from daimon.core.turn.admission import capture_backend_source
     from daimon.core.turn.deps import build_turn_deps
 
-    if self_posted:
-        # No provider session to read the card gate from: the verified origin
-        # itself must be a public conversation, as for an admitted Claude card.
-        if origin is None or _private_origin(origin):
+    if origin is not None and auth.no_confirmation_surface:
+        # A provider turn has no session to read: the verified origin itself
+        # must be a public conversation.
+        if _private_origin(origin):
             raise channel_backend.AgentBackendRefused("source_context_unavailable")
     elif origin is not None and (
         gap := await session_card_gap(
@@ -1575,6 +1568,7 @@ async def _capture_backend_source(
             origin,
             tool_name="request_agent_backend_switch",
             require_public_context=True,
+            gated=False,
         )
     ):
         # The gap names the cause, in the refusal log line and its copy.
@@ -1626,28 +1620,19 @@ _SOURCE_DETAIL_WORDS: Final[Mapping[str, str]] = {
     "place": "this conversation's channel couldn't be verified",
 }
 
-#: Why this conversation can't show the switch's Confirm card (a `CardGap`).
+#: Why this conversation can't read the agent's setup for a switch (a `CardGap`).
 _CARD_GAP_WORDS: Final[Mapping[str, str]] = {
     "source_context_unavailable": (
-        "A switch can't be confirmed from a direct message or from a conversation that "
+        "A switch can't be made from a direct message or from a conversation that "
         "started somewhere else. Ask this agent in a server channel or thread."
     ),
     "no_live_session": (
-        "I couldn't find my conversation in this thread, so I can't post the Confirm card. "
-        "Mention me again here, or in a new thread."
+        "I couldn't find my conversation in this thread. Mention me again here, or in a new thread."
     ),
     "other_agents_session": (
-        "Another agent's conversation runs in this thread, so I can't post the Confirm "
-        "card here. Mention me in a new thread."
+        "Another agent's conversation runs in this thread. Mention me in a new thread."
     ),
-    "session_not_gated": (
-        "This thread's conversation started without the Confirm card for this change. "
-        "Mention me in a new thread."
-    ),
-    "session_unreadable": (
-        "I couldn't check this conversation just now, so I can't post the Confirm card. "
-        "Try again in a minute."
-    ),
+    "session_unreadable": "I couldn't check this conversation just now. Try again in a minute.",
 }
 
 
@@ -1742,14 +1727,9 @@ def _backend_switch_refusal(
             "selfhosted_requires_channel_configuration": (
                 f"This agent can't use that self-hosted model yet. Ask {admin} to allow it."
             ),
-            "stale_preview": f"'{agent_name}' changed since the preview. Ask me to preview again.",
             "stale_revision": switched_meanwhile_text(agent_name, current, target),
-            "re_confirm": "This change needs a fresh confirmation. Ask me to preview again.",
-            "drops_required": "The confirmation didn't accept what this switch drops. "
-            "Ask me to preview again.",
-            "drops_mismatch": "What this switch drops changed. Ask me to preview again.",
             "revision_busy": "Another change to this agent is in progress. Retry in a moment.",
-            "invalid_request": "That request didn't match the preview. Ask me to preview again.",
+            "invalid_request": "Daimon couldn't read that request. Check the names and retry.",
         }.get(
             reason,
             "Something on Daimon's side refused this change. "
@@ -1808,8 +1788,6 @@ async def _write_backend_model(
     actor: channel_backend.BackendActor,
     *,
     expected_revision: int,
-    expected_digest: str,
-    accepted_drops: tuple[str, ...] | None = None,
     settings: channel_backend.AgentSettings | None = None,
 ) -> AgentBackendRevision:
     """Point `agent` at another provider's model through core `change_model`."""
@@ -1821,10 +1799,8 @@ async def _write_backend_model(
             target,
             expected_revision,
             actor,
-            expected_preview_digest=expected_digest,
             model=model,
             settings=settings,
-            **({"accepted_drops": accepted_drops} if accepted_drops is not None else {}),
         )
     changed = await change_model(
         agent,
@@ -1837,8 +1813,6 @@ async def _write_backend_model(
         ),
         edit=_edit_deps(runtime),
         backends=service,
-        accepted_drops=accepted_drops,
-        expected_digest=expected_digest,
         expected_revision=expected_revision,
         settings=settings,
     )
@@ -1864,9 +1838,7 @@ async def _set_agent_backend_impl(
     try:
         require_outside_chat_turn(auth)
     except ToolError as exc:
-        raise ToolError(
-            "Use request_agent_backend_switch in chat so the admin can confirm the preview."
-        ) from exc
+        raise ToolError("In chat, use request_agent_backend_switch instead.") from exc
     if not channel_backend.backend_selection_enabled(runtime.settings.turn):
         raise ToolError("Choosing a model provider is turned off. Nothing changed.")
     service = channel_backend.make_backend_service(
@@ -1909,9 +1881,7 @@ async def _set_agent_backend_impl(
         local = preview.setting_revision if expected_revision is None else expected_revision
         try:
             if backend is None:
-                revision = await service.clear_backend(
-                    current, local, actor, expected_preview_digest=preview.digest
-                )
+                revision = await service.clear_backend(current, local, actor)
             else:
                 revision = await _write_backend_model(
                     runtime,
@@ -1921,7 +1891,6 @@ async def _set_agent_backend_impl(
                     model,
                     actor,
                     expected_revision=local,
-                    expected_digest=preview.digest,
                 )
         except channel_backend.AgentBackendRefused as exc:
             if exc.reason == "stale_revision":
@@ -1949,13 +1918,12 @@ async def _set_agent_backend_impl(
 
 
 class AgentBackendSwitchInfo(BaseModel):
-    status: Literal["preview", "changed", "awaiting_confirmation"]
+    status: Literal["changed"]
     agent_name: str
     target_backend: Provider
     model: str | None = Field(default=None, exclude_if=lambda value: value is None)
     models: tuple[str, ...] = ()
     expected_revision: int
-    preview_digest: str
     unsupported_skills: tuple[str, ...]
     unsupported_mcps: tuple[str, ...]
     unsupported_capabilities: tuple[str, ...]
@@ -1966,117 +1934,12 @@ class AgentBackendSwitchInfo(BaseModel):
     agent_settings: str | None = Field(default=None, exclude_if=lambda value: value is None)
     # This chat's channel pins its own provider, which outranks the agent's setting here.
     channel_pin: str | None = Field(default=None, exclude_if=lambda value: value is None)
-
-
-_OWN_CARD_PLATFORMS: Final = frozenset({"discord", "slack", "teams", "web"})
-
-
-async def _post_own_switch_card(
-    runtime: McpRuntime,
-    auth: AuthIdentity,
-    origin: TurnOriginRow,
-    service: channel_backend.AgentBackendService,
-    reference: BackendSwitchReference,
-) -> str:
-    """Post the switch card a provider turn can't show, after the same checks as its click.
-
-    The card goes only into the verified origin's thread and only its requester
-    can press it (`daimon.core.switch_cards.press_switch_card`). Nothing changes
-    here; the press re-verifies everything before applying.
-    """
-    from daimon.core.confirmation import CardRefusal, ConfirmationPrompt, backend_switch_callbacks
-    from daimon.core.stores import backend_switch_cards as cards
-    from daimon.core.switch_cards import SWITCH_CARD_MAX_S, requested_switch_card
-
-    if auth.platform not in _OWN_CARD_PLATFORMS or auth.platform_user_id is None:
-        raise ToolError(
-            "I can't post a confirmation card from this conversation. An admin can "
-            "switch the agent from its Details. Nothing changed."
-        )
-    now = datetime.datetime.now(datetime.UTC)
-    # Outside any turn, so not capped by one; never past a day, and the card says when.
-    expires_at = now + datetime.timedelta(
-        seconds=min(runtime.settings.tool_safety.confirmation_timeout_s, SWITCH_CARD_MAX_S)
-    )
-    async with runtime.session_factory() as session:
-        waiting = await cards.waiting_for(
-            session,
-            tenant_id=auth.tenant_id,
-            requester_platform_user_id=auth.platform_user_id,
-            agent_name=reference.agent,
-            now=now,
-        )
-    if waiting:
-        raise ToolError(
-            f"There's already a card waiting for you to switch {reference.agent}. "
-            "Press it, or let it expire, before asking again. Nothing changed."
-        )
-
-    async def current_admin(_clicker: str) -> bool:
-        return auth.is_admin and not auth.client
-
-    prepare, _ = backend_switch_callbacks(
-        service,
-        sessionmaker=runtime.session_factory,
-        anthropic=runtime.client,
-        tenant_id=auth.tenant_id,
-        account_id=auth.account_id,
-        current_admin=current_admin,
-        current_platform_admin=current_admin,
-        default_agent_name=runtime.deployment_default.agent_name,
-        place_word=space_noun(auth.platform),
-        answering_agent_name=origin.responder_name,
-        handoff_thread=(origin.platform, origin.parent_channel_id, origin.thread_id),
-    )
-    prompt = ConfirmationPrompt(
-        title="Change the model?",
-        requester_platform_user_id=auth.platform_user_id,
-        expires_at=expires_at,
-        admin=True,
-        backend_switch=reference,
-    )
-    try:
-        prepared = await prepare(prompt)
-    except CardRefusal as exc:
-        said = str(exc)
-        raise ToolError(
-            said if said.endswith("Nothing changed.") else f"{said} Nothing changed."
-        ) from exc
-    except ValueError as exc:
-        raise ToolError(f"{exc} Nothing changed.") from exc
-    async with runtime.session_factory.begin() as session:
-        row = await cards.create_card(
-            session,
-            tenant_id=auth.tenant_id,
-            account_id=auth.account_id,
-            platform=origin.platform,
-            channel_id=origin.parent_channel_id,
-            thread_id=origin.thread_id,
-            setup_thread=origin.is_setup,
-            requester_platform_user_id=auth.platform_user_id,
-            client=auth.client,
-            answering_agent_name=origin.responder_name,
-            # What the card shows: re-previewed if the agent changed since (J5).
-            reference=(prepared.backend_switch or prepared.configuration or reference).model_dump(
-                mode="json"
-            ),
-            expires_at=expires_at,
-        )
-    card = requested_switch_card(
-        row.id,
-        title=prepared.title,
-        facts=tuple(fact for fact in (prepared.consequence, *prepared.detail_lines) if fact),
-        requester_platform_user_id=auth.platform_user_id,
-        expires_at=expires_at,
-    )
-    from daimon.adapters.mcp.tools._own_card import post_own_card
-
-    message_id = await post_own_card(runtime, auth, origin=origin, card=card)
-    async with runtime.session_factory.begin() as session:
-        await cards.mark_posted(session, card_id=row.id, message_id=message_id)
-    return (
-        "I posted a switch card in this conversation. Nothing changes until the requester "
-        "presses Switch on it. Tell them so; do not call this tool again for this switch."
+    # Deprecated: nothing is previewed any more. Kept, unset, for one release so a
+    # caller that reads it still validates.
+    preview_digest: str | None = Field(
+        default=None,
+        json_schema_extra={"deprecated": True},
+        exclude_if=lambda value: value is None,
     )
 
 
@@ -2107,9 +1970,7 @@ async def _request_agent_backend_switch_impl(
     agent_name: str,
     target_backend: Provider,
     expected_revision: int | None = None,
-    preview_digest: str | None = None,
     origin_context_id: str | None = None,
-    accepted_drops: tuple[str, ...] | None = None,
     model: str | None = None,
     thread_mode: ThreadMode | None = None,
     required_capabilities: tuple[Capability, ...] | None = None,
@@ -2118,6 +1979,11 @@ async def _request_agent_backend_switch_impl(
     handoff_summary: str | None = None,
     effort: Effort | None = None,
 ) -> AgentBackendSwitchInfo:
+    """Switch `agent_name` to `target_backend` at once, like a model change.
+
+    What the new provider can't carry is off there and named in the summary, as
+    information.
+    """
     model = _resolve_agent_model(target_backend, model)
     _require_selectable_model(target_backend, model)
     if auth.agent_id is not None or auth.platform_user_id is None:
@@ -2126,51 +1992,34 @@ async def _request_agent_backend_switch_impl(
     if origin is None:
         raise ToolError("Request this change from your active chat conversation.")
     refuse_helper(origin)
+    if not origin.attended:
+        raise ToolError(
+            "Only someone in the conversation can switch an agent's provider, and nobody "
+            "started this run. Nothing was changed."
+        )
 
-    from daimon.adapters.mcp.tools._session_gate import session_card_gap
     from daimon.adapters.mcp.tools.task_continuity import (
         _hand_off_task_impl,  # pyright: ignore[reportPrivateUsage]
         copy_awaiting_its_switch,
     )
     from daimon.core.channel_backend import BackendActor, load_backend_agent, make_backend_service
-    from daimon.core.confirmation import (
-        BackendSwitchReference,
-        reference_settings,
-        settings_line,
-        stated_settings,
-        switch_preview_digest,
-    )
-    from daimon.core.switch_card import needs_switch_card
+    from daimon.core.confirmation import settings_line, stated_settings
+    from daimon.core.switch_card import switch_lines
+    from daimon.core.turn.notices import conversations_follow_line, uses_phrase
     from pydantic import ValidationError
 
-    # A provider turn with no card of its own (OpenAI, Gemini): Daimon posts the
-    # card itself. Decided by the verified token's surface, never by the model.
-    self_card = auth.no_confirmation_surface and not card_satisfied(auth)
     on_now: Provider | None = None
-    # A new copy of this conversation's responder, made here: the confirmed switch
-    # hands it this conversation too.
+    # A new copy of this conversation's responder, made here: the switch hands it
+    # this conversation too.
     awaiting: str | None = None
     try:
         service = make_backend_service(
             runtime.session_factory,
             runtime.settings.turn,
-            capture_source=partial(
-                _capture_backend_source, runtime, auth, origin, self_posted=self_card
-            ),
+            capture_source=partial(_capture_backend_source, runtime, auth, origin),
         )
         if not service.enabled:
             raise ToolError("Choosing a model provider is turned off. Nothing changed.")
-        if self_card:
-            if _private_origin(origin):
-                # Worded as a Claude turn's refusal from a direct message.
-                raise channel_backend.AgentBackendRefused("source_context_unavailable")
-        elif (
-            await session_card_gap(runtime, auth, origin, tool_name="request_agent_backend_switch")
-            is not None
-        ):
-            raise ToolError(
-                "This conversation cannot verify the confirmation card. Nothing changed."
-            )
         agent = await load_backend_agent(
             runtime.client,
             runtime.session_factory,
@@ -2193,16 +2042,12 @@ async def _request_agent_backend_switch_impl(
                 )
                 + " Nothing changed."
             )
-        await _require_agent_editor(
-            service,
-            agent,
-            BackendActor(
-                tenant_id=auth.tenant_id,
-                account_id=auth.account_id,
-                subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS)),
-            ),
-            auth,
+        actor = BackendActor(
+            tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
+            subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS)),
         )
+        await _require_agent_editor(service, agent, actor, auth)
         on_now = await _provider_now(service, agent)
         if agent.source is not None and await copy_awaiting_its_switch(
             runtime,
@@ -2212,8 +2057,8 @@ async def _request_agent_backend_switch_impl(
             metadata=agent.source.spec.metadata,
         ):
             awaiting = agent.source.ref.id
-            # Every hand-off check, before a card is posted: its uncommitted-work
-            # question is one the person answers here, never on the card.
+            # Every hand-off check before the switch: its uncommitted-work question
+            # is one the person answers first.
             await _hand_off_task_impl(
                 runtime,
                 auth,
@@ -2226,7 +2071,7 @@ async def _request_agent_backend_switch_impl(
         if thread_mode == "shared" and not (
             auth.admin_for(DelegatedAction.AGENT_SETTINGS) and auth.agent_id is None
         ):
-            # The service refuses it too; say so before a card is posted.
+            # The service refuses it too; say so in the person's words.
             raise ToolError(
                 f"Sharing threads applies in every channel, so it needs "
                 f"{admin_noun(auth.platform)}. Nothing changed."
@@ -2254,111 +2099,52 @@ async def _request_agent_backend_switch_impl(
         preview = await service.preview(agent, target_backend, model, settings)
         if not preview.allowed:
             raise ToolError("That model provider isn't turned on here. Nothing changed.")
-        status: Literal["preview", "changed", "awaiting_confirmation"] = "preview"
-        summary = (
-            "Tell the person what stops working, then call request_agent_backend_switch again "
-            "in this same reply with its expected_revision and preview_digest. Do not ask the "
-            "person to reply yes or to confirm in chat: the second call posts the switch card, "
-            "and they press Switch on it. Their request is the go-ahead. Nothing has changed yet."
-        )
-        reference: BackendSwitchReference | None = None
-        # The person's hand-off answers, bound into the digest the card showed.
-        bound = unsaved_work is not None or handoff_summary is not None
-        # Nothing stops working: it applies now, like a model change. A hand-off still
-        # asks, and so does a run nobody started (a routine or wake): nobody asked for it.
-        auto = preview_digest is None and awaiting is None and not bound and origin.attended
-        if auto := auto and not needs_switch_card(preview):
-            expected_revision, preview_digest = preview.setting_revision, preview.digest
-            accepted_drops = tuple(preview.declared_drops) or None
-        if preview_digest is not None:
-            reference = BackendSwitchReference.model_validate(
-                {
-                    "agent": agent_name,
-                    "target_backend": target_backend,
-                    "model": model,
-                    "expected_revision": expected_revision,
-                    "preview_digest": preview_digest,
-                    "accepted_drops": accepted_drops,
-                    "thread_mode": thread_mode,
-                    "required_capabilities": required_capabilities,
-                    "effort": effort,
-                    "profile": profile,
-                    "unsaved_work": unsaved_work,
-                    "handoff_summary": handoff_summary,
-                    "for_everyone": for_everyone,
-                }
+        if awaiting is None and (current := await service.current(agent)) is not None:
+            same_settings = settings is None or settings == channel_backend.AgentSettings.of(
+                current
             )
-            current_digest = switch_preview_digest(preview.digest, unsaved_work, handoff_summary)
             if (
-                not self_card
-                and awaiting is None
-                and not bound
-                and (
-                    current_digest != reference.preview_digest
-                    or preview.setting_revision != reference.expected_revision
-                )
+                same_settings
+                and expected_revision in (None, current.local)
+                and (current.backend or DEFAULT_BACKEND) == target_backend
+                and current.model == preview.target_model
             ):
-                # The agent changed after the preview; its card re-previewed and showed
-                # the current one (J5). Apply that, only if nothing changed since. A
-                # hand-off is never re-previewed: its answers are bound to the preview.
-                from daimon.core.stores.backend_switch_cards import consume_refresh
-
-                async with runtime.session_factory.begin() as session:
-                    refreshed = await consume_refresh(
-                        session,
-                        tenant_id=auth.tenant_id,
-                        account_id=auth.account_id,
-                        agent_name=agent.name,
-                        stale_digest=reference.preview_digest,
-                        fresh_digest=current_digest,
-                        fresh_revision=preview.setting_revision,
-                        now=datetime.datetime.now(datetime.UTC),
-                    )
-                if refreshed:
-                    reference = reference.model_copy(
-                        update={
-                            "expected_revision": preview.setting_revision,
-                            "preview_digest": current_digest,
-                            "accepted_drops": tuple(preview.declared_drops) or None,
-                        }
-                    )
-            if (
-                bound
-                and switch_preview_digest(preview.digest, unsaved_work, handoff_summary)
-                != reference.preview_digest
-            ):
-                # The answer is bound into the digest the card showed: a changed or
-                # invented one is a different request. (Omitting a bound answer fails
-                # the switch's own digest check.)
-                raise channel_backend.AgentBackendRefused("stale_preview")
-        if reference is not None and self_card and not auto:
-            if awaiting is not None or bound:
-                # The hand-off this switch carries runs at the write, which a
-                # self-posted card's press doesn't do.
-                raise ToolError(
-                    "This switch also hands the conversation over, which I can't confirm "
-                    "from this conversation yet. Ask from a Claude conversation. Nothing changed."
+                return AgentBackendSwitchInfo(
+                    status="changed",
+                    agent_name=agent.name,
+                    target_backend=preview.target_backend,
+                    model=preview.target_model,
+                    models=selectable_models(preview.target_backend),
+                    expected_revision=current.local,
+                    unsupported_skills=preview.unsupported_skills,
+                    unsupported_mcps=preview.unsupported_mcps,
+                    unsupported_capabilities=preview.unsupported_capabilities,
+                    shared_thread_limits=preview.shared_thread_limits,
+                    cost_line=preview.cost_line,
+                    summary=f"{agent_name} already uses {uses_phrase(target_backend, model)}. "
+                    "Nothing changed.",
                 )
-            status = "awaiting_confirmation"
-            summary = await _post_own_switch_card(runtime, auth, origin, service, reference)
-        elif reference is not None:
-            # The card check awaited provider I/O; reread configuration at the write edge.
-            agent = await load_backend_agent(
-                runtime.client,
-                runtime.session_factory,
-                tenant_id=auth.tenant_id,
-                agent_name=agent_name,
+        try:
+            revision = await _write_backend_model(
+                runtime,
+                service,
+                agent,
+                target_backend,
+                model,
+                actor,
+                expected_revision=(
+                    preview.setting_revision if expected_revision is None else expected_revision
+                ),
+                settings=settings,
             )
-            actor = BackendActor(
-                tenant_id=auth.tenant_id,
-                account_id=auth.account_id,
-                subject=mcp_subject(auth, is_admin=auth.admin_for(DelegatedAction.AGENT_SETTINGS)),
-            )
-            from daimon.core.turn.notices import conversations_follow_line, uses_phrase
-
-            before = await service.current(agent)
-            if awaiting is not None:
-                # Checked again at the write edge, so a refusal changes nothing.
+        except channel_backend.AgentBackendRefused as exc:
+            if exc.reason == "stale_revision":
+                # Another switch landed first: name where the agent is now.
+                on_now = await _provider_now(service, agent)
+            raise
+        if awaiting is not None:
+            # J1: the switch and the hand-off it promises, in one step.
+            try:
                 await _hand_off_task_impl(
                     runtime,
                     auth,
@@ -2366,90 +2152,47 @@ async def _request_agent_backend_switch_impl(
                     agent_id=awaiting,
                     unsaved_work=unsaved_work,
                     summary=handoff_summary,
-                    switch="check",
+                    switch="commit",
                 )
-            try:
-                await _write_backend_model(
-                    runtime,
-                    service,
-                    agent,
-                    target_backend,
-                    reference.model,
-                    actor,
-                    expected_revision=reference.expected_revision,
-                    # A bound digest was checked above; this one is the switch's own.
-                    expected_digest=preview.digest if bound else reference.preview_digest,
-                    accepted_drops=reference.accepted_drops,
-                    settings=reference_settings(reference),
+            except Exception as exc:
+                # The switch landed: say so, whatever stopped the hand-off.
+                log.warning(
+                    "backend_switch.handoff_failed",
+                    agent=agent_name,
+                    error_type=type(exc).__name__,
+                    exc_info=True,
                 )
-            except channel_backend.AgentBackendRefused as exc:
-                if exc.reason == "stale_revision":
-                    # Another switch landed first: name where the agent is now.
-                    on_now = await _provider_now(service, agent)
-                raise
-            if awaiting is not None:
-                # J1: the switch and the hand-off it promises, in one step. The model's
-                # own order was a coin toss: a copy handed this conversation before
-                # its switch posted the card again instead of answering.
-                try:
-                    await _hand_off_task_impl(
-                        runtime,
-                        auth,
-                        origin_context_id=str(origin.id),
-                        agent_id=awaiting,
-                        unsaved_work=unsaved_work,
-                        summary=handoff_summary,
-                        switch="commit",
-                    )
-                except Exception as exc:
-                    # The switch landed: say so, whatever stopped the hand-off.
-                    log.warning(
-                        "backend_switch.handoff_failed",
-                        agent=agent_name,
-                        error_type=type(exc).__name__,
-                        exc_info=True,
-                    )
-                    why = (
-                        str(exc).removesuffix(" Nothing was changed.")
-                        if isinstance(exc, ToolError)
-                        else "something went wrong on our side."
-                    )
-                    raise ToolError(
-                        f"{agent_name} now uses "
-                        f"{uses_phrase(target_backend, reference.model)}, but this "
-                        f"conversation couldn't be handed to it: {why} Ask {agent_name} "
-                        "in a new conversation."
-                    ) from exc
-            status = "changed"
-            summary = (
-                f"{agent_name} now uses {uses_phrase(target_backend, reference.model)}. "
-                f"New conversations with {agent_name} use it. "
-                + conversations_follow_line(
-                    agent_name,
-                    target_backend,
-                    (before.backend if before else None) or DEFAULT_BACKEND,
+                why = (
+                    str(exc).removesuffix(" Nothing was changed.")
+                    if isinstance(exc, ToolError)
+                    else "something went wrong on our side."
                 )
-                + " "
-                + await _move_this_thread(
-                    runtime,
-                    auth,
-                    origin,
-                    agent_name,
-                    target_backend,
-                    pinned_here=await _channel_pin_line(runtime, origin) is not None,
-                )
-            )
+                raise ToolError(
+                    f"{agent_name} now uses {uses_phrase(target_backend, model)}, but this "
+                    f"conversation couldn't be handed to it: {why} Ask {agent_name} "
+                    "in a new conversation."
+                ) from exc
         channel_pin = await _channel_pin_line(runtime, origin)
-        if channel_pin is not None:
-            summary = f"{summary} {channel_pin}"
+        moved = await _move_this_thread(
+            runtime, auth, origin, agent_name, target_backend, pinned_here=channel_pin is not None
+        )
+        summary = " ".join(
+            (
+                f"{agent_name} now uses {uses_phrase(target_backend, model)}.",
+                f"New conversations with {agent_name} use it.",
+                conversations_follow_line(agent_name, target_backend, on_now),
+                moved,
+                *switch_lines(preview),
+                *((channel_pin,) if channel_pin is not None else ()),
+            )
+        )
         return AgentBackendSwitchInfo(
-            status=status,
+            status="changed",
             agent_name=agent.name,
             target_backend=preview.target_backend,
             model=preview.target_model,
             models=selectable_models(preview.target_backend),
-            expected_revision=preview.setting_revision,
-            preview_digest=switch_preview_digest(preview.digest, unsaved_work, handoff_summary),
+            expected_revision=revision.local,
             unsupported_skills=preview.unsupported_skills,
             unsupported_mcps=preview.unsupported_mcps,
             unsupported_capabilities=preview.unsupported_capabilities,
@@ -2483,7 +2226,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             """Change which provider's model the agent uses, or clear it with backend=null.
 
             The agent's owner or an admin, for direct coding-tool or API requests. Chat
-            turns use request_agent_backend_switch so the requester confirms the preview.
+            turns use request_agent_backend_switch.
             The returned preview names compatibility limits and list prices.
             Each person's own conversation with the agent moves to the new provider on
             their next message; shared threads stay on the old one; channel settings
@@ -2816,49 +2559,40 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             handoff_summary: Annotated[str | None, Field(max_length=2000)] = None,
             effort: Effort | None = None,
         ) -> AgentBackendSwitchInfo:
-            """Change an agent's model to another provider's; a switch that loses something asks.
+            """Change an agent's model to another provider's. It applies at once.
 
             Use when an admin or the agent's owner asks to switch it to Anthropic, OpenAI
             or Gemini. It stays the same agent on a new model: say "Researcher now uses
             Gemini 4 Argon", never a version, copy or variant. A member can make a copy
             they own with fork_agent and switch that copy.
             If the named model isn't available, say that with the allowed list.
-            optionally naming a model naturally: "switch Researcher to argon" or
+            A person may name a model naturally: "switch Researcher to argon" or
             "switch Researcher to luna". For an Anthropic model change such as
             "set Writer to opus 5.5", use update_agent with that natural model name.
             ``model`` accepts natural names or one of
             the returned ``models``; omit it for the provider's default. A provider
-            alone ("switch to GPT", "to Gemini") means its default: omit ``model`` and
-            preview; never ask which model. Never ask the person for a model id.
+            alone ("switch to GPT", "to Gemini") means its default: omit ``model``;
+            never ask which model. Never ask the person for a model id.
             Ambiguous model names return the choices.
-            The switch applies to
-            new conversations wherever the agent answers, and to this conversation
-            from the next message when the switched agent answers here (the result's
-            summary says which). The server's default or built-in agent switches only
-            when the person says it's for everyone (for_everyone=true, on both calls);
-            otherwise offer the copy below. For "make a copy of yourself on Gemini":
-            copy the agent with fork_agent and new_copy_if_taken=true (always a NEW
-            copy, never an earlier one; use the name it returns from here on), then
-            switch the copy here. Don't hand_off_task first: the confirmed switch hands
-            this conversation to the copy and moves it to Gemini from the next message.
-            Pass ``handoff_summary`` on both calls: a short summary of this conversation
+            The switch applies to new conversations wherever the agent answers, and to
+            this conversation from the next message when the switched agent answers here
+            (the result's summary says which). The summary also says what is off on the
+            new provider: tell the person, and never ask them to confirm. The
+            server's default or built-in agent switches only when the person says
+            it's for everyone (for_everyone=true); otherwise offer the copy
+            below. For "make a copy of yourself on Gemini": copy the agent with
+            fork_agent and new_copy_if_taken=true (always a NEW copy, never an earlier
+            one; use the name it returns from here on), then switch the copy here.
+            Don't hand_off_task first: the switch hands this conversation to the copy
+            and moves it to Gemini from the next message.
+            Pass ``handoff_summary``: a short summary of this conversation
             (what was asked, decided and still open; no secrets, keys or tool output),
             which the copy starts from there, since the history itself can't move.
-            If that preview asks the uncommitted-work question, pass the person's
-            answer as ``unsaved_work`` on both calls.
-            First call without preview_digest: one that loses nothing applies and returns
-            changed. Otherwise tell the person what stops working and any shared-thread
-            limit, then call again in this same turn with the same model and that preview's
-            expected_revision, preview_digest and exact declared_drops as accepted_drops.
-            Never ask the person to reply "yes", to confirm in chat, or for a second
-            go-ahead: the request that began this turn is the go-ahead, and the second
-            call posts the card, where they press Switch. On an OpenAI or Gemini turn
-            that call posts the card itself and returns awaiting_confirmation: tell the
-            person to press Switch, and don't call again. Never confirm, approve or accept it
-            on their behalf, and never say you did. A stale preview or expired card
-            changes nothing; preview again. Make any other change to the agent (its tools,
-            skills or settings) before previewing a switch: a change after the preview
-            makes it stale. Pass this active turn's origin_context_id.
+            If the call asks the uncommitted-work question, ask the person and call
+            again with their answer as ``unsaved_work``.
+            ``expected_revision`` refuses a switch when the agent changed since it was
+            read. ``preview_digest`` and ``accepted_drops`` are ignored.
+            Pass this active turn's origin_context_id.
             The same tool states the agent's own settings: ``thread_mode`` ("shared"
             to share threads where the channel allows it, admins only; or "per_caller") and
             ``required_capabilities`` (a channel that can't give one refuses the turn).
@@ -2867,15 +2601,14 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             agent keeps its own effort unless you pass one. To change only
             settings, pass the agent's current target_backend and model.
             """
+            del preview_digest, accepted_drops  # An older caller's second call; ignored.
             return await _request_agent_backend_switch_impl(
                 runtime,
                 await _auth(ctx),
                 agent_name=agent_name,
                 target_backend=target_backend,
                 expected_revision=expected_revision,
-                preview_digest=preview_digest,
                 origin_context_id=origin_context_id,
-                accepted_drops=accepted_drops,
                 model=model,
                 thread_mode=thread_mode,
                 required_capabilities=required_capabilities,

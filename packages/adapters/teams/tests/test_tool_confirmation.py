@@ -700,7 +700,7 @@ async def test_clicks_check_the_cached_owners_and_read_again_only_for_a_yes(
     )
     kwargs = factory.call_args.kwargs
     assert (kwargs["tenant_id"], kwargs["account_id"]) == (tenant, account), "the turn's ids"
-    check = kwargs["current_admin"]
+    check = kwargs["current_platform_admin"]
     for _ in range(25):
         assert await check(OTHER_AAD_OBJECT_ID) is False, "a non-owner is no admin"
     assert owners.await_count == 1, "a cached no needs no further read"

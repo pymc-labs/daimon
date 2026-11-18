@@ -322,16 +322,6 @@ def unsupported(changes: list[Change], *, a: AgentConfigDoc, b: AgentConfigDoc) 
     return None
 
 
-@dataclass(frozen=True)
-class SwitchConsent:
-    """What a person confirmed on a provider preview: the drops they accepted and the
-    digest and setting revision of the preview they saw."""
-
-    accepted_drops: tuple[str, ...]
-    digest: str
-    revision: int
-
-
 def _stated_effort(a: AgentConfigDoc, b: AgentConfigDoc) -> Effort | None:
     """The effort ``b`` states on its provider, or None when it leaves the agent's own. Pure.
 
@@ -607,9 +597,6 @@ _PROVIDER_REFUSALS: dict[str, tuple[str, AgentEditRefusal]] = {
     "profile_not_selectable": ("That model isn't available. Pick another.", "invalid"),
     "effort_not_offered": ("That model has no effort setting.", "invalid"),
     "stale_revision": ("The model changed since your draft began", "stale"),
-    "drops_required": ("That model can't use some of this agent's skills or servers.", "invalid"),
-    "stale_preview": ("The model changed since your draft began", "stale"),
-    "drops_mismatch": ("What that model drops changed since you looked.", "stale"),
     "source_unavailable": (
         "The agent's setup couldn't be read, so its model can't change now.",
         "unavailable",
@@ -644,7 +631,6 @@ class ProviderSwitch:
     model: str | None
     preview: CompatibilityPreview
     expected_revision: int
-    accepted_drops: tuple[str, ...] | None = None
     settings: AgentSettings | None = None
 
 
@@ -664,18 +650,14 @@ async def check_provider_switch(
     provider: Provider,
     model_id: str,
     expected_revision: int | None = None,
-    accepted_drops: tuple[str, ...] | None = None,
-    expected_preview_digest: str | None = None,
-    new_agent: bool = False,
     effort: Effort | None = None,
 ) -> ProviderSwitch:
     """Refuse now what pointing the agent at ``provider`` would refuse, writing nothing.
 
     ``expected_revision`` is the provider setting the change was made against; a setting
-    that moved since is stale. None takes the current one. A preview that declares drops
-    needs them accepted exactly, as shown; ``expected_preview_digest`` is that preview's.
-    A ``new_agent`` holds nothing a switch could drop, so it accepts what is declared.
-    ``effort`` states the agent's effort on ``provider``; None keeps its own.
+    that moved since is stale. None takes the current one. What the provider can't run
+    is off there and back on a switch back. ``effort`` states the agent's effort on
+    ``provider``; None keeps its own.
     """
     if deps.backends is None or not deps.backends.enabled:
         raise _provider_refusal(AgentBackendRefused("feature_disabled"), provider)
@@ -701,14 +683,6 @@ async def check_provider_switch(
         preview = await deps.backends.preview(source, backend, model, settings)
         if not preview.allowed:
             raise AgentBackendRefused("backend_not_allowed")
-        if new_agent:
-            accepted_drops = preview.declared_drops
-        if preview.declared_drops and accepted_drops is None:
-            raise AgentBackendRefused("drops_required")
-        if accepted_drops is not None and tuple(accepted_drops) != preview.declared_drops:
-            raise AgentBackendRefused("drops_mismatch")
-        if expected_preview_digest is not None and preview.digest != expected_preview_digest:
-            raise AgentBackendRefused("stale_preview")
         if expected_revision is not None and preview.setting_revision != expected_revision:
             raise AgentBackendRefused("stale_revision")
     except (AgentBackendRefused, BackendUnsupported) as exc:
@@ -722,32 +696,24 @@ async def check_provider_switch(
         model=model,
         preview=preview,
         expected_revision=preview.setting_revision,
-        accepted_drops=accepted_drops,
         settings=settings,
     )
 
 
 async def write_provider_switch(deps: AgentChangeDeps, switch: ProviderSwitch) -> None:
-    """Write a checked switch; refused as stale if the setting or its preview moved since."""
+    """Write a checked switch; refused as stale if the setting moved since."""
     if deps.backends is None:
         raise _provider_refusal(AgentBackendRefused("feature_disabled"), switch.provider)
     try:
         if switch.backend is None:
-            await deps.backends.clear_backend(
-                switch.source,
-                switch.expected_revision,
-                switch.actor,
-                expected_preview_digest=switch.preview.digest,
-            )
+            await deps.backends.clear_backend(switch.source, switch.expected_revision, switch.actor)
         else:
             await deps.backends.set_backend(
                 switch.source,
                 switch.backend,
                 switch.expected_revision,
                 switch.actor,
-                expected_preview_digest=switch.preview.digest,
                 model=switch.model,
-                accepted_drops=switch.accepted_drops,
                 settings=switch.settings,
             )
     except (AgentBackendRefused, BackendUnsupported) as exc:
@@ -761,7 +727,6 @@ async def switch_provider(
     agent: BetaManagedAgentsAgent,
     provider: Provider,
     model_id: str,
-    new_agent: bool = False,
 ) -> None:
     """Point the agent at ``provider`` and its ``model_id``, as the chat switch does.
 
@@ -769,7 +734,7 @@ async def switch_provider(
     applies to new conversations. Refused with `AgentEditError` in the editor's words.
     """
     switch = await check_provider_switch(
-        deps, actor=actor, agent=agent, provider=provider, model_id=model_id, new_agent=new_agent
+        deps, actor=actor, agent=agent, provider=provider, model_id=model_id
     )
     await write_provider_switch(deps, switch)
 
@@ -781,6 +746,8 @@ class ModelChanged:
     model: ModelRef
     revision: AgentBackendRevision | None = None
     record: BetaManagedAgentsAgent | None = None
+    #: What is off on the new provider, shown as information after the switch.
+    lines: tuple[str, ...] = ()
 
 
 async def _require_in_catalog(
@@ -807,17 +774,15 @@ async def change_model(
     actor: AgentActor,
     edit: AgentEditDeps,
     backends: AgentBackendService | None,
-    accepted_drops: tuple[str, ...] | None = None,
-    expected_digest: str | None = None,
     expected_revision: int | None = None,
     settings: AgentSettings | None = None,
 ) -> ModelChanged:
     """Run `agent` on any catalog `model`: the one model write every surface calls.
 
     A Claude model on an agent already on Claude edits its record. Any other move writes
-    the provider setting through the preview, consent and digest checks; capture is the
-    one `backends` was built with (None: provider choice is off here). `expected_digest`
-    and `expected_revision` are the preview the person saw; None takes the current one.
+    the provider setting; what the target can't run is off there.
+    Capture is the one `backends` was built with (None: provider choice is off here).
+    `expected_revision` is the setting the change was made against; None takes the current.
     Refused with `AgentBackendRefused` (`backend_not_allowed`: the tenant hasn't enabled
     the provider; `model_not_selectable`: not in the catalog), `BackendUnsupported`, or
     `AgentEditError` for a record edit.
@@ -836,31 +801,17 @@ async def change_model(
     if not await service.may_edit(agent, backend_actor):
         raise AgentBackendRefused("owner_or_admin_required", provider=model.provider)
     target = None if claude else model.provider
-    revision, digest = expected_revision, expected_digest
-    if revision is None or digest is None:
-        # The write re-previews and checks the digest; this only fills what's missing.
-        preview = await service.preview(agent, target, None if claude else model.id, settings)
-        if not preview.allowed:
-            raise AgentBackendRefused("backend_not_allowed", provider=model.provider)
-        revision = preview.setting_revision if revision is None else revision
-        digest = preview.digest if digest is None else digest
+    revision = expected_revision
+    if revision is None:
+        revision = current.local if current is not None else 0
     if target is not None:
         written = await service.set_backend(
-            agent,
-            target,
-            revision,
-            backend_actor,
-            expected_preview_digest=digest,
-            accepted_drops=accepted_drops,
-            model=model.id,
-            settings=settings,
+            agent, target, revision, backend_actor, model=model.id, settings=settings
         )
         return ModelChanged(model=model, revision=written)
     # Back to Claude: the record names the model, then the provider pin goes.
     record = await _edit_record_model(edit, agent, model, actor)
-    written = await service.clear_backend(
-        agent, revision, backend_actor, expected_preview_digest=digest
-    )
+    written = await service.clear_backend(agent, revision, backend_actor)
     return ModelChanged(model=model, revision=written, record=record)
 
 
@@ -1113,7 +1064,6 @@ async def _write(
     target: AgentConfigDoc,
     note: str | None,
     provider_revision: int,
-    consent: SwitchConsent | None = None,
 ) -> BetaManagedAgentsAgent:
     target = keep_helpers(base, with_hidden_places(base, target, is_admin=actor.subject.is_admin))
     changes = diff_config(base, target)
@@ -1142,9 +1092,7 @@ async def _write(
             agent=agent,
             provider=target.model.backend,
             model_id=target.model.id,
-            expected_revision=provider_revision if consent is None else consent.revision,
-            accepted_drops=None if consent is None else consent.accepted_drops,
-            expected_preview_digest=None if consent is None else consent.digest,
+            expected_revision=provider_revision,
             # Only an effort the draft changed is the person's; the rest stays the agent's.
             effort=_stated_effort(base, target),
         )
@@ -1212,11 +1160,8 @@ async def apply_draft(
     actor: AgentActor,
     ma_agent_id: str,
     note: str | None,
-    consent: SwitchConsent | None = None,
 ) -> BetaManagedAgentsAgent:
     """Write the actor's draft as the agent's next version; refused if it went stale.
-
-    A draft that moves the provider needs ``consent``: the preview the person confirmed.
 
     A draft is stale when the provider's version moved, and also when places or tool
     rules did, which move without a new version.
@@ -1243,7 +1188,6 @@ async def apply_draft(
                 target=AgentConfigDoc.model_validate(row.config),
                 note=(note or "").strip() or None,
                 provider_revision=_provider_revision(facts),
-                consent=consent,
             )
             await _drop_draft(deps, actor=actor, agent_id=agent.id)
             return written

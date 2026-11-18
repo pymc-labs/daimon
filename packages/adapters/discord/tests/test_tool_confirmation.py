@@ -769,17 +769,17 @@ async def test_runtime_hook_reuses_live_guild_admin_lookup(
     discord_confirmation_hook(channel, runtime=runtime, tenant_id=tenant, account_id=account)
     kwargs = factory.call_args.kwargs
     assert kwargs["tenant_id"] == tenant and kwargs["account_id"] == account
-    check = kwargs["current_admin"]
+    check = kwargs["current_platform_admin"]
     assert await check("111") is True
     member.guild_permissions = discord.Permissions.none()
     assert await check("111") is False
     assert channel.guild.fetch_member.await_count == 2
 
 
-async def test_runtime_hook_current_admin_refuses_outside_a_thread_or_text_channel(
+async def test_runtime_hook_platform_admin_refuses_outside_a_thread_or_text_channel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The backend-switch admin recheck is scoped to threads/text channels: a voice
+    """The admin cards' recheck is scoped to threads/text channels: a voice
     channel with the same guild and an administrator clicker must still refuse,
     not merely inherit whatever `requester_role` says about the guild member.
     """
@@ -801,7 +801,7 @@ async def test_runtime_hook_current_admin_refuses_outside_a_thread_or_text_chann
     factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
     discord_confirmation_hook(channel, runtime=runtime, tenant_id=tenant, account_id=account)
-    check = factory.call_args.kwargs["current_admin"]
+    check = factory.call_args.kwargs["current_platform_admin"]
     assert await check("111") is False
     channel.guild.fetch_member.assert_not_awaited()
 
@@ -999,10 +999,10 @@ async def test_runtime_hook_binds_pin_cards_to_the_admitted_origin_channel(
     assert factory.call_args.kwargs["pin_channel"] is None, "no admitted channel, no pin card"
 
 
-async def test_a_reply_thread_card_captures_with_its_parent_channel(
+async def test_the_admin_cards_capture_no_agent_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The source capture gets the thread and its parent, so only the turn's own thread counts."""
+    """The allowlist and pin cards change no agent, so no source is read in a thread or channel."""
     from types import SimpleNamespace
     from uuid import uuid4
 
@@ -1023,9 +1023,7 @@ async def test_a_reply_thread_card_captures_with_its_parent_channel(
         tenant_id=uuid4(),
         account_id=uuid4(),
     )
-    capture = made.call_args.kwargs["capture_source"]
-    assert capture.keywords["opened_thread_id"] == "222", "the thread the turn answers in"
-    assert capture.keywords["opened_thread_parent_id"] == "111", "and the channel it opened under"
+    assert made.call_args.kwargs["capture_source"] is channel_backend.NO_CAPTURE, "in a thread"
     made.reset_mock()
     discord_confirmation_hook(
         MagicMock(spec=discord.TextChannel),
@@ -1034,9 +1032,7 @@ async def test_a_reply_thread_card_captures_with_its_parent_channel(
         tenant_id=uuid4(),
         account_id=uuid4(),
     )
-    capture = made.call_args.kwargs["capture_source"]
-    assert capture.keywords["opened_thread_id"] is None, "a channel opens no thread"
-    assert capture.keywords["opened_thread_parent_id"] is None, "so it has no parent either"
+    assert made.call_args.kwargs["capture_source"] is channel_backend.NO_CAPTURE, "in a channel"
 
 
 async def test_a_card_still_open_replies_once_mentioning_only_its_requester(monkeypatch) -> None:
@@ -1086,7 +1082,7 @@ def _dm_runtime_hook(
 async def test_dm_admin_card_checks_the_tenants_server_live(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Friction #36: a DM has no guild, so the admin re-check uses the turn's tenant server."""
+    """A DM has no guild, so the admin re-check reads the turn's tenant server live."""
     guild = MagicMock(spec=discord.Guild)
     guild.owner_id = 999
     member = MagicMock(spec=discord.Member)
@@ -1094,18 +1090,9 @@ async def test_dm_admin_card_checks_the_tenants_server_live(
     member.roles = []
     member.guild_permissions = discord.Permissions(manage_guild=True)
     guild.fetch_member = AsyncMock(return_value=member)
-    callers = []
-
-    async def live_subject(_session, *, caller, **_kwargs):  # type: ignore[no-untyped-def]
-        # No Daimon admin grants: only the live server role counts.
-        callers.append(caller)
-        return SimpleNamespace(is_admin=caller.is_server_admin)
-
-    monkeypatch.setattr(confirmation_module, "load_live_subject", live_subject)
     factory, lookup = _dm_runtime_hook(monkeypatch, client=MagicMock(), guild=guild)
-    check = factory.call_args.kwargs["current_admin"]
+    check = factory.call_args.kwargs["current_platform_admin"]
     assert await check("111") is True
-    assert callers[-1].platform_user_id == "111"
     member.guild_permissions = discord.Permissions.none()
     assert await check("111") is False
     assert guild.fetch_member.await_count == 2
@@ -1116,10 +1103,10 @@ async def test_dm_admin_card_without_a_client_or_server_refuses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     factory, lookup = _dm_runtime_hook(monkeypatch, client=None, guild=MagicMock())
-    assert await factory.call_args.kwargs["current_admin"]("111") is False
+    assert await factory.call_args.kwargs["current_platform_admin"]("111") is False
     lookup.assert_not_awaited()
     factory, lookup = _dm_runtime_hook(monkeypatch, client=MagicMock(), guild=None)
-    assert await factory.call_args.kwargs["current_admin"]("111") is False
+    assert await factory.call_args.kwargs["current_platform_admin"]("111") is False
     lookup.assert_awaited_once()
 
 

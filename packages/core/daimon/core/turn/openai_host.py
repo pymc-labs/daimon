@@ -434,8 +434,8 @@ async def _prepare_with_runtime(
     _check_spec(spec, runtime, request.scope, revision)
     store = request.deps.state_store or PostgresStateStore(request.deps.sessionmaker)
     if current.backend_revision_origin == "agent":
-        # Admission retained this exact source consent; a generic StateStore
-        # write has no agent-origin association and cannot recreate that proof.
+        # Admission retained this exact agent revision; a generic StateStore
+        # write has no agent-origin association and cannot recreate it.
         async with request.deps.sessionmaker.begin() as session:
             retained = await mux_state.get_config_agent_revision(
                 session,
@@ -445,7 +445,7 @@ async def _prepare_with_runtime(
                 ),
             )
             if retained is None:
-                raise ScopeViolation(request.thread_id, "missing original backend consent")
+                raise ScopeViolation(request.thread_id, "missing original backend revision")
             await mux_state.put_config_revision(
                 session, revision, origin="agent", agent_revision=retained
             )

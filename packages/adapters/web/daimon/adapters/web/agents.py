@@ -20,7 +20,7 @@ from daimon.adapters.web.agent_access import (
 from daimon.adapters.web.agent_audit import recorded
 from daimon.adapters.web.caller import WebCaller
 from daimon.adapters.web.channel_names import channel_names
-from daimon.adapters.web.model_preview import ModelPreview, consent_of, preview_doc, refused_doc
+from daimon.adapters.web.model_preview import ModelPreview, preview_doc, refused_doc
 from daimon.adapters.web.nodes import AgentNode, agent_nodes, build_nodes, tenant_workspace
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core import (
@@ -114,10 +114,6 @@ class DraftBody(BaseModel):
 
 class ApplyBody(BaseModel):
     note: str | None = None
-    # What the person saw and confirmed when the draft moves the provider.
-    accepted_drops: list[str] | None = None
-    preview_digest: str | None = None
-    preview_revision: int | None = None
 
 
 class HelpersBody(BaseModel):
@@ -381,7 +377,6 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
                     agent=made,
                     provider=target.provider,
                     model_id=target.id,
-                    new_agent=True,
                 )
 
             start = start_elsewhere
@@ -471,7 +466,7 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
         )
         if isinstance(found, SwitchRefusal):
             return refused_doc(found)
-        return preview_doc(found, agent_name=name)
+        return preview_doc(found)
 
     @router.post("/{agent_id}/apply")
     async def apply(caller: Editor, agent_id: str, body: ApplyBody) -> AgentDetail:  # pyright: ignore[reportUnusedFunction]
@@ -481,7 +476,6 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
                 actor=actor_of(caller),
                 ma_agent_id=agent_id,
                 note=body.note,
-                consent=consent_of(body.accepted_drops, body.preview_digest, body.preview_revision),
             )
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc

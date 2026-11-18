@@ -58,17 +58,15 @@ from daimon.core.errors import DaimonError
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.model_switch import (
-    REVIEW_AGAIN_LABEL,
+    CANCEL_LABEL,
     SWITCH_BACK_LABEL,
-    ModelSwitchPreview,
+    TRY_AGAIN_LABEL,
     SwitchRefusal,
     back_to_claude,
-    confirm_or_refusal,
     panel_actor,
     panel_edit_deps,
     pick_or_refusal,
     set_effort,
-    switch_card_text,
 )
 from daimon.core.panel_audit import PanelOutcome, record_panel_write
 from daimon.core.roster import RosterAgent
@@ -77,7 +75,6 @@ from daimon.core.setup_conversations import (
     setup_target_label,
     shared_keys_sentence,
 )
-from daimon.core.switch_card import CANCEL_LABEL, SWITCH_LABEL
 from daimon.core.web_links import OPEN_IN_WEB
 
 import discord
@@ -383,7 +380,6 @@ class DetailsView(PanelViewBase):
         allowed_user_id: int,
         details: AgentDetails | None = None,
         agent: RosterAgent | None = None,
-        switch: ModelSwitchPreview | None = None,
         switch_value: str | None = None,
         refusal: SwitchRefusal | None = None,
     ) -> None:
@@ -392,11 +388,10 @@ class DetailsView(PanelViewBase):
         assert details is not None, "DetailsView needs a loaded AgentDetails on the panel state"
         self.details = details
         self.agent = agent or state.selected_agent
-        self.switch = switch
         self.switch_value = switch_value
         self.refusal = refusal
-        if switch is not None or refusal is not None:
-            self.add_item(self._switch_container(switch, refusal))
+        if refusal is not None:
+            self.add_item(self._refusal_container(refusal))
             return
         is_builtin = is_builtin_agent(
             name=details.name,
@@ -520,41 +515,27 @@ class DetailsView(PanelViewBase):
 
         self.add_item(container)
 
-    def _switch_container(
-        self, switch: ModelSwitchPreview | None, refusal: SwitchRefusal | None
+    def _refusal_container(
+        self, refusal: SwitchRefusal
     ) -> discord.ui.Container[discord.ui.LayoutView]:
-        """The one preview or refusal a pick leads to, with its way forward."""
-        if refusal is not None:
-            lines: tuple[str, ...] = (refusal.line,)
-        else:
-            assert switch is not None, "a switch card needs a preview or a refusal"
-            lines = switch_card_text(
-                switch, agent_name=self.agent.name if self.agent is not None else None
-            )
+        """Why a pick wasn't applied, with its way forward."""
         text: discord.ui.TextDisplay[discord.ui.LayoutView] = discord.ui.TextDisplay(
-            "\n".join(lines)[:3000]
+            refusal.line[:3000]
         )
         container: discord.ui.Container[discord.ui.LayoutView] = discord.ui.Container(text)
         row: discord.ui.ActionRow[discord.ui.LayoutView] = discord.ui.ActionRow()
         cancel: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(label=CANCEL_LABEL)
         cancel.callback = self._on_model_cancel  # type: ignore[method-assign]
         row.add_item(cancel)
-        if refusal is None:
-            assert switch is not None, "a switch card needs a preview or a refusal"
-            confirm: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
-                label=SWITCH_LABEL, style=discord.ButtonStyle.primary, disabled=not switch.allowed
-            )
-            confirm.callback = self._on_model_confirm  # type: ignore[method-assign]
-            row.add_item(confirm)
-        elif refusal.action == "switch_back_to_claude":
+        if refusal.action == "switch_back_to_claude":
             back: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
                 label=SWITCH_BACK_LABEL, style=discord.ButtonStyle.primary
             )
             back.callback = self._on_switch_back  # type: ignore[method-assign]
             row.add_item(back)
-        elif refusal.action in ("fresh_preview", "confirm_again") and self.switch_value:
+        elif refusal.action == "fresh_preview" and self.switch_value:
             again: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
-                label=REVIEW_AGAIN_LABEL, style=discord.ButtonStyle.primary
+                label=TRY_AGAIN_LABEL, style=discord.ButtonStyle.primary
             )
             again.callback = self._on_review_again  # type: ignore[method-assign]
             row.add_item(again)
@@ -613,11 +594,7 @@ class DetailsView(PanelViewBase):
         )
 
     def _details_view(
-        self,
-        *,
-        switch: ModelSwitchPreview | None = None,
-        switch_value: str | None = None,
-        refusal: SwitchRefusal | None = None,
+        self, *, switch_value: str | None = None, refusal: SwitchRefusal | None = None
     ) -> DetailsView:
         return DetailsView(
             self.state,
@@ -625,27 +602,26 @@ class DetailsView(PanelViewBase):
             allowed_user_id=self.allowed_user_id,
             details=self.details,
             agent=self.agent,
-            switch=switch,
             switch_value=switch_value,
             refusal=refusal,
         )
 
     async def _preview_pick(self, interaction: discord.Interaction, value: str) -> None:
-        """Apply `value` when it loses nothing; else show the card, or why it can't be."""
+        """Apply `value`, then say what is off on the new provider; or show why it can't be."""
         service, edit, actor, admin = await self._model_deps(interaction)
-        shown = await pick_or_refusal(
+        done = await pick_or_refusal(
             service, edit, actor=actor, agent_name=self.details.name, value=value, admin=admin
         )
-        if isinstance(shown, SwitchRefusal):
-            await self._backend_audit(interaction, outcome="denied", reason=shown.reason)
-            view = self._details_view(refusal=shown, switch_value=value)
-        elif isinstance(shown, ModelSwitchPreview):
-            view = self._details_view(switch=shown, switch_value=value)
-        else:
-            await self._backend_audit(interaction, outcome="allowed", reason="completed")
-            await self._reload_after_switch(interaction)
+        if isinstance(done, SwitchRefusal):
+            await self._backend_audit(interaction, outcome="denied", reason=done.reason)
+            await self.swap_to(interaction, self._details_view(refusal=done, switch_value=value))
             return
-        await self.swap_to(interaction, view)
+        await self._backend_audit(interaction, outcome="allowed", reason="completed")
+        await self._reload_after_switch(interaction)
+        if done.lines:
+            await interaction.followup.send(
+                embed=build_notice_embed("\n".join(done.lines), neutral=True), ephemeral=True
+            )
 
     async def _on_model_select(
         self,
@@ -691,32 +667,6 @@ class DetailsView(PanelViewBase):
 
     async def _on_model_cancel(self, interaction: discord.Interaction) -> None:
         await self.swap_to(interaction, self._details_view())
-
-    async def _on_model_confirm(self, interaction: discord.Interaction) -> None:
-        if not await self._model_allowed(interaction):
-            return
-        if self.switch is None or self.switch_value is None:
-            return
-        await interaction.response.defer()
-        service, edit, actor, admin = await self._model_deps(interaction)
-        done = await confirm_or_refusal(
-            service,
-            edit,
-            actor=actor,
-            agent_name=self.details.name,
-            value=self.switch_value,
-            digest=self.switch.digest,
-            revision=self.switch.revision,
-            admin=admin,
-        )
-        if isinstance(done, SwitchRefusal):
-            await self._backend_audit(interaction, outcome="denied", reason=done.reason)
-            await self.swap_to(
-                interaction, self._details_view(refusal=done, switch_value=self.switch_value)
-            )
-            return
-        await self._backend_audit(interaction, outcome="allowed", reason="completed")
-        await self._reload_after_switch(interaction)
 
     async def _on_switch_back(self, interaction: discord.Interaction) -> None:
         if not await self._model_allowed(interaction):

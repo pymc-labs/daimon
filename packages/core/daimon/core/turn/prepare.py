@@ -928,6 +928,7 @@ async def _shared_thread(
                 platform=platform,
                 channel_id=channel_id,
                 thread_id=thread_id,
+                agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=admission.agent.id),
             )
         except BackendUnsupported as err:
             raise AdmissionDenied(reason="backend_unsupported") from err

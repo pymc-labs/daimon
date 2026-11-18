@@ -20,7 +20,6 @@ futures, which is fine — the turn waiting on them died with the process.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import re
 import secrets
@@ -28,7 +27,7 @@ import unicodedata
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final, Literal, cast
 from urllib.parse import unquote
@@ -53,16 +52,12 @@ from daimon.core.tool_safety import (
 )
 from daimon.core.tool_safety import backend_switch_tools as backend_switch_tools
 from mux.contracts.config import ThreadMode
-from mux.contracts.ids import ChannelRef, Provider
+from mux.contracts.ids import ChannelRef
 from mux.contracts.profile import Capability, Effort
-from mux.contracts.resources import AgentSpec
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 if TYPE_CHECKING:
-    from anthropic import AsyncAnthropic
     from daimon.core.channel_backend import AgentBackendService, AgentSettings
-    from daimon.core.neutral_resources import NeutralResourceHost
-    from daimon.core.stores.domain import BackendAgent, CompatibilityPreview
     from daimon.core.turn.deps import TurnDeps
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -73,7 +68,6 @@ __all__ = [
     "ApprovedConfirmation",
     "ConfirmationHook",
     "ConfirmationPrompt",
-    "BackendSwitchReference",
     "ToolRuleCardReference",
     "ServerSkillUpdateCard",
     "PendingConfirmations",
@@ -108,98 +102,6 @@ WRITE_BODY_BYTES: Final[int] = 14000
 SEND_HEADER_BYTES: Final[int] = 3000
 #: Longest `microsoft_write` path the card shows before Details.
 _WRITE_PATH_PREVIEW: Final[int] = 120
-
-
-class BackendSwitchReference(BaseModel):
-    """Untrusted tool reference; hosts reload the bound server-side preview."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    agent: str = Field(min_length=1)
-    target_backend: Provider
-    model: str | None = Field(default=None, min_length=1, exclude_if=lambda value: value is None)
-    expected_revision: int = Field(ge=0, strict=True)
-    preview_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
-    accepted_drops: tuple[str, ...] | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-    # The agent's own settings, when the request states them: both together,
-    # an unset one returning to the backend's default.
-    thread_mode: ThreadMode | None = Field(default=None, exclude_if=lambda value: value is None)
-    required_capabilities: tuple[Capability, ...] | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-    # The agent's reasoning effort and profile on the target provider, when settings are
-    # stated: what the agent runs with now unless the request changes it.
-    effort: Effort | None = Field(default=None, exclude_if=lambda value: value is None)
-    profile: str | None = Field(default=None, exclude_if=lambda value: value is None)
-    # The person said the switch is for everyone: needed for the server's default agent.
-    for_everyone: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
-    # The person's answer to the uncommitted-work question, when the switch also hands
-    # this conversation to the switched copy (J1). Bound into `preview_digest`.
-    unsaved_work: Literal["copy", "leave"] | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-    # The summary of this conversation the switch hands the copy (J2), as the model
-    # sent it. Bound into `preview_digest`, and shown on the card.
-    handoff_summary: str | None = Field(
-        default=None, max_length=2000, exclude_if=lambda value: value is None
-    )
-    # Set only by the card (never a tool argument): the stale preview digest this card
-    # re-previewed (J5). Its Confirm approves that one refresh (`approve_refresh`).
-    refreshed_from: str | None = Field(default=None, exclude_if=lambda value: value is None)
-
-    @field_validator("accepted_drops", mode="before")
-    @classmethod
-    def _accepted_drops(cls, value: object) -> tuple[str, ...] | None:
-        if value is None:
-            return None
-        return TypeAdapter(
-            AgentSpec.model_fields["declared_drops"].rebuild_annotation()
-        ).validate_python(value)
-
-
-def _forked_copy(agent: BackendAgent) -> bool:
-    """A copy fork_agent made in a conversation: its switch may hand it that
-    conversation (J1), so its answers are bound to the preview they answered."""
-    from daimon.core.defaults.metadata import MA_METADATA_KEY_FORKED_FROM, MA_METADATA_KEY_FORKED_IN
-
-    stamp = (agent.source.spec.metadata if agent.source is not None else None) or {}
-    return MA_METADATA_KEY_FORKED_FROM in stamp and MA_METADATA_KEY_FORKED_IN in stamp
-
-
-def switch_preview_digest(
-    digest: str,
-    unsaved_work: Literal["copy", "leave"] | None,
-    handoff_summary: str | None = None,
-) -> str:
-    """A switch preview's digest as the tool returns it and its card checks it: bound to
-    the uncommitted-work answer and the hand-off summary the switch carries (the raw
-    argument, as the card sees it), so none of them can change in between."""
-    if unsaved_work is None and handoff_summary is None:
-        return digest
-    bound = digest
-    if unsaved_work is not None:
-        bound += f"\nunsaved_work={unsaved_work}"
-    if handoff_summary is not None:
-        bound += f"\nhandoff_summary={handoff_summary}"
-    return hashlib.sha256(bound.encode()).hexdigest()
-
-
-#: How much of a hand-off summary the switch card shows (cards have small limits).
-_SUMMARY_SHOWN: Final = 600
-
-
-def _clipped(text: str, limit: int) -> str:
-    """`text` cut at `limit` characters, marked when cut."""
-    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
-
-
-#: What the card says each uncommitted-work answer does.
-_UNSAVED_WORK_WORDS: Final[Mapping[str, str]] = {
-    "copy": "copied into the working files first",
-    "leave": "left where they are",
-}
 
 
 class ToolRuleCardReference(BaseModel):
@@ -244,9 +146,6 @@ class ConfirmationPrompt(BaseModel):
     expires_at: datetime
     # Opt-in only: legacy prompts and their rendered cards stay unchanged.
     admin: bool = Field(default=False, exclude_if=lambda value: not value)
-    backend_switch: BackendSwitchReference | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
     configuration: ConfigurationReference | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -663,33 +562,6 @@ def prompt_for_tool_call(
         )
     if call.tool_name == "approve_reach" and own_server:
         return _reach_prompt(data, requester_platform_user_id, now + timeout)
-    if call.tool_name == "request_agent_backend_switch" and own_server:
-        reference = BackendSwitchReference.model_validate(
-            {
-                "agent": data.get("agent_name"),
-                "target_backend": data.get("target_backend"),
-                # As the tool resolved it ("argon" -> its id), or the card's
-                # preview names a model no agent can select.
-                "model": _switch_model(data.get("target_backend"), data.get("model")),
-                "expected_revision": data.get("expected_revision"),
-                "preview_digest": data.get("preview_digest"),
-                "accepted_drops": data.get("accepted_drops"),
-                "thread_mode": data.get("thread_mode"),
-                "required_capabilities": data.get("required_capabilities"),
-                "for_everyone": data.get("for_everyone") or False,
-                "unsaved_work": data.get("unsaved_work"),
-                "handoff_summary": data.get("handoff_summary"),
-            }
-        )
-        # No model-supplied compatibility text is accepted. The host hook must
-        # reload and verify the preview before displaying this opt-in prompt.
-        return ConfirmationPrompt(
-            title="Change the model?",
-            requester_platform_user_id=requester_platform_user_id,
-            expires_at=now + timeout,
-            admin=True,
-            backend_switch=reference,
-        )
     if call.tool_name == "create_notebook_upload_url" and publishing:
         action = f"Publish {notebook}"
         title = f"{action}?"
@@ -957,28 +829,6 @@ def stated_settings(
     )
 
 
-def _switch_model(backend: object, model: object) -> object:
-    """The tool call's model resolved as the tool resolves it; as sent when it can't be."""
-    from daimon.core.agent_model_names import resolve_switch_model
-    from mux.contracts.ids import PROVIDERS
-
-    if backend not in PROVIDERS or not (model is None or isinstance(model, str)):
-        return model
-    try:
-        return resolve_switch_model(backend, model)
-    except ValueError:
-        return model
-
-
-def reference_settings(reference: BackendSwitchReference) -> AgentSettings | None:
-    return stated_settings(
-        reference.thread_mode,
-        reference.required_capabilities,
-        reference.effort,
-        reference.profile,
-    )
-
-
 #: Plain words for a declared loss on a provider-switch card.
 _DROP_WORDS: Mapping[str, str] = {
     "credentials": "its saved keys",
@@ -1049,12 +899,6 @@ class CardRefusal(ValueError):
     """A card refused for a reason worded for the person; its text is shown as is."""
 
 
-#: The agent or setting moved between the preview and the confirm (another change in
-#: the same turn): a new preview fixes it, so the model is told to redo it, not to stop.
-STALE_SWITCH_TEXT: Final[str] = (
-    "The agent changed since the preview (for example, a tool was turned off). Preview "
-    "the switch again, then confirm. Nothing changed."
-)
 #: A settings card whose confirm doesn't match its preview: something changed since,
 #: or the confirm carries other settings than the preview did (a digest from reading
 #: the current limits, say). Retryable, worded for the person and the model alike.
@@ -1072,133 +916,19 @@ def backend_switch_callbacks(
     service: AgentBackendService,
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
-    anthropic: AsyncAnthropic,
     tenant_id: uuid.UUID,
     account_id: uuid.UUID,
-    current_admin: Callable[[str], Awaitable[bool]],
     current_platform_admin: Callable[[str], Awaitable[bool]],
-    resource_host: NeutralResourceHost | None = None,
-    default_agent_name: str | None = None,
-    place_word: str = "server",
     pin_channel: ChannelRef | None = None,
-    answering_agent_name: str | None = None,
-    handoff_thread: tuple[str, str, str] | None = None,
 ) -> tuple[
     Callable[[ConfirmationPrompt], Awaitable[ConfirmationPrompt]],
     Callable[[ConfirmationPrompt, str], Awaitable[str | None]],
 ]:
-    """Bind the existing card hook to trusted current identity and preview facts.
-
-    Only the loader reads agent configuration. The UI never treats a model's
-    compatibility claims or digest as authority; application remains the
-    shared service's compare-and-set after the approved tool call.
+    """Bind the admin settings cards (allowed providers, channel pins) to trusted current
+    identity and preview facts. A model switch needs no card: it applies like any change.
     """
     from daimon.core.authz import build_subject
-    from daimon.core.channel_backend import BackendActor, answers_for_everyone, load_backend_agent
     from daimon.core.stores.accounts import get_account_with_tenant
-
-    async def verified(
-        prompt: ConfirmationPrompt, clicker: str, *, refresh: bool = False
-    ) -> tuple[BackendAgent, CompatibilityPreview, BackendSwitchReference]:
-        """The card's checks, re-run. With `refresh` (preparing the card), a preview
-        that went stale because the agent changed (J5: "switch it to GPT and turn off
-        web search" in one turn) is replaced by the current one, which the card then
-        shows; a click (no `refresh`) still needs exactly what the card showed."""
-        reference = prompt.backend_switch
-        if not prompt.admin or reference is None or clicker != prompt.requester_platform_user_id:
-            raise ValueError("This confirmation is unavailable. Preview again.")
-        async with sessionmaker() as session:
-            identity = await get_account_with_tenant(session, account_id=account_id)
-        if (
-            identity is None
-            or identity.tenant_id != tenant_id
-            or identity.platform_user_id != clicker
-        ):
-            raise ValueError("This confirmation is unavailable. Preview again.")
-        agent = await load_backend_agent(
-            anthropic,
-            sessionmaker,
-            tenant_id=tenant_id,
-            agent_name=reference.agent,
-            resource_host=resource_host,
-        )
-        if not reference.for_everyone and await answers_for_everyone(
-            sessionmaker, agent, default_agent_name=default_agent_name
-        ):
-            from daimon.core.turn.notices import default_agent_switch_text
-
-            raise CardRefusal(
-                default_agent_switch_text(
-                    agent.name,
-                    reference.target_backend,
-                    place=place_word,
-                    me=answering_agent_name == agent.name,
-                )
-            )
-        preview = await service.preview(
-            agent, reference.target_backend, reference.model, reference_settings(reference)
-        )
-        if (
-            preview.tenant_id == tenant_id
-            and preview.agent_id == agent.agent_id
-            and preview.setting_revision != reference.expected_revision
-        ):
-            # Another switch of this agent landed after this card was posted.
-            from daimon.core.turn.notices import switched_meanwhile_text
-            from mux.contracts.config import DEFAULT_BACKEND
-
-            setting = await service.current(agent)
-            raise CardRefusal(
-                switched_meanwhile_text(
-                    reference.agent,
-                    (setting.backend if setting is not None else None) or DEFAULT_BACKEND,
-                    reference.target_backend,
-                )
-            )
-        if (
-            preview.tenant_id != tenant_id
-            or preview.agent_id != agent.agent_id
-            or preview.target_backend != reference.target_backend
-            or not preview.allowed
-        ):
-            raise StalePreview(STALE_SWITCH_TEXT)
-        current_digest = switch_preview_digest(
-            preview.digest, reference.unsaved_work, reference.handoff_summary
-        )
-        if current_digest != reference.preview_digest:
-            # A hand-off answer (unsaved work, summary) is bound to the preview it
-            # answered: one changed after it is another request, never re-previewed.
-            # A copy made in a conversation can be handed it by its switch, with
-            # or without answers: never re-previewed either (fails closed).
-            answered = reference.unsaved_work is not None or reference.handoff_summary is not None
-            if not refresh or answered or _forked_copy(agent):
-                raise StalePreview(STALE_SWITCH_TEXT)
-            # The agent changed since the preview. The same request (agent, provider,
-            # model, settings, answers) against what it is now: the card shows these
-            # drops and this cost, and the person approves what they see.
-            reference = reference.model_copy(
-                update={
-                    "expected_revision": preview.setting_revision,
-                    "preview_digest": current_digest,
-                    "accepted_drops": tuple(preview.declared_drops) or None,
-                    "refreshed_from": reference.preview_digest,
-                }
-            )
-        elif (preview.declared_drops and reference.accepted_drops != preview.declared_drops) or (
-            not preview.declared_drops and reference.accepted_drops not in (None, ())
-        ):
-            # The same preview, but the confirm named other losses: not a stale preview.
-            raise ValueError("This preview changed. Preview and confirm again.")
-        subject = build_subject(is_admin=await current_admin(clicker), platform_user_id=clicker)
-        # The agent's owner or a current workspace admin, as the write re-checks.
-        if not await service.may_edit(agent, BackendActor(tenant_id, account_id, subject)):
-            raise ValueError("This change needs the agent's owner or a current workspace admin.")
-        # Recheck the scoped identity after the platform lookup has yielded.
-        async with sessionmaker() as session:
-            current = await get_account_with_tenant(session, account_id=account_id)
-        if current != identity:
-            raise ValueError("This permission changed. Preview and confirm again.")
-        return agent, preview, reference
 
     async def verified_configuration(
         prompt: ConfirmationPrompt, clicker: str
@@ -1313,8 +1043,6 @@ def backend_switch_callbacks(
         return action, details
 
     async def prepare(prompt: ConfirmationPrompt) -> ConfirmationPrompt:
-        from daimon.core.handoff_context import redact_handoff_summary
-
         if prompt.configuration is not None:
             action, details = await verified_configuration(
                 prompt, prompt.requester_platform_user_id
@@ -1328,97 +1056,14 @@ def backend_switch_callbacks(
                     "consequence": "\n".join(details),
                 }
             )
-        agent, preview, fresh = await verified(
-            prompt, prompt.requester_platform_user_id, refresh=True
-        )
-        stale = prompt.backend_switch
-        if stale is not None and fresh != stale:
-            # The approved call still carries the old preview: record what this card
-            # shows, so that call (and only it, unchanged since) applies it.
-            from daimon.core.stores import backend_switch_cards as cards
-
-            platform, channel, thread = handoff_thread or (
-                (pin_channel.platform, pin_channel.channel_id, "")
-                if pin_channel is not None
-                else (place_word, "", "")
-            )
-            async with sessionmaker.begin() as session:
-                await cards.record_refresh(
-                    session,
-                    tenant_id=tenant_id,
-                    account_id=account_id,
-                    platform=platform,
-                    channel_id=channel,
-                    thread_id=thread,
-                    requester_platform_user_id=prompt.requester_platform_user_id,
-                    agent_name=agent.name,
-                    stale_digest=stale.preview_digest,
-                    fresh=fresh,
-                    expires_at=prompt.expires_at,
-                )
-            prompt = prompt.model_copy(update={"backend_switch": fresh})
-        from daimon.core.switch_card import switch_card_lines, switch_title
-        from daimon.core.turn.notices import uses_phrase
-
-        unsaved = prompt.backend_switch.unsaved_work if prompt.backend_switch else None
-        # The person's own hand-off answer, bound into the digest: the card names it.
-        work = (f"Uncommitted changes: {_UNSAVED_WORK_WORDS[unsaved]}",) if unsaved else ()
-        details = (
-            *(
-                ("Agent settings: " + settings_line(preview.target_settings),)
-                if preview.target_settings
-                else ()
-            ),
-            *work,
-            *(
-                (
-                    f"Carries a summary of this conversation to {agent.name}: "
-                    # Redacted as the copy will get it: the card is posted in the channel.
-                    + _clipped(
-                        redact_handoff_summary(prompt.backend_switch.handoff_summary),
-                        _SUMMARY_SHOWN,
-                    ),
-                )
-                if prompt.backend_switch is not None
-                and prompt.backend_switch.handoff_summary is not None
-                else ()
-            ),
-        )
-        title = switch_title(agent.name, uses_phrase(preview.target_backend, preview.target_model))
-        return prompt.model_copy(
-            update={
-                "title": title,
-                "action": title.removesuffix("?"),
-                "denied_action": "Model unchanged",
-                "detail_lines": details,
-                "consequence": "\n".join((*switch_card_lines(preview), *work)) or None,
-            }
-        )
+        raise ValueError("This confirmation is unavailable. Preview again.")
 
     async def check(prompt: ConfirmationPrompt, clicker: str) -> str | None:
         try:
             if prompt.configuration is not None:
                 await verified_configuration(prompt, clicker)
             else:
-                agent, _, reference = await verified(prompt, clicker)
-                if reference.refreshed_from is not None:
-                    # Confirm on this card (a click that passed every check; a Deny
-                    # never gets here) is what lets the approved call apply it.
-                    from daimon.core.stores import backend_switch_cards as cards
-
-                    async with sessionmaker.begin() as session:
-                        approved = await cards.approve_refresh(
-                            session,
-                            tenant_id=tenant_id,
-                            account_id=account_id,
-                            agent_name=agent.name,
-                            stale_digest=reference.refreshed_from,
-                            fresh_digest=reference.preview_digest,
-                            fresh_revision=reference.expected_revision,
-                            now=datetime.now(UTC),
-                        )
-                    if not approved:
-                        raise StalePreview(STALE_SWITCH_TEXT)
+                raise ValueError("This confirmation is unavailable.")
         except CardRefusal as exc:
             return str(exc)
         except ValueError:

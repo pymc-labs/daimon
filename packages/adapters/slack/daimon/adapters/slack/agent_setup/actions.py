@@ -145,16 +145,13 @@ from daimon.core.github_panel import (
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.model_switch import (
     ModelPicker,
-    ModelSwitchPreview,
     SwitchRefusal,
     back_to_claude,
-    confirm_or_refusal,
     panel_actor,
     panel_edit_deps,
     pick_or_refusal,
     read_picker,
     set_effort,
-    switch_card_text,
 )
 from daimon.core.models_catalog import claude_model_choices
 from daimon.core.observability import capture_exception_with_scope
@@ -821,7 +818,7 @@ async def _model_action(
     team_id: str,
     view_info: Mapping[str, Any],
 ) -> None:
-    """Pick a model, review it, confirm once; or step back, or switch back to Claude.
+    """Pick a model and it applies; or step back, or switch back to Claude.
 
     Whether this person may change the agent is decided by the write (admin or owner),
     never by what the panel rendered.
@@ -884,7 +881,6 @@ async def _model_action(
             view=panel_views.build_model_switch_view(
                 (refusal.line,),
                 meta=dataclasses.replace(meta, backend_target=value),
-                confirm=False,
                 action=refusal.action,
             ),
         )
@@ -923,74 +919,41 @@ async def _model_action(
         await show_details()
         return
 
-    if action_id in (panel_views.ACTION_BACKEND_SELECT, panel_views.ACTION_BACKEND_AGAIN):
-        if action_id == panel_views.ACTION_BACKEND_SELECT:
-            option = cast("Mapping[str, object]", action.get("selected_option") or {})
-            value = str(option.get("value") or "")
-        else:
-            value = meta.backend_target or ""
-        shown = await pick_or_refusal(
-            service, edit, actor=actor, agent_name=name, value=value, admin=is_admin
-        )
-        if isinstance(shown, SwitchRefusal):
-            await refuse(shown, value)
-            return
-        if not isinstance(shown, ModelSwitchPreview):
-            await audit("allowed", "completed")
-            await show_details()
-            return
-        bound = dataclasses.replace(
-            meta,
-            backend_revision=shown.revision,
-            backend_digest=shown.digest,
-            backend_target=value,
-        )
-        await client.views_update(  # pyright: ignore[reportUnknownMemberType]
-            view_id=view_id,
-            hash=view_hash or None,
-            view=panel_views.build_model_switch_view(
-                switch_card_text(shown, agent_name=name, escape=escape_mrkdwn),
-                meta=bound,
-                confirm=shown.allowed,
-            ),
-        )
-        return
-
-    # Confirm: the revision, digest and pick the person was shown.
-    if meta.backend_revision is None or meta.backend_digest is None or meta.backend_target is None:
+    if action_id == panel_views.ACTION_BACKEND_SELECT:
+        option = cast("Mapping[str, object]", action.get("selected_option") or {})
+        value = str(option.get("value") or "")
+    else:
+        # Try again, or Switch on a card from before picks applied at once.
+        value = meta.backend_target or ""
+    if not value:
         await post_ephemeral(
             client,
             channel_id=meta.channel_id or user_id,
             user_id=user_id,
-            text="That preview is no longer available. Choose a model again.",
+            text="That pick is no longer on the card.\nChoose a model again.",
             error=True,
         )
         return
-    try:
-        await client.views_update(  # pyright: ignore[reportUnknownMemberType]
-            view_id=view_id,
-            hash=view_hash or None,
-            view=panel_views.build_model_switch_view((), meta=meta, confirm=False, applying=True),
-        )
-    except SlackApiError as exc:
-        if _is_hash_conflict(exc):
-            return
-        raise
-    done = await confirm_or_refusal(
+    done = await pick_or_refusal(
         service,
         edit,
         actor=actor,
         agent_name=name,
-        value=meta.backend_target,
-        digest=meta.backend_digest,
-        revision=meta.backend_revision,
+        value=value,
         admin=is_admin,
+        escape=escape_mrkdwn,
     )
     if isinstance(done, SwitchRefusal):
-        await refuse(done, meta.backend_target)
+        await refuse(done, value)
         return
     await audit("allowed", "completed")
-    await show_details()
+    if not done.lines:
+        await show_details()
+        return
+    await client.views_update(  # pyright: ignore[reportUnknownMemberType]
+        view_id=view_id,
+        view=panel_views.build_model_switch_view(done.lines, meta=meta, refused=False),
+    )
 
 
 async def _update_paged_view(
