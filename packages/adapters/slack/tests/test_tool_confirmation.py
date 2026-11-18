@@ -979,3 +979,53 @@ async def test_a_card_still_open_posts_one_reminder_in_its_thread(monkeypatch) -
             ),
         }
     ], "the mention stays in text so it notifies; the words ride a neutral card"
+
+
+@pytest.mark.parametrize(("where", "inside"), [("C_SEAL", True), ("D1", False)])
+async def test_always_click_carries_the_clicks_own_channel_as_its_origin(
+    monkeypatch: pytest.MonkeyPatch, where: str, inside: bool
+) -> None:
+    """A sealed channel's agent takes the rule from a click inside it, not from a DM."""
+    from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
+    from daimon.core.authz import Action, AgentRef, Place, authorize
+
+    cards = SlackConfirmationCards()
+    token, _future = cards._controls.pending.open()
+    prompt = _prompt().model_copy(
+        update={
+            "tool_rules_enabled": True,
+            "tool_rule": ToolRuleCardReference(
+                tenant_id=uuid.uuid4(),
+                agent_id="ma-1",
+                agent_name="Helper",
+                tool_key="linear/create_issue",
+                server_url="https://example.test/mcp",
+            ),
+        }
+    )
+    cards._controls.cards[token] = confirmation_module._PostedCard(
+        prompt,
+        _client(),
+        "C_SEAL",
+        "1700.1",
+        "1699.9",
+        rule_factory=MagicMock(),
+        rule_subject=AsyncMock(return_value=Subject(is_admin=True, platform_user_id="U2")),
+    )
+    save = AsyncMock(return_value="saved")
+    monkeypatch.setattr(confirmation_module, "save_always_allow", save)
+    click = _click(f"dcf:{token}:always", "U2") | {"channel": {"id": where}}
+    await cards.handle_click(click)
+    subject = save.call_args.kwargs["subject"]
+    sealed = TenantAccessPolicy(
+        channel_rules={"C_SEAL": ChannelRule(readers="own", writers="own")},
+        agent_rules={"Helper": AgentRule(runs_in=("C_SEAL",))},
+    )
+    decision = authorize(
+        sealed,
+        subject=subject,
+        action=Action.SET_AGENT_TOOL_RULE,
+        agent=AgentRef.of("Helper"),
+        place=Place(),
+    )
+    assert bool(decision) is inside, decision.reason

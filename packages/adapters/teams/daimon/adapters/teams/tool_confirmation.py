@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC
 from typing import TYPE_CHECKING
 
@@ -21,6 +21,7 @@ from daimon.adapters.teams.activity_feed import ActivityFeed
 from daimon.adapters.teams.card import notice_card
 from daimon.adapters.teams.card_actions import (
     button,
+    conversation_origin,
     submitted_fields,
     toast,
 )
@@ -479,7 +480,11 @@ class TeamsConfirmationCards:
         if clicker is None:
             return
         try:
-            subject = await posted.rule_subject(clicker)
+            # Where the click came from is the origin; the card never names it.
+            subject = replace(
+                await posted.rule_subject(clicker),
+                origin_channel_ids=conversation_origin(ctx.activity.conversation.id),
+            )
             scope = allowed_rule_scope(reference, subject)
         except Exception:
             subject = Subject()

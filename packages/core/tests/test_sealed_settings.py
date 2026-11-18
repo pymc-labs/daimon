@@ -305,3 +305,30 @@ async def test_memory_text_is_refused_by_the_stores_channel_not_the_agents_home(
         await ak._store_id(deps, target, actor(OUTSIDE), "discord/C_ACME")  # pyright: ignore[reportPrivateUsage,reportArgumentType]
     assert await ak._store_id(deps, target, actor(INSIDE), "discord/C_ACME") == "mem_1"  # pyright: ignore[reportPrivateUsage,reportArgumentType]
     assert await ak._store_id(deps, target, actor(OUTSIDE), "discord/C_OPEN") == "mem_1"  # pyright: ignore[reportPrivateUsage,reportArgumentType]
+
+
+def test_only_listed_read_only_functions_use_the_view_only_setup_property() -> None:
+    """`views_setup` and `require_setup(read_only=True)` stay out of every write path."""
+    from daimon.core.agent_target import VIEW_ONLY_READERS
+
+    used: set[tuple[str, str]] = set()
+    for path in (PACKAGES / "core/daimon/core").rglob("*.py"):
+        if path.name == "agent_target.py":
+            continue
+        for fn in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Attribute) and node.attr == "views_setup":
+                    used.add((path.name, fn.name))
+                if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "require_setup":
+                    for kw in node.keywords:
+                        if (
+                            kw.arg == "read_only"
+                            and isinstance(kw.value, ast.Constant)
+                            and kw.value.value is True
+                        ):
+                            used.add((path.name, fn.name))
+    assert used == set(VIEW_ONLY_READERS), (
+        f"unlisted view-only reader, or a listed one is gone: {used ^ set(VIEW_ONLY_READERS)}"
+    )

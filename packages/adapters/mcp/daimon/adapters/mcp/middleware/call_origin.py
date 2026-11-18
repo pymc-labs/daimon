@@ -11,7 +11,7 @@ from __future__ import annotations
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._authz_facts import CALL_ORIGIN
+from daimon.adapters.mcp.tools._authz_facts import CALL_ORIGIN, origin_proves_presence
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, list_running_origins
 from daimon.core.authz import origin_ids
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
@@ -37,13 +37,7 @@ async def call_origin_ids(
     origins = [origin] if origin is not None else await list_running_origins(runtime, auth)
     shared: frozenset[str] | None = None
     for found in origins:
-        # Unattended or resumed work proves nobody is there; a held credential stays in its hold.
-        if not found.attended or (
-            auth.hold is not None
-            and not auth.hold.contains(
-                found.thread_id or found.parent_channel_id, found.parent_channel_id
-            )
-        ):
+        if not origin_proves_presence(auth, found):
             return frozenset()
         ids = origin_ids(found.parent_channel_id, found.thread_id)
         shared = ids if shared is None else shared & ids

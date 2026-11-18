@@ -64,6 +64,17 @@ SENDING_PANEL_ERRORS = (*PANEL_ERRORS, *TEAMS_SEND_ERRORS)
 _EDIT_TIMEOUT_S = 5.0
 
 
+def conversation_origin(conversation_id: str) -> frozenset[str]:
+    """The channel a Teams conversation is; empty in a 1:1 chat or when it is not a channel."""
+    channel = teams_channel_of(conversation_id.strip())
+    if channel is None:
+        return frozenset()
+    try:
+        return origin_ids(normalize_channel_id("teams", channel))
+    except InvalidChannelId:
+        return frozenset()
+
+
 @dataclass(frozen=True)
 class Actor:
     """A verified clicker in a live tenant."""
@@ -81,13 +92,7 @@ class Actor:
 
         Never a channel the clicker typed or picked: that is the target, not the origin.
         """
-        channel = teams_channel_of(self.conversation_id.strip())
-        if channel is None:
-            return frozenset()
-        try:
-            return origin_ids(normalize_channel_id("teams", channel))
-        except InvalidChannelId:
-            return frozenset()
+        return conversation_origin(self.conversation_id)
 
     def admin_for(self, action: DelegatedAction | None = None) -> bool:
         return admin_for_action(

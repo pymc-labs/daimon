@@ -15,7 +15,7 @@ import asyncio
 import html
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
@@ -26,7 +26,7 @@ from daimon.adapters.slack.external_access import host_only_notice
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_identity import AgentIdentity
-from daimon.core.authz import Subject
+from daimon.core.authz import Subject, origin_ids
 from daimon.core.confirmation import (
     ApprovedConfirmation,
     ConfirmationAnswer,
@@ -367,7 +367,16 @@ class SlackConfirmationCards:
             await _ephemeral(posted, clicker, self._controls.missing_message(token))
             return
         try:
-            subject = await posted.rule_subject(clicker)
+            # Where the click came from is the origin; the card never names it.
+            card: dict[str, Any] = payload.get("message") or {}
+            where: dict[str, Any] = payload.get("channel") or {}
+            subject = replace(
+                await posted.rule_subject(clicker),
+                origin_channel_ids=origin_ids(
+                    str(where.get("id") or "") or None,
+                    card.get("thread_ts"),
+                ),
+            )
             scope = allowed_rule_scope(reference, subject)
         except Exception:
             scope = None

@@ -17,7 +17,7 @@ from dataclasses import replace
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._authz_facts import mcp_subject
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject, origin_proves_presence
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.agent_pins import (
     PIN_WRITE_REFUSAL,
@@ -75,7 +75,9 @@ async def require_pin_write_access(
     if callable(ma_agent):
         ma_agent = await ma_agent()
     subject = mcp_subject(auth, is_admin=admin)
-    if origin is not None and not auth.is_external_agent:
+    if origin is not None and (auth.is_external_agent or not origin_proves_presence(auth, origin)):
+        origin = None  # an unattended or out-of-hold origin proves nothing
+    if origin is not None:
         subject = replace(
             subject, origin_channel_ids=origin_ids(origin.parent_channel_id, origin.thread_id)
         )

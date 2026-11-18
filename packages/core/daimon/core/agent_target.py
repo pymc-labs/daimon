@@ -36,10 +36,14 @@ class AgentTarget:
     agent_id: uuid.UUID
     owned: bool
     managed: bool
-    # Admins, and owners unless the agent is a member's copy with its setup withheld.
+    # Admins, and owners unless the agent is a member's copy with its setup withheld, and
+    # not from outside a private channel's own agent. Every write path reads this one.
     sees_setup: bool
     # Its own channel is private and the request is from outside it (`sealed_outside`).
     sealed: bool = False
+    # Like `sees_setup`, but still true outside a sealed agent. Only the read-only views
+    # listed in `VIEW_ONLY_READERS` (checked by a test) may read it; never a write.
+    views_setup: bool = False
 
 
 async def load_target(deps: AgentEditDeps, *, actor: AgentActor, ma_agent_id: str) -> AgentTarget:
@@ -80,8 +84,9 @@ async def load_target(deps: AgentEditDeps, *, actor: AgentActor, ma_agent_id: st
         agent_id=derive_agent_uuid(tenant_id=actor.tenant_id, ma_agent_id=agent.id),
         owned=owned,
         managed=system_agent_rejection(agent) is not None,
-        sees_setup=sees,
+        sees_setup=sees and sealed is None,
         sealed=sealed is not None,
+        views_setup=sees,
     )
 
 
@@ -99,6 +104,18 @@ def agent_names_loader(
     return load
 
 
+#: The only functions that call `require_setup(..., read_only=True)`: each only reads.
+VIEW_ONLY_READERS = frozenset(
+    {
+        ("agent_keys.py", "list_key_names"),
+        ("coding_keys.py", "list_agent_coding_keys"),
+        ("coding_key_connect.py", "connect_status"),
+        ("agent_google.py", "get_binding"),
+        ("agent_knowledge.py", "list_stores"),
+    }
+)
+
+
 def require_setup(target: AgentTarget, what: str, *, read_only: bool = False) -> None:
     """Refuse unless the actor sees the agent's setup (an admin, or its owner).
 
@@ -107,5 +124,5 @@ def require_setup(target: AgentTarget, what: str, *, read_only: bool = False) ->
     """
     if target.sealed and not read_only:
         raise AgentEditError(SEALED_REFUSAL, kind="forbidden")
-    if not target.sees_setup:
+    if not (target.views_setup if read_only else target.sees_setup):
         raise AgentEditError(f"{what} is for the agent's owner or an admin.", kind="forbidden")

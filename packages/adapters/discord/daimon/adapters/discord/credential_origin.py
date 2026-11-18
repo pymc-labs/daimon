@@ -103,7 +103,12 @@ async def refuse_if_pinned_elsewhere(
 ) -> bool:
     """Refuse a form for a pinned agent that was asked for from outside its channels."""
     async with runtime.sessionmaker() as session:
-        refusal = await request_pin_refusal(session, row=row, agent=agent)
+        refusal = await request_pin_refusal(
+            session,
+            row=row,
+            agent=agent,
+            location_verified=is_credential_interaction_valid(interaction, row),
+        )
     if refusal is None:
         return False
     await interaction.followup.send(embed=build_notice_embed(refusal), ephemeral=True)
