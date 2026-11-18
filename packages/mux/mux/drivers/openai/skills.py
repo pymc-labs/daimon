@@ -26,8 +26,9 @@ from mux.state.operations import request_digest
 
 _POST_PUBLISH_READ_RETRY_DELAYS_S = (0.5, 1.0, 2.0, 4.0, 8.0)
 """Bounded ~15.5s backoff applied to the version-metadata and content reads
-inside skill-pin resolution (`skill_bindings.resolve_pins`), never to
-`retrieve`/`list`/`delete` or any other skill call.
+inside skill-pin resolution (`skill_bindings.resolve_pins`), to content
+verification, and to the read-back that `create` and `publish_version` wait
+for; never to `retrieve`/`list`/`delete`.
 
 Root-caused live against the QA OpenAI key (neutral-core F2-O probe, then
 confirmed independently against the same key): a freshly published version's
@@ -70,13 +71,14 @@ _NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
 def plain_manifest(content: bytes) -> bytes:
-    """SKILL.md with a multi-line or styled `name`/`description` as one quoted line,
+    """SKILL.md with a multi-line or block `name`/`description` as one quoted line,
     and a `name` OpenAI refuses as its lowercase hyphen slug.
 
     OpenAI stores a block scalar (`description: >`) with its line breaks at upload,
     then refuses every session attaching it: "archive metadata does not match its
-    Skills API version". A plain one-line value is kept byte for byte, so the
-    digests of skills already pinned do not change.
+    Skills API version". A one-line value, quoted or commented too, keeps its bytes,
+    so the digests of skills already pinned do not change. Any rewrite that does not
+    load back as the same values keeps the original bytes.
     """
     try:
         match = _FRONTMATTER.match(content.decode())
@@ -86,7 +88,9 @@ def plain_manifest(content: bytes) -> bytes:
     if match is None or not isinstance(loaded, dict):
         return content
     values = cast(dict[object, object], loaded)
-    lines, out, index = match[1].splitlines(keepends=True), list[str](), 0
+    expected = dict(values)
+    # "\n" only: `str.splitlines` also breaks at U+2028, U+2029 and NEL inside a value.
+    lines, out, index = match[1].split("\n"), list[str](), 0
     while index < len(lines):
         line, index = lines[index], index + 1
         key = _KEY.match(line)
@@ -102,12 +106,24 @@ def plain_manifest(content: bytes) -> bytes:
             end -= 1
         if key[1] == "name" and _NAME.fullmatch(value) is None:
             # OpenAI refuses any other name; its slug is written unquoted.
-            line = f"name: {'-'.join(re.findall(r'[a-z0-9]+', value.lower()))}\n"
-        elif end > index or line[key.end() :].strip() != value:
-            line = f"{key[1]}: {json.dumps(' '.join(value.split()), ensure_ascii=False)}\n"
-        out.append(line)
+            plain = written = "-".join(re.findall(r"[a-z0-9]+", value.lower()))
+        elif end > index:
+            plain = " ".join(value.split())
+            written = json.dumps(plain, ensure_ascii=False)
+        else:
+            plain = written = ""
+        if not plain:  # a one-line value, or a name with no slug, keeps its line
+            out.append(line)
+            continue
+        out.append(f"{key[1]}: {written}")
+        expected[key[1]] = plain
         index = end
-    return (match.string[: match.start(1)] + "".join(out) + match.string[match.end(1) :]).encode()
+    try:
+        if out == lines or yaml.safe_load("\n".join(out)) != expected:
+            return content
+    except yaml.YAMLError:
+        return content
+    return (match.string[: match.start(1)] + "\n".join(out) + match.string[match.end(1) :]).encode()
 
 
 def plain_bundle(bundle: SkillUpload) -> SkillUpload:

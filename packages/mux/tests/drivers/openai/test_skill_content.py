@@ -71,22 +71,55 @@ async def test_native_archive_pin_verifies_all_files_and_closes_owned_stream(fau
     ]
 
 
-def test_plain_manifest_when_description_is_a_block_scalar_then_uploads_one_quoted_line():
-    """OpenAI rejects sessions attaching a `description: >` skill; plain ones stay byte for byte."""
+FOLDED = b"---\nname: lint\ndescription: >\n  Lint data.\n  Use it: often.\nlicense: MIT\n---\nbody"
+
+
+@pytest.mark.parametrize(
+    ("source", "uploaded"),
+    [
+        (
+            FOLDED,
+            b'---\nname: lint\ndescription: "Lint data. Use it: often."\nlicense: MIT\n---\nbody',
+        ),
+        (b"---\nname: lint\ndescription: Lint data.\n---\nbody", None),
+        (
+            b"---\nname: Marimo__Notebooks_\ndescription: d\n---\n",
+            b"---\nname: marimo-notebooks\ndescription: d\n---\n",
+        ),
+        (b'---\nname: lint\ndescription: "Lint data."\n---\n', None),
+        (b"---\nname: lint\ndescription: Lint data. # why\n---\n", None),
+        (b"---\nname: __\ndescription: d\n---\n", None),
+        (b"---\nname: lint\ndescription: &d >\n  a\n  b\nsummary: *d\n---\n", None),
+        *(
+            (
+                f'---\nname: lint\ndescription: "a{brk}b\n  c"\n---\n'.encode(),
+                b'---\nname: lint\ndescription: "a b c"\n---\n',
+            )
+            for brk in ("\u2028", "\u2029", "\x85")
+        ),
+    ],
+    ids=[
+        "folded",
+        "plain",
+        "bad-name",
+        "quoted",
+        "commented",
+        "no-slug",
+        "anchor",
+        "ls",
+        "ps",
+        "nel",
+    ],
+)
+def test_plain_manifest_when_description_is_a_block_scalar_then_uploads_one_quoted_line(
+    source: bytes, uploaded: bytes | None
+):
+    """OpenAI rejects sessions attaching a `description: >` skill or a refused name; a
+    one-line value keeps its bytes, and a rewrite that loads differently is not made."""
     from mux.drivers.openai.skills import bundle_zip, plain_manifest
 
-    folded = (
-        b"---\nname: lint\ndescription: >\n  Lint data.\n  Use it: often.\nlicense: MIT\n---\nbody"
-    )
-    zipped = bundle_zip(SkillUpload(files=(SkillUploadFile(path="SKILL.md", content=folded),)))
-    uploaded = zipfile.ZipFile(io.BytesIO(zipped)).read("bundle/SKILL.md")
-    assert uploaded == (
-        b'---\nname: lint\ndescription: "Lint data. Use it: often."\nlicense: MIT\n---\nbody'
-    ), "the folded value becomes one quoted line; other keys and the body are kept"
-    assert plain_manifest(uploaded) == uploaded, "a rewritten manifest is stable"
-    plain = b"---\nname: lint\ndescription: Lint data.\n---\nbody"
-    assert plain_manifest(plain) == plain, "a plain manifest keeps its bytes and pinned digest"
-    named = b"---\nname: Marimo__Notebooks_\ndescription: d\n---\n"
-    assert plain_manifest(named) == b"---\nname: marimo-notebooks\ndescription: d\n---\n", (
-        "a name OpenAI refuses becomes its unquoted slug"
-    )
+    expected = source if uploaded is None else uploaded
+    zipped = bundle_zip(SkillUpload(files=(SkillUploadFile(path="SKILL.md", content=source),)))
+    actual = zipfile.ZipFile(io.BytesIO(zipped)).read("bundle/SKILL.md")
+    assert actual == expected, "only a multi-line value or a refused name is rewritten"
+    assert plain_manifest(actual) == actual, "a rewritten manifest is stable"
