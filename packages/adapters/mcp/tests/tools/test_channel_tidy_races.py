@@ -19,7 +19,7 @@ from daimon.core.stores.access_policy import (
 )
 from daimon.core.stores.agent_posts import get_post
 from daimon.testing.db import build_test_engine
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent_payload
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -42,9 +42,7 @@ async def write_policy(world, policy):
 
 
 def agent_payload(world, agent):
-    return ma_agent(
-        id=agent, name=agent, metadata={"daimon_tenant": str(world.tenant_id), "daimon_name": agent}
-    ).model_dump(mode="json")
+    return ma_agent_payload(id=agent, name=agent, tenant_id=world.tenant_id)
 
 
 async def late_ma_hook(world, agent, hook):

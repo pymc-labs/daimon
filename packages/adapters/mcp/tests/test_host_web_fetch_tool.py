@@ -22,6 +22,8 @@ from fastmcp.exceptions import ToolError
 from pydantic import PostgresDsn
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .harness import auth_identity
+
 
 def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> McpRuntime:
     return McpRuntime(
@@ -116,9 +118,9 @@ async def test_web_fetch_when_nobody_attends_then_needs_the_turns_signed_leave(
         chat_session_id="chat-1",
     )
     await db_session.commit()
-    auth = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        account.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         chat_session_id="chat-1",

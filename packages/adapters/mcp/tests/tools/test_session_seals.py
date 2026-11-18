@@ -54,6 +54,8 @@ from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 _AGENT = "ag_acme"
 _SEALED = "chan-acme"
 _OPEN = "chan-b"
@@ -131,9 +133,9 @@ class _World:
     def agent_key_auth(self, bound_channel_id: str | None = None) -> AuthIdentity:
         """An agent-chat key (headless: plugin, another program), maybe minted in a channel."""
         agent_uuid = derive_agent_uuid(tenant_id=self.tenant_id, ma_agent_id=_AGENT)
-        return AuthIdentity(
-            account_id=self.account_id,
-            tenant_id=self.tenant_id,
+        return auth_identity(
+            self.account_id,
+            self.tenant_id,
             role=Role.USER,
             platform=self.platform,
             agent_id=agent_uuid,
@@ -143,11 +145,7 @@ class _World:
 
     def runtime(self) -> McpRuntime:
         router = MARouter()
-        agent = ma_agent(
-            id=_AGENT,
-            name="acme-project",
-            metadata={"daimon_tenant": str(self.tenant_id), "daimon_name": "acme-project"},
-        )
+        agent = ma_agent(id=_AGENT, name="acme-project", tenant_id=self.tenant_id)
         router.add_agent(agent)
         router.add_agent_list(agent)
         router.add(

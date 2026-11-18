@@ -24,6 +24,8 @@ from daimon.core.stores.domain import Role
 from fastmcp.exceptions import ToolError
 from pydantic import SecretStr
 
+from ..harness import auth_identity
+
 _conftest_path = Path(__file__).parent / "conftest.py"
 _spec = importlib.util.spec_from_file_location("_tools_conftest", _conftest_path)
 assert _spec is not None and _spec.loader is not None
@@ -51,9 +53,9 @@ def _runtime() -> McpRuntime:
 
 
 def _auth() -> AuthIdentity:
-    return AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
+    return auth_identity(
+        uuid.uuid4(),
+        uuid.uuid4(),
         role=Role.USER,
         platform="discord",
         external_id=GUILD,

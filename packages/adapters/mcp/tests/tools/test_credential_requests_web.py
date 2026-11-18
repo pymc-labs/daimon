@@ -24,7 +24,7 @@ from daimon.core.stores.domain import Role, TurnOriginRow
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.stores.web_notices import WEB_NOTICE_CHANNEL, parse_web_notice
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent_payload
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
@@ -33,18 +33,20 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 _request_agent_key = credential_requests._request_agent_key_impl  # pyright: ignore[reportPrivateUsage]
 
 _THREAD = f"web:{uuid.uuid4()}"
 
 
 def _client(tenant_id: uuid.UUID) -> AsyncAnthropic:
-    agent = ma_agent(
+    agent = ma_agent_payload(
         id="ag_web",
         name="daimon",
         model=ma_model_config("claude-sonnet-4-6", speed="standard"),
         metadata={MA_METADATA_KEY_TENANT: str(tenant_id), MA_METADATA_KEY_NAME: "daimon"},
-    ).model_dump(mode="json")
+    )
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([agent]))
     return build_fake_anthropic(router.dispatch)
@@ -67,14 +69,13 @@ async def _web_origin(
     sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession, platform: str
 ) -> tuple[AuthIdentity, TurnOriginRow]:
     tenant = await make_tenant(db_session)
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        uuid.uuid4(),
+        tenant.id,
         role=Role.USER,
         platform=platform,
         external_id=None,
         platform_user_id="person-1",
-        is_admin=False,
     )
     await make_account(db_session, tenant=tenant, id=auth.account_id)
     await db_session.commit()

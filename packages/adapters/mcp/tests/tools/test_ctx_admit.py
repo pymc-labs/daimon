@@ -28,6 +28,8 @@ from fastmcp.exceptions import ToolError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 
 def _current_member(*, is_admin: bool = False):  # type: ignore[no-untyped-def]
     from daimon.core.membership import CachedMembershipResolver, Membership
@@ -40,9 +42,7 @@ def _current_member(*, is_admin: bool = False):  # type: ignore[no-untyped-def]
 async def test_admit_denies_when_over_balance(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.USER, platform_user_id="u1"
-    )
+    auth = auth_identity(uuid.uuid4(), uuid.uuid4(), role=Role.USER, platform_user_id="u1")
     with (
         patch("daimon.core.spend_gate.is_over_balance", new=AsyncMock(return_value=True)),
         pytest.raises(ToolError, match="credit is depleted"),
@@ -57,7 +57,7 @@ async def test_admit_denies_when_over_balance(
 
 
 async def test_admit_skips_billing_for_internal_identity() -> None:
-    auth = AuthIdentity(account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.USER)
+    auth = auth_identity(uuid.uuid4(), uuid.uuid4(), role=Role.USER)
     with patch(
         "daimon.core.spend_gate.is_over_balance",
         new=AsyncMock(side_effect=AssertionError("must not check")),

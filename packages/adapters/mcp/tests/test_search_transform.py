@@ -17,6 +17,8 @@ from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 
+from .harness import auth_identity
+
 _GATED = sorted(APPROVAL_TOOLS)
 
 
@@ -81,9 +83,9 @@ class _SetAuth(Middleware):
 
 
 def _chat_agent(daimon_tools: frozenset[str] | None) -> AuthIdentity:
-    return AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
+    return auth_identity(
+        uuid.uuid4(),
+        uuid.uuid4(),
         role=Role.USER,
         chat_agent_id=uuid.uuid4(),
         daimon_tools=daimon_tools,

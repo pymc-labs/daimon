@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 from aioresponses import aioresponses
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import direct_messages
 from daimon.core.config import (
@@ -25,16 +24,17 @@ from fastmcp.exceptions import ToolError
 from pydantic import SecretStr
 from slack_sdk.web.async_client import AsyncWebClient
 
+from ..harness import auth_identity
+
 
 def runtime_and_auth(platform="discord", policy=None):
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
+    auth = auth_identity(
+        uuid.uuid4(),
+        uuid.uuid4(),
         role=Role.USER,
         platform=platform,
         external_id="111" if platform == "discord" else "T123",
         platform_user_id="42" if platform == "discord" else "U123",
-        is_admin=False,
     )
     settings = Settings(
         database=DatabaseSettings(url="postgresql+asyncpg://x/y"),

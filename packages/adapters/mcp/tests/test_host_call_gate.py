@@ -38,6 +38,8 @@ from fastmcp.server.transforms.search import BM25SearchTransform
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .harness import auth_identity
+
 _SECRET = "s" * 32
 _URL = "https://mcp.example.com/mcp"
 _USER = "user-1"
@@ -64,9 +66,9 @@ class Rig:
     failure: list[Exception]
 
     def identity(self, **changes: Any) -> AuthIdentity:
-        base = AuthIdentity(
-            account_id=self.account_id,
-            tenant_id=self.tenant_id,
+        base = auth_identity(
+            self.account_id,
+            self.tenant_id,
             role=Role.USER,
             platform="discord",
             chat_agent_id=self.agent_id,

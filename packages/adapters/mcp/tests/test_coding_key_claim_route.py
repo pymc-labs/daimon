@@ -17,7 +17,7 @@ from daimon.core.stores import agent_owners
 from daimon.core.stores import coding_key_claims as claims
 from daimon.core.stores.mcp_tokens import get_mcp_token
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent_payload
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -57,7 +57,7 @@ async def _batch(
             expires_at=now + ttl,
             code_hashes={client: hash_code(code) for client, code in codes.items()},
         )
-    body = ma_agent(id=ma_agent_id, name="helper", tenant_id=tenant.id).model_dump(mode="json")
+    body = ma_agent_payload(id=ma_agent_id, name="helper", tenant_id=tenant.id)
     _ROUTER.add("GET", rf"/v1/agents/{ma_agent_id}", lambda _r, _m: httpx.Response(200, json=body))
     return codes
 

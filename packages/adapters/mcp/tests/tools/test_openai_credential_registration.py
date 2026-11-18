@@ -9,11 +9,12 @@ from typing import cast
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.tools import openai_credential_requests as native
-from daimon.core.stores.domain import Role
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import TextContent
 from mux.errors import UnsupportedCapability
+
+from ..harness import auth_identity
 
 
 async def test_native_registration_disabled_without_factory_or_identity_io() -> None:
@@ -59,10 +60,11 @@ async def test_legacy_credentials_never_reach_native_factory(
     monkeypatch: pytest.MonkeyPatch, legacy: str
 ) -> None:
     server = FastMCP("native")
-    auth = AuthIdentity(
-        tenant_id=uuid.uuid4(),
-        account_id=uuid.uuid4(),
-        role=Role.ADMIN,
+    auth = auth_identity(
+        uuid.uuid4(),
+        uuid.uuid4(),
+        is_admin=False,
+        is_platform_admin=False,
         agent_id=uuid.uuid4() if legacy == "agent" else None,
         chat_agent_id=uuid.uuid4() if legacy == "chat" else None,
     )

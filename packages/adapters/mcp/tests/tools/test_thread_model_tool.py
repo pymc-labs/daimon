@@ -20,11 +20,12 @@ from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings, Tu
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.thread_models import get_thread_model
-from daimon.core.turn_origin import turn_origin
 from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import auth_identity, discord_turn_origin
 
 _RESPONDER_ID = "agt_daimon"
 _CHAT_SESSION = "chat-session-1"
@@ -49,9 +50,9 @@ def _runtime(
 def _auth(
     tenant_id: uuid.UUID, account_id: uuid.UUID, *, chat_session_id: str | None = _CHAT_SESSION
 ) -> AuthIdentity:
-    return AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
+    return auth_identity(
+        account_id,
+        tenant_id,
         role=Role.USER,
         platform="discord",
         platform_user_id="42",
@@ -79,19 +80,8 @@ async def test_a_persons_turn_switches_its_own_conversation_only(
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker)
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id=_CHAT_SESSION,
-        sender_foreign=False,
-        shared_channel=False,
+    async with discord_turn_origin(
+        committing_sessionmaker, tenant, caller, chat_session_id=_CHAT_SESSION
     ) as origin:
         from datetime import UTC, datetime
 
@@ -137,20 +127,8 @@ async def test_an_unattended_run_cannot_change_a_conversations_model(
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker)
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        attended=False,
-        chat_session_id=_CHAT_SESSION,
-        sender_foreign=False,
-        shared_channel=False,
+    async with discord_turn_origin(
+        committing_sessionmaker, tenant, caller, chat_session_id=_CHAT_SESSION, attended=False
     ) as origin:
         with pytest.raises(ToolError, match="Only someone in the conversation"):
             await _set_thread_model_impl(
@@ -175,19 +153,8 @@ async def test_a_call_without_this_turns_origin_is_refused(
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker)
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id=_CHAT_SESSION,
-        sender_foreign=False,
-        shared_channel=False,
+    async with discord_turn_origin(
+        committing_sessionmaker, tenant, caller, chat_session_id=_CHAT_SESSION
     ) as origin:
         with pytest.raises(ToolError):
             await _set_thread_model_impl(
@@ -209,19 +176,8 @@ async def test_a_model_this_deployment_does_not_offer_is_refused(
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker)
 
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id=_CHAT_SESSION,
-        sender_foreign=False,
-        shared_channel=False,
+    async with discord_turn_origin(
+        committing_sessionmaker, tenant, caller, chat_session_id=_CHAT_SESSION
     ) as origin:
         with pytest.raises(ToolError, match="isn't a model this conversation can use"):
             await _set_thread_model_impl(
@@ -299,19 +255,8 @@ async def test_another_providers_model_is_kept_at_once_and_says_whats_off(
     runtime = _runtime(committing_sessionmaker, mux=True, **gate)
     await _openai_pick(monkeypatch, committing_sessionmaker, tenant.id, caller.id, admin=True)
     _with_a_loss(monkeypatch)
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id=_CHAT_SESSION,
-        sender_foreign=False,
-        shared_channel=False,
+    async with discord_turn_origin(
+        committing_sessionmaker, tenant, caller, chat_session_id=_CHAT_SESSION
     ) as origin:
         auth = replace(_auth(tenant.id, caller.id), no_confirmation_surface=not carded)
         kept = await _set_thread_model_impl(
@@ -332,19 +277,8 @@ async def test_another_providers_model_needs_the_owner_without_opt_in(
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, mux=True)
     await _openai_pick(monkeypatch, committing_sessionmaker, tenant.id, caller.id, admin=False)
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id=_CHAT_SESSION,
-        sender_foreign=False,
-        shared_channel=False,
+    async with discord_turn_origin(
+        committing_sessionmaker, tenant, caller, chat_session_id=_CHAT_SESSION
     ) as origin:
         with pytest.raises(ToolError, match="owner or an admin can do that. Nothing changed."):
             await _set_thread_model_impl(

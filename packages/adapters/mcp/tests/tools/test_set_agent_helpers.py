@@ -27,7 +27,7 @@ from daimon.core.stores.domain import Role, TurnOriginRow
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from daimon.core.stores.turn_origins import create_origin
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent_payload
 from fastmcp.exceptions import ToolError
 from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.resources import AgentSpec
@@ -58,9 +58,7 @@ class _World:
             metadata[MA_METADATA_KEY_MANAGED] = "true"
         if owned:
             metadata[MA_METADATA_KEY_ACCOUNT] = str(uuid.uuid4())
-        self.agents.append(
-            ma_agent(id=agent_id, name=name, metadata=metadata).model_dump(mode="json")
-        )
+        self.agents.append(ma_agent_payload(id=agent_id, name=name, metadata=metadata))
 
     def runtime(self) -> McpRuntime:
         router = MARouter()

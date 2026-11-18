@@ -8,7 +8,6 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.direct_messages import send_direct_message_impl
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
@@ -18,6 +17,8 @@ from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.testing.factories import make_tenant
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import auth_identity
 
 _CALLER = "11111111-2222-3333-4444-555555555555"
 _RECIPIENT = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -72,12 +73,8 @@ async def _call(
         deployment_default=DeploymentDefault(),
         teams_client=client,
     )
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant.id,
-        role=Role.USER,
-        platform="teams",
-        platform_user_id=_CALLER,
+    auth = auth_identity(
+        uuid.uuid4(), tenant.id, role=Role.USER, platform="teams", platform_user_id=_CALLER
     )
     args = {"recipient_id": _RECIPIENT.upper(), "content": "hello"} | kw
     return await send_direct_message_impl(runtime, auth, **args)

@@ -9,7 +9,6 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment
-from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.environments import (
     _archive_environment_impl,
@@ -33,6 +32,8 @@ from mux.testing.drivers.anthropic.ma import (
     list_response,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import auth_identity
 
 
 def _ma_env(**overrides: object) -> BetaEnvironment:
@@ -94,7 +95,7 @@ async def test_list_environments_impl_returns_list(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN)
+    auth = auth_identity(account_id, tenant_id, is_admin=False, is_platform_admin=False)
     result = await _list_environments_impl(
         _runtime(client, committing_sessionmaker), auth, page=None
     )
@@ -110,7 +111,7 @@ async def test_get_environment_impl_raises_not_found() -> None:
     router.add("GET", r"/v1/environments", lambda _req, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN)
+    auth = auth_identity(account_id, tenant_id, is_admin=False, is_platform_admin=False)
     with pytest.raises(ToolError, match="not found"):
         await _get_environment_impl(_runtime(client), auth, "nope")
 
@@ -132,7 +133,7 @@ async def test_create_environment_impl_calls_ma_create() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     spec = EnvironmentSpec(name="e")
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
     result = await _create_environment_impl(_runtime(client), auth, spec)
     assert result.name == "e", "should return the created environment name"
     assert result.id == "env_x", "should store the MA-assigned id"
@@ -164,7 +165,7 @@ async def test_create_environment_sends_the_pip_list_the_caller_supplied() -> No
             "packages": {"type": "packages", "pip": ["numpy", "pandas", "pymc"]},
         },
     )
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
     await _create_environment_impl(_runtime(client), auth, spec)
 
     assert len(created) == 1, "should call MA create exactly once"
@@ -208,7 +209,7 @@ async def test_create_environment_impl_rejects_duplicate_name() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     spec = EnvironmentSpec(name="dupe")
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
     with pytest.raises(ToolError, match="already exists in this server"):
         await _create_environment_impl(_runtime(client), auth, spec)
     assert created == [], "create route must not be hit when the name collides"
@@ -245,7 +246,7 @@ async def test_update_environment_impl_patch_only_non_none(
     router.add("POST", r"/v1/environments/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
     await _update_environment_impl(
         _runtime(client, committing_sessionmaker),
         auth,
@@ -261,7 +262,7 @@ async def test_update_environment_impl_rejects_empty_patch() -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.ADMIN, is_admin=True)
+    auth = auth_identity(account_id, tenant_id, is_platform_admin=False)
     with pytest.raises(ToolError, match="at least one field"):
         await _update_environment_impl(
             _runtime(MagicMock()),  # type: ignore[arg-type]
@@ -319,9 +320,7 @@ async def test_archive_environment_impl_archives_in_ma_and_clears_its_picks(
         deployment_default=DeploymentDefault(),
     )
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, is_platform_admin=False)
     result = await _archive_environment_impl(runtime, auth, "e")
 
     assert archived == ["env_a"], "should archive the correct MA environment"
@@ -377,9 +376,7 @@ async def test_update_and_archive_refuse_a_managed_environment(
     )
     router.add("POST", r"/v1/environments/([^/]+)", on_write)
     runtime = _runtime(build_fake_anthropic(router.dispatch), committing_sessionmaker)
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, is_platform_admin=False)
 
     with pytest.raises(ToolError, match="managed by defaults.*create_environment"):
         await _update_environment_impl(
@@ -454,9 +451,7 @@ async def test_opening_or_archiving_a_sealed_channels_environment_needs_confirmi
     router.add("POST", r"/v1/environments/([^/]+)/archive", on_write)
     router.add("POST", r"/v1/environments/([^/]+)", on_write)
     runtime = _runtime(build_fake_anthropic(router.dispatch), committing_sessionmaker)
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.ADMIN, is_admin=True
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, is_platform_admin=False)
     unrestricted: Any = {"type": "cloud", "networking": {"type": "unrestricted"}}
     a_host: Any = {"type": "cloud", "networking": {**_CLOSED_NETWORK, "allowed_hosts": ["x.io"]}}
     packages_only: Any = {"type": "cloud", "packages": {"pip": ["numpy"]}}
@@ -527,9 +522,7 @@ async def test_a_sealed_thread_counts_under_the_channel_a_session_ran_it_in(
         lambda _req, m: httpx.Response(200, json=_ma_env(id=m.group(1)).model_dump(mode="json")),
     )
     runtime = _runtime(build_fake_anthropic(router.dispatch), committing_sessionmaker)
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.ADMIN, is_admin=True
-    )
+    auth = auth_identity(uuid.uuid4(), tenant.id, is_platform_admin=False)
     unrestricted: Any = {"type": "cloud", "networking": {"type": "unrestricted"}}
 
     await _update_environment_impl(

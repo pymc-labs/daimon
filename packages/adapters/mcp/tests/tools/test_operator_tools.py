@@ -13,15 +13,6 @@ import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
-from daimon.adapters.mcp.middleware.mcp_identity import (
-    IdentityMiddleware,
-    production_agent_id_resolver,
-    production_internal_resolver,
-    production_is_admin_resolver,
-    production_role_resolver,
-    production_subject_resolver,
-    production_tenant_resolver,
-)
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import (
     _admit,  # pyright: ignore[reportPrivateUsage]
@@ -58,7 +49,7 @@ from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores import promo_codes
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.direct_messages import DirectMessageRow, start_conversation
-from daimon.core.stores.domain import Role, TenantRow
+from daimon.core.stores.domain import TenantRow
 from daimon.core.stores.mcp_tokens import create_mcp_token_row
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.thread_agent_bindings import create_binding
@@ -76,7 +67,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from ..harness import seed_server_admin
+from ..harness import auth_identity, production_identity_middleware, seed_server_admin
 
 
 def _runtime(sessionmaker: async_sessionmaker[AsyncSession]) -> McpRuntime:
@@ -125,13 +116,12 @@ def _identity(
     jti: uuid.UUID | None = None,
     scopes: frozenset[str] = frozenset(),
 ) -> AuthIdentity:
-    return AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
+    return auth_identity(
+        account_id,
+        tenant_id,
+        is_platform_admin=False,
         platform="discord",
         platform_user_id="u-admin",
-        is_admin=True,
         token_kind="operator" if jti is not None else "cli",
         token_jti=jti,
         scopes=scopes,
@@ -346,15 +336,7 @@ async def _verified_operator_identity(
             now=datetime.now(UTC),
             ttl_days=30,
         )
-    middleware = IdentityMiddleware(
-        subject_resolver=production_subject_resolver,
-        tenant_resolver=production_tenant_resolver,
-        role_resolver=production_role_resolver,
-        agent_id_resolver=production_agent_id_resolver,
-        is_admin_resolver=production_is_admin_resolver,
-        internal_resolver=production_internal_resolver,
-        sessionmaker=sessionmaker,
-    )
+    middleware = production_identity_middleware(sessionmaker)
     mcp = FastMCP(name="identity", auth=DaimonJWTVerifier(secret=secret, sessionmaker=sessionmaker))
     mcp.add_middleware(middleware)
     captured: list[AuthIdentity] = []

@@ -35,6 +35,7 @@ from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .harness import auth_identity
 from .test_tool_schema_snapshot import (
     _fully_configured_settings,  # pyright: ignore[reportPrivateUsage]
 )
@@ -270,9 +271,9 @@ async def _two_running_origins(
                 shared_channel=False,
                 chat_session_id="session-1",
             )
-    auth = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        account.id,
+        tenant.id,
         role=Role.USER,
         platform="discord",
         chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=ma_agent),

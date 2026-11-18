@@ -15,7 +15,6 @@ import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import SkillListResponse
 from daimon.adapters.mcp import bundles, hosted_artifacts, resource_ports
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import (
     hub,
@@ -42,12 +41,14 @@ from pydantic import BaseModel, PostgresDsn, SecretStr
 from starlette.applications import Starlette
 from starlette.routing import Route
 
+from .harness import auth_identity
+
 TENANT = uuid.UUID(int=1)
 ACCOUNT = uuid.UUID(int=2)
 AGENT = ma_agent(id="agent", tenant_id=TENANT)
-AUTH = AuthIdentity(
-    tenant_id=TENANT,
-    account_id=ACCOUNT,
+AUTH = auth_identity(
+    ACCOUNT,
+    TENANT,
     role=Role.USER,
     agent_id=derive_agent_uuid(tenant_id=TENANT, ma_agent_id="agent"),
 )

@@ -35,17 +35,15 @@ from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 _MA_ID = "ag_routine"
 _NAME = "nightly-report"
 _ME = "U_ME"
 
 
 def _agent(tenant_id: uuid.UUID) -> Any:
-    return ma_agent(
-        id=_MA_ID,
-        name=_NAME,
-        metadata={"daimon_tenant": str(tenant_id), "daimon_name": _NAME},
-    )
+    return ma_agent(id=_MA_ID, name=_NAME, tenant_id=tenant_id)
 
 
 def _runtime(db: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID) -> tuple[McpRuntime, Any]:
@@ -96,14 +94,13 @@ async def _setup(
 def _member(
     tenant_id: uuid.UUID, account_id: uuid.UUID, agent_id: uuid.UUID | None
 ) -> AuthIdentity:
-    return AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
+    return auth_identity(
+        account_id,
+        tenant_id,
         role=Role.USER,
         platform="discord",
         platform_user_id=_ME,
         agent_id=agent_id,
-        is_admin=False,
     )
 
 

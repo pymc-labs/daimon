@@ -42,12 +42,14 @@ from daimon.core.stores.turn_origins import create_origin
 from daimon.core.teams_graph import GraphUnavailable
 from daimon.testing.asgi import INIT_BODY, INIT_HEADERS, asgi_lifespan, call_mcp_tool
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent, ma_agent_payload
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from mux.testing.drivers.anthropic.ma_models import ma_model_config
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from ..harness import auth_identity
 
 _create_routine_impl = _routines_mod._create_routine_impl  # pyright: ignore[reportPrivateUsage]
 _delete_routine_impl = _routines_mod._delete_routine_impl  # pyright: ignore[reportPrivateUsage]
@@ -111,19 +113,17 @@ def _auth_identity(
 ) -> AuthIdentity:
     """A member in a chat turn with the MA agent ``talking_to`` (None: no agent)."""
     tenant_id = tenant_id if tenant_id is not None else uuid.uuid4()
-    return AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
+    return auth_identity(
+        uuid.uuid4(),
+        tenant_id,
         role=Role.USER,
+        is_admin=is_admin,
         platform=platform,
         external_id=external_id,
         platform_user_id=platform_user_id,
-        is_admin=is_admin,
-        chat_agent_id=(
-            None
-            if talking_to is None
-            else derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=talking_to)
-        ),
+        chat_agent_id=None
+        if talking_to is None
+        else derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=talking_to),
         chat_session_id="test-session",
     )
 
@@ -1656,12 +1656,12 @@ async def test_update_routine_refuses_moving_a_pinned_agent_out_of_its_channels(
 
 
 def _display_named_agent(tenant_id: uuid.UUID) -> dict[str, object]:
-    return ma_agent(
+    return ma_agent_payload(
         id="ag_resolved",
         name="Acme Display",
         model=ma_model_config("claude-sonnet-4-6", speed="standard"),
         metadata={MA_METADATA_KEY_TENANT: str(tenant_id), MA_METADATA_KEY_NAME: "acme-config"},
-    ).model_dump(mode="json")
+    )
 
 
 async def test_create_routine_checks_the_pin_on_every_name_of_the_resolved_agent(
@@ -1732,12 +1732,12 @@ async def test_update_routine_checks_the_pin_on_the_existing_agents_display_name
 
 
 def _empty_display_agent(tenant_id: uuid.UUID) -> dict[str, object]:
-    return ma_agent(
+    return ma_agent_payload(
         id="ag_resolved",
         name="",
         model=ma_model_config("claude-sonnet-4-6", speed="standard"),
         metadata={MA_METADATA_KEY_TENANT: str(tenant_id), MA_METADATA_KEY_NAME: "acme-config"},
-    ).model_dump(mode="json")
+    )
 
 
 async def test_an_empty_name_pin_does_not_pin_a_routine_on_create_or_update(

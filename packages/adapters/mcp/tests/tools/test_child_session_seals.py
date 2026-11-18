@@ -16,13 +16,15 @@ from daimon.core.permissions import session_readable_from
 from daimon.core.session_seal import child_seal_ids, seal_ids, session_facts
 from daimon.core.stores.domain import Role
 
+from ..harness import auth_identity
+
 _SEALED = "sealed-room"
 
 
 def _provider_auth(seals: frozenset[str]) -> AuthIdentity:
-    return AuthIdentity(
-        tenant_id=uuid.uuid4(),
-        account_id=uuid.uuid4(),
+    return auth_identity(
+        uuid.uuid4(),
+        uuid.uuid4(),
         role=Role.USER,
         platform="discord",
         chat_session_id="chat",

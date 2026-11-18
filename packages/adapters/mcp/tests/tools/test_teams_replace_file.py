@@ -24,6 +24,8 @@ from daimon.testing.factories import make_account, make_tenant
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..harness import auth_identity
+
 _ENTRA = "99999999-8888-7777-6666-555555555555"
 _CALLER = "11111111-2222-3333-4444-555555555555"
 _TEAM = "19:team@thread.tacv2"
@@ -173,9 +175,9 @@ async def _setup(db_session: AsyncSession, filename: str) -> tuple[AuthIdentity,
         now=now,
         chat_session_id="test-session",
     )
-    auth = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        account.id,
+        tenant.id,
         role=Role.USER,
         platform="teams",
         platform_user_id=_CALLER,

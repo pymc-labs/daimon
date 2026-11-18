@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.tools.watches import manage_watch_impl, rotate_watch_impl
 from daimon.adapters.mcp.watch_polling import poll_read_place as real_poll_read_place
 from daimon.adapters.mcp.watch_polling import run_poll
@@ -24,6 +23,8 @@ from daimon.testing.watch_fixtures import install_poll_ports
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from sqlalchemy import text
+
+from .harness import auth_identity
 
 pytestmark = pytest.mark.fresh_schema
 
@@ -142,13 +143,13 @@ async def runtime_watch(db_session_factory, monkeypatch):
             )
         ),
     )
-    auth = AuthIdentity(
-        account_id=watch.owner_account_id,
-        tenant_id=watch.tenant_id,
+    auth = auth_identity(
+        watch.owner_account_id,
+        watch.tenant_id,
+        role=Role.USER,
         platform="discord",
         platform_user_id="123",
         external_id=tenant.external_id,
-        role=Role.USER,
     )
     return runtime, watch, auth
 

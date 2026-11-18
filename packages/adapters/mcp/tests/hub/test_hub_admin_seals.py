@@ -34,7 +34,7 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role, RoutineDestinationKind, RoutineRow
 from daimon.testing.factories import make_ledger_entry, make_platform_principal, make_tenant
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent_payload
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from mux.testing.drivers.anthropic.ma_models import ma_session
@@ -85,11 +85,7 @@ class _Hub:
 
     async def call(self, name: str, **arguments: Any) -> dict[str, Any]:
         router = MARouter()
-        agent = ma_agent(
-            id=_AGENT,
-            name="acme-project",
-            metadata={"daimon_tenant": str(self.tenant_id), "daimon_name": "acme-project"},
-        ).model_dump(mode="json")
+        agent = ma_agent_payload(id=_AGENT, name="acme-project", tenant_id=self.tenant_id)
         router.add("GET", r"/v1/agents", lambda _r, _m: list_response([agent]))
         router.add("GET", rf"/v1/agents/{_AGENT}", lambda _r, _m: httpx.Response(200, json=agent))
         router.add(

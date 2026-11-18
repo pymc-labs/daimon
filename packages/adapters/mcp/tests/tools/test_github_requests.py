@@ -7,9 +7,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.tools import github_requests as requests_module
 from daimon.core.stores.domain import Role
+
+from ..harness import auth_identity
 
 
 async def test_teams_request_points_to_connect_github_not_another_platform(
@@ -18,12 +19,8 @@ async def test_teams_request_points_to_connect_github_not_another_platform(
     """Teams has no admin request cards yet; Connect GitHub works there instead."""
     origin = SimpleNamespace(platform="teams", helper_of=None)
     monkeypatch.setattr(requests_module, "require_turn_origin", AsyncMock(return_value=origin))
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
-        role=Role.USER,
-        platform="teams",
-        platform_user_id="aad-member",
+    auth = auth_identity(
+        uuid.uuid4(), uuid.uuid4(), role=Role.USER, platform="teams", platform_user_id="aad-member"
     )
     result = await requests_module.request_github_access_impl(
         SimpleNamespace(),  # type: ignore[arg-type]

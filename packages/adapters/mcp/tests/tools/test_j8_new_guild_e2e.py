@@ -107,11 +107,7 @@ async def test_a_server_joined_without_signup_credit_is_refused_in_plain_words(
 
 def _copy_router(tenant_id, created):
     """Anthropic's agents API with the new server's default Daimon agent on it."""
-    source = ma_agent(
-        id="ag_daimon",
-        name="Daimon",
-        metadata={"daimon_tenant": str(tenant_id), "daimon_name": "Daimon"},
-    )
+    source = ma_agent(id="ag_daimon", name="Daimon", tenant_id=tenant_id)
 
     def create(request: httpx.Request, _match: re.Match[str]) -> httpx.Response:
         import json

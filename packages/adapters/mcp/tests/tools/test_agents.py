@@ -12,15 +12,6 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import SkillListResponse
 from cryptography.fernet import Fernet, MultiFernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
-from daimon.adapters.mcp.middleware.mcp_identity import (
-    IdentityMiddleware,
-    production_agent_id_resolver,
-    production_internal_resolver,
-    production_is_admin_resolver,
-    production_role_resolver,
-    production_subject_resolver,
-    production_tenant_resolver,
-)
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import agents as agents_mod
 from daimon.adapters.mcp.tools.agents import (
@@ -55,7 +46,7 @@ from daimon.core.stores.user_skills import upsert_user_skill
 from daimon.testing.asgi import call_mcp_tool
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma_models import ma_agent
+from daimon.testing.ma_models import ma_agent, ma_agent_payload
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
@@ -72,6 +63,8 @@ from mux.testing.drivers.anthropic.ma import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp
+
+from ..harness import auth_identity, production_identity_middleware
 
 # Repeated nested config required by the SDK response models. Inlined in every
 # test that needs it (only the permission_policy block is shared — every other
@@ -124,17 +117,7 @@ def _agents_mcp_app(
     behind the real auth + identity middleware pipeline."""
     mock_sessionmaker: async_sessionmaker[AsyncSession] = MagicMock()  # type: ignore[assignment]
     mcp = FastMCP(name="agents-schema-test", auth=StaticTokenVerifier(tokens={token: claims}))
-    mcp.add_middleware(
-        IdentityMiddleware(
-            subject_resolver=production_subject_resolver,
-            tenant_resolver=production_tenant_resolver,
-            role_resolver=production_role_resolver,
-            agent_id_resolver=production_agent_id_resolver,
-            is_admin_resolver=production_is_admin_resolver,
-            internal_resolver=production_internal_resolver,
-            sessionmaker=mock_sessionmaker,
-        )
-    )
+    mcp.add_middleware(production_identity_middleware(mock_sessionmaker))
     register_agent_tools(mcp, _runtime(client, session_factory=session_factory))
     return mcp.http_app()
 
@@ -151,12 +134,12 @@ def _make_agent_payload_with_skill_type(
     SDK's discriminated skills union has no constructor for a novel skill
     type, so validated construction is impossible for that single field
     (mirrors test_sessions.py's ``_make_session_payload(status=...)``)."""
-    payload = ma_agent(
+    payload = ma_agent_payload(
         id=agent_id,
         name=name,
-        metadata={"daimon_tenant": str(tenant_id), "daimon_name": name},
+        tenant_id=tenant_id,
         skills=[{"skill_id": "skill_x", "type": "anthropic", "version": "1"}],
-    ).model_dump(mode="json")
+    )
     payload["skills"][0]["type"] = skill_type
     return payload
 
@@ -220,24 +203,11 @@ async def test_list_agents_impl_returns_tenant_agents(
     router.add(
         "GET",
         r"/v1/agents",
-        lambda _req, _m: list_response(
-            [
-                ma_agent(
-                    name="demo",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "demo"},
-                ).model_dump(mode="json")
-            ]
-        ),
+        lambda _req, _m: list_response([ma_agent_payload(name="demo", tenant_id=tenant_id)]),
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     result = await _list_agents_impl(
         _runtime(client, session_factory=db_session_factory), auth, page=None
     )
@@ -257,26 +227,20 @@ async def test_get_agent_impl_returns_agent_info(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     name="a",
                     metadata={
                         "daimon_tenant": str(tenant_id),
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
     assert result.name == "a", "should return the requested agent"
     assert isinstance(result, AgentInfo), "should return an AgentInfo"
@@ -296,7 +260,7 @@ async def test_get_agent_impl_returns_mcp_servers_and_skills(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     name="a",
                     mcp_servers=[
                         {"name": "ctx7", "type": "url", "url": "https://ctx7.example/mcp"}
@@ -305,8 +269,8 @@ async def test_get_agent_impl_returns_mcp_servers_and_skills(
                         {"type": "custom", "skill_id": "skill_build", "version": "1"},
                         {"type": "anthropic", "skill_id": "xlsx", "version": "2"},
                     ],
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "a"},
-                ).model_dump(mode="json")
+                    tenant_id=tenant_id,
+                )
             ]
         ),
     )
@@ -329,13 +293,7 @@ async def test_get_agent_impl_returns_mcp_servers_and_skills(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
 
     assert [(s.name, s.url) for s in result.mcp_servers] == [
@@ -363,14 +321,14 @@ async def test_list_agents_impl_includes_mcp_servers_and_skills(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     name="demo",
                     mcp_servers=[
                         {"name": "docs", "type": "url", "url": "https://docs.example/mcp"}
                     ],
                     skills=[{"type": "custom", "skill_id": "skill_build", "version": "1"}],
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "demo"},
-                ).model_dump(mode="json")
+                    tenant_id=tenant_id,
+                )
             ]
         ),
     )
@@ -393,13 +351,7 @@ async def test_list_agents_impl_includes_mcp_servers_and_skills(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     rows = await _list_agents_impl(
         _runtime(client, session_factory=db_session_factory), auth, page=None
     )
@@ -422,13 +374,7 @@ async def test_get_agent_impl_raises_tool_error_not_found(
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     with pytest.raises(ToolError, match="not found"):
         await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "nope")
 
@@ -440,11 +386,11 @@ def _get_one(tenant_id: uuid.UUID, metadata: dict[str, str], system: str | None)
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     name="a",
                     system=system,
                     metadata={"daimon_tenant": str(tenant_id), "daimon_name": "a", **metadata},
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -459,13 +405,7 @@ async def test_get_agent_impl_returns_system_prompt_to_admin_on_editable_agent(
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     client = _get_one(tenant_id, {"daimon_account": str(account_id)}, "You are A.")
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
 
     result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
 
@@ -478,13 +418,7 @@ async def test_get_agent_impl_returns_empty_string_for_admin_when_agent_has_no_p
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     client = _get_one(tenant_id, {"daimon_account": str(account_id)}, None)
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
 
     result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
 
@@ -497,12 +431,8 @@ async def test_get_agent_impl_withholds_system_prompt_from_non_admin(
     tenant_id = await _make_tenant_with_default_agent(db_session_factory, agent_name="a")
     account_id = uuid.uuid4()
     client = _get_one(tenant_id, {"daimon_account": str(account_id)}, "secret prompt")
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.USER,
-        agent_id=uuid.uuid4(),
-        bound_channel_id="C_READ",
+    auth = auth_identity(
+        account_id, tenant_id, role=Role.USER, agent_id=uuid.uuid4(), bound_channel_id="C_READ"
     )
 
     result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
@@ -524,13 +454,7 @@ async def test_get_agent_impl_withholds_system_prompt_of_uneditable_agent_even_f
 ) -> None:
     tenant_id = uuid.uuid4()
     client = _get_one(tenant_id, metadata, "daimon prompt")
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id)
 
     result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
 
@@ -557,7 +481,7 @@ async def test_get_agent_impl_never_returns_another_tenants_agent_or_prompt(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_tenant_b",
                     name="shared-name",
                     system="tenant B prompt",
@@ -566,18 +490,12 @@ async def test_get_agent_impl_never_returns_another_tenants_agent_or_prompt(
                         "daimon_name": "shared-name",
                         "daimon_account": str(uuid.uuid4()),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_a,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_a)
 
     with pytest.raises(ToolError) as excinfo:
         await _get_agent_impl(
@@ -596,13 +514,7 @@ async def test_list_agents_impl_never_returns_system_prompt(
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
     client = _get_one(tenant_id, {"daimon_account": str(account_id)}, "You are A.")
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
 
     result = await _list_agents_impl(
         _runtime(client, session_factory=db_session_factory), auth, page=None
@@ -629,7 +541,7 @@ async def test_create_agent_impl_calls_ma_create(
 
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         created.append(json_body(req))
-        return httpx.Response(200, json=ma_agent(id="ag_new", name="demo").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(id="ag_new", name="demo"))
 
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
@@ -638,20 +550,12 @@ async def test_create_agent_impl_calls_ma_create(
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(
-            200, json=ma_agent(id="ag_new", name="demo").model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent_payload(id="ag_new", name="demo")),
     )
     client = build_fake_anthropic(router.dispatch)
 
     spec = AgentSpec(name="demo", model="claude-opus-4-5")
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     result = await _create_agent_impl(
         _runtime(client, session_factory=db_session_factory), auth, spec
     )
@@ -680,7 +584,7 @@ async def test_create_agent_impl_adds_base_toolset_when_caller_passes_only_mcp_t
 
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         created.append(json_body(req))
-        return httpx.Response(200, json=ma_agent(name="demo").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(name="demo"))
 
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
@@ -689,7 +593,7 @@ async def test_create_agent_impl_adds_base_toolset_when_caller_passes_only_mcp_t
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(200, json=ma_agent(name="demo").model_dump(mode="json")),
+        lambda _req, _m: httpx.Response(200, json=ma_agent_payload(name="demo")),
     )
     client = build_fake_anthropic(router.dispatch)
 
@@ -701,13 +605,7 @@ async def test_create_agent_impl_adds_base_toolset_when_caller_passes_only_mcp_t
             "mcp_servers": [{"type": "url", "name": "docs", "url": "https://docs.example/mcp"}],
         }
     )
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _create_agent_impl(_runtime(client, session_factory=db_session_factory), auth, spec)
 
     assert len(created) == 1, "should call MA create exactly once"
@@ -727,13 +625,7 @@ async def test_create_agent_impl_rejects_non_empty_skills() -> None:
         model="claude-opus-4-5",
         skills=[SkillRef(type="custom", skill_id="x")],
     )
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     with pytest.raises(ToolError, match="skills"):
         await _create_agent_impl(
             _runtime(MagicMock()),  # type: ignore[arg-type]
@@ -761,7 +653,7 @@ async def test_update_agent_impl_forwards_only_non_none_fields(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -769,7 +661,7 @@ async def test_update_agent_impl_forwards_only_non_none_fields(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -778,7 +670,7 @@ async def test_update_agent_impl_forwards_only_non_none_fields(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(
+            json=ma_agent_payload(
                 id="ag_a",
                 name="a",
                 metadata={
@@ -786,19 +678,13 @@ async def test_update_agent_impl_forwards_only_non_none_fields(
                     "daimon_name": "a",
                     "daimon_account": str(account_id),
                 },
-            ).model_dump(mode="json"),
+            ),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     row = await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -834,15 +720,13 @@ async def test_update_agent_impl_returns_applies_for_model_change(
     router.add(
         "GET",
         r"/v1/agents",
-        lambda _req, _m: list_response(
-            [ma_agent(id="ag_a", name="a", metadata=metadata).model_dump(mode="json")]
-        ),
+        lambda _req, _m: list_response([ma_agent_payload(id="ag_a", name="a", metadata=metadata)]),
     )
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
-            200, json=ma_agent(id="ag_a", name="a", metadata=metadata).model_dump(mode="json")
+            200, json=ma_agent_payload(id="ag_a", name="a", metadata=metadata)
         ),
     )
     router.add(
@@ -850,19 +734,11 @@ async def test_update_agent_impl_returns_applies_for_model_change(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(id="ag_a", name="a", model="claude-opus-5", metadata=metadata).model_dump(
-                mode="json"
-            ),
+            json=ma_agent_payload(id="ag_a", name="a", model="claude-opus-5", metadata=metadata),
         ),
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
 
     row = await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -897,15 +773,13 @@ async def test_update_agent_impl_returns_applies_for_system_change(
     router.add(
         "GET",
         r"/v1/agents",
-        lambda _req, _m: list_response(
-            [ma_agent(id="ag_a", name="a", metadata=metadata).model_dump(mode="json")]
-        ),
+        lambda _req, _m: list_response([ma_agent_payload(id="ag_a", name="a", metadata=metadata)]),
     )
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
-            200, json=ma_agent(id="ag_a", name="a", metadata=metadata).model_dump(mode="json")
+            200, json=ma_agent_payload(id="ag_a", name="a", metadata=metadata)
         ),
     )
     router.add(
@@ -913,19 +787,11 @@ async def test_update_agent_impl_returns_applies_for_system_change(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(id="ag_a", name="a", system="new prompt", metadata=metadata).model_dump(
-                mode="json"
-            ),
+            json=ma_agent_payload(id="ag_a", name="a", system="new prompt", metadata=metadata),
         ),
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
 
     row = await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -960,15 +826,13 @@ async def test_update_agent_impl_returns_applies_for_model_then_instructions_whe
     router.add(
         "GET",
         r"/v1/agents",
-        lambda _req, _m: list_response(
-            [ma_agent(id="ag_a", name="a", metadata=metadata).model_dump(mode="json")]
-        ),
+        lambda _req, _m: list_response([ma_agent_payload(id="ag_a", name="a", metadata=metadata)]),
     )
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
-            200, json=ma_agent(id="ag_a", name="a", metadata=metadata).model_dump(mode="json")
+            200, json=ma_agent_payload(id="ag_a", name="a", metadata=metadata)
         ),
     )
     router.add(
@@ -976,23 +840,13 @@ async def test_update_agent_impl_returns_applies_for_model_then_instructions_whe
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(
-                id="ag_a",
-                name="a",
-                model="claude-opus-5",
-                system="new prompt",
-                metadata=metadata,
-            ).model_dump(mode="json"),
+            json=ma_agent_payload(
+                id="ag_a", name="a", model="claude-opus-5", system="new prompt", metadata=metadata
+            ),
         ),
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
 
     row = await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -1027,7 +881,7 @@ async def test_update_agent_impl_rejects_empty_patch() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -1035,19 +889,13 @@ async def test_update_agent_impl_rejects_empty_patch() -> None:
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     with pytest.raises(ToolError, match="at least one field"):
         await _update_agent_impl(
             _runtime(client),
@@ -1075,7 +923,7 @@ async def test_update_agent_impl_forwards_empty_list_to_clear(
         captured.update(json_body(req))
         return httpx.Response(
             200,
-            json=ma_agent(id="ag_a", name="a", tools=[]).model_dump(mode="json"),
+            json=ma_agent_payload(id="ag_a", name="a", tools=[]),
         )
 
     router = MARouter()
@@ -1084,7 +932,7 @@ async def test_update_agent_impl_forwards_empty_list_to_clear(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -1092,27 +940,19 @@ async def test_update_agent_impl_forwards_empty_list_to_clear(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(
-            200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a")),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -1157,26 +997,14 @@ async def test_fork_agent_impl_creates_ma_agent_from_source_spec(
         "GET",
         r"/v1/agents",
         lambda _req, _m: list_response(
-            [
-                ma_agent(
-                    id="ag_src",
-                    name="source",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id="ag_src", name="source", tenant_id=tenant_id)]
         ),
     )
     router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     result = await _fork_agent_impl(
         _runtime(client, session_factory=db_session_factory, fernet=fernet),
@@ -1219,7 +1047,7 @@ def _fork_router(tenant_id: uuid.UUID, created: list[dict[str, Any]]) -> MARoute
                     "configs": [],
                 }
             ],
-            metadata={"daimon_tenant": str(tenant_id), "daimon_name": name},
+            tenant_id=tenant_id,
         )
         for name in ("src", "other")
     }
@@ -1278,11 +1106,10 @@ async def _member(db_session_factory: async_sessionmaker[AsyncSession], **change
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session)
         account = await make_account(session, tenant=tenant)
-    auth = AuthIdentity(
-        account_id=account.id,
-        tenant_id=tenant.id,
+    auth = auth_identity(
+        account.id,
+        tenant.id,
         role=Role.USER,
-        is_admin=False,
         platform="discord",
         platform_user_id="member-1",
         chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_src"),
@@ -1579,26 +1406,14 @@ async def test_fork_agent_impl_adds_base_toolset_when_source_lacks_it(
         "GET",
         r"/v1/agents",
         lambda _req, _m: list_response(
-            [
-                ma_agent(
-                    id="ag_src",
-                    name="source",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id="ag_src", name="source", tenant_id=tenant_id)]
         ),
     )
     router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     await _fork_agent_impl(
         _runtime(client, session_factory=db_session_factory, fernet=fernet),
@@ -1643,26 +1458,14 @@ async def test_fork_agent_impl_normalizes_stale_guidance_block(
         "GET",
         r"/v1/agents",
         lambda _req, _m: list_response(
-            [
-                ma_agent(
-                    id="ag_src",
-                    name="source",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id="ag_src", name="source", tenant_id=tenant_id)]
         ),
     )
     router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     await _fork_agent_impl(
         _runtime(client, session_factory=db_session_factory, fernet=fernet),
@@ -1706,26 +1509,14 @@ async def test_fork_agent_impl_adds_guidance_when_source_has_none(
         "GET",
         r"/v1/agents",
         lambda _req, _m: list_response(
-            [
-                ma_agent(
-                    id="ag_src",
-                    name="source",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id="ag_src", name="source", tenant_id=tenant_id)]
         ),
     )
     router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     await _fork_agent_impl(
         _runtime(client, session_factory=db_session_factory, fernet=fernet),
@@ -1778,7 +1569,7 @@ async def test_fork_agent_impl_skips_guidance_for_isolated_source(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_src",
                     name="source",
                     metadata={
@@ -1786,7 +1577,7 @@ async def test_fork_agent_impl_skips_guidance_for_isolated_source(
                         "daimon_name": "source",
                         MA_METADATA_KEY_ISOLATED: "true",
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -1794,13 +1585,7 @@ async def test_fork_agent_impl_skips_guidance_for_isolated_source(
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     await _fork_agent_impl(
         _runtime(client, session_factory=db_session_factory, fernet=fernet),
@@ -1830,7 +1615,7 @@ async def test_archive_agent_impl_calls_ma_archive(
 
     def on_archive(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
         archived.append(m.group(1))
-        return httpx.Response(200, json=ma_agent(id=m.group(1)).model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(id=m.group(1)))
 
     router = MARouter()
     router.add(
@@ -1838,7 +1623,7 @@ async def test_archive_agent_impl_calls_ma_archive(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_d",
                     name="doomed",
                     metadata={
@@ -1846,20 +1631,14 @@ async def test_archive_agent_impl_calls_ma_archive(
                         "daimon_name": "doomed",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)/archive", on_archive)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _archive_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "doomed")
 
     assert archived == ["ag_d"], "should archive the correct MA agent"
@@ -1892,7 +1671,7 @@ async def test_archive_agent_impl_succeeds_when_store_archive_fails(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_d",
                     name="doomed",
                     metadata={
@@ -1900,14 +1679,14 @@ async def test_archive_agent_impl_succeeds_when_store_archive_fails(
                         "daimon_name": "doomed",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
     router.add(
         "POST",
         r"/v1/agents/([^/]+)/archive",
-        lambda _req, m: httpx.Response(200, json=ma_agent(id=m.group(1)).model_dump(mode="json")),
+        lambda _req, m: httpx.Response(200, json=ma_agent_payload(id=m.group(1))),
     )
     router.add(
         "POST",
@@ -1919,13 +1698,7 @@ async def test_archive_agent_impl_succeeds_when_store_archive_fails(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant.id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant.id)
     # Must not raise despite the 500 from the memory-store archive.
     await _archive_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "doomed")
 
@@ -1938,7 +1711,7 @@ def _archive_router(tenant_id: uuid.UUID, account_id: uuid.UUID) -> MARouter:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_d",
                     name="doomed",
                     metadata={
@@ -1946,14 +1719,14 @@ def _archive_router(tenant_id: uuid.UUID, account_id: uuid.UUID) -> MARouter:
                         "daimon_name": "doomed",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
     router.add(
         "POST",
         r"/v1/agents/([^/]+)/archive",
-        lambda _req, m: httpx.Response(200, json=ma_agent(id=m.group(1)).model_dump(mode="json")),
+        lambda _req, m: httpx.Response(200, json=ma_agent_payload(id=m.group(1))),
     )
     return router
 
@@ -1977,13 +1750,7 @@ async def test_archive_agent_clears_scope_rows_naming_the_agent(
     await db_session.commit()
 
     client = build_fake_anthropic(_archive_router(tenant.id, account_id).dispatch)
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant.id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant.id)
 
     await _archive_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "doomed")
 
@@ -2033,13 +1800,7 @@ async def test_archive_agent_clears_scope_rows_even_when_the_memory_store_archiv
         ),
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant.id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant.id)
 
     await _archive_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "doomed")
 
@@ -2063,7 +1824,7 @@ async def test_create_agent_impl_stamps_daimon_account_when_called(
 
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         created.append(json_body(req))
-        return httpx.Response(200, json=ma_agent(name="demo").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(name="demo"))
 
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
@@ -2072,18 +1833,12 @@ async def test_create_agent_impl_stamps_daimon_account_when_called(
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(200, json=ma_agent(name="demo").model_dump(mode="json")),
+        lambda _req, _m: httpx.Response(200, json=ma_agent_payload(name="demo")),
     )
     client = build_fake_anthropic(router.dispatch)
 
     spec = AgentSpec(name="demo", model="claude-opus-4-5")
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _create_agent_impl(_runtime(client, session_factory=db_session_factory), auth, spec)
     assert len(created) == 1, "should call MA create exactly once"
     assert created[0].get("metadata", {}).get("daimon_account") == str(guild_account), (
@@ -2107,7 +1862,7 @@ async def test_create_agent_merges_daimon_mcp_when_public_url_set(
 
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         created.append(json_body(req))
-        return httpx.Response(200, json=ma_agent(name="demo").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(name="demo"))
 
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
@@ -2115,18 +1870,12 @@ async def test_create_agent_merges_daimon_mcp_when_public_url_set(
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(200, json=ma_agent(name="demo").model_dump(mode="json")),
+        lambda _req, _m: httpx.Response(200, json=ma_agent_payload(name="demo")),
     )
     client = build_fake_anthropic(router.dispatch)
 
     spec = AgentSpec(name="demo", model="claude-opus-4-5")
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _create_agent_impl(
         _runtime(client, public_url=public_url, session_factory=db_session_factory),
         auth,
@@ -2165,7 +1914,7 @@ async def test_create_agent_stamps_spec_hash_and_managed_false(
 
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         created.append(json_body(req))
-        return httpx.Response(200, json=ma_agent(name="demo").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(name="demo"))
 
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
@@ -2173,18 +1922,12 @@ async def test_create_agent_stamps_spec_hash_and_managed_false(
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(200, json=ma_agent(name="demo").model_dump(mode="json")),
+        lambda _req, _m: httpx.Response(200, json=ma_agent_payload(name="demo")),
     )
     client = build_fake_anthropic(router.dispatch)
 
     spec = AgentSpec(name="demo", model="claude-opus-4-5")
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _create_agent_impl(_runtime(client, session_factory=db_session_factory), auth, spec)
 
     assert len(created) == 1, "should call MA create exactly once"
@@ -2226,26 +1969,14 @@ async def test_fork_agent_impl_stamps_daimon_account_on_clone(
         "GET",
         r"/v1/agents",
         lambda _req, _m: list_response(
-            [
-                ma_agent(
-                    id="ag_src",
-                    name="source",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id="ag_src", name="source", tenant_id=tenant_id)]
         ),
     )
     router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     await _fork_agent_impl(
         _runtime(client, session_factory=db_session_factory, fernet=fernet),
@@ -2291,13 +2022,7 @@ async def test_fork_agent_impl_copies_source_skills(
         "GET",
         r"/v1/agents",
         lambda _req, _m: list_response(
-            [
-                ma_agent(
-                    id="ag_src",
-                    name="source",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id="ag_src", name="source", tenant_id=tenant_id)]
         ),
     )
     router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
@@ -2305,13 +2030,7 @@ async def test_fork_agent_impl_copies_source_skills(
     router.add("GET", r"/v1/skills", lambda _req, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     await _fork_agent_impl(
         _runtime(client, session_factory=db_session_factory, fernet=fernet),
@@ -2396,13 +2115,7 @@ async def test_fork_agent_reports_the_skills_it_copied_even_when_its_reread_fail
     )
     await db_session.commit()
     client = build_fake_anthropic(combine_handlers(handler, make_fake_ma_handler(state)))
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant.id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(uuid.uuid4(), tenant.id)
 
     info = await _fork_agent_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -2439,26 +2152,14 @@ async def test_fork_agent_merges_daimon_mcp_when_public_url_set(
         "GET",
         r"/v1/agents",
         lambda _req, _m: list_response(
-            [
-                ma_agent(
-                    id="ag_src",
-                    name="source",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id="ag_src", name="source", tenant_id=tenant_id)]
         ),
     )
     router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     await _fork_agent_impl(
         _runtime(client, public_url=public_url, session_factory=db_session_factory, fernet=fernet),
@@ -2508,26 +2209,14 @@ async def test_fork_agent_skips_mcp_merge_when_public_url_none(
         "GET",
         r"/v1/agents",
         lambda _req, _m: list_response(
-            [
-                ma_agent(
-                    id="ag_src",
-                    name="source",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id="ag_src", name="source", tenant_id=tenant_id)]
         ),
     )
     router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     # public_url=None (default) — no daimon-mcp merge expected
     await _fork_agent_impl(
@@ -2562,13 +2251,7 @@ def _fork_agent_router(
         "GET",
         r"/v1/agents",
         lambda _req, _m: list_response(
-            [
-                ma_agent(
-                    id=source_id,
-                    name=source_name,
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": source_name},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id=source_id, name=source_name, tenant_id=tenant_id)]
         ),
     )
     router.add(
@@ -2576,15 +2259,13 @@ def _fork_agent_router(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(id=source_id, name=source_name).model_dump(mode="json"),
+            json=ma_agent_payload(id=source_id, name=source_name),
         ),
     )
     router.add(
         "POST",
         r"/v1/agents",
-        lambda _req, _m: httpx.Response(
-            200, json=ma_agent(id=fork_id, name=fork_name).model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent_payload(id=fork_id, name=fork_name)),
     )
     return router
 
@@ -2608,7 +2289,7 @@ async def test_update_agent_impl_passes_skills_to_ma_when_provided(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -2616,28 +2297,20 @@ async def test_update_agent_impl_passes_skills_to_ma_when_provided(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(
-            200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a")),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
     skills: list[dict[str, Any]] = [{"type": "anthropic", "skill_id": "cli-auth"}]
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -2673,7 +2346,7 @@ async def test_update_agent_impl_omits_skills_from_patch_when_none(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -2681,27 +2354,19 @@ async def test_update_agent_impl_omits_skills_from_patch_when_none(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(
-            200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a")),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -2735,7 +2400,7 @@ async def test_update_agent_impl_accepts_skills_only_patch(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -2743,28 +2408,20 @@ async def test_update_agent_impl_accepts_skills_only_patch(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(
-            200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a")),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
     skills: list[dict[str, Any]] = [{"type": "anthropic", "skill_id": "cli-auth"}]
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     # All other fields are None — must not raise "at least one field" guard.
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -2799,7 +2456,7 @@ async def test_update_agent_impl_resolves_skill_names_to_skill_ids(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -2807,7 +2464,7 @@ async def test_update_agent_impl_resolves_skill_names_to_skill_ids(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -2831,20 +2488,12 @@ async def test_update_agent_impl_resolves_skill_names_to_skill_ids(
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(
-            200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a")),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -2882,7 +2531,7 @@ async def test_update_agent_impl_rejects_custom_skill_dict(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -2890,27 +2539,19 @@ async def test_update_agent_impl_rejects_custom_skill_dict(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(
-            200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a")),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     with pytest.raises(ToolError, match="raw skill ids"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -2945,7 +2586,7 @@ async def test_attach_mcp_server_impl_appends_new_entry_preserving_existing(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     mcp_servers=[
@@ -2956,7 +2597,7 @@ async def test_attach_mcp_server_impl_appends_new_entry_preserving_existing(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -2965,23 +2606,17 @@ async def test_attach_mcp_server_impl_appends_new_entry_preserving_existing(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(
+            json=ma_agent_payload(
                 id="ag_a",
                 name="a",
                 mcp_servers=[{"name": "ctx7", "type": "url", "url": "https://ctx7.example/mcp"}],
-            ).model_dump(mode="json"),
+            ),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _attach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -3005,7 +2640,7 @@ async def test_attach_mcp_server_impl_is_noop_when_same_name_and_same_url_alread
 
     def on_update(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
         update_calls.append(m.group(1))
-        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a"))
 
     router = MARouter()
     router.add(
@@ -3013,7 +2648,7 @@ async def test_attach_mcp_server_impl_is_noop_when_same_name_and_same_url_alread
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     mcp_servers=[
@@ -3024,20 +2659,14 @@ async def test_attach_mcp_server_impl_is_noop_when_same_name_and_same_url_alread
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     result = await _attach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -3063,7 +2692,7 @@ async def test_attach_mcp_server_impl_replaces_when_same_name_different_url(
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a"))
 
     router = MARouter()
     router.add(
@@ -3071,7 +2700,7 @@ async def test_attach_mcp_server_impl_replaces_when_same_name_different_url(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     mcp_servers=[{"name": "ctx7", "type": "url", "url": "https://OLD.example/mcp"}],
@@ -3080,7 +2709,7 @@ async def test_attach_mcp_server_impl_replaces_when_same_name_different_url(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -3089,25 +2718,17 @@ async def test_attach_mcp_server_impl_replaces_when_same_name_different_url(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(
+            json=ma_agent_payload(
                 id="ag_a",
                 name="a",
                 mcp_servers=[{"name": "ctx7", "type": "url", "url": "https://OLD.example/mcp"}],
-            ).model_dump(mode="json"),
+            ),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        platform="discord",
-        platform_user_id="admin",
-    )
+    auth = auth_identity(account_id, tenant_id, platform="discord", platform_user_id="admin")
     await _attach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -3131,7 +2752,7 @@ async def test_attach_mcp_server_impl_appends_to_empty_mcp_servers(
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a"))
 
     router = MARouter()
     router.add(
@@ -3139,7 +2760,7 @@ async def test_attach_mcp_server_impl_appends_to_empty_mcp_servers(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     mcp_servers=[],
@@ -3148,7 +2769,7 @@ async def test_attach_mcp_server_impl_appends_to_empty_mcp_servers(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -3157,19 +2778,13 @@ async def test_attach_mcp_server_impl_appends_to_empty_mcp_servers(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(id="ag_a", name="a", mcp_servers=[]).model_dump(mode="json"),
+            json=ma_agent_payload(id="ag_a", name="a", mcp_servers=[]),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _attach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -3204,7 +2819,7 @@ def _list_one(agent_kwargs: dict[str, Any]) -> tuple[MARouter, AsyncAnthropic]:
     router.add(
         "POST",
         r"/v1/agents/([^/]+)/archive",
-        lambda _req, m: httpx.Response(200, json=ma_agent(id=m.group(1)).model_dump(mode="json")),
+        lambda _req, m: httpx.Response(200, json=ma_agent_payload(id=m.group(1))),
     )
     return router, build_fake_anthropic(router.dispatch)
 
@@ -3233,13 +2848,7 @@ async def test_update_agent_impl_rejects_system_agent_no_daimon_account(
         }
     )
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     with pytest.raises(ToolError, match="system agent"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -3284,13 +2893,7 @@ async def test_update_agent_impl_rejects_seeded_agent_that_is_also_account_stamp
         }
     )
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     with pytest.raises(ToolError, match="managed by defaults") as refused:
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -3354,13 +2957,7 @@ async def test_update_agent_impl_allows_a_panel_fork_of_a_seeded_agent(
     )
     router.add("POST", r"/v1/agents/ag_fork", on_update)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     info = await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -3390,9 +2987,7 @@ async def test_update_agent_impl_allows_any_stamped_agent_for_admin(
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(
-            200, json=ma_agent(id="ag_other", name="alices-agent").model_dump(mode="json")
-        )
+        return httpx.Response(200, json=ma_agent_payload(id="ag_other", name="alices-agent"))
 
     router = MARouter()
     router.add(
@@ -3400,7 +2995,7 @@ async def test_update_agent_impl_allows_any_stamped_agent_for_admin(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_other",
                     name="alices-agent",
                     metadata={
@@ -3408,7 +3003,7 @@ async def test_update_agent_impl_allows_any_stamped_agent_for_admin(
                         "daimon_name": "alices-agent",
                         "daimon_account": str(other_account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -3416,19 +3011,13 @@ async def test_update_agent_impl_allows_any_stamped_agent_for_admin(
         "GET",
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
-            200, json=ma_agent(id="ag_other", name="alices-agent").model_dump(mode="json")
+            200, json=ma_agent_payload(id="ag_other", name="alices-agent")
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=caller_account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(caller_account_id, tenant_id)
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -3455,7 +3044,7 @@ async def test_update_agent_impl_allows_owned_agent(
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a"))
 
     router = MARouter()
     router.add(
@@ -3463,7 +3052,7 @@ async def test_update_agent_impl_allows_owned_agent(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -3471,27 +3060,19 @@ async def test_update_agent_impl_allows_owned_agent(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(
-            200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a")),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -3520,13 +3101,7 @@ async def test_attach_mcp_server_impl_rejects_system_agent_no_daimon_account(
         }
     )
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     with pytest.raises(ToolError, match="system agent"):
         await _attach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -3552,9 +3127,7 @@ async def test_attach_mcp_server_impl_allows_any_stamped_agent_for_admin(
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(
-            200, json=ma_agent(id="ag_other", name="alices-agent").model_dump(mode="json")
-        )
+        return httpx.Response(200, json=ma_agent_payload(id="ag_other", name="alices-agent"))
 
     router = MARouter()
     router.add(
@@ -3562,7 +3135,7 @@ async def test_attach_mcp_server_impl_allows_any_stamped_agent_for_admin(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_other",
                     name="alices-agent",
                     mcp_servers=[],
@@ -3571,7 +3144,7 @@ async def test_attach_mcp_server_impl_allows_any_stamped_agent_for_admin(
                         "daimon_name": "alices-agent",
                         "daimon_account": str(other_account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -3580,21 +3153,13 @@ async def test_attach_mcp_server_impl_allows_any_stamped_agent_for_admin(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(id="ag_other", name="alices-agent", mcp_servers=[]).model_dump(
-                mode="json"
-            ),
+            json=ma_agent_payload(id="ag_other", name="alices-agent", mcp_servers=[]),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=caller_account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(caller_account_id, tenant_id)
     await _attach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -3619,13 +3184,7 @@ async def test_archive_agent_impl_rejects_system_agent_no_daimon_account(
         }
     )
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     with pytest.raises(ToolError, match="system agent"):
         await _archive_agent_impl(
             _runtime(client, session_factory=db_session_factory), auth, "daimon"
@@ -3648,7 +3207,7 @@ async def test_archive_agent_impl_allows_any_stamped_agent_for_admin(
 
     def on_archive(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
         archived.append(m.group(1))
-        return httpx.Response(200, json=ma_agent(id=m.group(1)).model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(id=m.group(1)))
 
     router = MARouter()
     router.add(
@@ -3656,7 +3215,7 @@ async def test_archive_agent_impl_allows_any_stamped_agent_for_admin(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_other",
                     name="alices-agent",
                     metadata={
@@ -3664,20 +3223,14 @@ async def test_archive_agent_impl_allows_any_stamped_agent_for_admin(
                         "daimon_name": "alices-agent",
                         "daimon_account": str(other_account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)/archive", on_archive)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=caller_account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(caller_account_id, tenant_id)
     await _archive_agent_impl(
         _runtime(client, session_factory=db_session_factory), auth, "alices-agent"
     )
@@ -3708,7 +3261,7 @@ async def test_update_agent_impl_unions_skills_with_existing_ma_skills(
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a"))
 
     router = MARouter()
     router.add(
@@ -3716,7 +3269,7 @@ async def test_update_agent_impl_unions_skills_with_existing_ma_skills(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     skills=[
@@ -3728,7 +3281,7 @@ async def test_update_agent_impl_unions_skills_with_existing_ma_skills(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -3737,26 +3290,20 @@ async def test_update_agent_impl_unions_skills_with_existing_ma_skills(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(
+            json=ma_agent_payload(
                 id="ag_a",
                 name="a",
                 skills=[
                     {"type": "anthropic", "skill_id": "cli-auth", "version": "1"},
                     {"type": "anthropic", "skill_id": "skill-repo", "version": "1"},
                 ],
-            ).model_dump(mode="json"),
+            ),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -3784,7 +3331,7 @@ async def test_update_agent_impl_unions_mcp_servers_with_existing_ma_servers(
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a"))
 
     router = MARouter()
     router.add(
@@ -3792,7 +3339,7 @@ async def test_update_agent_impl_unions_mcp_servers_with_existing_ma_servers(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     mcp_servers=[
@@ -3803,7 +3350,7 @@ async def test_update_agent_impl_unions_mcp_servers_with_existing_ma_servers(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -3812,25 +3359,19 @@ async def test_update_agent_impl_unions_mcp_servers_with_existing_ma_servers(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(
+            json=ma_agent_payload(
                 id="ag_a",
                 name="a",
                 mcp_servers=[
                     {"name": "daimon-mcp", "type": "url", "url": "https://daimon.example/mcp"},
                 ],
-            ).model_dump(mode="json"),
+            ),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -3857,7 +3398,7 @@ async def test_update_agent_impl_unions_tools_with_existing_ma_tools(
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a"))
 
     router = MARouter()
     router.add(
@@ -3865,7 +3406,7 @@ async def test_update_agent_impl_unions_tools_with_existing_ma_tools(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     tools=[
@@ -3889,7 +3430,7 @@ async def test_update_agent_impl_unions_tools_with_existing_ma_tools(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -3898,7 +3439,7 @@ async def test_update_agent_impl_unions_tools_with_existing_ma_tools(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(
+            json=ma_agent_payload(
                 id="ag_a",
                 name="a",
                 tools=[
@@ -3917,19 +3458,13 @@ async def test_update_agent_impl_unions_tools_with_existing_ma_tools(
                         "default_config": _ALLOW_ALL,
                     },
                 ],
-            ).model_dump(mode="json"),
+            ),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -3963,7 +3498,7 @@ async def test_update_agent_impl_caller_wins_on_skill_id_collision(
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a"))
 
     router = MARouter()
     router.add(
@@ -3971,7 +3506,7 @@ async def test_update_agent_impl_caller_wins_on_skill_id_collision(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     skills=[{"type": "anthropic", "skill_id": "cli-auth", "version": "1"}],
@@ -3980,7 +3515,7 @@ async def test_update_agent_impl_caller_wins_on_skill_id_collision(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -3989,23 +3524,17 @@ async def test_update_agent_impl_caller_wins_on_skill_id_collision(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(
+            json=ma_agent_payload(
                 id="ag_a",
                 name="a",
                 skills=[{"type": "anthropic", "skill_id": "cli-auth", "version": "1"}],
-            ).model_dump(mode="json"),
+            ),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -4035,7 +3564,7 @@ async def test_attach_mcp_server_impl_also_appends_matching_mcp_toolset(
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a"))
 
     router = MARouter()
     router.add(
@@ -4043,7 +3572,7 @@ async def test_attach_mcp_server_impl_also_appends_matching_mcp_toolset(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     mcp_servers=[],
@@ -4053,7 +3582,7 @@ async def test_attach_mcp_server_impl_also_appends_matching_mcp_toolset(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -4062,19 +3591,13 @@ async def test_attach_mcp_server_impl_also_appends_matching_mcp_toolset(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(id="ag_a", name="a", mcp_servers=[], tools=[]).model_dump(mode="json"),
+            json=ma_agent_payload(id="ag_a", name="a", mcp_servers=[], tools=[]),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _attach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -4107,7 +3630,7 @@ async def test_attach_mcp_server_impl_preserves_existing_tools_when_appending_to
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a"))
 
     router = MARouter()
     router.add(
@@ -4115,7 +3638,7 @@ async def test_attach_mcp_server_impl_preserves_existing_tools_when_appending_to
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     mcp_servers=[
@@ -4142,7 +3665,7 @@ async def test_attach_mcp_server_impl_preserves_existing_tools_when_appending_to
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -4151,7 +3674,7 @@ async def test_attach_mcp_server_impl_preserves_existing_tools_when_appending_to
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(
+            json=ma_agent_payload(
                 id="ag_a",
                 name="a",
                 mcp_servers=[
@@ -4173,19 +3696,13 @@ async def test_attach_mcp_server_impl_preserves_existing_tools_when_appending_to
                         "default_config": _ALLOW_ALL,
                     },
                 ],
-            ).model_dump(mode="json"),
+            ),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _attach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -4219,7 +3736,7 @@ async def test_attach_mcp_server_impl_does_not_duplicate_mcp_toolset_on_same_nam
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a"))
 
     router = MARouter()
     router.add(
@@ -4227,7 +3744,7 @@ async def test_attach_mcp_server_impl_does_not_duplicate_mcp_toolset_on_same_nam
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     mcp_servers=[{"name": "ctx7", "type": "url", "url": "https://OLD.example/mcp"}],
@@ -4244,7 +3761,7 @@ async def test_attach_mcp_server_impl_does_not_duplicate_mcp_toolset_on_same_nam
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -4253,7 +3770,7 @@ async def test_attach_mcp_server_impl_does_not_duplicate_mcp_toolset_on_same_nam
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(
+            json=ma_agent_payload(
                 id="ag_a",
                 name="a",
                 mcp_servers=[{"name": "ctx7", "type": "url", "url": "https://OLD.example/mcp"}],
@@ -4265,21 +3782,13 @@ async def test_attach_mcp_server_impl_does_not_duplicate_mcp_toolset_on_same_nam
                         "default_config": _ALLOW_ALL,
                     }
                 ],
-            ).model_dump(mode="json"),
+            ),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-        platform="discord",
-        platform_user_id="admin",
-    )
+    auth = auth_identity(account_id, tenant_id, platform="discord", platform_user_id="admin")
     await _attach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -4306,13 +3815,7 @@ async def test_attach_mcp_server_impl_raises_when_agent_not_found(
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     with pytest.raises(ToolError, match="agent 'missing-agent' not found"):
         await _attach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -4380,7 +3883,7 @@ async def test_update_agent_impl_raises_clear_error_when_skills_exceed_org_cap(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -4388,16 +3891,14 @@ async def test_update_agent_impl_raises_clear_error_when_skills_exceed_org_cap(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(
-            200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a")),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
@@ -4405,13 +3906,7 @@ async def test_update_agent_impl_raises_clear_error_when_skills_exceed_org_cap(
     skills: list[dict[str, Any]] = [
         {"type": "anthropic", "skill_id": f"skill_{i}"} for i in range(24)
     ]
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     with pytest.raises(ToolError, match="exceeds this organization"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -4445,7 +3940,7 @@ async def test_create_agent_impl_rejects_guild_stamped_name_collision() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_existing",
                     name="demo",
                     metadata={
@@ -4453,7 +3948,7 @@ async def test_create_agent_impl_rejects_guild_stamped_name_collision() -> None:
                         "daimon_name": "demo",
                         "daimon_account": str(guild_account),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -4467,13 +3962,7 @@ async def test_create_agent_impl_rejects_guild_stamped_name_collision() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     spec = AgentSpec(name="demo", model="claude-opus-4-5")
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     with pytest.raises(ToolError, match="already exists"):
         await _create_agent_impl(_runtime(client), auth, spec)
 
@@ -4492,7 +3981,7 @@ async def test_fork_agent_impl_rejects_guild_stamped_name_collision(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_existing",
                     name="myfork",
                     metadata={
@@ -4500,7 +3989,7 @@ async def test_fork_agent_impl_rejects_guild_stamped_name_collision(
                         "daimon_name": "myfork",
                         "daimon_account": str(guild_account),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -4513,13 +4002,7 @@ async def test_fork_agent_impl_rejects_guild_stamped_name_collision(
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     with pytest.raises(ToolError, match="already exists"):
         await _fork_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -4538,7 +4021,7 @@ async def test_fork_agent_impl_new_copy_if_taken_takes_the_next_free_name(
 
     def tagged(agent_id: str, name: str) -> dict[str, Any]:
         meta = {"daimon_tenant": str(tenant_id), "daimon_name": name}
-        return ma_agent(id=agent_id, name=name, metadata=meta).model_dump(mode="json")
+        return ma_agent_payload(id=agent_id, name=name, metadata=meta)
 
     created: list[dict[str, Any]] = []
 
@@ -4567,13 +4050,7 @@ async def test_fork_agent_impl_new_copy_if_taken_takes_the_next_free_name(
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     result = await _fork_agent_impl(
         _runtime(client, session_factory=db_session_factory, fernet=fernet),
@@ -4611,7 +4088,7 @@ async def test_create_agent_rejects_name_held_by_other_owner() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_personal",
                     name="demo",
                     metadata={
@@ -4619,7 +4096,7 @@ async def test_create_agent_rejects_name_held_by_other_owner() -> None:
                         "daimon_name": "demo",
                         "daimon_account": str(personal_account),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -4627,13 +4104,7 @@ async def test_create_agent_rejects_name_held_by_other_owner() -> None:
     client = build_fake_anthropic(router.dispatch)
 
     spec = AgentSpec(name="demo", model="claude-opus-4-5")
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     with pytest.raises(ToolError, match="already exists"):
         await _create_agent_impl(_runtime(client), auth, spec)
 
@@ -4661,7 +4132,7 @@ async def test_fork_agent_rejects_new_name_held_by_other_owner(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_personal",
                     name="myfork",
                     metadata={
@@ -4669,20 +4140,14 @@ async def test_fork_agent_rejects_new_name_held_by_other_owner(
                         "daimon_name": "myfork",
                         "daimon_account": str(personal_account),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     with pytest.raises(ToolError, match="already exists"):
         await _fork_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -4716,7 +4181,7 @@ async def test_update_agent_impl_raises_tool_error_when_skills_from_foreign_tena
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -4724,7 +4189,7 @@ async def test_update_agent_impl_raises_tool_error_when_skills_from_foreign_tena
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -4756,13 +4221,7 @@ async def test_update_agent_impl_raises_tool_error_when_skills_from_foreign_tena
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_a,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_a)
     with pytest.raises(ToolError) as exc_info:
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -4800,7 +4259,7 @@ async def test_update_agent_impl_raises_tool_error_for_raw_custom_skill_dict(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -4808,20 +4267,14 @@ async def test_update_agent_impl_raises_tool_error_for_raw_custom_skill_dict(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
     router.add("GET", r"/v1/skills", lambda _req, _m: list_response([]))
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     with pytest.raises(ToolError, match="raw skill ids"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -4851,11 +4304,11 @@ async def test_agent_info_skill_names_are_bare_for_own_namespace_pins(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     name="a",
                     skills=[{"type": "custom", "skill_id": "skill_auth", "version": "1"}],
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "a"},
-                ).model_dump(mode="json")
+                    tenant_id=tenant_id,
+                )
             ]
         ),
     )
@@ -4878,13 +4331,7 @@ async def test_agent_info_skill_names_are_bare_for_own_namespace_pins(
     )
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     result = await _get_agent_impl(_runtime(client, session_factory=db_session_factory), auth, "a")
 
     custom = next(s for s in result.skills if s.type == "custom")
@@ -4929,7 +4376,7 @@ async def test_attach_mcp_server_rejects_reserved_name() -> None:
 
     def on_update(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
         update_calls.append(m.group(1))
-        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a"))
 
     router = MARouter()
     router.add(
@@ -4937,7 +4384,7 @@ async def test_attach_mcp_server_rejects_reserved_name() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -4945,27 +4392,19 @@ async def test_attach_mcp_server_rejects_reserved_name() -> None:
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(
-            200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a")),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     with pytest.raises(ToolError, match="reserved built-in daimon server"):
         await _attach_mcp_server_impl(
             _runtime(client),
@@ -4987,7 +4426,7 @@ async def test_attach_mcp_server_rejects_public_url_under_other_name() -> None:
 
     def on_update(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
         update_calls.append(m.group(1))
-        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a"))
 
     router = MARouter()
     router.add(
@@ -4995,7 +4434,7 @@ async def test_attach_mcp_server_rejects_public_url_under_other_name() -> None:
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -5003,27 +4442,19 @@ async def test_attach_mcp_server_rejects_public_url_under_other_name() -> None:
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _req, _m: httpx.Response(
-            200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a")),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     # Exact match
     with pytest.raises(ToolError, match="Daimon's own connection"):
         await _attach_mcp_server_impl(
@@ -5058,7 +4489,7 @@ async def test_attach_mcp_server_allows_unrelated_server(
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a"))
 
     router = MARouter()
     router.add(
@@ -5066,7 +4497,7 @@ async def test_attach_mcp_server_allows_unrelated_server(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     mcp_servers=[],
@@ -5075,7 +4506,7 @@ async def test_attach_mcp_server_allows_unrelated_server(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -5084,19 +4515,13 @@ async def test_attach_mcp_server_allows_unrelated_server(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(id="ag_a", name="a", mcp_servers=[]).model_dump(mode="json"),
+            json=ma_agent_payload(id="ag_a", name="a", mcp_servers=[]),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     # Completely different name + URL — should succeed
     result = await _attach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory, public_url=public_url),
@@ -5128,7 +4553,7 @@ async def test_update_agent_adds_base_toolset_when_attaching_skills_to_toolless_
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a"))
 
     router = MARouter()
     router.add(
@@ -5136,10 +4561,9 @@ async def test_update_agent_adds_base_toolset_when_attaching_skills_to_toolless_
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
-                    # No agent_toolset_20260401 — legacy toolless agent
                     tools=[
                         {
                             "type": "mcp_toolset",
@@ -5153,7 +4577,7 @@ async def test_update_agent_adds_base_toolset_when_attaching_skills_to_toolless_
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -5162,7 +4586,7 @@ async def test_update_agent_adds_base_toolset_when_attaching_skills_to_toolless_
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(
+            json=ma_agent_payload(
                 id="ag_a",
                 name="a",
                 tools=[
@@ -5173,19 +4597,13 @@ async def test_update_agent_adds_base_toolset_when_attaching_skills_to_toolless_
                         "default_config": _ALLOW_ALL,
                     }
                 ],
-            ).model_dump(mode="json"),
+            ),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -5215,7 +4633,7 @@ async def test_update_agent_skips_tools_when_agent_already_has_base_toolset(
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         captured.update(json_body(req))
-        return httpx.Response(200, json=ma_agent(id="ag_a", name="a").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(id="ag_a", name="a"))
 
     router = MARouter()
     router.add(
@@ -5223,7 +4641,7 @@ async def test_update_agent_skips_tools_when_agent_already_has_base_toolset(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     tools=[
@@ -5238,7 +4656,7 @@ async def test_update_agent_skips_tools_when_agent_already_has_base_toolset(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -5247,7 +4665,7 @@ async def test_update_agent_skips_tools_when_agent_already_has_base_toolset(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(
+            json=ma_agent_payload(
                 id="ag_a",
                 name="a",
                 tools=[
@@ -5257,19 +4675,13 @@ async def test_update_agent_skips_tools_when_agent_already_has_base_toolset(
                         "default_config": _ALLOW_ALL,
                     }
                 ],
-            ).model_dump(mode="json"),
+            ),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -5305,7 +4717,7 @@ async def test_update_agent_retries_once_on_version_conflict(
         retrieve_calls.append("retrieve")
         return httpx.Response(
             200,
-            json=ma_agent(
+            json=ma_agent_payload(
                 id="ag_a",
                 name="a",
                 version=1,
@@ -5314,7 +4726,7 @@ async def test_update_agent_retries_once_on_version_conflict(
                     "daimon_name": "a",
                     "daimon_account": str(account_id),
                 },
-            ).model_dump(mode="json"),
+            ),
         )
 
     def on_update(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
@@ -5323,9 +4735,7 @@ async def test_update_agent_retries_once_on_version_conflict(
             return _conflict_response()
         return httpx.Response(
             200,
-            json=ma_agent(id="ag_a", name="a", description="updated", version=2).model_dump(
-                mode="json"
-            ),
+            json=ma_agent_payload(id="ag_a", name="a", description="updated", version=2),
         )
 
     router = MARouter()
@@ -5334,7 +4744,7 @@ async def test_update_agent_retries_once_on_version_conflict(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -5342,7 +4752,7 @@ async def test_update_agent_retries_once_on_version_conflict(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -5350,13 +4760,7 @@ async def test_update_agent_retries_once_on_version_conflict(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_no_retry_anthropic(router)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     result = await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -5385,7 +4789,7 @@ async def test_update_agent_maps_residual_conflict_to_tool_error(
     def on_retrieve(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         return httpx.Response(
             200,
-            json=ma_agent(
+            json=ma_agent_payload(
                 id="ag_a",
                 name="a",
                 metadata={
@@ -5393,7 +4797,7 @@ async def test_update_agent_maps_residual_conflict_to_tool_error(
                     "daimon_name": "a",
                     "daimon_account": str(account_id),
                 },
-            ).model_dump(mode="json"),
+            ),
         )
 
     def on_update(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
@@ -5405,7 +4809,7 @@ async def test_update_agent_maps_residual_conflict_to_tool_error(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -5413,7 +4817,7 @@ async def test_update_agent_maps_residual_conflict_to_tool_error(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -5421,13 +4825,7 @@ async def test_update_agent_maps_residual_conflict_to_tool_error(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_no_retry_anthropic(router)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     with pytest.raises(ToolError, match="modified concurrently"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -5456,7 +4854,7 @@ async def test_attach_mcp_server_retries_once_on_version_conflict(
         retrieve_calls.append("retrieve")
         return httpx.Response(
             200,
-            json=ma_agent(
+            json=ma_agent_payload(
                 id="ag_a",
                 name="a",
                 mcp_servers=[],
@@ -5466,7 +4864,7 @@ async def test_attach_mcp_server_retries_once_on_version_conflict(
                     "daimon_name": "a",
                     "daimon_account": str(account_id),
                 },
-            ).model_dump(mode="json"),
+            ),
         )
 
     def on_update(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
@@ -5475,7 +4873,7 @@ async def test_attach_mcp_server_retries_once_on_version_conflict(
             return _conflict_response()
         return httpx.Response(
             200,
-            json=ma_agent(id="ag_a", name="a", version=2).model_dump(mode="json"),
+            json=ma_agent_payload(id="ag_a", name="a", version=2),
         )
 
     router = MARouter()
@@ -5484,7 +4882,7 @@ async def test_attach_mcp_server_retries_once_on_version_conflict(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     mcp_servers=[],
@@ -5493,7 +4891,7 @@ async def test_attach_mcp_server_retries_once_on_version_conflict(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -5501,13 +4899,7 @@ async def test_attach_mcp_server_retries_once_on_version_conflict(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_no_retry_anthropic(router)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     result = await _attach_mcp_server_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -5530,7 +4922,7 @@ async def test_attach_mcp_server_maps_residual_conflict_to_tool_error(
     def on_retrieve(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         return httpx.Response(
             200,
-            json=ma_agent(
+            json=ma_agent_payload(
                 id="ag_a",
                 name="a",
                 mcp_servers=[],
@@ -5540,7 +4932,7 @@ async def test_attach_mcp_server_maps_residual_conflict_to_tool_error(
                     "daimon_name": "a",
                     "daimon_account": str(account_id),
                 },
-            ).model_dump(mode="json"),
+            ),
         )
 
     def on_update(_req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
@@ -5552,7 +4944,7 @@ async def test_attach_mcp_server_maps_residual_conflict_to_tool_error(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     mcp_servers=[],
@@ -5561,7 +4953,7 @@ async def test_attach_mcp_server_maps_residual_conflict_to_tool_error(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -5569,13 +4961,7 @@ async def test_attach_mcp_server_maps_residual_conflict_to_tool_error(
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
     client = build_no_retry_anthropic(router)
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     with pytest.raises(ToolError, match="modified concurrently"):
         await _attach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -5608,7 +4994,7 @@ def _scoped_agent_router(
         captured.update(json_body(req))
         return httpx.Response(
             200,
-            json=ma_agent(id="ag_scoped", name=agent_name, mcp_servers=[]).model_dump(mode="json"),
+            json=ma_agent_payload(id="ag_scoped", name=agent_name, mcp_servers=[]),
         )
 
     router = MARouter()
@@ -5617,7 +5003,7 @@ def _scoped_agent_router(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_scoped",
                     name=agent_name,
                     mcp_servers=[],
@@ -5626,7 +5012,7 @@ def _scoped_agent_router(
                         "daimon_name": agent_name,
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -5635,7 +5021,7 @@ def _scoped_agent_router(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(id="ag_scoped", name=agent_name, mcp_servers=[]).model_dump(mode="json"),
+            json=ma_agent_payload(id="ag_scoped", name=agent_name, mcp_servers=[]),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
@@ -5670,7 +5056,7 @@ async def test_update_agent_impl_rejects_non_admin_system_patch_when_agent_reach
         tenant_id=tenant_id, account_id=account_id, agent_name="scoped-agent"
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
+    auth = auth_identity(account_id, tenant_id, role=Role.USER)
     with pytest.raises(ToolError, match="Changing 'scoped-agent' needs its owner or an admin"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -5694,7 +5080,7 @@ async def test_update_agent_impl_refuses_non_admin_description_patch_when_agent_
         tenant_id=tenant_id, account_id=account_id, agent_name="scoped-agent"
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
+    auth = auth_identity(account_id, tenant_id, role=Role.USER)
     with pytest.raises(ToolError, match="admin"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -5719,7 +5105,7 @@ async def test_update_agent_impl_rejects_non_admin_skills_patch_when_agent_reach
         tenant_id=tenant_id, account_id=account_id, agent_name="scoped-agent"
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
+    auth = auth_identity(account_id, tenant_id, role=Role.USER)
     with pytest.raises(ToolError, match="Changing 'scoped-agent' needs its owner or an admin"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -5743,7 +5129,7 @@ async def test_update_agent_impl_rejects_non_admin_mcp_servers_patch_when_agent_
         tenant_id=tenant_id, account_id=account_id, agent_name="scoped-agent"
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
+    auth = auth_identity(account_id, tenant_id, role=Role.USER)
     with pytest.raises(
         ToolError, match="Connections require a platform admin or this agent's owner"
     ):
@@ -5769,7 +5155,7 @@ async def test_update_agent_impl_rejects_non_admin_tools_patch_when_agent_reacha
         tenant_id=tenant_id, account_id=account_id, agent_name="scoped-agent"
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
+    auth = auth_identity(account_id, tenant_id, role=Role.USER)
     with pytest.raises(ToolError, match="Changing 'scoped-agent' needs its owner or an admin"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -5793,7 +5179,7 @@ async def test_update_agent_impl_refuses_non_admin_system_patch_when_agent_unrea
         tenant_id=tenant_id, account_id=account_id, agent_name="unscoped-agent"
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
+    auth = auth_identity(account_id, tenant_id, role=Role.USER)
     with pytest.raises(ToolError, match="admin"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -5823,13 +5209,7 @@ async def test_update_agent_impl_allows_admin_system_patch_without_a_reach_read(
         tenant_id=tenant_id, account_id=account_id, agent_name="scoped-agent"
     )
 
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
     result = await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
@@ -5853,7 +5233,7 @@ async def test_attach_mcp_server_impl_rejects_non_admin_when_agent_reachable(
         tenant_id=tenant_id, account_id=account_id, agent_name="scoped-agent"
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
+    auth = auth_identity(account_id, tenant_id, role=Role.USER)
     with pytest.raises(
         ToolError, match="Connections require a platform admin or this agent's owner"
     ):
@@ -5875,7 +5255,7 @@ async def test_attach_mcp_server_impl_refuses_non_admin_when_agent_unreachable(
         tenant_id=tenant_id, account_id=account_id, agent_name="unscoped-agent"
     )
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
+    auth = auth_identity(account_id, tenant_id, role=Role.USER)
     with pytest.raises(ToolError, match="admin"):
         await _attach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
@@ -5908,20 +5288,14 @@ async def test_fork_agent_impl_refuses_a_non_admin_even_for_the_seeded_agent(
         "GET",
         r"/v1/agents",
         lambda _req, _m: list_response(
-            [
-                ma_agent(
-                    id="ag_src",
-                    name="daimon",
-                    metadata={"daimon_tenant": str(tenant_id), "daimon_name": "daimon"},
-                ).model_dump(mode="json")
-            ]
+            [ma_agent_payload(id="ag_src", name="daimon", tenant_id=tenant_id)]
         ),
     )
     router.add("GET", r"/v1/agents/([^/]+)", on_retrieve)
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
+    auth = auth_identity(account_id, tenant_id, role=Role.USER)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     with pytest.raises(ToolError, match="requires an admin"):
         await _fork_agent_impl(
@@ -5951,13 +5325,7 @@ async def test_fork_agent_impl_refuses_to_copy_a_pinned_agent_even_for_an_admin(
         fork_id="ag_copy",
         fork_name="acme-copy",
     )
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant.id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(uuid.uuid4(), tenant.id)
 
     with pytest.raises(
         ToolError, match="agent rule limiting where it runs|runs it only in certain channels"
@@ -5984,7 +5352,7 @@ async def test_fork_agent_impl_refuses_a_non_admin_copying_a_project_agent(
 
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         created.append(json_body(req))
-        return httpx.Response(200, json=ma_agent(id="ag_new", name="loot").model_dump(mode="json"))
+        return httpx.Response(200, json=ma_agent_payload(id="ag_new", name="loot"))
 
     router = MARouter()
     router.add(
@@ -5992,7 +5360,7 @@ async def test_fork_agent_impl_refuses_a_non_admin_copying_a_project_agent(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_src",
                     name="acme-project",
                     metadata={
@@ -6000,23 +5368,19 @@ async def test_fork_agent_impl_refuses_a_non_admin_copying_a_project_agent(
                         "daimon_name": "acme-project",
                         "daimon_account": str(uuid.uuid4()),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
-        lambda _r, _m: httpx.Response(
-            200, json=ma_agent(id="ag_src", name="acme-project").model_dump(mode="json")
-        ),
+        lambda _r, _m: httpx.Response(200, json=ma_agent_payload(id="ag_src", name="acme-project")),
     )
     router.add("POST", r"/v1/agents", on_create)
     client = build_fake_anthropic(router.dispatch)
 
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=tenant_id, role=Role.USER, is_admin=False
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id, role=Role.USER)
     fernet = build_multifernet((Fernet.generate_key().decode(),))
     with pytest.raises(ToolError, match="requires an admin"):
         await _fork_agent_impl(
@@ -6070,12 +5434,12 @@ def _cap_router(
         response_skills = [{**s, "version": s.get("version", "1")} for s in body.get("skills", [])]
         return httpx.Response(
             200,
-            json=ma_agent(
+            json=ma_agent_payload(
                 id="ag_a",
                 name="a",
                 skills=response_skills or existing_skills,
                 mcp_servers=body.get("mcp_servers", existing_mcp_servers),
-            ).model_dump(mode="json"),
+            ),
         )
 
     router = MARouter()
@@ -6084,7 +5448,7 @@ def _cap_router(
         r"/v1/agents",
         lambda _req, _m: list_response(
             [
-                ma_agent(
+                ma_agent_payload(
                     id="ag_a",
                     name="a",
                     metadata={
@@ -6092,7 +5456,7 @@ def _cap_router(
                         "daimon_name": "a",
                         "daimon_account": str(account_id),
                     },
-                ).model_dump(mode="json")
+                )
             ]
         ),
     )
@@ -6101,12 +5465,9 @@ def _cap_router(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(
             200,
-            json=ma_agent(
-                id="ag_a",
-                name="a",
-                skills=existing_skills,
-                mcp_servers=existing_mcp_servers,
-            ).model_dump(mode="json"),
+            json=ma_agent_payload(
+                id="ag_a", name="a", skills=existing_skills, mcp_servers=existing_mcp_servers
+            ),
         ),
     )
     router.add("POST", r"/v1/agents/([^/]+)", on_update)
@@ -6129,13 +5490,7 @@ async def test_update_agent_refuses_when_merged_skills_exceed_the_product_cap(
         update_calls=update_calls,
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
 
     with pytest.raises(ToolError) as exc_info:
         await _update_agent_impl(
@@ -6174,13 +5529,7 @@ async def test_update_agent_allows_a_skill_merge_exactly_at_the_cap(
         update_calls=update_calls,
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
 
     result = await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -6216,13 +5565,7 @@ async def test_update_agent_refuses_when_merged_mcp_servers_exceed_the_product_c
         update_calls=update_calls,
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
 
     with pytest.raises(ToolError) as exc_info:
         await _update_agent_impl(
@@ -6258,13 +5601,7 @@ async def test_update_agent_allows_an_mcp_merge_exactly_at_the_cap(
         update_calls=update_calls,
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
 
     result = await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -6337,7 +5674,7 @@ def test_create_spec_accepts_the_current_generation_models() -> None:
 
 def _create_demo_router() -> AsyncAnthropic:
     """Serve the empty name-collision listing plus create/retrieve for one agent."""
-    body = ma_agent(id="ag_new", name="demo").model_dump(mode="json")
+    body = ma_agent_payload(id="ag_new", name="demo")
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
     router.add("POST", r"/v1/agents", lambda _req, _m: httpx.Response(200, json=body))
@@ -6349,13 +5686,7 @@ async def test_create_agent_returns_unrouted_note_when_not_reachable(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = await _make_tenant_with_default_agent(db_session_factory, agent_name=None)
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id)
 
     result = await _create_agent_impl(
         _runtime(_create_demo_router(), session_factory=db_session_factory),
@@ -6375,13 +5706,7 @@ async def test_create_agent_returns_no_unrouted_note_when_a_config_row_names_it(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = await _make_tenant_with_default_agent(db_session_factory, agent_name="demo")
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id)
 
     result = await _create_agent_impl(
         _runtime(_create_demo_router(), session_factory=db_session_factory),
@@ -6398,11 +5723,7 @@ async def test_fork_agent_returns_unrouted_note_when_not_reachable(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id = await _make_tenant_with_default_agent(db_session_factory, agent_name=None)
-    source = ma_agent(
-        id="ag_src",
-        name="source",
-        metadata={"daimon_tenant": str(tenant_id), "daimon_name": "source"},
-    )
+    source = ma_agent(id="ag_src", name="source", tenant_id=tenant_id)
     router = MARouter()
     router.add_agent_list(source)
     router.add(
@@ -6413,17 +5734,9 @@ async def test_fork_agent_returns_unrouted_note_when_not_reachable(
     router.add(
         "POST",
         r"/v1/agents",
-        lambda _req, _m: httpx.Response(
-            200, json=ma_agent(id="ag_new", name="myfork").model_dump(mode="json")
-        ),
+        lambda _req, _m: httpx.Response(200, json=ma_agent_payload(id="ag_new", name="myfork")),
     )
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id)
 
     result = await _fork_agent_impl(
         _runtime(
@@ -6474,13 +5787,7 @@ async def test_update_agent_refuses_to_repoint_the_reserved_server(
         update_calls=update_calls,
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
 
     with pytest.raises(ToolError, match="reserved|Daimon's own"):
         await _update_agent_impl(
@@ -6511,13 +5818,7 @@ async def test_update_agent_accepts_the_canonical_reserved_entry_round_trip(
         update_calls=update_calls,
     )
     client = build_fake_anthropic(router.dispatch)
-    auth = AuthIdentity(
-        account_id=account_id,
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(account_id, tenant_id)
 
     await _update_agent_impl(
         _runtime(
@@ -6540,7 +5841,7 @@ def _personal_agent_router(
 ) -> tuple[list[dict[str, Any]], AsyncAnthropic]:
     """One agent that already has `ctx7` at the real URL; captures update bodies."""
     updates: list[dict[str, Any]] = []
-    body = ma_agent(
+    body = ma_agent_payload(
         id="ag_personal",
         name="personal-bot",
         mcp_servers=[{"name": "ctx7", "type": "url", "url": "https://real.example/mcp"}],
@@ -6549,7 +5850,7 @@ def _personal_agent_router(
             "daimon_name": "personal-bot",
             "daimon_account": str(account_id),
         },
-    ).model_dump(mode="json")
+    )
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         updates.append(json_body(req))
@@ -6585,7 +5886,7 @@ async def test_member_cannot_repoint_a_server_on_someones_personal_default_agent
         )
     member = uuid.uuid4()
     updates, client = _personal_agent_router(tenant_id=tenant_id, account_id=member)
-    auth = AuthIdentity(account_id=member, tenant_id=tenant_id, role=Role.USER, is_admin=False)
+    auth = auth_identity(member, tenant_id, role=Role.USER)
     runtime = _runtime(client, session_factory=db_session_factory)
 
     with pytest.raises(ToolError, match="admin"):
@@ -6627,7 +5928,7 @@ async def test_create_agent_impl_renders_no_face_for_the_deployment_default(
 
     monkeypatch.setattr(agent_identity, "get_or_create_avatar", generate)
     tenant_id = uuid.uuid4()
-    agent = ma_agent(id="ag_new", name="daimon").model_dump(mode="json")
+    agent = ma_agent_payload(id="ag_new", name="daimon")
     router = MARouter()
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
     router.add("POST", r"/v1/agents", lambda _req, _m: httpx.Response(200, json=agent))
@@ -6637,13 +5938,7 @@ async def test_create_agent_impl_renders_no_face_for_the_deployment_default(
         session_factory=db_session_factory,
         deployment_default=DeploymentDefault(agent_name="daimon"),
     )
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(uuid.uuid4(), tenant_id)
 
     await _create_agent_impl(runtime, auth, AgentSpec(name="daimon", model="claude-opus-4-5"))
 
@@ -6661,13 +5956,7 @@ _BRIDGE_SERVER: dict[str, str] = {
 async def test_attach_mcp_server_impl_refuses_a_server_name_with_a_slash() -> None:
     """`linear/bridge/get_issue` would also read as linear's `bridge/get_issue`."""
     client = MagicMock()
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=uuid.uuid4(),
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(uuid.uuid4(), uuid.uuid4())
     with pytest.raises(ToolError, match="cannot contain '/'"):
         await _attach_mcp_server_impl(
             _runtime(client),
@@ -6739,13 +6028,8 @@ async def test_the_agents_owner_may_change_its_prompt_and_connections(
     captured, client = _scoped_agent_router(
         tenant_id=tenant_id, account_id=owner_id, agent_name="scoped-agent"
     )
-    auth = AuthIdentity(
-        account_id=owner_id,
-        tenant_id=tenant_id,
-        role=Role.USER,
-        is_admin=False,
-        platform="discord",
-        platform_user_id="owner-user",
+    auth = auth_identity(
+        owner_id, tenant_id, role=Role.USER, platform="discord", platform_user_id="owner-user"
     )
     await _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
@@ -6770,11 +6054,10 @@ async def test_only_the_owner_person_passes_the_owner_gate(
     captured, client = _scoped_agent_router(
         tenant_id=tenant_id, account_id=owner_id, agent_name="scoped-agent"
     )
-    auth = AuthIdentity(
-        account_id=member_id if who == "member" else owner_id,
-        tenant_id=tenant_id,
+    auth = auth_identity(
+        member_id if who == "member" else owner_id,
+        tenant_id,
         role=Role.USER,
-        is_admin=False,
         platform="discord",
         platform_user_id="someone",
         agent_id=uuid.uuid4() if who == "agent_key" else None,
@@ -6819,13 +6102,8 @@ async def test_create_agent_records_the_person_who_created_it_as_owner(
         r"/v1/agents/([^/]+)",
         lambda _req, _m: httpx.Response(200, json=created.model_dump(mode="json")),
     )
-    auth = AuthIdentity(
-        account_id=creator.id,
-        tenant_id=tenant.id,
-        role=Role.USER,
-        is_admin=False,
-        platform="discord",
-        platform_user_id="creator-user",
+    auth = auth_identity(
+        creator.id, tenant.id, role=Role.USER, platform="discord", platform_user_id="creator-user"
     )
     await _create_agent_impl(
         _runtime(build_fake_anthropic(router.dispatch), session_factory=db_session_factory),
@@ -6897,13 +6175,8 @@ async def test_two_people_creating_one_name_get_one_agent_and_one_owner(
     runtime = _runtime(build_fake_anthropic(router.dispatch), session_factory=sessions)
 
     def person(account: uuid.UUID, user: str) -> AuthIdentity:
-        return AuthIdentity(
-            account_id=account,
-            tenant_id=tenant.id,
-            role=Role.USER,
-            is_admin=False,
-            platform="discord",
-            platform_user_id=user,
+        return auth_identity(
+            account, tenant.id, role=Role.USER, platform="discord", platform_user_id=user
         )
 
     results = await asyncio.gather(
@@ -6948,7 +6221,7 @@ async def test_two_copies_of_yourself_at_once_take_two_new_names(
 
     def tagged(agent_id: str, name: str) -> dict[str, Any]:
         meta = {"daimon_tenant": str(tenant.id), "daimon_name": name}
-        return ma_agent(id=agent_id, name=name, metadata=meta).model_dump(mode="json")
+        return ma_agent_payload(id=agent_id, name=name, metadata=meta)
 
     stored = [tagged("ag_src", "daimon"), tagged("ag_old", "daimon-argon")]
 
@@ -6969,13 +6242,7 @@ async def test_two_copies_of_yourself_at_once_take_two_new_names(
     runtime = _runtime(
         build_fake_anthropic(router.dispatch), session_factory=sessions, fernet=fernet
     )
-    auth = AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant.id,
-        role=Role.ADMIN,
-        is_admin=True,
-        is_platform_admin=True,
-    )
+    auth = auth_identity(uuid.uuid4(), tenant.id)
 
     results = await asyncio.gather(
         *(
@@ -7002,7 +6269,7 @@ async def test_an_agent_named_after_the_check_is_refused_not_rewritten(
     async with db_session_factory() as session, session.begin():
         tenant = await make_tenant(session, platform="discord")
         creator = await make_account(session, tenant=tenant)
-    existing = ma_agent(id="ag_theirs", name="demo").model_dump(mode="json")
+    existing = ma_agent_payload(id="ag_theirs", name="demo")
     existing["metadata"] = {"daimon_tenant": str(tenant.id), "daimon_name": "demo"}
     lists = iter([[], [existing]])
     posts: list[str] = []
@@ -7015,13 +6282,8 @@ async def test_an_agent_named_after_the_check_is_refused_not_rewritten(
     router.add("GET", r"/v1/agents", lambda _req, _m: list_response(next(lists)))
     router.add("POST", r"/v1/agents", on_post)
     router.add("POST", r"/v1/agents/([^/]+)", on_post)
-    auth = AuthIdentity(
-        account_id=creator.id,
-        tenant_id=tenant.id,
-        role=Role.USER,
-        is_admin=False,
-        platform="discord",
-        platform_user_id="creator",
+    auth = auth_identity(
+        creator.id, tenant.id, role=Role.USER, platform="discord", platform_user_id="creator"
     )
     with pytest.raises(ToolError, match="already exists"):
         await _create_agent_impl(
@@ -7075,11 +6337,10 @@ async def test_the_owner_sees_the_setup_they_edit(
     _, client = _scoped_agent_router(
         tenant_id=tenant_id, account_id=owner_id, agent_name="scoped-agent"
     )
-    auth = AuthIdentity(
-        account_id=owner_id if who == "owner" else member_id,
-        tenant_id=tenant_id,
+    auth = auth_identity(
+        owner_id if who == "owner" else member_id,
+        tenant_id,
         role=Role.USER,
-        is_admin=False,
         platform="discord",
         platform_user_id=who,
     )
@@ -7174,7 +6435,7 @@ async def test_a_member_who_creates_an_agent_in_chat_lists_gets_and_edits_it(
     def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         body = json_body(req)
         payload = {
-            **ma_agent(id="ag_draft", name=body["name"]).model_dump(mode="json"),
+            **ma_agent_payload(id="ag_draft", name=body["name"]),
             "metadata": body["metadata"],
             "system": body.get("system") or "",
         }
@@ -7199,13 +6460,8 @@ async def test_a_member_who_creates_an_agent_in_chat_lists_gets_and_edits_it(
     runtime = _runtime(build_fake_anthropic(router.dispatch), session_factory=sessions)
 
     def person(account: uuid.UUID, user: str) -> AuthIdentity:
-        return AuthIdentity(
-            account_id=account,
-            tenant_id=tenant.id,
-            role=Role.USER,
-            is_admin=False,
-            platform="discord",
-            platform_user_id=user,
+        return auth_identity(
+            account, tenant.id, role=Role.USER, platform="discord", platform_user_id=user
         )
 
     me, them = person(creator.id, "creator"), person(other.id, "other")
@@ -7258,12 +6514,11 @@ async def test_connection_write_keeps_ownership_without_using_delegation(
     captured, client = _scoped_agent_router(
         tenant_id=tenant_id, account_id=owner_id, agent_name="scoped-agent"
     )
-    auth = AuthIdentity(
-        account_id=owner_id if owner else member_id,
-        tenant_id=tenant_id,
+    auth = auth_identity(
+        owner_id if owner else member_id,
+        tenant_id,
         role=Role.USER,
         is_admin=not owner,
-        is_platform_admin=False,
         platform="discord",
         platform_user_id="owner-user" if owner else "member-user",
     )
