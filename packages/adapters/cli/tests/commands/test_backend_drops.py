@@ -914,10 +914,10 @@ async def test_recorded_portable_model_controls_are_shown_and_switched_off(opera
 
     rt, _, agent, _, _ = operator
     agent.model = BetaManagedAgentsModelConfig.model_validate(
-        {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}}
+        {"id": "claude-haiku-5-5", "speed": "fast", "effort": {"type": "medium"}}
     )
     text = await run(operator, dry_run=True)
-    assert "Won't be available on openai: memory, model_controls, sandbox" in text
+    assert "Won't be available on openai: fast_mode, memory, sandbox" in text
     output = StringIO()
     await agents_backend_change(
         rt=rt,
@@ -928,12 +928,11 @@ async def test_recorded_portable_model_controls_are_shown_and_switched_off(opera
         as_json=True,
     )
     result = json.loads(output.getvalue())
-    assert result["preview"]["declared_drops"] == [
-        "memory",
-        "model_controls",
-        "sandbox",
-    ]
-    assert await audited(operator) == "completed; declared_drops=memory,model_controls,sandbox"
+    lost = ["fast_mode", "memory", "sandbox"]
+    if backend == "gemini":
+        lost = ["effort_setting", *lost]
+    assert result["preview"]["declared_drops"] == lost
+    assert await audited(operator) == f"completed; declared_drops={','.join(lost)}"
 
 
 async def test_native_no_drop_switch_records_no_losses(operator):

@@ -563,7 +563,11 @@ class IdentityMiddleware(Middleware):
 
             # `call_tool` re-enters here with the inner tool's name, so the proxy is covered.
             if str(getattr(context.message, "name", "")) in confirmation_gated_tools():
-                return await self._require_host_call_gate().ask(context, identity)
+                return await self._require_host_call_gate().ask(
+                    context,
+                    identity,
+                    lambda context: self._run_backend(context, call_next, identity),
+                )
         return await self._run_backend(context, call_next, identity)
 
     def attach_host_call_gate(self, gate: HostCallGate) -> None:
