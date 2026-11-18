@@ -13,7 +13,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   again. No hub lists a channel's own agent, and an admin can't run it from a DM
   or the hub. Admins keep hub reads of open channels. Admins who used a home
   channel's agent from a DM now use it in its channel.
-||||||| parent of e1f84fe53 (feat: a private channel's settings change only from inside the channel)
 - **A private channel's settings change only from inside the channel, for admins
   too.** In every install, an admin can't change a channel with limited readers,
   or the agent that channel keeps to itself, from the web app, the hub or a DM.
