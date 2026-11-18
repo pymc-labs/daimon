@@ -266,6 +266,25 @@ async def _assigned_agent(
     )
 
 
+async def aware_at(
+    sessions: Sessions,
+    settings: Settings | None,
+    place: FeaturePlace,
+    assignment: Assignment | None = None,
+) -> bool:
+    """Whether `web_awareness` is On at `place`; False when it is Off or unreadable. A place
+    with a channel but no agent takes the agent assigned there, given `assignment`."""
+    if place.agent_id is None and place.channel_id is not None and assignment is not None:
+        # A card in a channel follows the agent assigned there (#1775).
+        try:
+            place = replace(place, agent_id=await _assigned_agent(sessions, place, assignment))
+        except Exception:  # A failed lookup offers no link, as an unreadable feature does.
+            log.warning("web_links.assigned_agent_failed", exc_info=True)
+            return False
+    found = await place_feature_or_none(sessions, settings, place, "web_awareness")
+    return found is not None and found.on
+
+
 async def links_at(
     sessions: Sessions,
     settings: Settings | None,
@@ -273,18 +292,9 @@ async def links_at(
     links: TenantLinks | None,
     assignment: Assignment | None = None,
 ) -> TenantLinks | None:
-    """`links` where `web_awareness` is On at `place`; None when it is Off or unreadable. A
-    place with a channel but no agent takes the agent assigned there, given `assignment`.
-    Every path that tells the agent about the web app or puts a link to it on a card asks
-    this (a turn's controls ask its snapshot in `render_turn_origin`)."""
+    """`links` where `web_awareness` is On at `place` (`aware_at`), else None. Every path that
+    tells the agent about the web app or puts a link to it on a card asks this (a turn's
+    controls ask its snapshot in `render_turn_origin`)."""
     if links is None:
         return None
-    if place.agent_id is None and place.channel_id is not None and assignment is not None:
-        # A card in a channel follows the agent assigned there (#1775).
-        try:
-            place = replace(place, agent_id=await _assigned_agent(sessions, place, assignment))
-        except Exception:  # A failed lookup offers no link, as an unreadable feature does.
-            log.warning("web_links.assigned_agent_failed", exc_info=True)
-            return None
-    found = await place_feature_or_none(sessions, settings, place, "web_awareness")
-    return links if found is not None and found.on else None
+    return links if await aware_at(sessions, settings, place, assignment) else None

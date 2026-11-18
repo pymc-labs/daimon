@@ -314,8 +314,8 @@ _UNGATED_LINKS = {
     "core/turn/admission.py": "same: the test above checks every render gets the turn features",
     "core/features/eval_key.py": "a fixed example turn for the model-input eval, never sent",
 }
-# `load_here_card` asks `links_at` itself, at the agent its card finds answering.
-_LINK_GATES = {"links_at", "load_here_card"}
+# `aware_at` is `links_at` without links; `load_here_card` asks `links_at` at its answering agent.
+_LINK_GATES = {"links_at", "aware_at", "load_here_card"}
 
 
 def test_web_awareness_off_leaves_out_every_web_link_and_web_app_tool() -> None:
