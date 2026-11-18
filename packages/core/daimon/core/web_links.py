@@ -1,4 +1,4 @@
-"""Links from chat to pages of the web app. Pure: no I/O, no clock.
+"""Links from chat to pages of the web app. Pure but `links_at`, which reads one feature.
 
 The route table mirrors `web/src/lib/deep-links.json`, which the web app builds its own
 links from; a test keeps the two equal. A link is
@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from typing import Final, Literal, NamedTuple
 from urllib.parse import quote
 
-from daimon.core.config import WebModuleKey, WebSettings
+from daimon.core.config import Settings, WebModuleKey, WebSettings
+from daimon.core.features.snapshot import FeaturePlace, Sessions, place_feature_or_none
 
 OPEN_IN_WEB: Final = "Open in web"
 """The label of every panel button that opens the web app, on every platform."""
@@ -220,3 +221,18 @@ def panel_links(
     """The links a chat panel may offer in `tenant_id`; None with no web app."""
     links = WebLinks.from_settings(web)
     return None if links is None else links.for_tenant(tenant_id, admin=admin)
+
+
+async def links_at(
+    sessions: Sessions,
+    settings: Settings | None,
+    place: FeaturePlace,
+    links: TenantLinks | None,
+) -> TenantLinks | None:
+    """`links` where `web_awareness` is On at `place`; None when it is Off or unreadable.
+    Every path that tells the agent about the web app or puts a link to it on a card asks
+    this (a turn's controls ask its snapshot in `render_turn_origin`)."""
+    if links is None:
+        return None
+    found = await place_feature_or_none(sessions, settings, place, "web_awareness")
+    return links if found is not None and found.on else None
