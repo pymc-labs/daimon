@@ -73,6 +73,12 @@ class Actor:
     is_platform_admin: bool = False
     foreign: bool = False
 
+    @property
+    def channel_thread(self) -> tuple[str, str | None]:
+        """The channel and post pressed in; Teams names a post ``<channel>;messageid=<id>``."""
+        channel = self.conversation_id.split(";", 1)[0]
+        return channel, None if channel == self.conversation_id else self.conversation_id
+
     def admin_for(self, action: DelegatedAction | None = None) -> bool:
         return admin_for_action(
             platform_admin=self.is_platform_admin, daimon_admin=self.is_admin, action=action
