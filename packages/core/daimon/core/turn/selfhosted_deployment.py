@@ -16,8 +16,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import httpx
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.hosted_codec import SELFHOSTED
 from daimon.core.turn.prepare import ProviderPreparationRequest
-from daimon.core.turn.selfhosted_codec import PROFILE
 from daimon.core.turn.selfhosted_host import SelfHostedHostRuntime, register_host
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Scope, SkillRef
@@ -39,6 +39,9 @@ if TYPE_CHECKING:
     from daimon.core.stores.neutral_catalog import AgentRevision
     from daimon.core.tool_safety import ToolSafetyPolicy
     from mux.drivers.selfhosted import HarnessConfig
+
+PROFILE = SELFHOSTED.profile
+
 
 _ROWS = TypeAdapter(list[dict[str, JsonValue]])
 _MAX_BYTES = 1_048_576
@@ -152,7 +155,7 @@ class SelfHostedDeployment(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    profile: Literal["selfhosted.loop"] = PROFILE
+    profile: Literal["selfhosted.loop"] = "selfhosted.loop"
     tenant_id: str = Field(min_length=1)
     platform: str = Field(min_length=1)
     channel_id: str = Field(min_length=1)

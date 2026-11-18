@@ -27,7 +27,7 @@ from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.host_spend_cap import HOST_SPEND_CAP_NOTICE, SpendGuard
-from daimon.core.turn.openai_codec import PROFILE, PROFILES
+from daimon.core.turn.hosted_codec import OPENAI
 from daimon.core.turn.openai_environment import EnvironmentPort
 from daimon.core.turn.openai_host import OpenAIHostRuntime, driver, register_host
 from daimon.core.turn.openai_late_usage import LATE_USAGE
@@ -65,6 +65,10 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
+
+PROFILE = OPENAI.profile
+PROFILES = OPENAI.profiles
+
 
 log = structlog.get_logger(__name__)
 Nonblank = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]

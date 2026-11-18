@@ -577,7 +577,7 @@ databases skip, and foreign URL refusals have connection-trap regressions.
 
 | Owner-reviewed reachable reasons | Real source of the host outcome |
 | --- | --- |
-| completed, interrupted, upstream, session_terminated | OpenAI native root/session events, `openai_io.py`, normal driver finalizers and reducers |
+| completed, interrupted, upstream, session_terminated | OpenAI native root/session events, `hosted_io.py`, normal driver finalizers and reducers |
 | rate_limited, connection_lost, interrupt_timeout | SDK HTTP status translation, driver reconnect/stop finalizers |
 | requires_action, ceiling | Native origin approval pause; driver/run deadline finalizers |
 | admission_balance_depleted, admission_cap_exceeded, admission_channel_budget_exceeded | Common admission balance and budget gates |
@@ -590,7 +590,7 @@ Excluded reasons: `reducer_bug` is reserved without a production raiser;
 `refused` needs the Anthropic refusal idle (`stop_details`), which the OpenAI
 codec never emits;
 `mcp_degraded_empty` and `retrying_unsettled` require legacy SDK error records
-which the OpenAI codec never emits (`reducers.py`/`openai_codec.py`).
+which the OpenAI codec never emits (`reducers.py`/`hosted_codec.py`).
 `session_preparation_failed` and `session_agent_mismatch` arise in legacy
 binding/compatibility, after the native profile dispatch in `bind_session_impl`.
 `recovery_cancelled` and `recovery_failed` require legacy mapping replacement: the

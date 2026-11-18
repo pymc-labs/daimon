@@ -10,8 +10,8 @@ import pytest
 from anthropic.types.beta.sessions import BetaManagedAgentsSessionRetriesExhausted
 from daimon.core.turn import driver
 from daimon.core.turn.gemini import GeminiTurnIO
+from daimon.core.turn.hosted_codec import OPENAI, display_event
 from daimon.core.turn.io import TurnEvent
-from daimon.core.turn.openai_codec import display_event
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.termination import (
     ProviderTerminalFailure,
@@ -76,7 +76,9 @@ class OfflineIO:
                 event,
             )
         elif event.native.provider == "openai":
-            self.frame = TurnEvent(display_event(event, session_id=event.session_id), event)
+            self.frame = TurnEvent(
+                display_event(event, session_id=event.session_id, codec=OPENAI), event
+            )
         else:
             backend = SimpleNamespace(
                 capabilities=lambda: SimpleNamespace(profile_id="gemini.inline_reuse")

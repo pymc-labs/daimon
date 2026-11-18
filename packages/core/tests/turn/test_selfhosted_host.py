@@ -1213,10 +1213,10 @@ async def test_production_shell_admits_before_http_records_and_revokes(
     wire.unmatched_start = unmatched
     dropped = []
     if drop_stream:
+        from daimon.core.turn.hosted_io import _HostedStream
         from daimon.core.turn.io import TurnConnectionLost
-        from daimon.core.turn.selfhosted_io import _SelfHostedStream
 
-        original_next = _SelfHostedStream.__anext__
+        original_next = _HostedStream.__anext__
 
         async def disconnect_after_record(stream):
             event = await original_next(stream)
@@ -1226,7 +1226,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                 raise TurnConnectionLost("offline reader dropped after first durable record")
             return event
 
-        monkeypatch.setattr(_SelfHostedStream, "__anext__", disconnect_after_record)
+        monkeypatch.setattr(_HostedStream, "__anext__", disconnect_after_record)
     assert ensure_channel_runtime(PROFILE)
     admitted = await admit(
         request.deps,
@@ -1561,7 +1561,7 @@ async def test_preparation_rechecks_disabled_operator_switch_before_harness_io(
 
 
 async def test_batched_host_approvals_submit_independent_idempotent_actions(composed, monkeypatch):
-    from daimon.core.turn.selfhosted_io import SelfHostedTurnIO
+    from daimon.core.turn.hosted_io import SelfHostedTurnIO
     from mux.contracts.actions import UserMessage
     from mux.contracts.events import TextPart
 
@@ -1680,7 +1680,7 @@ async def test_batched_host_approvals_submit_independent_idempotent_actions(comp
 async def test_interrupt_journals_canonical_stop_before_releasing_occupancy(
     composed, monkeypatch, delta_count
 ):
-    from daimon.core.turn.selfhosted_io import SelfHostedTurnIO
+    from daimon.core.turn.hosted_io import SelfHostedTurnIO
     from mux.contracts.actions import UserMessage
     from mux.contracts.events import TextPart
 
@@ -1749,8 +1749,8 @@ async def test_interrupt_journals_canonical_stop_before_releasing_occupancy(
 
 
 async def test_replay_pages_past_five_thousand_records_in_one_turn(composed, monkeypatch):
+    from daimon.core.turn.hosted_io import SelfHostedTurnIO
     from daimon.core.turn.reducers import apply
-    from daimon.core.turn.selfhosted_io import SelfHostedTurnIO
     from daimon.core.turn.state import TextBlock, TurnState
     from mux.contracts.actions import UserMessage
     from mux.contracts.events import TextPart
@@ -1823,8 +1823,8 @@ async def test_replay_pages_past_five_thousand_records_in_one_turn(composed, mon
 async def test_live_and_replayed_approval_permissions_match(composed, explicit, approval_first):
     from daimon.core.tool_safety import ToolSafetyPolicy, decide_tool_call
     from daimon.core.turn.approvals import tool_calls_for
+    from daimon.core.turn.hosted_io import SelfHostedTurnIO
     from daimon.core.turn.reducers import apply
-    from daimon.core.turn.selfhosted_io import SelfHostedTurnIO
     from daimon.core.turn.state import ToolUseBlock, TurnState
     from mux.contracts.actions import UserMessage
     from mux.contracts.events import TextPart

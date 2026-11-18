@@ -248,8 +248,8 @@ def test_missing_resource_authorizer_refuses_without_runtime_or_legacy_fallback(
 _NATIVE_MODULES = frozenset(
     {
         "daimon.core.turn.openai_host",
-        "daimon.core.turn.openai_codec",
-        "daimon.core.turn.openai_io",
+        "daimon.core.turn.hosted_codec",
+        "daimon.core.turn.hosted_io",
         "daimon.core.turn.openai_state",
         "daimon.core.turn.openai_deployment",
         "daimon.core.turn.gemini",

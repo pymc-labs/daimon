@@ -15,7 +15,7 @@ from typing import cast
 
 import httpx
 import pytest
-from daimon.core.turn.selfhosted_io import SelfHostedTurnIO
+from daimon.core.turn.hosted_io import SelfHostedTurnIO
 from mux.contracts.ids import ModelRef, ResourceRef, Revision
 from mux.contracts.ports import Agents, Environments
 from mux.contracts.resources import Agent, AgentSpec, Environment, EnvironmentSpec, SessionSpec

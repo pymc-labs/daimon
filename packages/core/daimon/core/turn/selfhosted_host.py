@@ -28,6 +28,8 @@ from daimon.core.turn.carry_over import (
     replaced_session,
 )
 from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
+from daimon.core.turn.hosted_codec import SELFHOSTED
+from daimon.core.turn.hosted_io import SelfHostedTurnIO
 from daimon.core.turn.io import TurnCodecRequest, TurnIO, register_turn_codec
 from daimon.core.turn.persistence import current_persistence
 from daimon.core.turn.prepare import (
@@ -46,8 +48,6 @@ from daimon.core.turn.replace_binding import (
     recorded_facts,
     replace_binding,
 )
-from daimon.core.turn.selfhosted_codec import PROFILE
-from daimon.core.turn.selfhosted_io import SelfHostedTurnIO
 from daimon.core.turn.selfhosted_state import invocation_baseline, skipped_skill_notice
 from daimon.core.usage_recording import record_provider_usage
 from mux.contracts.config import ConfigRevision
@@ -61,6 +61,8 @@ from mux.errors import BindingConflict, ContinuityLost, ScopeViolation, Unsuppor
 from mux.state.lease import Lease, LeaseBusy, Slot, StaleFence
 from mux.state.operations import request_digest
 from mux.state.store import StateStore
+
+PROFILE = SELFHOSTED.profile
 
 
 @dataclass(frozen=True)

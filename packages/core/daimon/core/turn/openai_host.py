@@ -36,9 +36,9 @@ from daimon.core.turn.carry_over import (
 )
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.host_spend_cap import SpendGuard
+from daimon.core.turn.hosted_codec import OPENAI
+from daimon.core.turn.hosted_io import OpenAITurnIO
 from daimon.core.turn.io import TurnCodecRequest, TurnIO, register_turn_codec
-from daimon.core.turn.openai_codec import PROFILE, PROFILES
-from daimon.core.turn.openai_io import OpenAITurnIO
 from daimon.core.turn.openai_late_usage import READ_TIMEOUT_S, LateUsage
 from daimon.core.turn.openai_state import (
     OpenAIRecoveryJournal,
@@ -79,6 +79,10 @@ from mux.profiles.openai import NATIVE_MODELS, PERSISTENT_WORKSPACE
 from mux.state.lease import Lease, Slot
 from mux.state.operations import request_digest
 from mux.state.store import ERA_REF, StateStore, adopted_identity
+
+PROFILE = OPENAI.profile
+PROFILES = OPENAI.profiles
+
 
 log = structlog.get_logger(__name__)
 

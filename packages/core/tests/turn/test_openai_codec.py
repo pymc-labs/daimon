@@ -1,14 +1,18 @@
 """OpenAI display compatibility proofs; no registration or provider calls."""
 
 from datetime import UTC, datetime
+from functools import partial
 
 import pytest
-from daimon.core.turn.openai_codec import display_batch, display_event
+from daimon.core.turn import hosted_codec
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
 from mux.contracts.events import Event, NativeProvenance
 from mux.errors import ScopeViolation, UnsupportedCapability
 from pydantic import JsonValue
+
+display_event = partial(hosted_codec.display_event, codec=hosted_codec.OPENAI)
+display_batch = partial(hosted_codec.display_batch, codec=hosted_codec.OPENAI)
 
 
 def event(kind: str, payload: dict[str, JsonValue], **fields: object) -> Event:
