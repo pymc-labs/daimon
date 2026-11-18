@@ -37,6 +37,7 @@ class SessionMCPVault:
 
     async def delete(self, context: Context, scope: Scope, *, key: str) -> None:
         port = _port(context, scope, {self.vault.id})
+        # Wiped unless this request made the vault: an older one holds unknown bearers.
         with suppress_mcp_error_details(self.secrets or None):
             actual = await port.retrieve(scope, self.vault)
             if actual.name != self.name:
@@ -219,7 +220,8 @@ async def rotate(
     if scope.is_platform or scope.is_legacy_host_authorized:
         raise context.unsupported("caller_scoped_mcp_vault")
     secrets = [await _secret(resolver, scope, c) for c in connections]
-    with suppress_mcp_error_details(secrets):
+    # Wiped: the vault may still echo an earlier turn's bearer, which this turn can't know.
+    with suppress_mcp_error_details(None):
         actual = await _port(context, scope, {managed.vault.id}).retrieve(scope, managed.vault)
         if actual.name != managed.name:
             raise ScopeViolation(managed.vault.id, "session MCP vault identity changed")

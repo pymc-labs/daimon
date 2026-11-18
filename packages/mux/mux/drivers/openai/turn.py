@@ -25,7 +25,7 @@ from mux.drivers.openai._common import Context, objects, owned, text
 from mux.drivers.openai.actions import translate
 from mux.drivers.openai.normalize import SCHEMA_DATE, EventNormalizer
 from mux.drivers.openai.sessions import OpenAISessions
-from mux.drivers.openai.transport import Object, object_json, segment
+from mux.drivers.openai.transport import Object, object_json, segment, suppress_mcp_error_details
 from mux.errors import ProviderError
 
 
@@ -223,13 +223,17 @@ class OpenAIEvents:
             "required_actions": [dict(action.payload) for action in current.required_actions],
         }
         inputs = translate(events, raw, self._c.profile_id)
+        # A session's own MCP vault may echo an earlier turn's bearer, which this
+        # request can't know to mask: its native error details are wiped.
+        wiped = None if self._sessions.managed_vault(scope, session) else ()
         try:
-            await self._c.call(
-                "POST",
-                f"/agents/sessions/{segment(session.id)}/events",
-                body={"events": inputs},
-                key=key,
-            )
+            with suppress_mcp_error_details(wiped):
+                await self._c.call(
+                    "POST",
+                    f"/agents/sessions/{segment(session.id)}/events",
+                    body={"events": inputs},
+                    key=key,
+                )
         except ProviderError as error:
             if error.category == "transient_network":
                 return SendReceipt(operation_id=key, status="outcome_unknown", input_ids=())
@@ -483,15 +487,15 @@ class OpenAIEvents:
             else:
                 raise self._c.unsupported("cancel_target")
         else:
+            wiped = None if self._sessions.managed_vault(scope, session) else ()
             try:
-                await self._c.call(
-                    "POST",
-                    f"/agents/sessions/{segment(session.id)}/events",
-                    body={
-                        "events": [{"type": "agent.session.input.cancel"}],
-                    },
-                    key=key,
-                )
+                with suppress_mcp_error_details(wiped):  # as in `send`
+                    await self._c.call(
+                        "POST",
+                        f"/agents/sessions/{segment(session.id)}/events",
+                        body={"events": [{"type": "agent.session.input.cancel"}]},
+                        key=key,
+                    )
             except ProviderError as error:
                 if error.category != "transient_network":
                     raise

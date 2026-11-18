@@ -130,13 +130,13 @@ def _native_error_details(error: APIStatusError) -> dict[str, str | None]:
         pass
 
     return {
-        "native_message": redact(raw.get("message"), secrets),
-        "native_error_code": redact(raw.get("code"), secrets, identifier=True),
-        "native_param": redact(raw.get("param"), secrets, identifier=True),
+        "native_message": _redact(raw.get("message"), secrets),
+        "native_error_code": _redact(raw.get("code"), secrets, identifier=True),
+        "native_param": _redact(raw.get("param"), secrets, identifier=True),
     }
 
 
-def redact(value: object, secrets: Collection[str], *, identifier: bool = False) -> str | None:
+def _redact(value: object, secrets: Collection[str], *, identifier: bool = False) -> str | None:
     """Mask known secrets, any 8+ character fragment of one, tokens and URLs."""
     if not isinstance(value, str):
         return None
@@ -164,17 +164,17 @@ def redact(value: object, secrets: Collection[str], *, identifier: bool = False)
 @contextmanager
 def suppress_mcp_error_details(secrets: Collection[str] | None) -> Iterator[None]:
     """MCP errors can echo credentials from an earlier vault request: mask this
-    flow's MCP secrets (and fragments) in the native fields. A flow that knows
-    none of them (deleting an earlier session's vault) keeps none of the fields."""
+    flow's MCP secrets (and fragments) in the native fields. A flow on an existing
+    vault (rotation, turns, deletes) can't know every bearer it held: None keeps none."""
     try:
         yield
     except ProviderError as error:
         if secrets is None:
             error.native_message = error.native_error_code = error.native_param = None
         else:
-            error.native_message = redact(error.native_message, secrets)
-            error.native_error_code = redact(error.native_error_code, secrets, identifier=True)
-            error.native_param = redact(error.native_param, secrets, identifier=True)
+            error.native_message = _redact(error.native_message, secrets)
+            error.native_error_code = _redact(error.native_error_code, secrets, identifier=True)
+            error.native_param = _redact(error.native_param, secrets, identifier=True)
         raise
 
 
