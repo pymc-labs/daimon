@@ -162,6 +162,37 @@ def test_older_scripts_passing_accept_drops_still_parse() -> None:
     assert "accept_drops" not in inspect.signature(agents.agents_backend_change).parameters
 
 
+def test_an_older_script_passing_accept_drops_runs_the_switch_unchanged(monkeypatch) -> None:
+    """The command runs with --accept-drops and the value reaches nothing."""
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    from daimon.adapters.cli.commands import agents
+    from daimon.adapters.cli.main import app
+    from typer.testing import CliRunner
+
+    seen: list[dict[str, object]] = []
+
+    @asynccontextmanager
+    async def runtime(_settings):
+        yield SimpleNamespace()
+
+    async def change(**kwargs):
+        seen.append(kwargs)
+
+    monkeypatch.setattr(agents, "load_settings", lambda: SimpleNamespace())
+    monkeypatch.setattr(agents.channel_backend, "backend_selection_enabled", lambda _turn: True)
+    monkeypatch.setattr(agents, "build_runtime", runtime)
+    monkeypatch.setattr(agents, "agents_backend_change", change)
+    result = CliRunner().invoke(
+        app, ["agents", "backend", "set", "Research", "openai", "--yes", "--accept-drops", "x"]
+    )
+    assert result.exit_code == 0, result.output
+    assert len(seen) == 1, "the switch ran once"
+    assert "x" not in seen[0].values(), "the flag's value reaches nothing"
+    assert not any("drop" in key for key in seen[0]), "the change takes no drops argument"
+
+
 @pytest.mark.parametrize("backend", ["openai", "gemini"])
 async def test_actual_source_gets_and_its_losses_reach_the_readback(operator, backend):
     rt, tenant, agent, _, requests = operator

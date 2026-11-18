@@ -623,15 +623,20 @@ class _NoSession:
 
 
 @pytest.mark.parametrize(
-    ("responder", "private", "expected"),
+    ("responder", "private", "place", "expected"),
     [
-        ("agent", False, None),
-        ("other", False, "other_agents_session"),
-        ("agent", True, "source_context_unavailable"),
+        ("agent", False, ("c", "t"), None),
+        ("other", False, ("c", "t"), "other_agents_session"),
+        ("agent", True, ("c", "t"), "source_context_unavailable"),
+        ("agent", False, ("elsewhere", "t"), "source_context_unavailable"),
+        ("agent", False, ("c", "elsewhere"), "source_context_unavailable"),
+        ("agent", False, ("c", None), None),
+        ("agent", False, ("elsewhere", None), "source_context_unavailable"),
+        ("agent", False, (None, None), "source_context_unavailable"),
     ],
 )
 async def test_an_ungated_read_checks_place_and_responder_but_never_a_card(
-    monkeypatch, responder, private, expected
+    monkeypatch, responder, private, place, expected
 ):
     """`gated=False` needs no card or gate, yet still needs this thread's own public session."""
     from daimon.adapters.mcp.tools._session_gate import session_card_gap
@@ -647,7 +652,7 @@ async def test_an_ungated_read_checks_place_and_responder_but_never_a_card(
         "retrieve_session",
         AsyncMock(return_value=SimpleNamespace(agent=agent, metadata={})),
     )
-    facts = SimpleNamespace(private=private, channel="c", thread="t")
+    facts = SimpleNamespace(private=private, channel=place[0], thread=place[1])
     monkeypatch.setattr(_session_gate, "session_facts", lambda *_a, **_k: facts)
     monkeypatch.setattr(_session_gate, "has_confirmation_gate", lambda *_a, **_k: False)
     monkeypatch.setattr(_session_gate, "_recorded_as_gated", AsyncMock(return_value=False))
@@ -669,4 +674,4 @@ async def test_an_ungated_read_checks_place_and_responder_but_never_a_card(
         require_public_context=True,
         gated=False,
     )
-    assert gap == expected, f"responder={responder} private={private}: {gap}"
+    assert gap == expected, f"responder={responder} private={private} place={place}: {gap}"
