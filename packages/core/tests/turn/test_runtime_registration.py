@@ -252,12 +252,10 @@ _NATIVE_MODULES = frozenset(
         "daimon.core.turn.openai_io",
         "daimon.core.turn.openai_state",
         "daimon.core.turn.openai_deployment",
-        "daimon.core.turn.openai_credential_requests",
         "daimon.core.turn.gemini",
         "daimon.core.turn.gemini_prepare",
         "daimon.core.turn.gemini_state",
         "daimon.core.turn.gemini_deployment",
-        "daimon.core.turn.gemini_credential_requests",
     }
 )
 

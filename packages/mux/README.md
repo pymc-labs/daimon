@@ -932,11 +932,6 @@ the tenant/account scope authorized by the mapping lookup. Its native snapshot
 keeps the SDK's partial metadata and exception behavior without projecting a
 generic session binding. The host still commits the stamp before preparation
 locks the mapping and leaves unreadable stamps for the next bind to retry.
-Gemini native credential offers have a separate, default-off operator adapter
-and MCP registration edge. They verify the authorized resource scope, durable
-caller/binding/catalog identity and native target readback before posting shared
-cards. Production native origin/registry wiring and timed expiry remain pending;
-see `docs/drivers/gemini/NATIVE-CREDENTIAL-TARGET.md`.
 
 ### Tool-only post history checks
 
