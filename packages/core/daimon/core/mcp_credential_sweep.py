@@ -163,7 +163,7 @@ async def sweep_stale_admin_credentials(
             account_id = uuid.UUID(parts[0])
             if len(parts) == 1:
                 try:
-                    if vault_id in await mounted_live_vault_ids(client, scope=scope):
+                    if vault_id in await mounted_live_vault_ids(client):
                         in_use_vault_ids.append(vault_id)
                         continue
                     if not dry_run:

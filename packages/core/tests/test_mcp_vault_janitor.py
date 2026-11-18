@@ -222,7 +222,7 @@ async def test_relay_vaults_no_live_session_mounts_are_archived_after_the_grace(
             return httpx.Response(200, json=listed[0])
         raise AssertionError(f"unexpected call: {req.method} {req.url}")
 
-    async def mounted(client: AsyncAnthropic, *, scope: object) -> frozenset[str]:
+    async def mounted(client: AsyncAnthropic) -> frozenset[str]:
         return frozenset({"vlt_mounted"})
 
     monkeypatch.setattr(mcp_vault_janitor, "mounted_live_vault_ids", mounted)

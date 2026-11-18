@@ -21,9 +21,9 @@ from anthropic.types.beta.session_create_params import Agent, Resource
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, legacy_iter
 from mux.contracts.extensions import ExtensionConfig
-from mux.contracts.ids import PageRequest, Revision, Scope
+from mux.contracts.ids import Revision, Scope
 from mux.contracts.ports import SessionResources
-from mux.contracts.resources import ResourceBinding, Session, SessionFilter, SessionSpec
+from mux.contracts.resources import ResourceBinding, Session, SessionSpec
 from mux.drivers.anthropic import NativeSessionResources
 from pydantic import JsonValue
 
@@ -265,25 +265,14 @@ async def add_session_file_record(
     )
 
 
-async def mounted_live_vault_ids(client: AsyncAnthropic, *, scope: Scope) -> frozenset[str]:
-    """Provider live sessions include unmapped hub/agent-chat sessions, not just DB rows."""
-    backend = managed_agents(client, scope=scope)
+async def mounted_live_vault_ids(client: AsyncAnthropic) -> frozenset[str]:
+    """Provider live sessions include unmapped hub/agent-chat sessions, not just DB rows.
+
+    Reads the SDK pages directly: converting every session to a mux record
+    stalled the event loop on a large fleet, and only the vault ids are needed.
+    """
     mounted: set[str] = set()
-    cursor: str | None = None
-    while True:
-        page = await legacy_call(
-            backend.sessions.list(
-                scope,
-                filters=SessionFilter(include_archived=False),
-                page=PageRequest(cursor=cursor),
-            )
-        )
-        for record in page.data:
-            session = sdk_session(record)
-            if session.archived_at is None:
-                mounted.update(session.vault_ids)
-        if not page.has_more:
-            return frozenset(mounted)
-        if page.next_cursor is None or page.next_cursor == cursor:
-            raise ValueError("live session inventory did not advance")
-        cursor = page.next_cursor
+    async for session in client.beta.sessions.list(include_archived=False, limit=1000):
+        if session.archived_at is None:
+            mounted.update(session.vault_ids or ())
+    return frozenset(mounted)

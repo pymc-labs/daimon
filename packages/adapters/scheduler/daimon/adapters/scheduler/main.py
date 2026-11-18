@@ -1197,8 +1197,9 @@ async def _sweep_github_issued_tokens(
 
 
 # Each run lists every vault, and live sessions once a relay vault is old enough.
+# Seeded at import so a restart does not sweep at once.
 _RELAY_VAULT_ARCHIVE_INTERVAL = timedelta(minutes=10)
-_last_relay_vault_archive: dict[str, datetime] = {}
+_last_relay_vault_archive: dict[str, datetime] = {"started": datetime.now(UTC)}
 
 
 @scheduler_step

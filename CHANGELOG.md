@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Gemini and vault-cleanup work no longer stalls other turns.** Reading and
+  saving a Gemini conversation's stored state now runs off the event loop, and the
+  scheduler's idle relay vault sweep reads only session vault ids and waits ten
+  minutes after a restart before its first run.
 - **GPT threads start with skills whose description spans lines.** A SKILL.md
   block scalar (`description: >`) made OpenAI refuse the session. `name` and
   `description` now upload as one line, an invalid name such as

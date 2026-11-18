@@ -41,7 +41,6 @@ from daimon.core.mux_backend import platform_scope
 from daimon.core.mux_compat import archive_vault, list_vaults
 from daimon.core.session_ports_compat import mounted_live_vault_ids
 from daimon.core.stores.accounts import load_live_account_ids
-from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
@@ -133,12 +132,11 @@ async def _idle_relay_vault_ids(
     vaults: Sequence[BetaManagedAgentsVault],
     *,
     now: dt.datetime,
-    scope: Scope,
 ) -> list[str]:
     candidates = relay_vault_candidates(vaults, now=now)
     if not candidates:
         return []
-    mounted = await mounted_live_vault_ids(client, scope=scope)
+    mounted = await mounted_live_vault_ids(client)
     return [vault_id for vault_id in candidates if vault_id not in mounted]
 
 
@@ -146,7 +144,7 @@ async def archive_idle_relay_vaults(client: AsyncAnthropic, *, now: dt.datetime)
     """Archive relay vaults no live session mounts; returns their ids."""
     scope = platform_scope("mcp_vault_janitor.archive_idle_relay_vaults")
     vaults = [v async for v in list_vaults(client, scope=scope)]
-    idle = await _idle_relay_vault_ids(client, vaults, now=now, scope=scope)
+    idle = await _idle_relay_vault_ids(client, vaults, now=now)
     for vault_id in idle:
         _log.info("mcp_vault_janitor.archive_relay", vault_id=vault_id)
         await archive_vault(client, vault_id, scope=scope)
@@ -180,7 +178,7 @@ async def archive_orphan_mcp_vaults(
     orphan_ids, unparseable_ids = partition_orphan_vault_ids(
         vaults, live_account_ids=live_account_ids
     )
-    orphan_ids += await _idle_relay_vault_ids(client, vaults, now=now, scope=scope)
+    orphan_ids += await _idle_relay_vault_ids(client, vaults, now=now)
 
     if unparseable_ids:
         _log.warning(
