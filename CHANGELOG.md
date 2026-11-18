@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **An agent's page shows it is loading.** While a slow agent loaded, the page
+  stayed blank.
 - **Agents switched to GPT or Gemini answer again.** A new conversation with
   one was refused with "Something went wrong on our side".
 - **The Web app setting (`web_awareness`, was "Web app links") turns off every
