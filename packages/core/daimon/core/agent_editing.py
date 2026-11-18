@@ -70,6 +70,7 @@ from daimon.core.permissions import (
     SEALED_REFUSAL,
     WEB_PLACE_ID,
     agent_permissions,
+    sealed_outside,
     with_agent_rule,
 )
 from daimon.core.rule_views import binding_refusal, clear_refusal, render_binding_refusal
@@ -772,6 +773,12 @@ async def check_places(
             row = await get_scope(session, scope=scope)
             if row is not None and row.agent_name in names:
                 cleared.append(channel_id)
+    # A private channel's pick is its setting, changed only from inside it, admins too.
+    picks = tuple(c for c in (*turn_on, *cleared) if c != WEB_PLACE_ID)
+    if picks and sealed_outside(
+        policy, actor.subject.inside, channel_ids=picks, operator=actor.subject.operator
+    ):
+        raise AgentEditError(SEALED_REFUSAL, kind="forbidden")
     refusal = places_refusal(
         places_policy(
             policy, names=names, agent_name=name, runs_in=_rule_target(policy, names, before, after)

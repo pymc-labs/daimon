@@ -20,7 +20,6 @@ import anthropic as anthropic_errors
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core._models import ChannelConfig
 from daimon.core.agent_ownership import agent_name_lock, record_agent_creator
 from daimon.core.anthropic_guard import AnthropicDisabled
 from daimon.core.authz import Subject
@@ -46,9 +45,9 @@ from daimon.core.stores.access_policy import (
     policy_write_transaction,
     set_access_policy,
 )
+from daimon.core.stores.scoped_config_read import list_channels_picking_agent
 from daimon.core.stores.scoped_config_write import clear_agent_references
 from pydantic import ValidationError
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger()
@@ -255,18 +254,13 @@ async def archive_sealed_refusal(
     (`forget_archived_agent`). A private channel that picks it changes only from
     inside, so the archive is refused before any write. Call it in every archive path.
     """
-    channels = (
-        await session.execute(
-            select(ChannelConfig.channel_id).where(
-                ChannelConfig.tenant_id == tenant_id,
-                ChannelConfig.agent_name.in_(_own_names(name, agent)),
-            )
-        )
-    ).scalars()
+    channels = await list_channels_picking_agent(
+        session, tenant_id=tenant_id, agent_names=_own_names(name, agent)
+    )
     return await sealed_pick_refusal(
         session,
         tenant_id=tenant_id,
-        channels=list(channels),
+        channels=channels,
         subject=subject,
         picks=f"{name} as its agent",
         change="its agent",

@@ -428,3 +428,31 @@ def test_every_archive_path_checks_the_channels_that_pick_it() -> None:
             if key not in _ARCHIVE_UNGUARDED:
                 missed.add(key)
     assert not missed, f"check the seal first, or list the path with a reason: {sorted(missed)}"
+
+
+# A call that refuses a private channel's pick from outside it, before the pick is committed.
+_PICK_GUARDS = {
+    "check_places": "agent_editing: `sealed_outside` on every pick it adds or clears",
+    "require_channel_admin": "channel_changes: `sealed_outside` on the channel",
+    "_write_rule": "channel_rules: `authorize(SET_CHANNEL_RULE)` in the same transaction",
+}
+
+
+def test_every_channel_pick_writer_checks_the_seal() -> None:
+    """A channel's default agent is its setting. Every function that writes it
+    (`write_channel_default`) calls a guard that refuses a private channel from outside."""
+    missed: set[tuple[str, str]] = set()
+    for path in PACKAGES.rglob("*.py"):
+        if "/tests/" in str(path) or path.name == "channel_changes.py" and "stores" in str(path):
+            continue
+        for fn in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            called = {
+                getattr(n.func, "id", None) or getattr(n.func, "attr", "")
+                for n in ast.walk(fn)
+                if isinstance(n, ast.Call)
+            }
+            if "write_channel_default" in called and not called & _PICK_GUARDS.keys():
+                missed.add((str(path.relative_to(PACKAGES)), fn.name))
+    assert not missed, f"guard these channel pick writes: {sorted(missed)}"
