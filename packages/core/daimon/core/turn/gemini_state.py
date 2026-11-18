@@ -16,6 +16,7 @@ import json
 import os
 import sqlite3
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
@@ -43,6 +44,9 @@ _RECORDS = TypeAdapter(Records)
 _JSON = TypeAdapter[JsonValue](JsonValue)
 _ROWS = TypeAdapter(dict[str, JsonValue])
 log = structlog.get_logger(__name__)
+# A multi-MB Records body decodes and encodes many times per turn; on the loop that
+# stalls every concurrent turn. Its own pool so it cannot starve to_thread's.
+_CODEC = ThreadPoolExecutor(max_workers=2, thread_name_prefix="gemini-records")
 
 # An attempt whose interaction never reports a measured cost (a lost response,
 # a crash before usage, an unpriced alias) stops counting against the cap after
@@ -163,6 +167,16 @@ def _decode(value: JsonValue) -> object:
     raise ValueError("invalid durable Gemini tag")
 
 
+def _load(body: str | None) -> Records:
+    if body is None:
+        return Records()
+    return _RECORDS.validate_python(_decode(_JSON.validate_json(body)))
+
+
+def _dump(records: Records) -> str:
+    return json.dumps(_encode(_RECORDS.dump_python(records)), allow_nan=False)
+
+
 async def _finish(operation: Callable[[], None]) -> None:
     await complete(asyncio.to_thread(operation))
 
@@ -243,24 +257,15 @@ class _GeminiStorage:
                 yield records
             return
         body = await cast(Callable[[], Awaitable[str | None]], reader)()
-        yield (
-            Records()
-            if body is None
-            else _RECORDS.validate_python(_decode(_JSON.validate_json(body)))
-        )
+        yield await asyncio.get_running_loop().run_in_executor(_CODEC, _load, body)
 
     @asynccontextmanager
     async def transaction(self, *, after_dispatch: bool = False) -> AsyncIterator[Records]:
         async with self._database.transaction(after_dispatch=after_dispatch) as payload:
-            body = payload.body
-            records = (
-                Records()
-                if body is None
-                else _RECORDS.validate_python(_decode(_JSON.validate_json(body)))
-            )
+            loop = asyncio.get_running_loop()
+            records = await loop.run_in_executor(_CODEC, _load, payload.body)
             yield records
-            encoded = json.dumps(_encode(_RECORDS.dump_python(records)), allow_nan=False)
-            await payload.save(encoded)
+            await payload.save(await loop.run_in_executor(_CODEC, _dump, records))
 
 
 @runtime_checkable
