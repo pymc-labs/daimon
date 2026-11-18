@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
+from importlib import import_module
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
@@ -297,6 +298,9 @@ def create_mcp_app(
     validation is skipped; PUBLIC_URL is still enforced because
     `ensure_mcp_vault` needs it on the session-create side.
     """
+    # A switch preview's first use imports the OpenAI SDK: seconds of CPU on the
+    # event loop, stalling every request. Paid here, at startup, instead.
+    import_module("mux.drivers.openai")
     effective_settings = settings or load_settings()
     # The JSON chain and stdlib redaction before the first log line (uvicorn
     # has configured its loggers by the time it calls this factory); without
