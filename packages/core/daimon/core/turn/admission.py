@@ -1083,24 +1083,28 @@ async def _admit_gates(
         retained_binding: ProviderBinding | None = None
         retained_shared = False
         follow_generation: int | None = None
-        if (
-            selection_enabled
-            and channel is not None
-            and slot_thread_id is not None
-            and not is_dm
-            and config.thread_binding_kind != "setup"
-        ):
+
+        async def read_retained(db: AsyncSession, *, shared_ok: bool = True) -> None:
+            """Read the thread's retained binding: the shared slot first, then this caller's.
+
+            Without `shared_ok` the shared slot is skipped (it was made for another agent).
+            """
+            nonlocal retained_revision, retained_binding, retained_shared
+            nonlocal backend_revision, backend_revision_origin, backend_footer_profile
+            assert channel is not None and slot_thread_id is not None
             thread = ThreadRef(channel=channel, thread_id=slot_thread_id)
             slots = [Slot(thread=thread, account_id=str(principal.account_id))]
             if backend_ever_shared:
                 slots.insert(0, Slot(thread=thread))
             for slot in slots:
+                if slot.account_id is None and not shared_ok:
+                    continue
                 if released and slot.account_id is not None:
                     continue  # A due release: this caller's slot selects afresh.
                 binding = (
                     await deps.state_store.get_binding(slot)
                     if deps.state_store is not None
-                    else await mux_state.get_binding(session, slot)
+                    else await mux_state.get_binding(db, slot)
                 )
                 if binding is None:
                     continue
@@ -1112,7 +1116,7 @@ async def _admit_gates(
                 retained_binding, retained_shared = binding, slot.account_id is None
                 try:
                     retained, _, source = await channel_backend.resolve_turn_backend(
-                        session, channel, None, enabled=True, retained_revision=retained_revision
+                        db, channel, None, enabled=True, retained_revision=retained_revision
                     )
                 except (channel_backend.AgentBackendRefused, BackendUnsupported) as error:
                     _log_backend_unsupported("retained_revision_lookup", error)
@@ -1141,7 +1145,7 @@ async def _admit_gates(
                 # A caller's older session remains on its original default
                 # backend even if neutral thread bindings did not yet exist.
                 previous = await get_thread_session_at(
-                    session,
+                    db,
                     tenant_id=tenant_id,
                     platform=platform,
                     thread_id=slot_thread_id,
@@ -1157,6 +1161,15 @@ async def _admit_gates(
                     retained_revision = 0
                     backend_revision = None
                     backend_revision_origin = None
+        if (
+            selection_enabled
+            and channel is not None
+            and slot_thread_id is not None
+            and not is_dm
+            and config.thread_binding_kind != "setup"
+        ):
+            await read_retained(session)
+
         if selection_enabled and backend_revision is not None:
             backend_footer_profile = backend_revision.profile
         if selection_enabled and channel is not None and retained_revision == 0:
@@ -1588,6 +1601,7 @@ async def _admit_gates(
         nonlocal backend_revision, backend_ever_shared, backend, backend_revision_origin
         nonlocal backend_footer_profile, source_agent
         nonlocal retained_revision, backend_follow, follow_generation, thread_choice
+        nonlocal retained_binding, retained_shared
         if selfhosted:
             return
         if selection_enabled and channel is not None and not configured_channel:
@@ -1606,16 +1620,29 @@ async def _admit_gates(
             selection_enabled
             and channel is not None
             and retained_revision
-            and not retained_shared
             and not configured_channel
         ):
             # A held revision runs only for the agent it was made for: after the
             # thread's responder changed, this slot selects afresh for the new one.
+            turn_agent = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent.id)
             async with deps.sessionmaker() as owner_session:
                 owner = await mux_state.config_agent_id(owner_session, channel, retained_revision)
-            if owner is not None and owner != derive_agent_uuid(
-                tenant_id=tenant_id, ma_agent_id=agent.id
-            ):
+                if retained_shared and owner is not None and owner != turn_agent:
+                    # The shared slot keeps the first agent's revision and cannot be
+                    # released for one caller: skip it and read this caller's own slot.
+                    retained_revision = None
+                    retained_binding = None
+                    retained_shared = False
+                    backend_revision = None
+                    backend_revision_origin = None
+                    backend_footer_profile = None
+                    await read_retained(owner_session, shared_ok=False)
+                    owner = (
+                        await mux_state.config_agent_id(owner_session, channel, retained_revision)
+                        if retained_revision
+                        else None
+                    )
+            if owner is not None and owner != turn_agent:
                 follow_generation = retained_binding.generation if retained_binding else 0
                 retained_revision = None
                 backend_revision = None
