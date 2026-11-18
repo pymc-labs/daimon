@@ -1873,7 +1873,9 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
         )
     if setting is not None:
         if setting.backend != revision.backend:
-            raise AgentBackendRefused("revision_busy")
+            # The agent's setting moved to another provider than this turn's
+            # revision: not a race a retry clears, so `preparation_failed`.
+            raise UnsupportedCapability(("source_drift",), revision.profile)
         model = revision.model
         if model is None and revision.backend != spec.model.provider:
             # Only Claude names no model: a source born elsewhere runs Claude's default.

@@ -1893,7 +1893,9 @@ async def resolve_turn_backend(
         if setting is not None and setting.backend is not None and not setting.born
         else None
     )
-    if linked is not None and validate_origin is not None:
+    if linked is not None:
+        if validate_origin is None:
+            raise AgentBackendRefused("source_unavailable")
         validate_origin = partial(
             cast(_RevisionOriginValidator, validate_origin), agent_revision=linked
         )
