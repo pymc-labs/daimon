@@ -100,7 +100,12 @@ async def read_capped(resp: httpx.Response, *, url: str, cap: int) -> bytes:
     it streams, so an oversize tarball is never held in memory."""
     content_length = resp.headers.get("content-length")
     if cap > 0 and content_length is not None and int(content_length) > cap:
-        _log.warning("skill_sync.fetcher.tarball_too_large", url=url, cap=cap)
+        _log.warning(
+            "skill_sync.fetcher.tarball_too_large",
+            url=url,
+            cap=cap,
+            content_length=content_length,
+        )
         raise TarballTooLarge(
             f"tarball for {url} exceeds max_tarball_bytes cap of {cap} bytes "
             f"(Content-Length={content_length})"
