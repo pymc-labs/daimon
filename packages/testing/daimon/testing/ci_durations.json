@@ -943,7 +943,6 @@
   "tests/test_deploy_reconcile_wait.py": 5.51,
   "tests/test_deploy_superseded.py": 0.73,
   "tests/test_deploy_workflow_quotes.py": 0.19,
-  "tests/test_hackathon_load_rehearsal.py": 0.01,
   "tests/test_posted_controls_equivalence.py": 0.36,
   "tests/test_selfhosted_model_defaults.py": 0.0,
   "tests/test_staging_iap_ssh.py": 1.14,
