@@ -31,6 +31,7 @@ from daimon.core.turn.gemini_deployment import GeminiPlan
 from daimon.core.turn.prepare import CONTINUED, admitted_session_scope
 from daimon.core.turn.runtime_manifest import read_preparation_counterpart
 from daimon.core.turn.runtimes import build_channel_runtime, scope_channel_runtimes
+from daimon.testing.settings_mock import bare_settings
 from mux.contracts.config import ConfigRevision
 from mux.contracts.resources import EnvironmentSpec
 from mux.drivers.gemini.flash import FLASH_PRIMARY
@@ -81,7 +82,7 @@ async def template(switched_request, source_mcp, monkeypatch, tmp_path, request)
             turn_runtimes={},
             turn_runtime_factory=build_channel_runtime,
             state_store=PostgresStateStore(sessions),
-            **({"settings": object()} if relay else {}),
+            **({"settings": bare_settings()} if relay else {}),
         ),
     )
     if relay:
@@ -325,6 +326,34 @@ async def test_a_catalogue_blip_at_a_turn_asks_for_a_retry_not_a_new_confirmatio
 
 
 @pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("relay_agent", [False, True])
+async def test_a_preview_hides_what_its_turn_hides(
+    template, switched_request, monkeypatch, relay_agent
+):
+    """A tool Off here is never named lost: the preview reads the place's features that
+    hide tools, which no backend narrows, and a relay agent's memory is Off as on its turn."""
+    from daimon.core.features.model_input import HIDING_KEYS
+    from daimon.core.turn import admission, runtime_manifest
+
+    request, *_ = template
+    _, _, source, actor, *_ = switched_request
+    real, seen = runtime_manifest.capture_preparation_source, []
+
+    async def spy(preparation, **kwargs):
+        seen.append(preparation.admission)
+        return await real(preparation, **kwargs)
+
+    monkeypatch.setattr(runtime_manifest, "capture_preparation_source", spy)
+    monkeypatch.setattr(admission, "agent_has_identity_relay", lambda *_a, **_k: relay_agent)
+    await _bound_capture(request, actor)(source)
+    assert seen, "the preview captured"
+    for read in seen:
+        assert read.toolset.hidden_daimon_tools, "default capabilities are Off: tools hidden"
+        assert set(read.features.features) == set(HIDING_KEYS)
+        assert read.resolved("repo_memory").locked is relay_agent
+
+
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("kind", ["unreachable", "server_error"])
 async def test_a_catalogue_blip_at_a_preview_records_no_loss(
     template, switched_request, monkeypatch, kind
@@ -564,7 +593,7 @@ async def test_the_relay_mounts_a_user_connector_instead_of_losing_it(template, 
     request, quote, native, *_ = template
     assert "mcp_server:linear" in quote.declared_drops, "confirmed while the relay was off"
     monkeypatch.setattr(snapshot, "deployment_on", lambda _s, k, _p: k == "mcp_connector_relay")
-    request = replace(request, deps=replace(request.deps, settings=object()))
+    request = replace(request, deps=replace(request.deps, settings=bare_settings()))
     selected, runtime = await _prepared(request)
     daimon, linear = selected.target_spec.mcp_servers
     public = str(request.deps.mcp.public_url).rstrip("/")
@@ -591,7 +620,7 @@ async def test_a_channel_less_read_keeps_a_connector_only_if_every_platform_rela
         "deployment_on",
         lambda _s, key, platform: key == "mcp_connector_relay" and platform == "slack",
     )
-    request = replace(request, deps=replace(request.deps, settings=object()))
+    request = replace(request, deps=replace(request.deps, settings=bare_settings()))
     both = replace(request, answers_on=("discord", "slack"))
     selected, _ = await _prepared(both)
     assert "mcp_server:linear" in selected.target_spec.declared_drops, (
@@ -641,7 +670,7 @@ async def test_the_host_call_gate_offers_gated_tools_behind_a_card(template, mon
 
     monkeypatch.setattr(discovery, "list_mcp_tools", listed)
     monkeypatch.setattr(snapshot, "deployment_on", lambda _s, key, _p: key == "host_call_gate")
-    request = replace(request, deps=replace(request.deps, settings=object()))
+    request = replace(request, deps=replace(request.deps, settings=bare_settings()))
     captured = await capture_preparation_source(request, fresh=True)
     (representation,) = [r for r in captured.representations if r.target.mcp_servers]
     (connection,) = representation.target.mcp_servers
@@ -1306,9 +1335,14 @@ async def test_a_tool_whose_feature_is_off_here_leaves_the_allowlist_unasked(tem
     request, *_ = template
     hidden = property(lambda _: frozenset({"search_tools"}))
     monkeypatch.setattr(SessionToolset, "hidden_daimon_tools", hidden)
-    selected, _ = await _prepared(request)
-    assert _connection(selected).tool_policy["allowed_tools"] == ["call_tool"], "never listed"
+    selected, runtime = await _prepared(request)
+    connection = _connection(selected)
+    assert connection.tool_policy["allowed_tools"] == ["call_tool"], "never listed"
     assert "mcp_tool:daimon-mcp:search_tools" not in selected.target_spec.declared_drops
+    transport = runtime.transport_factory(request.admission.backend_revision, request.scope)
+    # The server still lists it: the credential is minted all the same.
+    assert await transport.mcp_secrets(request.scope, connection.credential_ref, connection.url)
+    await runtime.end_of_turn()
 
 
 @pytest.mark.parametrize(

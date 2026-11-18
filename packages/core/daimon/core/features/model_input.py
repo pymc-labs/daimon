@@ -22,6 +22,8 @@ SESSION_KEYS: Final[tuple[str, ...]] = (
 TOOLSET_KEYS: Final[tuple[str, ...]] = (*SESSION_KEYS, "repo_memory", "web_awareness")
 """What `SessionToolset.of` reads: `repo_memory` and `web_awareness` also hide their tools,
 while they bind per turn."""
+HIDING_KEYS: Final[tuple[str, ...]] = (*CAPABILITY_KEYS, "repo_memory", "web_awareness")
+"""What `hidden_daimon_tools` reads; no backend narrows any of them."""
 TURN_KEYS: Final[tuple[str, ...]] = ("web_awareness",)
 PER_TURN_KEYS: Final[tuple[str, ...]] = (
     "mcp_briefing", "repo_memory", "context_provider", "origin_fragments",

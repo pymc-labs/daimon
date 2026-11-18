@@ -21,7 +21,7 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.features.deployment import deployment_value
-from daimon.core.features.model_input import SESSION_KEYS, TOOL_KEYS, SessionToolset
+from daimon.core.features.model_input import HIDING_KEYS, SESSION_KEYS, TOOL_KEYS, SessionToolset
 from daimon.core.features.registry import (
     FEATURES,
     TIERS,
@@ -101,6 +101,12 @@ _NARROWED: dict[str, str] = {
     "thread_providers": "an agent owner's consent, checked when a conversation's model is picked",
     **{f"web.{module}": "workspace-only web app surface" for module in WEB_MODULES},
 }
+
+
+def test_no_backend_narrows_what_hides_daimon_tools() -> None:
+    """A switch preview reads these before it knows the target backend."""
+    order = resolution_order(list(HIDING_KEYS))
+    assert not [spec.key for spec in order if spec.backend_tiers or spec.backend_fixed]
 
 
 def test_every_feature_has_all_five_tiers_unless_narrowed_for_a_reason() -> None:

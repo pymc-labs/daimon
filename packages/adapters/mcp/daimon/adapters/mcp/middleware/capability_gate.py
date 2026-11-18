@@ -5,8 +5,9 @@ external MCP clients and agent keys reach the server directly, so the server ref
 `call_tool` re-enters the middleware with the inner tool's name, so proxied calls are covered.
 
 tools/list is filtered for every caller except a chat-execution credential: the native turn
-checks its live catalogue against its allowlist (`turn/runtime_manifest.py`), and Claude
-sessions already hide the tools in their session config. Such a caller is refused at call time.
+checks this catalogue against its consent, less the tools Off at its place, which a template's
+allowlist leaves out (`turn/template_mcp.py`); Claude sessions hide them in their session
+config. Such a caller is refused at call time.
 
 A tool whose setup this server lacks (`SERVER_SETUP`) leaves every list, that credential's too,
 and its call is refused as not set up: a worker can't judge that setup, and the server's
@@ -143,7 +144,7 @@ async def _key_agent_id(runtime: McpRuntime, auth: AuthIdentity, derived: uuid.U
 
 
 def _lists_everything(auth: AuthIdentity) -> bool:
-    """A chat-execution credential: its native catalogue must match its allowlist."""
+    """A chat-execution credential: its native turn checks the whole catalogue (`mint`)."""
     return auth.chat_agent_id is not None and auth.agent_id is None
 
 

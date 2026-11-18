@@ -747,8 +747,9 @@ async def _capture_source_capabilities(
             settings = request.deps.settings
             gated, carded = confirmation_gated_tools(), RETIRED_GATES
             # The catalogue lists every tool (`_lists_everything`); a feature Off here leaves
-            # its tools out of the allowlist, as a Claude session's toolset does.
-            hidden = request.admission.toolset.hidden_daimon_tools
+            # its tools out of a template's allowlist, as a Claude session's toolset does. A
+            # pinned install keeps its exact allowlist; the server refuses them on call.
+            hidden = request.admission.toolset.hidden_daimon_tools if template else frozenset[str]()
             if settings is not None and deployment_on_everywhere(
                 settings, "host_call_gate", request.answers_on or (request.platform,)
             ):

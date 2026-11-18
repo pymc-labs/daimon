@@ -168,6 +168,8 @@ class TemplateMCPCredential:
                 raise ScopeViolation("mcp-credential", "invalid scoped MCP credential") from None
         # A held credential lists only the held allowlist (`daimon.core.mcp_hold`).
         expected = self.catalogue if admission.hold is None else held_catalogue(self.catalogue)
+        # The server lists a tool Off here (`_lists_everything`); the allowlist leaves it out.
+        hidden = admission.toolset.hidden_daimon_tools
         now = request.now()
         ttl_s = min(int(max((request.deadline - now).total_seconds(), 0.0)) + 60, 900)
         secret = request.deps.mcp.jwt_secret.get_secret_value().encode()
@@ -204,7 +206,7 @@ class TemplateMCPCredential:
                 max_ttl_s=ttl_s,
                 chat_execution=True,
             )
-            if await list_mcp_tools(own, token) != expected:
+            if await list_mcp_tools(own, token) - hidden != expected - hidden:
                 raise ValueError("target MCP catalogue differs from captured source")
             token = await self._bind(token, agent_id=agent_id)
         except (OSError, ValueError):
