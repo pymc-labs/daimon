@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -48,6 +49,9 @@ class MemoryUsageRevisions:
 #: Ended turns: their items no longer change, so their search count is cached.
 _ENDED = frozenset({"completed", "cancelled", "failed"})
 _SEARCH_CACHE = 4096
+#: An ended turn's resource can still lack usage its terminal event carried, or
+#: fill it in after that event. Without either, it is re-read after these delays.
+_USAGE_SETTLE_DELAYS_S = (0.5, 1.0, 2.0)
 
 
 def billable_search(item: Mapping[str, JsonValue]) -> bool:
@@ -104,6 +108,14 @@ class OpenAIUsage:
     def __init__(self, context: Context, revisions: UsageRevisions) -> None:
         self._c, self._revisions = context, revisions
         self._searches_of: OrderedDict[tuple[ResourceRef, str], tuple[str, int]] = OrderedDict()
+        self._terminal: OrderedDict[tuple[ResourceRef, str], Object] = OrderedDict()
+
+    def note_terminal(self, session: ResourceRef, turn_id: str, usage: Object) -> None:
+        """Keep a root terminal event's own usage for a resource read that lacks it."""
+        self._terminal[session, turn_id] = usage
+        self._terminal.move_to_end((session, turn_id))
+        if len(self._terminal) > _SEARCH_CACHE:
+            self._terminal.popitem(last=False)
 
     @owned
     async def list(
@@ -113,7 +125,10 @@ class OpenAIUsage:
         raw = await self._c.call(
             "GET", f"/agents/sessions/{segment(session.id)}/turns", params=query(page)
         )
-        values = [await self._observe(session, turn) for turn in objects(raw["data"])]
+        values = [
+            await self._observe(session, self._settled(session, turn))
+            for turn in objects(raw["data"])
+        ]
         more = raw["has_more"]
         if not isinstance(more, bool):
             raise ValueError("invalid has_more")
@@ -127,13 +142,30 @@ class OpenAIUsage:
     ) -> tuple[UsageObservation, ...]:
         """The root turn's own observation, reading no other turn or its items."""
         self._c.check(scope, session, "session")
-        turn = await self._c.call(
-            "GET", f"/agents/sessions/{segment(session.id)}/turns/{segment(turn_id)}"
-        )
-        if turn.get("id") != turn_id:
-            raise ValueError("usage belongs to another turn")
+        path = f"/agents/sessions/{segment(session.id)}/turns/{segment(turn_id)}"
+
+        async def read() -> Object:
+            turn = await self._c.call("GET", path)
+            if turn.get("id") != turn_id:
+                raise ValueError("usage belongs to another turn")
+            return turn
+
+        turn = self._settled(session, await read())
+        for delay in _USAGE_SETTLE_DELAYS_S:
+            if turn.get("status") not in _ENDED or turn.get("usage") is not None:
+                break
+            await asyncio.sleep(delay)
+            turn = self._settled(session, await read())
         value = await self._observe(session, turn)
         return () if value.thread_id is not None else (value,)
+
+    def _settled(self, session: ResourceRef, turn: Object) -> Object:
+        """An ended turn lacking usage takes its terminal event's own, when seen."""
+        if turn.get("status") in _ENDED and turn.get("usage") is None:
+            noted = self._terminal.get((session, text(turn["id"])))
+            if noted is not None:
+                return {**turn, "usage": noted}
+        return turn
 
     async def _observe(self, session: ResourceRef, turn: Object) -> UsageObservation:
         if turn.get("session_id") != session.id:

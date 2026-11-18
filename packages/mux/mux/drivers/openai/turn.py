@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Protocol
@@ -55,9 +55,20 @@ async def close(source: AsyncIterator[Object]) -> None:
         await method()
 
 
+#: Receives a root terminal event's own `usage`, which the turn resource can lack.
+type TerminalUsage = Callable[[ResourceRef, str, Object], None]
+
+
 class _NormalizedStream(AsyncIterator[Event]):
-    def __init__(self, source: AsyncIterator[Object], session: ResourceRef, previews: bool) -> None:
+    def __init__(
+        self,
+        source: AsyncIterator[Object],
+        session: ResourceRef,
+        previews: bool,
+        terminal_usage: TerminalUsage | None = None,
+    ) -> None:
         self._source, self._previews = source, previews
+        self._session, self._terminal_usage = session, terminal_usage
         self._iterator = source.__aiter__()
         self._normalizer = EventNormalizer(session.id)
         self._pending: deque[Event] = deque()
@@ -74,10 +85,18 @@ class _NormalizedStream(AsyncIterator[Event]):
                 if self._pending:
                     return self._pending.popleft()
                 raw = await self._iterator.__anext__()
+                events = self._normalizer.normalize_batch(raw)
+                usage = raw.get("usage")
+                for event in events:
+                    if (
+                        self._terminal_usage is not None
+                        and event.type == "session.turn_ended"
+                        and event.turn_id is not None
+                        and isinstance(usage, dict)
+                    ):
+                        self._terminal_usage(self._session, event.turn_id, object_json(usage))
                 self._pending.extend(
-                    event
-                    for event in self._normalizer.normalize_batch(raw)
-                    if self._previews or event.authority != "preview"
+                    event for event in events if self._previews or event.authority != "preview"
                 )
         except (ValueError, KeyError, TypeError):
             await self.aclose()
@@ -153,9 +172,14 @@ class OpenAIEvents:
     """
 
     def __init__(
-        self, context: Context, sessions: OpenAISessions, journal: RecoveryJournal
+        self,
+        context: Context,
+        sessions: OpenAISessions,
+        journal: RecoveryJournal,
+        terminal_usage: TerminalUsage | None = None,
     ) -> None:
         self._c, self._sessions, self._journal = context, sessions, journal
+        self._terminal_usage = terminal_usage
 
     @owned
     async def send(
@@ -212,7 +236,7 @@ class OpenAIEvents:
         source = await self._c.transport.open_stream(
             f"/agents/sessions/{segment(session.id)}/events"
         )
-        return _NormalizedStream(source, session, previews)
+        return _NormalizedStream(source, session, previews, self._terminal_usage)
 
     async def stream(
         self,
