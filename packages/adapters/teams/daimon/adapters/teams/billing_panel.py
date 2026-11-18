@@ -68,42 +68,27 @@ from daimon.adapters.teams.commands import CommandContext
 from daimon.adapters.teams.identity import DENIED, canonical_uuid
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.runtime import TeamsRuntime
+from daimon.adapters.teams.ui_render import panel_body, section_container
 from daimon.core.billing_panel import (
     ADD_CREDIT,
-    ASK_ADMIN,
-    CHANNEL_BUDGET,
-    CHANNEL_BUDGETS,
     CHANNEL_BUDGETS_SHOWN,
     EXPIRY_DATES,
-    EXPIRY_INTRO,
+    EXPIRY_ID,
     LOOK_UP,
-    NOTHING_USED,
     REDEEM_CODE,
     TITLE,
-    TOP_SPENDERS,
     TOP_SPENDERS_SHOWN,
     TOPUP_AMOUNTS,
-    YOU,
+    BillingMarks,
     BillingPanelState,
     MemberRow,
-    admin_summary,
-    caller_line,
-    channel_budget_line,
-    channel_budget_phrase,
+    billing_screen,
     create_checkout,
-    credit_headline,
-    expiry_rows,
     load_billing_snapshot,
     lookup_line,
-    month_label,
     month_start,
-    more_channel_budgets,
-    more_spenders,
     redeemed_text,
-    spend_over_cap,
-    spender_line,
     stored_name_labels,
-    timed_credit_note,
 )
 from daimon.core.errors import DaimonError
 from daimon.core.observability import capture_exception_with_scope
@@ -129,6 +114,7 @@ from daimon.core.stores.usage_events import (
     turn_count_for_user_in_tenant_since,
 )
 from daimon.core.teams_bot_framework import SERVICE_URL
+from daimon.core.ui import titled
 from microsoft_teams.api import AdaptiveCardInvokeActivity, AdaptiveCardInvokeResponse
 from microsoft_teams.apps import ActivityContext, App
 from microsoft_teams.cards import (
@@ -139,12 +125,10 @@ from microsoft_teams.cards import (
     ChoiceSetInput,
     Column,
     ColumnSet,
-    Container,
     ExecuteAction,
     OpenUrlAction,
     QueryData,
     ShowCardAction,
-    TextBlock,
     TextInput,
     ToggleVisibilityAction,
 )
@@ -163,7 +147,6 @@ PERSON_INPUT = "person"
 # Teams' people picker: the choices come from the organisation's directory.
 # https://learn.microsoft.com/microsoftteams/platform/task-modules-and-cards/cards/people-picker
 PEOPLE_DATASET = "graph.microsoft.com/users"
-EXPIRY_ID = "billing-expiry"
 ENTER_CODE = "Enter a promo code."
 CODE_INPUT = "code"
 # The panel waits at most this long for roster lookups, all together.
@@ -198,41 +181,6 @@ def card_time(moment: datetime) -> str:
 def card_date(moment: datetime) -> str:
     """A date Teams shows in each reader's own timezone."""
     return f"{{{{DATE({moment.astimezone(UTC):%Y-%m-%dT%H:%M:%SZ}, SHORT)}}}}"
-
-
-def _details(*lines: str) -> list[CardElement]:
-    """Small grey lines."""
-    return [
-        TextBlock(text=line, is_subtle=True, size="Small", spacing="None", wrap=True)
-        for line in lines
-    ]
-
-
-def _block(*items: CardElement, element_id: str | None = None, hidden: bool = False) -> Container:
-    """One section of the card, set apart from the one above."""
-    return Container(
-        items=list(items),
-        separator=True,
-        spacing="Large",
-        id=element_id,
-        is_visible=False if hidden else None,
-    )
-
-
-def _header(title: str, *subtext: str) -> Container:
-    return Container(items=[heading(title), *_details(*subtext)])
-
-
-def _credit(state: BillingPanelState) -> list[CardElement]:
-    """The total as the biggest text on the card, the words under it, and the timed credit."""
-    figure, words = credit_headline(state.guild_balance_usd)
-    items: list[CardElement] = [TextBlock(text=figure, size="ExtraLarge", weight="Bolder")]
-    if words is not None:
-        items.append(TextBlock(text=words, spacing="None", wrap=True))
-    details = [note] if (note := timed_credit_note(state.timed_credit)) else []
-    if not state.is_admin:
-        details.append(ASK_ADMIN)
-    return items + _details(*details)
 
 
 def plain_name(name: str) -> str:
@@ -427,30 +375,10 @@ def _actions(
     return actions
 
 
-def _titled(
-    title: str, *items: CardElement, element_id: str | None = None, hidden: bool = False
-) -> Container:
-    """A section with a bold title, set apart from the one above."""
-    label = TextBlock(text=title, weight="Bolder", wrap=True)
-    return _block(label, *items, element_id=element_id, hidden=hidden)
-
-
 def spender_name(row: MemberRow) -> str:
     """The row's name as plain card text, or `Name unavailable` when none is known."""
     name = plain_name(row.display_name) if row.display_name else ""
     return name or NAME_UNAVAILABLE
-
-
-def _spenders(state: BillingPanelState) -> Container:
-    """`Top spenders` by name, then a grey `+ N more`."""
-    rows = [
-        spender_line(rank, spender_name(row), cost=row.cost_usd, is_caller=row.is_caller)
-        for rank, row in enumerate(state.member_rows[:TOP_SPENDERS_SHOWN], start=1)
-    ] or [NOTHING_USED]
-    items: list[CardElement] = _rows(*rows)
-    if overflow := more_spenders(len(state.member_rows), state.over_cap_count):
-        items += _details(f"+ {overflow} more")
-    return _titled(TOP_SPENDERS, *items)
 
 
 def channel_name_text(channel_id: str, names: Mapping[str, str]) -> str:
@@ -459,66 +387,13 @@ def channel_name_text(channel_id: str, names: Mapping[str, str]) -> str:
     return name or CHANNEL_NAME_UNAVAILABLE
 
 
-def _channel_budgets(
-    state: BillingPanelState, now: datetime, names: Mapping[str, str]
-) -> Container:
-    """`Channel budgets` by channel name, most used first, five then a grey `+ N more`."""
-    lines = [
-        channel_budget_line(
-            status, label=channel_name_text(status.budget.channel_id, names), now=now
-        )
-        for status in state.channel_budgets[:CHANNEL_BUDGETS_SHOWN]
-    ]
-    items: list[CardElement] = _rows(*lines)
-    if more := more_channel_budgets(state):
-        items += _details(f"+ {more} more")
-    return _titled(CHANNEL_BUDGETS, *items)
-
-
-def _rows(*lines: str) -> list[CardElement]:
-    """List rows, close together."""
-    return [TextBlock(text=line, spacing="Small", wrap=True) for line in lines]
-
-
-def _panel_body(
-    state: BillingPanelState,
-    since: datetime,
-    now: datetime,
-    channel_names: Mapping[str, str],
-    place: str | None,
-    lookup: Lookup | None,
-    web_url: str | None,
-) -> list[CardElement]:
-    subtext = (
-        admin_summary(since, spend=state.guild_spend, people=state.guild_distinct_members)
-        if state.is_admin
-        else (month_label(since),)
+def _marks(channel_names: Mapping[str, str]) -> BillingMarks:
+    return BillingMarks(
+        person=spender_name,
+        channel=lambda channel_id: channel_name_text(channel_id, channel_names),
+        date=card_date,
+        expiry_inline=True,
     )
-    body: list[CardElement] = [_header(TITLE, *subtext)]
-    if not state.is_admin:
-        own = caller_line(state.caller_spend, state.caller_cap, state.caller_turns)
-        over = (
-            "  ⚠️ Over your monthly limit"
-            if spend_over_cap(state.caller_spend, state.caller_cap)
-            else ""
-        )
-        body.append(_titled(f"{YOU}{over}", *_rows(own)))
-    body.append(_block(*_credit(state)))
-    if state.channel_budget is not None:
-        phrase = channel_budget_phrase(state.channel_budget, now=now)
-        body.append(_titled(CHANNEL_BUDGET, *_rows(phrase)))
-    if state.is_admin:
-        body.append(_spenders(state))
-        if state.channel_budgets:
-            body.append(_channel_budgets(state, now, channel_names))
-    if state.timed_credit:
-        rows = expiry_rows(state.timed_credit, when=card_date)
-        body.append(_titled(EXPIRY_INTRO, *_rows(*rows), element_id=EXPIRY_ID, hidden=True))
-    if actions := _actions(state, place, web_url):
-        body.append(ActionSet(actions=actions, separator=True, spacing="Large"))
-    if lookup is not None and state.is_admin:
-        body.append(_titled(lookup.name, *_rows(lookup.line)))
-    return body
 
 
 def panel_card(
@@ -540,7 +415,13 @@ def panel_card(
     ``web_url`` is the spend page, offered as a button.
     """
     now = now or datetime.now(UTC)
-    body = _panel_body(state, since, now, channel_names or {}, place, lookup, web_url)
+    body = panel_body(
+        billing_screen(state, since=since, now=now, marks=_marks(channel_names or {}))
+    )
+    if actions := _actions(state, place, web_url):
+        body.append(ActionSet(actions=actions, separator=True, spacing="Large"))
+    if lookup is not None and state.is_admin:
+        body.append(section_container(titled(lookup.name, lookup.line)))
     if notice is not None:
         body = [*text_lines(notice), *body]
     return AdaptiveCard(body=body, fallback_text=TITLE)
