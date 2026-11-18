@@ -145,8 +145,8 @@ async def copy_awaiting_its_switch(
     """A copy fork_agent made of this conversation's responder, in this conversation,
     still on the responder's provider and not answering here yet (J1).
 
-    Its switch card's approval hands it this conversation and switches it in one
-    step; any other copy (an older one, a channel rule's) is an ordinary agent.
+    Its switch hands it this conversation and switches it in one step; any other
+    copy (an older one, a channel rule's) is an ordinary agent.
     """
     from daimon.core.stores import thread_agent_bindings
 
@@ -240,22 +240,20 @@ async def _hand_off_task_impl(
             runtime, auth, origin, ma_agent_id=destination.id, metadata=destination.metadata
         )
     ):
-        # J1: the model chose the order before. Sometimes it handed the thread to the
-        # copy and stopped, and the copy's next turn posted the switch card instead
-        # of answering.
+        # J1: the switch hands the thread over itself. A hand-off first left the copy
+        # answering on the old provider.
         raise ToolError(
             f"{destination_name} is a new copy of you, still on your model provider. If "
-            "the person asked for it on another provider, post its switch card now "
-            f"instead (request_agent_backend_switch for {destination_name}, with the "
-            "preview's digest): approving the card hands this thread to it and switches "
-            "it, in one step. If the copy should stay on this provider, call "
+            "the person asked for it on another provider, switch it now instead "
+            f"(request_agent_backend_switch for {destination_name}): the switch hands "
+            "this thread to it, in one step. If the copy should stay on this provider, call "
             "hand_off_task again with keep_provider=true. Nothing was changed."
         )
     named_work = sanitize_requested_work(continuation, echoes=(destination_name,))
     summary = _clean_summary(summary)
     # The destination answers at once only when the person's own new message asked
     # for this hand-off: never for a resumed or queued turn (a hand-off's own first
-    # turn among them), a wake, a routine, an agent key or a switch card.
+    # turn among them), a wake, a routine, an agent key or a provider switch.
     starts_turn = (
         switch is None
         and origin.human_invocation is True
@@ -720,7 +718,7 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 description=(
                     "True only for a new copy of you that should stay on your model "
                     "provider. A copy being switched to another provider is handed the "
-                    "thread after its switch card is approved, never before."
+                    "thread by its switch, never before."
                 )
             ),
         ] = False,
@@ -749,7 +747,7 @@ def register_task_continuity_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         That agent answers here from now on, with its own keys, connections and
         memory; conversation, decisions and files move with the requester. When
         the person's own message asked for the hand-off, it answers right away (one
-        billed turn); otherwise (a routine, a wake, an agent key, a switch card)
+        billed turn); otherwise (a routine, a wake, an agent key, a provider switch)
         from their next message.
 
         `origin_context_id` must name this execution's origin and match the

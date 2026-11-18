@@ -184,16 +184,18 @@ async def test_j5_the_owner_attaches_a_skill_and_it_sticks(owner):
 
 
 @MEMBER
-async def test_j5_the_owner_previews_a_switch_to_gpt(owner):
+async def test_j5_the_owner_switches_to_gpt_on_the_first_call(owner):
+    """The owner's switch applies at once, with no preview to confirm."""
     info = await _created(owner)
-    preview = await _request_agent_backend_switch_impl(
+    changed = await _request_agent_backend_switch_impl(
         owner.runtime,
         owner.auth,
         agent_name=info.name,
         target_backend="openai",
         origin_context_id=str(owner.origin.id),
     )
-    assert preview.status == "preview" and preview.target_backend == "openai"
+    assert changed.status == "changed", f"applied: {changed}"
+    assert changed.target_backend == "openai", "the switch names its provider"
 
 
 @MEMBER
@@ -214,15 +216,7 @@ async def test_j5_the_owner_switches_to_gpt_and_the_read_back_says_so(owner):
         "target_backend": "openai",
         "origin_context_id": str(owner.origin.id),
     }
-    preview = await _request_agent_backend_switch_impl(owner.runtime, owner.auth, **switch)
-    await _request_agent_backend_switch_impl(
-        owner.runtime,
-        owner.auth,
-        **switch,
-        expected_revision=preview.expected_revision,
-        preview_digest=preview.preview_digest,
-        accepted_drops=preview.declared_drops,
-    )
+    await _request_agent_backend_switch_impl(owner.runtime, owner.auth, **switch)
     seen = await _read(owner, info)
     assert seen.provider == "openai"
     assert seen.active_model == backend_selection("openai").model

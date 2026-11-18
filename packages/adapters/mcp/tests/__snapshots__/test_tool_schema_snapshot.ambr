@@ -4666,7 +4666,7 @@
         That agent answers here from now on, with its own keys, connections and
         memory; conversation, decisions and files move with the requester. When
         the person's own message asked for the hand-off, it answers right away (one
-        billed turn); otherwise (a routine, a wake, an agent key, a switch card)
+        billed turn); otherwise (a routine, a wake, an agent key, a provider switch)
         from their next message.
         <blank line>
         `origin_context_id` must name this execution's origin and match the
@@ -4705,7 +4705,7 @@
           }),
           'keep_provider': dict({
             'default': False,
-            'description': 'True only for a new copy of you that should stay on your model provider. A copy being switched to another provider is handed the thread after its switch card is approved, never before.',
+            'description': 'True only for a new copy of you that should stay on your model provider. A copy being switched to another provider is handed the thread by its switch, never before.',
             'type': 'boolean',
           }),
           'origin_context_id': dict({
@@ -7624,49 +7624,40 @@
     }),
     'request_agent_backend_switch': dict({
       'description': '''
-        Change an agent's model to another provider's; a switch that loses something asks.
+        Change an agent's model to another provider's. It applies at once.
         <blank line>
         Use when an admin or the agent's owner asks to switch it to Anthropic, OpenAI
         or Gemini. It stays the same agent on a new model: say "Researcher now uses
         Gemini 4 Argon", never a version, copy or variant. A member can make a copy
         they own with fork_agent and switch that copy.
         If the named model isn't available, say that with the allowed list.
-        optionally naming a model naturally: "switch Researcher to argon" or
+        A person may name a model naturally: "switch Researcher to argon" or
         "switch Researcher to luna". For an Anthropic model change such as
         "set Writer to opus 5.5", use update_agent with that natural model name.
         ``model`` accepts natural names or one of
         the returned ``models``; omit it for the provider's default. A provider
-        alone ("switch to GPT", "to Gemini") means its default: omit ``model`` and
-        preview; never ask which model. Never ask the person for a model id.
+        alone ("switch to GPT", "to Gemini") means its default: omit ``model``;
+        never ask which model. Never ask the person for a model id.
         Ambiguous model names return the choices.
-        The switch applies to
-        new conversations wherever the agent answers, and to this conversation
-        from the next message when the switched agent answers here (the result's
-        summary says which). The server's default or built-in agent switches only
-        when the person says it's for everyone (for_everyone=true, on both calls);
-        otherwise offer the copy below. For "make a copy of yourself on Gemini":
-        copy the agent with fork_agent and new_copy_if_taken=true (always a NEW
-        copy, never an earlier one; use the name it returns from here on), then
-        switch the copy here. Don't hand_off_task first: the confirmed switch hands
-        this conversation to the copy and moves it to Gemini from the next message.
-        Pass ``handoff_summary`` on both calls: a short summary of this conversation
+        The switch applies to new conversations wherever the agent answers, and to
+        this conversation from the next message when the switched agent answers here
+        (the result's summary says which). The summary also says what is off on the
+        new provider until a switch back: tell the person, and never ask them to
+        confirm. The server's default or built-in agent switches only when the
+        person says it's for everyone (for_everyone=true); otherwise offer the copy
+        below. For "make a copy of yourself on Gemini": copy the agent with
+        fork_agent and new_copy_if_taken=true (always a NEW copy, never an earlier
+        one; use the name it returns from here on), then switch the copy here.
+        Don't hand_off_task first: the switch hands this conversation to the copy
+        and moves it to Gemini from the next message.
+        Pass ``handoff_summary``: a short summary of this conversation
         (what was asked, decided and still open; no secrets, keys or tool output),
         which the copy starts from there, since the history itself can't move.
-        If that preview asks the uncommitted-work question, pass the person's
-        answer as ``unsaved_work`` on both calls.
-        First call without preview_digest: one that loses nothing applies and returns
-        changed. Otherwise tell the person what stops working and any shared-thread
-        limit, then call again in this same turn with the same model and that preview's
-        expected_revision, preview_digest and exact declared_drops as accepted_drops.
-        Never ask the person to reply "yes", to confirm in chat, or for a second
-        go-ahead: the request that began this turn is the go-ahead, and the second
-        call posts the card, where they press Switch. On an OpenAI or Gemini turn
-        that call posts the card itself and returns awaiting_confirmation: tell the
-        person to press Switch, and don't call again. Never confirm, approve or accept it
-        on their behalf, and never say you did. A stale preview or expired card
-        changes nothing; preview again. Make any other change to the agent (its tools,
-        skills or settings) before previewing a switch: a change after the preview
-        makes it stale. Pass this active turn's origin_context_id.
+        If the call asks the uncommitted-work question, ask the person and call
+        again with their answer as ``unsaved_work``.
+        ``expected_revision`` refuses a switch when the agent changed since it was
+        read. ``preview_digest`` and ``accepted_drops`` are ignored.
+        Pass this active turn's origin_context_id.
         The same tool states the agent's own settings: ``thread_mode`` ("shared"
         to share threads where the channel allows it, admins only; or "per_caller") and
         ``required_capabilities`` (a channel that can't give one refuses the turn).
@@ -9056,7 +9047,7 @@
         Change which provider's model the agent uses, or clear it with backend=null.
         <blank line>
         The agent's owner or an admin, for direct coding-tool or API requests. Chat
-        turns use request_agent_backend_switch so the requester confirms the preview.
+        turns use request_agent_backend_switch.
         The returned preview names compatibility limits and list prices.
         Each person's own conversation with the agent moves to the new provider on
         their next message; shared threads stay on the old one; channel settings
@@ -9863,10 +9854,8 @@
         for every later reply until someone changes it; the reply in progress
         keeps its model. Other conversations are unaffected.
         <blank line>
-        A pick that loses something returns ``changes`` and does nothing yet:
-        read them to the person, and only after they agree in a later message
-        call again with the same ``model``, ``digest`` and ``revision``. Any
-        other pick applies at once.
+        A pick applies at once. What the new provider can't carry is off
+        there until a switch back; the note says what.
         <blank line>
         ``origin_context_id`` must name this execution's attended origin;
         routines and other unattended runs are refused. Read the returned

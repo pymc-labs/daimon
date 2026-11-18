@@ -282,29 +282,23 @@ def _with_a_loss(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(core, "preview_thread_model", lossy)
 
 
-async def test_another_providers_model_waits_for_the_persons_yes(
+@pytest.mark.parametrize("carded", [True, False], ids=["card_surface", "no_card_surface"])
+async def test_another_providers_model_is_kept_at_once_and_says_whats_off(
     monkeypatch: pytest.MonkeyPatch,
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
+    carded: bool,
 ) -> None:
+    """Like a model change: no card and no second call, even where no card can show."""
+    from dataclasses import replace
+
     tenant = await make_tenant(db_session)
     caller = await make_account(db_session, tenant=tenant)
     await db_session.commit()
-    runtime = _runtime(committing_sessionmaker, mux=True)
-    """A pick that loses something returns the card's words and keeps nothing until yes."""
-    tool = await _openai_pick(
-        monkeypatch, committing_sessionmaker, tenant.id, caller.id, admin=True
-    )
+    gate = {} if carded else {"host_call_gate": "off"}
+    runtime = _runtime(committing_sessionmaker, mux=True, **gate)
+    await _openai_pick(monkeypatch, committing_sessionmaker, tenant.id, caller.id, admin=True)
     _with_a_loss(monkeypatch)
-    confirmed: list[tuple[str, str, str, int]] = []
-
-    async def confirm(pick, value, *, thread_id, digest, revision):
-        from daimon.core.thread_models import ThreadModelChange
-
-        confirmed.append((value, thread_id, digest, revision))
-        return ThreadModelChange(model_id="gpt-6-luna", note="kept")
-
-    monkeypatch.setattr(tool, "confirm_thread_model", confirm)
     async with turn_origin(
         committing_sessionmaker,
         tenant_id=tenant.id,
@@ -319,25 +313,13 @@ async def test_another_providers_model_waits_for_the_persons_yes(
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
-        auth, where = _auth(tenant.id, caller.id), str(origin.id)
-        shown = await _set_thread_model_impl(
-            runtime, auth, origin_context_id=where, model="openai:gpt-6-luna"
-        )
-        assert shown.model == "openai:gpt-6-luna" and shown.digest is not None
-        assert shown.changes[0].startswith("Switch this conversation to "), "the card's title"
-        assert shown.changes[1:] == [_LIMIT], "then only what the switch limits"
-        assert confirmed == [], "nothing is kept before the person agrees"
-        assert await _stored(committing_sessionmaker, tenant.id, "T_THREAD") is None
+        auth = replace(_auth(tenant.id, caller.id), no_confirmation_surface=not carded)
         kept = await _set_thread_model_impl(
-            runtime,
-            auth,
-            origin_context_id=where,
-            model="openai:gpt-6-luna",
-            digest=shown.digest,
-            revision=shown.revision,
+            runtime, auth, origin_context_id=str(origin.id), model="openai:gpt-6-luna"
         )
-    assert kept.note == "kept"
-    assert confirmed == [("openai:gpt-6-luna", "T_THREAD", shown.digest, shown.revision)]
+    assert kept.model == "gpt-6-luna"
+    assert _LIMIT in kept.note, "the note says what the new provider limits"
+    assert await _stored(committing_sessionmaker, tenant.id, "T_THREAD") == "gpt-6-luna"
 
 
 async def test_another_providers_model_needs_the_owner_without_opt_in(
@@ -372,85 +354,3 @@ async def test_another_providers_model_needs_the_owner_without_opt_in(
                 model="openai:gpt-6-luna",
             )
     assert await _stored(committing_sessionmaker, tenant.id, "T_THREAD") is None
-
-
-@pytest.mark.parametrize(
-    ("before", "digest"),
-    [("openai", "d1"), ("anthropic", None), ("anthropic", "d1")],
-    ids=["same_provider_confirm", "cross_provider_preview", "cross_provider_confirm"],
-)
-async def test_with_the_host_call_gate_off_only_a_same_provider_pick_runs(
-    monkeypatch: pytest.MonkeyPatch,
-    db_session: AsyncSession,
-    committing_sessionmaker: async_sessionmaker[AsyncSession],
-    before: str,
-    digest: str | None,
-) -> None:
-    """A provider turn with no card may keep its provider's models; another provider is refused."""
-    from dataclasses import replace
-    from types import SimpleNamespace
-
-    from daimon.core.model_switch import ModelSwitchPreview
-    from daimon.core.thread_models import ThreadModelChange
-    from mux.contracts.ids import ModelRef
-
-    tenant = await make_tenant(db_session)
-    caller = await make_account(db_session, tenant=tenant)
-    await db_session.commit()
-    runtime = _runtime(committing_sessionmaker, mux=True, host_call_gate="off")
-    tool = await _openai_pick(
-        monkeypatch, committing_sessionmaker, tenant.id, caller.id, admin=True
-    )
-    kept: list[str] = []
-
-    async def preview(pick, value):
-        fake = SimpleNamespace(
-            digest="d1",
-            setting_revision=1,
-            allowed=True,
-            declared_drops=("memory",),
-            shared_thread_limits=(),
-            skill_names={},
-        )
-        model = ModelRef(provider="openai", id="gpt-6-luna")
-        return ModelSwitchPreview(model=model, label="GPT", before=before, preview=fake)  # pyright: ignore[reportArgumentType]
-
-    async def confirm(pick, value, *, thread_id, digest, revision):
-        kept.append(value)
-        return ThreadModelChange(model_id="gpt-6-luna", note="kept")
-
-    from daimon.core import thread_model_switch as core
-
-    monkeypatch.setattr(tool, "preview_thread_model", preview)
-    monkeypatch.setattr(core, "preview_thread_model", preview)
-    monkeypatch.setattr(tool, "confirm_thread_model", confirm)
-    async with turn_origin(
-        committing_sessionmaker,
-        tenant_id=tenant.id,
-        account_id=caller.id,
-        platform="discord",
-        parent_channel_id="C_PARENT",
-        thread_id="T_THREAD",
-        responder_ma_agent_id=_RESPONDER_ID,
-        responder_name="daimon",
-        role=Role.USER,
-        chat_session_id=_CHAT_SESSION,
-        sender_foreign=False,
-        shared_channel=False,
-    ) as origin:
-        auth = replace(_auth(tenant.id, caller.id), no_confirmation_surface=True)
-        call = _set_thread_model_impl(
-            runtime,
-            auth,
-            origin_context_id=str(origin.id),
-            model="openai:gpt-6-luna",
-            digest=digest,
-            revision=None if digest is None else 1,
-        )
-        if before == "openai":
-            assert (await call).note == "kept"
-            assert kept == ["openai:gpt-6-luna"], "a same-provider pick is kept"
-        else:
-            with pytest.raises(ToolError, match="needs an approval card"):
-                await call
-            assert kept == [], "another provider is never kept without a card"

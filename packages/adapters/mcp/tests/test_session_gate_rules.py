@@ -575,3 +575,98 @@ async def test_a_bind_made_with_the_places_toolset_proves_the_card(
         ma_agent_id="agent",
         reported_tools_sha256=hash_tools(AGENT.tools),
     ), "a bind made with the place's toolset must prove the publish card"
+
+
+@pytest.mark.parametrize("thread_pick_asked", [False, True])
+@pytest.mark.parametrize("tool", ["request_channel_pin", "request_provider_allowlist", "add_skill"])
+async def test_a_bind_from_when_switches_asked_still_proves_every_other_card(
+    monkeypatch, thread_pick_asked, tool
+):
+    """A session bound while the provider switches asked keeps proving the cards it gated."""
+    from daimon.core.confirmation import backend_switch_tools
+    from daimon.core.tool_safety import CARDED_TOOLS, WATCH_CONFIRMED_TOOLS
+
+    policy = ToolSafetyPolicy(enabled=True)
+    runtime = _runtime()
+    runtime.settings.tool_safety = policy
+    monkeypatch.setattr(_session_gate, "backend_selection_enabled", lambda _: True)
+    monkeypatch.setattr(_session_gate, "daimon_rule_tools_for", AsyncMock(return_value=frozenset()))
+    retired = {"request_agent_backend_switch"} | (
+        {"set_thread_model"} if thread_pick_asked else set()
+    )
+    today = WATCH_CONFIRMED_TOOLS | set(CARDED_TOOLS) | {"approve_reach"}
+    recorded = session_tools(
+        AGENT,
+        frozenset(),
+        tool_safety=policy,
+        public_url="https://mcp.example/mcp",
+        confirmed_tools=today | backend_switch_tools(enabled=True) | retired,
+    )
+    live = SimpleNamespace(effective_config=SimpleNamespace(tools_sha256=hash_tools(recorded)))
+    proven = await _session_gate._recorded_as_gated(  # pyright: ignore[reportPrivateUsage]
+        runtime,
+        AUTH,
+        live,
+        tool_name=tool,
+        ma_agent_id=AGENT.id,
+        reported_tools_sha256=hash_tools(AGENT.tools),
+    )
+    assert proven, f"the old bind's {tool} card must still count"
+
+
+class _NoSession:
+    async def __aenter__(self) -> object:
+        return object()
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+
+@pytest.mark.parametrize(
+    ("responder", "private", "expected"),
+    [
+        ("agent", False, None),
+        ("other", False, "other_agents_session"),
+        ("agent", True, "source_context_unavailable"),
+    ],
+)
+async def test_an_ungated_read_checks_place_and_responder_but_never_a_card(
+    monkeypatch, responder, private, expected
+):
+    """`gated=False` needs no card or gate, yet still needs this thread's own public session."""
+    from daimon.adapters.mcp.tools._session_gate import session_card_gap
+
+    runtime = _runtime()
+    runtime.session_factory = _NoSession  # type: ignore[misc]
+    live = SimpleNamespace(ma_session_id="session", effective_config=None)
+    monkeypatch.setattr(_session_gate, "get_live_thread_session", AsyncMock(return_value=live))
+    monkeypatch.setattr(_session_gate, "card_satisfied", lambda _auth: True)
+    agent = SimpleNamespace(id="agent", tools=[])
+    monkeypatch.setattr(
+        _session_gate,
+        "retrieve_session",
+        AsyncMock(return_value=SimpleNamespace(agent=agent, metadata={})),
+    )
+    facts = SimpleNamespace(private=private, channel="c", thread="t")
+    monkeypatch.setattr(_session_gate, "session_facts", lambda *_a, **_k: facts)
+    monkeypatch.setattr(_session_gate, "has_confirmation_gate", lambda *_a, **_k: False)
+    monkeypatch.setattr(_session_gate, "_recorded_as_gated", AsyncMock(return_value=False))
+    origin = cast(
+        Any,
+        SimpleNamespace(
+            attended=True,
+            platform="discord",
+            session_thread_id="t",
+            parent_channel_id="c",
+            responder_ma_agent_id=responder,
+        ),
+    )
+    gap = await session_card_gap(
+        runtime,
+        AUTH,
+        origin,
+        tool_name="request_agent_backend_switch",
+        require_public_context=True,
+        gated=False,
+    )
+    assert gap == expected, f"responder={responder} private={private}: {gap}"

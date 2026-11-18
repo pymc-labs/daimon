@@ -38,6 +38,7 @@ from daimon.core.tool_safety import (
     CARDED_TOOLS,
     DAIMON_SERVER_NAME,
     REACH_APPROVAL_TOOLS,
+    RETIRED_GATES,
     WATCH_CONFIRMED_TOOLS,
     has_confirmation_gate,
     microsoft_send_tools,
@@ -69,6 +70,7 @@ async def session_card_gap(
     *,
     tool_name: str,
     require_public_context: bool = False,
+    gated: bool = True,
 ) -> CardGap | None:
     """None when this call's session waits for the person's Approve, else why it does not.
 
@@ -76,10 +78,12 @@ async def session_card_gap(
     the origin's responder and hold `tool_name` on `always_ask`, as MA reports
     it or, failing that, as daimon recorded sending it (`_recorded_as_gated`).
     An `agent_chat` or unattended session has no origin, or an unattended one.
+    `gated=False` checks only the session's place and responder, for a tool that
+    asks nobody.
     """
     if origin is None:
         return "no_origin"
-    if card_satisfied(auth):
+    if gated and card_satisfied(auth):
         # The person pressed Approve on Daimon's own card for exactly this call.
         return None
     if not origin.attended:
@@ -131,15 +135,20 @@ async def session_card_gap(
                 return "source_context_unavailable"
         if ma_session.agent.id != origin.responder_ma_agent_id:
             return "other_agents_session"
-        if has_confirmation_gate(
-            [tool.model_dump(mode="json") for tool in ma_session.agent.tools], tool_name=tool_name
-        ) or await _recorded_as_gated(
-            runtime,
-            auth,
-            live,
-            tool_name=tool_name,
-            ma_agent_id=ma_session.agent.id,
-            reported_tools_sha256=hash_tools(ma_session.agent.tools),
+        if (
+            not gated
+            or has_confirmation_gate(
+                [tool.model_dump(mode="json") for tool in ma_session.agent.tools],
+                tool_name=tool_name,
+            )
+            or await _recorded_as_gated(
+                runtime,
+                auth,
+                live,
+                tool_name=tool_name,
+                ma_agent_id=ma_session.agent.id,
+                reported_tools_sha256=hash_tools(ma_session.agent.tools),
+            )
         ):
             return None
         return "session_not_gated"
@@ -280,9 +289,14 @@ async def _recorded_as_gated(
         before_pin_set,
         before_pin_clear,
     )
-    # A bind from before the thread-model confirm asked proves any other card.
-    if tool_name != "set_thread_model":
-        candidates += tuple(candidate - {"set_thread_model"} for candidate in candidates)
+    # A bind from before the provider switches stopped asking holds them gated; it
+    # still proves every other card. Older still, the thread-model pick didn't ask.
+    if selection:
+        candidates += tuple(
+            candidate | switch
+            for switch in (RETIRED_GATES, RETIRED_GATES - {"set_thread_model"})
+            for candidate in candidates
+        )
     lead_tools = await confirmation_tools(runtime.session_factory, auth.tenant_id)
     # A bind made before the carded tools or the reach card holds neither gated, and
     # the two vary independently. Such a template proves only a call to some other
