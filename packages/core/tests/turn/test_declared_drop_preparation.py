@@ -39,10 +39,20 @@ from ..test_agent_backend import enable
 from ..test_agent_backend import owned as owned
 
 
+def unprepared(losses: tuple[str, ...]) -> tuple[str, ...]:
+    """The stored revision carries no effort, so the prepared turn loses it on every backend."""
+    return tuple(sorted({*losses, "effort_setting"}))
+
+
 async def declared(switched) -> tuple[str, ...]:
     """What the switch said is off on the picked provider, for the source as it is now."""
     _, service, source, _, accepted, *_ = switched
     return (await service.preview(source, accepted.backend, accepted.model)).declared_drops
+
+
+def model_losses(switched) -> tuple[str, ...]:
+    """The model settings a switch turns off: OpenAI carries the effort, Gemini offers none."""
+    return ("fast_mode",) if switched[4].backend == "openai" else ("effort_setting", "fast_mode")
 
 
 @pytest.fixture
@@ -1212,7 +1222,7 @@ _LIVE_ROOT = json.loads(
         {
             "backend": backend,
             **_LIVE_ROOT,
-            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+            "model": {"id": "claude-haiku-5-5", "speed": "fast", "effort": {"type": "medium"}},
         }
         for backend in ("openai", "gemini")
     ],
@@ -1224,10 +1234,12 @@ async def test_live_manifest_switch_preview_and_prepare_declare_exact_losses(
     request, _, source, _, _, _, reads, constructions, _, _ = switched_request
     assert len(source.effective_spec.skills) == 11
     assert source.memory_required
-    losses = ("mcp", "memory", "model_controls", "sandbox", "skills", "tools")
+    losses = tuple(
+        sorted((*model_losses(switched_request), "mcp", "memory", "sandbox", "skills", "tools"))
+    )
     assert await declared(switched_request) == losses, "the switch says what is off"
     prepared = await read_preparation_counterpart(request)
-    assert prepared.target_spec.declared_drops == losses, "the turn runs without them"
+    assert prepared.target_spec.declared_drops == unprepared(losses), "the turn runs without them"
     assert not prepared.target_spec.tools and not prepared.target_spec.mcp_servers
     assert len(constructions) == 1 and all(call.method == "GET" for call in reads)
 
@@ -1358,7 +1370,7 @@ async def test_well_formed_channel_skill_remains_a_declarable_loss(
     [
         {
             "backend": backend,
-            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+            "model": {"id": "claude-haiku-5-5", "speed": "fast", "effort": {"type": "medium"}},
         }
         for backend in ("openai", "gemini")
     ],
@@ -1366,11 +1378,13 @@ async def test_well_formed_channel_skill_remains_a_declarable_loss(
 )
 async def test_portable_recorded_model_controls_apply_and_prepare(switched_request):
     request, _, _, _, _, _, _, constructions, _, _ = switched_request
-    losses = ("memory", "model_controls", "sandbox")
+    losses = tuple(sorted((*model_losses(switched_request), "memory", "sandbox")))
     assert await declared(switched_request) == losses
     selected = await read_preparation_counterpart(request)
-    assert selected.target_spec.declared_drops == losses, "the recorded controls are off there"
-    assert "model_controls" in selected.target_spec.system
+    assert selected.target_spec.declared_drops == unprepared(losses), (
+        "the recorded controls are off"
+    )
+    assert "fast mode" in selected.target_spec.system
     assert not selected.target_spec.extensions
     assert len(constructions) == 1
 
@@ -1381,7 +1395,7 @@ async def test_portable_recorded_model_controls_apply_and_prepare(switched_reque
         {
             "backend": backend,
             "caller_mcp": True,
-            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+            "model": {"id": "claude-haiku-5-5", "speed": "fast", "effort": {"type": "medium"}},
         }
         for backend in ("openai", "gemini")
     ],
@@ -1392,10 +1406,12 @@ async def test_captured_portable_caller_mcp_loss_reaches_retained_preparation(sw
     assert source.effective_spec.mcp_servers == ()
     assert len(source.resource_requirements) == 1
     assert source.resource_requirements[0].id.startswith("caller-mcp:")
-    losses = ("mcp", "memory", "model_controls", "sandbox")
+    losses = tuple(sorted((*model_losses(switched_request), "mcp", "memory", "sandbox")))
     assert await declared(switched_request) == losses
     selected = await read_preparation_counterpart(request)
-    assert selected.target_spec.declared_drops == losses, "the caller's MCP is off there"
+    assert selected.target_spec.declared_drops == unprepared(losses), (
+        "the caller's MCP is off there"
+    )
     assert not selected.target_spec.mcp_servers
     assert len(constructions) == 1
 
@@ -1444,7 +1460,7 @@ async def test_portable_native_switch_survives_store_and_retained_prepare(switch
         {
             "backend": "openai",
             "caller_mcp": True,
-            "model": {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}},
+            "model": {"id": "claude-haiku-5-5", "speed": "fast", "effort": {"type": "medium"}},
         }
     ],
     indirect=True,
@@ -1471,7 +1487,13 @@ async def test_agent_origin_openai_host_preserves_its_switch_before_paid_request
         selected, now=lambda: datetime.now(UTC), deadline=datetime.now(UTC) + timedelta(seconds=30)
     )
     revision = selected.admission.backend_revision
-    assert selected.target_spec.declared_drops == ("mcp", "memory", "model_controls", "sandbox")
+    assert selected.target_spec.declared_drops == (
+        "effort_setting",
+        "fast_mode",
+        "mcp",
+        "memory",
+        "sandbox",
+    )
     assert selected.verified_counterpart == selected.counterpart
     if fault == "foreign_agent":
         selected = replace(

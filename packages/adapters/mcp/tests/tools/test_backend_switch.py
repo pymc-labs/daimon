@@ -273,7 +273,7 @@ async def test_a_chat_switch_applies_on_the_first_call_like_a_model_change(
     if model_controls:
         payload["model"] = {
             "id": "claude-haiku-5-5",
-            "speed": "standard",
+            "speed": "fast",
             "effort": {"type": "medium"},
         }
     switch = {
@@ -287,10 +287,11 @@ async def test_a_chat_switch_applies_on_the_first_call_like_a_model_change(
     assert "unknown" in changed.cost_line.lower(), changed.cost_line
     drops = changed.declared_drops
     assert {"memory", "sandbox"} <= set(drops), drops
-    assert ("model_controls" in drops) == model_controls, drops
-    assert own_tools or drops == (
-        ("memory", "model_controls", "sandbox") if model_controls else ("memory", "sandbox")
-    ), drops
+    settings = {"fast mode", "effort setting"} & set(drops)
+    carried = {"fast mode"} if target == "openai" else {"fast mode", "effort setting"}
+    assert settings == (carried if model_controls else set()), drops
+    assert not {"model_controls", "fast_mode", "effort_setting"} & set(drops), drops
+    assert own_tools or set(drops) == {"memory", "sandbox"} | settings, drops
     agent()
     with pytest.raises(ToolError, match="Someone just switched Researcher; it's now on"):
         await _request_agent_backend_switch_impl(runtime, auth, **switch, expected_revision=0)

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Approval-gated tools work on OpenAI and Gemini turns as on Claude.** Each
+  one, reach approvals included, asks on the same card with the same checks,
+  and a tool Claude runs without asking runs at once. Claude's default speed
+  and effort are no longer reported as lost, an effort the new provider offers
+  carries over, and each setting that is lost is named.
+
 - **A sealed channel's conversations and its own agent stay in the channel,
   admins included.** Admins no longer read another person's conversation from a
   sealed or limited channel through the hub, even after the channel is opened

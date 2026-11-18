@@ -5,11 +5,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from daimon.core.channel_backend import AgentSettings
 from daimon.core.stores.domain import SourceRepresentation
 from daimon.core.turn.runtime_manifest import (
     classify_source_obligations,
     preview_source_drops,
     source_preservation_pin,
+    unavailable_line,
 )
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, SkillRef
@@ -576,21 +578,32 @@ def test_represented_native_builtin_loss_requires_tools_even_on_the_same_provide
         assert "tools" not in classify_source_obligations(source, native_retained, environment=None)
 
 
+def test_the_agent_is_told_the_exact_model_setting_that_is_off():
+    line = unavailable_line(("effort_setting", "fast_mode", "sandbox"))
+    assert line == "Unavailable capabilities: effort setting, fast mode, sandbox.", line
+
+
 @pytest.mark.parametrize("provider", ["openai", "gemini"])
 @pytest.mark.parametrize(
-    "controls,required",
+    "controls,expected",
     [
-        ({}, False),
-        ({"speed": None}, False),
-        ({"speed": "standard"}, True),
-        ({"speed": "fast"}, True),
-        ({"effort": None}, True),
-        ({"effort": "low"}, "effort_setting"),
-        ({"effort": {"type": "medium"}, "speed": "standard"}, True),
+        ({}, ()),
+        ({"speed": None}, ()),
+        # Claude's defaults, as the model panel saves them, are no loss.
+        ({"speed": "standard"}, ()),
+        ({"effort": None}, ()),
+        ({"effort": "high", "speed": "standard"}, ()),
+        ({"effort": {"type": "high"}}, ()),
+        ({"speed": "fast"}, ("fast_mode",)),
+        ({"inference_geo": "us"}, ("inference_region",)),
+        # An effort the target offers carries over; Gemini offers none, so it is a loss.
+        ({"effort": "low"}, ("effort_setting",)),
+        ({"effort": {"type": "medium"}, "speed": "standard"}, ("effort_setting",)),
+        ({"effort": "low", "speed": "fast"}, ("effort_setting", "fast_mode")),
     ],
 )
-def test_model_controls_are_offered_only_for_valid_unrepresented_controls(
-    captured, provider, controls, required
+def test_each_unrepresented_model_control_is_named_on_its_own(
+    captured, provider, controls, expected
 ):
     extension = ExtensionConfig(
         namespace="anthropic.model_config",
@@ -607,16 +620,22 @@ def test_model_controls_are_offered_only_for_valid_unrepresented_controls(
     model = ModelRef(
         provider=provider, id="gpt-6-luna" if provider == "openai" else "gemini-3.8-flash"
     )
-    target = preview_source_drops(source, model)
-    # An effort alone is named as such; any other lost control reads as model settings.
-    lost = "model_controls" if required is True else required
-    assert target.declared_drops == ((lost, "sandbox") if required else ("sandbox",)), (
-        "the lost control is named once"
+    effort = AgentSettings().for_backend(provider, source).effort
+    if "effort_setting" in expected:
+        assert (effort is not None) == (provider == "openai"), "effort carries where offered"
+    lost = tuple(d for d in expected if effort is None or d != "effort_setting")
+    target = preview_source_drops(source, model, effort=effort)
+    assert target.declared_drops == tuple(sorted((*lost, "sandbox"))), (
+        "each lost control is named once"
     )
-    assert classify_source_obligations(source, target, environment=None) == frozenset()
-    if required:
-        omitted = target.model_copy(update={"declared_drops": ("sandbox",)})
-        assert classify_source_obligations(source, omitted, environment=None) == {lost}
+    assert (
+        classify_source_obligations(source, target, environment=None, target_effort=effort)
+        == frozenset()
+    )
+    omitted = target.model_copy(update={"declared_drops": ("sandbox",)})
+    assert classify_source_obligations(
+        source, omitted, environment=None, target_effort=effort
+    ) == set(lost)
 
 
 @pytest.mark.parametrize(
@@ -807,7 +826,7 @@ def test_a_source_effort_is_carried_only_when_the_target_states_one(captured):
     still = source.model_copy(
         update={"effective_spec": spec.model_copy(update={"extensions": (fast,)})}
     )
-    assert "model_controls" in preview_source_drops(still, ref, effort="low").declared_drops
+    assert "fast_mode" in preview_source_drops(still, ref, effort="low").declared_drops
 
 
 _FILES = (

@@ -628,8 +628,7 @@ async def test_gated_and_publishing_tools_stay_unavailable_in_a_template(templat
 
 @pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_the_host_call_gate_offers_gated_tools_behind_a_card(template, monkeypatch):
-    """With the gate on for the platform each gated call is carded, so it is no loss;
-    a reach approval, tallied under a turn gone by the press, still is."""
+    """With the gate on for the platform each gated call is carded, so it is no loss."""
     from daimon.core.features import snapshot
     from daimon.core.mcp_oauth import discovery
     from daimon.core.turn.runtime_manifest import capture_preparation_source
@@ -647,10 +646,8 @@ async def test_the_host_call_gate_offers_gated_tools_behind_a_card(template, mon
     (representation,) = [r for r in captured.representations if r.target.mcp_servers]
     (connection,) = representation.target.mcp_servers
     allowed = set(connection.tool_policy["allowed_tools"])  # pyright: ignore[reportArgumentType]
-    assert set(GATED) <= allowed, "every gated tool is offered behind its card"
-    assert representation.unavailable_mcp_tools == ("mcp_tool:daimon-mcp:approve_reach",), (
-        "a reach approval stays a named loss"
-    )
+    assert {*GATED, "approve_reach"} <= allowed, "every gated tool is offered behind its card"
+    assert representation.unavailable_mcp_tools == ()
 
 
 def _gated(request, gating):

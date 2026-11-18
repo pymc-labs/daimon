@@ -142,7 +142,7 @@ def requested_call_card(row: HostCallCardRow) -> PostedCard:
     return PostedCard(
         kind="call",
         state="requested",
-        headline=f"🔧 {row.agent_name} wants to run {row.tool_name}",
+        headline=row.reference.get("title") or f"🔧 {row.agent_name} wants to run {row.tool_name}",
         facts=(json_block(args),),
         buttons=(
             CardButton(
