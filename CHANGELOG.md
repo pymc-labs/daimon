@@ -34,8 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can't run, such as some skills, MCP servers or tools, is off there and said once
   as information; it comes back on a switch back. Creating an agent on an OpenAI
   or Gemini model sets its provider. Who may switch, the provider allowlist,
-  prices and daily caps are unchanged, and a switch button posted earlier applies
-  the switch when pressed.
+  prices and daily caps are unchanged. A switch button posted earlier closes as
+  expired when pressed; ask for the switch again.
 - **An agent with a signed-identity MCP server stays in its channel and keeps no
   memory.** Its channel turns run held: they post only in their channel and its
   threads, send no DMs and have no admin tools. It keeps no long-term memory, and
