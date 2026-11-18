@@ -1,11 +1,6 @@
-"""Tests for the Slack billing_panel views and command handler.
+"""The Slack /billing modal: its actions, Slack's names, and the command and click handlers.
 
-Covers:
-- build_billing_container renders top-up static_select ONLY when is_admin
-- empty-period clean render (zero usage produces a no-usage line, not an error)
-- a failed snapshot load replaces the Loading… modal
-
-The shared figures and the snapshot read are covered in core's test_billing_panel.py.
+The panel's words are core's `billing_screen` (test_billing_panel.py there).
 """
 
 from __future__ import annotations
@@ -129,6 +124,7 @@ def test_build_billing_container_omits_topup_select_for_member() -> None:
 
     topup = _find_topup_select(blocks)
     assert topup is None, "build_billing_container must NOT render top-up select for a non-admin"
+    assert "billing_lookup" not in str(blocks), "no picker for a member"
 
 
 async def test_both_views_show_the_invoking_channels_budget_only_when_it_has_one(
@@ -159,57 +155,6 @@ async def test_both_views_show_the_invoking_channels_budget_only_when_it_has_one
             texts[channel_id] = str(blocks)
         assert "*This channel*\\n$1.20 of $5.00 used this month" in texts["C1"]
         assert "*This channel*" not in texts["C2"], "no budget, no section"
-
-
-def test_build_billing_container_empty_period_renders_cleanly() -> None:
-    """Zero usage renders a clean 'no usage' line — no crash, no KeyError."""
-    from daimon.adapters.slack.billing_panel.views import build_billing_container
-
-    state = BillingPanelState(
-        is_admin=False,
-        caller_user_id="U_EMPTY",
-        caller_spend=0.0,
-        caller_turns=0,
-        caller_cap=None,
-        guild_balance_usd=Decimal("0"),
-        guild_spend=0.0,
-        guild_turns=0,
-        guild_distinct_members=0,
-        member_rows=(),
-        over_cap_count=0,
-    )
-    blocks = build_billing_container(state, now=_NOW, since=_SINCE)
-
-    # Must produce at least one block without raising
-    assert len(blocks) > 0, "empty-period render must produce blocks without crashing"
-    # Check that some block mentions 'no usage' to assert clean empty render
-    all_text = " ".join(
-        str(b.get("text", {}).get("text", "") or b.get("elements", [])) for b in blocks
-    )
-    assert "nothing used this month" in all_text.lower(), (
-        "empty-period render must include a 'no usage' line rather than implying an error"
-    )
-
-
-def test_build_billing_container_admin_empty_period_renders_cleanly() -> None:
-    """Admin view with zero member rows renders cleanly."""
-    from daimon.adapters.slack.billing_panel.views import build_billing_container
-
-    state = BillingPanelState(
-        is_admin=True,
-        caller_user_id="U_ADMIN",
-        caller_spend=0.0,
-        caller_turns=0,
-        caller_cap=None,
-        guild_balance_usd=Decimal("0"),
-        guild_spend=0.0,
-        guild_turns=0,
-        guild_distinct_members=0,
-        member_rows=(),
-        over_cap_count=0,
-    )
-    blocks = build_billing_container(state, now=_NOW, since=_SINCE)
-    assert len(blocks) > 0, "empty-period admin render must produce blocks without crashing"
 
 
 async def test_handle_billing_command_replaces_loading_modal_with_error_on_failure(
@@ -328,36 +273,6 @@ def test_the_admin_panel_is_month_credit_channel_and_actions_apart() -> None:
     assert view["blocks"][-1]["elements"][0]["type"] == "users_select"
 
 
-def test_the_member_panel_adds_your_use_and_asks_an_admin_for_credit() -> None:
-    from daimon.adapters.slack.billing_panel.views import build_billing_container
-
-    blocks = build_billing_container(_make_member_state(), now=_NOW, since=_SINCE)
-    assert _shape(blocks) == [
-        "context: January 2025",
-        "divider",
-        "section: *You*\n$0.75 of your $5.00 this month",
-        "divider",
-        "section: *$30.00* total credit left",
-        "context: Ask an admin to add credit.",
-    ], "a member without timed credit has no actions at all"
-    with_timed = dataclasses.replace(_make_member_state(), timed_credit=(_credit("5", 20),))
-    blocks = build_billing_container(with_timed, now=_NOW, since=_SINCE)
-    assert _shape(blocks)[-1] == "actions: billing_expiry_open", "only Expiry dates"
-
-
-def test_a_negative_balance_says_no_credit_left_and_still_shows_timed_credit() -> None:
-    from daimon.adapters.slack.billing_panel.views import build_billing_container
-
-    state = dataclasses.replace(
-        _make_member_state(), guild_balance_usd=Decimal("-3"), timed_credit=(_credit("5", 20),)
-    )
-    shape = _shape(build_billing_container(state, now=_NOW, since=_SINCE))
-    assert shape[4:6] == [
-        "section: *No credit left* $3.00 spent beyond it",
-        "context: Includes $5.00 that expires. It's used first.\nAsk an admin to add credit.",
-    ]
-
-
 def test_expiry_dates_lists_each_credit_soonest_first() -> None:
     from daimon.adapters.slack.billing_panel.views import build_expiry_view
 
@@ -459,40 +374,20 @@ def _make_admin_view_options() -> list[dict[str, Any]]:
     return select["options"]
 
 
-def test_top_spenders_and_channel_budgets_count_the_rest_and_a_lookup_shows_below() -> None:
+def test_a_lookup_shows_below_the_picker() -> None:
     from daimon.adapters.slack.billing_panel.views import Lookup, build_billing_container
 
-    rows = tuple(_row(f"U{i:08d}") for i in range(7))
-    budgets = tuple(_budget(f"C{i}", str(9 - i)) for i in range(7))
-    state = dataclasses.replace(
-        _make_admin_state(), member_rows=rows, over_cap_count=1, channel_budgets=budgets
-    )
     blocks = build_billing_container(
-        state, now=_NOW, since=_SINCE, lookup=Lookup("U00000001", "Cy & Di", "$2.00 this month")
+        _make_admin_state(),
+        now=_NOW,
+        since=_SINCE,
+        lookup=Lookup("U00000001", "Cy & Di", "$2.00 this month"),
     )
-    shape = _shape(blocks)
-    spenders = next(i for i, line in enumerate(shape) if "*Top spenders*" in line)
-    assert shape[spenders + 1] == "context: + 3 more"
-    budgets_at = next(i for i, line in enumerate(shape) if "*Channel budgets*" in line)
-    assert shape[budgets_at].startswith(
-        "section: *Channel budgets*\n<#C0>  $9.00 of $10.00 used this month"
-    )
-    assert "<#C5>" not in shape[budgets_at] and shape[budgets_at + 1] == "context: + 2 more"
-    assert shape[-2:] == ["actions: billing_lookup", "section: *Cy &amp; Di*\n$2.00 this month"]
+    assert _shape(blocks)[-2:] == [
+        "actions: billing_lookup",
+        "section: *Cy &amp; Di*\n$2.00 this month",
+    ]
     assert blocks[-1]["block_id"] == "billing_lookup_result"
-
-
-def test_a_member_sees_neither_spenders_nor_channel_budgets() -> None:
-    from daimon.adapters.slack.billing_panel.views import build_billing_container
-
-    state = dataclasses.replace(
-        _make_member_state(),
-        member_rows=(_row("U0123ABCD"),),
-        channel_budgets=(_budget("C1", "1"),),
-    )
-    text = str(build_billing_container(state, now=_NOW, since=_SINCE))
-    assert "Top spenders" not in text and "Channel budgets" not in text
-    assert "billing_lookup" not in text, "no picker for a member"
 
 
 def _panel_payload(action_id: str, **action: str) -> dict[str, Any]:

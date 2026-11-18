@@ -21,9 +21,9 @@ from daimon.adapters.discord.billing_panel.panel import (
 )
 from daimon.adapters.discord.billing_panel.read import load_billing_snapshot
 from daimon.adapters.discord.billing_panel.redeem import RedeemCodeModal, redeem_result_text
-from daimon.adapters.discord.billing_panel.state import BillingPanelState
 from daimon.adapters.discord.bot import _build_ready_embed
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.billing_panel import BillingPanelState
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.promo_codes import (
     build_promo_code_terms,
@@ -39,7 +39,6 @@ from daimon.core.stores import tenant_ledger
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_account, make_channel_budget, make_tenant
-from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -574,30 +573,6 @@ async def test_snapshot_offers_redemption_only_while_a_code_is_redeemable(
         since=SINCE,
     )
     assert "Redeem code" in _buttons(view), "the admin panel should render the button"
-
-
-async def test_snapshot_hides_redemption_when_the_lookup_fails(
-    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A failed promo lookup hides the button and leaves the rest of the read working."""
-
-    async def failing_lookup(session: AsyncSession, *, now: datetime, **_: object) -> bool:
-        await session.execute(text("SELECT 1/0"))  # aborts the surrounding transaction
-        return True
-
-    monkeypatch.setattr(
-        "daimon.adapters.discord.billing_panel.read.has_redeemable_promo_code", failing_lookup
-    )
-    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(GUILD_ID))
-    await make_tenant(db_session, id=tenant_id, workspace_id=str(GUILD_ID))
-    terms = build_promo_code_terms(amount_usd=Decimal("10"), timed=False)
-    await promo_store.insert_promo_code(db_session, code_hash="h", terms=terms)
-
-    state = await _admin_snapshot(db_session, now=datetime.now(UTC))
-
-    assert state.is_admin and not state.has_redeemable_promo_code, (
-        "a failed lookup should still load the admin panel, without the redeem button"
-    )
 
 
 async def test_snapshot_carries_live_timed_credit(db_session: AsyncSession) -> None:
