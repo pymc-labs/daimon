@@ -11,7 +11,9 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._card import require_card
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._web_admin import agent_names, now, refused, web_admin_of
+from daimon.adapters.mcp.tools._web_url import web_aware
 from daimon.core import web_admin
+from daimon.core.features.registry import FEATURES
 from daimon.core.web_admin import ModuleName, WebAdminError
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -42,13 +44,18 @@ async def _change_impl(
     origin_context_id: str,
 ) -> WorkspaceSettingsChanged:
     actor = await web_admin_of(runtime, auth)
+    if (modules is not None or default_agent is not None) and not await web_aware(runtime, auth):
+        raise ToolError(
+            f"{FEATURES['web_awareness'].name} is turned off here, so modules and "
+            "default_agent can't change. Nothing was done."
+        )
     await require_card(
         runtime, auth, tool_name="change_workspace_settings", origin_context_id=origin_context_id
     )
     try:
         people = [uuid.UUID(p) for p in invoker_people]
     except ValueError as err:
-        raise ToolError("invoker_people must be web person ids.") from err
+        raise ToolError("invoker_people must be person ids.") from err
     try:
         changed = await web_admin.change_settings(
             runtime.session_factory,
@@ -80,8 +87,8 @@ def register_web_workspace_settings_tool(mcp: FastMCP, runtime: McpRuntime) -> N
         dm_enabled: bool | None = None,
         dm_memory_read_only: bool | None = None,
     ) -> WorkspaceSettingsChanged:
-        """Change the web modules, web chat agent, who may start turns (everyone or exactly
-        ``invoker_people``) and the direct-message rules."""
+        """Change the workspace's modules and default agent, who may start turns (everyone or
+        exactly ``invoker_people``) and the direct-message rules."""
         return await _change_impl(
             runtime,
             await _auth(ctx),

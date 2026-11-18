@@ -991,8 +991,8 @@
     }),
     'change_workspace_settings': dict({
       'description': '''
-        Change the web modules, web chat agent, who may start turns (everyone or exactly
-        ``invoker_people``) and the direct-message rules.
+        Change the workspace's modules and default agent, who may start turns (everyone or
+        exactly ``invoker_people``) and the direct-message rules.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -1908,7 +1908,7 @@
     }),
     'create_allowance': dict({
       'description': '''
-        Set an allowance for a person (web person id), a group (name, or ``everyone``) or
+        Set an allowance for a person (person id), a group (name, or ``everyone``) or
         an invite (id): a limit in billed dollars, monthly or in total, for every agent
         or one. A cap is monthly, for everyone or one person, with no agent or end date.
       ''',
@@ -9265,7 +9265,7 @@
       }),
     }),
     'set_agent_owners': dict({
-      'description': "Set an agent's owner and co-owners to exactly these web person or account ids.",
+      'description': "Set an agent's owner and co-owners to exactly these person or account ids.",
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({

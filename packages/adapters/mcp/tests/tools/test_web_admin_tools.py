@@ -284,6 +284,27 @@ async def test_change_settings_when_admin_then_reports_changes(runtime, monkeypa
     assert [(c.setting, c.value) for c in out.changes] == [("Who can use the agents", "Everyone")]
 
 
+async def test_change_settings_when_web_app_off_then_web_settings_refused(runtime, monkeypatch):
+    """With `web_awareness` Off, the web app's modules and chat agent can't change from chat."""
+
+    async def off(*_a: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(settings_tool, "web_aware", off)
+    with pytest.raises(ToolError, match="turned off"):
+        await settings_tool._change_impl(
+            runtime,
+            make_auth(),
+            modules={"chat": False},
+            default_agent=None,
+            everyone_invokes=None,
+            invoker_people=[],
+            dm_enabled=None,
+            dm_memory_read_only=None,
+            origin_context_id="ctx",
+        )
+
+
 async def test_create_allowance_when_agent_not_in_workspace_then_refused(runtime):
     with pytest.raises(ToolError, match="agent"):
         await allowance_tool._create_impl(

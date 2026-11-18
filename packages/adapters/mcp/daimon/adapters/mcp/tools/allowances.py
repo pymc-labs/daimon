@@ -220,7 +220,7 @@ def register_allowance_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         expires_at: datetime | None = None,
         cap: bool = False,
     ) -> AllowanceChanged:
-        """Set an allowance for a person (web person id), a group (name, or ``everyone``) or
+        """Set an allowance for a person (person id), a group (name, or ``everyone``) or
         an invite (id): a limit in billed dollars, monthly or in total, for every agent
         or one. A cap is monthly, for everyone or one person, with no agent or end date."""
         return await _create_impl(
