@@ -13,6 +13,7 @@ workers only persist a subset of newly generated snapshots.
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
@@ -35,6 +36,7 @@ from daimon.core.config import (
     SlackSettings,
     TurnSettings,
 )
+from daimon.core.features.tool_gate import WEB_APP_TOOLS
 from daimon.core.scope import DeploymentDefault
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
@@ -177,6 +179,11 @@ async def test_rendered_tool_schema_matches_snapshot(
     assert create.parameters["properties"]["source"]["const"] == "poll"
     assert "page_id" not in create.parameters["properties"]
 
+    named = {n for n, t in rendered.items() if re.search(r"(?i)\bweb (app|person)", str(t))}
+    assert named <= WEB_APP_TOOLS, (
+        f"{sorted(named - WEB_APP_TOOLS)} name the web app: add them to WEB_APP_TOOLS (hidden "
+        "while web_awareness is Off) or word them without it"
+    )
     assert rendered == snapshot, "rendered tool schema drifted from the committed snapshot"
 
 

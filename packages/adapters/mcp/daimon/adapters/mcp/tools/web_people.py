@@ -304,7 +304,7 @@ def register_web_people_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         origin_context_id: str | None = None,
         after: str | None = None,
     ) -> WebPeople:
-        """List the web app's people, oldest first, with role, status and groups. ``query``
+        """List the workspace's people, oldest first, with role, status and groups. ``query``
         keeps those whose name or email contains it. Emails show only in a direct message with
         the admin; elsewhere ``private_details`` is ``direct_message`` and they are null. Pass
         this active turn's origin_context_id. ``next_page`` goes back as ``after``."""
@@ -314,7 +314,7 @@ def register_web_people_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def get_person(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, person_id: str, origin_context_id: str | None = None
     ) -> WebPersonDetail:
-        """Show one web person: role, status, groups, sign-ins and, for a visitor, their
+        """Show one person: role, status, groups, sign-ins and, for a visitor, their
         invite. Email and sign-ins show only in a direct message with the admin; elsewhere
         ``private_details`` is ``direct_message``. Pass this active turn's origin_context_id.
         Admin-only."""
@@ -322,7 +322,7 @@ def register_web_people_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool(name="list_web_groups", tags={"admin"})
     async def list_groups(ctx: Context) -> WebGroups:  # pyright: ignore[reportUnusedFunction]
-        """List everyone and each group the web sign-ins carry, with head counts. Admin-only."""
+        """List everyone and each group people sign in with, with head counts. Admin-only."""
         return await _groups_impl(runtime, await _auth(ctx))
 
     @mcp.tool(name="update_web_person", tags={"admin"})

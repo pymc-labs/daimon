@@ -18,15 +18,13 @@ WEB_APP_TOOLS: Final[frozenset[str]] = frozenset(
         "set_web_invite_files",
         "issue_visitor_link",
         "revoke_web_link",
-        "list_web_people",
-        "get_web_person",
-        "list_web_groups",
         "update_web_person",
         "list_agent_web_access",
         "set_agent_web_access",
     }
 )
-"""Tools that exist only for the web app: `web_awareness` Off hides and refuses them."""
+"""Tools that exist only for the web app: `web_awareness` Off hides and refuses them. The
+people and group lookups stay: allowances, owners and turn rules take their ids."""
 
 STOP_TOOLS: Final[frozenset[str]] = frozenset(
     {"fly_stop_session", "fly_list_sessions", "list_long_jobs", "get_long_job", "cancel_long_job"}

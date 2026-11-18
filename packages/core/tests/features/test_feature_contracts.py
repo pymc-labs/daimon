@@ -307,45 +307,66 @@ def test_every_turn_origin_render_gets_the_turn_features() -> None:
         assert passes, f"{path.name}:{call.lineno} must pass features= or **backend_facts()"
 
 
-_LINK_BUILDERS = {"panel_links", "for_tenant", "from_settings", "TenantLinks"}
+_LINK_BUILDERS = {"panel_links", "for_tenant", "TenantLinks"}
 _UNGATED_LINKS = {
-    "core/web_links.py": "defines the builders and `links_at`",
-    "core/turn/deps.py": "a turn's links; `render_turn_origin` drops them per the turn's snapshot",
-    "core/turn/admission.py": "same: the test above checks every render gets the turn features",
-    "core/features/eval_key.py": "a fixed example turn for the model-input eval, never sent",
+    "core/web_links.py::panel_links": "a builder",
+    "core/web_links.py::for_tenant": "a builder",
+    "core/turn/deps.py::build_turn_deps": "a turn's links; `render_turn_origin` drops them",
+    "core/turn/admission.py::_web_links": "same: the test above checks every render's features",
+    "core/features/eval_key.py::sample_controls": "a fixed example turn for the eval, never sent",
 }
-# `aware_at` is `links_at` without links; `load_here_card` asks `links_at` at its answering agent.
-_LINK_GATES = {"links_at", "aware_at", "load_here_card"}
+# `aware_at` is `links_at` without links; `load_here_card` asks `links_at` at its answering
+# agent; `_where_aware` asks `aware_at` at the MCP caller's places.
+_LINK_GATES = {"links_at", "aware_at", "load_here_card", "_where_aware"}
+# Tools in the web app's modules that stay with it Off, and why.
+_WEB_KEPT = {
+    "list_web_people": "allowances, owners and turn rules take the person ids it returns",
+    "get_web_person": "same",
+    "list_web_groups": "same, for groups",
+    "change_workspace_settings": "turn rules aren't web-only; it refuses modules and the agent",
+}
+
+
+def _link_builders() -> list[str]:
+    """`path::function` of each function that builds web links without asking a gate."""
+    found = []
+    for path in _PRODUCT:
+        for fn in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            calls = [node for node in ast.walk(fn) if isinstance(node, ast.Call)]
+            names = {getattr(c.func, "id", None) or getattr(c.func, "attr", "") for c in calls}
+            built = names & _LINK_BUILDERS or any(
+                ast.unparse(c.func) == "WebLinks.from_settings" for c in calls
+            )
+            if built and not names & _LINK_GATES:
+                found.append(f"{path.relative_to(_ROOT / 'packages').as_posix()}::{fn.name}")
+    return found
 
 
 def test_web_awareness_off_leaves_out_every_web_link_and_web_app_tool() -> None:
-    """Every chat-side builder of web links asks `links_at` (Off at its place: no link), and the
-    web app's own tools, found from their modules, are hidden and refused while it is Off."""
-    builders = [
-        path
-        for path in _PRODUCT
-        if any(
-            name != "from_settings" or ast.unparse(call.func) == "WebLinks.from_settings"
-            for name in _LINK_BUILDERS
-            for call in _named_calls(path, name)
-        )
-    ]
-    assert len(builders) >= 5, "the web link builders moved; point this test at them"
-    for path in builders:
-        rel = next((r for r in _UNGATED_LINKS if path.as_posix().endswith(r)), None)
-        assert rel is not None or _LINK_GATES & _calls(path), (
-            f"{path.name} builds web links without `links_at`; gate them or list it with a reason"
-        )
+    """Every function that builds web links asks a gate (`links_at`: Off at its place, no
+    link), and the web app's own tools, found from their modules, are hidden and refused while
+    it is Off."""
+    ungated = {item.split("/daimon/", 1)[-1] for item in _link_builders()}
+    assert ungated == _UNGATED_LINKS.keys(), (
+        f"web links built without `links_at`: {sorted(ungated - _UNGATED_LINKS.keys())}; gate "
+        "them or list them with a reason"
+    )
+    modules = ("web_invites.py", "web_people.py", "web_workspace_settings.py")
     registered = {
         kw.value.value
-        for name in ("web_invites.py", "web_people.py")
         for path in _PRODUCT
-        if path.name == name
+        if path.name in modules
         for call in _named_calls(path, "tool")
         for kw in call.keywords
         if kw.arg == "name" and isinstance(kw.value, ast.Constant)
     }
-    assert registered == WEB_APP_TOOLS, "WEB_APP_TOOLS must be exactly the web app's own tools"
+    assert registered - _WEB_KEPT.keys() == WEB_APP_TOOLS, (
+        "WEB_APP_TOOLS must be exactly the web app's own tools"
+    )
+    settings = next(p for p in _PRODUCT if p.as_posix().endswith("tools/web_workspace_settings.py"))
+    assert "web_aware" in _calls(settings), "it refuses its web-only fields while Off"
     off = ResolvedFeature("web_awareness", "off", "thread")
     toolset = SessionToolset.of(FeatureSnapshot(_PLACE, 0, {"web_awareness": off}), {})
     assert toolset.hidden_daimon_tools >= WEB_APP_TOOLS, "a session is not offered them"

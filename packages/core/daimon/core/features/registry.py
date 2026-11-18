@@ -257,7 +257,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         binds="turn",
         doc=(
             "The agent knows about the web app: messages, routine runs and tool results carry "
-            "its address and the pages it may link to, its people and invite tools are offered, "
+            "its address and the pages it may link to, its invite and web access tools are offered, "
             "and Daimon's cards show buttons into it. Off leaves all of that out here."
         ),
         platforms=EVERY_PLATFORM,

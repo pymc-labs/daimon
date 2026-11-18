@@ -87,7 +87,7 @@ owners and helpers and save a skill's files.
 | `revert_agent` | all callers | Restore a recorded version of an agent's setup as its next version; name, avatar, places and sign-ins stay. |
 | `save_agent_skill_files` | all callers | Edit an agent's skill file: publish text files as a new version of one of its skills, or a new skill when ``skill_id`` is left out, and pin it. |
 | `set_agent_helpers` | admin only | Set the agents an agent may ask for help to exactly these names or ids, for any agent you can see; helpers kept to channels you can't see stay. |
-| `set_agent_owners` | admin only | Set an agent's owner and co-owners to exactly these web person or account ids. |
+| `set_agent_owners` | admin only | Set an agent's owner and co-owners to exactly these person or account ids. |
 
 ## `agent_memory`
 
@@ -145,7 +145,7 @@ invite.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_allowance` | admin only | Set an allowance for a person (web person id), a group (name, or ``everyone``) or an invite (id): a limit in billed dollars, monthly or in total, for every agent or one. |
+| `create_allowance` | admin only | Set an allowance for a person (person id), a group (name, or ``everyone``) or an invite (id): a limit in billed dollars, monthly or in total, for every agent or one. |
 | `delete_allowance` | admin only | Remove an allowance or cap. |
 | `list_allowances` | admin only | List the workspace's spend allowances and caps, newest first. |
 | `set_allowance_amount` | admin only | Change the dollar amount of an existing allowance or cap. |
@@ -736,10 +736,10 @@ The web app's people, groups and agent access, from chat.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `get_web_person` | admin only | Show one web person: role, status, groups, sign-ins and, for a visitor, their invite. |
+| `get_web_person` | admin only | Show one person: role, status, groups, sign-ins and, for a visitor, their invite. |
 | `list_agent_web_access` | admin only | List each agent's web chat access: on or off, who may use it and the channel it is kept to, if any. |
-| `list_web_groups` | admin only | List everyone and each group the web sign-ins carry, with head counts. |
-| `list_web_people` | admin only | List the web app's people, oldest first, with role, status and groups. |
+| `list_web_groups` | admin only | List everyone and each group people sign in with, with head counts. |
+| `list_web_people` | admin only | List the workspace's people, oldest first, with role, status and groups. |
 | `set_agent_web_access` | admin only | Turn an agent's web chat on or off and set who may use it: everyone or up to 100 groups or invitees. |
 | `update_web_person` | admin only | Set a web person's role (web app admin or member, not Daimon admin) or suspend or restore them. |
 
@@ -750,7 +750,7 @@ messages.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `change_workspace_settings` | admin only | Change the web modules, web chat agent, who may start turns (everyone or exactly ``invoker_people``) and the direct-message rules. |
+| `change_workspace_settings` | admin only | Change the workspace's modules and default agent, who may start turns (everyone or exactly ``invoker_people``) and the direct-message rules. |
 
 ## `wizard`
 
