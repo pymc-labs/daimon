@@ -47,6 +47,9 @@ class TurnHold:
     platform: str
     channel_id: str
     client: bool
+    #: An agent with a signed-identity relay server answers here: its earlier tool
+    #: results are for the audience of that moment, so it reads no session transcript.
+    relay: bool = False
 
     def contains(self, channel_id: str | None, parent_channel_id: str | None = None) -> bool:
         """Whether a target channel or thread lies inside the held channel."""

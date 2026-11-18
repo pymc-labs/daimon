@@ -401,6 +401,8 @@ def _inside_hold(hold: TurnHold, at: Place) -> bool:
 
 
 def _session_inside_hold(hold: TurnHold, facts: SessionFacts) -> bool:
+    if hold.relay:
+        return False
     if facts.private:
         return False
     if facts.thread is not None:

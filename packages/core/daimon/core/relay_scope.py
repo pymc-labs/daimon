@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Final
 
+from daimon.core.features.session_identity import SessionIdentity
 from daimon.core.features.snapshot import FeatureSnapshot
 from daimon.core.mcp_identity import identity_relay_urls
 
@@ -37,6 +38,11 @@ def relay_seal_ids(*, channel_id: str, thread_id: str | None) -> frozenset[str]:
     (the same ids `daimon.core.permissions.limiting_ids_at` records for a limited channel)."""
     ids = (channel_id, thread_id, f"{channel_id}:{thread_id}" if thread_id is not None else None)
     return frozenset(i for i in ids if i is not None)
+
+
+def relay_memory_is_on(identity: SessionIdentity) -> bool:
+    """Whether a session built with `identity` mounts any long-term memory."""
+    return identity.personal_memory or identity.shared_memory or identity.channel_memory
 
 
 def without_long_term_memory(snapshot: FeatureSnapshot) -> FeatureSnapshot:

@@ -3008,3 +3008,57 @@ async def test_admit_leaves_an_agent_without_a_relay_server_as_it_was(
         assert identity.personal_memory and identity.shared_memory and identity.channel_memory
         assert admission.feature_on("repo_memory")
         assert not admission.origin_seal_ids and not admission.source_sealed
+
+
+async def test_a_relay_agents_helper_inherits_its_hold_seal_and_no_memory(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A helper with no relay server of its own still runs held, sealed and memory-free
+    when the asking turn is a relay agent's; a plain asker's helper is unchanged."""
+    from daimon.core.scope import HelperTarget
+    from daimon.core.turn.admission import HelperCall, admit_helper
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    relay_agent = ma_agent(
+        id="ag_1",
+        name="daimon",
+        tenant_id=tenant.id,
+        mcp_servers=[{"type": "url", "name": "g", "url": f"{_RELAY_APP}/mcp-identity/grove"}],
+    )
+    helper_agent = ma_agent(id="ag_2", name="helper", tenant_id=tenant.id)
+    router = resolved_agent_env_router(
+        relay_agent, ma_environment(id="env_1", name="default", tenant_id=tenant.id)
+    )
+    router.add_agent(helper_agent)
+    deps = replace(
+        _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router),
+        public_url=f"{_RELAY_APP}/mcp",
+    )
+    call = HelperCall(target=HelperTarget(ma_agent_id="ag_2", name="helper"), thread_key="h-1")
+    CACHE.clear()
+    parent = await admit(
+        deps,
+        origin="chat",
+        tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id="chan-1",
+        role=Role.ADMIN,
+        now=_NOW,
+    )
+    assert parent.request is not None and parent.request.relay_scoped
+    helper = await admit_helper(deps, parent.request, call, now=_NOW)
+    assert helper.agent.id == "ag_2"
+    assert helper.hold is not None and helper.hold.relay and helper.hold.channel_id == "chan-1"
+    assert helper.origin_seal_ids == {"chan-1"}
+    identity = helper.identity
+    assert not (identity.personal_memory or identity.shared_memory or identity.channel_memory)
+    assert not helper.feature_on("repo_memory") and not helper.is_admin
+
+    plain = replace(parent.request, relay_scoped=False)
+    unchanged = await admit_helper(deps, plain, call, now=_NOW)
+    assert unchanged.hold is None and not unchanged.origin_seal_ids
+    assert unchanged.identity.shared_memory

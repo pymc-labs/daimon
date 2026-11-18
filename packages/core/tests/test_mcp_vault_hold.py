@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import uuid
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -17,6 +18,7 @@ from anthropic import AsyncAnthropic
 from daimon.core.mcp_auth import mint_chat_mcp_token
 from daimon.core.mcp_hold import (
     HOLD_CLAIM,
+    hold_claim,
     hold_from_metadata,
     hold_key,
     hold_metadata_value,
@@ -92,6 +94,12 @@ def test_hold_claim_round_trips_and_rejects_other_shapes() -> None:
     ):
         with pytest.raises(ValueError):
             parse_hold_claim(bad)
+    relay = TurnHold(platform="slack", channel_id="C1", client=False, relay=True)
+    assert parse_hold_claim(hold_claim(relay)) == relay
+    assert hold_key(relay) != hold_key(replace(relay, relay=False))
+    assert "relay" not in hold_claim(replace(relay, relay=False))
+    with pytest.raises(ValueError):
+        parse_hold_claim({**hold_claim(relay), "relay": False})
     assert hold_from_metadata(hold_metadata_value(HOLD)) == HOLD
     assert hold_from_metadata(None) is None
     with pytest.raises(ValueError):

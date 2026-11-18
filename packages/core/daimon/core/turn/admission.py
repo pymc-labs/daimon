@@ -334,6 +334,9 @@ class HelperCall:
 
     target: HelperTarget
     thread_key: str
+    # The asking turn is a relay agent's: its helper inherits the held, sealed,
+    # memory-free turn whatever servers the helper itself has (`daimon.core.relay_scope`).
+    relay_scoped: bool = False
 
 
 @dataclass(frozen=True)
@@ -360,6 +363,8 @@ class AdmitRequest:
     spend_person: SpendPerson | None
     surface: Surface | None
     principal_platform: str | None
+    # The turn was admitted as a relay agent's (`daimon.core.relay_scope`); its helpers inherit it.
+    relay_scoped: bool = False
 
 
 @dataclass(frozen=True)
@@ -401,6 +406,8 @@ class Admission:
     # The origin channel is shared with another organisation (stamped on the turn origin).
     shared_channel: bool = False
     private_dm_id: str | None = None
+    # A relay agent's turn (`daimon.core.relay_scope`): held, sealed, no memory, a fresh session.
+    relay_scoped: bool = False
     # The channel and thread the turn runs in, and every sealed id that seals
     # them (the channel and a thread sealed on its own): stamped on the session
     # so the transcript tools can apply the seal to it
@@ -737,6 +744,7 @@ async def admit(
         spend_person=spend_person,
         surface=surface,
         principal_platform=principal_platform,
+        relay_scoped=result.relay_scoped,
     )
     return replace(result, observation=observation, request=request)
 
@@ -773,7 +781,7 @@ async def admit_helper(
         spend_person=request.spend_person,
         surface=request.surface,
         principal_platform=request.principal_platform,
-        helper=helper,
+        helper=replace(helper, relay_scoped=request.relay_scoped),
     )
 
 
@@ -1453,11 +1461,15 @@ async def _admit_gates(
 
     # An agent with a signed-identity MCP server answers with what its channel's
     # readers can read, so its turn stays in that channel (`daimon.core.relay_scope`).
-    relay_agent = agent_has_identity_relay(
+    relay_agent = (helper is not None and helper.relay_scoped) or agent_has_identity_relay(
         (server.url for server in agent.mcp_servers), public_url=deps.public_url
     )
-    if relay_agent and hold is None and not is_dm:
-        hold = TurnHold(platform, channel_id, client=False)
+    if relay_agent and not is_dm:
+        hold = (
+            replace(hold, relay=True)
+            if hold is not None
+            else TurnHold(platform, channel_id, client=False, relay=True)
+        )
         subject = replace(subject, is_admin=False)
         effective_admin = False
     grant = AdmissionGrant(
@@ -1931,6 +1943,7 @@ async def _admit_gates(
         source_shared=source_shared,
         hold=hold,
         shared_channel=shared,
+        relay_scoped=relay_agent,
         origin_channel_id=channel_id,
         origin_thread_id=thread_id,
         origin_seal_ids=seal_ids,
@@ -2207,7 +2220,12 @@ async def _tightened_hold(
         return grant, shared
     hold = TurnHold(grant.platform, grant.channel_id, client)
     if grant.hold is not None:
-        hold = TurnHold(hold.platform, grant.hold.channel_id, client or grant.hold.client)
+        hold = TurnHold(
+            hold.platform,
+            grant.hold.channel_id,
+            client or grant.hold.client,
+            relay=grant.hold.relay,
+        )
     subject = replace(grant.subject, is_admin=False, client=hold.client)
     return replace(grant, subject=subject, hold=hold), shared
 

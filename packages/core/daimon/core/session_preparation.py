@@ -54,6 +54,7 @@ from daimon.core.mcp_hold import hold_key
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, resource_ref
 from daimon.core.mux_compat import legacy_call
+from daimon.core.relay_scope import relay_memory_is_on
 from daimon.core.session_compat import (
     DEFAULT_MA_CAPABILITIES,
     ChangeReason,
@@ -869,7 +870,11 @@ async def _prepare_session_for_turn_locked(
         )
 
         if row is None:
-            seed = await find_carry_over() if find_carry_over is not None else None
+            seed = (
+                await find_carry_over()
+                if find_carry_over is not None and not admission.relay_scoped
+                else None
+            )
             fresh = await ops.create_fresh(
                 deps,
                 admission,
@@ -882,6 +887,11 @@ async def _prepare_session_for_turn_locked(
             return await from_fresh(fresh, carried or CONTINUED)
 
         fresh_start = row.fresh_start_requested_at is not None
+        # A relay agent's channel turn starts from nothing: an earlier turn's
+        # Grove results must not outlive the audience that was allowed to see them
+        # (`daimon.core.relay_scope`). Channel history still gives continuity.
+        relay_fresh = admission.relay_scoped and admission.hold is not None
+        fresh_start = fresh_start or relay_fresh
 
         await _heal_lineage(deps, db, row=row)
 
@@ -954,6 +964,15 @@ async def _prepare_session_for_turn_locked(
             )
         admission = await restrict_inherited_memory(deps, admission, inherited)
         agent_uuid = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(admission.agent.id))
+        if (
+            admission.relay_scoped
+            and not fresh_start
+            and not handed_over
+            and recorded is not None
+            and relay_memory_is_on(SessionIdentity.frozen(recorded.identity_features))
+        ):
+            # A relay agent's (DM) session recorded with memory on is replaced, never reused.
+            fresh_start = True
         # A live session keeps the identity features it was created with; a new one
         # (`/new`, a hand-over) is built with this place's current values.
         built_with = (
@@ -1170,7 +1189,11 @@ async def _prepare_session_for_turn_locked(
                     retry_after=moment + dt.timedelta(seconds=BUSY_RETRY_S),
                 )
             # A fresh start may be a move here from another provider: carry that over.
-            seed = await find_carry_over() if fresh_start and find_carry_over is not None else None
+            seed = (
+                await find_carry_over()
+                if fresh_start and not admission.relay_scoped and find_carry_over is not None
+                else None
+            )
             outcome = await _run_replacement(
                 deps,
                 admission,
