@@ -1306,9 +1306,14 @@ async def test_a_tool_whose_feature_is_off_here_leaves_the_allowlist_unasked(tem
     request, *_ = template
     hidden = property(lambda _: frozenset({"search_tools"}))
     monkeypatch.setattr(SessionToolset, "hidden_daimon_tools", hidden)
-    selected, _ = await _prepared(request)
-    assert _connection(selected).tool_policy["allowed_tools"] == ["call_tool"], "never listed"
+    selected, runtime = await _prepared(request)
+    connection = _connection(selected)
+    assert connection.tool_policy["allowed_tools"] == ["call_tool"], "never listed"
     assert "mcp_tool:daimon-mcp:search_tools" not in selected.target_spec.declared_drops
+    transport = runtime.transport_factory(request.admission.backend_revision, request.scope)
+    # The server still lists it: the credential is minted all the same.
+    assert await transport.mcp_secrets(request.scope, connection.credential_ref, connection.url)
+    await runtime.end_of_turn()
 
 
 @pytest.mark.parametrize(
