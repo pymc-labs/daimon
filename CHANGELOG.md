@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **An agent's page shows it is loading.** While a slow agent loaded, the page
   stayed blank.
+- **Switching a Gemini conversation's model no longer times out.** The switch
+  reads the agent's setup once instead of twice, and its reads run together.
 - **Agents switched to GPT or Gemini answer again.** A new conversation with
   one was refused with "Something went wrong on our side".
 - **The Web app setting (`web_awareness`, was "Web app links") turns off every
