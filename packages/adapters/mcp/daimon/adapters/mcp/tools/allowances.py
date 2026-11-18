@@ -112,7 +112,7 @@ async def _list_impl(
     actor = await web_admin_of(runtime, auth)
     async with runtime.session_factory() as db:
         rows = await spend_allowances.list_for_tenant(db, tenant_id=actor.tenant_id)
-    links = admin_links(runtime, actor)
+    links = await admin_links(runtime, auth, actor)
     shown, total, next_page = paged(list(reversed(rows)), after)
     return Allowances(
         await _lines(runtime, actor.tenant_id, shown),
@@ -156,7 +156,7 @@ async def _create_impl(
     except WebAdminError as err:
         raise refused(err) from err
     [line] = await _lines(runtime, actor.tenant_id, [row])
-    links = admin_links(runtime, actor)
+    links = await admin_links(runtime, auth, actor)
     return AllowanceChanged(line, links.allowance(line.allowance_id) if links else None)
 
 
@@ -178,7 +178,7 @@ async def _set_impl(
     except WebAdminError as err:
         raise refused(err) from err
     [line] = await _lines(runtime, actor.tenant_id, [row])
-    links = admin_links(runtime, actor)
+    links = await admin_links(runtime, auth, actor)
     return AllowanceChanged(line, links.allowance(line.allowance_id) if links else None)
 
 

@@ -168,7 +168,7 @@ async def _people_impl(
         rows = rows[:size]
         identities = await identities_store.list_for_people(db, person_ids=[p.id for p in rows])
         roles = await roles_of(db, rows)
-    links = admin_links(runtime, actor)
+    links = await admin_links(runtime, auth, actor)
     return WebPeople(
         [_person(p, roles[p.id], _groups(identities[p.id]), details) for p in rows],
         details,
@@ -195,7 +195,7 @@ async def _person_impl(
             else None
         )
     open_invite = invite if invite is not None and invite.revoked_at is None else None
-    links = admin_links(runtime, actor)
+    links = await admin_links(runtime, auth, actor)
     return WebPersonDetail(
         person=_person(person, role, _groups(identities), details),
         identities=[f"{i.provider}:{i.label}" for i in identities] if details == "shown" else [],
@@ -242,7 +242,7 @@ async def _update_impl(
             shown = await role_of(db, changed)
     except WebAdminError as err:
         raise refused(err) from err
-    links = admin_links(runtime, actor)
+    links = await admin_links(runtime, auth, actor)
     return replace(
         _person(changed, shown, _groups(identities), details),
         web_url=links.person(str(changed.id)) if links else None,
