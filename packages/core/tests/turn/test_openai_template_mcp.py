@@ -560,11 +560,9 @@ async def test_a_tool_gated_after_the_switch_keeps_the_copy_running(template, mo
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-async def test_a_tool_the_owner_turned_off_after_the_switch_asks_again(template, consent_request):
-    """Turning a Daimon tool off is the owner's change: re_confirm, nothing sent."""
+async def test_a_tool_the_owner_turned_off_after_the_switch_keeps_it(template, consent_request):
+    """Only the owner or an admin edits the agent, and the model and losses stay: no card."""
     from anthropic.types.beta import BetaManagedAgentsAgent
-    from daimon.core.channel_backend import AgentBackendRefused
-    from daimon.core.turn.errors import AdmissionDenied
 
     request, _, wire, _ = template
     router = consent_request[5]
@@ -576,11 +574,29 @@ async def test_a_tool_the_owner_turned_off_after_the_switch_asks_again(template,
     router.add_agent(BetaManagedAgentsAgent.model_validate(native))
     router.add_environment(request.admission.environment)
     router.add_environment_list(request.admission.environment)
-    with pytest.raises(AdmissionDenied) as refused:
-        await _turn(request, 0)
-    assert isinstance(refused.value.__cause__, AgentBackendRefused), "refused as a re-confirm"
-    assert refused.value.__cause__.reason == "re_confirm", "the owner's change needs a new card"
-    assert wire.posts == [], "nothing reached OpenAI"
+    await _turn(request, 0)
+    (body,) = wire.posts
+    (mcp,) = [tool for tool in body["agent"]["tools"] if tool["type"] == "mcp"]
+    assert "search_tools" not in mcp["allowed_tools"], "the tool turned off never runs"
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_new_instructions_after_the_switch_keep_it(template, consent_request):
+    """An edit that changes neither the model nor the losses (Daimon rewriting an
+    agent's prompt) asks no one to confirm the switch again."""
+    from anthropic.types.beta import BetaManagedAgentsAgent
+
+    request, _, wire, _ = template
+    router = consent_request[5]
+    native = request.admission.agent.model_dump(mode="json")
+    native["system"] = "Edited instructions"
+    router.routes.clear()
+    router.add_agent(BetaManagedAgentsAgent.model_validate(native))
+    router.add_environment(request.admission.environment)
+    router.add_environment_list(request.admission.environment)
+    await _turn(request, 0)
+    assert len(wire.posts) == 1, "the turn ran on OpenAI"
+    assert "Edited instructions" in wire.agent["instructions"]
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)

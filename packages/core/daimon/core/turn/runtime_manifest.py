@@ -1885,8 +1885,6 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
             raise AgentBackendRefused("re_confirm", detail="backend_mismatch")
         if revision.model is None and revision.backend != spec.model.provider:
             raise AgentBackendRefused("re_confirm", detail="model_unpinned")
-        if not source_pin_matches(source, consent.source_pin):
-            raise AgentBackendRefused("re_confirm", detail="source_pin")
         from daimon.core.channel_backend import loss_names
 
         target = preview_source_drops(
@@ -1894,6 +1892,9 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
             ModelRef(provider=revision.backend, id=revision.model or spec.model.id),
             effort=revision.effort,
         )
+        # An edit since the confirmation (instructions, a key, Daimon's own prompt
+        # update) asks again only when it changes the model or what the agent loses:
+        # the owner or an admin who may edit it may confirm the same card anyway.
         if not covers(
             consent,
             target,
@@ -1994,7 +1995,8 @@ async def read_preparation_counterpart(
             raise AdmissionDenied(reason="backend_unsupported", cause=cause) from error
         raise AdmissionDenied(reason="backend_unsupported") from error
     except UnsupportedCapability as error:
-        raise AdmissionDenied(reason="backend_unsupported") from error
+        # The provider is set up; this agent can't be built there (the log names why).
+        raise AdmissionDenied(reason="backend_unsupported", cause="preparation_failed") from error
     except Exception as error:
         from daimon.core.channel_backend import backend_refusal_causes, transient_failure
 

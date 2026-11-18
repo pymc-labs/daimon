@@ -280,3 +280,32 @@ def test_an_upstream_failure_is_busy_only_when_a_retry_can_clear_it(cause, busy)
     raised = TurnError(kind="upstream", message="upstream")
     raised.__cause__ = cause
     assert transient_failure(raised) is busy
+
+
+def _raised_names() -> set[str]:
+    """Every literal name our code raises: `.unsupported("x")`, `UnsupportedCapability(("x",)`."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[4]
+    names: set[str] = set()
+    for base in ("packages/mux/mux", "packages/core/daimon"):
+        for path in (root / base).rglob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if not isinstance(node, ast.Call) or not node.args:
+                    continue
+                func, arg = node.func, node.args[0]
+                called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+                if called in ("unsupported", "_unsupported") and isinstance(arg, ast.Constant):
+                    names.add(arg.value)
+                elif called == "UnsupportedCapability" and isinstance(arg, ast.Tuple):
+                    names |= {e.value for e in arg.elts if isinstance(e, ast.Constant)}
+    return {n for n in names if isinstance(n, str)}
+
+
+def test_every_name_our_code_raises_is_logged_by_name():
+    from daimon.core.channel_backend import _raised_capability
+
+    names = _raised_names()
+    assert len(names) > 100  # the scan finds the drivers' names
+    assert sorted(n for n in names if not _raised_capability(n)) == []

@@ -101,7 +101,8 @@ async def test_real_admission_refuses_even_a_reader_accepting_the_native_compone
     assert first == {"type": "AdmissionDenied", "reason": "backend_unsupported"}
     assert any(cause["type"] == "UnsupportedCapability" for cause in diagnostics[-1]["causes"])
     assert "private" not in str(refused.value)
-    assert (refused.value.cause, refused.value.provider) == ("agent_backend", provider)
+    # The provider is set up; never say it isn't.
+    assert (refused.value.cause, refused.value.provider) == ("preparation_failed", provider)
     async with host.sessions() as db:
         assert await mux_state.latest_config_revision(db, REVISION.channel) is None
         assert await mux_state.next_config_local(db, REVISION.channel) == 1
