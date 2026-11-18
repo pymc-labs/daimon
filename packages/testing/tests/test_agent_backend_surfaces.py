@@ -150,6 +150,11 @@ def seam(monkeypatch):
     service.current = AsyncMock(return_value=None)
     # The owner-or-admin read; this fake has no owners, so admins only.
     service.may_edit = AsyncMock(side_effect=lambda actual, actor: actor.subject.is_admin)
+    service.edit_refusal = AsyncMock(
+        side_effect=lambda actual, actor: (
+            None if actor.subject.is_admin else "owner_or_admin_required"
+        )
+    )
     service.tenant_policy = AsyncMock(
         return_value=TenantBackendPolicy(
             tenant_id=TENANT, revision="1", enabled_backends=("anthropic", "openai", "gemini")

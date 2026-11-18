@@ -132,7 +132,7 @@ from daimon.core.agent_identity import (
 )
 from daimon.core.agent_ownership import owns_agent
 from daimon.core.answering_map import AnsweringMap, routed_agent_names
-from daimon.core.authz import build_subject
+from daimon.core.authz import build_subject, origin_ids
 from daimon.core.channel_rules import as_readers, as_writers, channel_rule_status
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import DaimonError
@@ -863,7 +863,11 @@ async def _model_action(
         principal = await get_or_create_platform_principal(
             session, tenant_id=tenant_id, platform="slack", external_id=user_id
         )
-    subject = build_subject(is_admin=is_admin, platform_user_id=user_id)
+    subject = build_subject(
+        is_admin=is_admin,
+        platform_user_id=user_id,
+        origin_channel_ids=origin_ids(meta.channel_id, meta.thread_id),
+    )
     service = channel_backend.make_backend_service(
         runtime.sessionmaker,
         runtime.settings.turn,
@@ -1387,7 +1391,13 @@ async def _dispatch_panel_action(
         value = str(selected.get("value") or "")
         if not value or not meta.channel_id:
             return
-        subject = await load_picker_subject(runtime, client, tenant_id=tenant_id, user_id=user_id)
+        subject = await load_picker_subject(
+            runtime,
+            client,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            origin=origin_ids(meta.channel_id, meta.thread_id),
+        )
         if not await may_pick_environment(
             runtime, tenant_id=tenant_id, channel_id=meta.channel_id, subject=subject
         ):

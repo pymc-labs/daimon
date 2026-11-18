@@ -44,6 +44,7 @@ from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import source_agent_record
 from daimon.core.neutral_resources import NeutralResourceHost
+from daimon.core.permissions import sealed_outside
 from daimon.core.pricing import (
     MODEL_PRICING,
     ProviderPrice,
@@ -951,6 +952,7 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
     safe_reasons = {
         "actor_not_found",
         "admin_required",
+        "sealed_channel",
         "agent_identity_required",
         "agent_not_found",
         "backend_not_allowed",
@@ -1390,20 +1392,32 @@ class AgentBackendService:
         if not await agent_backends.actor_exists(session, agent.tenant_id, actor.account_id):
             raise AgentBackendRefused("actor_not_found")
         policy = await policy_store.load_access_policy(session, tenant_id=agent.tenant_id)
+        # A private channel's own agent changes only from inside the channel, for admins too.
+        if actor.subject.is_admin and sealed_outside(
+            policy,
+            actor.subject.inside,
+            agent_names=(agent.name,),
+            operator=actor.subject.operator,
+        ):
+            raise AgentBackendRefused("sealed_channel")
         if authorize(policy, subject=actor.subject, action=Action.SET_AGENT_RULE):
             return True
         if not await may_edit_as_owner(session, agent.tenant_id, agent.agent_id, actor):
             raise AgentBackendRefused("owner_or_admin_required")
         return False
 
-    async def may_edit(self, agent: BackendAgent, actor: BackendActor) -> bool:
-        """Whether `actor` may change this agent now: a read for previews and cards."""
+    async def edit_refusal(self, agent: BackendAgent, actor: BackendActor) -> str | None:
+        """Why `actor` may not change this agent now (a refusal code), or None: a read."""
         try:
             async with self._sessions() as session:
                 await self._authorize_edit(session, agent, actor)
-        except AgentBackendRefused:
-            return False
-        return True
+        except AgentBackendRefused as refused:
+            return refused.reason
+        return None
+
+    async def may_edit(self, agent: BackendAgent, actor: BackendActor) -> bool:
+        """Whether `actor` may change this agent now: a read for previews and cards."""
+        return await self.edit_refusal(agent, actor) is None
 
     async def _policy(self, session: AsyncSession, tenant_id: uuid.UUID) -> TenantBackendPolicy:
         policy = await policy_store.load_access_policy(session, tenant_id=tenant_id)

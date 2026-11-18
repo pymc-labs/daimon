@@ -21,7 +21,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_pins import agent_pin_names
-from daimon.core.authz import Action, Subject, authorize
+from daimon.core.authz import Action, AgentRef, Subject, authorize
 from daimon.core.defaults.ma_index import find_agents_by_daimon_tag
 from daimon.core.defaults.metadata import MA_METADATA_KEY_CHANNEL_COPY, MA_METADATA_KEY_MANAGED
 from daimon.core.errors import DaimonError
@@ -29,7 +29,7 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.memory_resource import archive_memory_store_for_agent
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent
-from daimon.core.permissions import without_agent_rules
+from daimon.core.permissions import SEALED_REFUSAL, without_agent_rules
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, TenantConfigRow
 from daimon.core.stores.access_policy import (
     load_access_policy,
@@ -45,6 +45,7 @@ _log = structlog.get_logger(__name__)
 
 ArchiveRefusal = Literal[
     "admin_required",
+    "sealed_channel",
     "not_found",
     "ambiguous",
     "not_channel_copy",
@@ -56,6 +57,7 @@ ArchiveRefusal = Literal[
 
 _REFUSALS: dict[ArchiveRefusal, str] = {
     "admin_required": "Only an admin can archive an agent.",
+    "sealed_channel": SEALED_REFUSAL,
     "not_found": "There is no agent by that name.",
     "ambiguous": "More than one agent has that name, or it changed: list the agents again.",
     "not_channel_copy": (
@@ -165,8 +167,16 @@ async def archive_channel_copy(
     async with policy_write_transaction(sessionmaker, tenant_id=tenant_id) as session:
         await lock_access_policy(session, tenant_id=tenant_id)
         policy = await load_access_policy(session, tenant_id=tenant_id)
-        if not authorize(policy, subject=subject, action=Action.ARCHIVE_CHANNEL_COPY):
-            raise ChannelCopyArchiveRefused("admin_required")
+        decision = authorize(
+            policy,
+            subject=subject,
+            action=Action.ARCHIVE_CHANNEL_COPY,
+            agent=AgentRef.of(name, *names),
+        )
+        if not decision:
+            raise ChannelCopyArchiveRefused(
+                "sealed_channel" if decision.reason == "sealed_channel" else "admin_required"
+            )
         tenant, channels = await list_propagations_for_tenant(session, tenant_id=tenant_id)
         refusal = archive_refusal(
             name=name,

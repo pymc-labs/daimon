@@ -56,7 +56,7 @@ async def list_key_names(
 ) -> list[KeyName]:
     """The names of the agent's stored keys, for an admin or the agent's owner."""
     target = await load_target(deps, actor=actor, ma_agent_id=ma_agent_id)
-    require_setup(target, "Keys")
+    require_setup(target, "Keys", read_only=True)
     async with deps.session_factory() as session:
         rows = await list_agent_file_revisions(
             session, tenant_id=actor.tenant_id, agent_id=target.agent_id

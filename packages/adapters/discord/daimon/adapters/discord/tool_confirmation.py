@@ -17,12 +17,14 @@ import re
 import secrets
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from functools import partial
 from time import monotonic
 from typing import TYPE_CHECKING
 
 import structlog
 from daimon.adapters.discord.notice_card import build_notice_embed
+from daimon.adapters.discord.origin import interaction_origin
 from daimon.adapters.discord.theme import COLOR_AMBER, COLOR_GREEN, COLOR_GREYPLE
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Subject
@@ -245,7 +247,11 @@ class _ConfirmationView(discord.ui.LayoutView):
             return
         await interaction.response.defer()
         try:
-            subject = await self._rule_subject(clicker)
+            # Where the click came from is the origin; the card never names it.
+            subject = replace(
+                await self._rule_subject(clicker),
+                origin_channel_ids=interaction_origin(interaction),
+            )
             scope = allowed_rule_scope(reference, subject)
         except Exception:
             scope = None

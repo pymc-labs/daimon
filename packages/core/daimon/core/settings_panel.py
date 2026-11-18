@@ -25,6 +25,7 @@ from typing import Final
 
 from anthropic import AsyncAnthropic
 from daimon.core.admin_actions import DelegatedAction
+from daimon.core.authz import origin_ids
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import list_agents_by_tenant
@@ -121,19 +122,37 @@ async def chat_actor(
     return FeatureActor(tenant_id, account, "panel", user_id, admin_for)
 
 
+def _names_from(agents: AgentLoader) -> Callable[[str], Awaitable[Sequence[str | None]]]:
+    async def names(agent_id: str) -> Sequence[str | None]:
+        return [a.name for a in await agents() if a.id == agent_id]
+
+    return names
+
+
 async def apply_choice(
     sessions: Sessions,
     settings: Settings,
     actor: FeatureActor,
     raw: object,
     place: FeaturePlace,
+    *,
+    agents: AgentLoader | None = None,
 ) -> tuple[bool, str] | None:
     """Apply a pressed choice (`features.surface.parse_choice`): ``(True, what changed)``,
-    ``(False, why not)``, or None for a forged choice, which changes nothing and says nothing."""
+    ``(False, why not)``, or None for a forged choice, which changes nothing and says nothing.
+
+    The panel's own channel is where the press started: the platform shows the panel only to
+    someone who can see that channel (`FeatureActor.inside`)."""
     if (choice := parse_choice(raw)) is None:
         return None
-    if choice.agent:
-        place = replace(place, agent_id=choice.agent)
+    chosen = choice.agent
+    actor = replace(
+        actor,
+        inside=origin_ids(place.channel_id, place.thread_id),
+        agent_names=_names_from(agents) if agents is not None else None,
+    )
+    if chosen:
+        place = replace(place, agent_id=chosen)
     try:
         change = await change_feature(
             sessions,
@@ -465,7 +484,7 @@ async def press(
         return await show(sessions, settings, actor, place, raw, agents=agents)
     if not FEATURES[choice.key].on_platform(place.platform):
         return None
-    done = await apply_choice(sessions, settings, actor, raw, place)
+    done = await apply_choice(sessions, settings, actor, raw, place, agents=agents)
     if done is None:
         return None
     screen = await _feature(

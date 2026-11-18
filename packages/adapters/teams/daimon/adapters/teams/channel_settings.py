@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from typing import Final, cast, get_args
 
 import anthropic
@@ -142,7 +143,7 @@ class ChannelSettingsDialog:
 
     async def _subject(self, actor: Actor) -> Subject:
         async with self._runtime.sessionmaker() as session:
-            return await load_live_subject(
+            subject = await load_live_subject(
                 session,
                 tenant_id=actor.tenant_id,
                 platform="teams",
@@ -151,6 +152,7 @@ class ChannelSettingsDialog:
                 ),
                 action=DelegatedAction.CHANNEL_PERMISSIONS,
             )
+        return replace(subject, origin_channel_ids=actor.origin)
 
     async def _listed(self, tenant_id: uuid.UUID) -> dict[str, str | None]:
         async with self._runtime.sessionmaker() as session:
@@ -393,7 +395,11 @@ class ChannelSettingsDialog:
                 readers=None if readers == current.readers else readers,
                 writers=None if writers == current.writers else writers,
                 # Only an admin reaches this, re-checked by the caller.
-                subject=build_subject(is_admin=True, platform_user_id=actor.user_id),
+                subject=build_subject(
+                    is_admin=True,
+                    platform_user_id=actor.user_id,
+                    origin_channel_ids=actor.origin,
+                ),
                 surface="panel",
                 default=self._runtime.deployment_default,
                 actor_account_id=await get_or_create_account(self._runtime, actor),

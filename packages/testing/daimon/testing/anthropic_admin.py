@@ -293,7 +293,7 @@ class AnthropicAdminBindings:
                 tenant_id=uuid.UUID(self.binding.scope.tenant_id),
                 name=name,
                 closing_channel_id=channel,
-                subject=Subject(is_admin=True),
+                subject=Subject(is_admin=True, operator=True),
                 default=self.binding.default,
                 expected_ma_agent_id=before.native_id,
             )

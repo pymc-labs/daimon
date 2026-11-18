@@ -23,6 +23,7 @@ from daimon.core.channel_backend import (
 )
 from daimon.core.constants import DEFAULT_AGENT_MODEL
 from daimon.core.errors import UserFacingError
+from daimon.core.permissions import SEALED_REFUSAL
 from daimon.core.stores import mux_state
 from daimon.core.turn.notices import provider_name
 from mux.contracts.config import DEFAULT_BACKEND
@@ -47,6 +48,7 @@ _LINES: Final[dict[str, tuple[str, RefusalAction | None]]] = {
     "stale_revision": ("This changed since you looked. Try again.", "fresh_preview"),
     "admin_required_for_shared_threads": ("A shared thread needs an admin to switch.", None),
     "admin_required": ("Only an admin can do that.", None),
+    "sealed_channel": (SEALED_REFUSAL, None),
     "owner_or_admin_required": ("Only the agent's owner or an admin can do that.", None),
     "model_not_selectable": ("That model isn't available. Pick another.", "pick_another_model"),
     "profile_not_selectable": ("That model isn't available. Pick another.", "pick_another_model"),

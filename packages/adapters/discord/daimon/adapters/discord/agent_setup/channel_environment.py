@@ -11,12 +11,14 @@ exist before anything is written.
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from typing import Final
 
 import anthropic
 import structlog
 from daimon.adapters.discord.agent_setup.state import PanelState
 from daimon.adapters.discord.checks import admin_caller
+from daimon.adapters.discord.origin import interaction_origin
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Subject
@@ -90,13 +92,14 @@ async def load_picker_subject(
     """
     caller = admin_caller(interaction.user)
     async with runtime.sessionmaker() as session:
-        return await load_live_subject(
+        subject = await load_live_subject(
             session,
             tenant_id=panel_tenant_id(state),
             platform="discord",
             caller=caller,
             action=DelegatedAction.ENVIRONMENTS,
         )
+    return replace(subject, origin_channel_ids=interaction_origin(interaction))
 
 
 async def may_pick_environment(

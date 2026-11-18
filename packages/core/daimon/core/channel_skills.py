@@ -102,10 +102,13 @@ REFUSALS: Final[dict[ChannelSkillRefusal, str]] = {
 }
 
 
-def may_set_channel_skills(subject: Subject, channel_id: str) -> Decision:
-    """Whether `subject` may add or remove `channel_id`'s skills: server admins only. Pure."""
+def may_set_channel_skills(
+    policy: TenantAccessPolicy, subject: Subject, channel_id: str
+) -> Decision:
+    """Whether `subject` may add or remove `channel_id`'s skills: server admins only, and a
+    private channel's only from inside it (`sealed_outside`). Pure."""
     return authorize(
-        TenantAccessPolicy(),
+        policy,
         subject=subject,
         action=Action.SET_CHANNEL_SKILLS,
         place=Place(channel_id=channel_id),

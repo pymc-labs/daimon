@@ -19,6 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   again. No hub lists a channel's own agent, and an admin can't run it from a DM
   or the hub. Admins keep hub reads of open channels. Admins who used a home
   channel's agent from a DM now use it in its channel.
+- **A private channel's settings change only from inside the channel, for admins
+  too.** In every install, an admin can't change a channel with limited readers,
+  or the agent that channel keeps to itself, from the web app, the hub or a DM.
+  That covers rules, prompt, tools and connections, budget, skills and
+  environments, feature switches including memory, coding keys, and reading the
+  agent's memory text. Use the settings panel or the chat tool in the channel.
+  An agent key, a resumed turn or a routine can't make these changes either.
+  Archiving an agent or environment that such a channel picks waits until the
+  channel picks another one, from inside. The operator CLI is unchanged, and so
+  are members and open channels.
 - **OpenAI turns record their tokens and cost when usage arrives late.** OpenAI
   can end a turn before its turn resource reports usage, and fill it in up to
   half an hour later. Daimon takes the usage the turn's completion event carries,

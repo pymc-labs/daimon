@@ -20,6 +20,7 @@ from __future__ import annotations
 import datetime as dt
 import functools
 import uuid
+from dataclasses import replace
 from typing import Any, Final
 
 import structlog
@@ -37,7 +38,7 @@ from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.agent_ownership import owns_agent
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL
-from daimon.core.authz import AgentRef, Decision, Subject, build_agent_ref
+from daimon.core.authz import AgentRef, Decision, Subject, build_agent_ref, origin_ids
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import (
     authorize_coding_token,
@@ -393,6 +394,8 @@ async def _authorize_mint(
             caller=caller,
             action=None,
         )
+        # The panel's own channel is where the press came from (never a pick).
+        subject = replace(subject, origin_channel_ids=origin_ids(channel_id))
         owned = not subject.is_admin and await owns_agent(
             session,
             tenant_id=tenant_id,
