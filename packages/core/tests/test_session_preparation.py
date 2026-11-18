@@ -16,6 +16,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -123,6 +124,21 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import QueuePool
 from structlog.testing import capture_logs
+
+_binding = partial(
+    create_binding,
+    platform="discord",
+    thread_id="thread-1",
+    responder_ma_agent_id="ag_successor",
+    responder_name="research-bot",
+    kind="handoff",
+)
+
+
+_prepared_replacement = partial(
+    PreparedReplacement, extra_resources=(), transfer_file_id=None, transfer_kind="transcript"
+)
+
 
 _NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
 _AGENT_ID = "ag_prep"
@@ -936,9 +952,7 @@ async def test_replacement_checkpoint_live_and_recovered_debits_use_old_channel(
         await recorder(event=event)
         missed = event.model_copy(update={"id": "evt_checkpoint_missed"})
         transport.state.events[old_session_id].append(missed.model_dump(mode="json"))
-        return PreparedReplacement(
-            extra_resources=(), transfer_file_id=None, transfer_kind="history", user_prefix=""
-        )
+        return _prepared_replacement(transfer_kind="history", user_prefix="")
 
     monkeypatch.setattr(WorkspaceTransferRunner, "__call__", checkpoint)
     runner = WorkspaceTransferRunner(
@@ -2322,16 +2336,7 @@ async def test_a_responder_change_authorized_by_a_handoff_binding_replaces_the_s
     successor_agent = _agent(agent_id="ag_successor")
     _register(transport.state, successor_agent)
     async with db_session_factory() as session, session.begin():
-        binding = await create_binding(
-            session,
-            tenant_id=tenant.id,
-            platform="discord",
-            parent_channel_id="channel-1",
-            thread_id="thread-1",
-            responder_ma_agent_id="ag_successor",
-            responder_name="research-bot",
-            kind="handoff",
-        )
+        binding = await _binding(session, tenant_id=tenant.id, parent_channel_id="channel-1")
 
     handed = await _prepare(
         deps,
@@ -2372,16 +2377,7 @@ async def test_a_responder_change_does_not_run_the_new_agent_on_the_old_agents_s
     successor_agent = _agent(agent_id="ag_successor")
     _register(transport.state, successor_agent)
     async with db_session_factory() as session, session.begin():
-        binding = await create_binding(
-            session,
-            tenant_id=tenant.id,
-            platform="discord",
-            parent_channel_id="channel-1",
-            thread_id="thread-1",
-            responder_ma_agent_id="ag_successor",
-            responder_name="research-bot",
-            kind="handoff",
-        )
+        binding = await _binding(session, tenant_id=tenant.id, parent_channel_id="channel-1")
         await mark_turn_active(
             session, id=old_row.id, active_turn_message_id="msg-in-flight", now=_NOW
         )
@@ -2427,16 +2423,7 @@ async def test_a_responder_change_proceeds_once_the_turn_marker_has_gone_stale(
     successor_agent = _agent(agent_id="ag_successor")
     _register(transport.state, successor_agent)
     async with db_session_factory() as session, session.begin():
-        binding = await create_binding(
-            session,
-            tenant_id=tenant.id,
-            platform="discord",
-            parent_channel_id="channel-1",
-            thread_id="thread-1",
-            responder_ma_agent_id="ag_successor",
-            responder_name="research-bot",
-            kind="handoff",
-        )
+        binding = await _binding(session, tenant_id=tenant.id, parent_channel_id="channel-1")
         await mark_turn_active(
             session,
             id=old_row.id,
@@ -2482,12 +2469,7 @@ async def test_the_callers_unsaved_work_answer_reaches_the_transfer_hook_once(
 
     async def _transfer(**kwargs: Any) -> PreparedReplacement:
         seen.append(kwargs["unsaved_work"])
-        return PreparedReplacement(
-            extra_resources=(),
-            transfer_file_id=None,
-            transfer_kind="transcript",
-            user_prefix="",
-        )
+        return _prepared_replacement(user_prefix="")
 
     moved = _agent(model_id="claude-opus-5")
     _register(transport.state, moved)
@@ -2524,12 +2506,7 @@ async def test_a_caller_who_was_never_asked_carries_no_unsaved_work_answer(
 
     async def _transfer(**kwargs: Any) -> PreparedReplacement:
         seen.append(kwargs["unsaved_work"])
-        return PreparedReplacement(
-            extra_resources=(),
-            transfer_file_id=None,
-            transfer_kind="transcript",
-            user_prefix="",
-        )
+        return _prepared_replacement(user_prefix="")
 
     moved = _agent(model_id="claude-opus-5")
     _register(transport.state, moved)
@@ -2916,12 +2893,7 @@ async def test_a_transcript_or_bundle_transfer_keeps_the_predecessors_seal(
     assert isinstance(first, PreparedTurn)
 
     async def _transfer(**_kwargs: Any) -> PreparedReplacement:
-        return PreparedReplacement(
-            extra_resources=(),
-            transfer_file_id=None,
-            transfer_kind="transcript",
-            user_prefix="Carrying the transcript over.",
-        )
+        return _prepared_replacement(user_prefix="Carrying the transcript over.")
 
     moved = _agent(model_id="claude-opus-5")
     _register(transport.state, moved)
@@ -2956,16 +2928,7 @@ async def test_a_handoff_successor_keeps_the_predecessors_seal(
     successor_agent = _agent(agent_id="ag_successor")
     _register(transport.state, successor_agent)
     async with db_session_factory() as session, session.begin():
-        binding = await create_binding(
-            session,
-            tenant_id=tenant.id,
-            platform="discord",
-            parent_channel_id="vault",
-            thread_id="thread-1",
-            responder_ma_agent_id="ag_successor",
-            responder_name="research-bot",
-            kind="handoff",
-        )
+        binding = await _binding(session, tenant_id=tenant.id, parent_channel_id="vault")
 
     handed = await _prepare(
         deps,
@@ -3171,23 +3134,12 @@ async def test_a_handoff_carries_the_old_work_only_to_an_agent_inside_its_seal(
     successor_agent = _agent(agent_id="ag_successor")
     _register(transport.state, successor_agent)
     async with db_session_factory() as session, session.begin():
-        binding = await create_binding(
-            session,
-            tenant_id=tenant.id,
-            platform="discord",
-            parent_channel_id="vault",
-            thread_id="thread-1",
-            responder_ma_agent_id="ag_successor",
-            responder_name="research-bot",
-            kind="handoff",
-        )
+        binding = await _binding(session, tenant_id=tenant.id, parent_channel_id="vault")
     calls: list[str] = []
 
     async def _transfer(**kwargs: Any) -> PreparedReplacement:
         calls.append(kwargs["old_session_id"])
-        return PreparedReplacement(
-            extra_resources=(), transfer_file_id=None, transfer_kind="transcript", user_prefix="x"
-        )
+        return _prepared_replacement(user_prefix="x")
 
     handed = await _prepare(
         deps,
@@ -3524,9 +3476,7 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
         if checkpoints == 2:
             checkpoint_entered.set()
         await checkpoint_release.wait()
-        return PreparedReplacement(
-            extra_resources=(), transfer_file_id=None, transfer_kind="transcript", user_prefix=""
-        )
+        return _prepared_replacement(user_prefix="")
 
     auth = AuthIdentity(
         account_id=account.id,
@@ -3711,9 +3661,7 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
         if checkpoints == 2:
             checkpoint_entered.set()
         await checkpoint_release.wait()
-        return PreparedReplacement(
-            extra_resources=(), transfer_file_id=None, transfer_kind="transcript", user_prefix=""
-        )
+        return _prepared_replacement(user_prefix="")
 
     auth = AuthIdentity(
         account_id=account.id,
@@ -3936,9 +3884,7 @@ async def test_turn_queued_behind_long_replacements_waits_then_runs(
         if count == 2:
             entered.set()
         await release.wait()
-        return PreparedReplacement(
-            extra_resources=(), transfer_file_id=None, transfer_kind="transcript", user_prefix=""
-        )
+        return _prepared_replacement(user_prefix="")
 
     from daimon.core import session_preparation_stages
     from daimon.core.session_fence_retry import FenceUnavailable
@@ -4206,12 +4152,7 @@ async def test_a_member_hands_the_thread_to_the_channels_new_agent_in_place(
 
     async def _transfer(**kwargs: Any) -> PreparedReplacement:
         carried.append(kwargs["old_session_id"])
-        return PreparedReplacement(
-            extra_resources=(),
-            transfer_file_id=None,
-            transfer_kind="transcript",
-            user_prefix="<previous_session>...</previous_session>",
-        )
+        return _prepared_replacement(user_prefix="<previous_session>...</previous_session>")
 
     handed = await _prepare(
         deps,
@@ -4365,12 +4306,7 @@ async def test_unseal_during_preparation_retains_inherited_memory_restriction(
     monkeypatch.setattr(session_preparation, "reauthorize", pause)
 
     async def carry(**_kwargs):
-        return PreparedReplacement(
-            extra_resources=(),
-            transfer_file_id=None,
-            transfer_kind="transcript",
-            user_prefix="sealed history",
-        )
+        return _prepared_replacement(user_prefix="sealed history")
 
     task = asyncio.create_task(
         _prepare(deps, queued, tenant=tenant, account=account, transfer=carry)
@@ -4674,12 +4610,7 @@ async def _review_replacement(db, factory, *, sealed=False, lift=False):
 
     async def carry(**kw):
         transfers.append(kw["old_session_id"])
-        return PreparedReplacement(
-            extra_resources=(),
-            transfer_file_id=None,
-            transfer_kind="transcript",
-            user_prefix="SEALED_WORK",
-        )
+        return _prepared_replacement(user_prefix="SEALED_WORK")
 
     handed = await _prepare(
         deps,
@@ -4996,23 +4927,12 @@ async def test_a_handoff_carries_nothing_across_the_isolation_boundary(
     successor_agent = _agent(agent_id="ag_successor")
     _register(transport.state, successor_agent)
     async with db_session_factory() as session, session.begin():
-        binding = await create_binding(
-            session,
-            tenant_id=tenant.id,
-            platform="discord",
-            parent_channel_id="vault",
-            thread_id="thread-1",
-            responder_ma_agent_id="ag_successor",
-            responder_name="research-bot",
-            kind="handoff",
-        )
+        binding = await _binding(session, tenant_id=tenant.id, parent_channel_id="vault")
     calls: list[str] = []
 
     async def _transfer(**kwargs: Any) -> PreparedReplacement:
         calls.append(kwargs["old_session_id"])
-        return PreparedReplacement(
-            extra_resources=(), transfer_file_id=None, transfer_kind="transcript", user_prefix="x"
-        )
+        return _prepared_replacement(user_prefix="x")
 
     handed = await _prepare(
         deps,

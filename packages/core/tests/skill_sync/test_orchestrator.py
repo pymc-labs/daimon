@@ -19,6 +19,7 @@ import uuid
 from datetime import UTC, datetime
 from email.parser import BytesParser
 from email.policy import default
+from functools import partial
 
 import httpx
 import pytest
@@ -57,6 +58,14 @@ from mux.testing.drivers.anthropic.ma import (
     not_found_response,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_upsert_user_skill = partial(
+    upsert_user_skill,
+    agent_name="agent",
+    source_repo_branch="main",
+    source_path="",
+    anthropic_latest_version="1",
+)
 
 
 def _assert_skill_multipart(request: httpx.Request) -> bytes:
@@ -250,18 +259,14 @@ async def test_subsequent_sync_with_changed_content_uploads_new_version(
     # Seed an existing row with a stale content_hash.
     # Bundled name is owner-qualified: github.com/o/r → "o-r".
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=cli.id,
-            agent_name="agent",
             name="o-r",
             source_repo_url="https://github.com/o/r",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_old_does_not_match",
             anthropic_id="sk_old",
-            anthropic_latest_version="1",
         )
 
     tarball = make_tarball(
@@ -356,18 +361,14 @@ async def test_dedup_skips_upload_when_content_hash_matches(
     seed_hash = hashlib.sha256(zip_bytes).hexdigest()
 
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=cli.id,
-            agent_name="agent",
             name=entry.name,
             source_repo_url="https://github.com/o/r",
-            source_repo_branch="main",
-            source_path="",
             content_hash=seed_hash,
             anthropic_id="sk_existing",
-            anthropic_latest_version="1",
         )
 
     http_client = httpx.AsyncClient(
@@ -947,31 +948,23 @@ async def test_orphan_delete_only_fires_for_successfully_fetched_repos(
 
     # Seed two existing rows: one for r1 (will be orphaned), one for r2 (untouched).
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=cli.id,
-            agent_name="agent",
             name="orphan_from_r1",
             source_repo_url="https://github.com/o/r1",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_r1",
             anthropic_id="sk_r1",
-            anthropic_latest_version="1",
         )
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=cli.id,
-            agent_name="agent",
             name="kept_from_r2",
             source_repo_url="https://github.com/o/r2",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_r2",
             anthropic_id="sk_r2",
-            anthropic_latest_version="1",
         )
 
     # r1 fetches an empty tarball — no SKILL.md, split=True → bundler returns [].
@@ -1040,18 +1033,14 @@ async def test_orphan_delete_skipped_when_repo_fetch_failed(
     fernet = make_fernet()
 
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=cli.id,
-            agent_name="agent",
             name="transient_orphan",
             source_repo_url="https://github.com/o/r1",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_r1",
             anthropic_id="sk_transient",
-            anthropic_latest_version="1",
         )
 
     http_client = httpx.AsyncClient(
@@ -1112,18 +1101,14 @@ async def test_orphan_delete_local_row_survives_when_ma_delete_fails(
     fernet = make_fernet()
 
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=cli.id,
-            agent_name="agent",
             name="doomed_orphan",
             source_repo_url="https://github.com/o/r1",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_r1",
             anthropic_id="sk_doomed",
-            anthropic_latest_version="1",
         )
 
     empty_tarball = make_tarball({"r1-main/README.md": b"no skills"})
@@ -1194,18 +1179,14 @@ async def test_orphan_delete_retries_and_succeeds_on_second_sync(
     fernet = make_fernet()
 
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=cli.id,
-            agent_name="agent",
             name="retry_orphan",
             source_repo_url="https://github.com/o/r1",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_r1",
             anthropic_id="sk_retry",
-            anthropic_latest_version="1",
         )
 
     empty_tarball = make_tarball({"r1-main/README.md": b"no skills"})
@@ -1295,18 +1276,14 @@ async def test_orphan_delete_404_treated_as_already_deleted(
     fernet = make_fernet()
 
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=cli.id,
-            agent_name="agent",
             name="gone_orphan",
             source_repo_url="https://github.com/o/r1",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_r1",
             anthropic_id="sk_gone",
-            anthropic_latest_version="1",
         )
 
     empty_tarball = make_tarball({"r1-main/README.md": b"no skills"})
@@ -1382,18 +1359,14 @@ async def test_orphan_delete_transient_failure_retains_row_without_poisoning_att
     ledger_key = derive_agent_uuid(tenant_id=cli.tenant_id, ma_agent_id="ag_transient")
 
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=ledger_key,
-            agent_name="agent",
             name="transient_orphan",
             source_repo_url="https://github.com/o/r1",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_r1",
             anthropic_id="sk_transient",
-            anthropic_latest_version="1",
         )
 
     empty_tarball = make_tarball({"r1-main/README.md": b"no skills"})
@@ -1509,18 +1482,14 @@ async def test_orphan_delete_lingering_row_dedups_readded_skill(
     fernet = make_fernet()
 
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=cli.id,
-            agent_name="agent",
             name="collision_skill",
             source_repo_url="https://github.com/o/r1",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_r1",
             anthropic_id="sk_collision",
-            anthropic_latest_version="1",
         )
 
     empty_tarball = make_tarball({"r1-main/README.md": b"no skills"})
@@ -1699,18 +1668,14 @@ async def test_sync_agent_skills_attach_is_noop_when_skill_already_attached(
     seed_hash = hashlib.sha256(zip_bytes).hexdigest()
 
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=ledger_key,
-            agent_name="agent",
             name=entry.name,
             source_repo_url="https://github.com/o/r",
-            source_repo_branch="main",
-            source_path="",
             content_hash=seed_hash,
             anthropic_id="sk_existing",
-            anthropic_latest_version="1",
         )
 
     http_client = httpx.AsyncClient(
@@ -2253,18 +2218,14 @@ async def test_attach_adds_base_toolset_when_agent_lacks_it(
 
     # Seed a user_skills row so the attach step fires.
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=ledger_key,
-            agent_name="agent",
             name="my-skill",
             source_repo_url="https://github.com/o/r",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_1",
             anthropic_id="sk_new",
-            anthropic_latest_version="1",
         )
 
     # Toolless agent — no tools at all.
@@ -2340,18 +2301,14 @@ async def test_attach_sends_skills_only_when_agent_has_base_toolset(
     ledger_key = derive_agent_uuid(tenant_id=cli.tenant_id, ma_agent_id="ag_with_toolset")
 
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=ledger_key,
-            agent_name="agent",
             name="my-skill",
             source_repo_url="https://github.com/o/r",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_1",
             anthropic_id="sk_new",
-            anthropic_latest_version="1",
         )
 
     from anthropic.types.beta.beta_managed_agents_agent_toolset20260401 import (
@@ -2453,18 +2410,14 @@ async def test_attach_retries_once_on_version_conflict(
 
     # Row to attach.
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=ledger_key,
-            agent_name="agent",
             name="my-skill",
             source_repo_url="https://github.com/o/r",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_1",
             anthropic_id="sk_target",
-            anthropic_latest_version="1",
         )
 
     # Initial list response: agent has no skills yet.
@@ -2585,18 +2538,14 @@ async def test_attach_over_cap_records_failure_instead_of_raising(
 
     ledger_key = derive_agent_uuid(tenant_id=cli.tenant_id, ma_agent_id="ag_cap")
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=ledger_key,
-            agent_name="agent",
             name="my-skill",
             source_repo_url="https://github.com/o/r",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_1",
             anthropic_id="sk_target",
-            anthropic_latest_version="1",
         )
 
     agent_payload = ma_agent(
@@ -2729,18 +2678,14 @@ async def test_attach_refuses_union_when_legacy_registry_skill_shares_mount_name
 
     ledger_key = derive_agent_uuid(tenant_id=cli.tenant_id, ma_agent_id="ag_coll")
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=ledger_key,
-            agent_name="agent",
             name="my-skill",
             source_repo_url="https://github.com/o/r",
-            source_repo_branch="main",
-            source_path="",
             content_hash="hash_1",
             anthropic_id="sk_scoped",
-            anthropic_latest_version="1",
         )
 
     agent_payload = ma_agent(
@@ -2917,18 +2862,15 @@ async def test_sync_never_replaces_a_skill_added_by_hand(
     await db_session.commit()
     fernet = make_fernet()
     async with db_session_factory() as s, s.begin():
-        await upsert_user_skill(
+        await _upsert_user_skill(
             s,
             tenant_id=cli.tenant_id,
             principal_id=cli.id,
-            agent_name="agent",
             name="o-r",
             source_repo_url="",
             source_repo_branch="",
-            source_path="",
             content_hash="uploaded",
             anthropic_id="sk_up",
-            anthropic_latest_version="1",
             source="upload",
         )
     tarball = make_tarball({"r-main/SKILL.md": b"---\nname: r\ndescription: d\n---\nbody"})

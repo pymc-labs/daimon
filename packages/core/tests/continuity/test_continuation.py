@@ -11,6 +11,7 @@ import asyncio
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 import pytest
 import pytest_asyncio
@@ -44,6 +45,11 @@ from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, not
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 _NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
+
+_decide_continuation = partial(
+    decide_continuation, now=_NOW, latest_user_message_at=None, active_turn=False
+)
+
 _TARGET_ID = "agt_stats"
 
 
@@ -158,13 +164,8 @@ async def test_decide_skips_save_only_when_the_handoff_carried_no_work(
     request = _request(tenant_id=tenant_id, account_id=account_id, requested_work=None)
     await record_continuation(db_session_factory, request)
 
-    decision = await decide_continuation(
-        db_session_factory,
-        _live_target(tenant_id),
-        request=request,
-        now=_NOW,
-        latest_user_message_at=None,
-        active_turn=False,
+    decision = await _decide_continuation(
+        db_session_factory, _live_target(tenant_id), request=request
     )
 
     assert decision.action == "skip_save_only", "no requested work means no dispatch"
@@ -180,13 +181,8 @@ async def test_decide_dispatches_with_the_requested_work_as_the_seed_message(
     request = _request(tenant_id=tenant_id, account_id=account_id)
     await record_continuation(db_session_factory, request)
 
-    decision = await decide_continuation(
-        db_session_factory,
-        _live_target(tenant_id),
-        request=request,
-        now=_NOW,
-        latest_user_message_at=None,
-        active_turn=False,
+    decision = await _decide_continuation(
+        db_session_factory, _live_target(tenant_id), request=request
     )
 
     assert decision.action == "dispatch", "a live target with work queued runs the turn"
@@ -213,14 +209,7 @@ async def test_decide_skips_when_the_target_is_no_longer_that_agent(
     else:
         anthropic = _live_target(uuid.uuid4())
 
-    decision = await decide_continuation(
-        db_session_factory,
-        anthropic,
-        request=request,
-        now=_NOW,
-        latest_user_message_at=None,
-        active_turn=False,
-    )
+    decision = await _decide_continuation(db_session_factory, anthropic, request=request)
 
     assert decision.action == "skip_target_changed", (
         f"a {target_state} target must not receive a queued turn"
@@ -243,13 +232,11 @@ async def test_decide_skips_when_the_person_has_spoken_again_since_queueing(
         row = await get_continuation(session, idempotency_key=request.idempotency_key)
     assert row is not None, "the recorded row is the clock the supersede rule reads"
 
-    decision = await decide_continuation(
+    decision = await _decide_continuation(
         db_session_factory,
         _live_target(tenant_id),
         request=request,
-        now=_NOW,
         latest_user_message_at=row.created_at + timedelta(seconds=1),
-        active_turn=False,
     )
 
     assert decision.action == "skip_superseded", "a newer message replaces the queued work"
@@ -267,13 +254,11 @@ async def test_decide_dispatches_when_the_last_message_predates_the_queued_work(
         row = await get_continuation(session, idempotency_key=request.idempotency_key)
     assert row is not None, "the recorded row must exist to compare against"
 
-    decision = await decide_continuation(
+    decision = await _decide_continuation(
         db_session_factory,
         _live_target(tenant_id),
         request=request,
-        now=_NOW,
         latest_user_message_at=row.created_at - timedelta(seconds=1),
-        active_turn=False,
     )
 
     assert decision.action == "dispatch", "the request that caused the handoff cannot supersede it"
@@ -328,13 +313,8 @@ async def test_decide_dispatches_a_confirmed_call_wake_while_calls_are_approved(
     request = _request(tenant_id=tenant_id, account_id=account_id, reason="confirmed_call")
     await record_continuation(db_session_factory, request)
 
-    decision = await decide_continuation(
-        db_session_factory,
-        _live_target(tenant_id),
-        request=request,
-        now=_NOW,
-        latest_user_message_at=None,
-        active_turn=False,
+    decision = await _decide_continuation(
+        db_session_factory, _live_target(tenant_id), request=request
     )
 
     assert decision.action == "dispatch", "approved calls are waiting for this wake"
@@ -349,13 +329,8 @@ async def test_decide_skips_a_confirmed_call_wake_when_an_earlier_wake_ran_the_c
     request = _request(tenant_id=tenant_id, account_id=account_id, reason="confirmed_call")
     await record_continuation(db_session_factory, request)
 
-    decision = await decide_continuation(
-        db_session_factory,
-        _live_target(tenant_id),
-        request=request,
-        now=_NOW,
-        latest_user_message_at=None,
-        active_turn=False,
+    decision = await _decide_continuation(
+        db_session_factory, _live_target(tenant_id), request=request
     )
 
     assert decision.action == "skip_superseded", "no approved call left means no billed turn"
@@ -377,13 +352,11 @@ async def test_decide_skips_a_confirmed_call_wake_whose_call_outlived_its_card(
     request = _request(tenant_id=tenant_id, account_id=account_id, reason="confirmed_call")
     await record_continuation(db_session_factory, request)
 
-    decision = await decide_continuation(
+    decision = await _decide_continuation(
         db_session_factory,
         _live_target(tenant_id),
         request=request,
         now=_NOW + timedelta(minutes=11),
-        latest_user_message_at=None,
-        active_turn=False,
     )
 
     async with db_session_factory() as session:
@@ -401,13 +374,8 @@ async def test_decide_defers_while_a_turn_is_already_running_in_the_thread(
     request = _request(tenant_id=tenant_id, account_id=account_id)
     await record_continuation(db_session_factory, request)
 
-    decision = await decide_continuation(
-        db_session_factory,
-        _live_target(tenant_id),
-        request=request,
-        now=_NOW,
-        latest_user_message_at=None,
-        active_turn=True,
+    decision = await _decide_continuation(
+        db_session_factory, _live_target(tenant_id), request=request, active_turn=True
     )
 
     assert decision.action == "skip_turn_running", "the in-flight turn finishes first"
@@ -424,13 +392,10 @@ async def test_decide_refuses_a_request_that_was_never_recorded(
     tenant_id, account_id = caller
 
     with pytest.raises(DaimonError, match="never recorded"):
-        await decide_continuation(
+        await _decide_continuation(
             db_session_factory,
             _live_target(tenant_id),
             request=_request(tenant_id=tenant_id, account_id=account_id),
-            now=_NOW,
-            latest_user_message_at=None,
-            active_turn=False,
         )
 
 
@@ -636,13 +601,8 @@ async def test_decide_continuation_turn_running_copy_is_not_handoff_shaped_for_p
     request = _request(tenant_id=tenant_id, account_id=account_id, reason="private_input_applied")
     await record_continuation(db_session_factory, request)
 
-    decision = await decide_continuation(
-        db_session_factory,
-        _live_target(tenant_id),
-        request=request,
-        now=_NOW,
-        latest_user_message_at=None,
-        active_turn=True,
+    decision = await _decide_continuation(
+        db_session_factory, _live_target(tenant_id), request=request, active_turn=True
     )
 
     assert decision.action == "skip_turn_running", "the in-flight turn still finishes first"

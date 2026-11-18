@@ -16,6 +16,7 @@ import json
 import re
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +68,15 @@ from mux.testing.drivers.anthropic.ma_models import ma_model_usage, ma_session, 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .turn_path_support import TurnIOSpy, TurnPath
+
+_run_smoke_check = partial(
+    run_smoke_check,
+    agent_tag="daimon",
+    environment_tag="default",
+    markup=Decimal("1.0"),
+    tool_safety=OPEN_TOOL_SAFETY,
+)
+
 
 _TENANT_ID = derive_tenant_uuid(platform="cli", workspace_id="smoke")
 _CREATED_AT = datetime(2026, 4, 21, tzinfo=UTC)
@@ -336,17 +346,13 @@ async def test_run_smoke_check_writes_usage_event_and_returns_result_when_turn_c
     workspace = _Workspace()
     client = _build_happy_client(workspace)
 
-    result = await run_smoke_check(
+    result = await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=client,
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="happy-path",
-        markup=Decimal("1.0"),
         on_stage=lambda msg: None,
-        tool_safety=OPEN_TOOL_SAFETY,
         turn_path=turn_path,
     )
 
@@ -391,16 +397,12 @@ async def test_run_smoke_check_runs_the_turn_as_the_provisioned_smoke_account(
     _write_seed_tree(tmp_path)
     workspace = _Workspace()
 
-    result = await run_smoke_check(
-        tool_safety=OPEN_TOOL_SAFETY,
+    result = await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=_build_happy_client(workspace),
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="smoke-account",
-        markup=Decimal("1.0"),
         on_stage=lambda msg: None,
         turn_path=turn_path,
     )
@@ -440,15 +442,12 @@ async def test_run_smoke_check_runs_its_turn_under_the_policy_it_is_given(
 
     monkeypatch.setattr(smoke, "run_turn", spy)
     policy = ToolSafetyPolicy(enabled=True)
-    await run_smoke_check(
+    await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=client,
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="policy",
-        markup=Decimal("1.0"),
         on_stage=lambda msg: None,
         tool_safety=policy,
     )
@@ -464,30 +463,22 @@ async def test_run_smoke_check_is_idempotent_when_called_twice(
     _write_seed_tree(tmp_path)
     workspace = _Workspace()
 
-    first = await run_smoke_check(
+    first = await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=_build_happy_client(workspace, session_id="ses_idempotent_1"),
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="idempotent-1",
-        markup=Decimal("1.0"),
         on_stage=lambda msg: None,
-        tool_safety=OPEN_TOOL_SAFETY,
         turn_path=turn_path,
     )
-    second = await run_smoke_check(
+    second = await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=_build_happy_client(workspace, session_id="ses_idempotent_2"),
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="idempotent-2",
-        markup=Decimal("1.0"),
         on_stage=lambda msg: None,
-        tool_safety=OPEN_TOOL_SAFETY,
         turn_path=turn_path,
     )
 
@@ -514,17 +505,13 @@ async def test_run_smoke_check_recreates_agent_when_ma_agent_missing(
     _write_seed_tree(tmp_path)
     workspace = _Workspace()
 
-    first = await run_smoke_check(
+    first = await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=_build_happy_client(workspace, session_id="ses_self_heal_1"),
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="self-heal",
-        markup=Decimal("1.0"),
         on_stage=lambda msg: None,
-        tool_safety=OPEN_TOOL_SAFETY,
         turn_path=turn_path,
     )
 
@@ -582,17 +569,13 @@ async def test_run_smoke_check_raises_when_no_usage_event_written(
     client = build_fake_anthropic(router.dispatch)
 
     with pytest.raises(SmokeCheckError, match="no usage_events row"):
-        await run_smoke_check(
+        await _run_smoke_check(
             session_factory=db_session_factory,
             anthropic=client,
             defaults_root=tmp_path,
-            agent_tag="daimon",
-            environment_tag="default",
             resolver_cache=new_resolver_cache(),
             topup_key="no-usage-event",
-            markup=Decimal("1.0"),
             on_stage=lambda msg: None,
-            tool_safety=OPEN_TOOL_SAFETY,
             turn_path=turn_path,
         )
     turn_io_used.assert_ran(turn_path)
@@ -632,17 +615,13 @@ async def test_run_smoke_check_propagates_session_error_when_stream_errors(
     client = build_fake_anthropic(router.dispatch)
 
     with pytest.raises(TurnError) as exc_info:
-        await run_smoke_check(
+        await _run_smoke_check(
             session_factory=db_session_factory,
             anthropic=client,
             defaults_root=tmp_path,
-            agent_tag="daimon",
-            environment_tag="default",
             resolver_cache=new_resolver_cache(),
             topup_key="session-error",
-            markup=Decimal("1.0"),
             on_stage=lambda msg: None,
-            tool_safety=OPEN_TOOL_SAFETY,
             turn_path=turn_path,
         )
 
@@ -660,17 +639,13 @@ async def test_run_smoke_check_inserts_topup_when_balance_zero(
     _write_seed_tree(tmp_path)
     workspace = _Workspace()
 
-    result = await run_smoke_check(
+    result = await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=_build_happy_client(workspace),
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="topup-zero-balance",
-        markup=Decimal("1.0"),
         on_stage=lambda msg: None,
-        tool_safety=OPEN_TOOL_SAFETY,
         turn_path=turn_path,
     )
 
@@ -703,17 +678,13 @@ async def test_run_smoke_check_skips_topup_when_balance_positive(
             idempotency_key="preseed-positive-balance",
         )
 
-    result = await run_smoke_check(
+    result = await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=_build_happy_client(workspace),
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="skip-topup",
-        markup=Decimal("1.0"),
         on_stage=lambda msg: None,
-        tool_safety=OPEN_TOOL_SAFETY,
         turn_path=turn_path,
     )
 
@@ -735,17 +706,13 @@ async def test_run_smoke_check_does_not_double_credit_when_topup_key_repeats(
     _write_seed_tree(tmp_path)
     workspace = _Workspace()
 
-    await run_smoke_check(
+    await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=_build_happy_client(workspace, session_id="ses_repeat_1"),
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="repeat-key",
-        markup=Decimal("1.0"),
         on_stage=lambda msg: None,
-        tool_safety=OPEN_TOOL_SAFETY,
         turn_path=turn_path,
     )
 
@@ -762,17 +729,13 @@ async def test_run_smoke_check_does_not_double_credit_when_topup_key_repeats(
                 idempotency_key="drain-for-repeat-test",
             )
 
-    second = await run_smoke_check(
+    second = await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=_build_happy_client(workspace, session_id="ses_repeat_2"),
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="repeat-key",
-        markup=Decimal("1.0"),
         on_stage=lambda msg: None,
-        tool_safety=OPEN_TOOL_SAFETY,
         turn_path=turn_path,
     )
 
@@ -800,18 +763,14 @@ async def test_run_smoke_check_raises_timeout_error_when_turn_exceeds_timeout(
     client = build_fake_anthropic(router.dispatch)
 
     with pytest.raises(SmokeCheckError, match="timed out"):
-        await run_smoke_check(
+        await _run_smoke_check(
             session_factory=db_session_factory,
             anthropic=client,
             defaults_root=tmp_path,
-            agent_tag="daimon",
-            environment_tag="default",
             resolver_cache=new_resolver_cache(),
             topup_key="timeout-case",
-            markup=Decimal("1.0"),
             timeout_s=0.05,
             on_stage=lambda msg: None,
-            tool_safety=OPEN_TOOL_SAFETY,
             turn_path=turn_path,
         )
     turn_io_used.assert_ran(turn_path)
@@ -827,17 +786,13 @@ async def test_run_smoke_check_reports_each_stage_via_on_stage(
     workspace = _Workspace()
     stages: list[str] = []
 
-    await run_smoke_check(
+    await _run_smoke_check(
         session_factory=db_session_factory,
         anthropic=_build_happy_client(workspace),
         defaults_root=tmp_path,
-        agent_tag="daimon",
-        environment_tag="default",
         resolver_cache=new_resolver_cache(),
         topup_key="stage-reporting",
-        markup=Decimal("1.0"),
         on_stage=stages.append,
-        tool_safety=OPEN_TOOL_SAFETY,
         turn_path=turn_path,
     )
 

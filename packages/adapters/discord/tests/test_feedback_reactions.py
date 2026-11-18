@@ -12,6 +12,7 @@ an empty list, for every "writes nothing" assertion) with zero extra I/O.
 
 from __future__ import annotations
 
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -57,14 +58,7 @@ async def test_application_webhook_post_counts_as_bot_authored(
     owns = AsyncMock(return_value=True)
     monkeypatch.setattr(DiscordPostTransport, "owns_message", owns)
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
-        message_id=123,
-        channel_id=456,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
-        emoji_name="👍",
-        message_author_id=900,
-    )
+    payload = _payload(message_id=123, channel_id=456, emoji_name="👍", message_author_id=900)
     assert await cog._is_bot_message_via_fetch(payload, bot_user_id=_BOT_USER_ID)  # pyright: ignore[reportPrivateUsage]
     owns.assert_awaited_once()
 
@@ -74,14 +68,7 @@ async def test_known_human_author_never_fetches_message() -> None:
     channel.fetch_message = AsyncMock()
     bot = _fake_bot(sessionmaker=MagicMock(), get_channel=MagicMock(return_value=channel))
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
-        message_id=123,
-        channel_id=456,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
-        emoji_name="👍",
-        message_author_id=1234,
-    )
+    payload = _payload(message_id=123, channel_id=456, emoji_name="👍", message_author_id=1234)
     await cog._record_vote_from_reaction(payload)  # pyright: ignore[reportPrivateUsage]
     channel.fetch_message.assert_not_awaited()
 
@@ -95,13 +82,8 @@ async def test_human_reactions_reuse_channel_webhook_listing() -> None:
     bot.http.channel_webhooks = AsyncMock(return_value=[])
     cog = FeedbackReactionCog(bot)
     for author_id in (1234, 1235):
-        payload = _build_payload(
-            message_id=author_id,
-            channel_id=456,
-            user_id=_REACTOR_ID,
-            guild_id=_GUILD_ID,
-            emoji_name="👍",
-            message_author_id=author_id,
+        payload = _payload(
+            message_id=author_id, channel_id=456, emoji_name="👍", message_author_id=author_id
         )
         await cog._record_vote_from_reaction(payload)  # pyright: ignore[reportPrivateUsage]
     bot.http.channel_webhooks.assert_awaited_once_with(456)
@@ -119,13 +101,8 @@ async def test_webhook_listing_403_is_cached_and_does_not_fetch_human_messages()
     )
     cog = FeedbackReactionCog(bot)
     for message_id in (1234, 1235):
-        payload = _build_payload(
-            message_id=message_id,
-            channel_id=456,
-            user_id=_REACTOR_ID,
-            guild_id=_GUILD_ID,
-            emoji_name="👍",
-            message_author_id=message_id,
+        payload = _payload(
+            message_id=message_id, channel_id=456, emoji_name="👍", message_author_id=message_id
         )
         await cog._record_vote_from_reaction(payload)  # pyright: ignore[reportPrivateUsage]
     bot.http.channel_webhooks.assert_awaited_once_with(456)
@@ -147,14 +124,7 @@ async def test_webhook_after_restart_is_discovered_without_application_id() -> N
         return_value=[{"id": "900", "application_id": str(_BOT_USER_ID), "channel_id": "456"}]
     )
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
-        message_id=123,
-        channel_id=456,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
-        emoji_name="👍",
-        message_author_id=900,
-    )
+    payload = _payload(message_id=123, channel_id=456, emoji_name="👍", message_author_id=900)
     assert await cog._possible_own_author(payload)  # pyright: ignore[reportPrivateUsage]
     assert await cog._is_bot_message_via_fetch(payload, bot_user_id=_BOT_USER_ID)  # pyright: ignore[reportPrivateUsage]
     bot.http.channel_webhooks.assert_awaited_once_with(456)
@@ -171,14 +141,7 @@ async def test_unresolved_webhook_application_is_not_memoized_false() -> None:
     bot = _fake_bot(sessionmaker=MagicMock(), get_channel=MagicMock(return_value=channel))
     cog = FeedbackReactionCog(bot)
     cog._is_recorded_agent_post = AsyncMock(return_value=False)  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
-    payload = _build_payload(
-        message_id=123,
-        channel_id=456,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
-        emoji_name="👍",
-        message_author_id=None,
-    )
+    payload = _payload(message_id=123, channel_id=456, emoji_name="👍", message_author_id=None)
     assert not await cog._is_bot_message_via_fetch(payload, bot_user_id=_BOT_USER_ID)  # pyright: ignore[reportPrivateUsage]
     assert 123 not in cog._author_is_bot  # pyright: ignore[reportPrivateUsage]
 
@@ -194,14 +157,7 @@ async def test_recorded_webhook_post_survives_unavailable_webhook_lookup() -> No
     bot = _fake_bot(sessionmaker=MagicMock(), get_channel=MagicMock(return_value=channel))
     cog = FeedbackReactionCog(bot)
     cog._is_recorded_agent_post = AsyncMock(return_value=True)  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
-    payload = _build_payload(
-        message_id=123,
-        channel_id=456,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
-        emoji_name="👍",
-        message_author_id=900,
-    )
+    payload = _payload(message_id=123, channel_id=456, emoji_name="👍", message_author_id=900)
     assert await cog._is_bot_message_via_fetch(payload, bot_user_id=_BOT_USER_ID)  # pyright: ignore[reportPrivateUsage]
 
 
@@ -237,6 +193,9 @@ def _build_payload(
         emoji,
         "REACTION_ADD",
     )
+
+
+_payload = partial(_build_payload, user_id=_REACTOR_ID, guild_id=_GUILD_ID)
 
 
 def _fake_bot(
@@ -295,11 +254,9 @@ async def test_thumbs_down_by_guild_member_writes_one_row(
     calls = _spy_on_record_vote(monkeypatch)
     bot = _fake_bot(sessionmaker=db_session_factory)
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
+    payload = _payload(
         message_id=1001,
         channel_id=2001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
         emoji_name="\N{THUMBS DOWN SIGN}",
         message_author_id=_BOT_USER_ID,
     )
@@ -327,11 +284,9 @@ async def test_thumbs_up_writes_a_row_with_vote_up(
     calls = _spy_on_record_vote(monkeypatch)
     bot = _fake_bot(sessionmaker=db_session_factory)
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
+    payload = _payload(
         message_id=1002,
         channel_id=2001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
         emoji_name="\N{THUMBS UP SIGN}",
         message_author_id=_BOT_USER_ID,
     )
@@ -361,13 +316,8 @@ async def test_fallback_fetch_message_authored_by_bot_writes_a_row(
         sessionmaker=db_session_factory, get_channel=MagicMock(return_value=fake_channel)
     )
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
-        message_id=1003,
-        channel_id=2001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
-        emoji_name="\N{THUMBS DOWN SIGN}",
-        message_author_id=None,
+    payload = _payload(
+        message_id=1003, channel_id=2001, emoji_name="\N{THUMBS DOWN SIGN}", message_author_id=None
     )
 
     await cog.on_raw_reaction_add(payload)
@@ -394,13 +344,8 @@ async def test_fallback_fetch_message_authored_by_someone_else_writes_nothing(
         sessionmaker=db_session_factory, get_channel=MagicMock(return_value=fake_channel)
     )
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
-        message_id=1004,
-        channel_id=2001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
-        emoji_name="\N{THUMBS DOWN SIGN}",
-        message_author_id=None,
+    payload = _payload(
+        message_id=1004, channel_id=2001, emoji_name="\N{THUMBS DOWN SIGN}", message_author_id=None
     )
 
     await cog.on_raw_reaction_add(payload)
@@ -424,13 +369,8 @@ async def test_fallback_fetch_message_raises_not_found_writes_nothing_and_does_n
         sessionmaker=db_session_factory, get_channel=MagicMock(return_value=fake_channel)
     )
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
-        message_id=1005,
-        channel_id=2001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
-        emoji_name="\N{THUMBS DOWN SIGN}",
-        message_author_id=None,
+    payload = _payload(
+        message_id=1005, channel_id=2001, emoji_name="\N{THUMBS DOWN SIGN}", message_author_id=None
     )
 
     await cog.on_raw_reaction_add(payload)  # must not raise
@@ -455,13 +395,8 @@ async def test_fallback_fetches_once_for_repeated_reactions_on_the_same_message(
         sessionmaker=db_session_factory, get_channel=MagicMock(return_value=fake_channel)
     )
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
-        message_id=1016,
-        channel_id=2001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
-        emoji_name="\N{THUMBS DOWN SIGN}",
-        message_author_id=None,
+    payload = _payload(
+        message_id=1016, channel_id=2001, emoji_name="\N{THUMBS DOWN SIGN}", message_author_id=None
     )
 
     await cog.on_raw_reaction_add(payload)
@@ -495,13 +430,8 @@ async def test_fallback_refetches_after_a_failed_fetch_is_not_memoized(
         sessionmaker=db_session_factory, get_channel=MagicMock(return_value=fake_channel)
     )
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
-        message_id=1017,
-        channel_id=2001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
-        emoji_name="\N{THUMBS DOWN SIGN}",
-        message_author_id=None,
+    payload = _payload(
+        message_id=1017, channel_id=2001, emoji_name="\N{THUMBS DOWN SIGN}", message_author_id=None
     )
 
     await cog.on_raw_reaction_add(payload)
@@ -531,11 +461,9 @@ async def test_the_author_memo_is_bounded_and_evicts_the_oldest_message(
     cog = FeedbackReactionCog(bot)
 
     def _payload_for(message_id: int) -> discord.RawReactionActionEvent:
-        return _build_payload(
+        return _payload(
             message_id=message_id,
             channel_id=2001,
-            user_id=_REACTOR_ID,
-            guild_id=_GUILD_ID,
             emoji_name="\N{THUMBS DOWN SIGN}",
             message_author_id=None,
         )
@@ -563,11 +491,9 @@ async def test_fast_path_does_not_call_fetch_message(
         sessionmaker=db_session_factory, get_channel=MagicMock(return_value=fake_channel)
     )
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
+    payload = _payload(
         message_id=1006,
         channel_id=2001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
         emoji_name="\N{THUMBS DOWN SIGN}",
         message_author_id=_BOT_USER_ID,
     )
@@ -591,11 +517,10 @@ async def test_bots_own_reaction_writes_nothing(
     calls = _spy_on_record_vote(monkeypatch)
     bot = _fake_bot(sessionmaker=db_session_factory)
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
+    payload = _payload(
         message_id=1007,
         channel_id=2001,
         user_id=_BOT_USER_ID,
-        guild_id=_GUILD_ID,
         emoji_name="\N{THUMBS DOWN SIGN}",
         message_author_id=_BOT_USER_ID,
     )
@@ -612,10 +537,9 @@ async def test_reaction_with_no_guild_id_writes_nothing(
     calls = _spy_on_record_vote(monkeypatch)
     bot = _fake_bot(sessionmaker=db_session_factory)
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
+    payload = _payload(
         message_id=1008,
         channel_id=2001,
-        user_id=_REACTOR_ID,
         guild_id=None,
         emoji_name="\N{THUMBS DOWN SIGN}",
         message_author_id=_BOT_USER_ID,
@@ -636,11 +560,9 @@ async def test_non_vote_emoji_writes_nothing(
     calls = _spy_on_record_vote(monkeypatch)
     bot = _fake_bot(sessionmaker=db_session_factory)
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
+    payload = _payload(
         message_id=1009,
         channel_id=2001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
         emoji_name="\N{SMILING FACE WITH SMILING EYES}",
         message_author_id=_BOT_USER_ID,
     )
@@ -660,11 +582,9 @@ async def test_custom_emoji_writes_nothing(
     calls = _spy_on_record_vote(monkeypatch)
     bot = _fake_bot(sessionmaker=db_session_factory)
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
+    payload = _payload(
         message_id=1010,
         channel_id=2001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
         emoji_name="x",
         emoji_id=123,
         message_author_id=_BOT_USER_ID,
@@ -683,10 +603,9 @@ async def test_guild_with_no_tenant_row_writes_nothing_and_does_not_raise(
     calls = _spy_on_record_vote(monkeypatch)
     bot = _fake_bot(sessionmaker=db_session_factory)
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
+    payload = _payload(
         message_id=1011,
         channel_id=2001,
-        user_id=_REACTOR_ID,
         guild_id=unprovisioned_guild_id,
         emoji_name="\N{THUMBS DOWN SIGN}",
         message_author_id=_BOT_USER_ID,
@@ -723,11 +642,9 @@ async def test_ma_session_id_populated_from_newest_live_session(
     calls = _spy_on_record_vote(monkeypatch)
     bot = _fake_bot(sessionmaker=db_session_factory)
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
+    payload = _payload(
         message_id=1012,
         channel_id=2001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
         emoji_name="\N{THUMBS DOWN SIGN}",
         message_author_id=_BOT_USER_ID,
     )
@@ -750,11 +667,9 @@ async def test_ma_session_id_is_none_when_no_thread_session_exists(
     calls = _spy_on_record_vote(monkeypatch)
     bot = _fake_bot(sessionmaker=db_session_factory)
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
+    payload = _payload(
         message_id=1013,
         channel_id=2001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
         emoji_name="\N{THUMBS DOWN SIGN}",
         message_author_id=_BOT_USER_ID,
     )
@@ -777,11 +692,10 @@ async def test_account_id_is_none_for_unknown_reactor_and_no_principal_is_create
     calls = _spy_on_record_vote(monkeypatch)
     bot = _fake_bot(sessionmaker=db_session_factory)
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
+    payload = _payload(
         message_id=1014,
         channel_id=2001,
         user_id=_OTHER_REACTOR_ID,
-        guild_id=_GUILD_ID,
         emoji_name="\N{THUMBS DOWN SIGN}",
         message_author_id=_BOT_USER_ID,
     )
@@ -817,11 +731,9 @@ async def test_account_id_populated_for_known_reactor(
     calls = _spy_on_record_vote(monkeypatch)
     bot = _fake_bot(sessionmaker=db_session_factory)
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
+    payload = _payload(
         message_id=1015,
         channel_id=2001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
         emoji_name="\N{THUMBS DOWN SIGN}",
         message_author_id=_BOT_USER_ID,
     )
@@ -849,11 +761,9 @@ async def test_first_thumbs_down_sends_exactly_one_private_message(
     recipient.send = AsyncMock()
     bot = _fake_bot(sessionmaker=db_session_factory, get_user=MagicMock(return_value=recipient))
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
+    payload = _payload(
         message_id=2001,
         channel_id=3001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
         emoji_name="\N{THUMBS DOWN SIGN}",
         message_author_id=_BOT_USER_ID,
     )
@@ -886,11 +796,9 @@ async def test_repeat_thumbs_down_by_same_person_sends_nothing(
     recipient.send = AsyncMock()
     bot = _fake_bot(sessionmaker=db_session_factory, get_user=MagicMock(return_value=recipient))
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
+    payload = _payload(
         message_id=2002,
         channel_id=3001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
         emoji_name="\N{THUMBS DOWN SIGN}",
         message_author_id=_BOT_USER_ID,
     )
@@ -919,19 +827,15 @@ async def test_flip_from_up_to_down_sends_exactly_one_private_message(
     recipient.send = AsyncMock()
     bot = _fake_bot(sessionmaker=db_session_factory, get_user=MagicMock(return_value=recipient))
     cog = FeedbackReactionCog(bot)
-    up_payload = _build_payload(
+    up_payload = _payload(
         message_id=2003,
         channel_id=3001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
         emoji_name="\N{THUMBS UP SIGN}",
         message_author_id=_BOT_USER_ID,
     )
-    down_payload = _build_payload(
+    down_payload = _payload(
         message_id=2003,
         channel_id=3001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
         emoji_name="\N{THUMBS DOWN SIGN}",
         message_author_id=_BOT_USER_ID,
     )
@@ -954,19 +858,15 @@ async def test_flip_from_down_to_up_sends_nothing(
     recipient.send = AsyncMock()
     bot = _fake_bot(sessionmaker=db_session_factory, get_user=MagicMock(return_value=recipient))
     cog = FeedbackReactionCog(bot)
-    down_payload = _build_payload(
+    down_payload = _payload(
         message_id=2004,
         channel_id=3001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
         emoji_name="\N{THUMBS DOWN SIGN}",
         message_author_id=_BOT_USER_ID,
     )
-    up_payload = _build_payload(
+    up_payload = _payload(
         message_id=2004,
         channel_id=3001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
         emoji_name="\N{THUMBS UP SIGN}",
         message_author_id=_BOT_USER_ID,
     )
@@ -989,11 +889,9 @@ async def test_thumbs_up_alone_sends_nothing(
     recipient.send = AsyncMock()
     bot = _fake_bot(sessionmaker=db_session_factory, get_user=MagicMock(return_value=recipient))
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
+    payload = _payload(
         message_id=2005,
         channel_id=3001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
         emoji_name="\N{THUMBS UP SIGN}",
         message_author_id=_BOT_USER_ID,
     )
@@ -1017,11 +915,9 @@ async def test_closed_dms_still_leave_the_vote_recorded(
     )
     bot = _fake_bot(sessionmaker=db_session_factory, get_user=MagicMock(return_value=recipient))
     cog = FeedbackReactionCog(bot)
-    payload = _build_payload(
+    payload = _payload(
         message_id=2006,
         channel_id=3001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
         emoji_name="\N{THUMBS DOWN SIGN}",
         message_author_id=_BOT_USER_ID,
     )
@@ -1054,19 +950,16 @@ async def test_two_different_people_each_receive_one_private_message(
         get_user=MagicMock(side_effect=_lookup_recipient),
     )
     cog = FeedbackReactionCog(bot)
-    payload_a = _build_payload(
+    payload_a = _payload(
         message_id=2007,
         channel_id=3001,
-        user_id=_REACTOR_ID,
-        guild_id=_GUILD_ID,
         emoji_name="\N{THUMBS DOWN SIGN}",
         message_author_id=_BOT_USER_ID,
     )
-    payload_b = _build_payload(
+    payload_b = _payload(
         message_id=2007,
         channel_id=3001,
         user_id=_OTHER_REACTOR_ID,
-        guild_id=_GUILD_ID,
         emoji_name="\N{THUMBS DOWN SIGN}",
         message_author_id=_BOT_USER_ID,
     )
@@ -1100,11 +993,9 @@ async def test_the_prompt_says_the_text_is_shared_only_when_the_tenant_routes_it
             support=support,
         )
         await FeedbackReactionCog(bot).on_raw_reaction_add(
-            _build_payload(
+            _payload(
                 message_id=message_id,
                 channel_id=3001,
-                user_id=_REACTOR_ID,
-                guild_id=_GUILD_ID,
                 emoji_name="\N{THUMBS DOWN SIGN}",
                 message_author_id=_BOT_USER_ID,
             )

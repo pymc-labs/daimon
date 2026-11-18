@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from typing import cast
 
 import pytest
@@ -34,6 +35,14 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 NOW = datetime(2026, 10, 9, tzinfo=UTC)
 TENANT = uuid.UUID(int=8)
 RATES = ModelRates(input=2, output=10, cache_write=3, cache_read=1)
+
+_record_turn_usage = partial(
+    record_turn_usage,
+    tenant_id=TENANT,
+    platform_user_id="user",
+    pricing=RATES,
+    channel_id="channel",
+)
 
 
 def observation(
@@ -181,27 +190,13 @@ async def test_c07_null_100_120_110_is_signed_once_and_channel_spend_is_110(
 
 async def test_c12_historical_replay_keeps_exact_rows_and_turn_key(account: Account) -> None:
     original = observation()
-    await record_turn_usage(
-        sessionmaker=account.sessions,
-        tenant_id=TENANT,
-        platform_user_id="user",
-        observation=original,
-        pricing=RATES,
-        channel_id="channel",
-    )
+    await _record_turn_usage(sessionmaker=account.sessions, observation=original)
     before_usage, before_ledger = await account.rows()
     assert before_usage[0].observation_revision is None
     assert await account.record(original)
     for _ in range(3):
         assert not await account.record(original)
-        await record_turn_usage(
-            sessionmaker=account.sessions,
-            tenant_id=TENANT,
-            platform_user_id="user",
-            observation=original,
-            pricing=RATES,
-            channel_id="channel",
-        )
+        await _record_turn_usage(sessionmaker=account.sessions, observation=original)
     after_usage, after_ledger = await account.rows()
     assert [r.model_dump(exclude={"observation_revision"}) for r in after_usage] == [
         r.model_dump(exclude={"observation_revision"}) for r in before_usage
@@ -507,14 +502,7 @@ async def test_revision_without_prior_uses_adjust_key(account: Account) -> None:
 
 
 async def test_historical_baseline_mismatch_is_refused(account: Account) -> None:
-    await record_turn_usage(
-        sessionmaker=account.sessions,
-        tenant_id=TENANT,
-        platform_user_id="user",
-        observation=observation(),
-        pricing=RATES,
-        channel_id="channel",
-    )
+    await _record_turn_usage(sessionmaker=account.sessions, observation=observation())
     before = await account.rows()
     row = await account.queue(observation(output=200))
     with pytest.raises(ValueError, match="unchanged first revision"):
@@ -572,15 +560,11 @@ async def test_legacy_channel_spend_excludes_positive_non_spend_credits(account:
 async def test_current_legacy_turn_writers_only_write_negative_spend(
     account: Account, reason: TurnLedgerReason
 ) -> None:
-    await record_turn_usage(
+    await _record_turn_usage(
         sessionmaker=account.sessions,
-        tenant_id=TENANT,
-        platform_user_id="user",
         observation=observation(),
-        pricing=RATES,
         markup=Decimal("1.25"),
         reason=reason,
-        channel_id="channel",
     )
     _, ledger = await account.rows()
     assert len(ledger) == 1 and ledger[0].reason == reason
@@ -648,13 +632,8 @@ async def test_c12_host_hook_validates_real_database_facts_and_rejects_broken_ev
     captured: dict[str, object] = {}
 
     async def host_evidence() -> Mapping[str, object]:
-        await record_turn_usage(
-            sessionmaker=account.sessions,
-            tenant_id=TENANT,
-            platform_user_id="user",
-            observation=observation(event_id="history"),
-            pricing=RATES,
-            channel_id="channel",
+        await _record_turn_usage(
+            sessionmaker=account.sessions, observation=observation(event_id="history")
         )
         history_before = await _snapshot(account, ("history",))
         assert await account.record(observation(event_id="history"))
@@ -779,15 +758,11 @@ async def test_c12_missing_or_empty_host_evidence_cannot_pass(
 async def test_negative_markup_legacy_credit_is_still_excluded_from_channel_spend(
     account: Account, reason: TurnLedgerReason
 ) -> None:
-    await record_turn_usage(
+    await _record_turn_usage(
         sessionmaker=account.sessions,
-        tenant_id=TENANT,
-        platform_user_id="user",
         observation=observation(),
-        pricing=RATES,
         markup=Decimal("-1"),
         reason=reason,
-        channel_id="channel",
     )
     _, ledger = await account.rows()
     assert len(ledger) == 1 and ledger[0].delta_usd == Decimal("0.001000")

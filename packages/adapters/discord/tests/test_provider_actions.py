@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from types import SimpleNamespace
 from typing import cast
 
@@ -24,6 +25,11 @@ from daimon.core.turn.provider_actions import (
 )
 from mux.contracts.events import Event, NativeProvenance, RequiredAction, RequiresActionPayload
 from mux.contracts.ids import Provider, ResourceRef, Scope
+
+_discord_provider_action_hook = partial(
+    actions.discord_provider_action_hook, thread_id="thread", channel_id=42
+)
+
 
 NOW = datetime(2026, 10, 10, tzinfo=UTC)
 SCOPE = Scope(
@@ -171,9 +177,7 @@ async def test_origin_buttons_return_exact_offered_response_and_retire(choice: s
     assert isinstance(surface, BrowserOriginAccess)
     offered = {"approve": surface.approve, "deny": surface.deny, "cancel": surface.cancel}[choice]
     channel = Channel()
-    hook = actions.discord_provider_action_hook(
-        cast(discord.abc.Messageable, channel), thread_id="thread", channel_id=42
-    )
+    hook = _discord_provider_action_hook(cast(discord.abc.Messageable, channel))
     task = asyncio.ensure_future(hook(value))
     view = await channel.pending_view()
     assert labels(view) == ["Approve", "Deny", "Cancel"]
@@ -198,9 +202,7 @@ async def test_authentication_has_no_approval_or_unoffered_completion_button(
     assert isinstance(surface, BrowserAuthentication)
     channel = Channel()
     task = asyncio.ensure_future(
-        actions.discord_provider_action_hook(
-            cast(discord.abc.Messageable, channel), thread_id="thread", channel_id=42
-        )(value)
+        _discord_provider_action_hook(cast(discord.abc.Messageable, channel))(value)
     )
     view = await channel.pending_view()
     assert labels(view) == expected
@@ -215,9 +217,7 @@ async def test_wrong_requester_or_destination_cannot_answer(user: int, channel_i
     value = prompt()
     channel = Channel()
     task = asyncio.ensure_future(
-        actions.discord_provider_action_hook(
-            cast(discord.abc.Messageable, channel), thread_id="thread", channel_id=42
-        )(value)
+        _discord_provider_action_hook(cast(discord.abc.Messageable, channel))(value)
     )
     view = await channel.pending_view()
     surface = value.surface
@@ -235,9 +235,7 @@ async def test_duplicate_click_cannot_replace_first_response() -> None:
     assert isinstance(surface, BrowserOriginAccess)
     channel = Channel()
     task = asyncio.ensure_future(
-        actions.discord_provider_action_hook(
-            cast(discord.abc.Messageable, channel), thread_id="thread", channel_id=42
-        )(value)
+        _discord_provider_action_hook(cast(discord.abc.Messageable, channel))(value)
     )
     view = await channel.pending_view()
     await view.settle(cast(discord.Interaction, Interaction()), surface.deny, "Deny")
@@ -253,9 +251,7 @@ async def test_stop_and_expiry_retire_controls_without_native_permission(stopped
     assert isinstance(surface, BrowserOriginAccess)
     channel = Channel()
     task = asyncio.ensure_future(
-        actions.discord_provider_action_hook(
-            cast(discord.abc.Messageable, channel), thread_id="thread", channel_id=42
-        )(value)
+        _discord_provider_action_hook(cast(discord.abc.Messageable, channel))(value)
     )
     view = await channel.pending_view()
     if stopped:
@@ -276,9 +272,7 @@ async def test_unanswered_timeout_retires_as_expired() -> None:
     )
     channel = Channel()
     waiting = asyncio.ensure_future(
-        actions.discord_provider_action_hook(
-            cast(discord.abc.Messageable, channel), thread_id="thread", channel_id=42
-        )(value)
+        _discord_provider_action_hook(cast(discord.abc.Messageable, channel))(value)
     )
     view = await channel.pending_view()
     assert await asyncio.wait_for(waiting, timeout=5) is None
@@ -290,9 +284,7 @@ async def test_outer_expiry_cancellation_is_expired_instead_of_stopped() -> None
     value = prompt()
     channel = Channel()
     waiting = asyncio.ensure_future(
-        actions.discord_provider_action_hook(
-            cast(discord.abc.Messageable, channel), thread_id="thread", channel_id=42
-        )(value)
+        _discord_provider_action_hook(cast(discord.abc.Messageable, channel))(value)
     )
     await channel.pending_view()
     Clock.now_at = value.context.expires_at
@@ -316,9 +308,9 @@ async def test_unbound_or_expired_prompt_posts_nothing(invalid: str) -> None:
         )
         context = replace(context, requester=requester)
     channel = Channel()
-    result = await actions.discord_provider_action_hook(
-        cast(discord.abc.Messageable, channel), thread_id="thread", channel_id=42
-    )(replace(value, context=context))
+    result = await _discord_provider_action_hook(cast(discord.abc.Messageable, channel))(
+        replace(value, context=context)
+    )
     assert result is None and channel.sends == 0
 
 
@@ -394,9 +386,7 @@ async def test_real_bound_core_action_uses_discord_surface_and_exact_response(ch
         value.context.requester,
         value.context.expires_at,
         asyncio.Event(),
-        hook=actions.discord_provider_action_hook(
-            cast(discord.abc.Messageable, channel), thread_id="thread", channel_id=42
-        ),
+        hook=_discord_provider_action_hook(cast(discord.abc.Messageable, channel)),
         now=Clock.now,
     )
     bound = approval.bind(SCOPE, SESSION)

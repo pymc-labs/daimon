@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 import pytest
 from daimon.core.stores.domain import Role
@@ -13,6 +14,15 @@ from daimon.core.stores.turn_origins import (
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+_origin = partial(
+    create_origin,
+    responder_ma_agent_id="agent_daimon",
+    responder_name="Daimon",
+    role=Role.USER,
+    sender_foreign=False,
+    shared_channel=False,
+)
+
 
 @pytest.mark.parametrize("mismatch", ["caller", "tenant", "platform", "expired", "unknown"])
 async def test_origin_lookup_rejects_invalid_authority(
@@ -21,20 +31,15 @@ async def test_origin_lookup_rejects_invalid_authority(
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     now = datetime.now(UTC)
-    origin = await create_origin(
+    origin = await _origin(
         db_session,
         tenant_id=tenant.id,
         account_id=account.id,
         platform="slack",
         parent_channel_id="C123",
         thread_id="123.456",
-        responder_ma_agent_id="agent_daimon",
-        responder_name="Daimon",
         configuration_target_ma_agent_id="agent_specialist",
         configuration_target_name="specialist",
-        role=Role.USER,
-        sender_foreign=False,
-        shared_channel=False,
         expires_at=now + timedelta(minutes=10),
         now=now,
     )
@@ -53,38 +58,28 @@ async def test_new_origin_prunes_expired_crash_records(db_session: AsyncSession)
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     before = datetime.now(UTC) - timedelta(hours=3)
-    crashed = await create_origin(
+    crashed = await _origin(
         db_session,
         tenant_id=tenant.id,
         account_id=account.id,
         platform="discord",
         parent_channel_id="parent",
         thread_id="old-thread",
-        responder_ma_agent_id="agent_daimon",
-        responder_name="Daimon",
         configuration_target_ma_agent_id=None,
         configuration_target_name=None,
-        role=Role.USER,
-        sender_foreign=False,
-        shared_channel=False,
         now=before,
         expires_at=before + timedelta(hours=2),
     )
     now = datetime.now(UTC)
-    current = await create_origin(
+    current = await _origin(
         db_session,
         tenant_id=tenant.id,
         account_id=account.id,
         platform="discord",
         parent_channel_id="parent",
         thread_id="new-thread",
-        responder_ma_agent_id="agent_daimon",
-        responder_name="Daimon",
         configuration_target_ma_agent_id=None,
         configuration_target_name=None,
-        role=Role.USER,
-        sender_foreign=False,
-        shared_channel=False,
         now=now,
         expires_at=now + timedelta(hours=2),
     )
@@ -118,20 +113,15 @@ async def test_account_deletion_cascades_turn_origin(db_session: AsyncSession) -
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     now = datetime.now(UTC)
-    origin = await create_origin(
+    origin = await _origin(
         db_session,
         tenant_id=tenant.id,
         account_id=account.id,
         platform="discord",
         parent_channel_id="parent",
         thread_id="thread",
-        responder_ma_agent_id="agent_daimon",
-        responder_name="Daimon",
         configuration_target_ma_agent_id="agent_specialist",
         configuration_target_name="specialist",
-        role=Role.USER,
-        sender_foreign=False,
-        shared_channel=False,
         now=now,
         expires_at=now + timedelta(hours=2),
     )
@@ -158,20 +148,15 @@ async def test_running_origins_are_listed_per_caller(
     now = datetime.now(UTC)
 
     async def origin(account_id: uuid.UUID, thread: str, *, ttl: int) -> None:
-        await create_origin(
+        await _origin(
             db_session,
             tenant_id=tenant.id,
             account_id=account_id,
             platform="teams",
             parent_channel_id="19:c",
             thread_id=thread,
-            responder_ma_agent_id="agent_daimon",
-            responder_name="Daimon",
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
-            role=Role.USER,
-            sender_foreign=False,
-            shared_channel=False,
             expires_at=now + timedelta(minutes=ttl),
             now=now - timedelta(minutes=1),
         )
@@ -191,19 +176,15 @@ async def test_an_origin_remembers_whether_its_sender_is_from_another_organisati
     tenant = await make_tenant(db_session, platform="teams")
     account = await make_account(db_session, tenant=tenant)
     now = datetime.now(UTC)
-    created = await create_origin(
+    created = await _origin(
         db_session,
         tenant_id=tenant.id,
         account_id=account.id,
         platform="teams",
         parent_channel_id="19:abc@thread.tacv2",
         thread_id="19:abc@thread.tacv2;messageid=1",
-        responder_ma_agent_id="agent_daimon",
-        responder_name="Daimon",
         configuration_target_ma_agent_id=None,
         configuration_target_name=None,
-        role=Role.USER,
-        shared_channel=False,
         expires_at=now + timedelta(minutes=10),
         now=now,
         sender_foreign=foreign,
@@ -228,19 +209,15 @@ async def test_an_origin_records_whether_its_channel_is_shared(
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     now = datetime.now(UTC)
-    origin = await create_origin(
+    origin = await _origin(
         db_session,
         tenant_id=tenant.id,
         account_id=account.id,
         platform="slack",
         parent_channel_id="C_SHARED",
         thread_id="123.456",
-        responder_ma_agent_id="agent_daimon",
-        responder_name="Daimon",
         configuration_target_ma_agent_id=None,
         configuration_target_name=None,
-        role=Role.USER,
-        sender_foreign=False,
         shared_channel=shared,
         expires_at=now + timedelta(minutes=10),
         now=now,
@@ -273,21 +250,16 @@ async def test_stale_holder_cannot_bind_or_clear_successors_origin_grant(
         tenant = await make_tenant(db)
         account = await make_account(db, tenant=tenant)
         origins = [
-            await create_origin(
+            await _origin(
                 db,
                 tenant_id=tenant.id,
                 account_id=account.id,
                 platform="discord",
                 parent_channel_id="parent",
                 thread_id="thread",
-                responder_ma_agent_id="agent_daimon",
-                responder_name="Daimon",
                 configuration_target_ma_agent_id=None,
                 configuration_target_name=None,
-                role=Role.USER,
                 attended=attended,
-                sender_foreign=False,
-                shared_channel=False,
                 now=now,
                 expires_at=now + timedelta(hours=1),
             )
@@ -339,7 +311,7 @@ async def test_signed_origin_keeps_attendance_separate_from_calling_grant(
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     now = datetime.now(UTC)
-    origin = await create_origin(
+    origin = await _origin(
         db_session,
         tenant_id=tenant.id,
         account_id=account.id,
@@ -350,10 +322,7 @@ async def test_signed_origin_keeps_attendance_separate_from_calling_grant(
         responder_name="agent",
         configuration_target_ma_agent_id=None,
         configuration_target_name=None,
-        role=Role.USER,
         attended=True,
-        sender_foreign=False,
-        shared_channel=False,
         now=now,
         expires_at=now + timedelta(minutes=10),
     )

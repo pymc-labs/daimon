@@ -16,6 +16,7 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from typing import Any, cast
 from uuid import UUID
 
@@ -85,6 +86,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .turn_path_support import TurnIOSpy, TurnPath
 
+_as_prepared_replacement = partial(
+    as_prepared_replacement, destination_model_id="claude-sonnet-5", from_agent_name="analysis-bot"
+)
+
+
 NOW = datetime(2026, 9, 13, 9, 0, 0, tzinfo=UTC)
 TRANSFER_ID = UUID("0f9d1c4e-7c2b-4f5a-9d3e-1b2c3d4e5f60")
 TENANT_ID = UUID("11111111-2222-3333-4444-555555555555")
@@ -99,6 +105,23 @@ def _now() -> datetime:
 
 async def _no_sleep(delay: float) -> None:
     return None
+
+
+_transfer_workspace = partial(
+    transfer_workspace,
+    tenant_id=TENANT_ID,
+    account_id=ACCOUNT_ID,
+    external_user_id="U123",
+    transfer_id=TRANSFER_ID,
+    markup=Decimal("1.0"),
+    checkpoint_deadline=DEADLINE,
+    from_agent_name="analysis-bot",
+    sleep=_no_sleep,
+    now=_now,
+    tool_safety=OPEN_TOOL_SAFETY,
+    public_url=None,
+    platform="discord",
+)
 
 
 def _client(state: FakeSessionsState) -> AsyncAnthropic:
@@ -232,24 +255,12 @@ async def test_transfer_rehosts_the_bundle_and_enqueues_its_deletion(
     _script_checkpoint_reply(state, old_session, "-rw-r--r-- 1 root root 42 handoff.tar.gz")
     output = state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
 
-    outcome = await transfer_workspace(
+    outcome = await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(),
-        tenant_id=TENANT_ID,
-        account_id=ACCOUNT_ID,
         turn_path=env_turn_path,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
-        sleep=_no_sleep,
-        now=_now,
-        tool_safety=OPEN_TOOL_SAFETY,
-        public_url=None,
-        platform="discord",
     )
 
     assert isinstance(outcome, FullHandoff), f"expected a full handoff, got {outcome!r}"
@@ -290,23 +301,13 @@ async def test_a_checkpoint_without_the_callers_account_runs_on_legacy_and_is_re
     state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
 
     async def transfer() -> object:
-        return await transfer_workspace(
+        return await _transfer_workspace(
             client,
             db_session_factory,
             old_session_id=old_session,
             old_snapshot=_snapshot(),
-            tenant_id=TENANT_ID,
             account_id=None,
             turn_path=turn_path,
-            external_user_id="U123",
-            transfer_id=TRANSFER_ID,
-            markup=Decimal("1.0"),
-            checkpoint_deadline=DEADLINE,
-            from_agent_name="analysis-bot",
-            sleep=_no_sleep,
-            now=_now,
-            tool_safety=OPEN_TOOL_SAFETY,
-            public_url=None,
             platform="test",
         )
 
@@ -342,24 +343,12 @@ async def test_transfer_records_a_repository_commit_it_could_not_prevent(
     )
     state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
 
-    outcome = await transfer_workspace(
+    outcome = await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(repo_mount_path="/root/repo"),
-        tenant_id=TENANT_ID,
-        account_id=ACCOUNT_ID,
         turn_path=turn_path,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
-        sleep=_no_sleep,
-        now=_now,
-        tool_safety=OPEN_TOOL_SAFETY,
-        public_url=None,
-        platform="discord",
     )
 
     assert isinstance(outcome, FullHandoff)
@@ -387,24 +376,12 @@ async def test_checkpoint_prompt_names_every_excluded_path(
     _script_checkpoint_reply(state, old_session, "ok")
     state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
 
-    await transfer_workspace(
+    await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(repo_mount_path="/root/repo"),
-        tenant_id=TENANT_ID,
-        account_id=ACCOUNT_ID,
         turn_path=turn_path,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
-        sleep=_no_sleep,
-        now=_now,
-        tool_safety=OPEN_TOOL_SAFETY,
-        public_url=None,
-        platform="discord",
     )
 
     sent_session, batch = state.sent_batches[0]
@@ -458,7 +435,7 @@ async def test_transfer_bills_the_checkpoint_at_the_old_model_as_a_checkpoint_de
     ]
     state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
 
-    outcome = await transfer_workspace(
+    outcome = await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
@@ -466,16 +443,6 @@ async def test_transfer_bills_the_checkpoint_at_the_old_model_as_a_checkpoint_de
         tenant_id=tenant.id,
         account_id=account.id,
         turn_path=turn_path,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
-        sleep=_no_sleep,
-        now=_now,
-        tool_safety=OPEN_TOOL_SAFETY,
-        public_url=None,
-        platform="discord",
     )
 
     assert isinstance(outcome, FullHandoff)
@@ -506,24 +473,12 @@ async def test_transfer_skips_the_billed_turn_when_the_session_never_answered(
     old_session = await _make_session(client)
     _seed_conversation(state, old_session, with_reply=False)
 
-    outcome = await transfer_workspace(
+    outcome = await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(),
-        tenant_id=TENANT_ID,
-        account_id=ACCOUNT_ID,
         turn_path=turn_path,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
-        sleep=_no_sleep,
-        now=_now,
-        tool_safety=OPEN_TOOL_SAFETY,
-        public_url=None,
-        platform="discord",
     )
 
     assert isinstance(outcome, TranscriptOnly), f"expected the transcript rung, got {outcome!r}"
@@ -546,24 +501,12 @@ async def test_transfer_degrades_to_transcript_when_the_old_session_is_archived(
     _seed_conversation(state, old_session, with_reply=True)
     await client.beta.sessions.archive(old_session)
 
-    outcome = await transfer_workspace(
+    outcome = await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(),
-        tenant_id=TENANT_ID,
-        account_id=ACCOUNT_ID,
         turn_path=env_turn_path,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
-        sleep=_no_sleep,
-        now=_now,
-        tool_safety=OPEN_TOOL_SAFETY,
-        public_url=None,
-        platform="discord",
     )
 
     assert isinstance(outcome, TranscriptOnly)
@@ -601,24 +544,12 @@ async def test_transfer_degrades_to_transcript_when_the_session_vanishes_mid_tra
     old_session_holder.append(old_session)
     _seed_conversation(state, old_session, with_reply=True)
 
-    outcome = await transfer_workspace(
+    outcome = await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(),
-        tenant_id=TENANT_ID,
-        account_id=ACCOUNT_ID,
         turn_path=turn_path,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
-        sleep=_no_sleep,
-        now=_now,
-        tool_safety=OPEN_TOOL_SAFETY,
-        public_url=None,
-        platform="discord",
     )
 
     assert isinstance(outcome, TranscriptOnly)
@@ -642,25 +573,13 @@ async def test_transfer_degrades_to_transcript_when_the_bundle_is_oversize(
     _script_checkpoint_reply(state, old_session, "ok")
     output = state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
 
-    outcome = await transfer_workspace(
+    outcome = await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(),
-        tenant_id=TENANT_ID,
-        account_id=ACCOUNT_ID,
         turn_path=turn_path,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
         max_bundle_bytes=len(TARBALL) - 1,
-        sleep=_no_sleep,
-        now=_now,
-        tool_safety=OPEN_TOOL_SAFETY,
-        public_url=None,
-        platform="discord",
     )
 
     assert isinstance(outcome, TranscriptOnly)
@@ -687,24 +606,12 @@ async def test_transfer_degrades_to_transcript_when_the_checkpoint_wrote_no_arch
     _script_checkpoint_reply(state, old_session, "I would rather not archive anything.")
     state.write_output(old_session, "unrelated-notes.md", b"not a bundle")
 
-    outcome = await transfer_workspace(
+    outcome = await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(),
-        tenant_id=TENANT_ID,
-        account_id=ACCOUNT_ID,
         turn_path=turn_path,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
-        sleep=_no_sleep,
-        now=_now,
-        tool_safety=OPEN_TOOL_SAFETY,
-        public_url=None,
-        platform="discord",
     )
 
     assert isinstance(outcome, TranscriptOnly)
@@ -746,24 +653,12 @@ async def test_transfer_degrades_to_transcript_when_the_re_upload_fails(
     _script_checkpoint_reply(state, old_session, "ok")
     state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
 
-    outcome = await transfer_workspace(
+    outcome = await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(),
-        tenant_id=TENANT_ID,
-        account_id=ACCOUNT_ID,
         turn_path=turn_path,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
-        sleep=_no_sleep,
-        now=_now,
-        tool_safety=OPEN_TOOL_SAFETY,
-        public_url=None,
-        platform="discord",
     )
 
     assert isinstance(outcome, TranscriptOnly)
@@ -789,24 +684,12 @@ async def test_transfer_returns_history_only_when_the_session_log_is_gone(
     _seed_conversation(state, old_session, with_reply=True)
     await client.beta.sessions.delete(old_session)
 
-    outcome = await transfer_workspace(
+    outcome = await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(),
-        tenant_id=TENANT_ID,
-        account_id=ACCOUNT_ID,
         turn_path=env_turn_path,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
-        sleep=_no_sleep,
-        now=_now,
-        tool_safety=OPEN_TOOL_SAFETY,
-        public_url=None,
-        platform="discord",
     )
 
     assert outcome == HistoryOnly(gap_reason="events_unavailable")
@@ -832,12 +715,8 @@ def test_as_prepared_replacement_mounts_the_bundle_and_keeps_the_transcript_out_
         unpreserved=(),
     )
 
-    prepared = as_prepared_replacement(
-        outcome,
-        destination_model_id="claude-sonnet-5",
-        from_agent_name="analysis-bot",
-        to_agent_name="report-bot",
-        requested_work="write up the results",
+    prepared = _as_prepared_replacement(
+        outcome, to_agent_name="report-bot", requested_work="write up the results"
     )
 
     assert prepared.transfer_kind == "full"
@@ -868,10 +747,9 @@ def test_as_prepared_replacement_puts_everything_in_the_user_prefix_on_an_ungate
         unpreserved=(),
     )
 
-    prepared = as_prepared_replacement(
+    prepared = _as_prepared_replacement(
         outcome,
         destination_model_id="claude-haiku-4-5",
-        from_agent_name="analysis-bot",
         to_agent_name="report-bot",
         requested_work="write up the results",
     )
@@ -888,10 +766,8 @@ def test_as_prepared_replacement_explains_the_gap_without_naming_a_reason_code()
     """`transfer_kind` and the not-carried line are what stop the copy
     overstating what survived. A reason code in user-facing text would be a
     leak, so the phrasing is a sentence, not an identifier."""
-    prepared = as_prepared_replacement(
+    prepared = _as_prepared_replacement(
         TranscriptOnly(transcript="", gap_reason="checkpoint_timeout"),
-        destination_model_id="claude-sonnet-5",
-        from_agent_name="analysis-bot",
         to_agent_name="analysis-bot",
         requested_work=None,
     )
@@ -907,10 +783,8 @@ def test_as_prepared_replacement_explains_the_gap_without_naming_a_reason_code()
 
 
 def test_as_prepared_replacement_says_only_the_thread_survived_for_history_only() -> None:
-    prepared = as_prepared_replacement(
+    prepared = _as_prepared_replacement(
         HistoryOnly(gap_reason="events_unavailable"),
-        destination_model_id="claude-sonnet-5",
-        from_agent_name="analysis-bot",
         to_agent_name="report-bot",
         requested_work=None,
     )
@@ -936,25 +810,13 @@ async def test_transfer_leaves_uncommitted_work_behind_and_names_it_when_asked_t
     _script_checkpoint_reply(state, old_session, "-rw-r--r-- 1 root root 42 handoff.tar.gz")
     state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
 
-    outcome = await transfer_workspace(
+    outcome = await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(repo_mount_path="/root/repo"),
-        tenant_id=TENANT_ID,
-        account_id=ACCOUNT_ID,
         turn_path=turn_path,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
         unsaved_work="leave",
-        sleep=_no_sleep,
-        now=_now,
-        tool_safety=OPEN_TOOL_SAFETY,
-        public_url=None,
-        platform="discord",
     )
 
     prompt = _checkpoint_instruction(state)
@@ -980,25 +842,13 @@ async def test_transfer_captures_uncommitted_work_when_the_answer_is_copy(
     _script_checkpoint_reply(state, old_session, "-rw-r--r-- 1 root root 42 handoff.tar.gz")
     state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
 
-    outcome = await transfer_workspace(
+    outcome = await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(repo_mount_path="/root/repo"),
-        tenant_id=TENANT_ID,
-        account_id=ACCOUNT_ID,
         turn_path=turn_path,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
         unsaved_work="copy",
-        sleep=_no_sleep,
-        now=_now,
-        tool_safety=OPEN_TOOL_SAFETY,
-        public_url=None,
-        platform="discord",
     )
 
     prompt = _checkpoint_instruction(state)
@@ -1031,24 +881,12 @@ async def test_a_partial_archive_crosses_and_names_the_files_it_left_out(
     )
     state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
 
-    outcome = await transfer_workspace(
+    outcome = await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(),
-        tenant_id=TENANT_ID,
-        account_id=ACCOUNT_ID,
         turn_path=turn_path,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
-        sleep=_no_sleep,
-        now=_now,
-        tool_safety=OPEN_TOOL_SAFETY,
-        public_url=None,
-        platform="discord",
     )
 
     assert isinstance(outcome, FullHandoff), f"a partial archive still crosses, got {outcome!r}"
@@ -1056,13 +894,7 @@ async def test_a_partial_archive_crosses_and_names_the_files_it_left_out(
     assert phrase.endswith("`/root/work/model.pkl`, `/root/work/draws, v2.nc` and 3 more"), (
         "every named file is quoted, so a comma in a name cannot split the list"
     )
-    prepared = as_prepared_replacement(
-        outcome,
-        destination_model_id="claude-sonnet-5",
-        from_agent_name="analysis-bot",
-        to_agent_name="analysis-bot",
-        requested_work=None,
-    )
+    prepared = _as_prepared_replacement(outcome, to_agent_name="analysis-bot", requested_work=None)
     assert f"Not carried over: {phrase}" in prepared.system_blocks[0]["text"], (
         "the successor reads the list where it reads everything else that is missing"
     )
@@ -1086,24 +918,12 @@ async def test_a_left_out_listing_does_not_rescue_an_archive_still_over_the_cap(
         f"{HANDOFF_LEFT_OUT_MARKER} /root/work/model.pkl\n{HANDOFF_TOO_LARGE_MARKER} 22000000\n",
     )
 
-    outcome = await transfer_workspace(
+    outcome = await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(),
-        tenant_id=TENANT_ID,
-        account_id=ACCOUNT_ID,
         turn_path=turn_path,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
-        sleep=_no_sleep,
-        now=_now,
-        tool_safety=OPEN_TOOL_SAFETY,
-        public_url=None,
-        platform="discord",
     )
 
     assert isinstance(outcome, TranscriptOnly), f"expected a transcript rung, got {outcome!r}"
@@ -1114,7 +934,7 @@ async def test_a_left_out_listing_does_not_rescue_an_archive_still_over_the_cap(
 def test_as_prepared_replacement_tells_the_successor_the_changes_were_left_behind() -> None:
     """The phrase travels all the way into the framing the successor reads, so
     it cannot quietly work around files that were never going to be there."""
-    prepared = as_prepared_replacement(
+    prepared = _as_prepared_replacement(
         FullHandoff(
             transfer_file_id="file_bundle",
             mount_path=HANDOFF_MOUNT_PATH,
@@ -1122,8 +942,6 @@ def test_as_prepared_replacement_tells_the_successor_the_changes_were_left_behin
             transcript=None,
             unpreserved=("uncommitted repository changes were left in the old checkout",),
         ),
-        destination_model_id="claude-sonnet-5",
-        from_agent_name="analysis-bot",
         to_agent_name="analysis-bot",
         requested_work=None,
     )
@@ -1152,24 +970,12 @@ async def test_checkpoint_rides_the_system_channel_on_a_model_that_takes_one(
     _script_checkpoint_reply(state, old_session, "-rw-r--r-- 1 root root 42 handoff.tar.gz")
     state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
 
-    outcome = await transfer_workspace(
+    outcome = await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(model_id="claude-sonnet-5"),
-        tenant_id=TENANT_ID,
-        account_id=ACCOUNT_ID,
         turn_path=turn_path,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
-        sleep=_no_sleep,
-        now=_now,
-        tool_safety=OPEN_TOOL_SAFETY,
-        public_url=None,
-        platform="discord",
     )
 
     assert isinstance(outcome, FullHandoff), f"expected a full handoff, got {outcome!r}"
@@ -1219,24 +1025,12 @@ async def test_checkpoint_stays_a_user_message_on_a_model_without_system_support
     _script_checkpoint_reply(state, old_session, "-rw-r--r-- 1 root root 42 handoff.tar.gz")
     state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
 
-    outcome = await transfer_workspace(
+    outcome = await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(model_id="claude-haiku-4-5"),
-        tenant_id=TENANT_ID,
-        account_id=ACCOUNT_ID,
         turn_path=turn_path,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
-        sleep=_no_sleep,
-        now=_now,
-        tool_safety=OPEN_TOOL_SAFETY,
-        public_url=None,
-        platform="discord",
     )
 
     assert isinstance(outcome, FullHandoff), f"expected a full handoff, got {outcome!r}"
@@ -1268,24 +1062,12 @@ async def test_transfer_degrades_to_transcript_when_the_checkpoint_rejects_its_o
     _seed_conversation(state, old_session, with_reply=True)
     _script_checkpoint_reply(state, old_session, f"{HANDOFF_TOO_LARGE_MARKER} 108097268")
 
-    outcome = await transfer_workspace(
+    outcome = await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(),
-        tenant_id=TENANT_ID,
-        account_id=ACCOUNT_ID,
         turn_path=turn_path,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
-        sleep=_no_sleep,
-        now=_now,
-        tool_safety=OPEN_TOOL_SAFETY,
-        public_url=None,
-        platform="discord",
     )
 
     assert isinstance(outcome, TranscriptOnly), f"expected a transcript rung, got {outcome!r}"
@@ -1353,25 +1135,13 @@ async def test_the_checkpoint_controls_carry_the_reason_they_were_given(
     _script_checkpoint_reply(state, old_session, "-rw-r--r-- 1 root root 42 handoff.tar.gz")
     state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
 
-    outcome = await transfer_workspace(
+    outcome = await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(),
-        tenant_id=TENANT_ID,
-        account_id=ACCOUNT_ID,
         turn_path=turn_path,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
         reason=CHECKPOINT_REASON_HANDOFF,
-        sleep=_no_sleep,
-        now=_now,
-        tool_safety=OPEN_TOOL_SAFETY,
-        public_url=None,
-        platform="discord",
     )
 
     assert isinstance(outcome, FullHandoff), f"expected a full handoff, got {outcome!r}"
@@ -1399,12 +1169,8 @@ def test_full_handoff_framing_names_the_normalised_mount_path() -> None:
         transcript=None,
         unpreserved=(),
     )
-    prepared = as_prepared_replacement(
-        outcome,
-        destination_model_id="claude-sonnet-5",
-        from_agent_name="daimon",
-        to_agent_name="daimon",
-        requested_work=None,
+    prepared = _as_prepared_replacement(
+        outcome, from_agent_name="daimon", to_agent_name="daimon", requested_work=None
     )
     framing_text = prepared.user_prefix + "".join(
         str(block.get("text", "")) for block in prepared.system_blocks
@@ -1452,24 +1218,12 @@ async def test_full_transfer_accepts_partial_upload_reply_and_enqueues_cleanup(
         _seed_conversation(state, old_session, with_reply=True)
         _script_checkpoint_reply(state, old_session, "ok")
         output = state.write_output(old_session, handoff_filename(TRANSFER_ID), TARBALL)
-        outcome = await transfer_workspace(
+        outcome = await _transfer_workspace(
             client,
             db_session_factory,
             old_session_id=old_session,
             old_snapshot=_snapshot(),
-            tenant_id=TENANT_ID,
-            account_id=ACCOUNT_ID,
             turn_path=turn_path,
-            external_user_id="U123",
-            transfer_id=TRANSFER_ID,
-            markup=Decimal("1.0"),
-            checkpoint_deadline=DEADLINE,
-            from_agent_name="analysis-bot",
-            sleep=_no_sleep,
-            now=_now,
-            tool_safety=OPEN_TOOL_SAFETY,
-            public_url=None,
-            platform="discord",
         )
     assert isinstance(outcome, FullHandoff)
     assert outcome.mount_path == HANDOFF_MOUNT_PATH
@@ -1595,23 +1349,12 @@ async def test_a_checkpoint_turn_is_decided_by_the_unattended_rules(
         )
     ]
 
-    await transfer_workspace(
+    await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(),
-        tenant_id=TENANT_ID,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
-        sleep=_no_sleep,
-        now=_now,
         tool_safety=policy,
-        public_url=None,
-        platform="discord",
-        account_id=ACCOUNT_ID,
     )
 
     answers = [
@@ -1763,23 +1506,12 @@ async def test_a_coordinator_session_is_never_checkpointed(
     _seed_conversation(state, old_session, with_reply=True)
     before = state.sessions[old_session].agent.tools
 
-    outcome = await transfer_workspace(
+    outcome = await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(),
-        tenant_id=TENANT_ID,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
-        sleep=_no_sleep,
-        now=_now,
         tool_safety=ToolSafetyPolicy(enabled=True),
-        public_url=None,
-        platform="discord",
-        account_id=ACCOUNT_ID,
     )
 
     assert isinstance(outcome, TranscriptOnly)
@@ -1833,23 +1565,13 @@ async def test_every_mcp_call_of_a_checkpoint_pauses_for_the_decider(
     )
     _seed_conversation(state, old_session, with_reply=True)
 
-    await transfer_workspace(
+    await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(),
-        tenant_id=TENANT_ID,
-        external_user_id="U123",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
-        sleep=_no_sleep,
-        now=_now,
         tool_safety=ToolSafetyPolicy(enabled=enabled),
         public_url=public_url,
-        platform="discord",
-        account_id=ACCOUNT_ID,
     )
 
     tools = state.sessions[old_session].agent.tools
@@ -1886,24 +1608,14 @@ async def test_handoff_away_from_gated_agent_skips_checkpoint_after_revocation(
         "daimon.core.mux_compat.retrieve_agent",
         AsyncMock(return_value=ma_agent(name="analysis-bot")),
     )
-    outcome = await transfer_workspace(
+    outcome = await _transfer_workspace(
         client,
         db_session_factory,
         old_session_id=old_session,
         old_snapshot=_snapshot(),
-        tenant_id=TENANT_ID,
         external_user_id="revoked-user",
-        transfer_id=TRANSFER_ID,
-        markup=Decimal("1.0"),
-        checkpoint_deadline=DEADLINE,
-        from_agent_name="analysis-bot",
         reason=CHECKPOINT_REASON_HANDOFF,
-        sleep=_no_sleep,
-        now=_now,
         tool_safety=ToolSafetyPolicy(enabled=True),
-        public_url=None,
-        platform="discord",
-        account_id=ACCOUNT_ID,
     )
     assert isinstance(outcome, TranscriptOnly)
     assert outcome.gap_reason == "invoker_not_allowed"

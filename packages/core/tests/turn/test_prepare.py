@@ -14,6 +14,7 @@ import uuid
 from collections.abc import Awaitable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 
 import httpx
 import pytest
@@ -68,6 +69,11 @@ from daimon.testing.factories import (  # isort: skip
     make_tenant,
     make_thread_session,
 )
+
+_bind_session = partial(
+    bind_session, platform="discord", external_user_id="user-1", reuse_existing=True
+)
+
 
 _NOW = datetime(2026, 7, 28, tzinfo=UTC)
 
@@ -233,15 +239,8 @@ async def test_bind_session_reuses_live_row_when_reuse_existing_true_and_row_exi
     env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
 
-    prepared = await bind_session(
-        deps,
-        admission,
-        tenant_id=tenant.id,
-        platform="discord",
-        external_user_id="user-1",
-        thread_id="thread-1",
-        session_account_id=account.id,
-        reuse_existing=True,
+    prepared = await _bind_session(
+        deps, admission, tenant_id=tenant.id, thread_id="thread-1", session_account_id=account.id
     )
 
     assert prepared.reused is True, "a live row hit must set reused=True"
@@ -297,15 +296,8 @@ async def test_bind_session_stamps_the_seal_on_a_session_reused_after_sealing(
         memory_read_only=seal_id is not None,
     )
 
-    prepared = await bind_session(
-        deps,
-        admission,
-        tenant_id=tenant.id,
-        platform="discord",
-        external_user_id="user-1",
-        thread_id="thread-1",
-        session_account_id=account.id,
-        reuse_existing=True,
+    prepared = await _bind_session(
+        deps, admission, tenant_id=tenant.id, thread_id="thread-1", session_account_id=account.id
     )
 
     assert prepared.reused is True
@@ -370,15 +362,12 @@ async def test_bind_session_blocks_a_sealed_turn_ma_will_not_stamp_mid_turn(
     )
 
     with pytest.raises(SessionBusyError):
-        await bind_session(
+        await _bind_session(
             deps,
             admission,
             tenant_id=tenant.id,
-            platform="discord",
-            external_user_id="user-1",
             thread_id="thread-1",
             session_account_id=account.id,
-            reuse_existing=True,
         )
 
 
@@ -397,15 +386,8 @@ async def test_bind_session_creates_session_and_writes_mapping_when_no_live_row(
     env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
 
-    prepared = await bind_session(
-        deps,
-        admission,
-        tenant_id=tenant.id,
-        platform="discord",
-        external_user_id="user-1",
-        thread_id="thread-2",
-        session_account_id=account.id,
-        reuse_existing=True,
+    prepared = await _bind_session(
+        deps, admission, tenant_id=tenant.id, thread_id="thread-2", session_account_id=account.id
     )
 
     assert len(session_bodies) == 1, "no live row must trigger exactly one create_session call"
@@ -452,15 +434,8 @@ async def test_bind_session_stamps_the_budget_channel_apart_from_the_origin(
         budget_channel_id="chan-2",
     )
 
-    await bind_session(
-        deps,
-        admission,
-        tenant_id=tenant.id,
-        platform="discord",
-        external_user_id="user-1",
-        thread_id="dm:1",
-        session_account_id=account.id,
-        reuse_existing=True,
+    await _bind_session(
+        deps, admission, tenant_id=tenant.id, thread_id="dm:1", session_account_id=account.id
     )
 
     metadata = session_bodies[0]["metadata"]
@@ -494,12 +469,10 @@ async def test_bind_session_always_creates_fresh_session_when_reuse_existing_fal
     env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
 
-    prepared = await bind_session(
+    prepared = await _bind_session(
         deps,
         admission,
         tenant_id=tenant.id,
-        platform="discord",
-        external_user_id="user-1",
         thread_id="thread-3",
         session_account_id=account.id,
         reuse_existing=False,
@@ -527,15 +500,8 @@ async def test_bind_session_recorder_writes_usage_event_matching_ma_session_id(
     env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
 
-    prepared = await bind_session(
-        deps,
-        admission,
-        tenant_id=tenant.id,
-        platform="discord",
-        external_user_id="user-1",
-        thread_id="thread-4",
-        session_account_id=account.id,
-        reuse_existing=True,
+    prepared = await _bind_session(
+        deps, admission, tenant_id=tenant.id, thread_id="thread-4", session_account_id=account.id
     )
 
     event = BetaManagedAgentsSpanModelRequestEndEvent(
@@ -707,15 +673,13 @@ async def test_bind_session_syncs_agent_mcp_credential_into_a_reused_session_vau
         account_id=account.id, agent=agent, env=ma_environment(id="env_reuse", tenant_id=tenant.id)
     )
 
-    prepared = await bind_session(
+    prepared = await _bind_session(
         deps,
         admission,
         tenant_id=tenant.id,
-        platform="discord",
         external_user_id="user-not-the-admin",
         thread_id="thread-reuse-mcp",
         session_account_id=account.id,
-        reuse_existing=True,
     )
 
     assert prepared.reused is True, "this must still be the reuse path"
@@ -772,15 +736,12 @@ async def test_bind_session_reuse_skips_mcp_sync_when_agent_has_no_stored_creden
         env=ma_environment(id="env_plain", tenant_id=tenant.id),
     )
 
-    prepared = await bind_session(
+    prepared = await _bind_session(
         deps,
         admission,
         tenant_id=tenant.id,
-        platform="discord",
-        external_user_id="user-1",
         thread_id="thread-reuse-plain",
         session_account_id=account.id,
-        reuse_existing=True,
     )
 
     assert prepared.reused is True, "reuse path unchanged for agents with no external MCP"
@@ -804,15 +765,12 @@ async def test_bind_session_fresh_bind_raises_ceiling_error_when_deadline_alread
     past_deadline = datetime.now(UTC) - timedelta(seconds=5)
 
     with pytest.raises(TurnError) as exc_info:
-        await bind_session(
+        await _bind_session(
             deps,
             admission,
             tenant_id=tenant.id,
-            platform="discord",
-            external_user_id="user-1",
             thread_id="thread-ceiling-fresh",
             session_account_id=account.id,
-            reuse_existing=True,
             deadline=past_deadline,
         )
 
@@ -879,15 +837,12 @@ async def test_bind_session_ceiling_breach_leaves_no_orphan_mapping_row(
     deadline = datetime.now(UTC) + timedelta(minutes=5)
 
     with pytest.raises(TurnError) as exc_info:
-        await bind_session(
+        await _bind_session(
             deps,
             admission,
             tenant_id=tenant.id,
-            platform="discord",
-            external_user_id="user-1",
             thread_id="thread-ceiling-no-orphan",
             session_account_id=account.id,
-            reuse_existing=True,
             deadline=deadline,
         )
 
@@ -936,15 +891,12 @@ async def test_bind_session_reuse_path_raises_ceiling_error_when_deadline_alread
     past_deadline = datetime.now(UTC) - timedelta(seconds=5)
 
     with pytest.raises(TurnError) as exc_info:
-        await bind_session(
+        await _bind_session(
             deps,
             admission,
             tenant_id=tenant.id,
-            platform="discord",
-            external_user_id="user-1",
             thread_id="thread-ceiling-reuse",
             session_account_id=account.id,
-            reuse_existing=True,
             deadline=past_deadline,
         )
 
@@ -969,15 +921,12 @@ async def test_bind_session_default_deadline_none_still_succeeds_on_the_happy_pa
     env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
 
-    prepared = await bind_session(
+    prepared = await _bind_session(
         deps,
         admission,
         tenant_id=tenant.id,
-        platform="discord",
-        external_user_id="user-1",
         thread_id="thread-ceiling-default-none",
         session_account_id=account.id,
-        reuse_existing=True,
     )
 
     assert len(session_bodies) == 1, "deadline=None must not skip create_session"
@@ -1003,15 +952,12 @@ async def test_bind_session_with_generous_explicit_deadline_matches_no_deadline_
 
     future_deadline = datetime.now(UTC) + timedelta(hours=1)
 
-    prepared = await bind_session(
+    prepared = await _bind_session(
         deps,
         admission,
         tenant_id=tenant.id,
-        platform="discord",
-        external_user_id="user-1",
         thread_id="thread-ceiling-generous",
         session_account_id=account.id,
-        reuse_existing=True,
         deadline=future_deadline,
     )
 
@@ -1063,15 +1009,12 @@ async def test_bind_recorder_bills_the_session_snapshot_model_when_the_agent_mod
     env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
 
-    prepared = await bind_session(
+    prepared = await _bind_session(
         deps,
         admission,
         tenant_id=tenant.id,
-        platform="discord",
-        external_user_id="user-1",
         thread_id="thread-model-changed",
         session_account_id=account.id,
-        reuse_existing=True,
     )
 
     assert prepared.reused is True, "this must be the reuse path"
@@ -1117,15 +1060,12 @@ async def test_fresh_session_records_a_snapshot_with_fingerprints(
     env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
 
-    prepared = await bind_session(
+    prepared = await _bind_session(
         deps,
         admission,
         tenant_id=tenant.id,
-        platform="discord",
-        external_user_id="user-1",
         thread_id="thread-fresh-snapshot",
         session_account_id=account.id,
-        reuse_existing=True,
     )
 
     assert prepared.reused is False, "this must be the fresh-session path"
@@ -1209,15 +1149,12 @@ async def test_legacy_row_without_snapshot_is_backfilled_with_one_retrieve(
     env = ma_environment(id="env_1", tenant_id=tenant.id)
     admission = _admission(account_id=account.id, agent=agent, env=env)
 
-    prepared = await bind_session(
+    prepared = await _bind_session(
         deps,
         admission,
         tenant_id=tenant.id,
-        platform="discord",
-        external_user_id="user-1",
         thread_id="thread-legacy",
         session_account_id=account.id,
-        reuse_existing=True,
     )
 
     assert prepared.reused is True, "a legacy row is still reused"
@@ -1306,15 +1243,12 @@ async def test_bind_session_raises_session_busy_when_a_handoff_lands_mid_turn(
 
     before = datetime.now(UTC)
     with pytest.raises(SessionBusyError) as caught:
-        await bind_session(
+        await _bind_session(
             deps,
             destination,
             tenant_id=tenant.id,
-            platform="discord",
-            external_user_id="user-1",
             thread_id="thread-handoff-busy",
             session_account_id=account.id,
-            reuse_existing=True,
         )
 
     assert caught.value.pending_reasons == ("agent_identity",), (

@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import uuid
+from functools import partial
 from typing import Any
 
 import httpx
@@ -41,6 +42,10 @@ _PUBLIC_URL = "https://mcp.example.com/mcp"
 _COPILOT_URL = "https://api.githubcopilot.com/mcp"
 _SECRET = b"s" * 32
 _NOW = dt.datetime(2026, 6, 29, tzinfo=dt.UTC)
+
+_sweep_stale_admin_credentials = partial(
+    sweep_stale_admin_credentials, jwt_secret=_SECRET, public_url=_PUBLIC_URL, now=_NOW
+)
 
 
 def _vault(vault_id: str, display_name: str) -> BetaManagedAgentsVault:
@@ -210,13 +215,8 @@ async def test_sweep_apply_deletes_and_recreates_public_url_cred_without_is_admi
         raise AssertionError(f"unexpected call: {req.method} {req.url}")
 
     client = _make_client(httpx.MockTransport(handler))
-    report = await sweep_stale_admin_credentials(
-        client,
-        session_factory=db_session_factory,
-        jwt_secret=_SECRET,
-        public_url=_PUBLIC_URL,
-        now=_NOW,
-        dry_run=False,
+    report = await _sweep_stale_admin_credentials(
+        client, session_factory=db_session_factory, dry_run=False
     )
 
     # The stale cred was deleted.
@@ -296,13 +296,8 @@ async def test_sweep_apply_copilot_cred_never_matched(db_session_factory) -> Non
         raise AssertionError(f"unexpected call: {req.method} {req.url}")
 
     client = _make_client(httpx.MockTransport(handler))
-    report = await sweep_stale_admin_credentials(
-        client,
-        session_factory=db_session_factory,
-        jwt_secret=_SECRET,
-        public_url=_PUBLIC_URL,
-        now=_NOW,
-        dry_run=False,
+    report = await _sweep_stale_admin_credentials(
+        client, session_factory=db_session_factory, dry_run=False
     )
 
     assert deleted_cred_ids == [], "Copilot-only vault must produce zero deletes"
@@ -350,13 +345,8 @@ async def test_sweep_dry_run_no_writes_but_report_lists_target(db_session_factor
 
     client = _make_client(httpx.MockTransport(handler))
     # dry_run is the default, but be explicit for clarity.
-    report = await sweep_stale_admin_credentials(
-        client,
-        session_factory=db_session_factory,
-        jwt_secret=_SECRET,
-        public_url=_PUBLIC_URL,
-        now=_NOW,
-        dry_run=True,
+    report = await _sweep_stale_admin_credentials(
+        client, session_factory=db_session_factory, dry_run=True
     )
 
     assert mutating_calls == [], f"dry_run must not issue any DELETE or POST; got: {mutating_calls}"
@@ -400,13 +390,7 @@ async def test_sweep_dry_run_is_the_default(db_session_factory) -> None:
 
     client = _make_client(httpx.MockTransport(handler))
     # Omit dry_run — should default to True.
-    report = await sweep_stale_admin_credentials(
-        client,
-        session_factory=db_session_factory,
-        jwt_secret=_SECRET,
-        public_url=_PUBLIC_URL,
-        now=_NOW,
-    )
+    report = await _sweep_stale_admin_credentials(client, session_factory=db_session_factory)
 
     assert mutating_calls == [], "default (dry_run=True) must not issue any writes"
     assert report.swept_pairs == [("vlt_1", "vcrd_stale")], (
@@ -447,13 +431,8 @@ async def test_sweep_skips_unparseable_suffix_vault(db_session_factory, bad_disp
         return httpx.Response(200, json={})
 
     client = _make_client(httpx.MockTransport(handler))
-    report = await sweep_stale_admin_credentials(
-        client,
-        session_factory=db_session_factory,
-        jwt_secret=_SECRET,
-        public_url=_PUBLIC_URL,
-        now=_NOW,
-        dry_run=False,
+    report = await _sweep_stale_admin_credentials(
+        client, session_factory=db_session_factory, dry_run=False
     )
 
     assert report.unparseable_vault_ids == ["vlt_bad"], (
@@ -529,13 +508,8 @@ async def test_sweep_mixed_vault_list_applies_to_correct_vaults(db_session_facto
         raise AssertionError(f"unexpected call: {req.method} {req.url}")
 
     client = _make_client(httpx.MockTransport(handler))
-    report = await sweep_stale_admin_credentials(
-        client,
-        session_factory=db_session_factory,
-        jwt_secret=_SECRET,
-        public_url=_PUBLIC_URL,
-        now=_NOW,
-        dry_run=False,
+    report = await _sweep_stale_admin_credentials(
+        client, session_factory=db_session_factory, dry_run=False
     )
 
     assert deleted_cred_ids == ["vcrd_stale"], "only the valid vault's public_url cred deleted"
@@ -568,13 +542,8 @@ async def test_sweep_never_recreates_an_unbound_or_malformed_vault(db_session_fa
 
     client = _make_client(httpx.MockTransport(handler))
     try:
-        report = await sweep_stale_admin_credentials(
-            client,
-            session_factory=db_session_factory,
-            jwt_secret=_SECRET,
-            public_url=_PUBLIC_URL,
-            now=_NOW,
-            dry_run=False,
+        report = await _sweep_stale_admin_credentials(
+            client, session_factory=db_session_factory, dry_run=False
         )
         assert report.failures == []
         assert report.unparseable_vault_ids == (["vlt_retired"] if suffix != "legacy" else [])
@@ -635,13 +604,8 @@ async def test_sweep_isolates_one_vault_failure_and_continues(
 
     client = _make_client(httpx.MockTransport(handler))
     try:
-        report = await sweep_stale_admin_credentials(
-            client,
-            session_factory=db_session_factory,
-            jwt_secret=_SECRET,
-            public_url=_PUBLIC_URL,
-            now=_NOW,
-            dry_run=False,
+        report = await _sweep_stale_admin_credentials(
+            client, session_factory=db_session_factory, dry_run=False
         )
         assert len(report.failures) == 1 and report.failures[0][0] == "vlt_bad"
         assert report.recreated_cred_ids == ["cred_new"]
@@ -685,13 +649,8 @@ async def test_retired_vault_is_not_archived_while_any_live_session_mounts_it(
 
     client = _make_client(httpx.MockTransport(handler))
     try:
-        report = await sweep_stale_admin_credentials(
-            client,
-            session_factory=db_session_factory,
-            jwt_secret=_SECRET,
-            public_url=_PUBLIC_URL,
-            now=_NOW,
-            dry_run=False,
+        report = await _sweep_stale_admin_credentials(
+            client, session_factory=db_session_factory, dry_run=False
         )
         assert report.failures == []
         assert report.in_use_vault_ids == (["vlt_old"] if mounted else [])

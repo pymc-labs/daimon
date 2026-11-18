@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -32,6 +33,14 @@ from daimon.core.posted_controls.confirmation import (
 )
 from daimon.core.posted_controls.lifecycle import drain_card_edits
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
+
+_tool_rule_card_reference = partial(
+    ToolRuleCardReference,
+    agent_id="ma-1",
+    agent_name="Helper",
+    tool_key="linear/create_issue",
+    server_url="https://example.test/mcp",
+)
 
 
 def _prompt(*, expires_in: timedelta = timedelta(minutes=10)) -> ConfirmationPrompt:
@@ -196,13 +205,7 @@ async def test_always_button_allows_admin_and_names_the_clicker(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     answer: asyncio.Future[ConfirmationAnswer] = asyncio.get_running_loop().create_future()
@@ -230,13 +233,7 @@ async def test_always_button_refuses_requester_without_admin_rights(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     answer: asyncio.Future[ConfirmationAnswer] = asyncio.get_running_loop().create_future()
@@ -265,13 +262,7 @@ async def test_always_defers_before_live_admin_check(monkeypatch: pytest.MonkeyP
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     order: list[str] = []
@@ -302,13 +293,7 @@ async def test_always_save_failure_marks_edit_done_and_approves_once(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     answer: asyncio.Future[ConfirmationAnswer] = asyncio.get_running_loop().create_future()
@@ -340,13 +325,7 @@ async def test_blocked_always_save_does_not_block_retirement(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     channel = MagicMock()
@@ -386,13 +365,7 @@ async def test_turn_cancel_after_always_settle_keeps_stopped_card(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     channel = MagicMock()
@@ -439,13 +412,7 @@ async def test_always_edit_after_discord_token_lifetime_stays_approved_once(
     prompt = _prompt().model_copy(
         update={
             "tool_rules_enabled": True,
-            "tool_rule": ToolRuleCardReference(
-                tenant_id=uuid.uuid4(),
-                agent_id="ma-1",
-                agent_name="Helper",
-                tool_key="linear/create_issue",
-                server_url="https://example.test/mcp",
-            ),
+            "tool_rule": _tool_rule_card_reference(tenant_id=uuid.uuid4()),
         }
     )
     answer: asyncio.Future[ConfirmationAnswer] = asyncio.get_running_loop().create_future()

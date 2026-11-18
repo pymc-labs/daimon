@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any, cast
 
 import anthropic
@@ -33,6 +34,8 @@ from packages.adapters.cli.tests.run.conftest import (
     assert_io_ran_on,
     cli_principal_count,
 )
+
+_run_conversation = partial(run_conversation, session_id="s1", user_message="hello")
 
 
 def _install_run_turn(
@@ -101,9 +104,7 @@ async def test_run_exits_0_on_end_turn(
 ) -> None:
     captured: dict[str, Any] = {}
     _install_run_turn(monkeypatch, state=TurnState(), captured=captured)
-    exit_code = await run_conversation(
-        rt=make_rt(), session_id="s1", user_message="hello", path=leg_path
-    )
+    exit_code = await _run_conversation(rt=make_rt(), path=leg_path)
     assert exit_code == 0
     await _assert_bridge(db_session, leg_path, captured)
 
@@ -121,9 +122,7 @@ async def test_run_exits_1_on_turn_error(
         state=TurnState(error=TurnError(kind="upstream", message="boom")),
         captured=captured,
     )
-    exit_code = await run_conversation(
-        rt=make_rt(), session_id="s1", user_message="hello", path=leg_path
-    )
+    exit_code = await _run_conversation(rt=make_rt(), path=leg_path)
     assert exit_code == 1
     await _assert_bridge(db_session, leg_path, captured)
 
@@ -137,8 +136,8 @@ async def test_run_reads_message_from_stdin(
 ) -> None:
     captured: dict[str, Any] = {}
     _install_run_turn(monkeypatch, state=TurnState(), captured=captured)
-    exit_code = await run_conversation(
-        rt=make_rt(), session_id="s1", user_message="hello from stdin", path=leg_path
+    exit_code = await _run_conversation(
+        rt=make_rt(), user_message="hello from stdin", path=leg_path
     )
     assert exit_code == 0
     assert captured["user_message"] == "hello from stdin"
@@ -165,9 +164,7 @@ async def test_run_api_error_emits_failed_terminal_and_exits_1(
 
     monkeypatch.setattr(cmd_mod, "run_turn", raising)
 
-    exit_code = await run_conversation(
-        rt=make_rt(), session_id="s1", user_message="hello", path=leg_path
-    )
+    exit_code = await _run_conversation(rt=make_rt(), path=leg_path)
     assert exit_code == 1
     await _assert_bridge(db_session, leg_path, seen)
     terminals = [
@@ -222,10 +219,9 @@ async def test_run_conversation_past_deadline_exits_nonzero_with_a_ceiling_termi
     http_client = httpx.AsyncClient(transport=transport, base_url="https://api.anthropic.com")
     client = anthropic.AsyncAnthropic(api_key="test", http_client=http_client)
 
-    exit_code = await run_conversation(
+    exit_code = await _run_conversation(
         rt=make_rt(client),
         session_id="sess_ceiling",
-        user_message="hello",
         path=leg_path,
         deadline=datetime.now(UTC) - timedelta(seconds=5),
     )
@@ -276,13 +272,7 @@ async def test_run_conversation_passes_the_tool_posture_to_the_driver(
     _install_run_turn(monkeypatch, state=TurnState(), captured=captured)
     posture = PolicyApproval(decide=unattended_decider(ToolSafetyPolicy(enabled=True)))
 
-    await run_conversation(
-        rt=make_rt(),
-        session_id="s1",
-        user_message="hello",
-        path=leg_path,
-        tool_confirmation=posture,
-    )
+    await _run_conversation(rt=make_rt(), path=leg_path, tool_confirmation=posture)
 
     assert captured["tool_confirmation"] is posture
     await _assert_bridge(db_session, leg_path, captured)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any, Literal
 from urllib.parse import parse_qs
 
@@ -39,6 +40,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 _NOW = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
 _MCP_URL = "https://mcp.notion.com/mcp"
 _PUBLIC_URL = "https://daimon.example/mcp"
+
+_complete_mcp_oauth_flow = partial(complete_mcp_oauth_flow, public_url=_PUBLIC_URL, now=_NOW)
 
 
 async def _flow(
@@ -226,15 +229,13 @@ async def test_complete_exchanges_code_writes_grant_and_attaches_server(
     anthropic, created, updates = _fake_ma(
         tenant_id, vault_id="vlt_me", account_id=flow.account_id, agent_id=flow.agent_id
     )
-    completion = await complete_mcp_oauth_flow(
+    completion = await _complete_mcp_oauth_flow(
         httpx.AsyncClient(transport=httpx.MockTransport(token_handler)),
         anthropic,
         flow=flow,
         code="code123",
         fernet=make_fernet(),
         jwt_secret=b"x" * 32,
-        public_url=_PUBLIC_URL,
-        now=_NOW,
         session_factory=db_session_factory,
         default=DeploymentDefault(agent_name="daimon", environment_name="default"),
     )
@@ -290,15 +291,13 @@ async def test_complete_refuses_repointing_a_shared_agents_server_for_a_member(
         mcp_servers=[{"name": "notion", "type": "url", "url": "https://real.example.com/mcp"}],
     )
     with pytest.raises(McpServerReplaceRefusedError):
-        await complete_mcp_oauth_flow(
+        await _complete_mcp_oauth_flow(
             httpx.AsyncClient(transport=httpx.MockTransport(token_handler)),
             anthropic,
             flow=flow,
             code="code123",
             fernet=make_fernet(),
             jwt_secret=b"x" * 32,
-            public_url=_PUBLIC_URL,
-            now=_NOW,
             session_factory=db_session_factory,
             default=DeploymentDefault(agent_name="daimon", environment_name="default"),
         )
@@ -326,15 +325,13 @@ async def test_complete_lets_an_admin_requester_repoint_a_shared_agents_server(
         agent_id=flow.agent_id,
         mcp_servers=[{"name": "notion", "type": "url", "url": "https://real.example.com/mcp"}],
     )
-    completion = await complete_mcp_oauth_flow(
+    completion = await _complete_mcp_oauth_flow(
         httpx.AsyncClient(transport=httpx.MockTransport(token_handler)),
         anthropic,
         flow=flow,
         code="code123",
         fernet=make_fernet(),
         jwt_secret=b"x" * 32,
-        public_url=_PUBLIC_URL,
-        now=_NOW,
         session_factory=db_session_factory,
         default=DeploymentDefault(agent_name="daimon", environment_name="default"),
     )
@@ -373,15 +370,13 @@ async def test_member_oauth_cannot_attach_a_new_server_to_an_unbound_agent(
         )
     )
     with pytest.raises(McpOAuthWriteRefusedError):
-        await complete_mcp_oauth_flow(
+        await _complete_mcp_oauth_flow(
             http,
             client,
             flow=flow,
             code="code",
             fernet=make_fernet(),
             jwt_secret=b"x" * 32,
-            public_url=_PUBLIC_URL,
-            now=_NOW,
             session_factory=db_session_factory,
             default=DeploymentDefault(agent_name="other"),
         )
@@ -410,15 +405,13 @@ async def test_personal_oauth_for_an_existing_server_does_not_mutate_the_agent(
             lambda _request: httpx.Response(200, json={"access_token": "personal-grant"})
         )
     )
-    completion = await complete_mcp_oauth_flow(
+    completion = await _complete_mcp_oauth_flow(
         http,
         client,
         flow=flow,
         code="code",
         fernet=make_fernet(),
         jwt_secret=b"x" * 32,
-        public_url=_PUBLIC_URL,
-        now=_NOW,
         session_factory=db_session_factory,
         default=DeploymentDefault(agent_name="daimon"),
     )
@@ -469,15 +462,13 @@ async def test_concurrent_server_replacement_withdraws_the_new_oauth_grant(
         )
     )
     with pytest.raises(McpServerReplaceRefusedError):
-        await complete_mcp_oauth_flow(
+        await _complete_mcp_oauth_flow(
             http,
             client,
             flow=flow,
             code="code",
             fernet=make_fernet(),
             jwt_secret=b"x" * 32,
-            public_url=_PUBLIC_URL,
-            now=_NOW,
             session_factory=db_session_factory,
             default=DeploymentDefault(agent_name="other"),
         )
@@ -508,15 +499,13 @@ async def test_each_grant_has_one_refresh_owner(
         tenant_id, vault_id="vlt_me", account_id=flow.account_id, agent_id=flow.agent_id
     )
     fernet = make_fernet()
-    completion = await complete_mcp_oauth_flow(
+    completion = await _complete_mcp_oauth_flow(
         httpx.AsyncClient(transport=httpx.MockTransport(token_handler)),
         anthropic,
         flow=flow,
         code="code123",
         fernet=fernet,
         jwt_secret=b"x" * 32,
-        public_url=_PUBLIC_URL,
-        now=_NOW,
         session_factory=db_session_factory,
         default=DeploymentDefault(agent_name="daimon", environment_name="default"),
         refresh_owner=owner,

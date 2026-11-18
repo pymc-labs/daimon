@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Mapping, Sequence
+from functools import partial
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -48,6 +49,9 @@ async def _no_token(url: str) -> str | None:
     return None
 
 
+_mcp_annotation_lookup = partial(mcp_annotation_lookup, server_urls=_SERVERS, token_for=_no_token)
+
+
 _BRIDGE_TOOLS: list[Mapping[str, JsonValue]] = [
     {"name": "memory_flag_list", "annotations": {"readOnlyHint": True}},
     {"name": "memory_flag_set", "annotations": {"readOnlyHint": False}},
@@ -70,9 +74,7 @@ def _deciders(policy: ToolSafetyPolicy, lookup: AnnotationLookup, card: AsyncMoc
 @pytest.mark.parametrize("attended", [True, False])
 async def test_a_read_only_hint_runs_a_noun_first_read_without_a_card(attended: bool) -> None:
     card = AsyncMock(return_value="denied")
-    lookup = mcp_annotation_lookup(
-        server_urls=_SERVERS, token_for=_no_token, read_catalogue=_catalogue(_BRIDGE_TOOLS)
-    )
+    lookup = _mcp_annotation_lookup(read_catalogue=_catalogue(_BRIDGE_TOOLS))
     result = await _deciders(_ON, lookup, card)[attended](_call("memory_flag_list"))
     assert result.allow, "readOnlyHint=true makes memory_flag_list a read"
     card.assert_not_awaited()
@@ -94,9 +96,7 @@ async def test_no_read_only_hint_or_a_destructive_one_is_never_auto_allowed(
     tool: str, attended: bool
 ) -> None:
     card = AsyncMock(return_value="denied")
-    lookup = mcp_annotation_lookup(
-        server_urls=_SERVERS, token_for=_no_token, read_catalogue=_catalogue(_BRIDGE_TOOLS)
-    )
+    lookup = _mcp_annotation_lookup(read_catalogue=_catalogue(_BRIDGE_TOOLS))
     result = await _deciders(_ON, lookup, card)[attended](_call(tool))
     assert not result.allow
     if attended:
@@ -119,9 +119,7 @@ async def test_an_operator_override_wins_over_annotations_both_ways(attended: bo
         effects={"bridge/memory_flag_list": "write", "bridge/memory_flag_purge": "read"},
     )
     reads: list[str | None] = []
-    lookup = mcp_annotation_lookup(
-        server_urls=_SERVERS, token_for=_no_token, read_catalogue=_catalogue(_BRIDGE_TOOLS, reads)
-    )
+    lookup = _mcp_annotation_lookup(read_catalogue=_catalogue(_BRIDGE_TOOLS, reads))
     card = AsyncMock(return_value="denied")
     decide = _deciders(policy, lookup, card)[attended]
     assert not (await decide(_call("memory_flag_list"))).allow, "override write beats readOnlyHint"
@@ -135,9 +133,7 @@ async def test_a_denied_entry_beats_a_trusted_read_only_hint(attended: bool) -> 
         enabled=True, trusted_annotations=("bridge",), denied=("bridge/memory_flag_list",)
     )
     reads: list[str | None] = []
-    lookup = mcp_annotation_lookup(
-        server_urls=_SERVERS, token_for=_no_token, read_catalogue=_catalogue(_BRIDGE_TOOLS, reads)
-    )
+    lookup = _mcp_annotation_lookup(read_catalogue=_catalogue(_BRIDGE_TOOLS, reads))
     card = AsyncMock(return_value="approved")
     decide = _deciders(policy, lookup, card)[attended]
     assert not (await decide(_call("memory_flag_list"))).allow
@@ -158,9 +154,7 @@ async def test_an_untrusted_servers_annotations_are_never_read(
     policy: ToolSafetyPolicy, attended: bool
 ) -> None:
     reads: list[str | None] = []
-    lookup = mcp_annotation_lookup(
-        server_urls=_SERVERS, token_for=_no_token, read_catalogue=_catalogue(_BRIDGE_TOOLS, reads)
-    )
+    lookup = _mcp_annotation_lookup(read_catalogue=_catalogue(_BRIDGE_TOOLS, reads))
     card = AsyncMock(return_value="denied")
     decide = _deciders(policy, lookup, card)[attended]
     with capture_logs() as logs:
@@ -177,9 +171,7 @@ async def test_an_unreadable_catalogue_falls_back_to_the_name(attended: bool) ->
     async def _refused(url: str, token: str | None) -> Sequence[Mapping[str, JsonValue]]:
         raise ValueError("MCP catalogue read refused")
 
-    lookup = mcp_annotation_lookup(
-        server_urls=_SERVERS, token_for=_no_token, read_catalogue=_refused
-    )
+    lookup = _mcp_annotation_lookup(read_catalogue=_refused)
     card = AsyncMock(return_value="denied")
     decide = _deciders(_ON, lookup, card)[attended]
     assert not (await decide(_call("memory_flag_list"))).allow
@@ -226,9 +218,7 @@ async def test_trusted_and_disabled_calls_do_not_read_annotations() -> None:
 
 @pytest.mark.parametrize("attended", [True, False])
 async def test_each_annotation_based_allow_is_logged(attended: bool) -> None:
-    lookup = mcp_annotation_lookup(
-        server_urls=_SERVERS, token_for=_no_token, read_catalogue=_catalogue(_BRIDGE_TOOLS)
-    )
+    lookup = _mcp_annotation_lookup(read_catalogue=_catalogue(_BRIDGE_TOOLS))
     card = AsyncMock(return_value="denied")
     decide = _deciders(_ON, lookup, card)[attended]
     with capture_logs() as logs:
@@ -259,9 +249,7 @@ async def test_a_refused_read_warns_once_per_server_then_logs_at_info(
 
     with capture_logs() as logs:
         for _ in range(2):
-            lookup = mcp_annotation_lookup(
-                server_urls=_SERVERS, token_for=_no_token, read_catalogue=_refused
-            )
+            lookup = _mcp_annotation_lookup(read_catalogue=_refused)
             assert await lookup(_call("memory_flag_list")) is None
     levels = [e["log_level"] for e in logs if e["event"] == "tool_safety.annotations_unavailable"]
     assert levels == ["warning", "info"]

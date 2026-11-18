@@ -8,6 +8,7 @@ No I/O, no DB, no mocks — pure unit assertions.
 """
 
 import json
+from functools import partial
 
 import pytest
 from daimon.adapters.slack.agent_setup.state import (
@@ -18,6 +19,11 @@ from daimon.adapters.slack.agent_setup.state import (
     encode_private_metadata,
 )
 from daimon.adapters.slack.modal_limits import MAX_PRIVATE_METADATA_CHARS
+
+_encode_private_metadata = partial(
+    encode_private_metadata, team_id="T01ABC123", channel_id="C01XYZ456"
+)
+
 
 # ---------------------------------------------------------------------------
 # encode/decode round-trip — L1
@@ -41,9 +47,7 @@ def test_encode_decode_l1_omits_none_fields() -> None:
 
 
 def test_encode_decode_l1_includes_selected_agent_name_when_provided() -> None:
-    encoded = encode_private_metadata(
-        team_id="T01ABC123", channel_id="C01XYZ456", selected_agent_name="my-agent"
-    )
+    encoded = _encode_private_metadata(selected_agent_name="my-agent")
     decoded = decode_private_metadata(encoded)
     assert decoded.get("selected_agent_name") == "my-agent", (
         "L1 with selected_agent_name should round-trip the agent name"
@@ -51,9 +55,7 @@ def test_encode_decode_l1_includes_selected_agent_name_when_provided() -> None:
 
 
 def test_encode_decode_l1_contains_no_workspace_derived_uuid() -> None:
-    encoded = encode_private_metadata(
-        team_id="T01ABC123", channel_id="C01XYZ456", selected_agent_name="my-agent"
-    )
+    encoded = _encode_private_metadata(selected_agent_name="my-agent")
     decoded = decode_private_metadata(encoded)
     assert "tenant_id" not in decoded, (
         "private_metadata must never contain tenant_id — it is always derived server-side"
@@ -66,12 +68,7 @@ def test_encode_decode_l1_contains_no_workspace_derived_uuid() -> None:
 
 
 def test_encode_decode_l2_round_trips_all_identifiers() -> None:
-    encoded = encode_private_metadata(
-        team_id="T01ABC123",
-        channel_id="C01XYZ456",
-        agent_name="my-agent",
-        active_section="skills",
-    )
+    encoded = _encode_private_metadata(agent_name="my-agent", active_section="skills")
     decoded = decode_private_metadata(encoded)
     assert decoded["team_id"] == "T01ABC123", "L2 should preserve team_id"
     assert decoded["channel_id"] == "C01XYZ456", "L2 should preserve channel_id"
@@ -80,12 +77,7 @@ def test_encode_decode_l2_round_trips_all_identifiers() -> None:
 
 
 def test_encode_decode_l2_omits_l3_only_fields() -> None:
-    encoded = encode_private_metadata(
-        team_id="T01ABC123",
-        channel_id="C01XYZ456",
-        agent_name="my-agent",
-        active_section="agent",
-    )
+    encoded = _encode_private_metadata(agent_name="my-agent", active_section="agent")
     decoded = decode_private_metadata(encoded)
     assert "parent_section" not in decoded, "L2 without parent_section should not include that key"
 
@@ -96,12 +88,7 @@ def test_encode_decode_l2_omits_l3_only_fields() -> None:
 
 
 def test_encode_decode_l3_round_trips_all_identifiers() -> None:
-    encoded = encode_private_metadata(
-        team_id="T01ABC123",
-        channel_id="C01XYZ456",
-        agent_name="my-agent",
-        parent_section="mcps",
-    )
+    encoded = _encode_private_metadata(agent_name="my-agent", parent_section="mcps")
     decoded = decode_private_metadata(encoded)
     assert decoded["team_id"] == "T01ABC123", "L3 should preserve team_id"
     assert decoded["channel_id"] == "C01XYZ456", "L3 should preserve channel_id"

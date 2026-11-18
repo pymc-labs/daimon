@@ -18,6 +18,7 @@ import types
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from typing import Any, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -53,6 +54,9 @@ from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import make_bot
+
+_run_outcome = partial(RunOutcome, ma_session_id="sess_test", recovered=False)
+
 
 _TENANT_UUID_NS = uuid.UUID("00000000-0000-0000-0000-0000000000aa")
 
@@ -399,12 +403,7 @@ async def test_is_setup_false_for_a_handoff_binding(
     prepared = _make_prepared_turn(
         continuity=ContinuityOutcome(), account_id=account_id, mapping_id=mapping_id
     )
-    run_outcome = RunOutcome(
-        state=TurnState(),
-        ma_session_id="sess_test",
-        mapping_id=mapping_id,
-        recovered=False,
-    )
+    run_outcome = _run_outcome(state=TurnState(), mapping_id=mapping_id)
 
     with (
         patch(
@@ -518,12 +517,8 @@ async def test_ordinary_turn_posts_no_system_message(
     prepared = _make_prepared_turn(
         continuity=ContinuityOutcome(), account_id=account_id, mapping_id=mapping_id
     )
-    run_outcome = RunOutcome(
-        state=TurnState(),
-        ma_session_id="sess_test",
-        mapping_id=mapping_id,
-        recovered=False,
-        continuity=ContinuityOutcome(),
+    run_outcome = _run_outcome(
+        state=TurnState(), mapping_id=mapping_id, continuity=ContinuityOutcome()
     )
 
     with (
@@ -573,9 +568,7 @@ async def test_pending_change_posts_must_finish_copy_after_the_answer(
         account_id=account_id,
         mapping_id=mapping_id,
     )
-    run_outcome = RunOutcome(
-        state=TurnState(), ma_session_id="sess_test", mapping_id=mapping_id, recovered=False
-    )
+    run_outcome = _run_outcome(state=TurnState(), mapping_id=mapping_id)
 
     with (
         patch(
@@ -632,12 +625,8 @@ async def test_replaced_leaves_the_reply_as_the_agents_text_and_tells_the_agent(
         account_id=uuid.uuid4(),
         mapping_id=mapping_id,
     )
-    run_outcome = RunOutcome(
-        state=TurnState(),
-        ma_session_id="sess_test",
-        mapping_id=mapping_id,
-        recovered=False,
-        continuity=prepared.continuity,
+    run_outcome = _run_outcome(
+        state=TurnState(), mapping_id=mapping_id, continuity=prepared.continuity
     )
 
     with (
@@ -698,12 +687,8 @@ async def test_replaced_with_no_answer_posts_no_summary_message(
         account_id=uuid.uuid4(),
         mapping_id=mapping_id,
     )
-    run_outcome = RunOutcome(
-        state=TurnState(),
-        ma_session_id="sess_test",
-        mapping_id=mapping_id,
-        recovered=False,
-        continuity=prepared.continuity,
+    run_outcome = _run_outcome(
+        state=TurnState(), mapping_id=mapping_id, continuity=prepared.continuity
     )
 
     with (
@@ -861,12 +846,8 @@ async def test_mention_turn_admin_settings_card_reads_no_agent_source(
     prepared = _make_prepared_turn(
         continuity=ContinuityOutcome(), account_id=account_id, mapping_id=mapping_id
     )
-    run_outcome = RunOutcome(
-        state=TurnState(),
-        ma_session_id="sess_test",
-        mapping_id=mapping_id,
-        recovered=False,
-        continuity=ContinuityOutcome(),
+    run_outcome = _run_outcome(
+        state=TurnState(), mapping_id=mapping_id, continuity=ContinuityOutcome()
     )
 
     services: list[Any] = []

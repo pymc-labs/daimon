@@ -12,6 +12,7 @@ import uuid
 from contextlib import suppress
 from dataclasses import replace
 from decimal import Decimal
+from functools import partial
 from types import SimpleNamespace
 from typing import Literal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -34,6 +35,14 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .harness import make_bot
+
+_resolved_config = partial(
+    ResolvedConfig,
+    agent_name="test-agent",
+    agent_name_tier="tenant",
+    environment_name="test-env",
+    environment_name_tier="tenant",
+)
 
 
 def _make_runtime(
@@ -413,12 +422,7 @@ class TestInflightDecrement:
         await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("5.00"))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_create_session.return_value = ma_session(id="sess-dec")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
@@ -462,12 +466,7 @@ class TestInflightDecrement:
         await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("5.00"))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_create_session.return_value = ma_session(id="sess-dec-err")
         mock_run_turn.side_effect = _anthropic.APIConnectionError(request=MagicMock())
         mock_find_agent.return_value = "ag_test"
@@ -517,12 +516,7 @@ class TestInflightIsolation:
         await provision_workspace(db_session_factory, guild_b, signup_credit=Decimal("5.00"))
         tenant_a = derive_tenant_uuid(platform="discord", workspace_id=guild_a)
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_create_session.return_value = ma_session(id="sess-isolation")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
@@ -599,12 +593,7 @@ class TestIsAdminDerivation:
         await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("5.00"))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_create_session.return_value = ma_session(id="sess-admin-true")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
@@ -670,12 +659,7 @@ class TestIsAdminDerivation:
         await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("5.00"))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_create_session.return_value = ma_session(id="sess-admin-false")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
@@ -739,12 +723,7 @@ class TestIsAdminDerivation:
         await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("5.00"))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_create_session.return_value = ma_session(id="sess-user-admin")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
@@ -1719,12 +1698,7 @@ class TestPerCallerSessionKeying:
         await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("100.00"))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
         mock_build_context_xml.return_value = ("<context></context>", [])
@@ -1853,12 +1827,7 @@ class TestPerCallerSessionKeying:
         await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("100.00"))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
         mock_build_context_xml.return_value = ("<context></context>", [])
@@ -1966,12 +1935,7 @@ class TestPerTurnRoleUpsert:
         await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("100.00"))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_create_session.return_value = ma_session(id="sess-role-admin")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
@@ -2035,12 +1999,7 @@ class TestPerTurnRoleUpsert:
         await provision_workspace(db_session_factory, guild_id, signup_credit=Decimal("100.00"))
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_create_session.return_value = ma_session(id="sess-role-user")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"
@@ -2117,12 +2076,7 @@ class TestPerTurnRoleUpsert:
             await s.commit()
         cli_account_id = cli_principal.account_id
 
-        mock_resolve_config.return_value = ResolvedConfig(
-            agent_name="test-agent",
-            agent_name_tier="tenant",
-            environment_name="test-env",
-            environment_name_tier="tenant",
-        )
+        mock_resolve_config.return_value = _resolved_config()
         mock_create_session.return_value = ma_session(id="sess-no-downgrade")
         mock_find_agent.return_value = "ag_test"
         mock_find_env.return_value = "env_test"

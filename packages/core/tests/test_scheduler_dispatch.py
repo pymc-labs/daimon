@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 import pytest
 from daimon.core.scheduler import RoutineDispatcher, run_one_tick
@@ -16,6 +17,8 @@ from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from .turn_path_support import TurnIOSpy, TurnPath
+
+_run_one_tick = partial(run_one_tick, max_age=timedelta(minutes=15), dispatch_timeout_s=60)
 
 
 @pytest.fixture
@@ -67,14 +70,8 @@ async def test_slow_routine_does_not_block_next_tick_or_overlap_itself(
             fast_done.set()
 
     async def tick(now: datetime) -> None:
-        await run_one_tick(
-            now=now,
-            sm=db_session_factory,
-            fire=fire,
-            max_age=timedelta(minutes=15),
-            max_concurrent_fires=2,
-            dispatch_timeout_s=60,
-            dispatcher=dispatcher,
+        await _run_one_tick(
+            now=now, sm=db_session_factory, fire=fire, max_concurrent_fires=2, dispatcher=dispatcher
         )
 
     try:
@@ -136,13 +133,11 @@ async def test_missed_slots_skip_or_coalesce_once(
         fired.append(row.id)
 
     for _ in range(2):
-        await run_one_tick(
+        await _run_one_tick(
             now=NOW,
             sm=db_session_factory,
             fire=fire,
-            max_age=timedelta(minutes=15),
             max_concurrent_fires=2,
-            dispatch_timeout_s=60,
             wait_for_completion=True,
         )
     assert fired == [routine.id] * expected_fires
@@ -173,14 +168,8 @@ async def test_capacity_remains_bounded_across_ticks_and_shutdown_joins_fires(
         await release.wait()
 
     async def tick() -> None:
-        await run_one_tick(
-            now=NOW,
-            sm=db_session_factory,
-            fire=fire,
-            max_age=timedelta(minutes=15),
-            max_concurrent_fires=1,
-            dispatch_timeout_s=60,
-            dispatcher=dispatcher,
+        await _run_one_tick(
+            now=NOW, sm=db_session_factory, fire=fire, max_concurrent_fires=1, dispatcher=dispatcher
         )
 
     try:
@@ -221,23 +210,15 @@ async def test_slots_due_between_ticks_are_skipped_when_fire_completes(
     async def fire(row: RoutineRow) -> None:
         fired.append(row.id)
 
-    await run_one_tick(
-        now=NOW,
-        sm=db_session_factory,
-        fire=fire,
-        max_age=timedelta(minutes=15),
-        max_concurrent_fires=1,
-        dispatch_timeout_s=60,
-        dispatcher=dispatcher,
+    await _run_one_tick(
+        now=NOW, sm=db_session_factory, fire=fire, max_concurrent_fires=1, dispatcher=dispatcher
     )
     await dispatcher.drain()
-    await run_one_tick(
+    await _run_one_tick(
         now=finished_at,
         sm=db_session_factory,
         fire=fire,
-        max_age=timedelta(minutes=15),
         max_concurrent_fires=1,
-        dispatch_timeout_s=60,
         dispatcher=dispatcher,
     )
     await dispatcher.drain()
@@ -262,14 +243,7 @@ async def test_tick_returns_dispatcher_without_waiting_for_a_fire(
         await release.wait()
 
     dispatcher = await asyncio.wait_for(
-        run_one_tick(
-            now=NOW,
-            sm=db_session_factory,
-            fire=fire,
-            max_age=timedelta(minutes=15),
-            max_concurrent_fires=1,
-            dispatch_timeout_s=60,
-        ),
+        _run_one_tick(now=NOW, sm=db_session_factory, fire=fire, max_concurrent_fires=1),
         timeout=10,
     )
     try:
@@ -298,14 +272,8 @@ async def test_default_skip_claimed_batch_survives_wait_past_freshness_window(
             await release.wait()
 
     async def tick(now: datetime) -> None:
-        await run_one_tick(
-            now=now,
-            sm=db_session_factory,
-            fire=fire,
-            max_age=timedelta(minutes=15),
-            max_concurrent_fires=1,
-            dispatch_timeout_s=60,
-            dispatcher=dispatcher,
+        await _run_one_tick(
+            now=now, sm=db_session_factory, fire=fire, max_concurrent_fires=1, dispatcher=dispatcher
         )
 
     try:
@@ -347,13 +315,11 @@ async def test_claimed_queue_stays_bounded_across_ticks(
 
     try:
         for _ in range(2):
-            await run_one_tick(
+            await _run_one_tick(
                 now=NOW,
                 sm=db_session_factory,
                 fire=fire,
-                max_age=timedelta(minutes=15),
                 max_concurrent_fires=1,
-                dispatch_timeout_s=60,
                 dispatcher=dispatcher,
             )
         await asyncio.wait_for(started.wait(), timeout=10)
@@ -445,11 +411,10 @@ async def test_dispatch_timeout_through_headless_records_ceiling(
                 turn_path=turn_path,
             )
 
-        dispatcher = await run_one_tick(
+        dispatcher = await _run_one_tick(
             now=NOW,
             sm=db_session_factory,
             fire=fire,
-            max_age=timedelta(minutes=15),
             max_concurrent_fires=1,
             dispatch_timeout_s=0.1,
         )

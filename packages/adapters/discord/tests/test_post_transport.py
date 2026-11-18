@@ -3,6 +3,7 @@
 import asyncio
 import io
 import logging
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -19,6 +20,10 @@ from daimon.adapters.discord.post_transport import (
     _webhooks,
 )
 from discord.webhook.async_ import async_context
+
+_discord_post_transport = partial(
+    DiscordPostTransport, name="Research", avatar_url=None, builtin=False
+)
 
 
 @pytest.fixture(autouse=True)
@@ -65,9 +70,7 @@ def _world(*, manage_webhooks: bool = True) -> tuple[MagicMock, MagicMock, Magic
 async def test_agent_uses_channel_webhook_with_wait_and_identity() -> None:
     client, channel, hook = _world()
     view = MagicMock(spec=discord.ui.View)
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url="https://x/y", builtin=False
-    )
+    transport = _discord_post_transport(client, channel, avatar_url="https://x/y")
     await transport.send(content="answer", view=view)
     hook.send.assert_awaited_once()
     assert hook.send.call_args.kwargs["wait"] is True
@@ -79,13 +82,8 @@ async def test_agent_uses_channel_webhook_with_wait_and_identity() -> None:
 
 async def test_disabled_identity_posts_plain_bot_message_without_webhook() -> None:
     client, channel, hook = _world()
-    transport = DiscordPostTransport(
-        client,
-        channel,
-        name="Research",
-        avatar_url="https://x/y",
-        builtin=False,
-        identity_enabled=False,
+    transport = _discord_post_transport(
+        client, channel, avatar_url="https://x/y", identity_enabled=False
     )
     await transport.send(content="answer")
     channel.send.assert_awaited_once_with(content="answer")
@@ -98,9 +96,7 @@ async def test_disabled_identity_posts_plain_bot_message_without_webhook() -> No
 async def test_bot_runtime_switch_covers_recovery_transports() -> None:
     client, channel, _ = _world()
     client.runtime.settings.agent_identity.enabled = False
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     await transport.send(content="answer")
     channel.send.assert_awaited_once_with(content="answer")
     channel.create_webhook.assert_not_awaited()
@@ -109,25 +105,19 @@ async def test_bot_runtime_switch_covers_recovery_transports() -> None:
 async def test_excluded_guild_posts_as_bot_and_other_guild_uses_webhook() -> None:
     client, channel, hook = _world()
     client.runtime.settings.agent_identity.excluded_discord_guild_ids = ["123"]
-    excluded = DiscordPostTransport(
-        client, channel, name="Research", avatar_url="https://x/y", builtin=False
-    )
+    excluded = _discord_post_transport(client, channel, avatar_url="https://x/y")
     await excluded.send(content="answer")
     channel.send.assert_awaited_once_with(content="answer")
     hook.send.assert_not_awaited()
     channel.guild.id = 456
-    included = DiscordPostTransport(
-        client, channel, name="Research", avatar_url="https://x/y", builtin=False
-    )
+    included = _discord_post_transport(client, channel, avatar_url="https://x/y")
     await included.send(content="answer")
     assert hook.send.call_args.kwargs["username"] == "Research"
 
 
 async def test_terminal_flush_without_card_omits_none_view() -> None:
     client, channel, hook = _world()
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     lifecycle = DiscordTurnLifecycle(
         send=transport.send,
         edit=transport.edit,
@@ -140,9 +130,7 @@ async def test_terminal_flush_without_card_omits_none_view() -> None:
 
 async def test_missing_permission_falls_back_to_bot() -> None:
     client, channel, hook = _world(manage_webhooks=False)
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     await transport.send(content="answer")
     channel.send.assert_awaited_once_with(content="-# Research\nanswer")
     hook.send.assert_not_awaited()
@@ -155,9 +143,7 @@ async def test_missing_permission_is_logged_once_per_guild() -> None:
     with structlog.testing.capture_logs() as logs:
         for content in ("one", "two"):
             _unavailable_until.clear()
-            transport = DiscordPostTransport(
-                client, channel, name="Research", avatar_url=None, builtin=False
-            )
+            transport = _discord_post_transport(client, channel)
             await transport.send(content=content)
     warnings = [
         entry for entry in logs if entry["event"] == "discord.identity_fallback_no_manage_webhooks"
@@ -178,9 +164,7 @@ async def test_thread_post_targets_parent_webhook_and_thread() -> None:
     thread.parent = parent
     thread.locked = False
     thread.send = AsyncMock()
-    transport = DiscordPostTransport(
-        client, thread, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, thread)
     await transport.send(content="answer")
     parent.create_webhook.assert_awaited_once()
     assert hook.send.call_args.kwargs["thread"] is thread
@@ -239,9 +223,7 @@ async def test_slow_webhook_create_falls_back_then_uses_created_hook(
 
     channel.create_webhook = AsyncMock(side_effect=create)
     monkeypatch.setattr(post_transport, "_CREATE_WAIT_SECONDS", 0.01)
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     await transport.send(content="first")
     channel.send.assert_awaited_once_with(content="-# Research\nfirst")
     channel.create_webhook.assert_awaited_once()
@@ -293,16 +275,12 @@ async def test_create_429_falls_back_within_budget_and_respects_cooldown(
 
     channel.create_webhook = AsyncMock(side_effect=create)
     monkeypatch.setattr(post_transport, "_CREATE_WAIT_SECONDS", 0.01)
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     await transport.send(content="first")
     channel.send.assert_awaited_once_with(content="-# Research\nfirst")
     release.set()
     await post_transport._creation_tasks[channel.id]  # pyright: ignore[reportPrivateUsage]
-    cooldown_transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    cooldown_transport = _discord_post_transport(client, channel)
     await cooldown_transport.send(content="during cooldown")
     assert channel.send.call_args.kwargs["content"] == "-# Research\nduring cooldown"
     channel.create_webhook.assert_awaited_once()
@@ -318,9 +296,7 @@ async def test_webhook_403_falls_back_with_name_and_caches_unavailability() -> N
     hook.send = AsyncMock(
         side_effect=discord.Forbidden(MagicMock(status=403), {"message": "Missing Permissions"})
     )
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     await transport.send(content="answer")
     channel.send.assert_awaited_once_with(content="-# Research\nanswer")
 
@@ -332,9 +308,7 @@ async def test_exhausted_webhook_429_is_not_silently_reposted_by_bot() -> None:
             MagicMock(status=429), {"message": "rate limited", "retry_after": 2.0}
         )
     )
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
 
     with pytest.raises(discord.HTTPException) as exc_info:
         await transport.send(content="answer")
@@ -350,9 +324,7 @@ async def test_bot_fallback_429_propagates() -> None:
             MagicMock(status=429), {"message": "rate limited", "retry_after": 2.0}
         )
     )
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False, identity_enabled=False
-    )
+    transport = _discord_post_transport(client, channel, identity_enabled=False)
 
     with pytest.raises(discord.HTTPException) as exc_info:
         await transport.send(content="answer")
@@ -369,9 +341,7 @@ async def test_webhook_400_cooldown_only_applies_to_that_agent_identity() -> Non
             MagicMock(spec=discord.Message),
         ]
     )
-    research = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    research = _discord_post_transport(client, channel)
     writer = DiscordPostTransport(client, channel, name="Writer", avatar_url=None, builtin=False)
     await research.send(content="first")
     await writer.send(content="second")
@@ -388,13 +358,9 @@ async def test_webhook_limit_is_cached_across_turns() -> None:
             MagicMock(status=400), {"code": 30007, "message": "Maximum webhooks reached"}
         )
     )
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     await transport.send(content="one")
-    next_turn = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    next_turn = _discord_post_transport(client, channel)
     await next_turn.send(content="two")
     assert channel.send.call_args.kwargs["content"] == "-# Research\ntwo"
     channel.create_webhook.assert_awaited_once()
@@ -413,9 +379,7 @@ async def test_cached_edit_does_not_wait_for_pending_create(
 
     channel.create_webhook = AsyncMock(side_effect=create)
     monkeypatch.setattr(post_transport, "_CREATE_WAIT_SECONDS", 0.2)
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     post = asyncio.create_task(transport.send(content="first"))
     await asyncio.sleep(0)
     await asyncio.sleep(0)
@@ -446,9 +410,7 @@ async def test_one_hook_per_channel_and_edits_by_existing_message_webhook_id() -
     thread.id = 23
     thread.parent = parent
     thread.locked = False
-    transport = DiscordPostTransport(
-        client, thread, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, thread)
     for _ in range(3):
         await transport.send(content="answer")
     assert post_transport._POOL_SIZE == 1  # pyright: ignore[reportPrivateUsage]
@@ -477,9 +439,7 @@ async def test_same_parent_threads_can_select_one_webhook() -> None:
         thread.id = thread_id
         thread.parent = parent
         thread.locked = False
-        transport = DiscordPostTransport(
-            client, thread, name="Research", avatar_url=None, builtin=False
-        )
+        transport = _discord_post_transport(client, thread)
         await transport.send(content="answer")
 
     assert hooks[0].send.await_count == 3
@@ -493,9 +453,7 @@ async def test_locked_thread_uses_bot_fallback() -> None:
     thread.parent = parent
     thread.locked = True
     thread.send = AsyncMock()
-    transport = DiscordPostTransport(
-        client, thread, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, thread)
     await transport.send(content="answer")
     thread.send.assert_awaited_once_with(content="-# Research\nanswer")
     hook.send.assert_not_awaited()
@@ -520,9 +478,7 @@ async def test_webhook_message_edits_and_deletes_through_webhook() -> None:
     message.delete = AsyncMock()
     hook.edit_message = AsyncMock(return_value=message)
     hook.delete_message = AsyncMock()
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     await transport._webhook()  # pyright: ignore[reportPrivateUsage]
     channel.create_webhook.reset_mock()
     channel.permissions_for.return_value.manage_webhooks = False
@@ -541,9 +497,7 @@ async def test_urgent_webhook_edit_uses_an_independent_adapter() -> None:
     message.id = 40
     message.webhook_id = hook.id
     message.application_id = client.application_id
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     _webhooks[channel.id] = {hook.id: hook}
     normal_adapter = async_context.get()
     started, release = asyncio.Event(), asyncio.Event()
@@ -584,9 +538,7 @@ async def test_existing_webhook_message_is_edited_and_deleted_with_identity_off_
     message.application_id = client.application_id
     hook.edit_message = AsyncMock(return_value=message)
     hook.delete_message = AsyncMock()
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     _webhooks[channel.id] = {hook.id: hook}
 
     await transport.edit(message, content="updated")
@@ -609,9 +561,7 @@ async def test_bot_message_edits_and_deletes_through_bot() -> None:
     edited = MagicMock(spec=discord.Message)
     message.edit = AsyncMock(return_value=edited)
     message.delete = AsyncMock()
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     assert await transport.edit(message, content="updated") is edited, (
         "the edited message comes back, so a turn can read Discord's edit time"
     )
@@ -632,9 +582,7 @@ async def test_deleted_webhook_edit_posts_replacement() -> None:
             MagicMock(status=404), {"code": 10015, "message": "Unknown Webhook"}
         )
     )
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     await transport._webhook()  # pyright: ignore[reportPrivateUsage]
     replacement = await transport.edit(message, content="updated", attachments=[])
     assert replacement is hook.send.return_value
@@ -652,9 +600,7 @@ async def test_recovery_edit_does_not_replace_unknown_webhook_card() -> None:
             MagicMock(status=404), {"code": 10015, "message": "Unknown Webhook"}
         )
     )
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     await transport._webhook()  # pyright: ignore[reportPrivateUsage]
 
     with pytest.raises(discord.ClientException, match="no longer exists"):
@@ -672,9 +618,7 @@ async def test_missing_webhook_token_posts_edit_as_replacement() -> None:
     message.application_id = client.application_id
     message.author.name = "Research"
     channel.send = AsyncMock(return_value=MagicMock(spec=discord.Message))
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     channel.permissions_for.return_value.manage_webhooks = False
     client.http.channel_webhooks = AsyncMock(return_value=[])
     replacement = await transport.edit(message, content="updated")
@@ -689,9 +633,7 @@ async def test_recovery_edit_does_not_replace_card_without_webhook_token() -> No
     message.id = 40
     message.webhook_id = hook.id
     message.application_id = client.application_id
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     channel.permissions_for.return_value.manage_webhooks = False
     client.http.channel_webhooks = AsyncMock(return_value=[])
 
@@ -711,9 +653,7 @@ async def test_webhook_edit_403_lookup_does_not_post_replacement() -> None:
     message.id = 40
     message.webhook_id = 30
     message.application_id = client.application_id
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     with pytest.raises(discord.ClientException, match="webhook lookup failed"):
         await transport.edit(message, content="updated")
     with pytest.raises(discord.ClientException, match="webhook lookup unavailable"):
@@ -731,9 +671,7 @@ async def test_listed_webhook_without_token_does_not_post_replacement() -> None:
     message.id = 40
     message.webhook_id = 30
     message.application_id = client.application_id
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     with pytest.raises(discord.ClientException):
         await transport.edit(message, content="updated")
     channel.send.assert_not_awaited()
@@ -741,9 +679,7 @@ async def test_listed_webhook_without_token_does_not_post_replacement() -> None:
 
 async def test_loaded_webhook_id_proves_ownership_without_application_id() -> None:
     client, channel, hook = _world()
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     await transport._webhook()  # pyright: ignore[reportPrivateUsage]
     message = MagicMock(spec=discord.Message)
     message.webhook_id = hook.id
@@ -763,9 +699,7 @@ async def test_failed_webhook_upload_rebuilds_file_for_bot_fallback() -> None:
 
     hook.send = AsyncMock(side_effect=fail_upload)
     channel.send = AsyncMock(return_value=MagicMock(spec=discord.Message))
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     await transport.send(content="answer", files=[original])
     files = channel.send.call_args.kwargs["files"]
     assert files[0].fp.read() == b"payload"
@@ -795,9 +729,7 @@ async def test_archived_thread_webhook_retry_rebuilds_file() -> None:
         return sent
 
     hook.send = AsyncMock(side_effect=send)
-    transport = DiscordPostTransport(
-        client, thread, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, thread)
     result = await transport.send(
         content="answer", files=[discord.File(io.BytesIO(b"payload"), filename="a.txt")]
     )
@@ -811,9 +743,7 @@ async def test_lifecycle_prefix_is_not_duplicated_after_webhook_rejection() -> N
     hook.send = AsyncMock(
         side_effect=discord.HTTPException(MagicMock(status=400), {"code": 50035, "message": "bad"})
     )
-    transport = DiscordPostTransport(
-        client, channel, name="Research", avatar_url=None, builtin=False
-    )
+    transport = _discord_post_transport(client, channel)
     await transport.send(content="-# Research\nfirst")
     assert channel.send.call_args.kwargs["content"] == "-# Research\nfirst"
     await transport.send(content="second")
@@ -828,9 +758,7 @@ async def test_missing_permission_backs_off_for_sixty_seconds(
     client, channel, _ = _world(manage_webhooks=False)
 
     async def send() -> None:
-        transport = DiscordPostTransport(
-            client, channel, name="Research", avatar_url=None, builtin=False
-        )
+        transport = _discord_post_transport(client, channel)
         await transport.send(content="answer")
 
     await send()

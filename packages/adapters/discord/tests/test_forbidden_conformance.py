@@ -10,6 +10,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Never, cast
 from unittest.mock import AsyncMock
@@ -70,6 +71,9 @@ from packages.adapters.discord.tests.forbidden_hook import (
     OverwriteReceipt,
     evaluate_new14,
 )
+
+_scope = partial(Scope, principal_id="qa-admin:100", authorization_id="qa-offline:100")
+
 
 if TYPE_CHECKING:
     from discord.types.channel import TextChannel as TextChannelPayload
@@ -368,12 +372,7 @@ async def configured_hook(
 ) -> tuple[DiscordForbiddenHook, OverwriteReceipt]:
     hook = await ready_hook(ingress, backend)
     overwrite = await hook.discord_overwrite_edge(
-        scope=Scope(
-            tenant_id=str(ingress.tenant_id),
-            account_id=str(ingress.account_id),
-            principal_id="qa-admin:100",
-            authorization_id="qa-offline:100",
-        ),
+        scope=_scope(tenant_id=str(ingress.tenant_id), account_id=str(ingress.account_id)),
         owned_workspace_id="100",
         owned_channel_id="101",
         source={
@@ -445,11 +444,9 @@ async def test_unbound_native_trace_is_refused(ingress: OwnedIngress) -> None:
 @pytest.mark.parametrize("bad_binding", ["account", "tenant", "workspace", "channel", "platform"])
 async def test_foreign_overwrite_is_refused(ingress: OwnedIngress, bad_binding: str) -> None:
     hook = DiscordForbiddenHook(bot=ingress.bot, gateway=ingress.gateway, native=ingress.native)
-    scope = Scope(
+    scope = _scope(
         tenant_id=str(uuid.uuid4()) if bad_binding == "tenant" else str(ingress.tenant_id),
         account_id=str(uuid.uuid4()) if bad_binding == "account" else str(ingress.account_id),
-        principal_id="qa-admin:100",
-        authorization_id="qa-offline:100",
     )
     if bad_binding == "platform":
         scope = Scope.platform(reason="mutation control")
@@ -484,12 +481,7 @@ async def test_non_original_admin_operation_is_refused(
     hook = DiscordForbiddenHook(bot=ingress.bot, gateway=ingress.gateway, native=ingress.native)
     with pytest.raises(ValidationError):
         await hook.discord_overwrite_edge(
-            scope=Scope(
-                tenant_id=str(ingress.tenant_id),
-                account_id=str(ingress.account_id),
-                principal_id="qa-admin:100",
-                authorization_id="qa-offline:100",
-            ),
+            scope=_scope(tenant_id=str(ingress.tenant_id), account_id=str(ingress.account_id)),
             owned_workspace_id="100",
             owned_channel_id="101",
             source={"do": "admin", "tool": "discord_overwrite", "args": bad_args},
@@ -503,12 +495,7 @@ async def test_concurrent_overwrites_and_reuse_are_refused(ingress: OwnedIngress
 
     async def bind_again() -> OverwriteReceipt:
         return await hook.discord_overwrite_edge(
-            scope=Scope(
-                tenant_id=str(ingress.tenant_id),
-                account_id=str(ingress.account_id),
-                principal_id="qa-admin:100",
-                authorization_id="qa-offline:100",
-            ),
+            scope=_scope(tenant_id=str(ingress.tenant_id), account_id=str(ingress.account_id)),
             owned_workspace_id="100",
             owned_channel_id="101",
             source={
@@ -687,11 +674,8 @@ async def test_every_reachable_runtime_dependency_refused_before_observation(
             ingress.bot.runtime = bad
             with pytest.raises(ValueError):
                 await hook.discord_overwrite_edge(
-                    scope=Scope(
-                        tenant_id=str(ingress.tenant_id),
-                        account_id=str(ingress.account_id),
-                        principal_id="qa-admin:100",
-                        authorization_id="qa-offline:100",
+                    scope=_scope(
+                        tenant_id=str(ingress.tenant_id), account_id=str(ingress.account_id)
                     ),
                     owned_workspace_id="100",
                     owned_channel_id="101",
@@ -773,11 +757,8 @@ async def test_replaced_runtime_after_await_is_refused_before_receipt(
             monkeypatch.setattr(hook_module, "current_backend", replace_after_read)
             with pytest.raises(ValueError, match="absent injected"):
                 await hook.discord_overwrite_edge(
-                    scope=Scope(
-                        tenant_id=str(ingress.tenant_id),
-                        account_id=str(ingress.account_id),
-                        principal_id="qa-admin:100",
-                        authorization_id="qa-offline:100",
+                    scope=_scope(
+                        tenant_id=str(ingress.tenant_id), account_id=str(ingress.account_id)
                     ),
                     owned_workspace_id="100",
                     owned_channel_id="101",

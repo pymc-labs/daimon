@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from functools import partial
 from typing import cast
 from unittest.mock import MagicMock
 
@@ -13,6 +14,8 @@ from daimon.core.agent_identity import resolve_agent_identity
 from daimon.core.stores.agent_avatars import AvatarLink, get_agent_avatar
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+_resolve_agent_identity = partial(resolve_agent_identity, is_builtin=False, enabled=True)
 
 
 @pytest.mark.asyncio
@@ -36,13 +39,11 @@ async def test_slow_face_render_does_not_block_turn_past_the_wait(
     factory = MagicMock()
     factory.kw = {"bind": None}
     identity = await asyncio.wait_for(
-        resolve_agent_identity(
+        _resolve_agent_identity(
             cast(AsyncSession, object()),
             tenant_id=tenant_id,
             agent_name="Analyst",
-            is_builtin=False,
             public_base_url="https://example.test",
-            enabled=True,
             background_sessionmaker=cast(async_sessionmaker[AsyncSession], factory),
             wait_for_face=True,
         ),
@@ -72,13 +73,11 @@ async def test_new_agent_first_answer_waits_for_its_face(
     monkeypatch.setattr(agent_identity, "get_or_create_avatar", generate)
     factory = MagicMock()
     factory.kw = {"bind": None}
-    identity = await resolve_agent_identity(
+    identity = await _resolve_agent_identity(
         cast(AsyncSession, object()),
         tenant_id=uuid.uuid4(),
         agent_name="Test-Agent",
-        is_builtin=False,
         public_base_url="https://example.test",
-        enabled=True,
         background_sessionmaker=cast(async_sessionmaker[AsyncSession], factory),
         wait_for_face=True,
     )
@@ -100,13 +99,11 @@ async def test_panels_do_not_wait_for_a_new_face(monkeypatch: pytest.MonkeyPatch
     factory = MagicMock()
     factory.kw = {"bind": None}
     identity = await asyncio.wait_for(
-        resolve_agent_identity(
+        _resolve_agent_identity(
             cast(AsyncSession, object()),
             tenant_id=uuid.uuid4(),
             agent_name="Panel",
-            is_builtin=False,
             public_base_url="https://example.test",
-            enabled=True,
             background_sessionmaker=cast(async_sessionmaker[AsyncSession], factory),
         ),
         timeout=0.1,
@@ -131,13 +128,11 @@ async def test_failed_face_render_skips_the_second_read(monkeypatch: pytest.Monk
     monkeypatch.setattr(agent_identity, "get_or_create_avatar", generate)
     factory = MagicMock()
     factory.kw = {"bind": None}
-    identity = await resolve_agent_identity(
+    identity = await _resolve_agent_identity(
         cast(AsyncSession, object()),
         tenant_id=uuid.uuid4(),
         agent_name="Broken",
-        is_builtin=False,
         public_base_url="https://example.test",
-        enabled=True,
         background_sessionmaker=cast(async_sessionmaker[AsyncSession], factory),
         wait_for_face=True,
     )
@@ -153,13 +148,11 @@ async def test_broken_face_lookup_returns_name_without_picture(
         raise ValueError("bad stored face")
 
     monkeypatch.setattr(agent_identity, "get_agent_avatar", lookup)
-    identity = await resolve_agent_identity(
+    identity = await _resolve_agent_identity(
         cast(AsyncSession, object()),
         tenant_id=uuid.uuid4(),
         agent_name="Analyst",
-        is_builtin=False,
         public_base_url="https://example.test",
-        enabled=True,
     )
     assert identity.name == "Analyst"
     assert identity.avatar_url is None
@@ -173,11 +166,10 @@ async def test_switch_off_does_not_load_a_broken_face_catalogue(
         raise ValueError("bad face manifest")
 
     monkeypatch.setattr(agent_faces, "_catalogue", broken_catalogue)
-    identity = await resolve_agent_identity(
+    identity = await _resolve_agent_identity(
         cast(AsyncSession, object()),
         tenant_id=uuid.uuid4(),
         agent_name="Research",
-        is_builtin=False,
         public_base_url="https://example.test",
         enabled=False,
     )
@@ -204,13 +196,11 @@ async def test_existing_initials_url_is_used_while_face_is_queued(
     monkeypatch.setattr(agent_identity, "_FIRST_FACE_WAIT_S", 0.01)
     factory = MagicMock()
     factory.kw = {"bind": None}
-    identity = await resolve_agent_identity(
+    identity = await _resolve_agent_identity(
         cast(AsyncSession, object()),
         tenant_id=tenant_id,
         agent_name="Analyst",
-        is_builtin=False,
         public_base_url="https://example.test",
-        enabled=True,
         background_sessionmaker=cast(async_sessionmaker[AsyncSession], factory),
     )
     assert identity.avatar_url == "https://example.test/avatars/old-token/123456789abc.png"
@@ -233,13 +223,11 @@ async def test_face_generation_error_does_not_escape_background_task(
     monkeypatch.setattr(agent_identity, "get_or_create_avatar", generate)
     factory = MagicMock()
     factory.kw = {"bind": None}
-    identity = await resolve_agent_identity(
+    identity = await _resolve_agent_identity(
         cast(AsyncSession, object()),
         tenant_id=uuid.uuid4(),
         agent_name="Research",
-        is_builtin=False,
         public_base_url="https://example.test",
-        enabled=True,
         background_sessionmaker=cast(async_sessionmaker[AsyncSession], factory),
     )
     assert identity.name == "Research" and identity.avatar_url is None
@@ -256,13 +244,11 @@ async def test_background_face_generation_uses_independent_database_sessions(
     async with factory.begin() as session:
         tenant = await make_tenant(session)
     async with factory.begin() as session:
-        identity = await resolve_agent_identity(
+        identity = await _resolve_agent_identity(
             session,
             tenant_id=tenant.id,
             agent_name="Background Research",
-            is_builtin=False,
             public_base_url="https://example.test",
-            enabled=True,
             background_sessionmaker=factory,
             wait_for_face=True,
         )
@@ -298,13 +284,11 @@ async def test_face_generation_backs_off_and_stops_after_three_failures(
     factory = MagicMock()
     factory.kw = {"bind": None}
     for expected in range(1, 4):
-        await resolve_agent_identity(
+        await _resolve_agent_identity(
             cast(AsyncSession, object()),
             tenant_id=tenant_id,
             agent_name="Research",
-            is_builtin=False,
             public_base_url=None,
-            enabled=True,
             background_sessionmaker=cast(async_sessionmaker[AsyncSession], factory),
         )
         await agent_identity._face_tasks[key]
@@ -312,24 +296,20 @@ async def test_face_generation_backs_off_and_stops_after_three_failures(
         assert calls == expected
         assert agent_identity._face_failures[key][0] == expected
         if expected < 3:
-            await resolve_agent_identity(
+            await _resolve_agent_identity(
                 cast(AsyncSession, object()),
                 tenant_id=tenant_id,
                 agent_name="Research",
-                is_builtin=False,
                 public_base_url=None,
-                enabled=True,
                 background_sessionmaker=cast(async_sessionmaker[AsyncSession], factory),
             )
             assert key not in agent_identity._face_tasks
             agent_identity._face_failures[key] = expected, 0.0
-    await resolve_agent_identity(
+    await _resolve_agent_identity(
         cast(AsyncSession, object()),
         tenant_id=tenant_id,
         agent_name="Research",
-        is_builtin=False,
         public_base_url=None,
-        enabled=True,
         background_sessionmaker=cast(async_sessionmaker[AsyncSession], factory),
     )
     assert calls == 3

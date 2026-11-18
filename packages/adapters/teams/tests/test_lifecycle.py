@@ -11,6 +11,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import partial
 from typing import Any
 
 import httpx
@@ -47,6 +48,8 @@ from microsoft_teams.api import (
 from sqlalchemy.exc import OperationalError
 
 from .conftest import CHANNEL_ID, CONVERSATION_ID, SERVICE_URL, THREAD_ID, FakeSender
+
+_teams_turn_lifecycle = partial(TeamsTurnLifecycle, service_url=SERVICE_URL, cancel_key="key-1")
 
 
 class Clock:
@@ -266,11 +269,9 @@ async def test_recovery_attempt_stays_stopping_and_follows_the_old_attempts_edit
     old = await _posted(sender)
     old.request_stop()
     await sender.entered.wait()
-    adopted = TeamsTurnLifecycle(
+    adopted = _teams_turn_lifecycle(
         sender=sender,
         conversation_id=CONVERSATION_ID,
-        service_url=SERVICE_URL,
-        cancel_key="key-1",
         clock=Clock(),
         adopt_message_id=old.message_id,
     )
@@ -285,11 +286,9 @@ async def test_recovery_attempt_stays_stopping_and_follows_the_old_attempts_edit
 
 
 def _adopt(old: TeamsTurnLifecycle, sender: FakeSender) -> TeamsTurnLifecycle:
-    adopted = TeamsTurnLifecycle(
+    adopted = _teams_turn_lifecycle(
         sender=sender,
         conversation_id=CONVERSATION_ID,
-        service_url=SERVICE_URL,
-        cancel_key="key-1",
         clock=Clock(),
         adopt_message_id=old.message_id,
     )
@@ -614,11 +613,9 @@ async def test_every_fresh_post_of_a_turn_is_recorded_for_tidying(
     monkeypatch.setattr(lifecycle_module, "cost_footer_shown", hidden)
     tenant, intent = uuid.uuid4(), uuid.uuid4()
     sender = FakeSender()
-    lifecycle = TeamsTurnLifecycle(
+    lifecycle = _teams_turn_lifecycle(
         sender=sender,
         conversation_id=THREAD_ID,
-        service_url=SERVICE_URL,
-        cancel_key="key-1",
         clock=Clock(),
         tenant_id=tenant,
         sessionmaker=_Sessions(),
@@ -666,11 +663,9 @@ async def test_an_unlabelled_fresh_post_is_recorded_and_an_unlabelled_edit_is_no
         recorded.append(kw)
 
     monkeypatch.setattr(lifecycle_module, "record_turn_post", record)
-    lifecycle = TeamsTurnLifecycle(
+    lifecycle = _teams_turn_lifecycle(
         sender=FakeSender(),
         conversation_id=THREAD_ID,
-        service_url=SERVICE_URL,
-        cancel_key="key-1",
         clock=Clock(),
         tenant_id=uuid.uuid4(),
         sessionmaker=_Sessions(),
@@ -850,11 +845,9 @@ async def test_a_failed_answer_or_an_unprompted_turn_earns_no_check() -> None:
     )
     await lifecycle.on_terminal_success(_answer("Done."))
     await lifecycle.on_acknowledgment("done")
-    unprompted = TeamsTurnLifecycle(
+    unprompted = _teams_turn_lifecycle(
         sender=FakeSender(),
         conversation_id=CONVERSATION_ID,
-        service_url=SERVICE_URL,
-        cancel_key="key-1",
         unprompted=True,
         completion_ping=True,
         acknowledge=phases.append,
@@ -1319,13 +1312,8 @@ def test_a_long_non_ascii_answer_splits_under_the_teams_payload_cap() -> None:
 
 
 def _unprompted(sender: FakeSender) -> TeamsTurnLifecycle:
-    return TeamsTurnLifecycle(
-        sender=sender,
-        conversation_id=CONVERSATION_ID,
-        service_url=SERVICE_URL,
-        cancel_key="key-1",
-        clock=Clock(),
-        unprompted=True,
+    return _teams_turn_lifecycle(
+        sender=sender, conversation_id=CONVERSATION_ID, clock=Clock(), unprompted=True
     )
 
 

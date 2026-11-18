@@ -10,6 +10,7 @@ import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -68,6 +69,9 @@ from daimon.testing.factories import (  # isort: skip
     make_tenant_config,
     make_monthly_limit,
 )
+
+_tenant_config = partial(make_tenant_config, agent_name="daimon", environment_name="default")
+
 
 _NOW = datetime(2026, 7, 28, tzinfo=UTC)
 _MONTH = timedelta(days=40)
@@ -130,9 +134,7 @@ async def test_admit_over_balance_tenant_raises_admission_denied_balance_deplete
     platform: str,
 ) -> None:
     tenant = await make_tenant(db_session)
-    await make_tenant_config(
-        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
-    )
+    await _tenant_config(db_session, tenant=tenant)
     await db_session.commit()
     # No ledger entry seeded -> balance is 0 -> over-balance.
 
@@ -178,9 +180,7 @@ async def test_admit_over_limit_user_raises_admission_denied_cap_exceeded(
     funding_mode: FundingMode,
 ) -> None:
     tenant = await make_tenant(db_session)
-    await make_tenant_config(
-        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
-    )
+    await _tenant_config(db_session, tenant=tenant)
     if funding_mode == "prepaid":
         await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
     else:
@@ -221,9 +221,7 @@ async def test_admit_over_limit_user_raises_admission_denied_cap_exceeded(
 
 async def _funded_tenant_with_spent_channel(session: AsyncSession) -> TenantRow:
     tenant = await make_tenant(session)
-    await make_tenant_config(
-        session, tenant=tenant, agent_name="daimon", environment_name="default"
-    )
+    await _tenant_config(session, tenant=tenant)
     await make_ledger_entry(session, tenant=tenant, delta_usd=Decimal("10"))
     await make_ledger_entry(
         session, tenant=tenant, delta_usd=Decimal("-1"), channel_id="chan-1", occurred_at=_NOW
@@ -505,9 +503,7 @@ async def test_admit_happy_path_returns_admission_with_retrieved_agent_and_accou
     tmp_path: Path,
 ) -> None:
     tenant = await make_tenant(db_session)
-    await make_tenant_config(
-        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
-    )
+    await _tenant_config(db_session, tenant=tenant)
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
     await db_session.commit()
 
@@ -549,9 +545,7 @@ async def test_admit_reads_the_daimon_tools_the_agent_has_ask_or_deny_rules_on(
     from daimon.core.tool_safety import ToolSafetyPolicy
 
     tenant = await make_tenant(db_session)
-    await make_tenant_config(
-        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
-    )
+    await _tenant_config(db_session, tenant=tenant)
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
     for key, rule in (
         ("daimon-mcp/hubspot_update_objects", "ask"),
@@ -603,9 +597,7 @@ async def test_admission_reads_agent_rules_only_when_tool_safety_and_rules_are_o
     from sqlalchemy import event
 
     tenant = await make_tenant(db_session)
-    await make_tenant_config(
-        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
-    )
+    await _tenant_config(db_session, tenant=tenant)
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
     await db_session.commit()
     router = resolved_agent_env_router(
@@ -667,9 +659,7 @@ async def test_a_tenant_whose_credit_ran_out_is_refused_without_the_no_credit_ye
     from daimon.core.stores import tenant_ledger
 
     tenant = await make_tenant(db_session)
-    await make_tenant_config(
-        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
-    )
+    await _tenant_config(db_session, tenant=tenant)
     # Signup credit, then spent: the balance is 0 but it had credit.
     for delta, reason in ((Decimal("1"), "trial"), (Decimal("-1"), "usage")):
         await tenant_ledger.insert_entry(
@@ -959,9 +949,7 @@ async def test_setup_admission_uses_bound_identity_and_leaves_missing_target_unc
     from daimon.core.stores.thread_agent_bindings import create_binding
 
     tenant = await make_tenant(db_session)
-    await make_tenant_config(
-        db_session, tenant=tenant, agent_name="specialist", environment_name="default"
-    )
+    await _tenant_config(db_session, tenant=tenant, agent_name="specialist")
     await create_binding(
         db_session,
         tenant_id=tenant.id,
@@ -1016,9 +1004,7 @@ async def test_handoff_thread_admits_the_agent_the_task_was_handed_to(
     from daimon.core.stores.thread_agent_bindings import create_binding
 
     tenant = await make_tenant(db_session)
-    await make_tenant_config(
-        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
-    )
+    await _tenant_config(db_session, tenant=tenant)
     await create_binding(
         db_session,
         tenant_id=tenant.id,
@@ -1064,9 +1050,7 @@ async def test_handoff_thread_refuses_an_agent_from_another_workspace(
     from daimon.core.stores.thread_agent_bindings import create_binding
 
     tenant = await make_tenant(db_session)
-    await make_tenant_config(
-        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
-    )
+    await _tenant_config(db_session, tenant=tenant)
     await create_binding(
         db_session,
         tenant_id=tenant.id,
@@ -1101,9 +1085,7 @@ async def _seed_admittable_tenant(
     db_session: AsyncSession, *, policy: TenantAccessPolicy | None, platform: str = "discord"
 ) -> TenantRow:
     tenant = await make_tenant(db_session, platform=platform)  # type: ignore[arg-type]
-    await make_tenant_config(
-        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
-    )
+    await _tenant_config(db_session, tenant=tenant)
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
     if policy is not None:
         await set_access_policy(db_session, tenant_id=tenant.id, policy=policy)
@@ -2315,9 +2297,7 @@ async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
     from daimon.core.turn.admission import reauthorize, refresh_approval_gate
 
     tenant = await make_tenant(db_session)
-    await make_tenant_config(
-        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
-    )
+    await _tenant_config(db_session, tenant=tenant)
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
     other = await make_tenant(db_session)
     await set_access_policy(
@@ -2412,9 +2392,7 @@ async def test_gate_revocation_reaches_prepared_and_running_turns(
     from daimon.core.turn.posture import PolicyApproval
 
     tenant = await make_tenant(db_session)
-    await make_tenant_config(
-        db_session, tenant=tenant, agent_name="daimon", environment_name="default"
-    )
+    await _tenant_config(db_session, tenant=tenant)
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
     await db_session.commit()
     deps = replace(

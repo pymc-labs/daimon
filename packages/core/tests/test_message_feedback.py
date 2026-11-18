@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from functools import partial
 
 from daimon.core.credential_requests import CUSTOM_ID_PATTERN as CREDENTIAL_CUSTOM_ID_PATTERN
 from daimon.core.credential_requests import build_custom_id as build_credential_custom_id
@@ -23,113 +24,65 @@ BOT_USER_ID = 1
 REACTOR_ID = 2
 GUILD_ID = 9
 
+_vote_for_reaction = partial(
+    vote_for_reaction,
+    emoji_is_custom=False,
+    reactor_id=REACTOR_ID,
+    bot_user_id=BOT_USER_ID,
+    guild_id=GUILD_ID,
+)
+
 
 # --- vote_for_reaction ---
 
 
 def test_vote_for_reaction_thumbs_up_by_non_bot_user_in_guild_returns_up() -> None:
-    assert (
-        vote_for_reaction(
-            emoji_name=THUMBS_UP,
-            emoji_is_custom=False,
-            reactor_id=REACTOR_ID,
-            bot_user_id=BOT_USER_ID,
-            guild_id=GUILD_ID,
-        )
-        == "up"
-    ), "a plain thumbs-up by a non-bot user in a guild must count as an up-vote"
+    assert _vote_for_reaction(emoji_name=THUMBS_UP) == "up", (
+        "a plain thumbs-up by a non-bot user in a guild must count as an up-vote"
+    )
 
 
 def test_vote_for_reaction_thumbs_down_by_non_bot_user_in_guild_returns_down() -> None:
-    assert (
-        vote_for_reaction(
-            emoji_name=THUMBS_DOWN,
-            emoji_is_custom=False,
-            reactor_id=REACTOR_ID,
-            bot_user_id=BOT_USER_ID,
-            guild_id=GUILD_ID,
-        )
-        == "down"
-    ), "a plain thumbs-down by a non-bot user in a guild must count as a down-vote"
+    assert _vote_for_reaction(emoji_name=THUMBS_DOWN) == "down", (
+        "a plain thumbs-down by a non-bot user in a guild must count as a down-vote"
+    )
 
 
 def test_vote_for_reaction_reactor_is_bot_returns_none() -> None:
-    assert (
-        vote_for_reaction(
-            emoji_name=THUMBS_DOWN,
-            emoji_is_custom=False,
-            reactor_id=BOT_USER_ID,
-            bot_user_id=BOT_USER_ID,
-            guild_id=GUILD_ID,
-        )
-        is None
-    ), "the bot's own seeded reactions must never count as votes for themselves"
+    assert _vote_for_reaction(emoji_name=THUMBS_DOWN, reactor_id=BOT_USER_ID) is None, (
+        "the bot's own seeded reactions must never count as votes for themselves"
+    )
 
 
 def test_vote_for_reaction_no_guild_returns_none_even_for_valid_thumbs_emoji() -> None:
-    assert (
-        vote_for_reaction(
-            emoji_name=THUMBS_UP,
-            emoji_is_custom=False,
-            reactor_id=REACTOR_ID,
-            bot_user_id=BOT_USER_ID,
-            guild_id=None,
-        )
-        is None
-    ), "a DM reaction resolves no tenant and must be ignored entirely"
+    assert _vote_for_reaction(emoji_name=THUMBS_UP, guild_id=None) is None, (
+        "a DM reaction resolves no tenant and must be ignored entirely"
+    )
 
 
 def test_vote_for_reaction_custom_emoji_returns_none() -> None:
-    assert (
-        vote_for_reaction(
-            emoji_name=THUMBS_UP,
-            emoji_is_custom=True,
-            reactor_id=REACTOR_ID,
-            bot_user_id=BOT_USER_ID,
-            guild_id=GUILD_ID,
-        )
-        is None
-    ), "a custom (non-Unicode) emoji must never count as a vote"
+    assert _vote_for_reaction(emoji_name=THUMBS_UP, emoji_is_custom=True) is None, (
+        "a custom (non-Unicode) emoji must never count as a vote"
+    )
 
 
 def test_vote_for_reaction_emoji_name_none_returns_none() -> None:
-    assert (
-        vote_for_reaction(
-            emoji_name=None,
-            emoji_is_custom=False,
-            reactor_id=REACTOR_ID,
-            bot_user_id=BOT_USER_ID,
-            guild_id=GUILD_ID,
-        )
-        is None
-    ), "a missing emoji name must never count as a vote"
+    assert _vote_for_reaction(emoji_name=None) is None, (
+        "a missing emoji name must never count as a vote"
+    )
 
 
 def test_vote_for_reaction_unrelated_emoji_returns_none() -> None:
-    assert (
-        vote_for_reaction(
-            emoji_name="\N{PARTY POPPER}",
-            emoji_is_custom=False,
-            reactor_id=REACTOR_ID,
-            bot_user_id=BOT_USER_ID,
-            guild_id=GUILD_ID,
-        )
-        is None
-    ), "an emoji that is neither thumbs-up nor thumbs-down must not count as a vote"
+    assert _vote_for_reaction(emoji_name="\N{PARTY POPPER}") is None, (
+        "an emoji that is neither thumbs-up nor thumbs-down must not count as a vote"
+    )
 
 
 def test_vote_for_reaction_skin_tone_thumbs_up_returns_none() -> None:
     skin_toned = THUMBS_UP + "\N{EMOJI MODIFIER FITZPATRICK TYPE-3}"
-    assert (
-        vote_for_reaction(
-            emoji_name=skin_toned,
-            emoji_is_custom=False,
-            reactor_id=REACTOR_ID,
-            bot_user_id=BOT_USER_ID,
-            guild_id=GUILD_ID,
-        )
-        is None
-    ), "skin-tone variants are distinct codepoint sequences and are deliberately not matched"
+    assert _vote_for_reaction(emoji_name=skin_toned) is None, (
+        "skin-tone variants are distinct codepoint sequences and are deliberately not matched"
+    )
 
 
 # --- is_bot_authored ---

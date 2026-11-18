@@ -11,6 +11,7 @@ import asyncio
 import os
 import uuid
 from datetime import UTC, datetime
+from functools import partial
 
 import pytest
 import pytest_asyncio
@@ -23,6 +24,16 @@ from daimon.core.stores.task_continuations import (
 )
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+_record_continuation = partial(
+    record_continuation,
+    platform="discord",
+    requester_external_user_id="discord-user-1",
+    target_ma_agent_id="agent_stats",
+    target_name="stats-bot",
+    reason="task_handoff",
+)
+
 
 _NOW = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
 
@@ -39,17 +50,12 @@ async def test_a_recorded_continuation_starts_pending_and_undelivered(
 ) -> None:
     key = uuid.uuid4()
 
-    row = await record_continuation(
+    row = await _record_continuation(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         parent_channel_id="channel-1",
         thread_id="thread-1",
         requester_account_id=uuid.uuid4(),
-        requester_external_user_id="discord-user-1",
-        target_ma_agent_id="agent_stats",
-        target_name="stats-bot",
-        reason="task_handoff",
         idempotency_key=key,
         requested_work="finish the regression writeup",
     )
@@ -69,7 +75,7 @@ async def test_a_continuation_with_no_requested_work_is_recordable(
     tenant_id: uuid.UUID,
 ) -> None:
     """A switch without work is still an audit row; it just never dispatches."""
-    row = await record_continuation(
+    row = await _record_continuation(
         db_session,
         tenant_id=tenant_id,
         platform="slack",
@@ -77,9 +83,6 @@ async def test_a_continuation_with_no_requested_work_is_recordable(
         thread_id="1700000000.000100",
         requester_account_id=uuid.uuid4(),
         requester_external_user_id="U123",
-        target_ma_agent_id="agent_stats",
-        target_name="stats-bot",
-        reason="task_handoff",
         idempotency_key=uuid.uuid4(),
     )
 
@@ -92,17 +95,12 @@ async def test_claiming_then_settling_walks_the_status_ladder(
     tenant_id: uuid.UUID,
 ) -> None:
     key = uuid.uuid4()
-    await record_continuation(
+    await _record_continuation(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         parent_channel_id="channel-1",
         thread_id="thread-1",
         requester_account_id=uuid.uuid4(),
-        requester_external_user_id="discord-user-1",
-        target_ma_agent_id="agent_stats",
-        target_name="stats-bot",
-        reason="task_handoff",
         idempotency_key=key,
         requested_work="finish the regression writeup",
     )
@@ -129,17 +127,12 @@ async def test_a_skipped_continuation_records_its_reason_and_never_stamps_delive
     tenant_id: uuid.UUID,
 ) -> None:
     key = uuid.uuid4()
-    await record_continuation(
+    await _record_continuation(
         db_session,
         tenant_id=tenant_id,
-        platform="discord",
         parent_channel_id="channel-1",
         thread_id="thread-1",
         requester_account_id=uuid.uuid4(),
-        requester_external_user_id="discord-user-1",
-        target_ma_agent_id="agent_stats",
-        target_name="stats-bot",
-        reason="task_handoff",
         idempotency_key=key,
         requested_work="finish the regression writeup",
     )
@@ -170,17 +163,12 @@ async def test_pending_listing_covers_one_thread_and_drops_settled_rows(
     other_thread = uuid.uuid4()
     settled = uuid.uuid4()
     for key, thread_id in ((mine, "thread-1"), (other_thread, "thread-2"), (settled, "thread-1")):
-        await record_continuation(
+        await _record_continuation(
             db_session,
             tenant_id=tenant_id,
-            platform="discord",
             parent_channel_id="channel-1",
             thread_id=thread_id,
             requester_account_id=uuid.uuid4(),
-            requester_external_user_id="discord-user-1",
-            target_ma_agent_id="agent_stats",
-            target_name="stats-bot",
-            reason="task_handoff",
             idempotency_key=key,
             requested_work="work",
         )
@@ -225,17 +213,12 @@ async def test_two_connections_racing_one_continuation_claim_it_exactly_once() -
     try:
         async with factory_a.begin() as seed:
             tenant = await make_tenant(seed)
-            await record_continuation(
+            await _record_continuation(
                 seed,
                 tenant_id=tenant.id,
-                platform="discord",
                 parent_channel_id="channel-race",
                 thread_id="thread-race",
                 requester_account_id=uuid.uuid4(),
-                requester_external_user_id="discord-user-1",
-                target_ma_agent_id="agent_stats",
-                target_name="stats-bot",
-                reason="task_handoff",
                 idempotency_key=key,
                 requested_work="finish the regression writeup",
             )

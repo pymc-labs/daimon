@@ -22,6 +22,7 @@ from collections.abc import Coroutine
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -81,6 +82,8 @@ from yarl import URL
 
 from .conftest import shown_text
 from .harness import make_orchestrate_app
+
+_tool_use_block = partial(ToolUseBlock, kind="tool_use", type="agent.tool_use", name="bash")
 
 
 async def _seed_thread_session(
@@ -1296,9 +1299,7 @@ async def test_orchestrate_first_turn_when_new_thread_creates_session_row_and_wr
 
         state = TurnState(
             content=[
-                ToolUseBlock(
-                    kind="tool_use", id="tu_first", type="agent.tool_use", name="bash", input={}
-                ),
+                _tool_use_block(id="tu_first", input={}),
                 TextBlock(kind="text", text="Hello!"),
             ]
         )
@@ -1864,9 +1865,7 @@ async def test_orchestrate_queue_coalesce_when_thread_in_flight_adds_hourglass_a
         # ToolUseBlock so the tool-use-gated output sweep runs for both turns.
         state = TurnState(
             content=[
-                ToolUseBlock(
-                    kind="tool_use", id="tu_coal", type="agent.tool_use", name="bash", input={}
-                ),
+                _tool_use_block(id="tu_coal", input={}),
                 TextBlock(kind="text", text="Coalesce response"),
             ]
         )
@@ -2127,9 +2126,7 @@ async def test_drain_partitions_queued_mentions_by_author_when_two_users_queue_i
         # ToolUseBlock so the tool-use-gated output sweep runs for both turns.
         state = TurnState(
             content=[
-                ToolUseBlock(
-                    kind="tool_use", id="tu_part", type="agent.tool_use", name="bash", input={}
-                ),
+                _tool_use_block(id="tu_part", input={}),
                 TextBlock(kind="text", text="Partitioned response"),
             ]
         )
@@ -3068,9 +3065,7 @@ async def test_run_thread_turn_output_sweep_is_detached_from_turn_path(
     async def _fake_run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
         state = TurnState(
             content=[
-                ToolUseBlock(
-                    kind="tool_use", id="tu_det", type="agent.tool_use", name="bash", input={}
-                ),
+                _tool_use_block(id="tu_det", input={}),
                 TextBlock(kind="text", text="Done."),
             ]
         )
@@ -3165,9 +3160,7 @@ async def test_run_thread_turn_two_turns_same_session_chain_sweeps_serially(
     async def _fake_run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
         state = TurnState(
             content=[
-                ToolUseBlock(
-                    kind="tool_use", id="tu_chain", type="agent.tool_use", name="bash", input={}
-                ),
+                _tool_use_block(id="tu_chain", input={}),
                 TextBlock(kind="text", text="Chained."),
             ]
         )
@@ -4923,9 +4916,7 @@ async def test_run_thread_turn_clears_the_active_turn_marker_on_success(
     async def _fake_run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
         state = TurnState(
             content=[
-                ToolUseBlock(
-                    kind="tool_use", id="tu_marker", type="agent.tool_use", name="bash", input={}
-                ),
+                _tool_use_block(id="tu_marker", input={}),
                 TextBlock(kind="text", text="Done."),
             ]
         )
@@ -5044,9 +5035,7 @@ async def test_marker_is_written_with_channel_before_the_turn_runs(
 
         state = TurnState(
             content=[
-                ToolUseBlock(
-                    kind="tool_use", id="tu_mid", type="agent.tool_use", name="bash", input={}
-                ),
+                _tool_use_block(id="tu_mid", input={}),
                 TextBlock(kind="text", text="Mid-turn."),
             ]
         )
