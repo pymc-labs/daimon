@@ -1,11 +1,5 @@
 """Routines admin CLI commands.
 
-Currently exposes the one-shot `backfill-agent-names` migration bridge for
-Between migration 0011 (nullable `agent_name`) and the
-forthcoming NOT NULL flip, this command walks every routine whose
-`agent_name IS NULL`, retrieves the agent from MA, and writes the daimon-tag
-into the row.
-
 Owner-DM creation is available to operators; interactive edits use chat tools
 and the adapters' `/routines` command. `sandbox-tools` is the operator's
 switch for a routine's built-in sandbox tools, one routine or a confirmed list
@@ -22,21 +16,16 @@ from pathlib import Path
 from typing import Annotated, Literal, cast
 
 import httpx
-import structlog
 import typer
-from anthropic import APIStatusError
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.config import DirectMessagePolicy, load_settings
 from daimon.core.cron import validated_next_slot
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
-from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.discord_membership import DiscordRestMembershipResolver, verify_discord_source
 from daimon.core.errors import StoreError, UserFacingError
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
-from daimon.core.mux_backend import resource_scope
-from daimon.core.mux_compat import retrieve_agent
 from daimon.core.routine_move import (
     RoutineFreshnessSettings,
     RoutineSeedEntry,
@@ -49,7 +38,6 @@ from daimon.core.routine_sandbox import (
     current_pin,
     pin_of,
 )
-from daimon.core.routines import routine_for_reader
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.identity import get_or_create_cli_principal
@@ -60,9 +48,7 @@ from daimon.core.stores.routines import (
     create_routine,
     get_routine,
     link_source_routine,
-    list_routines_missing_agent_name,
     set_sandbox_tools,
-    update_routine,
     validate_dm_source,
 )
 from daimon.core.stores.tenants import get_tenant
@@ -70,97 +56,7 @@ from pydantic import JsonValue, ValidationError
 from rich.console import Console
 from sqlalchemy import text
 
-_log = structlog.get_logger(__name__)
-
 routines_app = typer.Typer(help="Routines admin tasks.")
-
-_FALLBACK_NAME = "daimon"
-
-
-@routines_app.command("backfill-agent-names")
-def backfill_agent_names_command(
-    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
-) -> None:
-    """Populate ``routines.agent_name`` from MA agent metadata.
-
-    Idempotent — skips rows where ``agent_name`` is already non-NULL.
-    Falls back to ``"daimon"`` when MA returns 404 OR the agent is archived
-    OR the agent's metadata lacks ``daimon_name`` (only one
-    daimon-tagged agent per tenant today).
-
-    Non-404 ``APIStatusError`` (5xx, network) propagates; the operator re-runs
-    after MA recovers.
-    """
-    settings = load_settings()
-    console = Console(highlight=False)
-
-    async def _with_runtime() -> None:
-        async with build_runtime(settings) as rt:
-            await run_backfill_agent_names(rt=rt, console=console, dry_run=dry_run)
-
-    asyncio.run(_with_runtime())
-
-
-async def run_backfill_agent_names(
-    *,
-    rt: CliRuntime,
-    console: Console,
-    dry_run: bool,
-) -> None:
-    """Behavior body, callable by tests with an injected CliRuntime.
-
-    Mirrors the `defaults_apply(rt=...)` split in `commands/defaults.py` so
-    tests don't need to round-trip through `asyncio.run` + `load_settings`.
-    """
-    async with rt.sessionmaker() as session:
-        rows = await list_routines_missing_agent_name(session)
-
-    from_metadata = 0
-    fallback = 0
-
-    for row in rows:
-        row = routine_for_reader(row, user_id=None)
-        resolved: str
-        try:
-            agent = await retrieve_agent(
-                rt.anthropic,
-                row.agent_id,
-                scope=resource_scope(tenant_id=str(row.tenant_id)),
-                records=rt.sessionmaker,
-            )
-        except APIStatusError as err:
-            if err.status_code == 404:
-                resolved = _FALLBACK_NAME
-                fallback += 1
-            else:
-                raise
-        else:
-            tag = agent.metadata.get(MA_METADATA_KEY_NAME)
-            if agent.archived_at is not None or tag is None:
-                resolved = _FALLBACK_NAME
-                fallback += 1
-            else:
-                resolved = tag
-                from_metadata += 1
-
-        if dry_run:
-            _log.info(
-                "backfill.dry_run",
-                routine_id=str(row.id),
-                agent_id=row.agent_id,
-                resolved_agent_name=resolved,
-            )
-            continue
-
-        # Per-row tx — canonical async sessionmaker pattern.
-        async with rt.sessionmaker() as s, s.begin():
-            await update_routine(s, row.id, tenant_id=row.tenant_id, agent_name=resolved)
-
-    console.print(
-        f"Backfilled {len(rows)} routine(s) "
-        f"({from_metadata} from metadata, {fallback} fallback to {_FALLBACK_NAME!r})."
-        + (" [dry-run, no writes]" if dry_run else "")
-    )
 
 
 @routines_app.command("create")

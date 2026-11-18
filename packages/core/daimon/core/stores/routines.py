@@ -231,22 +231,6 @@ async def get_routine(
     return RoutineRow.model_validate(orm)
 
 
-async def list_routines_missing_agent_name(
-    session: AsyncSession,
-) -> list[RoutineRow]:
-    """Return all routines where `agent_name IS NULL`.
-
-    Used by the one-shot `daimon routines backfill-agent-names` CLI command
-    Inherently idempotent: re-running after backfill returns
-    an empty list. No pagination — the row count is bounded by tenant
-    routine cardinality, which is small.
-    """
-    rows = (
-        (await session.execute(select(Routine).where(Routine.agent_name.is_(None)))).scalars().all()
-    )
-    return [RoutineRow.model_validate(r) for r in rows]
-
-
 async def list_routines_for_tenant(
     session: AsyncSession, *, tenant_id: _uuid.UUID
 ) -> list[RoutineRow]:
