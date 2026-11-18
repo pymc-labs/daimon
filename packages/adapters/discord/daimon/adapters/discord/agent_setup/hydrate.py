@@ -40,6 +40,7 @@ from daimon.core.answering_map import AnsweringMap, load_answering_map
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
 from daimon.core.errors import UserFacingError
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.model_switch import panel_edit_deps, read_picker
 from daimon.core.roster import RosterAgent, load_roster
@@ -48,7 +49,7 @@ from daimon.core.scope import ChannelConfigRow
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.thread_agent_bindings import get_binding
-from daimon.core.web_links import panel_links
+from daimon.core.web_links import links_at, panel_links
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import discord
@@ -425,7 +426,18 @@ async def load_details_for(
             public_mcp_url=public_mcp_url(runtime),
             is_admin=state.is_admin,
             channel_label=_channel_label(state),
-            web=panel_links(runtime.settings.web, _tenant_id(state), admin=state.is_admin),
+            web=await links_at(
+                runtime.sessionmaker,
+                runtime.settings,
+                FeaturePlace.of(
+                    _tenant_id(state),
+                    "discord",
+                    str(state.channel_id),
+                    state.thread_id,
+                    agent_id=agent.ma_agent_id,
+                ),
+                panel_links(runtime.settings.web, _tenant_id(state), admin=state.is_admin),
+            ),
             records=runtime.sessionmaker,
         )
         state.avatar_urls[agent.name] = None

@@ -94,7 +94,12 @@ class BillingCog(commands.Cog):
                 account_id=account_id,
                 now=now,
                 since=since,
-                web_url=web_spend_url(runtime, interaction.guild_id, is_admin=is_admin),
+                web_url=await web_spend_url(
+                    runtime,
+                    interaction.guild_id,
+                    is_admin=is_admin,
+                    channel_id=invoking_channel_id(interaction),
+                ),
             )
             await interaction.followup.send(
                 view=view,
