@@ -247,7 +247,8 @@ async def _assigned_agent(
     sessions: Sessions, place: FeaturePlace, assignment: Assignment
 ) -> str | None:
     """The id (as the agent tier keys it) of the agent assigned to `place`'s channel: the
-    channel's, else the workspace's, else the deployment default. None when none is live."""
+    channel's, else the workspace's, else the deployment default. None when none is live. A
+    thread bound to another agent still follows its channel's assignment."""
     async with sessions() as session:
         context = ScopeContext(tenant_id=place.tenant_id, channel_id=place.channel_id)
         name = (await resolve(session, context=context, default=assignment.default)).agent_name
