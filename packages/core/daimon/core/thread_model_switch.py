@@ -123,18 +123,6 @@ def pick_value(choice: str) -> str:
     return f"{DEFAULT_BACKEND}:{model_id}" if model_id is not None else choice.strip()
 
 
-async def preview_thread_or_refusal(
-    pick: ThreadPick, value: str, *, admin: bool
-) -> ModelSwitchPreview | SwitchRefusal:
-    """`preview_thread_model`, with a refusal returned as the words a chat shows."""
-    try:
-        return await preview_thread_model(pick, value)
-    except (AgentBackendRefused, BackendUnsupported, AgentEditError) as error:
-        return refusal_of(error, admin=admin)
-    except AmbiguousModel:
-        return _ambiguous(value)
-
-
 def _ambiguous(value: str) -> SwitchRefusal:
     return SwitchRefusal(
         f"{value} could mean more than one model. Pick one from the list.", None, "ambiguous"
@@ -215,23 +203,6 @@ async def may_pick_provider(pick: ThreadPick) -> bool:
         if (await feature_in(session, pick.settings, place, "thread_providers")).on:
             return True
     return await pick.service.may_edit(pick.agent, pick.actor)
-
-
-async def preview_thread_model(pick: ThreadPick, value: str) -> ModelSwitchPreview:
-    """What picking `value` (`provider:id`) for one conversation would change.
-
-    No preview (None) for a Claude pick on a Claude agent, which keeps the agent's run.
-    """
-    shown, runs = await _gated(pick, value)
-    if not runs:
-        return shown
-    claude = shown.model.provider == DEFAULT_BACKEND
-    preview = await pick.service.preview(
-        pick.agent,
-        None if claude else shown.model.provider,
-        None if claude else shown.model.id,
-    )
-    return replace(shown, preview=preview)
 
 
 async def _gated(pick: ThreadPick, value: str) -> tuple[ModelSwitchPreview, bool]:
