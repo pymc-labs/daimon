@@ -656,9 +656,9 @@ async def test_every_reachable_runtime_dependency_refused_before_observation(
 
     event.listen(foreign.sync_engine, "do_connect", trap_connection)
     monkeypatch.setitem(
-        runtime_module._RUNTIME_FACTORIES,  # pyright: ignore[reportPrivateUsage]
+        runtime_module._BACKENDS,  # pyright: ignore[reportPrivateUsage]
         "openai.persistent_workspace",
-        trap_runtime,
+        runtime_module.HostedBackend(runtime=trap_runtime),
     )
     values: dict[str, object] = {
         "sessionmaker": async_sessionmaker(foreign),

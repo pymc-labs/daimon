@@ -1386,8 +1386,8 @@ async def test_final_host_outcome_preserves_observed_root(
 
 @pytest.mark.parametrize("append_mode", ["record", "record_many"])
 async def test_native_command_pair_survives_live_and_recovery_journal(composed, append_mode):
+    from daimon.core.turn.hosted_io import OpenAITurnIO
     from daimon.core.turn.openai_host import driver
-    from daimon.core.turn.openai_io import OpenAITurnIO
     from mux.drivers.openai.normalize import EventNormalizer
 
     request, _, store, _, runtime = composed
@@ -1463,8 +1463,8 @@ async def test_host_runtime_allows_omitted_optional_spend_control(composed):
 
 @pytest.mark.parametrize("recorded_id", ["native-answer-event", "openai:item:retained-answer"])
 async def test_recovery_after_upgrade_keeps_recorded_message_identity(composed, recorded_id):
+    from daimon.core.turn.hosted_io import OpenAITurnIO
     from daimon.core.turn.openai_host import driver
-    from daimon.core.turn.openai_io import OpenAITurnIO
     from mux.drivers.openai.normalize import EventNormalizer
 
     request, wire, store, _, runtime = composed

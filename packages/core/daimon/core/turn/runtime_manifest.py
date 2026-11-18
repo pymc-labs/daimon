@@ -146,6 +146,39 @@ ApiKeyEnvironment = Annotated[
 ]
 
 
+class ManifestUnreadable(Exception):
+    """A configured manifest that can't be read, is too large or isn't a list of objects."""
+
+
+def manifest_rows() -> list[dict[str, JsonValue]]:
+    """The operator manifest's rows; none when no manifest is configured."""
+    path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
+    if not path:
+        return []
+    try:
+        with Path(path).open("rb") as manifest:
+            raw = manifest.read(_MAX_BYTES + 1)
+        if len(raw) > _MAX_BYTES:
+            raise ManifestUnreadable
+        return _ROWS.validate_json(raw)
+    except (OSError, ValidationError):
+        raise ManifestUnreadable from None
+
+
+def tenant_deployments[Row: BaseModel](
+    model: type[Row], profile: str, tenant_id: str
+) -> tuple[Row, ...]:
+    """One tenant's validated rows for `profile`; none if the manifest can't be read."""
+    try:
+        return tuple(
+            model.model_validate(row)
+            for row in manifest_rows()
+            if row.get("profile") == profile and row.get("tenant_id") == tenant_id
+        )
+    except (ManifestUnreadable, ValidationError):
+        return ()
+
+
 def validate_configured_runtime_manifest() -> None:
     """Check an explicitly configured manifest's references, without constructing plans.
 
@@ -153,16 +186,9 @@ def validate_configured_runtime_manifest() -> None:
     manifests retain the existing selected-turn refusal; no discovery happens here.
     Scope/digest, full provider policy and key availability remain admission checks.
     """
-    path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
-    if not path:
-        return
     try:
-        with Path(path).open("rb") as manifest:
-            raw = manifest.read(_MAX_BYTES + 1)
-        if len(raw) > _MAX_BYTES:
-            raise ProviderRuntimeConfigurationError("invalid_manifest")
-        rows = _ROWS.validate_json(raw)
-    except (OSError, ValidationError):
+        rows = manifest_rows()
+    except ManifestUnreadable:
         raise ProviderRuntimeConfigurationError("invalid_manifest") from None
     for row in rows:
         reference = row.get("api_key_env")
@@ -470,20 +496,13 @@ async def _capture_source_capabilities(
     from sqlalchemy.exc import SQLAlchemyError
 
     source = source.model_copy(update={"representations": ()})
-    path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
-    rows: list[dict[str, JsonValue]] = []
-    if path is not None:
-        try:
-            with Path(path).open("rb") as stream:
-                raw = stream.read(_MAX_BYTES + 1)
-            if len(raw) > _MAX_BYTES:
-                raise ValueError("manifest too large")
-            rows = _ROWS.validate_json(raw)
-        except (OSError, ValueError):
-            # This optional capability evidence cannot break an ordinary source
-            # capture. A full deployment still refuses without the representation,
-            # and its closed runtime-manifest loader independently rejects bad input.
-            return source
+    try:
+        rows = manifest_rows()
+    except ManifestUnreadable:
+        # This optional capability evidence cannot break an ordinary source
+        # capture. A full deployment still refuses without the representation,
+        # and its closed runtime-manifest loader independently rejects bad input.
+        return source
     # A code-default agent template counts only where the operator configured no
     # row for this tenant's profile at all, matching selection's last resort.
     tenant = str(source.tenant_id)
@@ -2189,16 +2208,9 @@ def _configured_rows() -> list[dict[str, JsonValue]]:
     A configured manifest that can't be read refuses (`AdmissionDenied`) rather than
     falling back to the code defaults, so a broken operator file never widens access.
     """
-    manifest_path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
-    if not manifest_path:
-        return []
     try:
-        with Path(manifest_path).open("rb") as manifest:
-            raw = manifest.read(_MAX_BYTES + 1)
-        if len(raw) > _MAX_BYTES:
-            raise AdmissionDenied(reason="backend_unsupported")
-        return _ROWS.validate_json(raw)
-    except (OSError, ValidationError):
+        return manifest_rows()
+    except ManifestUnreadable:
         raise AdmissionDenied(reason="backend_unsupported") from None
 
 

@@ -93,9 +93,9 @@ HANDOFF_PICKUP_SEED: Final[str] = "Pick up where the conversation left off."
 
 
 def _selfhosted_runtime_ready() -> bool:
-    from daimon.core.turn.runtimes import ensure_channel_runtime
+    from daimon.core.turn.runtimes import hosted_backend
 
-    return ensure_channel_runtime("selfhosted.loop")
+    return hosted_backend("selfhosted.loop") is not None
 
 
 async def can_start_turn(

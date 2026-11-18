@@ -427,7 +427,7 @@ def test_a_sealed_selfhosted_conversation_says_to_start_a_new_one(
     """The harness seals a conversation whose tools would not stop. Its errored
     root, live or replayed, keeps that reason up to the error card."""
     from daimon.core.errors import TurnError
-    from daimon.core.turn.selfhosted_io import root_failed
+    from daimon.core.turn.hosted_io import root_failed
     from daimon.core.turn.termination import termination_reason
 
     cause = root_failed(native_reason)

@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 import pytest
 from daimon.core.config import load_turn_settings
 from daimon.core.turn.admission import admit_impl
-from daimon.core.turn.openai_io import OpenAITurnIO
+from daimon.core.turn.hosted_io import OpenAITurnIO
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.prepare import bind_session_impl
 from daimon.core.turn.run import run_prepared_turn

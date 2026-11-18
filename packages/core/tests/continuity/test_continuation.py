@@ -773,10 +773,10 @@ async def test_a_self_hosted_destination_starts_only_where_its_runtime_runs(
 ) -> None:
     from daimon.core.continuity.continuation import can_start_turn
 
-    def _runtime_ready(_name: str) -> bool:
-        return ready
+    def _runtime(_name: str) -> object:
+        return object() if ready else None
 
-    monkeypatch.setattr("daimon.core.turn.runtimes.ensure_channel_runtime", _runtime_ready)
+    monkeypatch.setattr("daimon.core.turn.runtimes.hosted_backend", _runtime)
     started = await can_start_turn(
         None,  # type: ignore[arg-type]  # the runtime alone decides; no read
         target_ma_agent_id="sh_agent_x",

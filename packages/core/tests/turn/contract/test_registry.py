@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-from importlib.metadata import entry_points
-
-from daimon.core.turn.io import _TURN_CODECS  # pyright: ignore[reportPrivateUsage]
+from daimon.core.turn.runtimes import hosted_profiles
 
 from .registry import BACKENDS
 
 
 def runnable_profiles() -> set[str]:
-    """Every profile with turn IO: the built-in one, each installed provider runtime,
-    and anything already registered in this process."""
-    installed = {entry.name for entry in entry_points(group="daimon.turn_runtimes")}
-    return {"anthropic.managed_agents", *installed, *_TURN_CODECS}
+    """Every profile with turn IO: the built-in one and each hosted backend."""
+    return {"anthropic.managed_agents", *hosted_profiles()}
 
 
 def test_every_runnable_profile_has_a_contract_backend() -> None:

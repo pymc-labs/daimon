@@ -24,16 +24,15 @@ from mux.drivers.anthropic import AnthropicCompletions
 type AuxiliaryPurpose = Literal["thread_naming", "classifier"]
 type CompletionsFactory = Callable[[], Completions]
 
-_FACTORIES: dict[Provider, CompletionsFactory] = {}
-
 
 class AuxiliaryUnavailable(DaimonError):
     """No provider can serve a side call on this install."""
 
 
-def register_completions(provider: Provider, factory: CompletionsFactory) -> None:
-    """Make a provider's completions driver reachable for keyless installs."""
-    _FACTORIES[provider] = factory
+def _completions(provider: Provider) -> CompletionsFactory | None:
+    from daimon.core.turn.runtimes import provider_completions
+
+    return provider_completions(provider)
 
 
 @dataclass(frozen=True)
@@ -55,7 +54,7 @@ def auxiliary_provider(anthropic: AsyncAnthropic, admitted: Provider | None) -> 
     if anthropic_configured(anthropic):
         return DEFAULT_BACKEND
     for provider in (admitted, *DEFAULT_KEY_ENV):
-        if provider is not None and provider in _FACTORIES and side_call_priced(provider):
+        if provider is not None and _completions(provider) and side_call_priced(provider):
             return provider
     raise AuxiliaryUnavailable("No provider is available for this call.")
 
@@ -75,7 +74,8 @@ async def auxiliary_complete(
     require_anthropic_allowed()
     chosen = auxiliary_provider(anthropic, provider)
     model = (anthropic_model if chosen == DEFAULT_BACKEND else None) or AUXILIARY_MODELS[chosen]
-    driver = AnthropicCompletions(anthropic) if chosen == DEFAULT_BACKEND else _FACTORIES[chosen]()
+    factory = _completions(chosen) if chosen != DEFAULT_BACKEND else None
+    driver = factory() if factory is not None else AnthropicCompletions(anthropic)
     scope = Scope.legacy_host_authorized(call_site=f"auxiliary_calls:{purpose}")
     result = await driver.complete(scope, model, system, prompt, max_tokens, effort)
     return AuxiliaryCompletion(result.text, result.usage, result.refused, chosen, model)

@@ -798,9 +798,9 @@ async def test_opaque_runtime_dependencies_refuse_before_real_event(
     # The genuine default resolver is safe even under a broken guard: its
     # registered composition is trapped before deployment/credential discovery.
     monkeypatch.setitem(
-        runtime_module._RUNTIME_FACTORIES,  # pyright: ignore[reportPrivateUsage]
+        runtime_module._BACKENDS,  # pyright: ignore[reportPrivateUsage]
         "openai.persistent_workspace",
-        trap_runtime,
+        runtime_module.HostedBackend(runtime=trap_runtime),
     )
     replacements: dict[str, object] = {
         "turn_runtime_factory": trap_runtime,

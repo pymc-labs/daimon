@@ -547,63 +547,6 @@ their typed PENDING declarations. Shared fixture activation and complete C18
 coverage remain separate owner dependencies; these offline proofs claim no
 new live matrix PASS. SDK clients use the shared isolated testing factory and
 all native HTTP is directed to MockTransport at invalid fixture domains.
-### Explicit native credential offers
-
-The host's `OpenAINativeCredentialAdapter` in
-`daimon.core.turn.openai_credential_requests` offers the shared Connect GitHub
-or private-key card for a verified OpenAI target. Its `operator_enabled`
-capability defaults to false and requires a supplied `NativeCredentialDelivery`.
-The separate `register_openai_credential_tools` MCP entry point also defaults to
-false and requires an authenticated `OpenAICredentialGrant` factory. Register it
-only on an explicitly selected native MCP server; collisions with existing tools
-refuse. Existing servers and Anthropic credential paths retain their dispatch.
-
-The operator derives the native agent/session references, provider binding,
-retained config revision and catalog revision from verified host execution.
-Model arguments contain only the origin ID and optional key name. The adapter
-checks the current origin, requester, fresh role and policy, tenant, resource
-account, requester session account, workspace, persisted binding and native
-agent readback. A channel copy may belong to the guild resource account while
-its session belongs to the requester; neither is inferred from an MA identity.
-Legacy agent/external credentials are refused on the native endpoint.
-Private-key offers require both CONFIGURE and POST on Surface.CONFIG for a
-non-admin requester; this explicit capability is stricter than the legacy path.
-
-The delivery edge must durably register the full `NativeCredentialRequest` and
-a native interaction handler before posting a real platform message. Its control
-uses `nc_openai_input:` and must never enter a legacy MA resolver. A missing
-edge refuses before I/O. This slice supplies the scoped controller and shared
-card model, rather than installing a production registry or callback handler.
-An operator can use the existing platform renderer for the card, retaining its
-labels and replacing its dispatch identity with the native request control.
-
-Offline proofs execute the existing native channel-copy helper through the SDK,
-fresh catalog/native readback, identity-injected MCP dispatch and actual Discord
-serialization. The MCP proofs inject a controlled `AuthIdentity`; they do not
-certify authentication middleware or JWT verification. They observe a Connect
-GitHub offer by checking the rendered product card title and repository-selection
-description, without starting OAuth. Transport-owned button labels supply no
-offer evidence. Mutation regressions reject altered product titles and
-descriptions. They also observe a private-key card routed to the native target.
-Full own-fork scenario setup
-and production delivery bindings remain separate prerequisites. The request
-records the shared 30-minute TTL; it does not schedule expiry or certify an
-expired card. Credential consumption, probing, OAuth and submission ordering
-are outside this slice and receive no changes.
-
-The offline D8 consumer in `tests/judge/openai_credential_catalog.py` accepts an
-explicit `opt-in-product` offer delivery. A3's native MCP grant must actually
-call the scoped adapter: the consumer does not invoke a tool on the model's
-behalf. The button copy comes from the product-built `ConnectCard.title`, and
-the consumer reads the accepted Discord payload, with owned request, native
-session/root, delivery window and database-bind checks. Product title and
-forbidden-description mutations reach the frozen catalog predicates. The
-default consumer has no offer binding. Qualify observed results **under opt-in
-profile**; a full PASS also requires the original own-fork/admin, native host
-turn and routing envelopes. Supplemental card joins contain no completion
-certificate. Missing source execution or delivery stays PENDING, and OAuth,
-credential submission and expiry remain outside this observation.
-
 ### C18 host termination evidence
 
 The opt-in `compose_openai_host(..., termination=OpenAITerminationEnvelope(...))`
@@ -634,7 +577,7 @@ databases skip, and foreign URL refusals have connection-trap regressions.
 
 | Owner-reviewed reachable reasons | Real source of the host outcome |
 | --- | --- |
-| completed, interrupted, upstream, session_terminated | OpenAI native root/session events, `openai_io.py`, normal driver finalizers and reducers |
+| completed, interrupted, upstream, session_terminated | OpenAI native root/session events, `hosted_io.py`, normal driver finalizers and reducers |
 | rate_limited, connection_lost, interrupt_timeout | SDK HTTP status translation, driver reconnect/stop finalizers |
 | requires_action, ceiling | Native origin approval pause; driver/run deadline finalizers |
 | admission_balance_depleted, admission_cap_exceeded, admission_channel_budget_exceeded | Common admission balance and budget gates |
@@ -647,7 +590,7 @@ Excluded reasons: `reducer_bug` is reserved without a production raiser;
 `refused` needs the Anthropic refusal idle (`stop_details`), which the OpenAI
 codec never emits;
 `mcp_degraded_empty` and `retrying_unsettled` require legacy SDK error records
-which the OpenAI codec never emits (`reducers.py`/`openai_codec.py`).
+which the OpenAI codec never emits (`reducers.py`/`hosted_codec.py`).
 `session_preparation_failed` and `session_agent_mismatch` arise in legacy
 binding/compatibility, after the native profile dispatch in `bind_session_impl`.
 `recovery_cancelled` and `recovery_failed` require legacy mapping replacement: the
@@ -655,24 +598,6 @@ explicit profile guard in `run_prepared_turn_impl` excludes OpenAI. Native histo
 replay retains the same session and correctly records `recovered=False`; a
 recovered replacement row is not claimed. Admission/remaining driver branches
 without executed native cases stay PENDING until those proofs are supplied.
-
-### NEW27 native credential prerequisite (opt-in only)
-
-`tests/judge/openai_rejected_token_catalog.py` binds the frozen NEW27 source to
-an actual A3 MCP-form admission attempt. The current native adapter offers only
-GitHub and environment input, so the result is
-`PENDING: OPENAI_NATIVE_MCP_FORM_UNAVAILABLE` under the opt-in profile.
-No credential submit, rejecting HTTP probe or scoped `used_at` readback has
-occurred. N7's Anthropic consume-before-probe FAIL is not OpenAI evidence.
-
-Native MCP-token request persistence and interaction submission are product
-prerequisites. Their eventual conformance binding must invoke the real native
-submit against N7's owned loopback rejecting probe and query its genuinely
-minted request using fixed parameterized scope predicates. Do not translate
-OpenAI identities into `target_ma_agent_id`, execute the source SQL template,
-invent a request row, or change consume/probe ordering to earn this assertion.
-When native MCP offers become available, the current diagnostic refuses until
-that submit/probe/readback binding exists. No default runtime installs this hook.
 
 ### C03 tool-free QA envelope
 

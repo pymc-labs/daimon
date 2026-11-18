@@ -14,9 +14,9 @@ from daimon.core.turn.outcomes import TurnObservation
 from mux.state.memory import MemoryStateStore
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from .conformance_support import patch_hosted
 from .test_provider_dispatch import (
     ACCOUNT,
-    PROFILE,
     SESSION,
     TENANT,
     admission,
@@ -97,7 +97,7 @@ async def test_delayed_binding_owner_is_cancelled_by_the_original_preparation_de
     if provider == "anthropic":
         monkeypatch.setattr(session_preparation, "prepare_session_for_turn", completed)
     else:
-        monkeypatch.setitem(prepare._PROVIDER_PREPARATIONS, PROFILE, completed)
+        patch_hosted(monkeypatch, prepare=completed)
     clocks = []
 
     def deadline_owner(*, now):
