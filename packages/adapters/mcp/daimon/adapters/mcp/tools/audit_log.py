@@ -153,9 +153,8 @@ def register_audit_log_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         last: str | None = None,
         limit: int = 50,
     ) -> AuditLog:
-        """List the workspace's audit log, newest first: ``web`` for admin changes in the
-        web app, ``security`` for chat tool calls and panel writes. Filter by acting web
-        person, ``kind`` (see list_audit_kinds) and UTC days ``first`` to ``last``
+        """List the workspace's audit log, newest first: ``web`` for admin changes made outside
+        chat, ``security`` for chat tool calls and panel writes. Filter by acting person, ``kind`` (see list_audit_kinds) and UTC days ``first`` to ``last``
         (YYYY-MM-DD). Admin-only."""
         return await _log_impl(
             runtime,

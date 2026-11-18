@@ -160,7 +160,7 @@ def register_scope_settings_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         you are, what is in effect, which level decided it (``source``: ``default``,
         ``deployment`` for everywhere, ``workspace``, ``agent``, ``channel`` or ``thread``)
         and whether it is locked. Anyone may read them; read each ``summary`` back. People
-        change them with ``/settings``, the web app's Settings section or ``change_setting``.
+        change them with ``/settings`` or ``change_setting``.
         """
         return await _get_settings_impl(runtime, await _auth(ctx), origin_context_id)
 

@@ -104,7 +104,7 @@ def register_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         subject_id: str,
         subject_kind: SubjectKind = "user",
     ) -> GrantAdminResult:
-        """Make a user or role a Daimon admin, not a web app role (see update_web_person).
+        """Make a user or role a Daimon admin, a role of its own beside any sign-in role.
 
         Platform admins only, via a personal CLI credential; chat, routines and agent
         credentials are refused. Delegates cannot delegate. Billing and spend caps stay

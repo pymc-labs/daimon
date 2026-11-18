@@ -45,7 +45,7 @@ Tenant-wide Daimon admin delegation, with fresh platform-only mutation gates.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `grant_admin` | admin only | Make a user or role a Daimon admin, not a web app role (see update_web_person). |
+| `grant_admin` | admin only | Make a user or role a Daimon admin, a role of its own beside any sign-in role. |
 | `list_admins` | operator tokens with tenant:read | List this tenant's explicit Daimon admin grants (any member). |
 | `revoke_admin` | admin only | Revoke an explicit Daimon admin grant immediately (platform admins only). |
 
@@ -158,7 +158,7 @@ tool calls and panel writes, newest first.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `list_audit_kinds` | admin only | List the kinds of audit entry the workspace has recorded, for the log's ``kind`` filter. |
-| `list_audit_log` | admin only | List the workspace's audit log, newest first: ``web`` for admin changes in the web app, ``security`` for chat tool calls and panel writes. |
+| `list_audit_log` | admin only | List the workspace's audit log, newest first: ``web`` for admin changes made outside chat, ``security`` for chat tool calls and panel writes. |
 
 ## `channel_budgets`
 

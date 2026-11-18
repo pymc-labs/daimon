@@ -4412,7 +4412,7 @@
         you are, what is in effect, which level decided it (``source``: ``default``,
         ``deployment`` for everywhere, ``workspace``, ``agent``, ``channel`` or ``thread``)
         and whether it is locked. Anyone may read them; read each ``summary`` back. People
-        change them with ``/settings``, the web app's Settings section or ``change_setting``.
+        change them with ``/settings`` or ``change_setting``.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4626,7 +4626,7 @@
     }),
     'grant_admin': dict({
       'description': '''
-        Make a user or role a Daimon admin, not a web app role (see update_web_person).
+        Make a user or role a Daimon admin, a role of its own beside any sign-in role.
         <blank line>
         Platform admins only, via a personal CLI credential; chat, routines and agent
         credentials are refused. Delegates cannot delegate. Billing and spend caps stay
@@ -5380,9 +5380,8 @@
     }),
     'list_audit_log': dict({
       'description': '''
-        List the workspace's audit log, newest first: ``web`` for admin changes in the
-        web app, ``security`` for chat tool calls and panel writes. Filter by acting web
-        person, ``kind`` (see list_audit_kinds) and UTC days ``first`` to ``last``
+        List the workspace's audit log, newest first: ``web`` for admin changes made outside
+        chat, ``security`` for chat tool calls and panel writes. Filter by acting person, ``kind`` (see list_audit_kinds) and UTC days ``first`` to ``last``
         (YYYY-MM-DD). Admin-only.
       ''',
       'parameters': dict({
