@@ -158,7 +158,7 @@ tool calls and panel writes, newest first.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `list_audit_kinds` | admin only | List the kinds of audit entry the workspace has recorded, for the log's ``kind`` filter. |
-| `list_audit_log` | admin only | List the workspace's audit log, newest first: ``web`` for admin changes made outside chat, ``security`` for chat tool calls and panel writes. |
+| `list_audit_log` | admin only | List the workspace's audit log, newest first. |
 
 ## `channel_budgets`
 

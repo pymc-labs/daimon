@@ -13,7 +13,6 @@ from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivat
 from daimon.adapters.mcp.tools._web_admin import agent_names, now, refused, web_admin_of
 from daimon.adapters.mcp.tools._web_url import web_aware
 from daimon.core import web_admin
-from daimon.core.features.registry import FEATURES
 from daimon.core.web_admin import ModuleName, WebAdminError
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -45,10 +44,7 @@ async def _change_impl(
 ) -> WorkspaceSettingsChanged:
     actor = await web_admin_of(runtime, auth)
     if (modules is not None or default_agent is not None) and not await web_aware(runtime, auth):
-        raise ToolError(
-            f"{FEATURES['web_awareness'].name} is turned off here, so modules and "
-            "default_agent can't change. Nothing was done."
-        )
+        raise ToolError("modules and default_agent can't change here. Nothing was done.")
     await require_card(
         runtime, auth, tool_name="change_workspace_settings", origin_context_id=origin_context_id
     )

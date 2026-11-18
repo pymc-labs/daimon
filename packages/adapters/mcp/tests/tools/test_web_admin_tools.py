@@ -291,7 +291,7 @@ async def test_change_settings_when_web_app_off_then_web_settings_refused(runtim
         return False
 
     monkeypatch.setattr(settings_tool, "web_aware", off)
-    with pytest.raises(ToolError, match="turned off"):
+    with pytest.raises(ToolError, match="can.t change here"):
         await settings_tool._change_impl(
             runtime,
             make_auth(),

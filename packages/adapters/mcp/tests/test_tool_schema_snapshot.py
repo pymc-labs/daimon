@@ -63,6 +63,15 @@ _MUST_CONTAIN = {
 }
 
 
+# Tools that say "web" without meaning the web app, and why.
+_WEB_WORDS = {
+    "set_agent_builtin_tool": "the agent's web search built-in",
+    "web_fetch": "a public web page",
+    "replace_channel_file": "Microsoft's Office for the web",
+    "list_audit_log": "the stored `web` source value",
+}
+
+
 @pytest.fixture
 def schema_sessionmaker() -> async_sessionmaker[AsyncSession]:
     """Registration and introspection must not connect to a database."""
@@ -179,10 +188,11 @@ async def test_rendered_tool_schema_matches_snapshot(
     assert create.parameters["properties"]["source"]["const"] == "poll"
     assert "page_id" not in create.parameters["properties"]
 
-    named = {n for n, t in rendered.items() if re.search(r"(?i)\bweb (app|person)", str(t))}
-    assert named <= WEB_APP_TOOLS, (
-        f"{sorted(named - WEB_APP_TOOLS)} name the web app: add them to WEB_APP_TOOLS (hidden "
-        "while web_awareness is Off) or word them without it"
+    named = {n for n, t in rendered.items() if re.search(r"(?i)\bweb\b", str(t))}
+    assert named - WEB_APP_TOOLS == _WEB_WORDS.keys(), (
+        f"{sorted(named - WEB_APP_TOOLS - _WEB_WORDS.keys())} name the web: add them to "
+        "WEB_APP_TOOLS (hidden while web_awareness is Off), word them without it, or list them "
+        "in _WEB_WORDS with a reason"
     )
     assert rendered == snapshot, "rendered tool schema drifted from the committed snapshot"
 
