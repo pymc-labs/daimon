@@ -39,7 +39,7 @@ from daimon.core.turn.host_spend_cap import SpendGuard
 from daimon.core.turn.io import TurnCodecRequest, TurnIO, register_turn_codec
 from daimon.core.turn.openai_codec import PROFILE, PROFILES
 from daimon.core.turn.openai_io import OpenAITurnIO
-from daimon.core.turn.openai_late_usage import LateUsage
+from daimon.core.turn.openai_late_usage import READ_TIMEOUT_S, LateUsage
 from daimon.core.turn.openai_state import (
     OpenAIRecoveryJournal,
     OpenAIUsageRevisions,
@@ -80,6 +80,8 @@ from mux.state.lease import Lease, Slot
 from mux.state.operations import request_digest
 from mux.state.store import ERA_REF, StateStore, adopted_identity
 
+log = structlog.get_logger(__name__)
+
 #: HTTP answers that reject a session create outright: no session exists afterwards.
 #: A 409 or 429 may follow an accepted create, so those stay `outcome_unknown`.
 # Profiles whose sessions mount uploaded files, so a replacement can carry them.
@@ -114,6 +116,8 @@ class OpenAIHostRuntime(TurnRuntime):
     spend_guard: SpendGuard | None = field(default=None, kw_only=True)
     #: Re-reads an ended root turn whose usage was unknown; None never re-reads.
     late_usage: LateUsage | None = field(default=None, kw_only=True)
+    #: Bounds one late read, so a hung provider cannot hold the thread's lease.
+    late_read_timeout_s: float = field(default=READ_TIMEOUT_S, kw_only=True)
 
 
 def runtime_for(runtime: TurnRuntime | None, revision: ConfigRevision | None) -> OpenAIHostRuntime:
@@ -645,47 +649,69 @@ async def _prepare_with_runtime(
     # runtime_for admitted exactly one native model; usage is priced at its rate.
     model_id = revision.model or ""
 
+    scope, tenant_id, binding_id = request.scope, request.tenant_id, binding.id
+    sessionmaker, markup = request.deps.sessionmaker, request.deps.markup
+    user_id, channel_id, agent_id = (
+        request.external_user_id,
+        revision.channel.channel_id,
+        current.agent.id,
+    )
+    late, read_timeout_s = runtime.late_usage, runtime.late_read_timeout_s
+
     async def record(*, observation: UsageObservation) -> bool:
         if observation.session != ref or observation.thread_id is not None:
             raise ScopeViolation(ref.id, "OpenAI host usage differs from bound root session")
         infrastructure = await runtime.infrastructure(observation)
         settled = await record_provider_usage(
-            sessionmaker=request.deps.sessionmaker,
-            binding_id=binding.id,
+            sessionmaker=sessionmaker,
+            binding_id=binding_id,
             observation=observation,
-            tenant_id=request.tenant_id,
-            platform_user_id=request.external_user_id,
+            tenant_id=tenant_id,
+            platform_user_id=user_id,
             provider_price=runtime.price,
             infrastructure_usd=infrastructure,
             billing_grain="turn",
             managed_session_id=ref.id,
             model_id=model_id,
-            markup=request.deps.markup,
-            channel_id=revision.channel.channel_id,
-            agent_id=current.agent.id,
+            markup=markup,
+            channel_id=channel_id,
+            agent_id=agent_id,
         )
-        late, turn_id = runtime.late_usage, observation.turn_id
-        if observation.completeness == "unknown" and late is not None and turn_id is not None:
-            late.defer(f"{binding.id}:{observation.id}", lambda now: reread(now, turn_id))
+        turn_id = observation.turn_id
+        # Not final: unknown, or a stream or stored fallback that may be a mid-turn snapshot.
+        if not observation.final and late is not None and turn_id is not None:
+            late.defer(f"{binding_id}:{observation.id}", lambda now: reread(now, turn_id))
         return settled
 
     async def reread(now: datetime, turn_id: str) -> bool:
-        """One late read of an ended root turn, under the thread's lease; True when done."""
+        """One late read of an ended root turn, under the thread's lease.
+
+        True once the turn resource itself gave final usage, or the thread has no
+        such turn to read; a fallback value never ends the re-reads.
+        """
         bound = await store.get_binding(slot)
         if bound is None or bound.native_refs.get("session") != ref.id:
+            log.warning(
+                "late_usage.rebound",
+                turn_id=turn_id,
+                session_id=ref.id,
+                bound_session_id=None if bound is None else bound.native_refs.get("session"),
+                binding_id=binding_id,
+            )
             return True  # the thread moved to another session
         async with hold_slot(store, slot, now) as lease:
             reading = TurnPersistence(
-                store, bound, request.scope, operation_key="late-usage:" + turn_id, session_ref=ref
+                store, bound, scope, operation_key="late-usage:" + turn_id, session_ref=ref
             )
-            with reading.holding(lease):
-                values = await driver(runtime, revision, request.scope, bound).usage.reconcile_turn(
-                    request.scope, ref, turn_id
-                )
+            async with asyncio.timeout(read_timeout_s):
+                with reading.holding(lease):
+                    values = await driver(runtime, revision, scope, bound).usage.reconcile_turn(
+                        scope, ref, turn_id
+                    )
         known = [value for value in values if value.completeness != "unknown"]
         for value in known:
             await record(observation=value)
-        return bool(known) or not values
+        return any(value.final for value in values) or not values
 
     return PreparedTurn(
         admission=request.admission,

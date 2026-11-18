@@ -11,10 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can end a turn before its turn resource reports usage, and fill it in up to
   half an hour later. Daimon takes the usage the turn's completion event carries,
   else the last usage the turn reported while it ran. A turn with neither is
-  billed as unknown at first and re-read in the background for about an hour;
-  usage that turns up is billed then and counts toward spend caps. No turn waits
-  for its usage, a replayed turn keeps the counts already recorded, and a restart
-  within that hour leaves the turn unknown.
+  billed from that value at first and re-read in the background for about an
+  hour, until the turn resource itself reports usage; what it reports is billed
+  then and counts toward spend caps. No turn waits for its usage, a replayed
+  turn keeps the counts already recorded, and a restart within that hour leaves
+  the turn unfinished.
 - **An agent switched to OpenAI keeps answering there after its prompt or tools
   change.** A switch asks again only when the model or what the agent loses
   changes. An agent whose Daimon tool list was long no longer fails to start on

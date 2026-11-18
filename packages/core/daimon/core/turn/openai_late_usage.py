@@ -22,6 +22,12 @@ log = structlog.get_logger(__name__)
 #: Waits before each re-read, doubling: about an hour in all.
 DELAYS_S = (60.0, 120.0, 240.0, 480.0, 960.0, 1920.0)
 
+#: How long one late read of a turn resource may take, lease included.
+READ_TIMEOUT_S = 20.0
+
+#: Most turns waiting on a re-read at once, per process.
+MAX_PENDING = 256
+
 #: One re-read at `now`: True once the usage is known or can no longer be read.
 type Reread = Callable[[datetime], Awaitable[bool]]
 
@@ -33,15 +39,23 @@ class LateUsage:
         self,
         *,
         delays_s: Sequence[float] = DELAYS_S,
+        max_pending: int = MAX_PENDING,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._delays, self._sleep, self._clock = tuple(delays_s), sleep, clock
+        self._max_pending = max_pending
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
     def defer(self, key: str, reread: Reread) -> None:
-        """Schedule `reread` for `key` unless one is already scheduled; never waits."""
+        """Schedule `reread` for `key` unless one is already scheduled; never waits.
+
+        Past `max_pending` turns the new one is skipped and left unbilled.
+        """
         if key in self._tasks:
+            return
+        if len(self._tasks) >= self._max_pending:
+            log.warning("openai_late_usage.skipped", key=key, pending=len(self._tasks))
             return
         # A fresh context: nothing of the turn that scheduled it (its lease) carries over.
         task = asyncio.create_task(self._run(key, reread), context=contextvars.Context())

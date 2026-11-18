@@ -6,6 +6,7 @@ import asyncio
 from datetime import UTC, datetime
 
 from daimon.core.turn.openai_late_usage import DELAYS_S, LateUsage
+from structlog.testing import capture_logs
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -78,3 +79,51 @@ async def test_defer_when_called_twice_for_one_turn_then_reads_once_and_never_wa
     gate.set()
     await late.wait()
     assert reads == ["first"], reads
+
+
+async def test_defer_when_the_pending_cap_is_reached_then_skips_and_logs() -> None:
+    """Past the cap a turn is left unbilled, not queued without bound; a freed slot reopens."""
+    gate, reads = asyncio.Event(), list[str]()
+
+    async def held(delay: float) -> None:
+        await gate.wait()
+
+    late = LateUsage(delays_s=(1.0,), sleep=held, clock=lambda: NOW, max_pending=2)
+
+    def reread(name: str):
+        async def read(now: datetime) -> bool:
+            reads.append(name)
+            return True
+
+        return read
+
+    with capture_logs() as logs:
+        for name in ("a", "b", "c"):
+            late.defer(name, reread(name))
+    skipped = [entry for entry in logs if entry["event"] == "openai_late_usage.skipped"]
+    assert [entry["key"] for entry in skipped] == ["c"], logs
+    gate.set()
+    await late.wait()
+    assert sorted(reads) == ["a", "b"], reads
+    late.defer("c", reread("c"))
+    await late.wait()
+    assert "c" in reads, "a finished turn frees its slot"
+
+
+async def test_defer_when_the_key_finished_then_it_can_be_deferred_again() -> None:
+    """A later revision of the same turn schedules a fresh re-read once the first is done."""
+    reads = list[str]()
+    late = LateUsage(delays_s=(1.0,), sleep=Sleeps(), clock=lambda: NOW)
+
+    def reread(name: str):
+        async def read(now: datetime) -> bool:
+            reads.append(name)
+            return True
+
+        return read
+
+    late.defer("turn", reread("first"))
+    await late.wait()
+    late.defer("turn", reread("second"))
+    await late.wait()
+    assert reads == ["first", "second"], reads

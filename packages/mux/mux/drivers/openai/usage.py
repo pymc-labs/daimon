@@ -74,7 +74,12 @@ def billable_search(item: Mapping[str, JsonValue]) -> bool:
 
 
 def observation(
-    turn: Object, session: ResourceRef, *, revision: int, web_searches: int = 0
+    turn: Object,
+    session: ResourceRef,
+    *,
+    revision: int,
+    web_searches: int = 0,
+    final: bool = False,
 ) -> UsageObservation:
     value = turn.get("usage")
     meter = {} if value is None else object_json(value)
@@ -108,6 +113,7 @@ def observation(
         if inputs is not None and outputs is not None
         else "partial",
         observed_at=datetime.now(UTC),
+        final=final,
         web_searches=web_searches,
     )
 
@@ -134,7 +140,7 @@ class OpenAIUsage:
             "GET", f"/agents/sessions/{segment(session.id)}/turns", params=query(page)
         )
         values = [
-            await self._observe(session, await self._settled(session, turn))
+            await self._observe(session, *await self._settled(session, turn))
             for turn in objects(raw["data"])
         ]
         more = raw["has_more"]
@@ -158,25 +164,33 @@ class OpenAIUsage:
         )
         if turn.get("id") != turn_id:
             raise ValueError("usage belongs to another turn")
-        value = await self._observe(session, await self._settled(session, turn))
+        value = await self._observe(session, *await self._settled(session, turn))
         return () if value.thread_id is not None else (value,)
 
-    async def _settled(self, session: ResourceRef, turn: Object) -> Object:
-        """A resource lacking usage keeps what is known: its terminal event's, else stored.
+    async def _settled(self, session: ResourceRef, turn: Object) -> tuple[Object, bool]:
+        """The turn with usage filled in, and whether that fill is a fallback.
 
-        A fresh driver never saw the event, so a stored meter's usage stands; a
-        null read never replaces counts already revised.
+        A resource lacking usage keeps what is known: its terminal event's, else
+        stored. A fresh driver never saw the event, so a stored meter's usage
+        stands; a null read never replaces counts already revised.
         """
         if turn.get("usage") is not None:
-            return turn
+            return turn, False
         turn_id = text(turn["id"])
         noted = self._terminal.get((session, turn_id)) if turn.get("status") in _ENDED else None
         if noted is None:
             stored = await self._revisions.latest(session, "openai:turn:" + turn_id)
             noted = stored.get("usage") if stored is not None else None
-        return turn if noted is None else {**turn, "usage": noted}
+        return (turn, False) if noted is None else ({**turn, "usage": noted}, True)
 
-    async def _observe(self, session: ResourceRef, turn: Object) -> UsageObservation:
+    async def _observe(
+        self, session: ResourceRef, turn: Object, fallback: bool = False
+    ) -> UsageObservation:
+        """`final` only for an ended turn whose resource itself reported usage.
+
+        A fallback (stream or stored) value may be a mid-turn snapshot, so the host
+        keeps re-reading until the resource answers.
+        """
         if turn.get("session_id") != session.id:
             raise ValueError("usage belongs to another session")
         observation(turn, session, revision=1)
@@ -188,7 +202,8 @@ class OpenAIUsage:
         if searches:
             meter["web_searches"] = searches
         rev = await self._revisions.revise(session, "openai:turn:" + text(turn["id"]), meter)
-        return observation(turn, session, revision=rev, web_searches=searches)
+        final = not fallback and turn.get("usage") is not None and turn.get("status") in _ENDED
+        return observation(turn, session, revision=rev, web_searches=searches, final=final)
 
     async def _searches(self, session: ResourceRef, turn: Object) -> int:
         """Billable searches of an ended turn, read from its items.

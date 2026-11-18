@@ -615,6 +615,7 @@ async def test_reconcile_turn_when_resource_lacks_usage_then_takes_the_terminal_
     (root,) = await driver.usage.reconcile_turn(SCOPE, REF, "root")
     assert root.completeness == "measured", root
     assert (root.input_tokens, root.output_tokens) == (100, 20), root
+    assert not root.final, "a usage the resource never reported can be a mid-turn snapshot"
     assert _root_reads(transport) == 1, "the event's usage needs no re-read"
 
 
@@ -662,6 +663,7 @@ async def test_reconcile_turn_when_an_ended_turn_lacks_usage_then_reads_it_once(
     transport.responses["GET", _ROOT] = {**turn(), "usage": _usage()}
     (late,) = await driver.usage.reconcile_turn(SCOPE, REF, "root")
     assert late.completeness == "measured" and late.revision == ended.revision + 1, late
+    assert late.final and not ended.final, "only the resource's own usage is final"
 
 
 @pytest.mark.asyncio
@@ -686,6 +688,8 @@ async def test_reconcile_turn_when_a_fresh_driver_replays_then_the_priced_revisi
     (priced,) = await first.usage.reconcile_turn(SCOPE, REF, "root")
     (replayed,) = await fresh().usage.reconcile_turn(SCOPE, REF, "root")
     assert (replayed.revision, replayed.input_tokens) == (priced.revision, 100), replayed
+    assert not replayed.final, "stored counts are a fallback, not the resource's answer"
     transport.responses["GET", _ROOT] = {**turn(), "usage": {**_usage(), "output_tokens": 30}}
     (filled,) = await fresh().usage.reconcile_turn(SCOPE, REF, "root")
     assert (filled.revision, filled.output_tokens) == (priced.revision + 1, 30), filled
+    assert filled.final, filled
