@@ -1301,6 +1301,19 @@ async def test_a_place_with_web_search_off_leaves_it_out_unasked(template, monke
     assert "builtin_tool:web_search" not in selected.target_spec.declared_drops
 
 
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
+async def test_a_tool_whose_feature_is_off_here_leaves_the_allowlist_unasked(template, monkeypatch):
+    """A feature Off at the place hides its Daimon tools from a native turn, as from Claude's."""
+    from daimon.core.features.model_input import SessionToolset
+
+    request, *_ = template
+    hidden = property(lambda _: frozenset({"search_tools"}))
+    monkeypatch.setattr(SessionToolset, "hidden_daimon_tools", hidden)
+    selected, _ = await _prepared(request)
+    assert _connection(selected).tool_policy["allowed_tools"] == ["call_tool"], "never listed"
+    assert "mcp_tool:daimon-mcp:search_tools" not in selected.target_spec.declared_drops
+
+
 @pytest.mark.parametrize(
     "switched_request",
     [PARAMS, {**PARAMS, "backend_model": "gemini-4-argon"}],
