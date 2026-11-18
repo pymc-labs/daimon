@@ -23,15 +23,6 @@ const client = new QueryClient({
   },
 })
 
-// A tab open across a deploy asks for page chunks the new build removed, and the page goes blank: load the new build.
-// Once in 10s, so a chunk that keeps failing shows the error instead of reloading forever.
-window.addEventListener("vite:preloadError", () => {
-  const last = Number(sessionStorage.getItem("chunk-reload"))
-  if (Date.now() - last < 10_000) return
-  sessionStorage.setItem("chunk-reload", String(Date.now()))
-  location.reload()
-})
-
 // `npm run dev:mock`: the API runs in a service worker with mock data; never in a production build.
 if (import.meta.env.MODE === "mock") {
   const { worker } = await import("./mock/browser")
