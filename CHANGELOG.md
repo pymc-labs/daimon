@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `marimo_notebooks` uploads as `marimo-notebooks`, and older copies upload again.
 - **Provider failures log the provider's reason.** Turn, session and sync
   failure logs carry the redacted provider code, field and message.
+- **The first GPT or Gemini turn after a restart no longer stalls other turns.**
+  Workers load provider runtimes at startup, and log the blocking code's stack
+  when anything holds the event loop over a second.
 
 - **An agent's page shows it is loading.** While a slow agent loaded, the page
   stayed blank.

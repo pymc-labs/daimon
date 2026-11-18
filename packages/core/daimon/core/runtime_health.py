@@ -5,10 +5,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import sys
+import threading
+import time
+import traceback
 import uuid
 from collections import Counter
 from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import asynccontextmanager, contextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
 from typing import TypedDict, cast
 
 import httpx
@@ -209,6 +213,45 @@ async def _run_health(
             next_log = window_start + interval_s
 
 
+@asynccontextmanager
+async def stall_watch(stall_s: float = 1.0) -> AsyncIterator[None]:
+    """Log each stall (one callback blocking the loop over `stall_s`): its length and stack."""
+    beat, stop = [time.monotonic()], threading.Event()
+
+    async def tick() -> None:
+        while True:
+            beat[0] = time.monotonic()
+            await asyncio.sleep(stall_s / 10)
+
+    def watch(loop_thread: int) -> None:
+        stalled, stack = 0.0, ""
+        while not stop.wait(stall_s / 4):
+            last = beat[0]
+            if stalled and last != stalled:
+                structlog.get_logger().warning(
+                    "runtime.loop_stalled", stalled_ms=round((last - stalled) * 1000), stack=stack
+                )
+                stalled = 0.0
+            if not stalled and time.monotonic() - last > stall_s:
+                stalled = last
+                frame = sys._current_frames().get(loop_thread)  # pyright: ignore[reportPrivateUsage]
+                # Import machinery frames would crowd out the code that imported.
+                frames = [
+                    f for f in traceback.extract_stack(frame) if not f.filename.startswith("<")
+                ]
+                stack = "".join(traceback.format_list(frames))
+
+    ticker = asyncio.create_task(tick())
+    threading.Thread(target=watch, args=(threading.get_ident(),), daemon=True).start()
+    try:
+        yield
+    finally:
+        stop.set()
+        ticker.cancel()
+        with suppress(asyncio.CancelledError):
+            await ticker
+
+
 def log_runtime_started(process: str) -> None:
     """Once per process start: which process, and which build."""
     structlog.get_logger().info("runtime.started", process=process, release=current_release())
@@ -221,11 +264,15 @@ async def runtime_health(
     interval_s: float,
     turns: Callable[[], tuple[int, int | None]] | None = None,
 ) -> AsyncIterator[None]:
-    """Start the process health heartbeat; interval zero disables it.
+    """Start the process health heartbeat and stall watch; interval zero disables both.
 
-    Logs `runtime.started` once on entry, whatever the interval.
+    Logs `runtime.started` and preloads provider runtimes once on entry, whatever the interval.
     """
+    # Local: the turn package imports this module.
+    from daimon.core.turn.runtimes import preload_channel_runtimes
+
     log_runtime_started(process)
+    await preload_channel_runtimes()
     discord_loggers = (
         [logging.getLogger("discord.http"), logging.getLogger("discord.webhook.async_")]
         if process == "discord"
@@ -241,7 +288,10 @@ async def runtime_health(
         else None
     )
     try:
-        yield
+        async with AsyncExitStack() as stack:
+            if interval_s > 0:
+                await stack.enter_async_context(stall_watch())
+            yield
     finally:
         if rate_limit_filter is not None:
             for discord_logger in discord_loggers:
