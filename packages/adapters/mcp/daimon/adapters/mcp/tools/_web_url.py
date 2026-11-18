@@ -22,7 +22,12 @@ WebUrl = Annotated[str | None, Field(exclude_if=lambda value: value is None)]
 async def web_aware(runtime: McpRuntime, auth: AuthIdentity) -> bool:
     """Whether `web_awareness` is On at every place the call may run (`caller_places`);
     False when that can't be read."""
-    assignment = Assignment(runtime.deployment_default, runtime.client, runtime.resolver_cache)
+    # An agent key is its own agent: never the one assigned to its channel.
+    assignment = (
+        None
+        if auth.agent_id is not None
+        else Assignment(runtime.deployment_default, runtime.client, runtime.resolver_cache)
+    )
     try:
         for place in await caller_places(runtime, auth, None):
             if not await aware_at(runtime.session_factory, runtime.settings, place, assignment):

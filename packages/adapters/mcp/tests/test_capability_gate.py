@@ -8,11 +8,12 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.middleware import capability_gate
 from daimon.adapters.mcp.middleware.capability_gate import CapabilityGateMiddleware, caller_places
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.server import create_mcp_app
@@ -175,14 +176,18 @@ async def test_an_agent_key_when_its_channel_turns_the_feature_off_is_refused(
     mcp = await _app(sessionmaker)
     tenant_id = await _tenant(sessionmaker)
     await _set(sessionmaker, tenant_id, "github", "off", FeatureTarget("channel", channel_id="c1"))
+    await _set(sessionmaker, tenant_id, "web_awareness", "off", FeatureTarget("agent", "agent_k"))
+    monkeypatch.setattr(capability_gate, "_key_agent_id", AsyncMock(return_value="agent_k"))
     agent_id = str(uuid.uuid4())
     _as(monkeypatch, tenant_id, platform="discord", agent_id=agent_id, bound_channel_id="c1")
     async with Client(mcp) as client:
         bound = await _error(client, "github_connect", {})
         _as(monkeypatch, tenant_id, platform="discord", agent_id=agent_id, bound_channel_id="c2")
         elsewhere = await _error(client, "github_connect", {})
+        web = await _error(client, "list_web_people", {})
     assert OFF in bound, f"the key bound to the Off channel reached github_connect: {bound!r}"
     assert OFF not in elsewhere, f"a key in another channel was refused: {elsewhere!r}"
+    assert OFF in web, f"the key's agent has the web app Off but reached it: {web!r}"
 
 
 async def test_the_tool_list_when_a_feature_is_off_drops_its_tools_for_an_external_client(
