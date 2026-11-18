@@ -933,11 +933,13 @@ async def _prepare_session_for_turn_locked(
                 and not fresh_start
                 and not admission.memory_read_only
                 and admission.hold is None
+                and not admission.relay_scoped
                 and row.budget_channel_id in ("", admission.budget_channel_id)
             ):
                 # No readable configuration to compare: the session is gone or
                 # unreadable, which the turn's own recovery handles. Bind it as
-                # every pre-continuity turn did.
+                # every pre-continuity turn did. A relay agent's session is never
+                # reused unseen: it falls to the checks below and is replaced.
                 return prepared(
                     ma_session_id=row.ma_session_id,
                     mapping_id=row.id,
@@ -1157,7 +1159,15 @@ async def _prepare_session_for_turn_locked(
         if isinstance(decision, ReplaceSession):
             # A handoff carries the old work only to an agent that could read
             # it itself from here; otherwise the new agent starts with nothing.
-            carry = not handed_over or await _destination_may_carry(deps, admission, row)
+            # A relay turn's work never moves to another session or agent, and a
+            # relay agent takes none in: the old session ran held with `:relay`
+            # in its hold key (`mcp_hold.hold_key`).
+            relay_source = recorded is not None and (recorded.mcp_hold or "").endswith(":relay")
+            carry = not handed_over or (
+                not admission.relay_scoped
+                and not relay_source
+                and await _destination_may_carry(deps, admission, row)
+            )
             await lock_session_mutation(db, row.ma_session_id)
             observed = None
             if source_exists:
