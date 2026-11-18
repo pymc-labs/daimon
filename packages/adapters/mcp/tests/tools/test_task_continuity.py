@@ -34,7 +34,11 @@ from daimon.core.stores.domain import Platform, Role
 from daimon.core.stores.scoped_config_read import list_propagations_for_tenant
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.task_continuations import list_pending_continuations
-from daimon.core.stores.thread_agent_bindings import create_binding, get_binding
+from daimon.core.stores.thread_agent_bindings import (
+    create_binding,
+    get_binding,
+    take_handoff_summary,
+)
 from daimon.core.stores.thread_sessions import create_thread_session, get_live_thread_session
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.turn_origin import turn_origin
@@ -43,7 +47,7 @@ from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from mux.testing.drivers.anthropic.ma_models import ma_model_config
-from pydantic import PostgresDsn, SecretStr
+from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _DESTINATION_ID = "agt_research"
@@ -2208,3 +2212,118 @@ async def test_only_a_persons_own_message_starts_the_destination_now(
         assert result.continuation_recorded is False
         assert result.confirmation.startswith("research-bot is taking over from your next message.")
         assert "First:" not in result.confirmation
+
+
+_RELAY_APP = "https://daimon.example.com/mcp"
+
+
+def _relay_server() -> list[dict[str, str]]:
+    from daimon.core.mcp_identity import relay_url
+
+    return [{"type": "url", "name": "grove", "url": relay_url(_RELAY_APP, "grove")}]
+
+
+@pytest.mark.parametrize("case", ["relay_channel", "relay_dm", "to_relay", "plain"])
+async def test_a_relay_agent_hands_nothing_off_and_is_handed_nothing(
+    case: str,
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A relay agent (channel turn: relay hold; DM: relay server) refuses to hand off. Handing
+    a thread to a relay agent binds it but leaves no summary or queued work; between agents with
+    no relay server the summary and work are kept as before."""
+    from daimon.core.turn_hold import TurnHold
+
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    destination = ma_agent(
+        id=_DESTINATION_ID,
+        name=_DESTINATION_NAME,
+        model=ma_model_config("claude-sonnet-5", speed="standard"),
+        metadata={
+            MA_METADATA_KEY_TENANT: str(tenant.id),
+            MA_METADATA_KEY_NAME: _DESTINATION_NAME,
+        },
+        mcp_servers=_relay_server() if case == "to_relay" else [],
+    ).model_dump(mode="json")
+    responder = ma_agent(
+        id=_RESPONDER_ID,
+        name="daimon",
+        model=ma_model_config("claude-sonnet-5", speed="standard"),
+        metadata={MA_METADATA_KEY_TENANT: str(tenant.id), MA_METADATA_KEY_NAME: "daimon"},
+        mcp_servers=_relay_server() if case == "relay_dm" else [],
+    ).model_dump(mode="json")
+    runtime = _runtime(committing_sessionmaker, _client([destination, responder]))
+    runtime.settings.mcp.public_url = HttpUrl(_RELAY_APP)  # pyright: ignore[reportAttributeAccessIssue]
+    auth = AuthIdentity(
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        platform="discord",
+        platform_user_id="42",
+        chat_session_id="test-session",
+        hold=(
+            TurnHold("discord", "C_PARENT", client=False, relay=True)
+            if case == "relay_channel"
+            else None
+        ),
+    )
+
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_PARENT",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.USER,
+        chat_session_id="test-session",
+        sender_foreign=False,
+        shared_channel=False,
+        platform_message_id="M1",
+    ) as origin:
+        await _asked_by_person(committing_sessionmaker, origin.id)
+        call = _hand_off_task_impl(
+            runtime,
+            auth,
+            origin_context_id=str(origin.id),
+            agent_id=_DESTINATION_ID,
+            continuation="finish the churn writeup",
+            summary="We decided to drop the annual plan and keep monthly billing.",
+        )
+        if case in ("relay_channel", "relay_dm"):
+            with pytest.raises(ToolError, match="can't hand"):
+                await call
+        else:
+            await call
+
+    async with committing_sessionmaker() as session:
+        binding = await get_binding(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="C_PARENT",
+            thread_id="T_THREAD",
+        )
+        pending = await list_pending_continuations(
+            session, tenant_id=tenant.id, platform="discord", thread_id="T_THREAD"
+        )
+        summary = await take_handoff_summary(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="C_PARENT",
+            thread_id="T_THREAD",
+            responder_ma_agent_id=_DESTINATION_ID,
+            account_id=caller.id,
+        )
+    if case in ("relay_channel", "relay_dm"):
+        assert binding is None and pending == [] and summary is None
+    elif case == "to_relay":
+        assert binding is not None and summary is None and pending == []
+    else:
+        assert binding is not None and summary is not None
+        assert len(pending) == 1
