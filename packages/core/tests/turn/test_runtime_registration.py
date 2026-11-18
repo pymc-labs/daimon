@@ -137,6 +137,34 @@ def test_invalid_turn_refuses_before_loading_a_provider(registry, monkeypatch, i
         registry.build_channel_runtime(request)
 
 
+def test_granted_tariffs_are_a_read_only_snapshot_built_without_a_runtime(registry, monkeypatch):
+    import uuid
+    from datetime import date
+    from decimal import Decimal
+
+    from daimon.core.pricing import ProviderPrice
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("tariff lookup constructed a runtime")
+
+    price = ProviderPrice(
+        "openai", "gpt-6-luna", date(2026, 10, 11), Decimal("1"), Decimal("2"), Decimal("0.5")
+    )
+    source = {("openai", "gpt-6-luna"): price}
+    grant = SimpleNamespace(source_agent_id=uuid.uuid4())
+    monkeypatch.setattr(registry, "_MODULES", {})
+    registry._BACKENDS[PROFILE] = HostedBackend(
+        runtime=forbidden, agent_grants=lambda tenant: (grant,), tariffs=lambda: source
+    )
+    prices = registry.agent_granted_prices("tenant")
+    assert dict(prices) == source
+    source.clear()
+    assert prices[("openai", "gpt-6-luna")] is price
+    with pytest.raises(TypeError):
+        prices[("openai", "gpt-6-luna")] = price  # type: ignore[index]
+    assert dict(registry.agent_granted_prices("tenant", uuid.uuid4())) == {}
+
+
 def test_resource_authorization_rereads_the_provider_validated_manifest_each_time(registry):
     grants = SimpleNamespace(
         account_id="caller",
