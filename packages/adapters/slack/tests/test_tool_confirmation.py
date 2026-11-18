@@ -29,7 +29,7 @@ from daimon.core.posted_controls.confirmation import (
 )
 from daimon.core.posted_controls.lifecycle import drain_card_edits
 from daimon.core.tool_safety import ToolCall
-from daimon.testing.adapters.slack.notices import shown_text
+from daimon.testing.slack_notices import shown_text
 from slack_sdk.web.async_client import AsyncWebClient
 
 

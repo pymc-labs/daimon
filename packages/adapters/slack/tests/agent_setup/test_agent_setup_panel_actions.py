@@ -71,9 +71,9 @@ from daimon.core.stores.security_audit import list_events
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.core.stores.thread_sessions import create_thread_session
-from daimon.testing.adapters.slack.notices import shown_text
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
+from daimon.testing.slack_notices import shown_text
 from daimon.testing.turn_fakes import deps_for
 from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
