@@ -19,7 +19,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import list_running_origins
 from daimon.adapters.mcp.tools._session_gate import session_card_gap
 from daimon.core.features.registry import limit_int
-from daimon.core.features.snapshot import FeaturePlace, deployment_on, resolve_features
+from daimon.core.features.snapshot import FeaturePlace, deployment_on_everywhere, resolve_features
 from daimon.core.outbound.mentions import (
     Platform,
     RenderedPost,
@@ -434,10 +434,8 @@ async def prepare_posts(
         so_far, approved = await lock_tally(session, tenant_id=auth.tenant_id, turn_key=scope.key)
         if rules.budget:
             # A provider turn asks on Daimon's host call card where that is on.
-            carded = (
-                not auth.no_confirmation_surface
-                or card_satisfied(auth)
-                or deployment_on(runtime.settings, "host_call_gate", auth.platform or "")
+            carded = not auth.no_confirmation_surface or deployment_on_everywhere(
+                runtime.settings, "host_call_gate", (auth.platform or "",)
             )
             _gate(scope, so_far, approved, call, plan or call.counts(), rules, auth, carded=carded)
         await save_tally(

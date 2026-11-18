@@ -251,15 +251,6 @@ RETIRED_GATES: Final[frozenset[str]] = frozenset(
 )
 
 
-def host_call_carded_tools() -> frozenset[str]:
-    """Gated tools the host call gate cards on a turn with no card of its own: every one.
-
-    A reach approval runs in the wake turn after the press, which also counts what the
-    asking turn reached (`tools._outbound.approve`).
-    """
-    return confirmation_gated_tools()
-
-
 def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
     """Project authoritative backend-selection eligibility into session controls."""
     return (

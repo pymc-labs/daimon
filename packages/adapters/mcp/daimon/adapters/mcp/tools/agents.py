@@ -66,6 +66,7 @@ from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
 from daimon.core.agent_ownership import agent_name_lock, member_copies_lock
 from daimon.core.anthropic_guard import anthropic_configured
 from daimon.core.authz import Surface
+from daimon.core.confirmation import loss_word
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.mcp_merge import DAIMON_MCP_SERVER_NAME, get_reserved_mcp_rejection
@@ -76,6 +77,7 @@ from daimon.core.defaults.metadata import (
 from daimon.core.defaults.skills import resolve_custom_skill_titles, resolve_skill_names
 from daimon.core.errors import DaimonError, DefaultsError
 from daimon.core.features import model_input
+from daimon.core.finer_drops import MODEL_SETTING_DROPS
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_attach import (
     McpServerReplaceRefusedError,
@@ -2199,7 +2201,10 @@ async def _request_agent_backend_switch_impl(
             shared_thread_limits=preview.shared_thread_limits,
             cost_line=preview.cost_line,
             summary=summary,
-            declared_drops=preview.declared_drops,
+            # A model setting reads as its words, never its bare token.
+            declared_drops=tuple(
+                loss_word(d) if d in MODEL_SETTING_DROPS else d for d in preview.declared_drops
+            ),
             agent_settings=settings_line(preview.target_settings)
             if preview.target_settings
             else None,

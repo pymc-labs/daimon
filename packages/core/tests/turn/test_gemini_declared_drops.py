@@ -183,7 +183,13 @@ async def test_ordinary_confirmed_target_native_readback_and_two_real_host_turns
     indirect=True,
 )
 async def test_portable_caller_mcp_and_model_losses_reach_native_gemini_preparation(ordinary):
-    assert ordinary[2].target_spec.declared_drops == ("mcp", "memory", "model_controls", "sandbox")
+    assert ordinary[2].target_spec.declared_drops == (
+        "effort_setting",
+        "fast_mode",
+        "mcp",
+        "memory",
+        "sandbox",
+    )
     await assert_ordinary_native_preparation_and_turns(ordinary)
 
 

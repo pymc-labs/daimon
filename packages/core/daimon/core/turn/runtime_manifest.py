@@ -742,18 +742,14 @@ async def _capture_source_capabilities(
             # stays unavailable (the server refuses it for provider-turn credentials).
             # A retired gate's stored ask runs.
             from daimon.core.features.snapshot import deployment_on_everywhere
-            from daimon.core.tool_safety import (
-                RETIRED_GATES,
-                confirmation_gated_tools,
-                host_call_carded_tools,
-            )
+            from daimon.core.tool_safety import RETIRED_GATES, confirmation_gated_tools
 
             settings = request.deps.settings
             gated, carded = confirmation_gated_tools(), RETIRED_GATES
             if settings is not None and deployment_on_everywhere(
                 settings, "host_call_gate", request.answers_on or (request.platform,)
             ):
-                carded |= host_call_carded_tools()
+                carded |= gated
             permissions = {
                 # A carded tool runs (Daimon posts its card) unless the agent
                 # turned it off, which stays a named loss as before.
@@ -1098,20 +1094,14 @@ def source_instructions_preserved(required: str | None, system: str | None) -> b
     )
 
 
-#: An agent read a bare `model_controls` as "I can't change models" and refused a
-#: switch its tools could make, so the Claude-only settings are named as such.
-_UNAVAILABLE_WORDS: Final[Mapping[str, str]] = {
-    "model_controls": "Claude-only model settings (changing models still works)",
-    "effort_setting": "the Claude effort setting (changing models still works)",
-}
-
-
 def unavailable_line(drops: Sequence[str], names: Mapping[str, str] | None = None) -> str:
     """The agent's own line of what its copy lacks: a skill by its name, never its id."""
+    from daimon.core.confirmation import loss_word
+
     words = (
         f"skill:{(names or {}).get(d.removeprefix('skill:'), d.removeprefix('skill:'))}"
         if d.startswith("skill:")
-        else _UNAVAILABLE_WORDS.get(d, d)
+        else loss_word(d)
         for d in drops
     )
     return "Unavailable capabilities: " + ", ".join(words) + "."
@@ -1142,27 +1132,28 @@ def _source_extension_obligation(
     native_target: AgentSpec | None = None,
     foreign_target: bool = False,
     target_effort: Effort | None = None,
-) -> Literal["model_controls", "effort_setting", "source_definition"] | None:
+) -> tuple[Literal["fast_mode", "inference_region", "effort_setting", "source_definition"], ...]:
+    """What the source's extension needs the target to carry; empty when it carries all."""
     if extension.version != 1:
-        return "source_definition"
+        return ("source_definition",)
     if extension.namespace == MODEL_CONFIG_NAMESPACE:
         from mux.drivers.anthropic import AgentModelConfig
 
         try:
             native = AgentModelConfig.model_validate(dict(extension.value))
         except ValueError:
-            return "source_definition"
+            return ("source_definition",)
         if native_target is not None and extension in (native_target.extensions or ()):
             model_id = native.model if isinstance(native.model, str) else native.model.id
             if model_id != native_target.model.id:
-                return "source_definition"
+                return ("source_definition",)
             profile = get_profile(backend_selection(native_target.model.provider).profile)
             if any(
                 offered.namespace == extension.namespace and offered.version == extension.version
                 for offered in profile.extensions
             ):
                 # The owning native compiler emits the complete unchanged model object.
-                return None
+                return ()
         model = extension.value.get("model")
         if isinstance(model, dict):
             # Unset fields and Claude's defaults (as the panel saves them) are no loss.
@@ -1172,33 +1163,26 @@ def _source_extension_obligation(
                 if (value.get("type") if isinstance(value, dict) else value)
                 not in (None, {"speed": "standard", "effort": "high"}.get(key))
             }
-            if set(model) <= {"id", "speed"} and model.get("speed") is None:
-                return None
-            # The target carries effort and the agent states its own there; speed stays
-            # a loss on every other provider.
-            if (
-                foreign_target
-                and target_effort is not None
-                and set(model) <= {"id", "speed", "effort"}
-                and model.get("speed") is None
-            ):
-                return None
-            if foreign_target:
-                # Effort alone is a named loss of its own: a provider that takes no
-                # effort (a named agent) leaves out exactly that setting.
-                if set(model) <= {"id", "speed", "effort"} and (
-                    model.get("speed") is None and model.get("effort") is not None
-                ):
-                    return "effort_setting"
-                return "model_controls"
-        return "source_definition"
+            if not foreign_target:
+                return (
+                    ()
+                    if set(model) <= {"id", "speed"} and model.get("speed") is None
+                    else ("source_definition",)
+                )
+            # Each lost control is named on its own; an effort the target carries is no loss.
+            return (
+                *(("fast_mode",) if model.get("speed") is not None else ()),
+                *(("inference_region",) if model.get("inference_geo") is not None else ()),
+                *(("effort_setting",) if model.get("effort") and target_effort is None else ()),
+            )
+        return ("source_definition",)
     if (
         extension.namespace == MULTIAGENT_NAMESPACE
         and extension.value == {"clear": True}
         or extension.namespace == AGENT_CREATE_NULLS_NAMESPACE
     ):
-        return None
-    return "source_definition"
+        return ()
+    return ("source_definition",)
 
 
 def source_translations(source: BackendAgent, profile_id: str) -> tuple[Capability, ...]:
@@ -1380,17 +1364,17 @@ def classify_source_obligations(
             continue
         else:
             foreign_target = target is not None and target.model.provider != spec.model.provider
-            obligation = _source_extension_obligation(
+            for obligation in _source_extension_obligation(
                 extension,
                 native_target=target if not foreign_target else None,
                 foreign_target=foreign_target,
                 target_effort=target_effort,
-            )
-            if obligation is not None and not (
-                obligation in ("model_controls", "effort_setting")
-                and (obligation in drops or FINER_DROPS.get(obligation) in drops)
             ):
-                missing.add(obligation)
+                if not (
+                    obligation in FINER_DROPS
+                    and (obligation in drops or FINER_DROPS[obligation] in drops)
+                ):
+                    missing.add(obligation)
     profile = get_profile(backend_selection(spec.model.provider).profile)
     tools_required = bool(
         spec.tools or any(item.value.get("tools") for item in spec.extensions or ())

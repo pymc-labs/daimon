@@ -12,24 +12,43 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal, cast
 
 import jwt as pyjwt
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.confirmed_call import host_confirmed_call
-from daimon.adapters.mcp.middleware.host_call_gate import MISMATCH_TEXT, HostCallGate
+from daimon.adapters.mcp.middleware.host_call_gate import (
+    MISMATCH_TEXT,
+    REACH_PLAN_TEXT,
+    HostCallGate,
+)
 from daimon.adapters.mcp.middleware.mcp_identity import IdentityMiddleware
+from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._outbound import TurnScope, approve
 from daimon.core import host_calls
+from daimon.core.authz import Subject
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
+from daimon.core.confirmation import ServerSkillUpdateCard, confirmed_tools_for_turn
 from daimon.core.host_calls import ConfirmedCallRunner, confirmed_call_prefix, run_confirmed_calls
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.outbound.reach import ReachPlan, ReachTally, turn_tally_key
 from daimon.core.session_seal import SEAL_CLAIM
+from daimon.core.stores import agent_tool_rules
 from daimon.core.stores.domain import Role
 from daimon.core.stores.host_call_cards import HostCallCardRow, list_cards
 from daimon.core.stores.mcp_tokens import create_mcp_token_row, get_mcp_token
+from daimon.core.stores.reach_tallies import lock_tally, save_tally
 from daimon.core.stores.turn_origins import create_origin, get_session_origin
-from daimon.core.tool_safety import CONFIRMED_DAIMON_TOOLS, confirmation_gated_tools
+from daimon.core.tool_safety import (
+    CONFIRMED_DAIMON_TOOLS,
+    DAIMON_SERVER_NAME,
+    ToolCall,
+    ToolSafetyPolicy,
+    confirmation_gated_tools,
+)
+from daimon.core.turn.approvals import agent_rule_lookup, interactive_decider
+from daimon.core.turn.unattended_capabilities import protected_tools
 from daimon.core.turn_origin import ExecutionFlags, current_execution_origin_id, execution_origin
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from fastmcp import Client, FastMCP
@@ -46,6 +65,7 @@ _URL = "https://mcp.example.com/mcp"
 _USER = "user-1"
 _MA_AGENT = "agent_x"
 _THREAD = "thread-1"
+_CHANNEL = "channel-1"
 _MESSAGE = "msg-1"
 
 
@@ -107,7 +127,8 @@ class Rig:
         for name in self.extra:
             field = CONFIRMED_DAIMON_TOOLS.get(name)
             properties = {} if field is None else {field: {"type": "string"}}
-            stub = _Stub(name=name, parameters={"type": "object", "properties": properties})
+            schema = {"type": "object", "properties": properties, "additionalProperties": True}
+            stub = _Stub(name=name, parameters=schema)
             stub._ran = self._record  # pyright: ignore[reportPrivateUsage]
             server.add_tool(stub)
         # The stock proxy: it re-enters the middleware with the inner tool's name.
@@ -175,7 +196,7 @@ async def rig(
             tenant_id=tenant.id,
             account_id=account.id,
             platform="discord",
-            parent_channel_id="channel-1",
+            parent_channel_id=_CHANNEL,
             thread_id=_THREAD,
             responder_ma_agent_id=_MA_AGENT,
             responder_name="Researcher",
@@ -250,10 +271,12 @@ async def _card(rig: Rig) -> HostCallCardRow:
 _ARGS = {"allowance_id": "a1"}
 
 
-async def _approved(rig: Rig, args: dict[str, Any] = _ARGS) -> uuid.UUID:
+async def _approved(
+    rig: Rig, args: dict[str, Any] = _ARGS, name: str = "delete_allowance"
+) -> uuid.UUID:
     """Ask for a gated call and press Approve on its card, as the requester does."""
     _attach(rig)
-    await _call(rig, rig.identity(), "delete_allowance", args)
+    await _call(rig, rig.identity(), name, args)
     card = await _card(rig)
 
     async def admin(_: str) -> bool:
@@ -347,43 +370,121 @@ async def test_ask_refuses_when_the_call_cannot_be_tied_to_a_live_turn(
 _REACH = {"threads": 3, "places": 2, "people": 0, "where": "#general and #news"}
 
 
+_DIGEST = "a" * 64
+
+
+#: Gated tools the rig serves with real bodies; the rest are stubs.
+_REAL_TOOLS = {"delete_allowance", "revoke_web_link", "approve_reach"}
+
+
 #: Every tool that needs a card, with arguments its stub takes.
 _GATED_ARGS = {
     "delete_allowance": _ARGS,
     "revoke_web_link": {"kind": "all"},
     "approve_reach": _REACH,
+    # What these cards need to read as a configuration change.
+    "request_channel_pin": {"preview_digest": _DIGEST, "expected_revision": 0, "model": "m"},
+    "request_channel_pin_clear": {"preview_digest": _DIGEST, "expected_revision": 1},
+    "request_provider_allowlist": {
+        "preview_digest": _DIGEST,
+        "expected_revision": "r1",
+        "providers": ["openai"],
+    },
 }
 
 
-#: Tools Claude's session runs without a card under that policy (`always_allow`).
-_UNCARDED = {
-    "off": {"add_server_skill", "add_skill", "microsoft_write", "set_routine_sandbox_tools"},
-    "on": {"set_routine_sandbox_tools"},
-}
+async def skill_update(_: ToolCall) -> ServerSkillUpdateCard:
+    return ServerSkillUpdateCard(name="s", version="1", new_version="2", changes={})
 
 
-@pytest.mark.parametrize("policy", ["off", "on"], ids=["safety_off", "safety_on"])
+async def _claude_outcome(
+    rig: Rig, policy: ToolSafetyPolicy, name: str, args: dict[str, Any]
+) -> str:
+    """What Claude's own decider does with the call: 'asked', 'ran' or 'refused'."""
+    asked: list[object] = []
+
+    async def confirm(prompt: object) -> Literal["denied"]:
+        asked.append(prompt)
+        return "denied"
+
+    deps = SimpleNamespace(backend_selection_enabled=True, microsoft_send=True, tool_safety=policy)
+    decide = interactive_decider(
+        policy,
+        requester_platform_user_id=_USER,
+        confirm=confirm,  # pyright: ignore[reportArgumentType]
+        trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+        confirmed_tools=confirmed_tools_for_turn(deps) | protected_tools(policy),  # pyright: ignore[reportArgumentType]
+        rules_for=agent_rule_lookup(
+            rig.sessions,
+            tenant_id=rig.tenant_id,
+            agent_id=_MA_AGENT,
+            server_urls={DAIMON_SERVER_NAME: _URL},
+            also_urls={DAIMON_SERVER_NAME: _URL},
+            channel_id=_CHANNEL,
+        ),
+        daimon_rules=True,
+        # Claude's card shows the skill's diff; a host card shows the call's own arguments.
+        skill_update_for=skill_update,
+    )
+    call = ToolCall(
+        tool_use_id="claude", server_name=DAIMON_SERVER_NAME, tool_name=name, input=args
+    )
+    result = await decide(call)
+    return "ran" if result.allow else "asked" if asked else "refused"
+
+
+async def _set_rule(rig: Rig, name: str, rule: Literal["ask", "deny"], channel: str | None) -> None:
+    async with rig.sessions.begin() as session:
+        await agent_tool_rules.set_rule(
+            session,
+            tenant_id=rig.tenant_id,
+            agent_id=_MA_AGENT,
+            agent_name="Researcher",
+            tool_key=f"{DAIMON_SERVER_NAME}/{name}",
+            channel_id=channel,
+            server_url=_URL,
+            rule=rule,
+            set_by="admin",
+            actor=Subject(is_admin=True),
+        )
+
+
+@pytest.mark.parametrize(
+    ("safety", "rule"),
+    [("off", None), ("on", None), ("on", "ask"), ("on", "channel_deny")],
+)
 @pytest.mark.parametrize("name", sorted(confirmation_gated_tools()))
-async def test_each_gated_tool_asks_and_runs_as_on_claude(rig: Rig, name: str, policy: str) -> None:
-    """OpenAI and Gemini turns share this credential. Each gated tool is carded where
-    Claude's session asks, then runs once after its requester's press; elsewhere it
-    runs at once, as on Claude."""
-    rig.extra = tuple(sorted(confirmation_gated_tools() - {*_GATED_ARGS}))
+async def test_each_gated_tool_asks_and_runs_as_on_claude(
+    rig: Rig, name: str, safety: str, rule: str | None
+) -> None:
+    """OpenAI and Gemini turns share this credential. Each gated tool gets the outcome
+    Claude's own decider gives it: a card, then one run after the press, or run or refused."""
+    rig.extra = tuple(sorted(confirmation_gated_tools() - _REAL_TOOLS))
     field = CONFIRMED_DAIMON_TOOLS.get(name)
     args = _GATED_ARGS.get(name, {} if field is None else {field: "x"})
+    on = safety == "on"
     settings = _settings()
-    safety = settings.tool_safety.model_copy(update={"enabled": policy == "on"})
-    settings = settings.model_copy(update={"tool_safety": safety})
+    policy = settings.tool_safety.model_copy(update={"enabled": on, "agent_rules": on})
+    settings = settings.model_copy(update={"tool_safety": policy})
     runtime = SimpleNamespace(session_factory=rig.sessions, settings=settings)
     rig.middleware.attach_host_call_gate(HostCallGate(runtime, public_url=_URL))  # pyright: ignore[reportArgumentType]
+    if rule is not None:
+        await _set_rule(
+            rig, name, "ask" if rule == "ask" else "deny", None if rule == "ask" else _CHANNEL
+        )
+    expected = await _claude_outcome(rig, policy, name, args)
 
-    await _call(rig, rig.identity(), name, args)
-    if name in _UNCARDED[policy]:
-        assert [ran for ran, _, _ in rig.ran] == [name], "ran at once, as on Claude"
-        assert await _cards(rig) == [], "no card where Claude asks none"
+    try:
+        await _call(rig, rig.identity(), name, args)
+        carded = len(await _cards(rig)) == 1
+        actual = "asked" if carded else "ran" if rig.ran else "refused"
+    except ToolError:
+        actual = "refused"
+    assert actual == expected, f"{name} ({safety}, {rule}): the gate and Claude's decider differ"
+    if actual != "asked":
         return
     card = await _card(rig)
-    assert card.tool_name == name and rig.ran == [], "carded, not run"
+    assert rig.ran == [], "carded, not run"
 
     async def admin(_: str) -> bool:
         return True
@@ -403,6 +504,48 @@ async def test_each_gated_tool_asks_and_runs_as_on_claude(rig: Rig, name: str, p
     await _call(rig, await _credential(rig, card.id), name, args)
     assert [ran for ran, _, _ in rig.ran] == [name], "ran once after the press"
     assert (await _card(rig)).status == "applied"
+
+
+async def test_ask_refuses_a_malformed_reach_plan_before_any_card(rig: Rig) -> None:
+    """The card would understate what approve_reach stores: nothing is asked."""
+    _attach(rig)
+
+    with pytest.raises(ToolError, match=REACH_PLAN_TEXT):
+        await _call(rig, rig.identity(), "approve_reach", {**_REACH, "threads": -1})
+
+    assert await _cards(rig) == [], "no record for a malformed plan"
+    assert rig.posted == [], "no card is posted"
+
+
+async def test_approve_moves_the_asking_turns_reach_tally_to_the_wake_turn_once(
+    rig: Rig,
+) -> None:
+    """The press runs approve_reach in the wake turn; what the asking turn reached counts once."""
+    card_id = await _approved(rig, _REACH, "approve_reach")
+    origin_id = (await _card(rig)).origin_id
+    asked, woke = turn_tally_key(origin_id), "turn:wake"
+    async with rig.sessions.begin() as session:
+        await lock_tally(session, tenant_id=rig.tenant_id, turn_key=asked)
+        await save_tally(
+            session, tenant_id=rig.tenant_id, turn_key=asked, tally=ReachTally(own_threads=2)
+        )
+    runtime = cast("McpRuntime", SimpleNamespace(session_factory=rig.sessions))
+    auth = await _credential(rig, card_id)
+    scope = TurnScope(key=woke, kind="live", own_places=frozenset(), requester_id=_USER)
+    plan = ReachPlan(threads=3, places=2, people=0)
+    token = host_confirmed_call.set(card_id)
+    try:
+        await approve(runtime, auth, scope, plan)
+        await approve(runtime, auth, scope, plan)
+    finally:
+        host_confirmed_call.reset(token)
+
+    async with rig.sessions.begin() as session:
+        moved, approved = await lock_tally(session, tenant_id=rig.tenant_id, turn_key=woke)
+        left, _ = await lock_tally(session, tenant_id=rig.tenant_id, turn_key=asked)
+    assert moved == ReachTally(own_threads=2), "the asking turn's reach counts once, in the wake"
+    assert approved == plan, "the plan is approved for the wake turn"
+    assert left == ReachTally(), "nothing stays under the asking turn"
 
 
 async def test_ask_refuses_when_the_host_call_gate_is_off(rig: Rig) -> None:

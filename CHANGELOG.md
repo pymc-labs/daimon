@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Approval-gated tools work on OpenAI and Gemini turns as on Claude.** Each
   one, reach approvals included, asks on the same card with the same checks,
-  and a tool Claude runs without asking runs at once. An agent told its Claude
-  model settings are unavailable is told that changing models still works, and
-  Claude's default speed and effort are no longer reported as lost.
+  and a tool Claude runs without asking runs at once. Claude's default speed
+  and effort are no longer reported as lost, an effort the new provider offers
+  carries over, and each setting that is lost is named.
 
 - **OpenAI turns record their tokens and cost when usage arrives late.** OpenAI
   can end a turn before its turn resource reports usage, and fill it in up to

@@ -415,16 +415,45 @@ class AgentSettings:
             facts["environment"] = self.environment
         return facts
 
-    def for_backend(self, backend: Provider | None) -> AgentSettings:
+    def for_backend(
+        self, backend: Provider | None, agent: BackendAgent | None = None
+    ) -> AgentSettings:
         """Keep what still applies on `backend`: a profile belongs to one backend only, and
-        the default one keeps its effort on the agent's own record, and a named agent takes none."""
+        the default one keeps its effort on the agent's own record, and a named agent takes none.
+        With no effort set, the `agent`'s Claude effort carries over where `backend` offers it."""
+        from daimon.core.agent_catalog import provider_efforts
+
         drops_effort = backend in (None, DEFAULT_BACKEND, *NAMED_AGENT_BACKENDS)
         # The environment is the operator's grant: `granted_settings` finds it anew.
         kept = replace(self, environment=None)
         kept = replace(kept, effort=None) if drops_effort else kept
+        if (
+            backend is not None
+            and kept.effort is None
+            and agent is not None
+            and (effort := claude_effort(agent)) in provider_efforts(backend)
+        ):
+            kept = replace(kept, effort=effort)
         if kept.profile is None or kept.profile.startswith(f"{backend or DEFAULT_BACKEND}."):
             return kept
         return AgentSettings(None, kept.requires, kept.thread_mode, kept.effort)
+
+
+def claude_effort(agent: BackendAgent) -> Effort | None:
+    """The effort a Claude agent states in its model setting ("high" when unset)."""
+    from mux.drivers.anthropic import AgentModelConfig
+    from mux.profiles.anthropic import MODEL_CONFIG_NAMESPACE
+
+    spec = agent.effective_spec or (agent.source.spec if agent.source is not None else None)
+    if spec is None or spec.model.provider != DEFAULT_BACKEND:
+        return None
+    for extension in spec.extensions or ():
+        if extension.namespace == MODEL_CONFIG_NAMESPACE:
+            model = AgentModelConfig.model_validate(dict(extension.value)).model
+            effort = None if isinstance(model, str) else model.effort
+            effort = effort if effort is None or isinstance(effort, str) else effort.type
+            return cast("Effort", effort or "high")
+    return "high"
 
 
 def granted_settings(
@@ -1122,7 +1151,7 @@ async def _plan_change(
         settings = settings or AgentSettings()
     elif operation in ("set", "clear"):
         # Stated settings replace the agent's; otherwise those that still apply stay.
-        settings = settings if settings is not None else kept.for_backend(backend)
+        settings = settings if settings is not None else kept.for_backend(backend, agent)
     else:
         settings = kept
     if (current.local if current else 0) != expected_revision:
@@ -1422,7 +1451,7 @@ class AgentBackendService:
         current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
         if settings is None:
             # A provider change keeps the agent's settings that still apply.
-            settings = AgentSettings.of(current).for_backend(target)
+            settings = AgentSettings.of(current).for_backend(target, agent)
         target = target or DEFAULT_BACKEND
         settings = granted_settings(agent, target, model, settings)
         original = agent
@@ -1501,7 +1530,7 @@ class AgentBackendService:
         picked = picked_model(target, model)
         async with self._sessions() as session:
             current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
-            settings = AgentSettings.of(current).for_backend(target)
+            settings = AgentSettings.of(current).for_backend(target, agent)
             settings = granted_settings(agent, target or DEFAULT_BACKEND, picked, settings)
             preview = await self._preview(session, agent, target, picked, settings)
         if not preview.allowed:
