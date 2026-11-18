@@ -22,8 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can't run, such as some skills, MCP servers or tools, is off there and said once
   as information; it comes back on a switch back. Creating an agent on an OpenAI
   or Gemini model sets its provider. Who may switch, the provider allowlist,
-  prices and daily caps are unchanged, and a switch button posted earlier says the
-  change already applies.
+  prices and daily caps are unchanged, and a switch button posted earlier applies
+  the switch when pressed.
 - **An agent switched to OpenAI keeps answering there after its prompt or tools
   change.** An agent whose Daimon tool list was long no longer fails to start on
   OpenAI, and a provider that is set up is never reported as missing.
