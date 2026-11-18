@@ -780,7 +780,7 @@ async def change_model(
     """Run `agent` on any catalog `model`: the one model write every surface calls.
 
     A Claude model on an agent already on Claude edits its record. Any other move writes
-    the provider setting; what the target can't run is off there until a switch back.
+    the provider setting; what the target can't run is off there.
     Capture is the one `backends` was built with (None: provider choice is off here).
     `expected_revision` is the setting the change was made against; None takes the current.
     Refused with `AgentBackendRefused` (`backend_not_allowed`: the tenant hasn't enabled

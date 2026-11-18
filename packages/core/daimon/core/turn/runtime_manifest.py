@@ -1881,7 +1881,7 @@ async def prepare_source(request: ProviderPreparationRequest) -> ProviderPrepara
             # Only Claude names no model: a source born elsewhere runs Claude's default.
             model = DEFAULT_AGENT_MODEL
         # Built from the source as it is now: an edit applies on the next turn, and
-        # what the provider can't carry is off until a switch back.
+        # what the provider can't carry is off there.
         target = preview_source_drops(
             source,
             ModelRef(provider=revision.backend, id=model or spec.model.id),

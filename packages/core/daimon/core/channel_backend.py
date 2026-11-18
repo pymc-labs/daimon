@@ -1609,6 +1609,14 @@ class AgentBackendService:
             )
             if not preview.allowed:
                 raise AgentBackendRefused("backend_not_allowed")
+            if (
+                operation == "set"
+                and current is not None
+                and (current.backend, current.model) == (backend, model)
+                and AgentSettings.of(current) == settings
+            ):
+                # Saving what is already saved adds no revision, audit row or reset.
+                return current
             previous_local = local or None
             # Validation is the same owner used for explicit channel selections.
             check_backend(

@@ -1981,8 +1981,8 @@ async def _request_agent_backend_switch_impl(
 ) -> AgentBackendSwitchInfo:
     """Switch `agent_name` to `target_backend` at once, like a model change.
 
-    What the new provider can't carry is off there until a switch back; the summary
-    says so, as information.
+    What the new provider can't carry is off there and named in the summary, as
+    information.
     """
     model = _resolve_agent_model(target_backend, model)
     _require_selectable_model(target_backend, model)
@@ -2577,9 +2577,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             The switch applies to new conversations wherever the agent answers, and to
             this conversation from the next message when the switched agent answers here
             (the result's summary says which). The summary also says what is off on the
-            new provider until a switch back: tell the person, and never ask them to
-            confirm. The server's default or built-in agent switches only when the
-            person says it's for everyone (for_everyone=true); otherwise offer the copy
+            new provider: tell the person, and never ask them to confirm. The
+            server's default or built-in agent switches only when the person says
+            it's for everyone (for_everyone=true); otherwise offer the copy
             below. For "make a copy of yourself on Gemini": copy the agent with
             fork_agent and new_copy_if_taken=true (always a NEW copy, never an earlier
             one; use the name it returns from here on), then switch the copy here.

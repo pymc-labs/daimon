@@ -274,6 +274,28 @@ async def test_an_edit_after_admission_or_an_unmet_rule_refuses_before_target_ru
         assert refused.value.cause == "preparation_busy"
 
 
+async def test_a_setting_and_revision_on_different_providers_refuse_as_preparation_failed(
+    switched_request,
+):
+    """A revision on another provider than its agent's setting is no race a retry clears."""
+    request = switched_request[0]
+    other = backend_selection("gemini")
+    revision = request.admission.backend_revision
+    assert revision is not None and revision.backend != "gemini", "the setting is on another"
+    mismatched = replace(
+        request,
+        admission=replace(
+            request.admission,
+            backend_revision=ConfigRevision.create(revision.channel, revision.local, other),
+        ),
+    )
+    with pytest.raises(AdmissionDenied) as refused:
+        await read_preparation_counterpart(mismatched)
+    assert refused.value.reason == "backend_unsupported"
+    assert refused.value.cause == "preparation_failed", "not the busy retry of an edit"
+    assert getattr(refused.value.__cause__, "missing", None) == ("source_drift",), "the mismatch"
+
+
 async def test_a_caller_target_cannot_replace_the_prepared_target(switched_request):
     request = switched_request[0]
     original = await prepare_source(request)

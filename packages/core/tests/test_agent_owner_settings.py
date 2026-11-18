@@ -278,7 +278,8 @@ async def test_the_owner_edits_settings_and_backend_and_a_member_cannot(people) 
     moved = await service.set_backend(agent, "openai", 1, actors["owner"])
     assert moved.backend == "openai" and moved.thread_mode == "shared"
     await service.set_settings(agent, AgentSettings(requires=REQUIRES_TOOLS), 2, actors["owner"])
-    switched = await service.set_backend(agent, "openai", 3, actors["owner"])
+    # A different model is a new revision (naming the saved one again writes nothing).
+    switched = await service.set_backend(agent, "openai", 3, actors["owner"], model="gpt-6-astra")
     assert switched.backend == "openai" and switched.requires == REQUIRES_TOOLS
     reverted = await service.revert(agent, actors["owner"], expected_revision=4)
     assert reverted.backend == "openai" and reverted.requires == REQUIRES_TOOLS
