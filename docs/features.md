@@ -308,7 +308,7 @@ The agent can search the web. Off removes it here; On never gives more than the 
 
 ## Web app
 
-The agent knows about the web app: messages, routine runs and tool results carry its address and the pages it may link to, its invite and web access tools are offered, and Daimon's cards show buttons into it. Off leaves all of that out here.
+The agent knows about the web app: messages, routine runs and tool results carry its address and the pages it may link to, its invite and access tools are offered, and Daimon's cards show buttons into it. Off leaves all of that out here.
 
 | | |
 | --- | --- |
