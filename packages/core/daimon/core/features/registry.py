@@ -248,14 +248,18 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
     *(_builtin(tool) for tool in BUILTIN_TOOLS),
     FeatureSpec(
         key="web_awareness",
-        name="Web app links",
+        name="Web app",
         category="model_input",
         effect="model",
         values=_ON_OFF,
         default="on",
         tiers=("deployment", "workspace", "agent", "channel", "thread"),
         binds="turn",
-        doc="Each message tells the agent the web app's address and the pages it may link to.",
+        doc=(
+            "The agent knows about the web app: messages, routine runs and tool results carry "
+            "its address and the pages it may link to, its people and invite tools are offered, "
+            "and Daimon's cards show buttons into it. Off leaves all of that out here."
+        ),
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
