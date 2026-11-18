@@ -205,7 +205,11 @@ async def _policy_gate(
             agent=AgentRef.of(*names),
             place=mcp_place(auth),
         )
-        if agent_names is not None and gated and (not hub_admin or role_gated)
+        # A hub admin skips the check, except for a channel's own agent: it answers only in
+        # its home, so a later admission recheck must still see a home it gained since.
+        if agent_names is not None
+        and gated
+        and (not hub_admin or role_gated or agent_permissions(policy, names).home is not None)
         else None
     )
     if decision is not None and not decision:
