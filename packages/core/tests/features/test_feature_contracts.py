@@ -21,7 +21,7 @@ from daimon.core.config import (
     Settings,
 )
 from daimon.core.features.deployment import deployment_value
-from daimon.core.features.model_input import SESSION_KEYS, TOOL_KEYS
+from daimon.core.features.model_input import SESSION_KEYS, TOOL_KEYS, SessionToolset
 from daimon.core.features.registry import (
     FEATURES,
     TIERS,
@@ -32,9 +32,10 @@ from daimon.core.features.registry import (
     parse_deployment,
     resolution_order,
 )
-from daimon.core.features.resolver import TierValue, resolve_feature
+from daimon.core.features.resolver import ResolvedFeature, TierValue, resolve_feature
 from daimon.core.features.session_identity import IDENTITY_KEYS
-from daimon.core.features.snapshot import may_turn_on
+from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot, may_turn_on
+from daimon.core.features.tool_gate import WEB_APP_TOOLS, server_gate_key
 from daimon.core.long_job_models import LongJobPolicy
 from pydantic import PostgresDsn, SecretStr
 
@@ -51,6 +52,7 @@ _MAY_WRITE = {
     "core/features/service.py",
 }
 _LEGACY_MODE = {"progress_plans", "thread_participation"}
+_PLACE = FeaturePlace(uuid.UUID(int=1), "slack", "C1", "T1")
 
 
 def _settings(**extra: object) -> Settings:
@@ -303,6 +305,51 @@ def test_every_turn_origin_render_gets_the_turn_features() -> None:
             isinstance(v, ast.Call) and getattr(v.func, "id", "") == "backend_facts" for v in spread
         )
         assert passes, f"{path.name}:{call.lineno} must pass features= or **backend_facts()"
+
+
+_LINK_BUILDERS = {"panel_links", "for_tenant", "from_settings", "TenantLinks"}
+_UNGATED_LINKS = {
+    "core/web_links.py": "defines the builders and `links_at`",
+    "core/turn/deps.py": "a turn's links; `render_turn_origin` drops them per the turn's snapshot",
+    "core/turn/admission.py": "same: the test above checks every render gets the turn features",
+    "core/features/eval_key.py": "a fixed example turn for the model-input eval, never sent",
+}
+
+
+def test_web_awareness_off_leaves_out_every_web_link_and_web_app_tool() -> None:
+    """Every chat-side builder of web links asks `links_at` (Off at its place: no link), and the
+    web app's own tools, found from their modules, are hidden and refused while it is Off."""
+    builders = [
+        path
+        for path in _PRODUCT
+        if any(
+            name != "from_settings" or ast.unparse(call.func) == "WebLinks.from_settings"
+            for name in _LINK_BUILDERS
+            for call in _named_calls(path, name)
+        )
+    ]
+    assert len(builders) >= 5, "the web link builders moved; point this test at them"
+    for path in builders:
+        rel = next((r for r in _UNGATED_LINKS if path.as_posix().endswith(r)), None)
+        assert rel is not None or "links_at" in _calls(path), (
+            f"{path.name} builds web links without `links_at`; gate them or list it with a reason"
+        )
+    registered = {
+        kw.value.value
+        for name in ("web_invites.py", "web_people.py")
+        for path in _PRODUCT
+        if path.name == name
+        for call in _named_calls(path, "tool")
+        for kw in call.keywords
+        if kw.arg == "name" and isinstance(kw.value, ast.Constant)
+    }
+    assert registered == WEB_APP_TOOLS, "WEB_APP_TOOLS must be exactly the web app's own tools"
+    off = ResolvedFeature("web_awareness", "off", "thread")
+    toolset = SessionToolset.of(FeatureSnapshot(_PLACE, 0, {"web_awareness": off}), {})
+    assert toolset.hidden_daimon_tools >= WEB_APP_TOOLS, "a session is not offered them"
+    assert all(server_gate_key(tool) == "web_awareness" for tool in WEB_APP_TOOLS), (
+        "and the server refuses them"
+    )
 
 
 def test_every_origin_note_follows_origin_fragments() -> None:
