@@ -27,7 +27,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from time import perf_counter
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 import structlog
 from anthropic import APIError, APIStatusError
@@ -1550,32 +1550,10 @@ async def _admit_gates(
         key = (admission.agent.id, running_on(admission)["provider"])
         if key in resolved:
             return resolved[key]
-        features = await resolve_features(
-            deps.sessionmaker,
-            deps.settings,
-            FeaturePlace.of(
-                tenant_id,
-                platform,
-                channel_id,
-                thread_id,
-                agent_id=key[0],
-                backend=key[1],
-            ),
-            keys=tuple(
-                dict.fromkeys(
-                    (
-                        *TURN_KEYS,
-                        *SESSION_KEYS,
-                        *PER_TURN_KEYS,
-                        *IDENTITY_KEYS,
-                        *HISTORY_KEYS,
-                        *CHAT_KEYS,
-                    )
-                )
-            ),
-            agent_builtins=builtins_of(admission.agent),
-            server_setup=False,
+        place = FeaturePlace.of(
+            tenant_id, platform, channel_id, thread_id, agent_id=key[0], backend=key[1]
         )
+        features = await place_features(deps, place, admission.agent)
         resolved[key] = without_long_term_memory(features) if relay_agent else features
         return resolved[key]
 
@@ -2716,15 +2694,30 @@ async def capture_backend_source(
                     deps, context.tenant_id, context.account_id, chat_admin=grant.subject.is_admin
                 ),
             )
+            # An agent's own read is of its chat turns: its features are the tenant's.
+            read_on = (
+                account.platform
+                if explicit_target_name is not None
+                else (context.platform or account.platform)
+            )
+            # The turn leaves out what is Off here, so the preview names none of it as lost.
+            feature_place = FeaturePlace.of(
+                context.tenant_id,
+                read_on,
+                context.channel_id,
+                context.thread_id,
+                agent_id=actual.id,
+                backend=running_on(admission)["provider"],
+            )
+            admission = replace(
+                admission, features=await place_features(deps, feature_place, actual)
+            )
             request = ProviderPreparationRequest(
                 deps,
                 admission,
                 scope,
                 context.tenant_id,
-                # An agent's own read is of its chat turns: its features are the tenant's.
-                account.platform
-                if explicit_target_name is not None
-                else context.platform or account.platform,
+                read_on,
                 label,
                 context.thread_id or "",
                 context.account_id,
@@ -2777,6 +2770,27 @@ async def capture_agent_source(
         private_dm_id=None,
         external_user_id=external_user_id,
         explicit_target_name=source.name,
+    )
+
+
+_TURN_FEATURE_KEYS: Final = tuple(
+    dict.fromkeys(
+        (*TURN_KEYS, *SESSION_KEYS, *PER_TURN_KEYS, *IDENTITY_KEYS, *HISTORY_KEYS, *CHAT_KEYS)
+    )
+)
+
+
+async def place_features(
+    deps: TurnDeps, place: FeaturePlace, agent: BetaManagedAgentsAgent
+) -> FeatureSnapshot:
+    """The features a turn of `agent` reads at `place`; its toolset hides tools by them."""
+    return await resolve_features(
+        deps.sessionmaker,
+        deps.settings,
+        place,
+        keys=_TURN_FEATURE_KEYS,
+        agent_builtins=builtins_of(agent),
+        server_setup=False,
     )
 
 

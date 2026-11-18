@@ -325,6 +325,24 @@ async def test_a_catalogue_blip_at_a_turn_asks_for_a_retry_not_a_new_confirmatio
 
 
 @pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
+async def test_a_preview_hides_what_its_turn_hides(template, switched_request, monkeypatch):
+    """A tool Off here is never named lost: the preview reads the place's features."""
+    from daimon.core.turn import runtime_manifest
+
+    request, *_ = template
+    _, _, source, actor, *_ = switched_request
+    real, seen = runtime_manifest.capture_preparation_source, []
+
+    async def spy(preparation, **kwargs):
+        seen.append(preparation.admission.toolset.hidden_daimon_tools)
+        return await real(preparation, **kwargs)
+
+    monkeypatch.setattr(runtime_manifest, "capture_preparation_source", spy)
+    await _bound_capture(request, actor)(source)
+    assert seen and all(seen), "default capabilities are Off, so their tools are hidden"
+
+
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 @pytest.mark.parametrize("kind", ["unreachable", "server_error"])
 async def test_a_catalogue_blip_at_a_preview_records_no_loss(
     template, switched_request, monkeypatch, kind
