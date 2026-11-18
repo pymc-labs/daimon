@@ -86,3 +86,7 @@ def test_plain_manifest_when_description_is_a_block_scalar_then_uploads_one_quot
     assert plain_manifest(uploaded) == uploaded, "a rewritten manifest is stable"
     plain = b"---\nname: lint\ndescription: Lint data.\n---\nbody"
     assert plain_manifest(plain) == plain, "a plain manifest keeps its bytes and pinned digest"
+    named = b"---\nname: Marimo__Notebooks_\ndescription: d\n---\n"
+    assert plain_manifest(named) == b"---\nname: marimo-notebooks\ndescription: d\n---\n", (
+        "a name OpenAI refuses becomes its unquoted slug"
+    )

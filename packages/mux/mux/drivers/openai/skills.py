@@ -66,10 +66,12 @@ async def retry_not_found[T](call: Callable[[], Awaitable[T]]) -> T:
 
 _FRONTMATTER = re.compile(r"\A---\r?\n(.*?\r?\n)---[ \t]*(?=\r?\n|\Z)", re.DOTALL)
 _KEY = re.compile(r"(name|description)[ \t]*:")
+_NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
 def plain_manifest(content: bytes) -> bytes:
-    """SKILL.md with a multi-line or styled `name`/`description` as one quoted line.
+    """SKILL.md with a multi-line or styled `name`/`description` as one quoted line,
+    and a `name` OpenAI refuses as its lowercase hyphen slug.
 
     OpenAI stores a block scalar (`description: >`) with its line breaks at upload,
     then refuses every session attaching it: "archive metadata does not match its
@@ -98,14 +100,17 @@ def plain_manifest(content: bytes) -> bytes:
             end += 1
         while end > index and not lines[end - 1].strip():
             end -= 1
-        if end > index or line[key.end() :].strip() != value:
+        if key[1] == "name" and _NAME.fullmatch(value) is None:
+            # OpenAI refuses any other name; its slug is written unquoted.
+            line = f"name: {'-'.join(re.findall(r'[a-z0-9]+', value.lower()))}\n"
+        elif end > index or line[key.end() :].strip() != value:
             line = f"{key[1]}: {json.dumps(' '.join(value.split()), ensure_ascii=False)}\n"
         out.append(line)
         index = end
     return (match.string[: match.start(1)] + "".join(out) + match.string[match.end(1) :]).encode()
 
 
-def _plain(bundle: SkillUpload) -> SkillUpload:
+def plain_bundle(bundle: SkillUpload) -> SkillUpload:
     return bundle.model_copy(
         update={
             "files": tuple(
@@ -120,7 +125,7 @@ def _plain(bundle: SkillUpload) -> SkillUpload:
 
 def bundle_digest(bundle: SkillUpload) -> str:
     """Pin file paths and the uploaded bytes independently of ZIP ordering and timestamps."""
-    plain = _plain(bundle)
+    plain = plain_bundle(bundle)
     canonical = plain.model_copy(update={"files": tuple(sorted(plain.files, key=lambda f: f.path))})
     return request_digest(canonical.model_dump(mode="json"))
 
@@ -209,7 +214,7 @@ def bundle_zip(bundle: SkillUpload) -> bytes:
     manifests: list[str] = []
     result = io.BytesIO()
     with zipfile.ZipFile(result, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for file in _plain(bundle).files:
+        for file in plain_bundle(bundle).files:
             path = PurePosixPath(file.path)
             if (
                 path.is_absolute()
@@ -249,6 +254,12 @@ class OpenAISkills:
             created_at=timestamp(raw["created_at"]),
         )
 
+    async def _readable(self, skill_id: str, version: str) -> None:
+        # A new version 404s for a few seconds; a session attaching it then fails.
+        await retry_not_found(
+            lambda: self._c.call("GET", f"/skills/{segment(skill_id)}/versions/{segment(version)}")
+        )
+
     @owned
     async def create(self, scope: Scope, bundle: SkillUpload, *, key: str) -> Skill:
         self._c.authorize(scope, "skill")
@@ -258,7 +269,9 @@ class OpenAISkills:
         raw = await self._resource.multipart(
             "/skills", files=(("files", "bundle.zip", body, "application/zip"),), fields={}, key=key
         )
-        return self._decode(raw)
+        skill = self._decode(raw)
+        await self._readable(skill.id, text(raw["latest_version"]))
+        return skill
 
     @owned
     async def publish_version(
@@ -280,6 +293,7 @@ class OpenAISkills:
         description = raw.get("description")
         if description is not None and not isinstance(description, str):
             raise ValueError("invalid description")
+        await self._readable(skill_id, version)
         return SkillVersion(
             ref=SkillRef(id=skill_id, version=version),
             version=version,
