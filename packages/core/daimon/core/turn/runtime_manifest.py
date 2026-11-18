@@ -1096,12 +1096,12 @@ def source_instructions_preserved(required: str | None, system: str | None) -> b
 
 def unavailable_line(drops: Sequence[str], names: Mapping[str, str] | None = None) -> str:
     """The agent's own line of what its copy lacks: a skill by its name, never its id."""
-    from daimon.core.confirmation import loss_word
+    from daimon.core.confirmation import agent_loss_word
 
     words = (
         f"skill:{(names or {}).get(d.removeprefix('skill:'), d.removeprefix('skill:'))}"
         if d.startswith("skill:")
-        else loss_word(d)
+        else agent_loss_word(d)
         for d in drops
     )
     return "Unavailable capabilities: " + ", ".join(words) + "."

@@ -420,7 +420,7 @@ class AgentSettings:
     ) -> AgentSettings:
         """Keep what still applies on `backend`: a profile belongs to one backend only, and
         the default one keeps its effort on the agent's own record, and a named agent takes none.
-        With no effort set, the `agent`'s Claude effort carries over where `backend` offers it."""
+        With no effort set, an effort the `agent` states carries over where `backend` offers it."""
         from daimon.core.agent_catalog import provider_efforts
 
         drops_effort = backend in (None, DEFAULT_BACKEND, *NAMED_AGENT_BACKENDS)
@@ -440,7 +440,7 @@ class AgentSettings:
 
 
 def claude_effort(agent: BackendAgent) -> Effort | None:
-    """The effort a Claude agent states in its model setting ("high" when unset)."""
+    """The effort a Claude agent states in its model setting; None when it states none."""
     from mux.drivers.anthropic import AgentModelConfig
     from mux.profiles.anthropic import MODEL_CONFIG_NAMESPACE
 
@@ -452,8 +452,8 @@ def claude_effort(agent: BackendAgent) -> Effort | None:
             model = AgentModelConfig.model_validate(dict(extension.value)).model
             effort = None if isinstance(model, str) else model.effort
             effort = effort if effort is None or isinstance(effort, str) else effort.type
-            return cast("Effort", effort or "high")
-    return "high"
+            return cast("Effort | None", effort)
+    return None
 
 
 def granted_settings(
@@ -1449,17 +1449,18 @@ class AgentBackendService:
             # The revision changed since the capture's plan; the caller retries.
             raise AgentBackendRefused("stale_revision")
         current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
-        if settings is None:
-            # A provider change keeps the agent's settings that still apply.
-            settings = AgentSettings.of(current).for_backend(target, agent)
-        target = target or DEFAULT_BACKEND
-        settings = granted_settings(agent, target, model, settings)
         original = agent
-        proposed = None
         if capture is not None:
             agent = captured if captured is not None else await capture(agent)
             if (agent.tenant_id, agent.agent_id) != (original.tenant_id, original.agent_id):
                 raise AgentBackendRefused("tenant_mismatch")
+        if settings is None:
+            # A provider change keeps the agent's settings that still apply.
+            settings = AgentSettings.of(current).for_backend(target, agent)
+        target = target or DEFAULT_BACKEND
+        settings = granted_settings(original, target, model, settings)
+        proposed = None
+        if capture is not None:
             _refuse_named_agent_effort(target, settings)
             from daimon.core.turn.runtime_manifest import preview_source_drops
 
@@ -1528,11 +1529,13 @@ class AgentBackendService:
             raise AgentBackendRefused("source_unavailable")
         target = None if target_backend == DEFAULT_BACKEND else target_backend
         picked = picked_model(target, model)
+        capture = self._capture_source if target is not None else None
+        captured = None if capture is None else await capture(agent)
         async with self._sessions() as session:
             current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
-            settings = AgentSettings.of(current).for_backend(target, agent)
+            settings = AgentSettings.of(current).for_backend(target, captured or agent)
             settings = granted_settings(agent, target or DEFAULT_BACKEND, picked, settings)
-            preview = await self._preview(session, agent, target, picked, settings)
+            preview = await self._preview(session, agent, target, picked, settings, captured)
         if not preview.allowed:
             raise AgentBackendRefused("backend_not_allowed", provider=target_backend)
         revision = AgentBackendRevision.model_validate(
@@ -1622,8 +1625,9 @@ class AgentBackendService:
             self._sessions, tenant_id=agent.tenant_id
         ) as session:
             admin = await self._authorize_edit(session, agent, actor)
+            # The captured source states the effort that carries over.
             plan = await _plan_change(
-                session, agent, operation, backend, model, settings, expected_revision
+                session, captured or agent, operation, backend, model, settings, expected_revision
             )
             current, _, kept, backend, model, settings = plan
             local = current.local if current else 0

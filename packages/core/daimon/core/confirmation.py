@@ -38,6 +38,7 @@ from daimon.core.agent_configuration import (
     provider_preview_digest,
 )
 from daimon.core.features.registry import DEFAULT, FEATURES
+from daimon.core.finer_drops import MODEL_SETTING_DROPS
 from daimon.core.microsoft_write_paths import write_kind
 from daimon.core.outbound.reach import ReachPlan, card_title
 from daimon.core.server_skills.gate import may_run
@@ -873,6 +874,11 @@ def drop_word(drop: str, names: Mapping[str, str] | None = None) -> str:
 def loss_word(drop: str, names: Mapping[str, str] | None = None) -> str:
     """A declared loss in a list of what stops working: 'memory', 'pricing skill'."""
     return drop_word(drop, names).removeprefix("its ")
+
+
+def agent_loss_word(drop: str) -> str:
+    """A loss as the agent reads it: a model setting in plain words, anything else by its id."""
+    return loss_word(drop) if drop in MODEL_SETTING_DROPS else drop
 
 
 def drop_words(drops: Sequence[str], names: Mapping[str, str] | None = None) -> str:

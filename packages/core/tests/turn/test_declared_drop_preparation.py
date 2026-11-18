@@ -1149,7 +1149,7 @@ async def test_chat_enabled_agent_switches_without_daimon_mcp_and_runs_without_i
     assert selected.target_spec.tools == selected.target_spec.mcp_servers == ()
     assert not selected.target_spec.extensions
     assert selected.target_spec.system.endswith(
-        "Unavailable capabilities: connected tools, memory, sandbox, tools."
+        "Unavailable capabilities: mcp, memory, sandbox, tools."
     )
     assert len(constructions) == len(targets) == 1
     assert constructions[0].target_spec == selected.target_spec
