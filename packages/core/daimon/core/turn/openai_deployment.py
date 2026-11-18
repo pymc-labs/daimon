@@ -44,6 +44,7 @@ from daimon.core.turn.runtime_manifest import (
     select_runtime_manifest,
     shared_copy_slot,
     source_pin_matches,
+    tenant_deployments,
     validate_counterpart_pins,
     validate_counterpart_request,
 )
@@ -59,9 +60,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    JsonValue,
-    TypeAdapter,
-    ValidationError,
     model_validator,
 )
 
@@ -71,8 +69,6 @@ PROFILES = OPENAI.profiles
 
 log = structlog.get_logger(__name__)
 Nonblank = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
-_MANIFEST = TypeAdapter(list[dict[str, JsonValue]])
-_MAX_MANIFEST_BYTES = 1_048_576
 
 
 class OpenAIDeployment(BaseModel):
@@ -292,21 +288,7 @@ def authorized_deployments(
     tenant, or a file that cannot be read or validated means none: nothing is
     authorized, and callers keep their existing path.
     """
-    manifest_path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
-    if not manifest_path:
-        return ()
-    try:
-        with Path(manifest_path).open("rb") as manifest:
-            raw = manifest.read(_MAX_MANIFEST_BYTES + 1)
-        if len(raw) > _MAX_MANIFEST_BYTES:
-            return ()
-        return tuple(
-            OpenAIDeployment.model_validate(row)
-            for row in _MANIFEST.validate_json(raw)
-            if row.get("profile") == profile and row.get("tenant_id") == tenant_id
-        )
-    except (OSError, ValidationError):
-        return ()
+    return tenant_deployments(OpenAIDeployment, profile, tenant_id)
 
 
 def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRuntime:

@@ -11,7 +11,6 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
@@ -31,8 +30,6 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
-    TypeAdapter,
-    ValidationError,
 )
 
 if TYPE_CHECKING:
@@ -43,10 +40,6 @@ if TYPE_CHECKING:
     from mux.drivers.selfhosted import HarnessConfig
 
 PROFILE = SELFHOSTED.profile
-
-
-_ROWS = TypeAdapter(list[dict[str, JsonValue]])
-_MAX_BYTES = 1_048_576
 
 
 class EntraTokenProvider:
@@ -196,21 +189,9 @@ def agent_deployments(tenant_id: str) -> tuple[SelfHostedDeployment, ...]:
 
 
 def _all_deployments(tenant_id: str) -> tuple[SelfHostedDeployment, ...]:
-    path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
-    if not path:
-        return ()
-    try:
-        with Path(path).open("rb") as stream:
-            raw = stream.read(_MAX_BYTES + 1)
-        if len(raw) > _MAX_BYTES:
-            return ()
-        return tuple(
-            SelfHostedDeployment.model_validate(row)
-            for row in _ROWS.validate_json(raw)
-            if row.get("profile") == PROFILE and row.get("tenant_id") == tenant_id
-        )
-    except (OSError, ValidationError):
-        return ()
+    from daimon.core.turn.runtime_manifest import tenant_deployments
+
+    return tenant_deployments(SelfHostedDeployment, PROFILE, tenant_id)
 
 
 def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedHostRuntime:
