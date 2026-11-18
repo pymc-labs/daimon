@@ -129,7 +129,7 @@ class RoutinesPanel:
             rows = [row for row in rows if row.created_by_user_id == user_id]
         rows = [routine_for_reader(row, user_id=user_id) for row in rows]
         shown, hidden = panel_rows(rows)
-        links = web_links(self._runtime, tenant_id, admin=is_admin, foreign=foreign)
+        links = await web_links(self._runtime, tenant_id, admin=is_admin, foreign=foreign)
         return panel_card(
             shown,
             hidden,

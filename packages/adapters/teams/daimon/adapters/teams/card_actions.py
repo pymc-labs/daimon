@@ -21,10 +21,11 @@ from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.admin_actions import DelegatedAction, admin_for_action
 from daimon.core.errors import DaimonError
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.platform_names import remember_user_name
 from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
-from daimon.core.web_links import OPEN_IN_WEB, TenantLinks, panel_links
+from daimon.core.web_links import OPEN_IN_WEB, TenantLinks, links_at, panel_links
 from microsoft_teams.api import (
     AdaptiveCardActionCardResponse,
     AdaptiveCardActionMessageResponse,
@@ -223,11 +224,27 @@ def button(
     )
 
 
-def web_links(
-    runtime: TeamsRuntime, tenant_id: uuid.UUID, *, admin: bool, foreign: bool = False
+async def web_links(
+    runtime: TeamsRuntime,
+    tenant_id: uuid.UUID,
+    *,
+    admin: bool,
+    foreign: bool = False,
+    channel_id: str | None = None,
+    thread_id: str | None = None,
+    agent_id: str | None = None,
 ) -> TenantLinks | None:
-    """The web links a card may offer; none to a sender from another organisation."""
-    return None if foreign else panel_links(runtime.settings.web, tenant_id, admin=admin)
+    """The web links a card may offer; none to a sender from another organisation or where
+    `web_awareness` is Off at the card's place (the workspace, a channel or an agent)."""
+    if foreign:
+        return None
+    place = FeaturePlace.of(tenant_id, "teams", channel_id, thread_id, agent_id=agent_id)
+    return await links_at(
+        runtime.sessionmaker,
+        runtime.settings,
+        place,
+        panel_links(runtime.settings.web, tenant_id, admin=admin),
+    )
 
 
 def open_in_web(url: str) -> OpenUrlAction:

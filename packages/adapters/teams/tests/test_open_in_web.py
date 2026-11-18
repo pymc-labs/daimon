@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
 from daimon.adapters.teams.card_actions import web_links
 from daimon.adapters.teams.channel_settings_card import ChannelSettings, channel_settings_form
 from daimon.adapters.teams.here import here_card
@@ -18,6 +19,11 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_details import AgentDetails
 from daimon.core.config import WebSettings
 from daimon.core.here_card import assemble_here_card
+from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.feature_values import set_feature_value
+from daimon.testing.factories import make_tenant
+from daimon.testing.settings_mock import mock_settings
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 URL = "https://app.example.com/w/t/agents/a"
 LABEL = "Open in web"
@@ -94,14 +100,58 @@ def test_here_card_has_the_button_only_with_a_url() -> None:
     assert LABEL not in _dump(card(None))
 
 
-def _runtime(web: WebSettings | None) -> TeamsRuntime:
-    return cast(TeamsRuntime, SimpleNamespace(settings=SimpleNamespace(web=web)))
+def _runtime(web: WebSettings | None, sessions: Any = None) -> TeamsRuntime:
+    settings = mock_settings()
+    settings.web = web
+    return cast(TeamsRuntime, SimpleNamespace(settings=settings, sessionmaker=sessions))
 
 
-def test_web_links_follow_the_web_block_and_the_sender() -> None:
-    on = _runtime(WebSettings(public_url="https://app.example.com/"))  # type: ignore[arg-type]
-    links = web_links(on, TENANT, admin=False)
+_WEB = WebSettings(public_url="https://app.example.com/")  # type: ignore[arg-type]
+
+
+async def test_web_links_follow_the_web_block_and_the_sender(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    on = _runtime(_WEB, db_session_factory)
+    async with db_session_factory.begin() as db:
+        tenant = await make_tenant(db)
+    links = await web_links(on, tenant.id, admin=False)
     assert links is not None
     assert (links.spend() or "").startswith("https://app.example.com/w/")
-    assert web_links(on, TENANT, admin=False, foreign=True) is None, "no links for a foreign sender"
-    assert web_links(_runtime(None), TENANT, admin=True) is None, "self-host: no web block"
+    assert await web_links(on, tenant.id, admin=False, foreign=True) is None, "foreign sender"
+    assert await web_links(_runtime(None), tenant.id, admin=True) is None, "self-host: no web block"
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        FeatureTarget("workspace"),
+        FeatureTarget("channel", channel_id="19:c@thread.tacv2"),
+        FeatureTarget("agent", agent_id="agent_a"),
+    ],
+    ids=["workspace", "channel", "agent"],
+)
+async def test_web_links_are_dropped_when_web_awareness_is_off_at_the_place(
+    db_session_factory: async_sessionmaker[AsyncSession], target: FeatureTarget
+) -> None:
+    async with db_session_factory.begin() as db:
+        tenant = await make_tenant(db)
+        await set_feature_value(
+            db,
+            tenant_id=tenant.id,
+            target=target,
+            key="web_awareness",
+            value="off",
+            set_by=None,
+            surface="chat",
+        )
+    runtime = _runtime(_WEB, db_session_factory)
+    here = await web_links(
+        runtime, tenant.id, admin=True, channel_id="19:c@thread.tacv2", agent_id="agent_a"
+    )
+    assert here is None, "Off at the place"
+    elsewhere = await web_links(
+        runtime, tenant.id, admin=True, channel_id="19:other@thread.tacv2", agent_id="agent_b"
+    )
+    kept = elsewhere is not None
+    assert kept is (target.tier != "workspace"), "a narrower Off leaves other places linked"

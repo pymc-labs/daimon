@@ -95,8 +95,13 @@ async def _load(context: CommandContext) -> HereCard:
             visible_channel_ids={asked.channel_id},
             bot_can_view=True,
             caller_can_view=True,
-            web=web_links(
-                runtime, context.tenant_id, admin=context.is_admin, foreign=asked.is_foreign
+            web=await web_links(
+                runtime,
+                context.tenant_id,
+                admin=context.is_admin,
+                foreign=asked.is_foreign,
+                channel_id=asked.channel_id,
+                thread_id=thread_id,
             ),
             records=runtime.sessionmaker,
         )
