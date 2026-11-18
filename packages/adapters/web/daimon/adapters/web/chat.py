@@ -66,11 +66,9 @@ class Rename(BaseModel):
 
 
 class PickModel(BaseModel):
-    """A model as `provider:id` (or `default`), with the preview the person confirmed."""
+    """A model as `provider:id` (or `default`)."""
 
     value: str = Field(min_length=1, max_length=200)
-    preview_digest: str = ""
-    preview_revision: int = 0
 
 
 class NewMessage(BaseModel):
@@ -341,17 +339,10 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
 
     @router.put("/sessions/{session_id}/model")
     async def pick_model(session_id: uuid.UUID, body: PickModel, caller: Caller) -> Picked:  # pyright: ignore[reportUnusedFunction]
-        """Keep the pick the person confirmed for this chat; `default` is the agent's own."""
+        """Keep the pick for this chat; `default` is the agent's own."""
         async with runtime.sessionmaker() as db:
             thread = await thread_of(db, caller, session_id)
-        return await keep_thread_model(
-            runtime,
-            caller,
-            thread,
-            value=body.value,
-            digest=body.preview_digest,
-            revision=body.preview_revision,
-        )
+        return await keep_thread_model(runtime, caller, thread, value=body.value)
 
     @router.delete("/sessions/{session_id}")
     async def delete(session_id: uuid.UUID, caller: Caller) -> dict[str, bool]:  # pyright: ignore[reportUnusedFunction]
