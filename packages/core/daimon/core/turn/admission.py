@@ -1542,6 +1542,43 @@ async def _admit_gates(
             return None
         return chosen.thread_id
 
+    resolved: dict[tuple[str, str], FeatureSnapshot] = {}
+
+    async def features_at(admission: Admission) -> FeatureSnapshot:
+        """The features this admission's turn runs with, read once: the counterpart check
+        and the turn hide the same tools, or their copies differ."""
+        key = (admission.agent.id, running_on(admission)["provider"])
+        if key in resolved:
+            return resolved[key]
+        features = await resolve_features(
+            deps.sessionmaker,
+            deps.settings,
+            FeaturePlace.of(
+                tenant_id,
+                platform,
+                channel_id,
+                thread_id,
+                agent_id=key[0],
+                backend=key[1],
+            ),
+            keys=tuple(
+                dict.fromkeys(
+                    (
+                        *TURN_KEYS,
+                        *SESSION_KEYS,
+                        *PER_TURN_KEYS,
+                        *IDENTITY_KEYS,
+                        *HISTORY_KEYS,
+                        *CHAT_KEYS,
+                    )
+                )
+            ),
+            agent_builtins=builtins_of(admission.agent),
+            server_setup=False,
+        )
+        resolved[key] = without_long_term_memory(features) if relay_agent else features
+        return resolved[key]
+
     async def verify_origin(
         selection: ResolvedBackend,
         origin: Literal["channel", "agent"],
@@ -1585,6 +1622,7 @@ async def _admit_gates(
             backend_agent_revision=agent_revision,
             backend_thread_id=_thread_of(agent_revision),
         )
+        provisional = replace(provisional, features=await features_at(provisional))
         request = ProviderPreparationRequest(
             deps=deps,
             admission=provisional,
@@ -1963,35 +2001,7 @@ async def _admit_gates(
         model_fell_back=thread_model.fell_back,
         web=await _web_links(deps, tenant_id, principal.account_id, chat_admin=effective_admin),
     )
-    result = replace(
-        result,
-        features=await resolve_features(
-            deps.sessionmaker,
-            deps.settings,
-            FeaturePlace.of(
-                tenant_id,
-                platform,
-                channel_id,
-                thread_id,
-                agent_id=agent.id,
-                backend=running_on(result)["provider"],
-            ),
-            keys=tuple(
-                dict.fromkeys(
-                    (
-                        *TURN_KEYS,
-                        *SESSION_KEYS,
-                        *PER_TURN_KEYS,
-                        *IDENTITY_KEYS,
-                        *HISTORY_KEYS,
-                        *CHAT_KEYS,
-                    )
-                )
-            ),
-            agent_builtins=builtins_of(agent),
-            server_setup=False,
-        ),
-    )
+    result = replace(result, features=await features_at(result))
     if follow_generation is not None:
         # Admitted: this conversation follows its agent (M03), only if its slot is
         # still the binding this message read (a concurrent move or card wins).
@@ -2014,8 +2024,6 @@ async def _admit_gates(
             account_id=principal.account_id,
             now=now,
         )
-    if relay_agent and result.features is not None:
-        result = replace(result, features=without_long_term_memory(result.features))
     mark("result")
     _log.info(
         "turn.admission_timing",

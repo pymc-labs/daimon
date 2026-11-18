@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Agents switched to GPT or Gemini answer again.** A new conversation with
+  one was refused with "Something went wrong on our side".
 - **The Web app setting (`web_awareness`, was "Web app links") turns off every
   mention of the web app at its place.** Off at the deployment, workspace,
   agent, channel or thread leaves the web address out of routine runs and tool
