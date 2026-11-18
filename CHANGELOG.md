@@ -3004,6 +3004,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repository with a personal access token (the repo credential form in Discord
   or Slack).
 
+- **The one-off backfill commands are removed.** `daimon agents backfill-toolset`,
+  `daimon agents rekey-guild-ownership`, `daimon routines backfill-agent-names`
+  and `daimon skills backfill-tenant-titles` are gone; they were for migrating
+  older deployments and nothing calls them.
+
 ## [0.2.0] - 2026-09-21
 
 Everything since the first release. Slack catches up with Discord across
