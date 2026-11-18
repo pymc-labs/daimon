@@ -189,5 +189,6 @@ async def test_a_blocked_loop_logs_the_blocking_stack() -> None:
         async with stall_watch(0.1):
             await asyncio.sleep(0.05)
             block_the_loop()
-    stacks = [log["stack"] for log in logs if log["event"] == "runtime.loop_stalled"]
-    assert any("in block_the_loop" in stack for stack in stacks)
+            await asyncio.sleep(0.2)
+    stalls = [log for log in logs if log["event"] == "runtime.loop_stalled"]
+    assert any(s["stalled_ms"] >= 400 and "in block_the_loop" in s["stack"] for s in stalls)

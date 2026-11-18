@@ -215,7 +215,7 @@ async def _run_health(
 
 @asynccontextmanager
 async def stall_watch(stall_s: float = 1.0) -> AsyncIterator[None]:
-    """Log the loop thread's stack once per stall: one callback blocking it over `stall_s`."""
+    """Log each stall (one callback blocking the loop over `stall_s`): its length and stack."""
     beat, stop = [time.monotonic()], threading.Event()
 
     async def tick() -> None:
@@ -224,17 +224,22 @@ async def stall_watch(stall_s: float = 1.0) -> AsyncIterator[None]:
             await asyncio.sleep(stall_s / 10)
 
     def watch(loop_thread: int) -> None:
-        reported = 0.0
+        stalled, stack = 0.0, ""
         while not stop.wait(stall_s / 4):
             last = beat[0]
-            if last != reported and time.monotonic() - last > stall_s:
-                reported = last
-                frame = sys._current_frames().get(loop_thread)  # pyright: ignore[reportPrivateUsage]
+            if stalled and last != stalled:
                 structlog.get_logger().warning(
-                    "runtime.loop_stalled",
-                    stalled_ms=round((time.monotonic() - last) * 1000),
-                    stack="".join(traceback.format_stack(frame)[-20:]) if frame else "",
+                    "runtime.loop_stalled", stalled_ms=round((last - stalled) * 1000), stack=stack
                 )
+                stalled = 0.0
+            if not stalled and time.monotonic() - last > stall_s:
+                stalled = last
+                frame = sys._current_frames().get(loop_thread)  # pyright: ignore[reportPrivateUsage]
+                # Import machinery frames would crowd out the code that imported.
+                frames = [
+                    f for f in traceback.extract_stack(frame) if not f.filename.startswith("<")
+                ]
+                stack = "".join(traceback.format_list(frames))
 
     ticker = asyncio.create_task(tick())
     threading.Thread(target=watch, args=(threading.get_ident(),), daemon=True).start()

@@ -11,6 +11,7 @@ from importlib.metadata import entry_points
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
+import structlog
 from daimon.core.mux_backend import TurnRuntime
 from daimon.core.turn.errors import AdmissionDenied
 from mux.errors import ScopeViolation, UnsupportedCapability
@@ -137,7 +138,12 @@ async def preload_channel_runtimes() -> None:
 
     def install() -> None:
         for point in entry_points(group="daimon.turn_runtimes"):
-            ensure_channel_runtime(point.name)
+            try:
+                ensure_channel_runtime(point.name)
+            except Exception:  # one broken provider must not stop the process
+                structlog.get_logger().warning(
+                    "runtime.preload_failed", profile=point.name, exc_info=True
+                )
 
     await asyncio.to_thread(install)
 
