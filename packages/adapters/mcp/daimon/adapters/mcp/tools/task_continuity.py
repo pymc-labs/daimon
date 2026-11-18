@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Literal, cast
 
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
@@ -57,6 +58,7 @@ from daimon.core.defaults.metadata import (
 from daimon.core.handoff_context import redact_handoff_summary
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.native_admins import AdminCaller
+from daimon.core.relay_scope import agent_has_identity_relay
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores import agent_backends
 from daimon.core.stores.access_policy import load_access_policy
@@ -185,6 +187,21 @@ class _HandOffChecked(Exception):
     """Rolls back a hand-off that was only checked (`switch="check"`)."""
 
 
+_RELAY_HANDOFF_REFUSAL = (
+    "This agent stays in its channel and keeps no conversation past it, so it can't hand "
+    "this task to another agent. Nothing was changed. Do not retry."
+)
+
+
+def _is_relay_agent(runtime: McpRuntime, agent: BetaManagedAgentsAgent | None) -> bool:
+    """Whether `agent` has a signed-identity MCP server attached (`daimon.core.relay_scope`)."""
+    public_url = runtime.settings.mcp.public_url
+    return agent is not None and agent_has_identity_relay(
+        (server.url for server in agent.mcp_servers),
+        public_url=None if public_url is None else str(public_url),
+    )
+
+
 async def _hand_off_task_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -216,6 +233,10 @@ async def _hand_off_task_impl(
     agents = await list_agents_by_tenant(
         runtime.client, tenant_id=auth.tenant_id, records=runtime.session_factory
     )
+    # A relay agent (channel turn or DM) hands nothing to anyone: one coarse rule.
+    caller_agent = next((a for a in agents if a.id == origin.responder_ma_agent_id), None)
+    if (auth.hold is not None and auth.hold.relay) or _is_relay_agent(runtime, caller_agent):
+        raise ToolError(_RELAY_HANDOFF_REFUSAL)
     # A thread under an isolated channel hands off only to that channel's own
     # agents; anywhere else, never to them.
     caller = await load_isolation_view(
@@ -368,7 +389,8 @@ async def _hand_off_task_impl(
             recorded = await locked_thread_sessions(
                 session, tenant_id=auth.tenant_id, platform=platform, thread_id=origin.thread_id
             )
-            readable = may_carry_work(
+            # A relay destination is handed no summary, queued work or session.
+            readable = not _is_relay_agent(runtime, destination) and may_carry_work(
                 await load_access_policy(session, tenant_id=auth.tenant_id),
                 destination=handoff_destination,
                 parent_channel_id=origin.parent_channel_id,
