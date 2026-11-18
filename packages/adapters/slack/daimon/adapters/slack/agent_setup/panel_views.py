@@ -47,7 +47,13 @@ from daimon.core.channel_environments import (
 from daimon.core.channel_rules import READERS_LABELS, WRITERS_LABELS, ChannelRuleStatus
 from daimon.core.github_connect_cards import repo_count
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
-from daimon.core.model_switch import REVIEW_AGAIN_LABEL, SWITCH_BACK_LABEL, ModelPicker
+from daimon.core.model_switch import (
+    BACK_LABEL,
+    CANCEL_LABEL,
+    REVIEW_AGAIN_LABEL,
+    SWITCH_BACK_LABEL,
+    ModelPicker,
+)
 from daimon.core.models_catalog import ModelChoice
 from daimon.core.panel_operator_tokens import PANEL_SCOPES, PANEL_TTL_DAYS, operator_token_line
 from daimon.core.platform_words import words_for
@@ -64,7 +70,6 @@ from daimon.core.stores.domain import (
     ChannelSkillRow,
     McpTokenRow,
 )
-from daimon.core.switch_card import CANCEL_LABEL, SWITCH_LABEL
 from daimon.core.text_layout import fit_lines
 
 __all__ = [
@@ -221,6 +226,7 @@ SLACK_SELECT_LIMIT: Final = 100
 
 ACTION_BACKEND_SELECT: Final = "agent_setup__backend_select"
 ACTION_BACKEND_CONFIRM: Final = "agent_setup__backend_confirm"
+"""Switch on a model card from before picks applied at once: applies its pick."""
 ACTION_EFFORT_SELECT: Final = "agent_setup__effort_select"
 """The effort select on Details: states the level on the agent's provider at once."""
 ACTION_BACKEND_CANCEL: Final = "agent_setup__backend_cancel"
@@ -700,27 +706,17 @@ def build_model_switch_view(
     lines: Sequence[str],
     *,
     meta: PanelMetadata,
-    confirm: bool,
+    refused: bool = True,
     action: RefusalAction | None = None,
-    applying: bool = False,
 ) -> dict[str, Any]:
-    """The one card (or refusal) a model pick leads to: Cancel, then its way forward."""
+    """What a model pick leads to: a refusal (Cancel, then its way forward), or what
+    the applied pick turned off (Back)."""
     blocks = [_section("\n".join(lines))]
-    if applying:
-        blocks.append(_context("Applying…"))
-    else:
-        name = meta.agent_name or ""
-        buttons = [_button(action_id=ACTION_BACKEND_CANCEL, label=CANCEL_LABEL, value=name)]
-        if confirm:
-            buttons.append(
-                _button(
-                    action_id=ACTION_BACKEND_CONFIRM,
-                    label=SWITCH_LABEL,
-                    value=name,
-                    style="primary",
-                )
-            )
-        elif action == "switch_back_to_claude":
+    name = meta.agent_name or ""
+    label = CANCEL_LABEL if refused else BACK_LABEL
+    buttons = [_button(action_id=ACTION_BACKEND_CANCEL, label=label, value=name)]
+    if refused:
+        if action == "switch_back_to_claude":
             buttons.append(
                 _button(
                     action_id=ACTION_BACKEND_BACK,
@@ -729,7 +725,7 @@ def build_model_switch_view(
                     style="primary",
                 )
             )
-        elif action in ("fresh_preview", "confirm_again") and meta.backend_target:
+        elif action == "fresh_preview" and meta.backend_target:
             buttons.append(
                 _button(
                     action_id=ACTION_BACKEND_AGAIN,
@@ -738,7 +734,7 @@ def build_model_switch_view(
                     style="primary",
                 )
             )
-        blocks.append({"type": "actions", "elements": buttons})
+    blocks.append({"type": "actions", "elements": buttons})
     return finish_modal(
         title="Model",
         blocks=blocks,

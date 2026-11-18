@@ -748,7 +748,7 @@ async def test_runtime_hook_reuses_live_workspace_admin_lookup(
     )
     kwargs = factory.call_args.kwargs
     assert kwargs["tenant_id"] == tenant and kwargs["account_id"] == account
-    check = kwargs["current_admin"]
+    check = kwargs["current_platform_admin"]
     assert await check("U1") is True
     client.users_info.return_value = {
         "ok": True,

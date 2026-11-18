@@ -154,10 +154,13 @@ class SlackConfirmationCards:
         """
 
         if runtime is not None:
-            from daimon.core.channel_backend import backend_selection_enabled, make_backend_service
+            from daimon.core.channel_backend import (
+                NO_CAPTURE,
+                backend_selection_enabled,
+                make_backend_service,
+            )
 
             if backend_selection_enabled(runtime.settings.turn):
-                from daimon.adapters.slack.admin import resolve_is_admin
                 from daimon.core.confirmation import backend_switch_callbacks
                 from mux.contracts.ids import ChannelRef
 
@@ -171,42 +174,15 @@ class SlackConfirmationCards:
                         client, user_id=clicker, host_team_id=team_id
                     )
 
-                async def current_admin(clicker: str) -> bool:
-                    return team_id is not None and await resolve_is_admin(
-                        client,
-                        user_id=clicker,
-                        host_team_id=team_id,
-                        action=DelegatedAction.AGENT_SETTINGS,
-                    )
-
-                from functools import partial
-
-                from daimon.core.turn.admission import capture_admitted_backend_source
-
-                capture = partial(
-                    capture_admitted_backend_source,
-                    runtime.turn_deps,
-                    admission=admission,
-                    tenant_id=tenant_id,
-                    account_id=account_id,
-                    platform="slack",
-                )
-
+                # The admin cards set the allowed providers or clear a pin: no agent source.
                 prepare_admin, check_admin = backend_switch_callbacks(
                     make_backend_service(
-                        runtime.sessionmaker, runtime.settings.turn, capture_source=capture
+                        runtime.sessionmaker, runtime.settings.turn, capture_source=NO_CAPTURE
                     ),
                     sessionmaker=runtime.sessionmaker,
-                    anthropic=runtime.anthropic,
                     tenant_id=tenant_id,
                     account_id=account_id,
-                    current_admin=current_admin,
                     current_platform_admin=current_platform_admin,
-                    answering_agent_name=(
-                        getattr(getattr(admission, "config", None), "agent_name", None)
-                    ),
-                    default_agent_name=runtime.deployment_default.agent_name,
-                    place_word="workspace",
                     # A channel-pin card clears only the channel this turn runs in.
                     pin_channel=ChannelRef(
                         tenant_id=str(tenant_id),
