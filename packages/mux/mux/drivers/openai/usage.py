@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -29,6 +28,12 @@ class UsageRevisions(Protocol):
         self, session: ResourceRef, observation_id: str, meter: Mapping[str, JsonValue]
     ) -> int: ...
 
+    async def latest(
+        self, session: ResourceRef, observation_id: str
+    ) -> Mapping[str, JsonValue] | None:
+        """The meter of the observation's newest revision, if any."""
+        ...
+
 
 class MemoryUsageRevisions:
     """Offline implementation. Sharing this object simulates host persistence."""
@@ -45,13 +50,16 @@ class MemoryUsageRevisions:
         self._values[identity] = (object_json(dict(meter)), rev)
         return rev
 
+    async def latest(
+        self, session: ResourceRef, observation_id: str
+    ) -> Mapping[str, JsonValue] | None:
+        prior = self._values.get((session, observation_id))
+        return None if prior is None else prior[0]
+
 
 #: Ended turns: their items no longer change, so their search count is cached.
 _ENDED = frozenset({"completed", "cancelled", "failed"})
 _SEARCH_CACHE = 4096
-#: An ended turn's resource can still lack usage its terminal event carried, or
-#: fill it in after that event. Without either, it is re-read after these delays.
-_USAGE_SETTLE_DELAYS_S = (0.5, 1.0, 2.0)
 
 
 def billable_search(item: Mapping[str, JsonValue]) -> bool:
@@ -126,7 +134,7 @@ class OpenAIUsage:
             "GET", f"/agents/sessions/{segment(session.id)}/turns", params=query(page)
         )
         values = [
-            await self._observe(session, self._settled(session, turn))
+            await self._observe(session, await self._settled(session, turn))
             for turn in objects(raw["data"])
         ]
         more = raw["has_more"]
@@ -140,32 +148,33 @@ class OpenAIUsage:
     async def reconcile_turn(
         self, scope: Scope, session: ResourceRef, turn_id: str
     ) -> tuple[UsageObservation, ...]:
-        """The root turn's own observation, reading no other turn or its items."""
+        """The root turn's own observation, reading no other turn or its items.
+
+        One read: usage the resource still lacks is the host's to re-read later.
+        """
         self._c.check(scope, session, "session")
-        path = f"/agents/sessions/{segment(session.id)}/turns/{segment(turn_id)}"
-
-        async def read() -> Object:
-            turn = await self._c.call("GET", path)
-            if turn.get("id") != turn_id:
-                raise ValueError("usage belongs to another turn")
-            return turn
-
-        turn = self._settled(session, await read())
-        for delay in _USAGE_SETTLE_DELAYS_S:
-            if turn.get("status") not in _ENDED or turn.get("usage") is not None:
-                break
-            await asyncio.sleep(delay)
-            turn = self._settled(session, await read())
-        value = await self._observe(session, turn)
+        turn = await self._c.call(
+            "GET", f"/agents/sessions/{segment(session.id)}/turns/{segment(turn_id)}"
+        )
+        if turn.get("id") != turn_id:
+            raise ValueError("usage belongs to another turn")
+        value = await self._observe(session, await self._settled(session, turn))
         return () if value.thread_id is not None else (value,)
 
-    def _settled(self, session: ResourceRef, turn: Object) -> Object:
-        """An ended turn lacking usage takes its terminal event's own, when seen."""
-        if turn.get("status") in _ENDED and turn.get("usage") is None:
-            noted = self._terminal.get((session, text(turn["id"])))
-            if noted is not None:
-                return {**turn, "usage": noted}
-        return turn
+    async def _settled(self, session: ResourceRef, turn: Object) -> Object:
+        """A resource lacking usage keeps what is known: its terminal event's, else stored.
+
+        A fresh driver never saw the event, so a stored meter's usage stands; a
+        null read never replaces counts already revised.
+        """
+        if turn.get("usage") is not None:
+            return turn
+        turn_id = text(turn["id"])
+        noted = self._terminal.get((session, turn_id)) if turn.get("status") in _ENDED else None
+        if noted is None:
+            stored = await self._revisions.latest(session, "openai:turn:" + turn_id)
+            noted = stored.get("usage") if stored is not None else None
+        return turn if noted is None else {**turn, "usage": noted}
 
     async def _observe(self, session: ResourceRef, turn: Object) -> UsageObservation:
         if turn.get("session_id") != session.id:
