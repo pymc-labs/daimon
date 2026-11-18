@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.prepare import bind_session_impl
+from daimon.core.turn.runtimes import preload_channel_runtimes
 
 from .test_configuration_grants import planned as planned
 from .test_openai_deployment import application as application
@@ -53,6 +54,7 @@ async def test_native_preparation_refuses_origin_before_runtime_or_configuration
 ):
     selected, _, _ = origin_plan
     object.__setattr__(selected.admission, "backend_revision_origin", origin)
+    await preload_channel_runtimes()  # as workers do at startup; SDK imports read the env
     monkeypatch.setattr(
         os.environ,
         "get",
